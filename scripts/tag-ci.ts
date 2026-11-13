@@ -46,6 +46,7 @@ import { FILE_DEPS, type Filed, type OpenRequest, commentRequest, fileRequest, o
 import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS_PATH } from "./perf-ratchet.ts";
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
+import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 import { durationOver, isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
@@ -67,6 +68,14 @@ export function hidePaths(line: string, roots: Record<string, string> = {}, home
 
 /** The heading of the perf warning in a Release's `## CI`; its lines follow, indented by 4 spaces. */
 export const PERF_WARNING_HEADING = "perf の警告（合否には数えない）:";
+/** The headings of the known failures (known-failures.json, read at the tag's commit): not `が落ちた:`, which failedIn reads. */
+export const KNOWN_HEADING = "既知の失敗を差し引いた（known-failures.json、このタグのコミットの登録）:";
+export const KNOWN_EXPIRED_HEADING = "期限切れで差し引かなかった:";
+/** `unreadable` = the registry at the tag's commit could not be read: nothing taken off, the walk goes on. */
+export interface KnownResult { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string }
+/** A known-failures section in the Release: its heading and the entries (the same lines as local-ci's comment, at most 20). */
+const knownSection = (title: string, xs: Subtracted[] | undefined): string[] => knownLines(title, xs?.slice(0, 20)).slice(1);
+
 /** The heading of the seconds over `local.durations` (not `が落ちた:`: failedIn reads that one). */
 export const DURATIONS_HEADING = "所要時間が上限を超えた（結果は変えない）:";
 
@@ -113,7 +122,7 @@ export function perfStreak(now: string[], earlier: string[][]): string[] {
  * step's name or its lines have a value usable for auth (`findSecrets`), none of them is written: the mark stays, a note
  * says why the rest is missing.
  */
-export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; warnings?: string[]; durations?: string[]; selection?: string }, host: HostAws = hostAws()): string {
+export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; warnings?: string[]; durations?: string[]; selection?: string; known?: KnownResult }, host: HostAws = hostAws()): string {
   // the mark is `[tag-ci] pass|fail <sha>` alone: it is what tagResult reads
   const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
   // an unnamed step's name is its script's first line, which may hold a path or a value as much as its output
@@ -122,6 +131,9 @@ export function resultSection(r: { sha: string; ok: boolean; step?: string; fail
     ...(r.ok ? [] : [`\`${step}\` が落ちた:`]),
     ...(r.fails ?? []).slice(0, 20).map((l) => `    ${hidePaths(l)}`),
     // failedIn reads the lines under "が落ちた:" up to the first line that is not indented: the heading ends them
+    ...knownSection(KNOWN_HEADING, r.known?.subtracted).map((l) => hidePaths(l)),
+    ...knownSection(KNOWN_EXPIRED_HEADING, r.known?.expired).map((l) => hidePaths(l)),
+    ...(r.known?.unreadable ? [`known-failures.json（このタグのコミットの登録）を読めなかったので差し引いていない: ${hidePaths(r.known.unreadable)}`] : []),
     ...(r.warnings?.length ? [PERF_WARNING_HEADING, ...r.warnings.slice(0, 20).map((l) => `    ${hidePaths(l)}`)] : []),
     // not the heading failedIn reads, and it ends the lines above it; the ceilings do not decide the result
     ...(r.durations?.length ? [DURATIONS_HEADING, ...r.durations.slice(0, 20).map((l) => `    ${hidePaths(l)}`)] : []),
@@ -171,6 +183,8 @@ async function listTags(root: string, sh: (cmd: string[]) => Promise<string>, me
 }
 
 export interface TagCiDeps extends Omit<Deps, "sh"> {
+  /** Today (UTC, YYYY-MM-DD) for the registry's `until`; tests give theirs. */
+  today?: string;
   /** Runs a command; throws on a non-zero exit. `input` goes to its stdin. */
   sh: (cmd: string[], cwd?: string, input?: string) => Promise<string>;
   /** Called when the newest tag has failed, before the walk: what it reports stays if the walk is cut. followUp runs again after the walk. */
@@ -297,7 +311,21 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     // every failed step: a perf step's failure does not stop bun test (#2945)
     const failed = run.results.filter((x) => x.code !== 0);
     // the perf steps do not count toward the result (runCheckout lets them all keep going): only the others' failures are the tag's, and the perf-ratchet's lines are a warning in the Release
-    const counted = failed.filter((f) => !isPerfStep(f));
+    let counted = failed.filter((f) => !isPerfStep(f));
+    // bun test alone failed with (fail) lines: what the registry at this tag's commit names, in date, is no failure (the same rule as local-ci's: subtractKnown)
+    let known: KnownResult | undefined;
+    const bunFail = counted.length === 1 && counted[0]!.name === "bun test" && (counted[0]!.fails ?? []).some((l) => l.startsWith("(fail) ")) ? counted[0]! : undefined;
+    const bunOutput = run.outputs["bun test"];
+    if (bunFail && bunOutput !== undefined) {
+      // a registry that cannot be read takes nothing off and says so: it must not stop the walk at this tag
+      const registry = await readKnownFailures(d.sh, root, sha).catch((e: unknown) => (e as Error).message.split("\n")[0]!);
+      const s = typeof registry === "string" ? null : subtractKnown(bunOutput, bunFail.fails!, registry, d.today ?? new Date().toISOString().slice(0, 10));
+      if (typeof registry === "string") known = { subtracted: [], expired: [], unreadable: registry };
+      else if (s) {
+        if (s.subtracted.length || s.expired.length) known = { subtracted: s.subtracted, expired: s.expired };
+        counted = s.rest.length === 0 ? [] : [{ ...bunFail, fails: s.rest }];
+      }
+    }
     const perfFailed = failed.some((f) => isPerfStep(f));
     const p = run.perf;
     const warnings = !perfFailed ? [] : p && !p.unknown ? [...p.raised, ...p.grew, ...p.improved, ...p.over] : ["perf の判定ができなかった（bench が落ちたか、check が判定の前に止まった）"];
@@ -312,7 +340,7 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     const durations = compared ? await (async () => durationOver(dir, stepSeconds(run.results)))().catch(() => []) : [];
     const step = counted.length ? counted.map((f) => f.name).join(" / ") : undefined;
     const hide = (l: string) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" });
-    return { sha, ok: counted.length === 0, step, fails: fails.map(hide), warnings: warnings.map(hide), durations: durations.map(hide), selection };
+    return { sha, ok: counted.length === 0, step, fails: fails.map(hide), warnings: warnings.map(hide), durations: durations.map(hide), selection, ...(known ? { known } : {}) };
   } finally {
     await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });

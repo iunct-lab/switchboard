@@ -37,3 +37,13 @@ describe("knowledgeDir", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: home }).knowledgeDir).toBe(join(homedir(), "Knowledge"));
   });
 });
+
+describe("dockerdIdleMs", () => {
+  test("dockerd idle wait defaults to 10 minutes", () => {
+    expect(loadConfig({ SWITCHBOARD_HOME: tmpdir() }).dockerdIdleMs).toBe(10 * 60_000);
+  });
+  test("dockerd idle wait is overridden by SWITCHBOARD_DOCKERD_IDLE_MIN; a non-number or 0 or less keeps the default", () => {
+    expect(loadConfig({ SWITCHBOARD_HOME: tmpdir(), SWITCHBOARD_DOCKERD_IDLE_MIN: "3" }).dockerdIdleMs).toBe(3 * 60_000);
+    for (const bad of ["x", "0", "-5", ""]) expect(loadConfig({ SWITCHBOARD_HOME: tmpdir(), SWITCHBOARD_DOCKERD_IDLE_MIN: bad }).dockerdIdleMs).toBe(10 * 60_000);
+  });
+});

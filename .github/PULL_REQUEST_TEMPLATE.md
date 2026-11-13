@@ -2,9 +2,9 @@
 
 ## 概要 / Summary
 
-<!-- 1 PR = 1 Task。`Closes #<Task番号>` を書く（PBI/Epic を直接 Closes しない）。Task の Issue に結果コメントを残す（.claude/skills/issue-workflow） -->
+<!-- 1 PR = 1 Task。`Closes #<Task番号>` を書く（Task の手順が残るなら `Refs #<Task番号>`。PBI/Epic を直接 Closes しない）。Task の Issue に結果コメントを残す（.claude/skills/issue-workflow） -->
 
-<!-- 何を、なぜ変えたか。関連Issueがあれば `Closes #123` -->
+<!-- 何を、なぜ変えたか。関連Issueがあれば `Closes #123`（手順が残るなら `Refs #123`） -->
 
 ## 影響コンポーネント / Affected components
 

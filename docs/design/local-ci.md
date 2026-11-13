@@ -72,6 +72,26 @@ When the perf check ran and printed a `bundle:` line, pass or fail, the comment 
 
 Just before posting, it reads head and base again in the same way (`notify`), and if either changed during the run, it posts nothing and exits 1 (it does not write the result for a head or base that was not tested; run it again). It does not rerun because the base moved forward after the post, or because the head changed through the automatic rebase after a lower PR is merged (if the diff of each commit is the same, merge-gate counts it as included in the pass's head with `git cherry`. The mark is only the first line, so as not to require a format of another repository's copy of local-ci (decided 2026-10-29; before that, the second line carried each PR's patch-id). When to run it and how merge-gate counts it are in "When to run local CI and how it counts" of [docs/merge-gate.md](../merge-gate.md)). It does not post when it could not read them again either. The text to be posted passes the kit's check for authentication values (`runForgeOperation`). If posting fails because of authentication or permissions, it prints the reason and stops with exit 1 (it does not post by another route; for a Task, confirm in the conversation). The mark is read by `LOCAL_CI_RESULT` (pass or fail, the head, then `base=`; for how the merge decision treats it see [docs/merge-gate.md](../merge-gate.md)).
 
+### Known failures
+
+A test that fails for a reason outside the change (a flaky test, a test broken by an earlier merge) can be registered so that it does not stop every PR. The registry is `known-failures.json` at the repository root, an array of entries:
+
+```json
+[{ "test": "scripts/foo.test.ts > a case of foo", "issue": 123, "until": "2026-12-01" }]
+```
+
+- `test`: `<file> > <title>`. `<file>` is the path `bun test` prints as a heading (`<path>:`) before that file's results, and `<title>` is what follows `(fail) ` on the failed test's line, without the trailing `[<n>ms]` (bun puts the describe blocks and the title there, `<describe> > <title>`, but not the file). It must match exactly
+- `issue`: the number of the issue that tracks the fix
+- `until`: the last day (UTC, `YYYY-MM-DD`) the entry is in effect. The guideline is about 7 days from registering. An entry is never extended automatically; renew it by hand with a new date if the fix is not done yet
+
+The registry is read from the base (the PR's base commit), never from the head, so a PR cannot excuse its own failures: an entry added by a PR takes effect only after that PR is merged.
+
+The failures are subtracted only when the single failed step is `bun test`, its output has at least one `(fail)` line, and bun's summary agrees with those lines: the ` <n> fail` count equals the number of `(fail)` lines and there is no ` <n> error` line (a file that fails to load and an error between tests print no `(fail)` line, and would otherwise hide behind the registered ones). If any other step failed too (the type check, the perf check), nothing is subtracted. A registry that cannot be read (an entry without `issue` or `until`, for example) subtracts nothing and the comment says so. Each `(fail)` line that matches an entry that is in date is subtracted; if no line is left, the run is a pass. A line that matches an entry whose `until` has passed is not subtracted and counts as a failure, and the comment names it.
+
+The same applies to a result collected later from an off-host build (`--collect`). The comment keeps the same first line (`[local-ci] pass ...`) and adds the parts `既知の失敗を差し引いた（known-failures.json、base の登録）:` and `期限切れで差し引かなかった:`, each a list of lines like `` - `<test>`（#<issue>、期限 <until>） ``. A fail that has some lines subtracted lists only the lines that were not.
+
+Tag CI does the same with the registry at the tag's own commit: a tag whose only failures are registered ones in date is a `[tag-ci] pass <sha>`, and the Release's `## CI` lists the subtracted tests under the heading `既知の失敗を差し引いた（known-failures.json、このタグのコミットの登録）:` and the expired ones under `期限切れで差し引かなかった:`, apart from the `が落ちた:` part that a later run reads.
+
 ### Local changes (`--change`)
 
 A change of a repository without a remote (the kit's `forgeOf` is `app`: no `forge` and no `origin`, or `forge: { "service": "app" }`) runs with `bun scripts/local-ci.ts --change <n> [--all] [--force]`, from inside its checkout, with `BACKLOG_URL` and `BACKLOG_WORKSPACE` (an app Task has them) to read the change. With a PR number or `--repo` it exits 2, and so it does in a checkout whose `forgeOf` is not `app` (the result is never posted on a PR of the same number). The other way round, a PR number in a checkout whose `forge` names `app` exits 2 too (it is never posted on the change of the same number).

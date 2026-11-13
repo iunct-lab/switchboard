@@ -79,7 +79,8 @@ gh repo clone "$REPO" "$R" -- -q --branch "$HEAD_REF"
 M="$R/_review"; mkdir -p "$M"                                     # untracked。レビュアーはここを読む
 gh pr view $N --json number,title,body,url -q '"# PR #\(.number) \(.title)\n\(.url)\n\n\(.body)"' > "$M/pr.md"
 gh pr diff $N > "$M/diff.patch"
-TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE 'Closes #[0-9]+|^Backlog-Task: [0-9]+$' | sed -n '/^Closes/{p;q}')   # Closes #N（GitHub の workspace）→
+TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE 'Closes #[0-9]+' | head -1)   # Closes #N（GitHub の workspace）→
+[ -n "$TASK" ] || TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE 'Refs #[0-9]+' | head -1)   # Refs #N（Task の手順が残る PR）→
 [ -n "$TASK" ] || TASK=$(tr -d '\r' < "$M/pr.md" | grep -oE '^Backlog-Task: [0-9]+$' | head -1)   # 単独行の Backlog-Task: N（ローカルのバックログ。task-to-pr のひな形が必ず置く）
 TASK=$(echo "$TASK" | grep -oE '[0-9]+' | head -1)
 ops-kit backlog view "$TASK" --fresh > "$M/task.md"
@@ -89,7 +90,7 @@ sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`R=$(mktemp -d …)` の中に。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・`/tmp` の古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`R=$(mktemp -d …)` の中に。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・`/tmp` の古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
 
@@ -106,6 +107,7 @@ PR's head branch) and any `docs/design/*.md` that covers the touched area (`_rev
 Judge the PR on these, in this order:
 1. Intent: does the diff do what the Task's 手順 and the PBI's acceptance criteria ask — no less, and nothing beyond it?
    Name anything the PR does that no criterion asks for, and any criterion the PR claims but does not meet.
+   Check that every point where the PR departs from the Task's 手順 or the acceptance criteria is written in the PR body's 逸脱 item and in a comment on the Task, and that every change the Task does not list is named in the PR body; report one that is not written as a finding.
    If the diff changes design documents (e.g. `docs/design/*.md`), say whether each change is within the PBI's acceptance criteria and the original request (`pbi.md`); list out-of-scope edits as `[should-fix]`.
 2. Design consistency: contradictions with `design-rules.md`, the relevant `docs/design/*.md`, the PBI's スコープ外 and
    決定ログ, or the existing shape of neighbouring code. Flag compatibility layers, one-use abstractions,
@@ -216,6 +218,7 @@ post_review $N codex "$M/codex.md"; post_review $N <extra> "$M/<extra>.md"     #
 ```bash
 # R・M・HEAD_REF・BASE_REF は 1 で作ったもの。OLD = 3 で控えた、前回レビューした head（fetch の前に控えておく）
 git -C "$R" fetch -q origin "$HEAD_REF" "$BASE_REF"
+gh pr view $N --json number,title,body,url -q '"# PR #\(.number) \(.title)\n\(.url)\n\n\(.body)"' > "$M/pr.md"   # 修正の後の PR 本文を取り直す（review-triage-and-merge の 3 で直したもの）
 NEW=$(git -C "$R" rev-parse "origin/$HEAD_REF")
 # 下の枝の修正を cascade した後でも、この PR のコミットだけを比べる（それぞれの base からの差分どうし）
 git -C "$R" range-diff "$(git -C "$R" merge-base "$OLD" "origin/$BASE_REF")..$OLD" "$(git -C "$R" merge-base "$NEW" "origin/$BASE_REF")..$NEW" > "$M/fix.range-diff"

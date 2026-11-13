@@ -46,6 +46,7 @@ import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
 import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
 import { isTest } from "./test-select.ts";
+import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 
 export type { Step };
 
@@ -183,7 +184,7 @@ export function workflowSteps(yaml: string): Step[] {
 /** `seconds`: a pass's type check and bun test seconds (#1886), for a checkout with scripts/ci.ts. */
 /** `selection`: what chose this run's tests, none with `--all` (#3297). `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
 /** `incremental`: this run was only the commits since the earlier pass `pass` (`incrementalBase`). */
-export interface LocalCiResult { /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number } }
+export interface LocalCiResult { /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number }; /** bun test's failures taken off by the registry at the base (known-failures.json): `subtracted` are why a pass is a pass, `expired` were registered but past their date (still failures), `unreadable` = the registry could not be read (nothing taken off). */ known?: { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string } }
 
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
@@ -219,6 +220,9 @@ export function resultComment(r: LocalCiResult): string {
       const fence = "`".repeat(Math.max(3, ...fails.map((l) => Math.max(0, ...(l.match(/`+/g) ?? []).map((x) => x.length)) + 1)));
       return ["", `結果: \`${f.name}\` が exit ${f.code}。${f.log ? "全文は実行したホストの記録（~/.cache の下）。" : ""}`, ...(fails.length ? [fence, ...fails, fence] : [])];
     }),
+    ...knownLines("既知の失敗を差し引いた（known-failures.json、base の登録）:", r.known?.subtracted),
+    ...knownLines("期限切れで差し引かなかった:", r.known?.expired),
+    ...(r.known?.unreadable ? ["", `known-failures.json（base の登録）を読めなかったので差し引いていない: ${r.known.unreadable}`] : []),
     "",
     "| 手順 | 結果 | 秒 |",
     "|---|---|---|",
@@ -271,13 +275,16 @@ const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
 
 /**
  * One build's script, run by `sb-offload --ci` in the ci image (git with PCRE, Bun, Codex CLI, Chromium are the image's):
- * as root, a tmpfs TMPDIR and the work tree's owner; then as the image's user `switchboard` (a login `su -`, so the
+ * as root, a tmpfs TMPDIR and the work tree's owner; then, in a new PID namespace, as the image's user `switchboard` (a login `su -`, so the
  * build's own environment, its credentials included, does not reach the steps; only the image's CHROME_BIN and
  * PLAYWRIGHT_BROWSERS_PATH are passed) the work tree as one commit with `origin` (a URL, no credentials), the install,
  * and every step in `bash -e -c` between its marks, stopping at the first that fails (a `keepGoing` step does not stop it).
  * `fixtures`: the build has the recordings in the user's `~/.switchboard/fixtures`; `required` exports SWITCHBOARD_FIXTURES so that a missing recording fails a test.
  * The host's AWS names reach the build as the user's `~/.aws/config`, written by the build's setup from `--names` (`runBuild`); the script holds none of them.
  * Nothing of this host's environment goes in (no token, no recordings' place). docs/design/local-ci-offload.md.
+ * Why the PID namespace: the build's PID 1 does not reap orphans, so a killed child stays a zombie that `kill(pid, 0)` finds
+ * alive and the child-cleanup tests fail. The namespace's init is a bash that reaps them; `exit $?` keeps bash from
+ * replacing itself with su (then su would be PID 1 and reap nothing).
  */
 export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { required: boolean } }): string {
   const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
@@ -301,7 +308,8 @@ export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { require
     "SB_LOCAL_CI_EOF",
     'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
     'chown -R switchboard /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: 作業ツリーの持ち主を switchboard にできない"; exit 1; }',
-    `su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"`,
+    'unshare --pid --fork --mount-proc true || { echo "sb-setup: PID 名前空間を作れない"; exit 1; }',
+    `unshare --pid --fork --mount-proc bash -c 'su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"; exit $?'`,
   ].join("\n");
 }
 
@@ -613,11 +621,34 @@ export function pendingFor(cache: string, repo: string, pr: number, head: string
 }
 
 /** The comment's result from a collected build: the steps read by their marks, as a run here reads them. */
-async function resultOf(p: Pending, out: { code: number; output: string }, d: Pick<Deps, "log">, cache: string): Promise<LocalCiResult> {
+async function resultOf(p: Pending, out: { code: number; output: string }, d: Pick<Deps, "log" | "sh">, cache: string, today?: string): Promise<LocalCiResult> {
   const ran = parseBuild(out.output, p.steps, out.code);
-  const { results, ok, bundle } = await settle(ran, d, `local-ci-${p.repo.replaceAll("/", "_")}-${p.pr}`, cache);
+  const { results, ok, bundle, outputs } = await settle(ran, d, `local-ci-${p.repo.replaceAll("/", "_")}-${p.pr}`, cache);
   const seconds = ok && p.ciTs ? stepSeconds(results) : undefined;
-  return { sha: p.head, base: p.base, results, ok, ...(seconds ? { seconds } : {}), ...(p.selection ? { selection: p.selection } : {}), ...(bundle.length ? { bundle } : {}), ...(p.incremental ? { incremental: p.incremental } : {}) };
+  const r = { sha: p.head, base: p.base, results, ok, ...(seconds ? { seconds } : {}), ...(p.selection ? { selection: p.selection } : {}), ...(bundle.length ? { bundle } : {}), ...(p.incremental ? { incremental: p.incremental } : {}) };
+  return ok ? r : withKnown(r, outputs, d.sh, p.root, today);
+}
+
+/**
+ * A failed result whose only failed step is bun test with (fail) lines: what the registry at the base (known-failures.json) names, in date, is no
+ * failure (subtractKnown; never the head's registry, a PR does not excuse its own failures). All taken off = a pass without seconds (a failed run's
+ * seconds are not compared); some left = still a fail whose bun test lines are those left. Shared by a run here and a result collected later.
+ */
+async function withKnown(r: LocalCiResult, outputs: Record<string, string>, sh: Deps["sh"], repoRoot: string, today = new Date().toISOString().slice(0, 10)): Promise<LocalCiResult> {
+  const failed = r.results.filter((x) => x.code !== 0);
+  const step = failed.length === 1 && failed[0]!.name === SECONDS_STEPS.test ? failed[0]! : undefined;
+  const output = step ? outputs[step.name] : undefined;
+  if (!step || output === undefined || !(step.fails ?? []).some((l) => l.startsWith("(fail) "))) return r;
+  let known;
+  try {
+    known = await readKnownFailures(sh, repoRoot, r.base);
+  } catch (e) {
+    return { ...r, known: { subtracted: [], expired: [], unreadable: (e as Error).message.split("\n")[0]! } };
+  }
+  const s = subtractKnown(output, step.fails!, known, today);
+  if (!s) return r;
+  const k = s.subtracted.length || s.expired.length ? { known: { subtracted: s.subtracted, expired: s.expired } } : {};
+  return { ...r, ok: s.rest.length === 0, results: r.results.map((x) => (x === step ? { ...x, fails: s.rest } : x)), ...k };
 }
 
 /**
@@ -682,7 +713,7 @@ export async function collectPending(d: Deps, cache: string, post = reportResult
 }
 
 /** `cache`: where the worktree and the failure logs go (~/.cache; tests give their own). TMPDIR goes under tmpdir() (#1056). */
-export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; force?: boolean; change?: ChangeTarget } = {}): Promise<LocalCiResult> {
+export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; force?: boolean; change?: ChangeTarget; today?: string } = {}): Promise<LocalCiResult> {
   const change = opts.change;
   const label = change ? `local-ci ${change.label}` : `local-ci ${repo}#${pr}`;
   let built: string | undefined;
@@ -696,7 +727,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       // this process is the one to write it now
       writePending(cache, { ...prior, pid: process.pid, boot: bootId() });
       const out = await d.offload!.collect(prior.build);
-      if (buildSpoke(out.output)) return (built = prior.build), resultOf(prior, out, d, cache);
+      if (buildSpoke(out.output)) return (built = prior.build), resultOf(prior, out, d, cache, opts.today);
       // the build is gone (its log kept 7 days) or could not be read: not a result of this head; a build of its own
       d.log(`ビルド ${prior.build} の結果が無い。新しくビルドする`);
       clearPending(cache, repo, pr, prior.build);
@@ -748,7 +779,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         for (const l of over) d.log(`警告: ${l}`);
         return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...(over.length ? { warnings: over } : {}), ...narrowed, ...bundle, ...incremental };
       }
-      return { sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental };
+      return withKnown({ sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental }, run.outputs, d.sh, repoRoot, opts.today);
     } finally {
       await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });

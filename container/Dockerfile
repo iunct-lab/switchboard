@@ -51,9 +51,11 @@ RUN set -eu; \
   printf 'owner: github\nname: gh-stack\nhost: github.com\ntag: %s\nispinned: true\npath: %s/gh-stack\n' "$GH_STACK_VERSION" "$D" > "$D/manifest.yml"; \
   rm -rf "$DL"
 
-# bun, claude and codex, from npm at a pinned version (the host takes the latest of each)
+# bun, claude and codex, from npm at a pinned version (the host takes the latest of each). The npm package of bun only has bun.exe next to
+# the binary process.execPath names; tests put dirname(process.execPath) on a narrow PATH and run `bun` from it (as on the host, ~/.bun/bin), so `bun` is a link there
 RUN npm install -g --no-fund --no-audit "bun@$BUN_VERSION" "@anthropic-ai/claude-code@$CLAUDE_VERSION" "@openai/codex@$CODEX_VERSION" \
   && for b in bun claude codex; do ln -sf "/usr/local/lib/nodejs/bin/$b" "/usr/local/bin/$b"; done \
+  && ln -s bun.exe /usr/local/lib/nodejs/lib/node_modules/bun/bin/bun \
   && npm cache clean --force
 
 # the user, its HOME, and the four paths that container/compose.yaml mounts volumes on (a new named volume takes the
@@ -71,7 +73,7 @@ ENV HOME=/home/switchboard
 FROM base AS ci
 ARG PLAYWRIGHT_VERSION=1.65.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN dnf install -y -q git-core fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
+RUN dnf install -y -q git-core zstd rsync procps-ng file diffutils fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
     cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib awscli-2 \
   && dnf clean all \
   && npx -y "playwright@$PLAYWRIGHT_VERSION" install chromium \

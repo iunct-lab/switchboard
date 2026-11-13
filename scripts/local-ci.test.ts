@@ -86,6 +86,128 @@ describe("local-ci", () => {
     return { d, calls, ran, envs, logged };
   };
 
+  describe("known failures (#4841)", () => {
+    const KNOWN = (rows: Array<{ test: string; issue: number; until: string }>) => JSON.stringify(rows);
+    const A = { test: "a.test.ts > flaky one", issue: 4826, until: "2026-11-20" };
+    const B = { test: "b.test.ts > flaky two", issue: 4827, until: "2026-11-20" };
+    /** bun 1.4's output for these failures: each file's `<path>:` heading, its `(fail) <title> [..ms]` lines (no file in them), the summary. */
+    const failOut = (...names: string[]) => {
+      const files = new Map<string, string[]>();
+      for (const n of names) { const i = n.indexOf(" > "); files.set(n.slice(0, i), [...(files.get(n.slice(0, i)) ?? []), n.slice(i + 3)]); }
+      return [...[...files].flatMap(([f, ts]) => ["", `${f}:`, ...ts.flatMap((t) => ["error: expect(received).toBe(expected)", `(fail) ${t} [3.21ms]`])]), "", " 0 pass", ` ${names.length} fail`].join("\n");
+    };
+    /** Answers git for known-failures.json at `refs` (ls-tree lists it, show prints it); `shown` = the refs looked at. */
+    const registryAt = (inner: Deps["sh"], refs: Record<string, string | undefined>, shown: string[]): Deps["sh"] => async (cmd, cwd) => {
+      const at = cmd.indexOf("ls-tree");
+      if (at >= 0 && cmd.at(-1) === "known-failures.json") return shown.push(`${cmd[at + 2]}:known-failures.json`), refs[cmd[at + 2]!] === undefined ? "" : "known-failures.json\n";
+      if (cmd.includes("show") && cmd.at(-1)!.endsWith(":known-failures.json")) {
+        const ref = cmd.at(-1)!.split(":")[0]!;
+        if (refs[ref] === undefined) throw new Error(`fatal: path 'known-failures.json' does not exist in '${ref}'`);
+        return refs[ref]!;
+      }
+      return inner(cmd, cwd);
+    };
+    /** \`registry\`: known-failures.json at the base's sha; \`head\`: the one at the head's sha (it must never be read). */
+    const known = (registry: string | undefined, failAt: string, output: string, o: { head?: string } = {}) => {
+      const f = deps(failAt, undefined, output);
+      const shown: string[] = [];
+      f.d.sh = registryAt(f.d.sh, { [BASE]: registry, [SHA]: o.head }, shown);
+      return { ...f, shown };
+    };
+    const at = (today: string) => ({ today });
+
+    test("every failure registered and in date: ok, with the subtraction listed; no seconds line", async () => {
+      const { d, shown } = known(KNOWN([A, B]), "bun test", failOut(A.test, B.test));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(true);
+      expect(r.seconds).toBeUndefined();
+      expect(r.known?.subtracted.map((x) => x.issue)).toEqual([4826, 4827]);
+      expect(r.known?.expired).toEqual([]);
+      expect(shown).toEqual([`${BASE}:known-failures.json`]);
+      const text = resultComment(r);
+      expect(text.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+      expect(passOf(text)).toEqual([SHA, BASE]);
+      expect(text).toContain("既知の失敗を差し引いた（known-failures.json、base の登録）:");
+      expect(text).toContain("- `a.test.ts > flaky one`（#4826、期限 2026-11-20）");
+      expect(text).toContain("- `b.test.ts > flaky two`（#4827、期限 2026-11-20）");
+      expect(text).not.toContain("期限切れで差し引かなかった");
+    });
+
+    test("one unregistered failure among them: fail, and the fail lines are the unregistered ones only", async () => {
+      const { d } = known(KNOWN([A]), "bun test", failOut(A.test, "c.test.ts > real"));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(false);
+      expect(r.results.find((x) => x.name === "bun test")!.fails).toEqual(["(fail) real [3.21ms]"]);
+      const text = resultComment(r);
+      expect(text.split("\n")[0]).toStartWith("[local-ci] fail ");
+      expect(text).toContain("(fail) real [3.21ms]");
+      expect(text).not.toContain("(fail) flaky one");
+      expect(text).toContain("既知の失敗を差し引いた");
+    });
+
+    test("the day before until is subtracted; the day after is a fail with the 期限切れ lines", async () => {
+      const rows = KNOWN([A]);
+      const before = await localCi(42, "/repo", known(rows, "bun test", failOut(A.test)).d, "example/development", CACHE, at("2026-11-19"));
+      expect(before.ok).toBe(true);
+      const last = await localCi(42, "/repo", known(rows, "bun test", failOut(A.test)).d, "example/development", CACHE, at("2026-11-20"));
+      expect(last.ok).toBe(true);
+      const after = await localCi(42, "/repo", known(rows, "bun test", failOut(A.test)).d, "example/development", CACHE, at("2026-11-21"));
+      expect(after.ok).toBe(false);
+      expect(after.known?.expired).toHaveLength(1);
+      const text = resultComment(after);
+      expect(text).toContain("期限切れで差し引かなかった:");
+      expect(text).toContain("- `a.test.ts > flaky one`（#4826、期限 2026-11-20）");
+      expect(text).toContain("(fail) flaky one [3.21ms]");
+    });
+
+    test("a registry only in the head is not subtracted: only the base's ref is read", async () => {
+      const { d, shown } = known(undefined, "bun test", failOut(A.test), { head: KNOWN([A]) });
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(false);
+      expect(r.known).toBeUndefined();
+      expect(shown).toEqual([`${BASE}:known-failures.json`]);
+      expect(resultComment(r)).not.toContain("既知の失敗を差し引いた");
+    });
+
+    test("a registry that cannot be read takes nothing off: a fail that says so", async () => {
+      const { d } = known(`[{"test":"a.test.ts > flaky one","issue":4826}]`, "bun test", failOut(A.test));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(false);
+      expect(resultComment(r)).toContain("known-failures.json（base の登録）を読めなかったので差し引いていない: known-failures.json: line 1: until must be");
+    });
+
+    test("bun's summary counts more failures than its (fail) lines (a file that did not load), or an error: nothing is taken off", async () => {
+      for (const out of [failOut(A.test).replace(" 1 fail", " 2 fail"), `${failOut(A.test)}\n 1 error`]) {
+        const r = await localCi(42, "/repo", known(KNOWN([A]), "bun test", out).d, "example/development", CACHE, at("2026-11-13"));
+        expect(r.ok).toBe(false);
+        expect(r.known).toBeUndefined();
+      }
+    });
+
+    test("a bun test failure with no (fail) line is not subtracted, and the registry is not read", async () => {
+      const { d, shown } = known(KNOWN([A]), "bun test", "error: Cannot find module 'x'\n 0 pass\n 1 fail");
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(false);
+      expect(r.known).toBeUndefined();
+      expect(shown).toEqual([]);
+    });
+
+    test("another step's failure (here the type check; a PR's run has no perf step) is never subtracted", async () => {
+      const { d, shown } = known(KNOWN([A]), "bun run typecheck", failOut(A.test));
+      const r = await localCi(42, "/repo", d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.ok).toBe(false);
+      expect(r.known).toBeUndefined();
+      expect(shown).toEqual([]);
+    });
+
+    test("a conflict is never subtracted", async () => {
+      const f = deps(undefined, undefined, "1 fail", {}, false, { conflict: true });
+      const r = await localCi(42, "/repo", f.d, "example/development", CACHE, at("2026-11-13"));
+      expect(r.conflict).toBe(true);
+      expect(r.known).toBeUndefined();
+    });
+  });
+
   describe("incremental run", () => {
     const PASS = "a".repeat(40);
     const comment = (body: string, createdAt = "2026-11-07T00:00:00Z", authorAssociation = "OWNER") => ({ body, createdAt, authorAssociation });
@@ -1271,8 +1393,12 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         return JSON.parse(readFileSync(FILE, "utf8")) as { build: string; steps: Array<{ name: string }>; [k: string]: unknown };
       };
       /** `main(["--collect"])` on a host whose build ends with `answer`; the head the PR names now is `head`. */
-      const collect = async (rec: { build: string; steps: Array<{ name: string }> }, o: { head?: string; post?: () => Promise<void>; output?: string; code?: number; live?: boolean; during?: () => void } = {}) => {
+      const collect = async (rec: { build: string; steps: Array<{ name: string }> }, o: { head?: string; post?: () => Promise<void>; output?: string; code?: number; live?: boolean; during?: () => void; registry?: string } = {}) => {
         const y = deps(undefined, undefined, "", {}, false, { heads: [o.head ?? SHA] });
+        if (o.registry !== undefined) {
+          const inner = y.d.sh;
+          y.d.sh = async (cmd, cwd) => (cmd.includes("ls-tree") ? "known-failures.json\n" : cmd.at(-1) === `${BASE}:known-failures.json` ? o.registry! : inner(cmd, cwd));
+        }
         const asked: string[] = [];
         let started = 0;
         y.d.offload = { start: async () => (started++, Promise.reject(new Error("no build is started"))), collect: async (b) => (asked.push(b), o.during?.(), { code: o.code ?? 0, output: o.output ?? passLog(rec.steps) }) };
@@ -1299,6 +1425,17 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(r.posted[0]).toContain("(fail) a > b [1ms]");
         expect(r.code).toBe(0);
         expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a collected build whose only failures are registered at the base is posted as a pass, as a run here is", async () => {
+        const rec = await cutOff();
+        const last = rec.steps.length - 1;
+        expect(rec.steps[last]!.name).toBe("bun test");
+        const log = [passLog(rec.steps.slice(0, last)), `sb-step: ${last} begin 200`, "", "scripts/a.test.ts:", "(fail) grp > flaky [1ms]", "", " 0 pass", " 1 fail", "", `sb-step: ${last} exit 1 201`, "sb-offload: exit 1"].join("\n");
+        const until = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+        const r = await collect(rec, { code: 1, output: log, registry: JSON.stringify([{ test: "scripts/a.test.ts > grp > flaky", issue: 7, until }]) });
+        expect(r.posted[0]!.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+        expect(r.posted[0]).toContain(`- \`scripts/a.test.ts > grp > flaky\`（#7、期限 ${until}）`);
       });
 
       test("pending: a head that moved is not posted and the record is removed", async () => {
@@ -1545,6 +1682,9 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     test("ciScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
       const script = ciScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
       for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      // the steps run in a new PID namespace whose init reaps orphans (the build's PID 1 does not)
+      expect(script).toContain("unshare --pid --fork --mount-proc bash -c 'su - switchboard -c ");
+      expect(script).toContain('sb-setup: PID 名前空間を作れない');
       // the image has them: nothing is installed or created in the build
       for (const gone of ["bun.sh/install", "@openai/codex@", "reinstall", "dnf ", "useradd", "su - sb "]) expect(script).not.toContain(gone);
       // a repository that is not owner/name (a local change's workspace) gets no origin

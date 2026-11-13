@@ -397,3 +397,178 @@ test("skills: a 利用者確認 line checked by answering decisions names them a
   const toUser = report.split("\n").find((line) => line.startsWith("利用者へ:")) ?? "";
   expect(toUser).toContain("判断待ちへの回答で確かめる行");
 });
+
+test("skills: task-to-pr: a change greps the other places that say the same fact and fixes them in the same PR", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const rules = skill.slice(skill.indexOf("### 3. 実装の規律"), skill.indexOf("### 4. テスト"));
+  expect(rules).toContain("同じ事実を書いているほかの文書・スキル・コード内コメントを `grep -rn` し、食い違うものは同じ PR で直す");
+  expect(rules).toContain("直さず残すものは「変えなかったこと」に書く");
+});
+
+test("skills: task-to-pr: an added test is seen red by breaking the implementation once, and the PR names the break", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  expect(skill.indexOf("**足す前に**")).toBeGreaterThan(-1);
+  expect(skill.indexOf("**テストを消す・統合するとき**")).toBeGreaterThan(skill.indexOf("**足す前に**"));
+  const before = skill.slice(skill.indexOf("**足す前に**"), skill.indexOf("**テストを消す・統合するとき**"));
+  expect(before).toContain("実装を 1 か所壊して");
+  expect(before).toContain("赤になるのを実行して見る");
+  expect(before).toContain("壊し方と赤になったテスト名を PR 本文の「テスト観点」に書く");
+});
+
+test("skills: task-to-pr: a change outside the Task is a deviation, commented on the Task before the PR and named next to 変えなかったこと", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  expect(skill).toContain("Task に無い方針・拒否・機構の追加と、別 Task の修正も同じ");
+  expect(skill).toContain("PR に入れる前に Task へ逸脱としてコメントし");
+  const template = skill.slice(skill.indexOf("## レビュアーへ"));
+  expect(template.indexOf("- 逸脱:")).toBe(template.indexOf("- 変えなかったこと:") + template.slice(template.indexOf("- 変えなかったこと:")).indexOf("\n") + 1);
+  // the review prompt has the reviewer check that a deviation is written in the PR body and on the Task
+  const review = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const intent = review.slice(review.indexOf("1. Intent:"), review.indexOf("2. Design consistency:"));
+  expect(intent).toContain("PR body's 逸脱 item and in a comment on the Task");
+  expect(intent).toContain("report one that is not written as a finding");
+});
+
+test("skills: task-to-pr: an added test asserts the behaviour of what is built and cleans up the environment it changes", () => {
+  const whole = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  expect(whole.indexOf("**足す前に**")).toBeGreaterThan(-1);
+  expect(whole.indexOf("**テストを消す・統合するとき**")).toBeGreaterThan(whole.indexOf("**足す前に**"));
+  const skill = whole.slice(whole.indexOf("**足す前に**"), whole.indexOf("**テストを消す・統合するとき**"));
+  expect(skill).toContain("断言は出来上がるもの（戻り値・出力・画面・保存された値）の振る舞いを確かめる");
+  expect(skill).toContain("文書・スキルの文そのものを変える PR の、文の在りかのテストは除く");
+  expect(skill).toContain("テストが変える環境変数・グローバル状態・ポート・日付は後始末する");
+});
+
+test("skills: task-to-pr: a new rule in a design doc, CLAUDE.md or a skill is outside the Task and goes to the PBI's decision log or a new Task", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  expect(skill).toContain("設計文書・CLAUDE.md（`AGENTS.md`）・スキルへの規則の追記も同じ扱い");
+  expect(skill).toContain("Task に無い新しい規則は PR に入れず、PBI の決定ログ（`ops-kit backlog edit <PBI>`）か新しい Task");
+  expect(skill).toContain("規則の文の追記はこの節の「Task の手順に書いたファイルと名前で作る」の項のとおり PR に入れない");
+});
+
+test("skills: task-to-pr: a PR that changes rule text checks it against the scripts and the other lines, says 未検証 for what it did not see, and writes owner/repo#N", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  expect(skill).toContain("関係するスクリプトを実行して実際の動きと、同じファイルのほかの行とに照らす");
+  expect(skill).toContain("同じ規則を 2 か所に書かず既にある行を指す");
+  expect(skill).toContain("観測していないことは「未検証」と書く");
+  expect(skill).toContain("`path:line` は書く前にその行を開いて中身を確かめる");
+  expect(skill).toContain("他リポジトリの Issue・PR は `owner/repo#N` で書く");
+});
+
+test("task-to-pr: the PR body has a correspondence table of the Task's steps, acceptance criteria and DoD", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const template = skill.slice(skill.indexOf("## レビュアーへ"), skill.indexOf("## 概要 / Summary"));
+  const row = template.split("\n").find((l) => l.startsWith("- 対応表:")) ?? "";
+  expect(row).toContain("`## 手順` の各番号");
+  expect(row).toContain("受け入れ条件");
+  expect(row).toContain("`## 完了条件 (DoD)` の各行");
+  expect(row).toContain("`## 検証` の各項目");
+  expect(row).toContain("「実施した / していない（理由）」と証跡の在りか");
+});
+
+test("skills: a PR with a step left undone says Refs, not Closes, and no skill closes its Task", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const rule = skill.slice(skill.indexOf("## 概要 / Summary"));
+  expect(rule).toContain("「していない」の行（後回しの検証を含む");
+  expect(skill).toContain("後回し・改変した検証の書き方は「レビュアーへ」の「検証」と「対応表」");
+  expect(rule).toContain("マージの後に書く結果コメントの行は「マージ後」と書き、数えない");
+  expect(rule).toContain("`Closes` ではなく `Refs #<Task>` にし、残りの手順を Task にコメントする");
+  expect(rule).toContain("利用者の判断を待つ Task（`## 判断待ち` に回答が無い、`（利用者確認: …）` の行が残る）の PR は");
+  expect(skill).toContain("未実施の手順が残る PR は `Refs #N`");
+  const close: [string, string][] = [
+    ["review-triage-and-merge", "PR が `Refs #<Task>` なら、Task に途中経過のコメント（マージした PR と残りの手順）を書き、Status を `In review` から `In progress` に戻して閉じない"],
+    ["pbi-complete", "PR が `Refs #<Task>` の Task は閉じず、Status を `In progress` に戻して"],
+    ["issue-workflow", "手順が残る PR は `Refs #N` で、マージしても Task は閉じず"],
+    ["issue-workflow", "`Refs` の PR なら（マージ + 途中経過のコメント）In progress に戻り"],
+    ["issue-workflow", "`Refs #N` の PR では結果コメントは途中経過（マージした PR と残りの手順）にし、Status は In review から In progress に戻す（Done にしない）"],
+    ["stacked-pr-delivery", "手順が残る PR は `Refs #N`"],
+  ];
+  for (const [name, text] of close) expect(readFileSync(join(skills, name, "SKILL.md"), "utf8")).toContain(text);
+  for (const file of [".github/PULL_REQUEST_TEMPLATE.md", "ops-kit/template/.github/PULL_REQUEST_TEMPLATE.md"]) {
+    expect(readFileSync(join(import.meta.dir, "../..", file), "utf8")).toContain("Task の手順が残るなら `Refs #<Task番号>`");
+  }
+});
+
+/** cross-runner-review's step 1 TASK lines, run as written on a PR body. */
+function readTask(body: string) {
+  const lines = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8").split("\n");
+  const from = lines.findIndex((l) => l.startsWith("TASK=$(tr"));
+  const to = lines.findIndex((l, i) => i > from && l.startsWith("TASK=$(echo"));
+  expect(from).toBeGreaterThan(-1);
+  expect(to).toBeGreaterThan(from);
+  const dir = mkdtempSync(join(tmpdir(), "skills-task-"));
+  try {
+    mkdirSync(join(dir, "_review"));
+    writeFileSync(join(dir, "_review", "pr.md"), body);
+    const run = spawnSync("bash", ["-c", `M=${dir}/_review\n${lines.slice(from, to + 1).join("\n")}\necho "$TASK"`], { encoding: "utf8" });
+    return run.stdout.trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("cross-runner-review: step 1 reads the Task from a PR that says only Refs #N", () => {
+  expect(readTask("# PR #1 t\n\nRefs #12。残りは次の PR\n")).toBe("12");
+  expect(readTask("Refs #12\nCloses #7\n")).toBe("7");
+  expect(readTask("Backlog-Task: 5\n")).toBe("5");
+});
+
+test("task-to-pr: the PR body's verification checks only what has a result, names where a deferred one goes, and does not count a pass of an altered check", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const template = skill.slice(skill.indexOf("## レビュアーへ"), skill.indexOf("## 概要 / Summary"));
+  const check = template.split("\n").find((l) => l.startsWith("- 検証:")) ?? "";
+  expect(check).toContain("結果の無い検証にはチェックを付けない");
+  expect(check).toContain("手で変えて（コマンド・場面・データを改めて）走らせた pass は Task の検証の pass と数えず、変えた点を書く");
+  const table = template.split("\n").find((l) => l.startsWith("- 対応表:")) ?? "";
+  expect(table).toContain("後回しにした検証は後回し先（例: 「PBI の最後」）を書く");
+  expect(table).toContain("対応するテストの場面（テスト名かコマンド）");
+  expect(skill).toContain("「していない」の行（後回しの検証を含む");
+});
+
+function triageStep3(): string {
+  const skill = readFileSync(join(skills, "review-triage-and-merge", "SKILL.md"), "utf8");
+  return skill.slice(skill.indexOf("## 3. 直す"), skill.indexOf("## 4. 返信する"));
+}
+
+test("review-triage-and-merge: each fixed finding's Scenario is reproduced before asking for the follow-up review (#3792)", () => {
+  const step3 = triageStep3();
+  const at = step3.indexOf("指摘の `Scenario:`（入力・状態）を再現して直ったことを確かめる");
+  expect(at).toBeGreaterThan(-1);
+  const paragraph = step3.slice(at, step3.indexOf("\n", at));
+  expect(paragraph).toContain("修正前に fail を見たもの");
+  expect(paragraph).toContain("Scenario の入力・状態を再現したコマンドと出力");
+  expect(paragraph).toContain("`path:line` を読み直した結果");
+  expect(paragraph).toContain("見直しを頼まずに直し続ける");
+  expect(step3.indexOf("見直しを頼む前に、修正した指摘ごとに")).toBeLessThan(step3.indexOf("`cross-runner-review` の 4"));
+});
+
+test("review-triage-and-merge: a fix reply names the commit and how it was checked (#3792)", () => {
+  const skill = readFileSync(join(skills, "review-triage-and-merge", "SKILL.md"), "utf8");
+  const line = skill.split("\n").find((l) => l.startsWith("修正: <")) ?? "";
+  expect(line).toContain("<commit sha 短縮>");
+  expect(line).toContain("確かめた方法: <回帰テスト名");
+  expect(line).toContain("Scenario を再現したコマンドと結果");
+});
+
+test("review-triage-and-merge: a deviation in a fix is written in the PR body's 逸脱 and the PBI's decision log before the follow-up review (#3588)", () => {
+  const step3 = triageStep3();
+  const at = step3.indexOf("修正が Task の手順・受け入れ条件から外れたら");
+  expect(at).toBeGreaterThan(-1);
+  const paragraph = step3.slice(at, step3.indexOf("\n", at));
+  expect(paragraph).toContain("見直しの前に PR 本文の「逸脱」の項");
+  expect(paragraph).toContain("ops-kit backlog comment <Task>");
+  expect(paragraph).toContain("ops-kit backlog edit <PBI>");
+  expect(paragraph).toContain("日付つきで 1 行");
+});
+
+test("cross-runner-review: the follow-up review re-reads the PR body, which the fix wrote first (#3792)", () => {
+  expect(triageStep3()).toContain("gh pr edit");
+  const review = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const step4 = review.slice(review.indexOf("## 4. 修正後の見直し"), review.indexOf("## 報告"));
+  expect(step4).toContain('> "$M/pr.md"');
+  expect(step4).toContain("gh pr view $N --json number,title,body,url");
+  // ローカルの変更（PR の無い workspace）でも、見直しの前に本文を直して取り直す
+  expect(triageStep3()).toContain("ops-kit backlog edit <変更> --body-file");
+  expect(triageStep3()).toContain("ops-kit backlog view <変更> --json | jq -r .issue.body");
+  const local = review.slice(review.indexOf("**ローカルの変更では**"), review.indexOf("レビュー指示（"));
+  expect(local).toContain('`ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）');
+});

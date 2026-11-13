@@ -754,6 +754,19 @@ describe("merge-gate readPr", () => {
       expect(reasons(f)).toEqual([]);
     });
 
+    test("a pass that subtracted known failures merges like any pass: the gate reads the first line only", async () => {
+      const steps = ["bun install --frozen-lockfile", "bun run typecheck"].map((name) => ({ name, code: 0, seconds: 1 }));
+      const bun = { name: "bun test", run: "bun test", code: 1, seconds: 1, tail: "", fails: [] };
+      const known = { subtracted: [{ line: "(fail) a.test.ts > flaky [1.0ms]", issue: 4826, until: "2026-12-01" }], expired: [] };
+      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [...steps, bun] as never, known });
+      expect(body).toContain("既知の失敗を差し引いた（known-failures.json、base の登録）:");
+      expect(body.split("\n")[0]).toBe(`[local-ci] pass ${S.b1} base=${BASE}`);
+      const f = await facts({ comment: body, steps: 0, runs: false }).read();
+      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(f.localCi).toBe(true);
+      expect(reasons(f)).toEqual([]);
+    });
+
     test("no Actions run at all + the pass → one local-ci SUCCESS check; without it, no check", async () => {
       const f = await facts({ comment: pass(S.b1!), steps: 0, runs: false }).read();
       expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);

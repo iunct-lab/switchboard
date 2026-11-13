@@ -72,6 +72,7 @@ import { IN_FLIGHT, isWorking, TURN_DONE, workPhase } from "./task-status.ts";
 import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
+import { createDockerdIdle } from "./dockerd-idle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
 import { DeviceAuths, type DeviceAuthInput } from "./deviceauth.ts";
 import { archiveProblem } from "./archive-status.ts";
@@ -1621,7 +1622,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!meta) return { started, skipped: ["meta workspace がありません"] };
     const held = await askPromotion("backlog-next");
     // a narrow firing logs no skips, but a promotion it asked for (no hold left: it was asked) is an action, logged as a full firing's is
-    if (held && only && !promotionHold) scheduler.note(`${db.getSchedule(scheduleId)?.title ?? "バックログを進める"}: ${held} (待ちが解けた)`);
+    if (held && only && !promotionHold) scheduler.note(`${db.getSchedule(scheduleId)?.title ?? "バックログを進める"}: ${held} (待ちが解けた)`, scheduleId);
     if (held) return { started, skipped: [], promotion: held };
     // Stage Tasks at work (Db's activeStage), and ones a button (or this firing) is creating right now (startingStage), per workspace and slot.
     const stageTasks = () => db.listActiveStageTasks();
@@ -2133,6 +2134,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         )
       : null;
   hostIdle?.start();
+  const dockerdIdle = createDockerdIdle(cfg, homedir());
+  dockerdIdle?.start();
   tasks.onTurnEnd(() => hostIdle?.touch());
   if (!cfg.candidate) resumeJobsOnTurnEnd(db, tasks);
   // a stop that waits on a date goes on once the date has passed, in a workspace with no import too
@@ -2902,7 +2905,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // approval-window starts no Task either: answered the same way
           const kind = db.getSchedule(id)?.action;
           if (kind === "secret-scan" || kind === "approval-window") {
-            void scheduler.runNow(id, "manual").catch((e) => scheduler.note(`${kind}: 始められない (manual): ${String((e as Error).message ?? e)}`));
+            void scheduler.runNow(id, "manual").catch((e) => scheduler.note(`${kind}: 始められない (manual): ${String((e as Error).message ?? e)}`, id));
             return json({ scanning: true }, 202);
           }
           try {
@@ -4737,6 +4740,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     resumer.stop();
     backlog.stop();
     hostIdle?.stop();
+    dockerdIdle?.stop();
     opsLoadSampler?.stop();
     runnerLogins.stop();
     deviceAuths.stop();

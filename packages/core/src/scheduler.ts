@@ -39,9 +39,24 @@ export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をして�
 /** The kinds that run on claude only and fire as a Task of their own on a fixed instruction. */
 const claudeOnly = (action: string): action is "insights" | "ui-layers" => action === "insights" || action === "ui-layers";
 
+/** Where `missedRuns` stops counting: a schedule years behind is not walked run by run. */
+export const MISSED_RUNS_CAP = 1000;
+
+/** How many times `cron` fires after `from` and before `to` (the runs a stopped daemon let pass); stops counting at `cap`. */
+export function missedRuns(cron: string, from: number, to: number, cap = MISSED_RUNS_CAP): number {
+  let n = 0;
+  let at = from;
+  while (n < cap) {
+    const next = nextRun(cron, new Date(at))?.getTime();
+    if (next === undefined || next >= to) break;
+    n++;
+    at = next;
+  }
+  return n;
+}
+
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
-  private log: string[] = [];
   /** backlog-next / secret-scan / approval-window schedules whose firing is still in progress. */
   private starting = new Set<string>();
   /** A runUnblocked asked while a firing was in progress: per schedule, the items per workspace, run after it. */
@@ -53,6 +68,8 @@ export class Scheduler {
   private fullWaiting = new Set<string>();
   /** A tick is in progress: a backlog-next firing can await GitHub longer than the 30 s interval. */
   private ticking = false;
+  /** A tick has run since this Scheduler was made: a run that passed before it passed while the daemon was stopped. */
+  private ticked = false;
 
   constructor(
     private db: Db,
@@ -151,7 +168,7 @@ export class Scheduler {
     // backlog-next decides per workspace and slot instead: its last Task running does not hold the others.
     const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
     if (prev && (isWorking(prev, "slot") || prev.queuedAt !== null)) {
-      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`);
+      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`, s.id);
       return null;
     }
     // A series that keeps stopping on the same thing is not fired by the clock again until it is answered, a condition is met or a Task ends without stopping; a person's "run now" still goes. backlog-next is held per stage by stopHeld instead.
@@ -159,7 +176,7 @@ export class Scheduler {
       const stuck = stuckSchedule(this.db, s);
       if (stuck) {
         this.db.updateSchedule(id, { nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
-        this.note(`${s.title}: 飛ばした (${reason}): 同じ理由で ${stuck.count} 回続けて止まっている（${stuck.reason}）。答えるか条件が成立するまで発火しない`);
+        this.note(`${s.title}: 飛ばした (${reason}): 同じ理由で ${stuck.count} 回続けて止まっている（${stuck.reason}）。答えるか条件が成立するまで発火しない`, s.id);
         return null;
       }
     }
@@ -177,7 +194,7 @@ export class Scheduler {
       const hot = this.db.quotaFor("claude").find((q) => q.window === "seven_day" && q.utilization >= limit && q.resetsAt * 1000 > this.now());
       if (hot) {
         this.db.updateSchedule(id, { nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
-        this.note(`${s.title}: ${s.action} を飛ばした (${reason}): Claude の 7 日枠が ${Math.round(hot.utilization * 100)}% で閾値 ${Math.round(limit * 100)}% 以上`);
+        this.note(`${s.title}: ${s.action} を飛ばした (${reason}): Claude の 7 日枠が ${Math.round(hot.utilization * 100)}% で閾値 ${Math.round(limit * 100)}% 以上`, s.id);
         return null;
       }
     }
@@ -209,9 +226,9 @@ export class Scheduler {
       }
     }, deferUntil === undefined ? {} : { deferUntil });
     this.db.updateSchedule(id, { lastRunAt: this.now(), lastTaskId: task.id, nextRunAt: nextRun(s.cron, new Date(this.now()))?.getTime() ?? null });
-    if (note) this.note(`${s.title}: ${note}`);
-    if (deferNote) this.note(`${s.title}: ${deferNote}`);
-    this.note(`${s.title}: started ${task.id} (${reason})`);
+    if (note) this.note(`${s.title}: ${note}`, s.id);
+    if (deferNote) this.note(`${s.title}: ${deferNote}`, s.id);
+    this.note(`${s.title}: started ${task.id} (${reason})`, s.id);
     return task;
   }
 
@@ -253,7 +270,7 @@ export class Scheduler {
       }
     }
     if (this.starting.has(id)) {
-      this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ項目を選んでいる`);
+      this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ項目を選んでいる`, id);
       return null;
     }
     this.starting.add(id);
@@ -265,14 +282,14 @@ export class Scheduler {
       const last = r.started.at(-1)?.task ?? null;
       if (reason === "unblocked") {
         if (last) this.db.updateSchedule(id, { lastTaskId: last.id });
-        for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (待ちが解けた)`);
+        for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (待ちが解けた)`, id);
         return last ?? (r.promotion ? { promotion: r.promotion } : null);
       }
       const next = nextRun(cron, new Date(this.now()))?.getTime() ?? null;
       this.db.updateSchedule(id, { lastRunAt: this.now(), nextRunAt: next, ...(last ? { lastTaskId: last.id } : {}) });
-      for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (${reason})`);
-      if (r.promotion) this.note(`${title}: ${r.promotion} (${reason})`);
-      for (const why of r.skipped) this.note(`${title}: 飛ばした (${reason}): ${why}`);
+      for (const x of r.started) this.note(`${title}: ${x.label} で開始 ${x.task.id} (${reason})`, id);
+      if (r.promotion) this.note(`${title}: ${r.promotion} (${reason})`, id);
+      for (const why of r.skipped) this.note(`${title}: 飛ばした (${reason}): ${why}`, id);
       return last ?? (r.promotion ? { promotion: r.promotion } : null);
     } finally {
       this.starting.delete(id);
@@ -284,7 +301,7 @@ export class Scheduler {
       if (kept) void (async () => {
         for (const [ws, n] of kept) {
           if (this.fullWaiting.has(id)) return;
-          await this.runUnblocked(id, ws, [...n]).catch((e) => this.note(`${title}: 始められない (待ちが解けた): ${String((e as Error)?.message ?? e)}`));
+          await this.runUnblocked(id, ws, [...n]).catch((e) => this.note(`${title}: 始められない (待ちが解けた): ${String((e as Error)?.message ?? e)}`, id));
         }
       })();
     }
@@ -296,13 +313,13 @@ export class Scheduler {
    */
   private async runSecretScan(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<null> {
     if (this.starting.has(id)) {
-      this.note(`${title}: 飛ばした (${reason}): 前の検査がまだ終わっていない`);
+      this.note(`${title}: 飛ばした (${reason}): 前の検査がまだ終わっていない`, id);
       return null;
     }
     this.starting.add(id);
     try {
-      // The result stays on the schedule: the log is memory, gone with a restart — without this, a clean day left
-      // no trace to tell "0 hits" from "did not run". 判断待ち's notice is read from it too.
+      // The result stays on the schedule too, next to the log lines (kept 90 days) — a clean day leaves
+      // a result to tell "0 hits" from "did not run" at a glance. 判断待ち's notice is read from it too.
       // each repository is read from where the last firing left it (kept on the schedule, so a restart keeps it too)
       const before = this.db.getSchedule(id)?.lastResult?.cursors ?? {};
       let r: { lines: string[]; summary: ScanSummary; cursors?: ScanCursors };
@@ -317,7 +334,7 @@ export class Scheduler {
       const at = this.now();
       // read again after the scan (minutes): a schedule turned into another action meanwhile keeps no result (its result
       // belongs to secret-scan), and one deleted meanwhile is not written back
-      for (const l of r.lines) this.note(`${title}: ${l} (${reason})`);
+      for (const l of r.lines) this.note(`${title}: ${l} (${reason})`, id);
       const still = this.db.getSchedule(id);
       if (!still) return null; // deleted meanwhile: logged above, nothing written back
       // a scan that threw read nothing: the cursors stay where they were
@@ -333,7 +350,7 @@ export class Scheduler {
   /** approval-window: no runner, no Task — its line in the log and on the schedule. One firing at a time, like secret-scan. */
   private async runApprovalWindow(id: string, title: string, cron: string, reason: "manual" | "due"): Promise<null> {
     if (this.starting.has(id)) {
-      this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ終わっていない`);
+      this.note(`${title}: 飛ばした (${reason}): 前の発火がまだ終わっていない`, id);
       return null;
     }
     this.starting.add(id);
@@ -341,7 +358,7 @@ export class Scheduler {
       let failed = 0;
       // the error's name only, as secret-scan's: a message could quote anything (docs/design/secret-guard.md)
       const line = await this.approvalWindow({ id, title }).catch((e) => ((failed = 1), `待ちを読めなかった（${e instanceof Error ? e.name : typeof e}）`));
-      this.note(`${title}: ${line} (${reason})`);
+      this.note(`${title}: ${line} (${reason})`, id);
       const at = this.now();
       // the line stays on the schedule, as secret-scan's does (a restart keeps it); the counts are not used for this kind
       if (this.db.getSchedule(id)?.action === "approval-window") this.db.updateSchedule(id, { lastRunAt: at, nextRunAt: nextRun(cron, new Date(at))?.getTime() ?? null, lastResult: { at, repos: 0, hits: 0, failed, lines: [line] } });
@@ -366,16 +383,26 @@ export class Scheduler {
   private async fireDue(): Promise<Task[]> {
     const started: Task[] = [];
     const t = this.now();
+    // the first tick after a start finds the runs that passed while the daemon was stopped; a later one finds the runs a
+    // long firing kept the ticker from (a secret-scan reads for minutes) — counted the same, written apart
+    const afterStart = !this.ticked;
+    this.ticked = true;
     for (const s of this.db.listSchedules()) {
       if (!s.enabled || s.nextRunAt === null || s.nextRunAt > t) continue;
       try {
+        // runs that passed are not fired again: only this one fires, the count is kept
+        const missed = missedRuns(s.cron, s.nextRunAt, t);
+        if (missed > 0) {
+          const n = missed >= MISSED_RUNS_CAP ? `${MISSED_RUNS_CAP} 回以上` : `${missed} 回`;
+          this.note(`${s.title}: ${afterStart ? "停止中に過ぎた" : "前の発火が長引いて過ぎた"} ${n}を飛ばした (due)`, s.id);
+        }
         const task = await this.runNow(s.id, "due");
         if (task && !("promotion" in task)) started.push(task);
         // a firing that started nothing still moves on — unless it already did, after a long firing (a secret-scan
         // reads for minutes: the next run from before it could be due again at once)
         else if ((this.db.getSchedule(s.id)?.nextRunAt ?? 0) <= t) this.db.updateSchedule(s.id, { nextRunAt: nextRun(s.cron, new Date(t))?.getTime() ?? null });
       } catch (e) {
-        this.note(`${s.title}: failed to start (${String((e as Error).message ?? e)})`);
+        this.note(`${s.title}: failed to start (${String((e as Error).message ?? e)})`, s.id);
         this.db.updateSchedule(s.id, { nextRunAt: nextRun(s.cron, new Date(t))?.getTime() ?? null });
       }
     }
@@ -393,13 +420,19 @@ export class Scheduler {
     this.timer = null;
   }
 
+  /** The last 50 lines of the schedules log, kept in the db (a restart keeps them). */
   recentLog(): string[] {
-    return this.log.slice(-50);
+    return this.db.recentScheduleLog(50).map((r) => `${new Date(r.ts).toISOString()} ${r.text}`);
   }
 
-  note(text: string) {
-    this.log.push(`${new Date(this.now()).toISOString()} ${text}`);
-    if (this.log.length > 200) this.log.splice(0, this.log.length - 200);
+  note(text: string, scheduleId: string | null = null) {
+    // a log line never fails the firing that writes it (it is called from catch handlers and after a firing ends,
+    // when the db can be closed on shutdown or busy)
+    try {
+      this.db.addScheduleLog({ ts: this.now(), scheduleId, text });
+    } catch (e) {
+      console.error(`[scheduler] log line not kept: ${String((e as Error)?.message ?? e)}`);
+    }
   }
 
   /**
