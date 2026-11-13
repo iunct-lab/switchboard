@@ -14,6 +14,13 @@ export const task = msgs({
   copy: { ja: "コピー", en: "Copy" },
   loading: { ja: "読み込み中…", en: "Loading…" },
   uploading: { ja: "アップロード中…", en: "Uploading…" },
+  budgetChoiceLabel: { ja: "予算を超えた Task の選択", en: "Choice for a Task over its budget" },
+  budgetChoiceHint: { ja: "予算 ${budget} を超えました。", en: "Over the ${budget} budget." },
+  budgetContinue: { ja: "このまま続ける", en: "Continue as is" },
+  budgetContinueTitle: { ja: "予算を ${budget} に上げて、次のターンを送れるようにします", en: "Raises the budget to ${budget} so the next turn can be sent" },
+  budgetContinuationPrompt: { ja: "Task「{title}」（{id}）の続き。元の Task は予算 ${budget} を超えたのでここで続ける。", en: "Continues Task \"{title}\" ({id}). The old Task went over its ${budget} budget, so the work goes on here." },
+  budgetCut: { ja: "新しい Task に切る", en: "Cut a new Task" },
+  budgetCutTitle: { ja: "同じ Workspace・同じランナーで、この Task を名指す新しい Task を開きます。この Task はそのまま残ります", en: "Opens a new Task in the same Workspace and runner that names this one. This Task stays as it is" },
 
   // asks.ts: kinds, states and groups of a question
   kindApproval: { ja: "ツール承認", en: "Tool approval" },

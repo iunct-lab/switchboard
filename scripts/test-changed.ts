@@ -4,13 +4,13 @@
 // 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）と、ほかのパッケージが読む共有の型
 // （packages/protocol/）が変わったとき。子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
 // 変更が無い、または選ばれたテストが無ければ何も回さない。SWITCHBOARD_SUPERVISED は抜いて回す。
-// sb-offload があるホストでは、録画を読まないテストを外のビルドで回し（local-ci と同じ placeSteps / groupScript /
-// parseGroup。docs/design/local-ci-offload.md）、録画を読むテストだけホストで回す。重い処理の枠は自分で取り、
-// ホストで回す間だけ持つ（外を待つ間は持たない）。外が失敗・時間切れ・中断してもホストで回し直さない。
+// sb-offload があるホストでは、選んだテスト全部（録画を読むものも）を外の 1 本のビルドで回す（local-ci と同じ runBuild /
+// ciScript / parseBuild。docs/design/local-ci-offload.md）。ホストの重い処理の枠は取らない。外が失敗・時間切れ・中断しても
+// ホストで回し直さない。sb-offload が無いホストでは、重い処理の枠を取って今までどおりホストで回す。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
-import { type Deps, groupScript, hostOffload, parseGroup, placeSteps, recordingTestFiles, sh, type Offload } from "./local-ci.ts";
+import { type Deps, hostOffload, parseBuild, runBuild, testRun, type Offload } from "./local-ci.ts";
 import { currentRepo } from "./repo.ts";
 import { repoFiles, selectFrom } from "./test-select.ts";
 
@@ -42,8 +42,6 @@ export interface RunDeps {
   offload?: Offload;
   /** 重い処理の枠を取って `fn` を回す。 */
   slot: Deps["slot"];
-  /** 録画を読むテストファイル（外に送らない）。 */
-  recordings: string[];
   /** owner/name。外の作業ツリーに origin として足す（origin を読むテストのため。local-ci と同じ）。 */
   repo?: string;
   log: (line: string) => void;
@@ -56,53 +54,32 @@ export async function runTests(picked: Picked, d: RunDeps): Promise<number> {
     const code = await d.slot("test-changed", () => d.spawnHost(["bun", "test", ...(tests ?? []).map((t) => `./${t}`)]));
     return code;
   }
-  const { host, groups } = placeSteps([{ name: "bun test", run: "bun test" }], tests, d.recordings);
-  const rec = new Set(d.recordings);
-  const hostFiles = tests ? tests.filter((f) => rec.has(f)) : d.recordings;
-  // 選んだファイルが全部録画を読むなら外に送るものは無い（ビルドを始めない）
-  const offFiles = tests ? tests.length - hostFiles.length : 1;
-  // 外のビルドを先に始め、ホストの手順の間だけ枠を持つ
-  const started = (offFiles ? groups : []).map((g) => ({
-    g,
-    done: d.offload!.run(groupScript(g.steps, { ...(d.repo ? { repo: d.repo } : {}) }), ROOT, g.size).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` })),
-  }));
-  let hostCode = 0;
-  if (hostFiles.length) {
-    hostCode = await d.slot("test-changed", async () => {
-      for (const s of host) {
-        const code = await d.spawnHost(["bash", "-e", "-c", s.run]);
-        if (code !== 0) return code;
-      }
-      return 0;
-    });
-  }
+  const steps = [{ name: "bun test", run: tests ? testRun(tests) : "bun test" }];
+  const { code, output } = await runBuild(d.offload, steps, ROOT, { ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
   let offCode = 0;
   let passed = 0;
   let counted = false;
   // 一式のときは選んだファイルの数が無いので、bun test の `Ran N tests across M files.` の M を数える
   let ranFiles = 0;
-  for (const { g, done } of started) {
-    const { code, output } = await done;
-    for (const r of parseGroup(output, g.steps, code)) {
-      if (r.code === 0) {
-        const m = r.output.match(/^\s*(\d+) pass\s*$/m);
-        if (m) (passed += Number(m[1]), (counted = true));
-        const f = r.output.match(/across (\d+) files?\./);
-        if (f) ranFiles += Number(f[1]);
-        continue;
-      }
-      offCode ||= r.code;
-      const fails = [...new Set(r.output.split("\n").filter((l) => l.startsWith("(fail)")))];
-      for (const l of fails) d.log(l);
-      d.log(r.tail.split("\n").filter((l) => !fails.includes(l)).join("\n"));
+  for (const r of parseBuild(output, steps, code)) {
+    if (r.code === 0) {
+      const m = r.output.match(/^\s*(\d+) pass\s*$/m);
+      if (m) (passed += Number(m[1]), (counted = true));
+      const f = r.output.match(/across (\d+) files?\./);
+      if (f) ranFiles += Number(f[1]);
+      continue;
     }
-    if (code !== 0) offCode ||= code;
+    offCode ||= r.code;
+    const fails = [...new Set(r.output.split("\n").filter((l) => l.startsWith("(fail)")))];
+    for (const l of fails) d.log(l);
+    d.log(r.tail.split("\n").filter((l) => !fails.includes(l)).join("\n"));
   }
+  if (code !== 0) offCode ||= code;
   // 通ったときも外で回ったと分かるように 1 行出す（pass の行が見つからなくてもファイル数は出す。一式で数が読めなければ数を省く）
-  const files = tests ? offFiles : ranFiles;
+  const files = tests ? tests.length : ranFiles;
   const counts = [...(files ? [`${files} ファイル`] : []), ...(counted ? [`${passed} pass`] : [])];
-  if (started.length && !offCode) d.log(`test-changed: 外で通った${counts.length ? `（${counts.join("、")}）` : ""}`);
-  return hostCode || offCode;
+  if (!offCode) d.log(`test-changed: 外で通った${counts.length ? `（${counts.join("、")}）` : ""}`);
+  return offCode;
 }
 
 if (import.meta.main) {
@@ -125,7 +102,6 @@ if (import.meta.main) {
       spawnHost: async (cmd) => await Bun.spawn(cmd, { cwd: ROOT, env, stdout: "inherit", stderr: "inherit" }).exited,
       ...(offload ? { offload } : {}),
       slot: (name, fn) => withHeavySlot(name, fn),
-      recordings: offload ? await recordingTestFiles(ROOT, sh) : [],
       ...(() => { try { return { repo: currentRepo(ROOT) }; } catch { return {}; } })(),
       log: (l) => console.log(l),
     }),

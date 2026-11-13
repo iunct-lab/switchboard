@@ -22,7 +22,7 @@ const CHECK = "bun scripts/perf-ratchet.ts check perf-result.json --base perf-ba
  * A fake clone of o/r: `tags` newest first, each with its Release body (null = no Release) and how its CI goes
  * (`fail`: the step's script that fails and its output; none = every step passes). Edits of a Release change its body.
  */
-function fake(tags: Array<{ tag: string; body: string | null; at?: number; fail?: { at: string; output: string }; merged?: false }>, yml = ciYml, select?: string | Error, changed = "") {
+function fake(tags: Array<{ tag: string; body: string | null; at?: number; fail?: { at: string; output: string }; merged?: false; budget?: string; slowTest?: number }>, yml = ciYml, select?: string | Error, changed = "") {
   const bodies = new Map(tags.map((t) => [t.tag, t.body]));
   const ran: Array<{ tag: string; script: string }> = [];
   const viewed: string[] = [];
@@ -61,13 +61,17 @@ function fake(tags: Array<{ tag: string; body: string | null; at?: number; fail?
         await Bun.write(`${dir}/.github/workflows/ci.yml`, yml);
         await Bun.write(`${dir}/scripts/ci.ts`, ciTs);
         if (select !== undefined) await Bun.write(`${dir}/scripts/test-select.ts`, "");
+        const budget = tags.find((t) => t.tag === tagOfDir(dir))?.budget;
+        if (budget !== undefined) await Bun.write(`${dir}/scripts/perf-budget.json`, budget);
       }
       return "";
     },
     step: async (script, cwd) => {
       const tag = tagOfDir(cwd);
       ran.push({ tag, script: script.trim() });
-      const f = tags.find((t) => t.tag === tag)?.fail;
+      const entry = tags.find((t) => t.tag === tag);
+      if (entry?.slowTest && script.trim() === "bun test") await Bun.sleep(entry.slowTest);
+      const f = entry?.fail;
       return f && script.trim() === f.at ? { code: 1, output: f.output } : { code: 0, output: "ok" };
     },
     log: () => undefined,
@@ -406,6 +410,57 @@ describe("tag-ci", () => {
     expect(f.ran.some((x) => x.script.includes("scripts/perf-bench.ts"))).toBe(true);
     expect(f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
     expect(f.bodies.get("v1.0.0")).toContain("    over: launch.ms = 900 > 800");
+  });
+
+  describe("seconds over local.durations (the result is not changed)", () => {
+    const budget = (test: number) => JSON.stringify({ local: { journeys: {}, durations: { typecheck: 1000, test } } });
+    test("a pass over the ceiling: the Release lists the over line; still a pass, exit 0, no request", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", budget: budget(0), slowTest: 150 }]);
+      const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      const body = f.bodies.get("v1.0.0")!;
+      expect(r.map((x) => x.result)).toEqual(["pass"]);
+      expect(tagCiExit(r)).toBe(0);
+      expect(body).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+      expect(body).toMatch(/所要時間が上限を超えた（結果は変えない）:\n {4}over: durations\.test = \d+(\.\d)? > ceiling 0/);
+      expect(failedIn(body)).toBeNull();
+      expect(warningsOf(body)).toEqual([]);
+      const q = requests(f);
+      await followUp(r, "o/r", "/repo", true, q.d, undefined, NO_HOST);
+      expect(q.open).toEqual([]);
+    });
+    test("a pass under the ceiling has no such line", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", budget: budget(1000), slowTest: 150 }]);
+      await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      expect(f.bodies.get("v1.0.0")).not.toContain("所要時間");
+    });
+    test("a failed tag is not compared, and failedIn still reads its failed lines", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", budget: budget(0), slowTest: 150, fail: testFail }]);
+      await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      const body = f.bodies.get("v1.0.0")!;
+      expect(body).not.toContain("所要時間");
+      expect(failedIn(body)).toEqual({ step: "bun test", fails: ["(fail) a > b"] });
+    });
+    test("a pass whose only failed step is perf's still compares the seconds, under the perf warning", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", budget: budget(0), slowTest: 150, fail: { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" } }]);
+      const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      const body = f.bodies.get("v1.0.0")!;
+      expect(r.map((x) => x.result)).toEqual(["pass"]);
+      expect(warningsOf(body)).toEqual(["over: launch.ms = 900 > 800"]);
+      expect(body).toMatch(/所要時間が上限を超えた（結果は変えない）:\n {4}over: durations\.test = /);
+    });
+    test("a budget that cannot be read compares nothing and keeps the result", async () => {
+      const f = fake([{ tag: "v1.0.0", body: "", budget: "{ not json", slowTest: 150 }]);
+      const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
+      const body = f.bodies.get("v1.0.0")!;
+      expect(r.map((x) => x.result)).toEqual(["pass"]);
+      expect(body).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+      expect(body).not.toContain("所要時間");
+    });
+    test("resultSection: the lines come after the perf warning, which keeps its own lines", () => {
+      const s = resultSection({ sha: shaOf("v1.0.0"), ok: true, warnings: ["over: x = 2 > ceiling 1"], durations: ["over: durations.test = 600 > ceiling 513.7"] }, NO_HOST);
+      expect(warningsOf(s)).toEqual(["over: x = 2 > ceiling 1"]);
+      expect(s.indexOf(PERF_WARNING_HEADING)).toBeLessThan(s.indexOf("所要時間が上限を超えた"));
+    });
   });
 
   test("a failed bun test with the check's many lines: the Release's fail lines are bun test's, the warning keeps the check's 20", async () => {

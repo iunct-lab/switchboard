@@ -16,6 +16,7 @@ import { AttachButton, AttachmentBar, AttachmentGallery, useAttachments, useDrop
 import { PresetPicker } from "./PresetPicker.tsx";
 import { jstDateTime, jstTime } from "../time.ts";
 import { titleToSave } from "../taskTitle.ts";
+import { continuationPrompt, overBudget } from "../budgetChoice.ts";
 import { AnswerArea } from "./Approvals.tsx";
 import { Markdown, MdViewToggle } from "./Markdown.tsx";
 import { useMdView } from "../mdView.ts";
@@ -162,6 +163,20 @@ export function TaskView(props: {
   };
 
   const busy = isWorkingStatus(props.task.status);
+  // 予算を超えた (llm-routing.md): the choice shows between turns, never over a running one. The cost is the one the Brief's 予算 row shows.
+  const showBudgetChoice = !cloud && !busy && overBudget(props.task, props.detail?.cost.costUsd ?? 0);
+  const [budgetChoosing, setBudgetChoosing] = useState(false);
+  const continueBudget = () => {
+    setBudgetChoosing(true);
+    api.setBudget(props.task.id, props.task.budgetUsd! * 2).catch((e) => props.onError(String((e as Error).message ?? e))).finally(() => setBudgetChoosing(false));
+  };
+  const cutNewTask = () => {
+    setBudgetChoosing(true);
+    api.createTask({ executionMode: "local", workspaceId: props.task.workspaceId ?? undefined, runner: props.task.runner, model: props.task.model ?? undefined, prompt: continuationPrompt(props.task) })
+      .then((created) => props.onOpenTask?.(created.id))
+      .catch((e) => props.onError(String((e as Error).message ?? e)))
+      .finally(() => setBudgetChoosing(false));
+  };
   // 結果 / 確認済み (#492): the answer comes back as task.updated too, which is what the lists redraw from
   const [outcomeErr, setOutcomeErr] = useState<string | null>(null);
   const setOutcome = (body: { outcome?: TaskOutcome; reviewed?: boolean }) => {
@@ -440,6 +455,13 @@ export function TaskView(props: {
         );
       })}
 
+      {showBudgetChoice && (
+        <div className="budget-choice" role="group" aria-label={t(m.budgetChoiceLabel)}>
+          <span className="hint">{t(m.budgetChoiceHint, { budget: props.task.budgetUsd! })}</span>
+          <button disabled={budgetChoosing} onClick={continueBudget} title={t(m.budgetContinueTitle, { budget: props.task.budgetUsd! * 2 })}>{t(m.budgetContinue)}</button>
+          <button disabled={budgetChoosing} onClick={cutNewTask} title={t(m.budgetCutTitle)}>{t(m.budgetCut)}</button>
+        </div>
+      )}
       {!cloud && <PresetPicker workspaceId={props.task.workspaceId} onText={(s) => setText(s)} onError={props.onError} />}
       {!cloud && <div className="composer">
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...drop.handlers}>

@@ -24,7 +24,7 @@
 import { existsSync } from "node:fs";
 import type { Backlog, BacklogCommentData, BacklogErrorKind, BacklogIssueData, BacklogPullRequestData, BacklogItem, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogProjectField, BacklogSource } from "@switchboard/protocol";
 import type { BacklogSnapshotEntry, Db } from "./db.ts";
-import { BacklogError, backlogRepoOf, confirmationsOf, confirmDecisionsOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
+import { BacklogError, GH_LOGIN_REFUSED, backlogRepoOf, confirmationsOf, confirmDecisionsOf, prereqsOf, projectOf, readStoredBacklog, syncsGithub, waitsOf, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
 import { linkedIssues } from "../../../scripts/task-paths.ts";
 import { Limit, sendGithubOperations } from "./backlog-send.ts";
 import { applyLocalOperations } from "./backlog-local.ts";
@@ -100,7 +100,7 @@ async function graphql(gh: GhRunner, cwd: string, query: string, vars: Vars, par
   const errors = Array.isArray(answer?.errors) ? answer.errors : [];
   const answered = errors.every((e) => partial && (e.type === "NOT_FOUND" || e.type === "FORBIDDEN") && e.path?.length === 2);
   if (!answer?.data || !answered || (r.code !== 0 && !errors.length))
-    throw new BacklogError(`gh api graphql: ${(errors[0]?.message ?? (r.stderr.trim() || `exit ${r.code}`)).slice(0, 200)}`, responseOf(r.stdout, r.stderr));
+    throw new BacklogError(`gh api graphql: ${(errors[0]?.message ?? (r.stderr.trim() || `exit ${r.code}`)).slice(0, 200)}`, responseOf(r.stdout, r.stderr), r.code !== 0 && !errors.length && GH_LOGIN_REFUSED.test(r.stderr) ? "gh-login" : undefined);
   return { data: answer.data, errors };
 }
 

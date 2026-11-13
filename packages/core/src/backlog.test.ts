@@ -3881,6 +3881,133 @@ test("backlog-next picks a local Ready PBI with gh throwing", async () => {
   expect((await scheduleLogAll(base)).filter((l) => l.includes("local: GitHub"))).toEqual([]);
 });
 
+describe("backlog-next auth (#3135)", () => {
+  // the import's `gh api` is refused for the login; every other call goes to the fake
+  const refused = (stderr: string): GhRunner => {
+    const ok = budgetGh(5000);
+    let on = false;
+    const gh: GhRunner = async (args, cwd) => (on && args[0] === "api" && !args.some((a) => a.includes("rateLimit")) ? { code: 1, stdout: "", stderr } : ok.gh(args, cwd));
+    return Object.assign(gh, { refuse: () => { on = true; }, allow: () => { on = false; } });
+  };
+  const run = async (stderr: string) => {
+    const gh = refused(stderr);
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    (gh as unknown as { refuse(): void }).refuse();
+    const id = await backlogNextSchedule(base);
+    return { base, status: (await runSchedule(base, id)).status };
+  };
+
+  test("backlog-next auth: an import refused with HTTP 401 holds the implement slot and logs it", async () => {
+    const { base } = await run("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+    expect(startedTasks().filter((t) => t.title.includes("実装"))).toHaveLength(0);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringMatching(/実装の枠: GitHub の認証切れ: 始めない（.*HTTP 401: Bad credentials.*）/));
+  });
+
+  test("backlog-next auth: gh auth login wording holds it too", async () => {
+    const { base } = await run("To get started with GitHub CLI, please run:  gh auth login");
+    expect(startedTasks().filter((t) => t.title.includes("実装"))).toHaveLength(0);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringMatching(/実装の枠: GitHub の認証切れ: 始めない（.*gh auth login.*）/));
+  });
+
+  test("backlog-next auth: the read right before a start refused with HTTP 401 holds the implement slot too", async () => {
+    // one settle is 4 `gh api` calls here: the firing's first read gets through, the read right before the start is refused
+    const ok = budgetGh(5000);
+    let calls = -1;
+    const gh: GhRunner = async (args, cwd) => (calls >= 0 && args[0] === "api" && ++calls > 4 ? { code: 1, stdout: "", stderr: "HTTP 401: Bad credentials (https://api.github.com/graphql)" } : ok.gh(args, cwd));
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    calls = 0;
+    const id = await backlogNextSchedule(base);
+    expect((await runSchedule(base, id)).status).toBe(201);
+    expect(startedTasks().filter((t) => t.title.includes("実装"))).toHaveLength(0);
+    const log = await scheduleLogAll(base);
+    const held = log.findIndex((l) => /実装の枠: GitHub の認証切れ: 始めない（.*HTTP 401.*）/.test(l));
+    expect(held).toBeGreaterThanOrEqual(0);
+    // held by the read right before the start: the firing's first read got through, so no "照合できない" line comes before it
+    expect(log.slice(0, held).filter((l) => l.includes("GitHub と照合できない"))).toEqual([]);
+  });
+
+  // an ended implement-slot stage Task of an Issue that is not in the fake backlog, with one stop.record
+  const endedOnStop = async (state: "waiting" | "resolved") => {
+    await Bun.sleep(50); // the import the boot started has finished: the stop is after the last successful one
+    const now = Date.now();
+    const id = "tsk_authstop399";
+    core!.db.insertTask({ id, workspaceId: metaId(), title: "#399 実装: PBI: 認証で止まった", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 399, action: "complete" }, statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.appendEvent(id, { t: "stop.record", stop: { id: "s399", work: { workspaceId: metaId(), issue: 399, taskId: id }, op: "gh", target: "", reason: "auth", evidence: "HTTP 401", safety: "before-effect", conditions: [], answer: null, actions: [], state, at: now } });
+  };
+  const implementStarts = () => startedTasks().filter((t) => t.title.includes("実装") && t.id !== "tsk_authstop399");
+
+  test("backlog-next auth: a last implement Task stopped on auth holds the slot while the import fails for another reason", async () => {
+    const gh = refused("dial tcp: i/o timeout");
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    await endedOnStop("waiting");
+    (gh as unknown as { refuse(): void }).refuse();
+    const id = await backlogNextSchedule(base);
+    await runSchedule(base, id);
+    expect(implementStarts()).toHaveLength(0);
+    expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("実装の枠: GitHub の認証切れ: 始めない（直前の工程 Task tsk_authstop399 が認証で止まり"));
+  });
+
+  test("backlog-next auth: an import that succeeds after the auth stop lets the next firing start", async () => {
+    // a failure that is neither the login nor a transient one: no wait before the next firing's import
+    const gh = refused("gh: unexpected error") as GhRunner & { refuse(): void; allow(): void };
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    await endedOnStop("waiting");
+    gh.refuse();
+    const id = await backlogNextSchedule(base);
+    await runSchedule(base, id);
+    expect(implementStarts()).toHaveLength(0);
+    // the fake gh is back: the next firing's import succeeds and lifts the hold
+    gh.allow();
+    await runSchedule(base, id);
+    expect(implementStarts()).toHaveLength(1);
+  });
+
+  test("backlog-next auth: a resolved auth stop does not hold", async () => {
+    const gh = refused("dial tcp: i/o timeout");
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    await endedOnStop("resolved");
+    (gh as unknown as { refuse(): void }).refuse();
+    const id = await backlogNextSchedule(base);
+    await runSchedule(base, id);
+    expect(implementStarts()).toHaveLength(1);
+    expect((await scheduleLogAll(base)).filter((l) => l.includes("認証切れ"))).toEqual([]);
+  });
+
+  test("backlog-next auth: the plan slot still starts while login is refused", async () => {
+    const { status } = await run("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+    expect(status).toBe(201);
+    expect(startedTasks().map((t) => t.title.split(":")[0])).toContain("#303 Task に分解");
+  });
+
+  test("backlog-next auth: a workspace kept here (backlog: switchboard) still starts its implement slot", async () => {
+    const gh = refused("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+    const claude = holdingClaude();
+    const base = await boot(gh, claude.adapter);
+    (gh as unknown as { refuse(): void }).refuse();
+    const dir = mkdtempSync(join(home!, "local-"));
+    copyFileSync(join(import.meta.dir, "../../../ops.config.json"), join(dir, "ops.config.json"));
+    const ws = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "local", backlog: "switchboard" }) })).json()) as { id: string };
+    await fetch(`${base}/api/backlog`, { method: "POST", body: JSON.stringify({ workspaceId: ws.id, title: "PBI: ローカル", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1" } }) });
+    const id = await backlogNextSchedule(base);
+    expect((await runSchedule(base, id)).status).toBe(201);
+    expect(startedTasks().find((x) => x.workspaceId === ws.id)?.stage).toEqual({ issue: 1, action: "complete" });
+    expect((await scheduleLogAll(base)).filter((l) => l.includes("local: ") && l.includes("認証切れ"))).toEqual([]);
+  });
+
+  test("backlog-next auth: the start button still answers 201 while login is refused", async () => {
+    const gh = refused("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+    const base = await boot(gh, holdingClaude().adapter);
+    (gh as unknown as { refuse(): void }).refuse();
+    expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+    expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toContain("#304 実装");
+  });
+});
+
 describe("GitHub budget", () => {
   test("GitHub budget: backlog-next starts on the stored data at 500 points left with the import refused for the limit, and logs no budget line", async () => {
     const low = budgetGh(500);

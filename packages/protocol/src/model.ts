@@ -803,8 +803,10 @@ const quotaAndResumeFields = {
   thinSample: z.number().int().min(1).max(1000),
   /** At most this many flow-improvement PBIs are in progress at once; backlog-next starts no more (P0 excepted). */
   flowLimit: z.number().int().min(0).max(100),
-  /** The budget (USD) of a Task made without one (a request, a schedule with none). null = no budget. Cost caps live in this group: this and `backlogQuotaLimit`. */
+  /** The budget (USD) of a Task made without one (a request, a schedule with none). null = no budget. Cost caps live in this group: this, `fableBudgetUsd` and `backlogQuotaLimit`. */
   defaultBudgetUsd: z.number().positive().max(10_000).nullable(),
+  /** Fable の Task に、予算が無ければ付ける既定の予算（#1989）。Fable の Task では `defaultBudgetUsd` より先に使う。null = 付けない */
+  fableBudgetUsd: z.number().positive().max(10_000).nullable(),
 };
 const judgeAndChoiceFields = {
   /** Asked once when the judge's runner cannot answer (`JUDGE_FALLBACK`). */
@@ -837,6 +839,7 @@ export const QuotaAndResumeSettings = z
     thinSample: quotaAndResumeFields.thinSample.default(5),
     flowLimit: quotaAndResumeFields.flowLimit.default(1),
     defaultBudgetUsd: quotaAndResumeFields.defaultBudgetUsd.default(null),
+    fableBudgetUsd: quotaAndResumeFields.fableBudgetUsd.default(null),
   })
   .prefault({});
 export type QuotaAndResumeSettings = z.infer<typeof QuotaAndResumeSettings>;

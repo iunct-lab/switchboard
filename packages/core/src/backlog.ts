@@ -1244,11 +1244,14 @@ export function answerStoredConfirmation(db: Db, source: BacklogSource, n: numbe
   return true;
 }
 
+/** gh's own wording (and GitHub's 401) for a missing or refused login. */
+export const GH_LOGIN_REFUSED = /gh auth login|not logged in|authentication required|HTTP 401|Bad credentials/i;
+
 async function call(gh: GhRunner, cwd: string, args: string[]): Promise<string> {
   const r = await gh(args, cwd);
   if (r.code !== 0) {
     // gh's own wording for a missing or refused login: the backlog then says to log in, not this text
-    const login = /gh auth login|not logged in|authentication required/i.test(r.stderr) ? "gh-login" : undefined;
+    const login = GH_LOGIN_REFUSED.test(r.stderr) ? "gh-login" : undefined;
     throw new BacklogError(`gh ${args.slice(0, 2).join(" ")}: ${(r.stderr.trim() || `exit ${r.code}`).slice(0, 200)}`, responseOf(r.stdout, r.stderr), login);
   }
   // `gh api --include` puts the status and headers first: only the body is the answer

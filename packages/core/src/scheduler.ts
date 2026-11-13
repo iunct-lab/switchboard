@@ -66,8 +66,8 @@ export class Scheduler {
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } = (r) => ({ runner: r }),
     /** approval-window: reads the batches still waiting (判断待ち shows them as a notice) and says so, in a line. */
     private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
-    /** The budget of a schedule's Task when the schedule has none: the settings' `defaultBudgetUsd` (null = none). */
-    private defaultBudgetUsd: () => number | null = () => null,
+    /** The budget of a schedule's Task of this model when the schedule has none: the settings' default for it (null = none). */
+    private defaultBudgetUsd: (model: string | null | undefined) => number | null = () => null,
   ) {}
 
   list(): Schedule[] {
@@ -191,7 +191,7 @@ export class Scheduler {
       runner,
       ...(s.model && !note ? { model: s.model } : {}),
       ...(s.effort && !note ? { effort: s.effort } : {}),
-      budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd() ?? undefined,
+      budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd(s.model && !note ? s.model : undefined) ?? undefined,
       scheduleId: s.id,
       kind: "maintenance",
       // Unattended runs get no shadow: the one-active-run guard and the queue's scheduled section only know the

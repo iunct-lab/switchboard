@@ -17,6 +17,10 @@
  * on the open tag-CI requests (they stay open: the PBI that fixed it closes them). What an open request already says is
  * not said again. With --repo no request is filed: a fail prints the request's text to stderr on every run (the
  * scheduled Task reports it as its stop).
+ * A run whose steps all ran and whose `bun test` passed (a perf-only fail too) also compares the type check's and bun
+ * test's seconds with the `local.durations` ceilings of scripts/perf-budget.json (local-ci's `durationOver`): the `over:`
+ * lines stay in the Release's `## CI` under `所要時間が上限を超えた（結果は変えない）:`, and the result, the exit code and
+ * the requests do not change (a budget that cannot be read compares nothing).
  * A red `bun test` also gets a `selection:` line in the Release: of the test files that failed, how many a PR's narrowed
  * local-ci would have run for the change since the tag before (#3297, docs/merge-gate.md).
  * `--latest-pass [--contained-in <commit>]` (#2962) runs nothing: it prints the newest tag whose last result is pass
@@ -42,7 +46,7 @@ import { FILE_DEPS, type Filed, type OpenRequest, commentRequest, fileRequest, o
 import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS_PATH } from "./perf-ratchet.ts";
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
-import { isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
+import { durationOver, isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -63,6 +67,8 @@ export function hidePaths(line: string, roots: Record<string, string> = {}, home
 
 /** The heading of the perf warning in a Release's `## CI`; its lines follow, indented by 4 spaces. */
 export const PERF_WARNING_HEADING = "perf の警告（合否には数えない）:";
+/** The heading of the seconds over `local.durations` (not `が落ちた:`: failedIn reads that one). */
+export const DURATIONS_HEADING = "所要時間が上限を超えた（結果は変えない）:";
 
 /** The warning lines (without their indent) a Release's body carries under PERF_WARNING_HEADING; the last heading's, only while the 4-space indented lines follow it. */
 export function warningsOf(body: string): string[] {
@@ -107,7 +113,7 @@ export function perfStreak(now: string[], earlier: string[][]): string[] {
  * step's name or its lines have a value usable for auth (`findSecrets`), none of them is written: the mark stays, a note
  * says why the rest is missing.
  */
-export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; warnings?: string[]; selection?: string }, host: HostAws = hostAws()): string {
+export function resultSection(r: { sha: string; ok: boolean; step?: string; fails?: string[]; warnings?: string[]; durations?: string[]; selection?: string }, host: HostAws = hostAws()): string {
   // the mark is `[tag-ci] pass|fail <sha>` alone: it is what tagResult reads
   const out = ["", "", "## CI", `[tag-ci] ${r.ok ? "pass" : "fail"} ${r.sha}`, "", "`bun scripts/tag-ci.ts` がこのタグのコミットで `.github/workflows/ci.yml` の手順（local-ci と同じ）を回した。"];
   // an unnamed step's name is its script's first line, which may hold a path or a value as much as its output
@@ -117,6 +123,8 @@ export function resultSection(r: { sha: string; ok: boolean; step?: string; fail
     ...(r.fails ?? []).slice(0, 20).map((l) => `    ${hidePaths(l)}`),
     // failedIn reads the lines under "が落ちた:" up to the first line that is not indented: the heading ends them
     ...(r.warnings?.length ? [PERF_WARNING_HEADING, ...r.warnings.slice(0, 20).map((l) => `    ${hidePaths(l)}`)] : []),
+    // not the heading failedIn reads, and it ends the lines above it; the ceilings do not decide the result
+    ...(r.durations?.length ? [DURATIONS_HEADING, ...r.durations.slice(0, 20).map((l) => `    ${hidePaths(l)}`)] : []),
   ];
   if (detail.length === 0) return `${out.join("\n")}\n`;
   const safe = findSecrets(detail.join("\n"), host).length === 0;
@@ -297,9 +305,14 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     const fails = counted.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / counted.length)));
     const test = run.outputs["bun test"];
     const selection = test !== undefined ? await selectionLine(test, before, dir, env, d) : undefined;
+    // every step ran and bun test passed: its seconds and the type check's against the ceilings; a CI without those steps is not compared
+    const bunTest = run.results.find((x) => x.name === "bun test");
+    const compared = run.results.length === run.steps.length && bunTest?.code === 0 && existsSync(join(dir, "scripts/ci.ts"));
+    // a CI without those steps (stepSeconds throws) or a budget that cannot be read compares nothing: the result stays
+    const durations = compared ? await (async () => durationOver(dir, stepSeconds(run.results)))().catch(() => []) : [];
     const step = counted.length ? counted.map((f) => f.name).join(" / ") : undefined;
     const hide = (l: string) => hidePaths(l, { [dir]: "<checkout>", [tmp]: "<tmp>" });
-    return { sha, ok: counted.length === 0, step, fails: fails.map(hide), warnings: warnings.map(hide), selection };
+    return { sha, ok: counted.length === 0, step, fails: fails.map(hide), warnings: warnings.map(hide), durations: durations.map(hide), selection };
   } finally {
     await d.sh(["git", "-C", root, "worktree", "remove", "--force", dir]).catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });

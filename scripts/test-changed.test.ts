@@ -1,9 +1,5 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { recordingTestFiles, sh } from "./local-ci";
 import { changedFiles, pickTests, runTests, type RunDeps } from "./test-changed";
 
 const tree: Record<string, string> = {
@@ -45,28 +41,12 @@ describe("test-changed", () => {
   });
 });
 
-test("a test that reads recordings is found before it is added (untracked), so it stays on the host", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "switchboard.test-changed."));
-  try {
-    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", dir, ...a]);
-    git("init", "-q");
-    mkdirSync(join(dir, "scripts"));
-    writeFileSync(join(dir, "scripts/old.test.ts"), 'import { x } from "../scripts/recordings.ts";\n');
-    git("add", "scripts/old.test.ts");
-    writeFileSync(join(dir, "scripts/new.test.ts"), 'import { x } from "../scripts/recordings";\n');
-    writeFileSync(join(dir, "scripts/plain.test.ts"), "export {};\n");
-    expect((await recordingTestFiles(dir, sh)).sort()).toEqual(["scripts/new.test.ts", "scripts/old.test.ts"]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 describe("runTests", () => {
   const A = "packages/core/src/a.test.ts";
   const R = "packages/core/src/rec.test.ts";
   const B = "scripts/gate.test.ts";
-  const rig = (o: { code?: number; output?: string; offload?: boolean; hostCode?: number; during?: () => void } = {}) => {
-    const st = { inSlot: false, inSlotAtOffload: undefined as boolean | undefined, slotLeftBeforeOffloadEnd: false, host: [] as string[][], scripts: [] as string[], logs: [] as string[], names: [] as string[] };
+  const rig = (o: { code?: number; output?: string; offload?: boolean; hostCode?: number } = {}) => {
+    const st = { inSlot: false, host: [] as string[][], scripts: [] as string[], runs: [] as Array<{ size: string; fixtures?: string; names?: string }>, logs: [] as string[], names: [] as string[] };
     const deps: RunDeps = {
       spawnHost: async (cmd) => (st.host.push(cmd), o.hostCode ?? 0),
       slot: async (name, fn) => {
@@ -78,44 +58,41 @@ describe("runTests", () => {
           st.inSlot = false;
         }
       },
-      recordings: [R],
       log: (l) => st.logs.push(l),
       ...(o.offload === false
         ? {}
         : {
             offload: {
-              run: async (script, _cwd, _size) => {
+              fixtures: { dir: "/fixtures-dir", required: true },
+              start: async (script, _cwd, run) => {
                 st.scripts.push(script);
-                st.inSlotAtOffload = st.inSlot;
-                await new Promise((r) => setTimeout(r, 5)); // 枠を取るならその間にホストの手順が回って出る
-                st.slotLeftBeforeOffloadEnd = !st.inSlot;
-                return { code: o.code ?? 0, output: o.output ?? "sb-step: 0 begin 1\nsb-step: 0 exit 0 2\n" };
+                st.runs.push(run);
+                return { build: "build-1" };
               },
+              collect: async () => ({ code: o.code ?? 0, output: o.output ?? "sb-step: 0 begin 1\nsb-step: 0 exit 0 2\n" }),
             },
           }),
     };
     return { st, deps };
   };
 
-  test("files that read no recording go off the host, a failure shows its (fail) line and exits non-zero", async () => {
+  test("every selected file, the ones that read recordings too, goes to one build; the host runs nothing and takes no slot; a failure shows its (fail) line and exits non-zero", async () => {
     const { st, deps } = rig({ code: 1, output: "sb-step: 0 begin 1\n(fail) a > works\nsb-step: 0 exit 1 2\n" });
     expect(await runTests({ tests: [A, R, B] }, deps)).toBe(1);
-    const off = st.scripts.join("\n");
-    expect(off).toContain("./packages/core/src/a.test.ts");
-    expect(off).toContain("./scripts/gate.test.ts");
-    expect(off).not.toContain("rec.test.ts");
-    // the host gets only the recording file
-    const host = st.host.map((c) => c.join(" ")).join("\n");
-    expect(host).toContain("rec.test.ts");
-    expect(host).not.toContain("a.test.ts");
-    expect(host).not.toContain("gate.test.ts");
+    expect(st.scripts).toHaveLength(1);
+    const off = st.scripts[0]!;
+    for (const f of [A, R, B]) expect(off).toContain(`./${f}`);
+    expect(st.host).toEqual([]);
+    expect(st.names).toEqual([]);
+    // the build runs only bun test, no public-tree check: the host's AWS names are not sent
+    expect(st.runs.map((r) => r.names)).toEqual([undefined]);
     expect(st.logs.join("\n")).toContain("(fail) a > works");
   });
 
   test("a passing offload logs one line with the file count and the pass count; a failure or a missing count line is handled", async () => {
     const ok = rig({ output: "sb-step: 0 begin 1\n 12 pass\n 0 fail\nsb-step: 0 exit 0 2\n" });
     expect(await runTests({ tests: [A, R, B] }, ok.deps)).toBe(0);
-    expect(ok.st.logs).toEqual(["test-changed: 外で通った（2 ファイル、12 pass）"]);
+    expect(ok.st.logs).toEqual(["test-changed: 外で通った（3 ファイル、12 pass）"]);
     const noCount = rig();
     await runTests({ tests: [A] }, noCount.deps);
     expect(noCount.st.logs).toEqual(["test-changed: 外で通った（1 ファイル）"]);
@@ -137,29 +114,13 @@ describe("runTests", () => {
     expect(st.scripts.join("\n")).toContain("git remote add origin 'https://github.com/o/r.git'");
   });
 
-  test("the host's files stay here, and the offload's script carries no token or recordings' place", async () => {
+  test("the recordings go by the call and are required, not by the script: it carries no token or recordings' place", async () => {
     const { st, deps } = rig();
     expect(await runTests({ tests: [A, R] }, deps)).toBe(0);
-    expect(st.host.at(-1)!.join(" ")).toContain("./packages/core/src/rec.test.ts");
-    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "SWITCHBOARD_FIXTURES"]) expect(st.scripts.join("\n")).not.toContain(name);
-    // the real offload's environment: hostOffload leaves those three out (local-ci.test.ts holds the same check on it)
-  });
-
-  test("the slot is not held while the offload runs, and not taken when nothing runs on the host", async () => {
-    const withHost = rig();
-    await runTests({ tests: [A, R] }, withHost.deps);
-    expect(withHost.st.inSlotAtOffload).toBe(false);
-    expect(withHost.st.slotLeftBeforeOffloadEnd).toBe(true);
-    expect(withHost.st.names).toEqual(["test-changed"]);
-    const noHost = rig();
-    await new Promise<void>((resolve) => {
-      noHost.deps.slot = async () => {
-        throw new Error("no slot expected");
-      };
-      noHost.deps.offload!.run = async () => (resolve(), { code: 0, output: "sb-step: 0 begin 1\nsb-step: 0 exit 0 2\n" });
-      void runTests({ tests: [A] }, noHost.deps);
-    });
-    expect(noHost.st.host).toEqual([]);
+    expect(st.runs[0]!.fixtures).toBe("/fixtures-dir");
+    expect(st.scripts[0]).toContain("export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures");
+    for (const name of ["GH_TOKEN", "GITHUB_TOKEN", "/fixtures-dir"]) expect(st.scripts.join("\n")).not.toContain(name);
+    // the real offload's environment: hostOffload leaves those out (local-ci.test.ts holds the same check on it)
   });
 
   test("a timed-out offload fails with its reason and the host does not rerun it", async () => {
@@ -169,18 +130,21 @@ describe("runTests", () => {
     expect(st.host).toEqual([]);
   });
 
-  test("a full run sends everything but the recording files; the host runs those", async () => {
+  test("a build that cannot be started fails the run with its message, and the host does not rerun it", async () => {
     const { st, deps } = rig();
-    expect(await runTests({ full: "x" }, deps)).toBe(0);
-    expect(st.scripts.join("\n")).toContain("--path-ignore-patterns=");
-    expect(st.scripts.join("\n")).toContain("packages/core/src/rec.test.ts");
-    expect(st.host.at(-1)!.join(" ")).toContain("rec.test.ts");
+    deps.offload!.start = async () => {
+      throw new Error("no build");
+    };
+    expect(await runTests({ tests: [A] }, deps)).toBe(1);
+    expect(st.logs.join("\n")).toContain("sb-offload: no build");
+    expect(st.host).toEqual([]);
   });
 
-  test("a failing host file fails the run; when every selected file reads recordings no build starts", async () => {
-    const { st, deps } = rig({ hostCode: 1 });
-    expect(await runTests({ tests: [R] }, deps)).toBe(1);
-    expect(st.scripts).toHaveLength(0);
+  test("a full run is one plain bun test in the build", async () => {
+    const { st, deps } = rig();
+    expect(await runTests({ full: "x" }, deps)).toBe(0);
+    expect(st.scripts[0]).toContain("bash -e -c 'bun test'; c=$?");
+    expect(st.host).toEqual([]);
   });
 
   test("without sb-offload everything goes to the host's bun test, inside the slot", async () => {

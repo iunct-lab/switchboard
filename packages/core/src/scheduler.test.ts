@@ -138,13 +138,15 @@ describe("scheduler", () => {
 
   test("a schedule without a budget takes the settings' default budget; its own budget is kept", async () => {
     let dflt: number | null = 3;
-    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, undefined, () => dflt);
+    const asked: (string | null | undefined)[] = [];
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, undefined, (model) => (asked.push(model), dflt));
     const plain = sc.create({ title: "plain", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     const own = sc.create({ title: "own", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p", budgetUsd: 1 });
     now = Date.parse("2026-09-06T03:00:00");
     const started = await sc.tick();
     expect(started.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBe(3);
     expect(started.find((t) => t.scheduleId === own.id)!.budgetUsd).toBe(1);
+    expect(asked).toEqual([undefined]); // the default is asked with the schedule's model (none here), for the Fable value (#1989)
     dflt = null; // no default: no budget, as before
     now = Date.parse("2026-09-07T03:00:00");
     db.updateTask(started[0]!.id, { status: "done" });
