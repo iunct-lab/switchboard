@@ -71,8 +71,8 @@ export type JobDeps = {
 
 /** The argv of each kind, as `cross-runner-review` runs a review and CLAUDE.md runs local CI. */
 export function jobCommand(req: JobRequest, idleS = 900): JobCommand {
-  if (req.kind === "local-ci") return { argv: ["bun", "scripts/local-ci.ts", String(req.pr)], tail: "" };
-  // a review takes no heavy slot, only waits for the memory floor (the kit README, 重い処理の枠): local CI keeps its slot
+  if (req.kind === "local-ci") return { argv: ["bun", "scripts/local-ci.ts", String(req.pr), ...(req.local ? ["--local"] : [])], tail: "" };
+  // a review takes no heavy slot, only waits for the memory floor (the kit README, Heavy-process slots): local CI keeps its slot
   const head = ["ops-kit", "heavy", "--memory-only", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
   if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", req.outFile, "-"], tail: ' < "$JOB_PROMPT"' };
   // stream-json: text output says nothing until the end, and idle-run would cut it

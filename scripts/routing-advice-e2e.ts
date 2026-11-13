@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
-import type { RunnerAdapter, Task } from "@switchboard/protocol";
+import type { RunnerAdapter, Task, TaskSummary } from "@switchboard/protocol";
 
 const home = mkdtempSync(join(tmpdir(), "sb-routing-advice-e2e-"));
 const adapter: RunnerAdapter = {
@@ -49,7 +49,11 @@ async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNul
   throw new Error(`Timeout: ${label}`);
 }
 const settings = (llm: object) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm } }) });
-const stored = async (title: string) => ((await (await fetch(`${base}/api/tasks`)).json()) as Task[]).find((t) => t.title === title);
+// the list carries only TaskSummary: find the id there, read the full Task (routing) from GET /api/tasks/:id
+const stored = async (title: string): Promise<Task | undefined> => {
+  const id = ((await (await fetch(`${base}/api/tasks`)).json()) as TaskSummary[]).find((t) => t.title === title)?.id;
+  return id ? ((await (await fetch(`${base}/api/tasks/${id}?limit=0`)).json()) as { task: Task }).task : undefined;
+};
 const create = async (title: string) => {
   const res = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: cfg.repoRoot, title, prompt: title, runner: "claude" }) });
   assert(res.status === 201, `${title}: ${res.status}`);

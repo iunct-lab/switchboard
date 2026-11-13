@@ -3,7 +3,7 @@ import type { AgentEvent, JudgeSettings, RunnerAdapter, RunnerId, RunnerSession,
 import { buildJudgePrompt, JUDGE_FALLBACK, judgeTurn, parseJudgement, type JudgeInput } from "./judge.ts";
 
 const INPUT: JudgeInput = { title: "README の誤字を直す", prompt: "README のインストール手順の誤字を直してください。", lastReply: "直しました。コミットは abc123 です。" };
-const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna" };
+const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 };
 
 /** Replays `events` for every turn of `id`; same shape as the replay adapter in suggest-workspace.test.ts. */
 function replayAdapter(id: RunnerId, events: AgentEvent[], opts: { starts?: StartOptions[]; modes?: string[] } = {}): RunnerAdapter {
@@ -94,14 +94,14 @@ describe("judgeTurn", () => {
 
   test("configured as the fallback itself: one turn, no second try", async () => {
     const starts: StartOptions[] = [];
-    const { out } = run([replayAdapter("claude", limited("claude"), { starts })], { enabled: true, ...JUDGE_FALLBACK });
+    const { out } = run([replayAdapter("claude", limited("claude"), { starts })], { enabled: true, ...JUDGE_FALLBACK, recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
     await expect(out).rejects.toThrow(/rate_limit_error/);
     expect(starts).toHaveLength(1);
   });
 });
 
 describe("judgeTurn settings tunables", () => {
-  const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet" };
+  const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 };
   test("the fallback from the settings: the configured runner fails, the given runner and model judge once", async () => {
     const codexStarts: StartOptions[] = [];
     const adapters = new Map<RunnerId, RunnerAdapter>([["claude", replayAdapter("claude", limited("claude"))], ["codex", replayAdapter("codex", answer('{"result": "done", "reason": "終わっている"}', "m"), { starts: codexStarts })]]);

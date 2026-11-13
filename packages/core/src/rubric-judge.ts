@@ -11,6 +11,9 @@ export const RECAP_CHARS = 12_000;
 /** How much of the person's later messages the `## 依頼` section carries (the newest are kept). */
 export const LATER_CHARS = 4_000;
 const LATER_EACH_CHARS = 600;
+/** The input caps; `judge.recapChars` / `laterChars` / `laterEachChars` override these defaults. */
+export type RubricCaps = Pick<JudgeSettings, "recapChars" | "laterChars" | "laterEachChars">;
+const DEFAULT_CAPS: RubricCaps = { recapChars: RECAP_CHARS, laterChars: LATER_CHARS, laterEachChars: LATER_EACH_CHARS };
 const REASON_CHARS = 200;
 
 export interface RubricJudgeInput {
@@ -43,7 +46,7 @@ export interface RubricJudgeOptions {
  * answers; the caller leaves the task unscored.
  */
 export async function judgeRubric(input: RubricJudgeInput, opts: RubricJudgeOptions): Promise<JudgeEval> {
-  const prompt = buildRubricPrompt(input);
+  const prompt = buildRubricPrompt(input, opts.settings);
   const tries: Array<{ runner: RunnerId; model: string }> = [{ runner: opts.settings.runner, model: opts.settings.model }];
   const fallback = opts.fallback ?? JUDGE_FALLBACK;
   if (opts.settings.runner !== fallback.runner || opts.settings.model !== fallback.model) tries.push(fallback);
@@ -66,19 +69,19 @@ export async function judgeRubric(input: RubricJudgeInput, opts: RubricJudgeOpti
   throw last ?? new Error("the daemon is stopping");
 }
 
-/** The person's later messages as `- ` lines, newest kept: the oldest are dropped past `LATER_CHARS` and one line says how many. */
-function laterLines(later: string[]): string[] {
+/** The person's later messages as `- ` lines, newest kept: the oldest are dropped past `caps.laterChars` and one line says how many. */
+function laterLines(later: string[], caps: RubricCaps = DEFAULT_CAPS): string[] {
   if (!later.length) return [];
-  const lines = later.map((t) => `- ${oneLine(t).slice(0, LATER_EACH_CHARS)}`);
+  const lines = later.map((t) => `- ${oneLine(t).slice(0, caps.laterEachChars)}`);
   let total = 0;
   let from = lines.length;
-  while (from > 0 && total + lines[from - 1]!.length + 1 <= LATER_CHARS) total += lines[--from]!.length + 1;
+  while (from > 0 && total + lines[from - 1]!.length + 1 <= caps.laterChars) total += lines[--from]!.length + 1;
   const kept = lines.slice(from);
   return ["その後の利用者の発言（古い順。範囲の変更・許可文・選択への答えを含む）:", ...(from > 0 ? [`- （古い発言 ${from} 件を省いた）`] : []), ...kept];
 }
 
 /** The prompt: the format, the rubric, then the request, the counts and the transcript. All task text is capped and untrusted. */
-export function buildRubricPrompt(input: RubricJudgeInput): string {
+export function buildRubricPrompt(input: RubricJudgeInput, caps: RubricCaps = DEFAULT_CAPS): string {
   const m = input.metrics;
   return [
     "あなたはエージェントが終えたタスクを、下のルーブリックに沿って観点ごとに 1〜5 点で採点します。JSON だけを返してください。",
@@ -92,13 +95,13 @@ export function buildRubricPrompt(input: RubricJudgeInput): string {
     "## 依頼",
     `title: ${oneLine(input.title).slice(0, 200)}`,
     `prompt: ${oneLine(input.prompt).slice(0, 1200)}`,
-    ...laterLines(input.later),
+    ...laterLines(input.later, caps),
     "",
     "## 指標（記録から数えたもの）",
     `ツール呼び出し ${m.toolCalls} / 失敗 ${m.toolFailures} / エラー ${m.errors} / 利用者の追加指示 ${m.userInstructions} / 停止 ${m.stops} / 最後のターンの終わり方 ${m.lastEnd ?? "-"}`,
     "",
     "## 会話（新しい部分を優先）",
-    transcriptLines(input.events, RECAP_CHARS),
+    transcriptLines(input.events, caps.recapChars),
   ].join("\n");
 }
 

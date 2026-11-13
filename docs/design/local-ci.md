@@ -15,6 +15,16 @@ A PR of another repository is run with `bun <Switchboard の clone>/scripts/loca
 - A result says what ran in its `テスト:` line and carries a machine line, `<!-- local-ci-tests {"ran":<number or null>,"total":<number>} -->` (`LOCAL_CI_TESTS` / `testsOf`). `ran` other than null means a narrowed run: do not read that run's `local-ci-seconds` `test` as the seconds of all tests, and it is not compared with the `test` ceiling below. A `--all` run has no total, so it has no such line.
 - After every step passed, those two seconds are compared with the `local.durations` ceilings of the worktree's `scripts/perf-budget.json` (`judgeDurations` in `scripts/perf-ratchet.ts`, see [perf.md](perf.md)). A value over its ceiling does not fail the run: the result stays `[local-ci] pass`, and the comment has a warning heading (`所要時間の警告（合否には数えない…）`) with each `over:` line under it (`warnings` of the result). The seconds do not decide the merge. A checkout without that file or those ceilings is not compared.
 
+## Where it runs
+
+The steps run in one of two places, chosen once per run:
+
+- With `--local`, every step runs on this machine, inside the heavy-work slot, whether or not an off-host build is available. Run it directly as `bun scripts/local-ci.ts <PR> --local`; a Task asks the app with `ops-kit job request local-ci <PR> --local`.
+- Without `--local`, on a host where `sb-offload` is on PATH, every step runs in one off-host build ("The host's heavy slot" in `local-ci-offload.md`).
+- Without `--local`, on a host with no `sb-offload` (a fork, a local container), every step runs on this machine inside the slot. Nothing needs to be specified.
+
+There is no environment variable or setting that switches this, and the host's free resources are not looked at to choose. `--local` changes neither the form of the result mark nor how it is posted: only where the steps run.
+
 ## Reusing a pass
 
 Before anything else, a run reads this PR's own comments. When the newest result there is a pass of the current head and `localCiOf`, with this PR as its own top, counts it (the pass is of this head, so its commits are the PR's as they are), the run prints `既に pass（<URL>）` and exits 0: no worktree, no fetch, no post. Anything else runs as usual. This check does not look at PRs above this one; which result merge-gate takes in a stack is in [docs/merge-gate.md](../merge-gate.md). `--force` runs regardless, and so does `--all`, because a narrowed pass is not what it asks for. An unreadable comment list means a normal run, and GitLab MRs always run.

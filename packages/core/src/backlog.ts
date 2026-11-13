@@ -93,6 +93,23 @@ function section(body: string, name: string): string {
   return out.join("\n");
 }
 
+/**
+ * The length of a request's own words: the text of its `## 要望` section without the lines that open or close a fence,
+ * trimmed; null = no such section, or one with no words in it (the caller then uses the whole body). A `## 要望` line
+ * inside a fence is not the section (as in `section`). Other sections (`## 解釈メモ` …) do not count.
+ */
+export function requestTextChars(body: string): number | null {
+  let fence: string | null = null;
+  const kept: string[] = [];
+  for (const line of section(body, "要望").split("\n")) {
+    const before: string | null = fence;
+    fence = fenceAfter(fence, line);
+    if (before === fence) kept.push(line); // a line that opens or closes a fence changes it
+  }
+  const n = kept.join("\n").trim().length;
+  return n > 0 ? n : null;
+}
+
 const CRITERIA = "## 到達点 / 受け入れ条件";
 const CONFIRM_MARK = "（利用者確認:";
 
@@ -214,18 +231,20 @@ export const DIRECT_RETURNED_LABEL = "direct-returned";
 /**
  * Which candidate a request starts in, from the candidates' own `auto` criteria (process-defs.ts; no value lives here):
  * `direct-returned` goes to the pipeline; otherwise the first candidate (in the order given) whose `auto` the request
- * meets (`bodyChars` ≤ `maxBodyChars`, none of `excludeLabels`); otherwise the pipeline. Pure and deterministic.
+ * meets (the request's `## 要望` text, or the whole body when it has none, ≤ `maxBodyChars`, none of `excludeLabels`); otherwise the pipeline. Pure and deterministic.
  */
-export function chooseProcess(item: Pick<BacklogItem, "bodyChars" | "labels">, defs: ProcessDef[]): { process: string; reason: string } {
+export function chooseProcess(item: Pick<BacklogItem, "bodyChars" | "requestChars" | "labels">, defs: ProcessDef[]): { process: string; reason: string } {
   if (item.labels.includes(DIRECT_RETURNED_LABEL)) return { process: "p0-pipeline", reason: "direct returned" };
   const misses: string[] = [];
+  const n = item.requestChars ?? item.bodyChars;
+  const what = item.requestChars !== null ? "要望の文" : "本文";
   for (const d of defs) {
     const a = d.auto;
     if (!a) continue;
     const label = a.excludeLabels?.find((l) => item.labels.includes(l));
     if (label !== undefined) { misses.push(`${d.id}: ラベル ${label}`); continue; }
-    if (a.maxBodyChars !== undefined && item.bodyChars > a.maxBodyChars) { misses.push(`${d.id}: 本文 ${item.bodyChars} 字 > ${a.maxBodyChars}`); continue; }
-    return { process: d.id, reason: `auto direct: 本文 ${item.bodyChars} 字${a.maxBodyChars !== undefined ? ` ≤ ${a.maxBodyChars}` : ""}` };
+    if (a.maxBodyChars !== undefined && n > a.maxBodyChars) { misses.push(`${d.id}: ${what} ${n} 字 > ${a.maxBodyChars}`); continue; }
+    return { process: d.id, reason: `auto direct: ${what} ${n} 字${a.maxBodyChars !== undefined ? ` ≤ ${a.maxBodyChars}` : ""}` };
   }
   return { process: "p0-pipeline", reason: `auto pipeline: ${misses.join(", ") || "自動の基準を持つ候補なし"}` };
 }
@@ -258,6 +277,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     onHold: raw.labels.nodes.some((l) => l.name === ON_HOLD_LABEL),
     flow: raw.labels.nodes.some((l) => l.name === FLOW_LABEL),
     bodyChars: raw.body.length,
+    requestChars: requestTextChars(raw.body),
     labels: raw.labels.nodes.map((l) => l.name),
     waits: [],
     waitsAt: null,
@@ -671,7 +691,17 @@ export const heldIn = (items: BacklogItem[], slot: Slot) =>
     });
 
 /** An item whose 実装 would touch what other work touches, or cannot be judged. */
-const isOverlapped = (i: BacklogItem) => !!i.overlap && (i.overlap.hits.length > 0 || i.overlap.unknown !== null);
+export const isOverlapped = (i: BacklogItem) => !!i.overlap && (i.overlap.hits.length > 0 || i.overlap.unknown !== null);
+
+/** Why the given overlapped items are not started, as the log and the refusals word it: the touching ones, then the ones that cannot be judged. */
+export function overlapLine(items: BacklogItem[]): string[] {
+  const out: string[] = [];
+  const touching = items.filter((i) => i.overlap!.hits.length > 0);
+  if (touching.length) out.push(`重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
+  const undecided = items.filter((i) => i.overlap!.unknown !== null);
+  if (undecided.length) out.push(`重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
+  return out;
+}
 
 /** The mark a resume of a stalled PBI ends its ## 状況 with: how many of its Tasks were closed then. */
 export const TASKS_DONE_MARK = (n: number) => `<!-- tasks-done: ${n} -->`;
@@ -1497,6 +1527,11 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   }
   const names = [...top].map(([name, dir]) => ({ name, dir }));
   const taskPaths = (n: number) => pathsIn(issues.get(n)?.body ?? "", names);
+  // another PBI's Task with a ready PR is judged by that PR's files (in `open`), not by the plan its body named; one that
+  // also has a Draft or a needs-decision PR keeps its body, which covers what that PR holds (as `readOthers` pushes it)
+  const deferred = new Set(openPulls.filter((p) => !open.includes(p)).flatMap((p) => p.closes));
+  const inPr = new Set(open.flatMap((p) => p.closes).filter((n) => !deferred.has(n)));
+  const otherPaths = (n: number) => (inPr.has(n) ? [] : taskPaths(n));
   // a Task of a PBI that waits for a date is not at work: nothing of it changes before the date
   const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
   const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)));
@@ -1516,7 +1551,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
     }
     for (const t of working) {
       if (own.has(t.number) || (t.parent !== null && own.has(t.parent))) continue;
-      others.push({ ref: `Task #${t.number}`, task: t.number, paths: taskPaths(t.number), updatedAt: t.updatedAt });
+      others.push({ ref: `Task #${t.number}`, task: t.number, paths: otherPaths(t.number), updatedAt: t.updatedAt });
     }
     // a PBI whose stage Task runs now: its open child Tasks are the other work too, even while their Status is not In progress yet
     for (const m of issues.values()) {
@@ -1524,7 +1559,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
       for (const n of m.subIssues) {
         const t = issues.get(n);
         if (!t || t.state !== "OPEN" || !t.labels.includes("type:task") || t.labels.includes("needs-decision") || working.includes(t) || own.has(n)) continue;
-        others.push({ ref: `Task #${n}`, task: n, paths: taskPaths(n), updatedAt: now.toISOString() });
+        others.push({ ref: `Task #${n}`, task: n, paths: otherPaths(n), updatedAt: now.toISOString() });
       }
     }
     const seen = new Set<string>();

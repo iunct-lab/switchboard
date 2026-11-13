@@ -21,7 +21,7 @@ export type ProcessDef = {
   /** The kinds of work the candidate is meant for, as its author wrote them (free text, one line each). */
   fits: string[];
   /**
-   * When a request may start in this candidate without a person choosing: `maxBodyChars` = the body's length limit,
+   * When a request may start in this candidate without a person choosing: `maxBodyChars` = the length limit of the request's own words (the characters of its `## 要望` section, fence lines left out; the whole body when it has no such section or the section holds no words),
    * `excludeLabels` = labels that keep it out. null = the candidate is never chosen automatically (the default one).
    */
   auto: ProcessAuto | null;

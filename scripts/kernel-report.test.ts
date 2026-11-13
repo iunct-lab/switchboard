@@ -130,6 +130,7 @@ test("reasonGroup keeps the criterion's limit and drops the body's actual size",
   expect(reasonGroup("backlog stage to-tasks")).toBe("ボタン");
   expect(reasonGroup("auto direct: 本文 152 字 ≤ 600")).toBe("自動 direct: 本文 ≤ 600");
   expect(reasonGroup("auto direct: 本文 90 字 ≤ 600")).toBe("自動 direct: 本文 ≤ 600");
+  expect(reasonGroup("auto direct: 要望の文 152 字 ≤ 600")).toBe("自動 direct: 要望の文 ≤ 600");
   expect(reasonGroup("auto direct: 本文 100 字")).toBe("自動 direct");
   expect(reasonGroup("auto pipeline: p1-direct: 本文 740 字 > 600")).toBe("自動 pipeline");
   expect(reasonGroup("direct returned")).toBe("戻した");

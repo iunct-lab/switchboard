@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -55,7 +55,7 @@ import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
-import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -1156,6 +1156,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (by && item.onHold) return done({ state: "queued", reason: ON_HOLD_RESUME, taskId: null, at });
     const action = ask.kind === "confirmation" ? (item.closable ? "close" : null) : item.stage === "in-progress" ? "complete" : (ACTION_FOR_STAGE[item.stage] ?? null);
     if (!action) return done(null);
+    // an 実装 whose files other work touches is not started by an answer either, as backlog-next's pickNext leaves it;
+    // one already running is the running answer below, not a refusal
+    if (action === "complete" && !item.activeTaskId && isOverlapped(item)) return done({ state: "queued", reason: overlapLine([item]).join("・"), taskId: null, at });
     const r = await startStage({ ws, meta: meta ?? ws, item, action });
     // the Task the answer started is its resume even when GitHub's comment time (answeredAt after the next sync) is later than its start
     const started = (taskId: string) => {
@@ -1597,10 +1600,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
     // PBIs whose Tasks' files other work touches: left before a session starts only to find that out
     const overlapped = overlapIn(unheld, slot, undefined, flow);
-    const touching = overlapped.filter((i) => i.overlap!.hits.length > 0);
-    if (touching.length) out.push(`重なり: ${touching.map((i) => `#${i.number}（${i.overlap!.hits.map((h) => `${h.ref}: ${h.path}`).join("・")}）`).join(" ")}`);
-    const undecided = overlapped.filter((i) => i.overlap!.unknown !== null);
-    if (undecided.length) out.push(`重なりを判定できない: ${undecided.map((i) => `#${i.number}（${i.overlap!.unknown}）`).join(" ")}`);
+    out.push(...overlapLine(overlapped));
     // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now
     const spinning = spinningIn(unheld, slot);
     if (spinning.length) out.push(`前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
@@ -3646,6 +3646,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
           if (action === "direct" && ws.kind !== "meta") return bad("直行で始められるのは meta workspace の要望だけです", 409);
           if (action !== "direct" && (action === "close" ? !item.closable : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
+          // the row's button does not start what backlog-next leaves for its overlap: the reason is the log's;
+          // a running stage Task is the 409 with its taskId below (the row opens it), not a refusal
+          if (action === "complete" && !activeStageTask(ws.id, n) && isOverlapped(item)) return json({ error: overlapLine([item]).join("・") }, 409);
           const r = await startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined });
           if ("active" in r) return json({ error: `#${n} の工程 Task が実行中です`, taskId: r.active.id }, 409);
           if ("starting" in r) return json({ error: `#${n} の工程 Task を開始しているところです`, taskId: null }, 409);
@@ -3698,7 +3701,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       "/api/tasks": {
-        GET: (req) => json(db.listTasks(new URL(req.url).searchParams.get("archived") === "1")),
+        GET: (req) => json(db.listTasks(new URL(req.url).searchParams.get("archived") === "1").map(taskSummary)),
         POST: async (req, srv) => {
           const parsed = CreateTaskInput.safeParse(await req.json().catch(() => ({})));
           if (!parsed.success) return bad(parsed.error.message);

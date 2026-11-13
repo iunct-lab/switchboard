@@ -712,6 +712,10 @@ export const JudgeSettings = z
     enabled: z.boolean().default(true),
     runner: RunnerId.default("codex"),
     model: z.string().default("gpt-6-luna"),
+    /** The rubric judge's input caps in characters: the transcript, the person's later messages in all, and each of them. */
+    recapChars: z.number().int().positive().default(12_000),
+    laterChars: z.number().int().positive().default(4_000),
+    laterEachChars: z.number().int().positive().default(600),
   })
   .prefault({});
 export type JudgeSettings = z.infer<typeof JudgeSettings>;
@@ -990,7 +994,7 @@ export const SettingsPatch = z.object({
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
   /** Partial: `{ judge: { enabled: false } }` leaves the saved runner / model alone. */
-  judge: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string() }).partial().optional(),
+  judge: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), recapChars: z.number().int().positive(), laterChars: z.number().int().positive(), laterEachChars: z.number().int().positive() }).partial().optional(),
   /**
    * Partial: `{ autoStart: { model: "x" } }` leaves the saved runner alone. `byKind`: a partial choice per kind
    * over that kind's saved one (else the common values); `null` = back to the common values.
@@ -1185,6 +1189,8 @@ export const JobRequest = z.discriminatedUnion("kind", [
     kind: z.literal("local-ci"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1),
     /** The recordings folder: it becomes `SWITCHBOARD_FIXTURES` in the job's environment, so a missing recording fails the run. */
     fixtures: z.string().min(1).optional(),
+    /** `--local`: every step runs on this machine, not in the build off the host. */
+    local: z.boolean().optional(),
   }),
   z.object({ kind: z.literal("review"), taskId: z.string().min(1), pr: z.number().int().positive(), runner: z.enum(["codex", "claude"]), cwd: z.string().min(1), promptFile: z.string().min(1), outFile: z.string().min(1) }),
 ]);
@@ -2011,8 +2017,10 @@ export const BacklogItem = z.object({
   onHold: z.boolean(),
   /** Carries the `flow-improvement` label. */
   flow: z.boolean(),
-  /** The length of the Issue's body in characters: what a process definition's `auto` criteria compare a request's size with. */
+  /** The length of the Issue's body in characters: what a process definition's `auto.maxBodyChars` compares when `requestChars` is null. */
   bodyChars: z.number().int().min(0),
+  /** The length of the `## 要望` section's text (fence lines left out), what `auto.maxBodyChars` compares first; null = the Issue has no such section, or it holds no words (the body's length is used). */
+  requestChars: z.number().int().min(0).nullable(),
   /** The Issue's label names: what a process definition's `auto.excludeLabels` and `direct-returned` read. */
   labels: z.array(z.string()),
   /**

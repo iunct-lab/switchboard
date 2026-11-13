@@ -18,7 +18,7 @@ import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
-import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, promotionStep, reportPromoteFailure, stageOf, toItem, requestTextChars, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
 
 // the writer of the waits, read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -2041,7 +2041,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
@@ -3086,6 +3086,37 @@ describe("backlog waitsUntil", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("withOverlap: another PBI's Task with a ready PR is judged by the PR's files; a glob or a command in its body is not a path", () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard.overlap-pr."));
+    mkdirSync(join(root, "src"));
+    try {
+      const now = new Date().toISOString();
+      const issue = (number: number, labels: string[], parent: number | null, subIssues: number[], body: string): BacklogIssueData => ({ number, title: `#${number}`, url: "u", state: "OPEN", stateReason: null, body, labels, milestone: null, parent, subIssues, createdAt: now, updatedAt: now, closedAt: null });
+      const issues = new Map([
+        [1, issue(1, ["type:pbi"], null, [11], "")],
+        [11, issue(11, ["type:task"], 1, [], "触る場所: `src/a.ts`、`src/b.ts`")],
+        [2, issue(2, ["type:pbi"], null, [22, 23], "")],
+        [22, issue(22, ["type:task"], 2, [], "触る場所: `src/a.ts`、`src/c.ts`")],
+        [23, issue(23, ["type:task"], 2, [], "触る場所: `src/d.ts`。探し方: `grep -n x src/*.ts`、確認: `bun test src/b.ts`")],
+      ]);
+      const statuses = new Map<number, string | number | null>([[22, "In progress"], [23, "In progress"]]);
+      const pr = (isDraft: boolean) => ({ number: 90, isDraft, labels: [], closes: [22], updatedAt: now, files: ["src/c.ts"], state: "OPEN" });
+      const run = (isDraft: boolean) => {
+        const items = [item({ number: 1, stage: "ready" }), item({ number: 2, stage: "in-progress" })];
+        withOverlap(items, issues, new Map(), [pr(isDraft)], statuses, root);
+        return items[0]!.overlap;
+      };
+      expect(run(false)).toBeNull();
+      expect(run(true)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts" }], unknown: null });
+      // a ready PR and a stacked Draft: the body still holds what the Draft carries
+      const items = [item({ number: 1, stage: "ready" }), item({ number: 2, stage: "in-progress" })];
+      withOverlap(items, issues, new Map(), [pr(false), { ...pr(true), number: 91 }], statuses, root);
+      expect(items[0]!.overlap).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts" }], unknown: null });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("backlog-next overlap: a Ready PBI whose Task names a file an open PR changes is not started and the log names the PR; once it closes the next firing starts it; nothing is written to GitHub", async () => {
@@ -3125,6 +3156,55 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
   const ready = (await refreshed(base)).items.find((i) => i.number === 304)!;
   expect(ready.overlap).toBeNull();
   expect(pickNext([ready], "implement")).toMatchObject({ item: { number: 304 }, action: "complete" });
+});
+
+/** waitsGh whose Ready PBI 304 has one open Task per file given. */
+function tasksOf304Gh(...files: string[]): GhRunner {
+  const fake = waitsGh({}, {});
+  return async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!args.find((a) => a.startsWith("query="))?.includes("comments(last:")) return r;
+    const body = JSON.parse(r.stdout);
+    body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: files.map((f, n) => ({ number: 3041 + n, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: `触る場所: \`${f}\``, comments: { nodes: [] } })) } };
+    return { ...r, stdout: JSON.stringify(body) };
+  };
+}
+
+test("start overlap: the row's 実装 of a Ready PBI whose Task names a file an open PR changes is 409 with the log's reason and starts no Task; to-tasks and a PBI with no overlap start", async () => {
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const base = await boot(tasksOf304Gh("src/a.ts", "src/a.ts"), holdingClaude().adapter);
+  expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts" }], unknown: null });
+  const r = await start(base, 304, { action: "complete" });
+  expect(r.status).toBe(409);
+  const { error } = (await r.json()) as { error: string };
+  expect(error.startsWith("重なり: #304（")).toBe(true);
+  expect(error).toContain("PR #900: src/a.ts");
+  expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).not.toContain("#304 実装");
+  // the other stages are not the overlap's: to-tasks starts
+  expect((await start(base, 303, { action: "to-tasks" })).status).toBe(201);
+  // no overlap: another PBI's 実装 starts
+  openPulls = [];
+  await fetch(`${base}/api/backlog?refresh=1`);
+  expect((await refreshed(base)).items.find((i) => i.number === 304)!.overlap).toBeNull();
+  expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+});
+
+test("start overlap: a PBI with one Task that can start (a file no open PR changes) starts from the row even while another Task's file overlaps", async () => {
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const base = await boot(tasksOf304Gh("src/a.ts", "src/b.ts"), holdingClaude().adapter);
+  expect((await waitsOfItem(base, 304)).overlap).toBeNull();
+  expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+});
+
+test("start overlap: a PBI whose 実装 already runs answers 409 with that Task's id (the row opens it), not the overlap refusal", async () => {
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const base = await boot(tasksOf304Gh("src/a.ts", "src/a.ts"), holdingClaude().adapter);
+  expect((await waitsOfItem(base, 304)).overlap?.hits).toEqual([{ ref: "PR #900", path: "src/a.ts" }]);
+  const now = Date.now();
+  core!.db.insertTask({ id: "tsk_run304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 304, action: "complete" }, statusAt: now, createdAt: now, updatedAt: now });
+  const r = await start(base, 304, { action: "complete" });
+  expect(r.status).toBe(409);
+  expect(await r.json()).toMatchObject({ taskId: "tsk_run304" });
 });
 
 /** moreReadyGh(309, 310) whose Ready PBIs 304 / Issue 309 / Issue 310 each have one open Task naming the file given. */
@@ -5645,6 +5725,37 @@ describe("chooseProcess: the candidate a request starts in", () => {
     const flagged = item({ ...small, labels: ["type:request", "needs-decision"] });
     expect(chooseProcess(flagged, defs(600))).toEqual({ process: "p0-pipeline", reason: "auto pipeline: p1-direct: ラベル needs-decision" });
     expect(chooseProcess(item({ ...small, labels: ["direct-returned"] }), defs(600))).toEqual({ process: "p0-pipeline", reason: "direct returned" });
+  });
+
+  const ws = { id: "ws_meta", name: "switchboard" };
+  const asItem = (body: string) => toItem(raw(["type:request"], body), 11, ws)!;
+  const req = (text: string, extra = "") => `## 要望\n\n${text}\n\n## 原文\n\n\`\`\`text\n元の文\n\`\`\`\n${extra}`;
+
+  test("two requests with the same 要望 and a different 解釈メモ length start in the same candidate", () => {
+    const short = asItem(req("ボタンの色を直す"));
+    const long = asItem(req("ボタンの色を直す", `\n## 解釈メモ\n\n${"あ".repeat(2000)}\n`));
+    expect(long.bodyChars).toBeGreaterThan(600);
+    expect(long.requestChars).toBe(short.requestChars);
+    expect(chooseProcess(long, defs(600))).toEqual(chooseProcess(short, defs(600)));
+    expect(chooseProcess(long, defs(600)).process).toBe("p1-direct");
+  });
+
+  test("a request's own words are counted without the fence lines; a body with no 要望 section is counted whole", () => {
+    expect(requestTextChars("## 要望\n\n```text\nabc\n```\n")).toBe(3);
+    expect(requestTextChars("## 原文\nabc")).toBeNull();
+    // a `## 要望` line quoted inside a fence is not the section, and an empty section has no words: both fall back to the body
+    const quoted = asItem("## 原文\n\n```text\n## 要望\nabc\n```\n" + "x".repeat(900));
+    expect(quoted.requestChars).toBeNull();
+    expect(chooseProcess(quoted, defs(600)).process).toBe("p0-pipeline");
+    expect(requestTextChars("## 要望\n\n```text\n```\n## 解釈メモ\nabc")).toBeNull();
+    const plain = asItem("x".repeat(700));
+    expect(plain.requestChars).toBeNull();
+    expect(chooseProcess(plain, defs(600))).toEqual({ process: "p0-pipeline", reason: "auto pipeline: p1-direct: 本文 700 字 > 600" });
+  });
+
+  test("the reason names the request's own words and their length", () => {
+    expect(chooseProcess(asItem("## 要望\n\nabcde\n"), defs(600)).reason).toBe("auto direct: 要望の文 5 字 ≤ 600");
+    expect(chooseProcess(asItem(`## 要望\n\n${"a".repeat(700)}\n`), defs(600)).reason).toBe("auto pipeline: p1-direct: 要望の文 700 字 > 600");
   });
 
   test("the kit's own definitions: p1-direct has the criteria and p0-pipeline has none", () => {

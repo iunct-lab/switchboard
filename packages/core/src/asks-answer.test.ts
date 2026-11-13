@@ -23,13 +23,15 @@ const ASKED = "a".repeat(40);
  * Every call is kept in `calls`.
  */
 type PrView = { state: string; head: string; comments: Array<{ body: string; createdAt: string }>; commits: Array<{ committedDate: string }> };
-function fakeGh(opts: { place?: string; pr?: PrView; prs?: Record<string, PrView> } = {}) {
+function fakeGh(opts: { place?: string; pr?: PrView; prs?: Record<string, PrView>; tasks306?: string[] } = {}) {
   const calls: string[][] = [];
   const own = structuredClone(decisions);
   if (opts.place) {
     const nodes = own.data.repository.i306!.comments.nodes;
     nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace("**止めた場所**: Task #307", `**止めた場所**: ${opts.place}`) };
   }
+  // one open Task of Issue 306 per file named (what its 実装 would touch)
+  if (opts.tasks306) own.data.repository.i306 = { ...own.data.repository.i306!, subIssues: { nodes: opts.tasks306.map((f, n) => ({ number: 3061 + n, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: `触る場所: \`${f}\``, comments: { nodes: [] } })) } } as never;
   const gh: GhRunner = async (args) => {
     calls.push(args);
     if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
@@ -61,10 +63,10 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-async function boot(gh: GhRunner, adapter: RunnerAdapter = holding): Promise<string> {
+async function boot(gh: GhRunner, adapter: RunnerAdapter = holding, pulls: Array<Record<string, unknown>> = []): Promise<string> {
   home = mkdtempSync(join(tmpdir(), "sb-asks-answer-"));
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
+  core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, gh: importing(gh, () => pulls), backlogAutoImport: true, judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined) });
   const base = `http://127.0.0.1:${core.server.port}`;
   for (let n = 0; n < 400; n++) {
     const b = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
@@ -230,6 +232,34 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect((await later.json()) as AskAnswerResult).toMatchObject({ already: false, ask: { state: "answered", resume: { state: "running" } } });
     expect(queued().map((o) => o[1])).toEqual(["comment", "comment", "set"]);
     expect(stageTasks(306)).toHaveLength(1);
+  });
+
+  test("重なり overlap: an answer to a Ready PBI whose Task names a file an open PR changes is written but starts no 実装 — queued with the log's reason; one with another file starts", async () => {
+    const base = await boot(fakeGh({ tasks306: ["src/a.ts"] }).gh, holding, [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }]);
+    const ask = await decisionOf306(base);
+    const body = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
+    expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n${B}`, screen: true }]);
+    expect(stageTasks(306)).toEqual([]);
+    expect(body.ask!.resume).toMatchObject({ state: "queued", taskId: null });
+    expect(body.ask!.resume!.reason!.startsWith("重なり: #306（")).toBe(true);
+    expect(body.ask!.resume!.reason).toContain("PR #900: src/a.ts");
+  });
+
+  test("重なり overlap: the same answer with the open PR on another file starts the 実装", async () => {
+    const base = await boot(fakeGh({ tasks306: ["src/a.ts"] }).gh, holding, [{ number: 900, files: ["src/b.ts"], headRefName: "sb/999-x" }]);
+    const ask = await decisionOf306(base);
+    const body = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
+    expect(body.ask!.resume).toMatchObject({ state: "running" });
+    expect(stageTasks(306).map((t) => t.title.split(":")[0])).toEqual(["#306 実装"]);
+  });
+
+  test("重なり overlap: an answer while the PBI's 実装 already runs answers that Task, not the overlap refusal", async () => {
+    const base = await boot(fakeGh({ tasks306: ["src/a.ts"] }).gh, holding, [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }]);
+    const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "running", { issue: 306, action: "complete" });
+    const ask = await decisionOf306(base);
+    const body = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
+    expect(stageTasks(306)).toHaveLength(1);
+    expect(body.ask!.resume).toMatchObject({ state: "running", taskId: t.id });
   });
 
   test("blocked: a stop condition not met and the runner's refusal stay after the answer — written, nothing started, queued with both reasons", async () => {

@@ -1,6 +1,6 @@
 # local-ci off the host
 
-On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CI project (`sb-offload --ci`), in an image that already holds the tools, so that local-ci runs of several Tasks no longer fill the host's memory. There is no setting or flag: with `sb-offload` on `PATH` the groups below go off the host, without it (any machine that is not the cloud host) every step runs where local-ci runs. The groups are `OFFLOAD_GROUPS` in `scripts/local-ci.ts`. How local-ci itself works is [local-ci.md](local-ci.md).
+On the cloud host (where `sb-offload` is installed, see [aws/README.md](../../aws/README.md) "Offload"), `bun scripts/local-ci.ts <PR>` runs its heavy steps off the host, in small builds of the offload CI project (`sb-offload --ci`), in an image that already holds the tools, so that local-ci runs of several Tasks no longer fill the host's memory. With `sb-offload` on `PATH` the groups below go off the host unless `--local` is given, which runs every step where local-ci runs (see "Where it runs" in [local-ci.md](local-ci.md)); without `sb-offload` (any machine that is not the cloud host) every step runs there too. The groups are `OFFLOAD_GROUPS` in `scripts/local-ci.ts`. How local-ci itself works is [local-ci.md](local-ci.md).
 
 ## What runs off the host
 

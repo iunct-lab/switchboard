@@ -7,7 +7,7 @@
 - リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける。Issue・コメント・ラベル・Project・Milestone は `ops-kit backlog`（Task の中でも外でも同じ）
 - Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority / Phase）・必須の節: root の `ops.config.json`。Milestone は Phase ごと（`Phase N — …`）。自分の Project URL を登録する。新しい Issue は `ops-kit backlog create` で作ると Task の中ではアプリが Project に入れる。フィールドは `ops-kit backlog triage` / `set`（Status は自分で付ける）
 - バックログの道具: `ops-kit backlog`（`--help`）と `ops-kit lint --fresh`。ほかのリポジトリのバックログは、Task の中では `--workspace <id>`、Task の外では `GH_REPO=<owner/name> SWITCHBOARD_PROJECT_URL=<URL>`。`scripts/setup/` の入口はブートストラップと検査（`bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）の用で、中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）
-- 公開リポジトリへの同期: 開発元の手順は `private/CLAUDE.md` に移した。公開の写しを作るなら、公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`（仕組みはキットの README の「公開リポジトリへの同期」）
+- 公開リポジトリへの同期: 開発元の手順は `private/CLAUDE.md` に移した。公開の写しを作るなら、公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`（仕組みはキットの README の「Syncing to the public repository」）
 - 認証に使える値（ホストの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（`SWITCHBOARD_ACTIONS` が `on` のリポジトリでは週に 1 回 `.github/workflows/secret-scan.yml` も走る）
 - Story Points の目安: 尺度と目安は `issue-workflow` の「### Story Points」。このリポジトリで基準にする閉じた PBI は `private/CLAUDE.md`
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
@@ -36,7 +36,7 @@ bun scripts/test-changed.ts     # <関係するテスト>。Task の中はこれ
 env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承すると selfdev の dry-run テストが落ちる
 ```
 
-型検査は、マシンの重い処理の枠を取ってから始める（`ops-kit heavy`。上限・置き場・足し方はキットの README の「重い処理の枠」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるホストでは録画を読まないテストを外のビルドで回し、外を待つ間は枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。
+型検査は、マシンの重い処理の枠を取ってから始める（`ops-kit heavy`。上限・置き場・足し方はキットの README の「Heavy-process slots」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるホストでは録画を読まないテストを外のビルドで回し、外を待つ間は枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。
 
 変更ごとのテストの型（軽い順。上の行で足りるなら下の行へ行かない。足す前の検討は `task-to-pr` の「足す前に」）:
 
@@ -46,7 +46,7 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承�
 | web の描画ロジック | `apps/web/src/*.test.ts`（DOM の型は `transcript.test.ts`。`bun:test` ファイルは web の typecheck から除外）。描画だけならここで止める |
 | アダプタ | Git の外の録画 fixture の再生（`runner-adapter-recording` スキル）。自分のランナーで録画して Git の外に保存し、`bun scripts/fixtures.ts list` で配置を確認する。変換はここで止める |
 | API | `startServer` を偽アダプタで起動して `fetch`（`core.test.ts` の型）。起動を要るのは HTTP の経路そのものを見るときだけ。関数で書けるものは関数で |
-| 単体で書けない UI / 経路 | 上のどれでも確かめられないときだけ。偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー（このとき `SWITCHBOARD_CANDIDATE=1` を必ず渡す。無いとコピーの中の Task が使用上限の自動再開で本物のセッション id のまま動き、GitHub への未送信の書き込みも送る）、ポートは `lsof` で空きを見て 47911 以上。`ops-kit heavy -- bun "$W/boot.ts"` で起動（キットの README の「重い処理の枠」））+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。boot.ts は自分で書かず `.claude/skills/verify-live-ui/SKILL.md` の boot.ts を写して使う。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
+| 単体で書けない UI / 経路 | 上のどれでも確かめられないときだけ。偽ランナーのデーモン（`startServer` を `mktemp -d /tmp/switchboard.e2e.XXXXXX` の `boot.ts` から、`SWITCHBOARD_HOME` は DB のコピー（このとき `SWITCHBOARD_CANDIDATE=1` を必ず渡す。無いとコピーの中の Task が使用上限の自動再開で本物のセッション id のまま動き、GitHub への未送信の書き込みも送る）、ポートは `lsof` で空きを見て 47911 以上。`ops-kit heavy -- bun "$W/boot.ts"` で起動（キットの README の「Heavy-process slots」））+ `bun run --cwd apps/web build` + headless Chrome（`--remote-debugging-port`、CDP）。boot.ts は自分で書かず `.claude/skills/verify-live-ui/SKILL.md` の boot.ts を写して使う。偽ランナーは `packages/core/src/devproxy.test.ts` の型 |
 | 境界（プロキシ・認証・CORS） | 実構成の E2E（`devproxy.test.ts` の型）。境界そのものを見るときだけ |
 
 動いている Switchboard での確認（live check）は `verify-live-ui` スキル（デーモンと Web UI `localhost:5173`）。

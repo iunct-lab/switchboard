@@ -360,9 +360,11 @@ export async function readOthers(task: number, m: Material): Promise<{ paths: st
     const [head, ...more] = f.split("/");
     if (!top.some((t) => t.name === head)) top.push({ name: head!, dir: more.length > 0 });
   }
+  // A Task with a ready PR is judged by that PR's files (pushed below), not by the plan its body named
+  const inPr = new Set(m.prs.filter((pr) => !pr.isDraft && !pr.labels.includes("needs-decision")).flatMap((pr) => pr.linked));
   for (const t of m.working) {
     if (own.has(t.number)) continue;
-    others.push({ ref: `Task #${t.number}`, task: t.number, paths: pathsIn(t.body, top), updatedAt: t.updatedAt });
+    others.push({ ref: `Task #${t.number}`, task: t.number, paths: inPr.has(t.number) ? [] : pathsIn(t.body, top), updatedAt: t.updatedAt });
   }
 
   const paths = pathsIn(issue.body, top);

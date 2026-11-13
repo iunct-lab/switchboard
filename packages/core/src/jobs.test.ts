@@ -160,6 +160,7 @@ describe("jobs", () => {
     expect(claude.argv).toContain("stream-json");
     expect(claude.tail).toContain('> "$JOB_OUT"');
     expect(claude.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]);
+    expect(jobCommand({ kind: "local-ci", taskId: "t1", pr: 12, cwd: repo, local: true }).argv).toEqual(["bun", "scripts/local-ci.ts", "12", "--local"]);
     expect(jobCommand(local()).argv).toEqual(["bun", "scripts/local-ci.ts", "12"]); // local CI takes its own slot: no --memory-only
     expect(codex.argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
     // the host may need longer (SWITCHBOARD_JOB_REVIEW_IDLE_S)

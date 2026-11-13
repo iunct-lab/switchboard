@@ -15,7 +15,7 @@ const EVENTS: AgentEvent[] = [
   { t: "session.end", status: "ok", summary: "直しました。" },
 ];
 const INPUT: RubricJudgeInput = { title: "README の誤字", prompt: "README の誤字を直して", later: [], events: EVENTS, metrics: METRICS, rubric: DEFAULT_RUBRIC };
-const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna" };
+const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 };
 
 /** Replays `events` for every turn of `id`; the same shape as judge.test.ts's. */
 function replayAdapter(id: RunnerId, events: AgentEvent[], opts: { starts?: StartOptions[] } = {}): RunnerAdapter {
@@ -87,7 +87,7 @@ describe("rubric judge", () => {
     const codexStarts: StartOptions[] = [];
     const claude = replayAdapter("claude", [{ t: "error", message: "rate_limit_error" }, { t: "session.end", status: "error" }]);
     const codex = replayAdapter("codex", answer(GOOD, "m"), { starts: codexStarts });
-    const j = await judgeRubric(INPUT, { adapters: new Map([["codex", codex], ["claude", claude]]), settings: { enabled: true, runner: "claude", model: "claude-sonnet" }, cwd: "/tmp/x", fallback: { runner: "codex", model: "m" } });
+    const j = await judgeRubric(INPUT, { adapters: new Map([["codex", codex], ["claude", claude]]), settings: { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, cwd: "/tmp/x", fallback: { runner: "codex", model: "m" } });
     expect(j.by).toBe("codex:m");
     expect(codexStarts.map((s) => s.model)).toEqual(["m"]);
   });
@@ -114,6 +114,31 @@ describe("rubric judge", () => {
     expect(kept.at(-1)).toContain("発言49 ");
     expect(request).toMatch(/- （古い発言 \d+ 件を省いた）/);
     expect(request).not.toContain("発言0 ");
+  });
+
+  test("the caps follow the settings", () => {
+    const caps = { recapChars: 300, laterChars: 200, laterEachChars: 50 };
+    const later = Array.from({ length: 20 }, (_, i) => `発言${i} ${"あ".repeat(100)}`);
+    const events: AgentEvent[] = Array.from({ length: 50 }, (_, i) => ({ t: "message.delta", role: "assistant", text: `line ${i} ${"x".repeat(100)}\n` }));
+    const prompt = buildRubricPrompt({ ...INPUT, later, events }, caps);
+    const request = prompt.slice(prompt.indexOf("## 依頼"), prompt.indexOf("## 指標"));
+    const kept = request.split("\n").filter((l) => l.startsWith("- 発言"));
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.every((l) => l.length <= 2 + caps.laterEachChars)).toBe(true);
+    expect(kept.join("\n").length).toBeLessThanOrEqual(caps.laterChars);
+    expect(request).toMatch(/- （古い発言 \d+ 件を省いた）/);
+    const talk = prompt.slice(prompt.indexOf("## 会話"));
+    expect(talk).toContain("line 49");
+    expect(talk.length).toBeLessThan(caps.recapChars + 100);
+    // without caps the defaults apply: all 20 messages fit in LATER_CHARS
+    expect(buildRubricPrompt({ ...INPUT, later })).not.toContain("古い発言");
+  });
+
+  test("judgeRubric asks with the caps of its settings", async () => {
+    const starts: StartOptions[] = [];
+    const later = Array.from({ length: 20 }, (_, i) => `発言${i} ${"あ".repeat(100)}`);
+    await judgeRubric({ ...INPUT, later }, { adapters: new Map([["codex", replayAdapter("codex", answer(GOOD, "gpt-6-luna"), { starts })]]), settings: { ...SETTINGS, laterChars: 200 }, cwd: "/tmp/x" });
+    expect(starts[0]!.prompt).toMatch(/- （古い発言 \d+ 件を省いた）/);
   });
 
   test("transcriptLines keeps the newest part past maxChars, marked; the prompt uses RECAP_CHARS", () => {

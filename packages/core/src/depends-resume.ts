@@ -112,7 +112,8 @@ export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: stri
  * After an import of the workspace: every open depends stop (of its Tasks changed in the last week) whose waits all
  * closed is recorded `resolved` under the same id, its conditions met. A Task started by hand then gets one follow-up
  * turn (`dependsResumePrompt`, every key of those stops), in the same runner session — once no depends stop of it still
- * waits (a runner that stopped twice has two stops; one still open holds the turn back). A stage Task (one for an Issue) gets none: what comes next
+ * waits (a runner that stopped twice has two stops; one still open holds the turn back) — except a job's result, which
+ * does not wait for PR / Issue stops and is held only while another job of the Task still runs. A stage Task (one for an Issue) gets none: what comes next
  * is backlog-next's, which starts the PBI's next stage Task — sending here too would run two on one PBI.
  * Left as it is: a stop with a wait still open or not read, and a Task with no runner session, one running or waiting,
  * or one with a resume planned (that resume continues it). The record is written before the turn, so the next import
@@ -135,9 +136,9 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     const closed = waits.filter((w) => waitsClosed(w, stateOf, jobStateOf, now));
     if (!closed.length) continue;
     const jobKeys = closed.flatMap((w) => w.stop.conditions.filter((c) => JOB_KEY.test(c.key)).map((c) => c.key));
-    // a stop on a job stays open while another depends stop of the Task still waits: resolved alone, its result would
-    // not be in the turn the last one sends
-    if (jobKeys.length && closed.length < waits.length) continue;
+    // jobs are batched among themselves: a stop on a job stays open while the Task still waits on a running job, so the
+    // last job's turn carries every result. A PR / Issue wait does not hold a job's result back
+    if (jobKeys.length && waits.some((w) => w.jobs.some((id) => jobStateOf(id) === "open"))) continue;
     // a stage Task gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
     const turn = issueOf(task) === null || jobKeys.length > 0;
     if (turn && (!task.runnerSessionId || isWorking(task, "dedupe"))) continue;
@@ -154,8 +155,9 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
       ...(w.stop.grant !== undefined ? { grant: w.stop.grant } : {}),
     });
     for (const w of closed) tasks.recordStop(task.id, report(w, "resolved", `待ちが片づいた: ${w.stop.conditions.map((c) => c.key).join(", ")}`, true));
-    // one turn for the Task, once none of its waits is open any more (a runner that stopped twice has two stops)
-    if (!turn || closed.length < waits.length) continue;
+    // one turn for the Task, once none of its waits is open any more (a runner that stopped twice has two stops); a job's
+    // result is sent without waiting for the PR / Issue waits
+    if (!turn || (!jobKeys.length && closed.length < waits.length)) continue;
     const keys = [...new Set(closed.flatMap((w) => w.stop.conditions.map((c) => c.key)))].filter((k) => k !== AFTER_KEY);
     const afters = [...new Set(closed.flatMap((w) => w.stop.conditions.filter((c) => c.key === AFTER_KEY).map((c) => c.value)))];
     const ended = [...new Set(jobKeys)].map((k) => db.getJob(Number(JOB_KEY.exec(k)![1]))).filter((j): j is Job => j !== null);

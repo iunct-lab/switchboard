@@ -222,7 +222,7 @@ const ownerName = (repo: string) => repo.trim().replace(/^[a-z]+:\/\/[^/]+\//i, 
 export function publicCopyRefusal(repo: string, cwd = process.cwd()): string | null {
   const target = publicCopyOf(cwd);
   if (!target || ownerName(target) !== ownerName(repo)) return null;
-  return `書き込み先 ${ownerName(repo)} は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: gh repo set-default <自分の owner/name>（remote に無ければ先に git remote add）、または GH_REPO=<自分の owner/name>（gh repo view の答えは変わらないので、-R "$(gh repo view …)" で書くなら gh repo set-default）。手順は ops-kit/README.md の「fork して開発を始める」`;
+  return `書き込み先 ${ownerName(repo)} は、この clone の ops.config.json の publicSync.target（公開側の写し）です。自分のリポジトリに向けてから実行してください: gh repo set-default <自分の owner/name>（remote に無ければ先に git remote add）、または GH_REPO=<自分の owner/name>（gh repo view の答えは変わらないので、-R "$(gh repo view …)" で書くなら gh repo set-default）。手順は ops-kit/README.md の「Starting development on a fork」`;
 }
 
 /** The repositories this clone marked as never written to (`git config ops-kit.noWrite`), as lower-case `owner/name`. */

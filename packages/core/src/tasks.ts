@@ -172,7 +172,7 @@ export interface TaskManagerOptions {
   /** Where a Codex task's own temp directory is made: `<daemon home>/tmp`. Unset = none is made. */
   privateTmpRoot?: string;
   /**
-   * The machine's heavy-process slots (`ops-kit heavy`, the kit's README "重い処理の枠"): added to a Codex task's scope
+   * The machine's heavy-process slots (`ops-kit heavy`, the kit's README "Heavy-process slots"): added to a Codex task's scope
    * at start so that its sandbox can take a slot like every other process. Unset = not added.
    */
   heavyStateDir?: string;

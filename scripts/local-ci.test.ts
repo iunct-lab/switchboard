@@ -865,6 +865,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(none.calls).toEqual([["git", "-C", "/meta", "remote", "get-url", "origin"]]);
     expect(await resolveTarget(["--all", "7"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta", all: true });
     expect(await resolveTarget(["7", "--force"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta", force: true });
+    expect(await resolveTarget(["7", "--local"], "/w/other", "/meta", none.sh)).toEqual({ pr: 7, repo: "example/development", root: "/meta", local: true });
     // --repo: the working tree it runs in, whose origin is that repository (https or ssh, with or without .git)
     for (const url of ["https://github.com/o/r.git", "https://github.com/o/r", "git@github.com:o/r.git", "ssh://git@github.com/o/r.git"]) {
       const x = run(url);
@@ -1146,6 +1147,39 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       expect(r.results.map((x) => x.name)).toEqual(prSteps.map((s) => s.name));
     });
 
+    test("--local runs every step here under the slot even with a build; without it the build is used; with no build the steps run here under the slot", async () => {
+      const root = mkdtempSync(join(CACHE, "main-root-"));
+      Bun.spawnSync(["git", "init", "-q", root]);
+      Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+      try {
+        const go = async (args: string[], x: ReturnType<typeof withOffload>, offload: boolean) => {
+          if (!offload) delete x.d.offload;
+          const fake = x.d.sh;
+          x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fake(cmd, cwd));
+          return main(args, root, x.d, async () => undefined, root, CACHE);
+        };
+        forget();
+        const local = withOffload();
+        expect(await go(["42", "--local"], local, true)).toBe(0);
+        expect(local.builds).toHaveLength(0);
+        expect(local.ran).toEqual(prSteps.map((s) => s.run.trim()));
+        expect(local.slots).toEqual(["local-ci example/development#42"]);
+        forget();
+        const off = withOffload();
+        expect(await go(["42"], off, true)).toBe(0);
+        expect(off.builds).toHaveLength(1);
+        expect(off.ran).toEqual([]);
+        forget();
+        const none = withOffload();
+        expect(await go(["42"], none, false)).toBe(0);
+        expect(none.builds).toHaveLength(0);
+        expect(none.ran).toEqual(prSteps.map((s) => s.run.trim()));
+        expect(none.slots).toEqual(["local-ci example/development#42"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     test("the heavy slot is taken for the whole run without sb-offload, and not at all with it (the worktree is made outside)", async () => {
       const track = (d: Deps) => {
         const t = { names: [] as string[], atGit: [] as number[], inside: 0 };
@@ -1388,6 +1422,25 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(r.results[0]!.fails).toContain("sb-offload: exit 2（ビルドの失敗）");
         // nothing started: no record
         expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a --local run that posted its result removes the record of an off-host build for the same head and base", async () => {
+        const root = mkdtempSync(join(CACHE, "main-root-"));
+        Bun.spawnSync(["git", "init", "-q", root]);
+        Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+        try {
+          forget();
+          await cutOff();
+          expect(existsSync(FILE)).toBe(true);
+          const y = withOffload();
+          const fy = y.d.sh;
+          y.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fy(cmd, cwd));
+          expect(await main(["42", "--local"], root, y.d, async () => undefined, root, CACHE)).toBe(0);
+          expect(y.builds).toHaveLength(0);
+          expect(existsSync(FILE)).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
       });
 
       test("pending: main keeps the record when the head and base cannot be read after the build, and drops it when a pass for the head is already there", async () => {

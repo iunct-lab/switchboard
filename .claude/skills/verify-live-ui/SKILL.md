@@ -88,7 +88,7 @@ const core = await startServer(loadConfig({
 console.log(`http://127.0.0.1:${core.server.port}`);
 ```
 
-`bun run --cwd apps/web build` のあと、`ops-kit heavy --name "fake daemon" -- bun "$W/boot.ts"` で起動する（マシンの重い処理の枠を取ってから始まる。枠が埋まっていれば空くまで待つ。キットの README の「重い処理の枠」）。出力された URL を headless Chrome（`--remote-debugging-port`、CDP）で開く。確認後は自分のプロセスと `$W` だけを片付ける。デーモンが動いている間は枠を持ち、片付けで止めると枠が空く。
+`bun run --cwd apps/web build` のあと、`ops-kit heavy --name "fake daemon" -- bun "$W/boot.ts"` で起動する（マシンの重い処理の枠を取ってから始まる。枠が埋まっていれば空くまで待つ。キットの README の「Heavy-process slots」）。出力された URL を headless Chrome（`--remote-debugging-port`、CDP）で開く。確認後は自分のプロセスと `$W` だけを片付ける。デーモンが動いている間は枠を持ち、片付けで止めると枠が空く。
 
 - 偽アダプタで応答を合成するときは、`start()` も `send()` もイベントを `queueMicrotask` で出す。`send()` の中で同期に出すと、Task が running になる前に届き、ターンが終わらない
 - Task は `/task/<id>` で直接開ける（ヘッダーのタブも `/backlog` などの URL を持つ。対応は `apps/web/src/route.ts`）。rail から押すなら `.t` の文字が Task の題の行（CDP で押す型は `scripts/attention-e2e.ts`）

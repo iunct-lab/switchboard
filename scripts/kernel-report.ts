@@ -75,16 +75,16 @@ export type Report = { days: number; since: number; tasks: number; byBundle: boo
 
 /**
  * The kind of reason, with the numbers a chooser writes into it left out so equal rules count together:
- * `direct button` / `backlog stage <x>` → ボタン, `auto direct: 本文 N 字 ≤ M` → `自動 direct: 本文 ≤ M` (the criterion's
- * limit stays, the body's actual size goes), `auto pipeline: …` → 自動 pipeline, `direct returned` → 戻した.
+ * `direct button` / `backlog stage <x>` → ボタン, `auto direct: <what> N 字 ≤ M` → `自動 direct: <what> ≤ M` (what was
+ * measured — 本文 or 要望の文 — and the criterion's limit stay, the actual size goes), `auto pipeline: …` → 自動 pipeline, `direct returned` → 戻した.
  * Any other text is その他 (a schedule's reason), no reason at all is 理由なし.
  */
 export function reasonGroup(reason: string | null | undefined): string {
   if (typeof reason !== "string" || !reason) return "理由なし";
   if (reason === "direct button" || reason.startsWith("backlog stage ")) return "ボタン";
   if (reason.startsWith("auto direct")) {
-    const limit = /≤\s*(\d+)/.exec(reason);
-    return limit ? `自動 direct: 本文 ≤ ${limit[1]}` : "自動 direct";
+    const m = /^auto direct:\s*(\S+)\s+\d+\s*字\s*≤\s*(\d+)/.exec(reason);
+    return m ? `自動 direct: ${m[1]} ≤ ${m[2]}` : "自動 direct";
   }
   if (reason.startsWith("auto pipeline")) return "自動 pipeline";
   if (reason === "direct returned") return "戻した";
