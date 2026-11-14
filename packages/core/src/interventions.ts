@@ -52,7 +52,7 @@ export function warmInterventions(db: Db, workspaces: Workspace[]): void {
 }
 
 /** The Issue a Task worked on: the stage Task's, or the `#N ` its title starts with. */
-const issueOfTask = (t: { title: string; stageIssue: number | null }): number | null => t.stageIssue ?? (/^#(\d+) /.exec(t.title)?.[1] ? Number(/^#(\d+) /.exec(t.title)![1]) : null);
+export const issueOfTask = (t: { title: string; stageIssue: number | null }): number | null => t.stageIssue ?? (/^#(\d+) /.exec(t.title)?.[1] ? Number(/^#(\d+) /.exec(t.title)![1]) : null);
 
 /**
  * Every intervention, oldest first, and what could not be counted. An intervention on an Issue needs the stored Issue (to name

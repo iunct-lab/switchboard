@@ -1,4 +1,4 @@
-import { isWorkingStatus, RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task, type TaskStopMark } from "@switchboard/protocol";
+import { personWait, RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task, type TaskStopMark } from "@switchboard/protocol";
 import { z } from "zod";
 import type { Db } from "./db.ts";
 
@@ -64,6 +64,27 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
 }
 
 /**
+ * Whether `a` is an answer to `last`'s series (the newest stop of it): an answer is to the stop at the same place
+ * (work + op + target) that was newest when it was given — one to another series' stop is not this one's, and one given
+ * before anything stopped here answers nothing. A runner names an Issue comment by URL, which is a pointer, not proof:
+ * until the comment is read and its repository and author checked (nothing reads it yet), only an answer the daemon saw
+ * the person give (`seq:`) counts. `stops` = one record per stop (its latest), `first` = when each stop first came.
+ */
+function answerIsOwn(stops: StopRecord[], first: Map<string, number>, last: StopRecord, a: StopRecord["answer"]): boolean {
+  if (!a || !a.ref.startsWith("seq:")) return false;
+  const owner = stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < a.at).at(-1);
+  return !!owner && stopKey(owner) === stopKey(last);
+}
+
+/**
+ * Whether `last` (the newest stop of its series) was answered after it came: an answer the newest stop carries over from
+ * an earlier stop at the same place (recordStop keeps it) is not an answer to this one — the Task stopped again after it.
+ */
+function answeredAfter(stops: StopRecord[], first: Map<string, number>, last: StopRecord): boolean {
+  return answerIsOwn(stops, first, last, last.answer) && last.answer!.at >= first.get(last.id)!;
+}
+
+/**
  * The series of `records` (any order), newest stop last first. A record with an id seen before updates that stop (its
  * state moved: retrying → resolved …); a new id is the series stopping again. Changes are against the stop before the
  * newest one at the same work + op + target, of any reason — so a different cause shows as `cause`.
@@ -86,12 +107,7 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
     const newest = (rs: StopRecord[]) => rs.reduce<StopRecord["answer"]>((a, s) => (s.answer && (!a || s.answer.at >= a.at) ? s.answer : a), null);
     // Answers seen before `last`, at this place in any series: one that came back is not a new answer.
     const before = stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < lastFirst);
-    // An answer is to the stop at this place (work + op + target) that was newest when it was given: one to another
-    // series' stop is not this one's, and one given before anything stopped here answers nothing.
-    const owner = (a: NonNullable<StopRecord["answer"]>) => stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < a.at).at(-1);
-    // A runner names an Issue comment by URL, which is a pointer, not proof: until the comment is read and its
-    // repository and author checked (nothing reads it yet), only an answer the daemon saw the person give counts.
-    const ours = (a: StopRecord["answer"]) => !!a && a.ref.startsWith("seq:") && (() => { const o = owner(a); return !!o && stopKey(o) === key; })();
+    const ours = (a: StopRecord["answer"]) => answerIsOwn(stops, first, last, a);
     const changes = compareStopConditions(before.at(-1), last, newest(before)).filter((c) => c.kind !== "answer" || ours(last.answer));
     const lastAnswer = newest(list.filter((x) => x.answer?.ref.startsWith("seq:")));
     const unchanged = list.length > 1 && changes.length === 0;
@@ -108,6 +124,7 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
       firstAt: first.get(list[0]!.id)!,
       lastAt: last.at,
       lastAnswer,
+      answered: answeredAfter(stops, first, last),
       grant: last.grant ?? null,
       conditions: last.conditions,
       actions: last.actions,
@@ -117,6 +134,37 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
     });
   }
   return out.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+/**
+ * What `stopMarks` needs of `reduceStops(records)[0]` — the series with the latest `lastAt` (the first of them on a tie) —
+ * without the answers, changes and next step the marks do not carry (those make `reduceStops` slow over thousands of
+ * Tasks). A test holds the two equal.
+ */
+export function lastStopMark(records: StopRecord[]): TaskStopMark | null {
+  const byId = new Map<string, StopRecord>();
+  const first = new Map<string, number>();
+  for (const r of [...records].sort((a, b) => a.at - b.at)) {
+    if (!first.has(r.id)) first.set(r.id, r.at);
+    byId.set(r.id, r);
+  }
+  const series = new Map<string, StopRecord[]>();
+  const stops = [...byId.values()].sort((a, b) => first.get(a.id)! - first.get(b.id)!);
+  for (const s of stops) {
+    const k = stopKey(s);
+    const list = series.get(k);
+    if (list) list.push(s);
+    else series.set(k, [s]);
+  }
+  let best: { key: string; last: StopRecord; count: number } | null = null;
+  for (const [key, list] of series) {
+    const last = list[list.length - 1]!;
+    if (!best || last.at > best.last.at) best = { key, last, count: list.length };
+  }
+  if (!best) return null;
+  const { key, last, count } = best;
+  // the answer is checked for the newest series only: the others are not shown
+  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, last) };
 }
 
 /**
@@ -152,20 +200,23 @@ export function stopRecordsFor(db: Db, task: Task): StopRecord[] {
 }
 
 /**
- * The last stop of each Task the person may have to act on: not reviewed (確認済み), not 完了, and stopped — the
- * same Tasks the web's `needsAttention` lists (waiting, or not working and not idle). Of each, the newest series
- * (`reduceStops` puts the latest `lastAt` first) among the stops that Task itself reported — not `stopRecordsFor`, which
- * also reads the other Tasks of the same Issue / schedule (their newer stop is not this Task's last stop) and only the
- * schedule's latest Tasks (an older Task's own stop would be lost). A Task with no stop record of its own is left out; the
- * others are not read.
+ * The last stop of each stopped Task that is not reviewed (確認済み), whatever its outcome: waiting, done, error or aborted,
+ * read in one query (`listStopRecordsOfStopped`). Of each, the newest series (`reduceStops` puts the latest `lastAt` first)
+ * among the stops that Task itself reported — not `stopRecordsFor`, which also reads the other Tasks of the same Issue /
+ * schedule (their newer stop is not this Task's last stop) and only the schedule's latest Tasks (an older Task's own stop
+ * would be lost). A Task with no stop record of its own is left out. Whether the mark means the person is wanted is
+ * `personWait`'s call, made by the reader.
  */
 export function stopMarks(db: Db, tasks: Task[]): Record<string, TaskStopMark> {
   const out: Record<string, TaskStopMark> = {};
+  const records = db.listStopRecordsOfStopped();
   for (const t of tasks) {
-    if (t.reviewedAt !== null || t.outcome === "done") continue;
-    if (t.status !== "waiting" && (isWorkingStatus(t.status) || t.status === "idle")) continue;
-    const s = reduceStops(db.listStopRecords([t.id]))[0];
-    if (s) out[t.id] = { key: s.key, reason: s.reason, state: s.state, conditions: s.conditions, count: s.count };
+    const own = records.get(t.id);
+    // a Task reviewed or at work waits on no one, whatever it stopped on (the outcome set aside, as the web's stopCandidates).
+    // listStopRecordsOfStopped narrows the same way in SQL (for speed); this decides again by the Tasks passed in.
+    if (!own || personWait({ ...t, outcome: "unknown" }, null) === "none") continue;
+    const mark = lastStopMark(own);
+    if (mark) out[t.id] = mark;
   }
   return out;
 }

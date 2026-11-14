@@ -9,7 +9,7 @@ import { openTask as openTaskShown, upsertSummary } from "./taskList.ts";
 import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
-import { attentionList } from "./attention.ts";
+import { stopCandidates } from "./attention.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
 import { loginRoute, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
@@ -414,10 +414,10 @@ export function App() {
   }, [reader]);
   // Archived Tasks (#1142) are read only when the rail asks to show them; Home leaves them out
   const live = useMemo(() => tasks.filter((t) => t.archivedAt === null), [tasks]);
-  // The last stop of each Task (#4480): read again when the 要対応 candidates (their ids and updatedAt) change, and on each
+  // The last stop of each Task (#4480): read again when the stop candidates (the stopped Tasks not 確認済み: their ids and updatedAt) change, and on each
   // stop record (`stopRev`: a record does not move a Task's row). A failed read keeps the last value; an answer that comes
   // after a newer read started is dropped, so an older answer does not put back marks already gone.
-  const candidatesSig = useMemo(() => attentionList(live).map((t) => `${t.id}:${t.updatedAt}`).join(","), [live]);
+  const candidatesSig = useMemo(() => stopCandidates(live).map((t) => `${t.id}:${t.updatedAt}`).join(","), [live]);
   useEffect(() => {
     if (!authorized || candidatesSig === "") return;
     let current = true;

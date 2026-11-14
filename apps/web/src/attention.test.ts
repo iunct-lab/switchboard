@@ -1,31 +1,53 @@
 import { expect, test } from "bun:test";
 import type { StopReasonCode, StopState, Task, TaskOutcome, TaskStatus, TaskStopMark } from "@switchboard/protocol";
-import { activeLabel, attentionGroups, attentionList, isActive, judgementNote, needsAttention, outcomeDotClass, outcomeLabel, terminalMark } from "./attention.ts";
+import { activeLabel, attentionGroups, isActive, judgementNote, outcomeDotClass, outcomeLabel, stopCandidates, terminalMark } from "./attention.ts";
 
 const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
 
-test("needsAttention: a stopped task not reviewed yet that did not come to 完了; never a running or idle one", () => {
-  for (const status of ["waiting", "done", "error", "aborted"] as const) {
+const mark = (reason: StopReasonCode, state: StopState, key = "k", conditions: TaskStopMark["conditions"] = []): TaskStopMark => ({ key, reason, state, conditions, count: 1, answered: false });
+// what 要対応 shows of one Task, and the order of its Tasks: Home and the rail read attentionGroups
+const needsAttention = (x: Task, m?: TaskStopMark) => attentionGroups([x], m ? { [x.id]: m } : null).needs.length > 0;
+const attentionList = (xs: Task[], marks: Record<string, TaskStopMark> | null) => attentionGroups(xs, marks).needs.flatMap((g) => g.tasks);
+test("needsAttention: by personWait — a stopped task not reviewed yet whose outcome is not 完了; an open approval always; never a running or idle one", () => {
+  for (const status of ["done", "error", "aborted"] as const) {
     expect(needsAttention(task("t", status, "done")), `${status} done`).toBe(false);
     for (const outcome of ["needs_action", "failed", "unknown"] as const) {
       expect(needsAttention(task("t", status, outcome)), `${status} ${outcome}`).toBe(true);
       expect(needsAttention(task("t", status, outcome, 5)), `${status} ${outcome} reviewed`).toBe(false);
     }
   }
+  // an open approval needs the person whatever the judge guessed
+  expect(needsAttention(task("t", "waiting", "done"))).toBe(true);
+  // a stop that waits on the person decides before the outcome; one that waits on something else does not need them
+  expect(needsAttention(task("t", "done", "done"), mark("decision", "waiting"))).toBe(true);
+  expect(needsAttention(task("t", "done", "needs_action"), mark("depends", "waiting"))).toBe(false);
   for (const status of ["running", "background", "idle"] as const) for (const outcome of ["done", "needs_action", "failed", "unknown"] as const) expect(needsAttention(task("t", status, outcome))).toBe(false);
 });
 
-test("attentionList: 要対応 → 失敗 → 未判定, newest first within each; 完了, reviewed and running ones left out", () => {
+test("stopCandidates: the stopped tasks not reviewed yet, 完了 ones too; not running, idle or reviewed ones", () => {
+  const ids = stopCandidates([
+    task("done", "done", "done"),
+    task("ask", "waiting", "done"),
+    task("failed", "error", "failed"),
+    task("reviewed", "done", "done", 5),
+    task("running", "running", "unknown"),
+    task("idle", "idle", "done"),
+  ]).map((t) => t.id);
+  expect(ids).toEqual(["done", "ask", "failed"]);
+});
+
+test("attentionList: 要対応 → 失敗 → 未判定, newest first within each; 完了, reviewed and running ones left out; a 完了 task stopped on a decision ranks as 要対応", () => {
   const list = attentionList([
     task("done-old", "done", "done", null, 1),
     task("unknown-new", "done", "unknown", null, 9),
     task("failed", "error", "failed", null, 2),
     task("ask-old", "waiting", "needs_action", null, 3),
     task("ask-new", "done", "needs_action", null, 8),
+    task("stopped-done", "done", "done", null, 4),
     task("reviewed", "done", "needs_action", 7, 10),
     task("running", "running", "unknown", null, 11),
-  ]);
-  expect(list.map((t) => t.id)).toEqual(["ask-new", "ask-old", "failed", "unknown-new"]);
+  ], { "stopped-done": mark("decision", "waiting") });
+  expect(list.map((t) => t.id)).toEqual(["ask-new", "stopped-done", "ask-old", "failed", "unknown-new"]);
 });
 
 test("labels and dots per outcome", () => {
@@ -63,7 +85,6 @@ test("activeLabel: running / waiting / background / an idle Task in the run-slot
   expect(isActive(q("running", null))).toBe(true);
 });
 
-const mark = (reason: StopReasonCode, state: StopState, key = "k", conditions: TaskStopMark["conditions"] = []): TaskStopMark => ({ key, reason, state, conditions, count: 1 });
 const split = (m: TaskStopMark | undefined, outcome: TaskOutcome = "needs_action") => {
   const r = attentionGroups([task("t", "done", outcome)], m ? { t: m } : {});
   return r.needs.length === 1 && r.waiting.length === 0 ? "needs" : r.waiting.length === 1 && r.needs.length === 0 ? "waiting" : "?";
@@ -71,6 +92,13 @@ const split = (m: TaskStopMark | undefined, outcome: TaskOutcome = "needs_action
 
 test("attentionGroups: waiting / exhausted on a reason that needs the person stays under needs", () => {
   for (const reason of ["decision", "auth", "permission", "input", "disk-full", "unknown"] as const) for (const state of ["waiting", "exhausted"] as const) expect(split(mark(reason, state)), `${reason} ${state}`).toBe("needs");
+});
+
+test("attentionGroups: a 完了 task stopped on a decision is under needs, a needs_action one stopped on depends under waiting; 完了 with no mark is in neither", () => {
+  expect(split(mark("decision", "waiting"), "done")).toBe("needs");
+  expect(split(mark("depends", "waiting"), "needs_action")).toBe("waiting");
+  const r = attentionGroups([task("t", "done", "done")], null);
+  expect([r.needs, r.waiting]).toEqual([[], []]);
 });
 
 test("attentionGroups: resolved, and depends waiting with its conditions, go to waiting", () => {

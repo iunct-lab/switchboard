@@ -1,7 +1,7 @@
 import { currentRepo } from "./repo.ts";
 import { describe, expect, test } from "bun:test";
 import { alreadyFiled, filedNumber } from "./file-request";
-import { filingLine, main, formatProposals, gaps, formatGaps, format, mergedSince, parseMarks, parseReverts, period, proposals, readHistory, requestFor, revertedShas, RunError, tally, type PrRecord, type Run } from "./merge-audit";
+import { auditRows, filingLine, formatAudit, main, formatProposals, gaps, formatGaps, format, mergedSince, parseMarks, parseReverts, period, proposals, readHistory, requestFor, revertedShas, RunError, tally, type PrRecord, type Run } from "./merge-audit";
 import fx from "./merge-audit.fixture.json";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -45,6 +45,25 @@ const replay = (opts: { offMain?: string[]; onMain?: string[]; ambiguous?: Recor
     const commit = /\/commits\/([0-9a-f]{40})\/pulls$/.exec(path);
     if (commit) return JSON.stringify((fx.commitPulls as Record<string, unknown>)[commit[1]!] ?? []);
     throw new Error(`unexpected ${cmd.join(" ")}`);
+  };
+  return { run, calls };
+};
+
+/** The same fixture read as another repository: main's commits come from `commits` (REST) and a short sha from `commits/<sha>` + `compare`. */
+const replayRemote = (compare = "ahead"): { run: Run; calls: string[][] } => {
+  const base = replay();
+  const calls: string[][] = [];
+  const run: Run = async (cmd) => {
+    calls.push(cmd);
+    const path = cmd[1] === "api" ? (cmd[2] === "-X" ? cmd[4]! : cmd[2]!) : "";
+    if (cmd[0] === "gh" && /\/commits$/.test(path)) return fx.log.split("\0").map((x) => x.replace(/^\n/, "")).filter(Boolean).map((x) => {
+      const [sha, at, ...message] = x.split("\t");
+      return JSON.stringify({ sha, at, message: message.join("\t") });
+    }).join("\n") + "\n";
+    const short = /\/commits\/([0-9a-f]{7,40})$/.exec(path)?.[1];
+    if (short) return `${(fx.revParse as Record<string, string>)[short] ?? short.padEnd(40, "0")}\n`;
+    if (/\/compare\//.test(path)) return `${compare}\n`;
+    return base.run(cmd);
   };
   return { run, calls };
 };
@@ -110,7 +129,7 @@ describe("readHistory + tally (fixture)", () => {
     const { run, calls } = replay();
     const h = await readHistory(P.since, run);
     // #910: merged in the period, its only mark from before it (read through the PR's own comments)
-    expect(h.prs.map((p) => p.number)).toEqual([804, 901, 902, 903, 904, 905, 906, 910, 912, 913, 914]);
+    expect(h.prs.map((p) => p.number)).toEqual([804, 901, 902, 903, 904, 905, 906, 910, 912, 913, 914, 921, 922, 923, 924]);
     expect(calls.some((x) => x.join(" ").includes("909"))).toBe(false); // a review comment is not a mark
     expect(calls.some((x) => x.join(" ").includes("pulls/908"))).toBe(false); // CONTRIBUTOR
     expect(calls.some((x) => x.join(" ").includes("pulls/911"))).toBe(false); // merged without a mark
@@ -191,7 +210,7 @@ describe("readHistory + tally (fixture)", () => {
 
   test("案なし: the lines after the table name each proposal, or say there is none (#1272)", () => {
     expect(formatProposals([])).toEqual(["案なし"]);
-    expect(formatProposals([{ kind: "size", evidence: [1], reverts: ["abcdef0"] }])[0]).toMatch(/^案: /);
+    expect(formatProposals([{ kind: "size", evidence: [1], reverts: ["abcdef0"], audited: [] }])[0]).toMatch(/^案: /);
   });
 
   test("要望: --file-request says what it did — filed, the same title already open, or nothing to file (#1272)", () => {
@@ -395,7 +414,7 @@ describe("proposals", () => {
     const prs = [rechecked(1, "responsibility"), rechecked(2, "responsibility"), rechecked(3, "size")];
     const R = "7".repeat(40);
     expect(proposals(prs, [{ sha: R, at: at(5), reverted: [2] }, { sha: "8".repeat(40), at: at(6), reverted: [9] }], W))
-      .toEqual([{ kind: "responsibility", evidence: [2], reverts: [R] }]);
+      .toEqual([{ kind: "responsibility", evidence: [2], reverts: [R], audited: [] }]);
     // not taken back, or merged before the look-back: nothing
     expect(proposals(prs, [], W)).toEqual([]);
     expect(proposals([rechecked(2, "responsibility", "2026-06-01T00:00:00Z")], [{ sha: "r", at: at(5), reverted: [2] }], W)).toEqual([]);
@@ -407,7 +426,7 @@ describe("proposals", () => {
     // 2026-09-30T23:30-07:00 is 2026-10-01T06:30Z: after the window that ends at 2026-10-01T00:00Z
     expect(proposals(prs, [{ sha: "r", at: "2026-09-30T23:30:00-07:00", reverted: [2] }], W)).toEqual([]);
     // 2026-10-01T08:00+09:00 is 2026-09-30T23:00Z: inside it
-    expect(proposals(prs, [{ sha: "r", at: "2026-10-01T08:00:00+09:00", reverted: [2] }], W)).toEqual([{ kind: "responsibility", evidence: [2], reverts: ["r"] }]);
+    expect(proposals(prs, [{ sha: "r", at: "2026-10-01T08:00:00+09:00", reverted: [2] }], W)).toEqual([{ kind: "responsibility", evidence: [2], reverts: ["r"], audited: [] }]);
   });
 
   test("rescue and design-rules as recheck kinds: a recheck merge counts in their rows, a taken-back one proposes asking, 5 yes propose nothing", () => {
@@ -416,8 +435,8 @@ describe("proposals", () => {
     expect(rows.find((r) => r.kind === "rescue")).toMatchObject({ asked: 0, recheckMerged: [2] });
     expect(rows.find((r) => r.kind === "design-rules")).toMatchObject({ asked: 0, recheckMerged: [3] });
     expect(proposals(prs, [{ sha: "r", at: at(5), reverted: [2, 3] }], W)).toEqual([
-      { kind: "rescue", evidence: [2], reverts: ["r"] },
-      { kind: "design-rules", evidence: [3], reverts: ["r"] },
+      { kind: "rescue", evidence: [2], reverts: ["r"], audited: [] },
+      { kind: "design-rules", evidence: [3], reverts: ["r"], audited: [] },
     ]);
     expect(proposals([...answered("rescue", ["yes", "yes", "yes", "yes", "yes"]), ...answered("design-rules", ["yes", "yes", "yes", "yes", "yes"], 200)], [], W)).toEqual([]);
   });
@@ -426,6 +445,104 @@ describe("proposals", () => {
     expect(proposals(answered("security:words", ["yes", "yes", "yes", "yes", "yes"]), [], W)).toEqual([]);
   });
 
+});
+
+describe("監査の行（#4915）", () => {
+  const A = { since: "2026-10-04T00:00:00.000Z", until: "2026-10-05T00:00:00.000Z" };
+  const run = (repo = currentRepo()) => readHistory(A.since, replay().run, repo);
+
+  test("parseMarks: `[post-audit] pass|finding <merge sha>` is a mark with a verdict and no merge kind; a short sha is not one", () => {
+    const sha = "c".repeat(40);
+    expect(parseMarks([c(`[post-audit] finding ${sha}\n\n- a.ts:1 x`, "2026-10-04T05:00:00Z"), c("[post-audit] pass abc1234")]))
+      .toEqual([{ kind: "post-audit", kinds: [], sha, at: "2026-10-04T05:00:00Z", verdict: "finding" }]);
+  });
+
+  test("監査の行が通り方ごとに出る", async () => {
+    const { prs } = await run();
+    const rows = auditRows(prs, A);
+    expect(rows).toEqual([
+      { route: "review", sampled: 1, findings: 0, rate: 0 },
+      { route: "direct", sampled: 1, findings: 0, rate: 0 },
+      { route: "recheck", sampled: 2, findings: 1, rate: 0.5 },
+    ]);
+    expect(formatAudit("example/development", rows)).toEqual([
+      "監査 example/development review 抜き取り 1 / finding 0 / 率 0%",
+      "監査 example/development direct 抜き取り 1 / finding 0 / 率 0%",
+      "監査 example/development recheck 抜き取り 2 / finding 1 / 率 50%",
+    ]);
+  });
+
+  test("抜き取り 0 の通り方も 0 で出る", async () => {
+    const { prs } = await run();
+    // a period with no audit mark: every route is a line of 0
+    const none = auditRows(prs, { since: "2026-09-26T00:00:00.000Z", until: "2026-10-03T00:00:00.000Z" });
+    expect(formatAudit("o/r", none)).toEqual([
+      "監査 o/r review 抜き取り 0 / finding 0 / 率 0%",
+      "監査 o/r direct 抜き取り 0 / finding 0 / 率 0%",
+      "監査 o/r recheck 抜き取り 0 / finding 0 / 率 0%",
+    ]);
+    // only the review route sampled: direct stays a 0 line
+    const only = auditRows(prs.filter((p) => p.number === 921), A);
+    expect(only.map((r) => [r.route, r.sampled])).toEqual([["review", 1], ["direct", 0], ["recheck", 0]]);
+  });
+
+  test("再チェックだけで出た PR の finding が案の根拠になる", async () => {
+    const { prs, reverts } = await run();
+    const W = { since: "2026-07-06T00:00:00.000Z", until: "2026-10-05T00:00:00.000Z" };
+    // #923 was lifted by a recheck of its head and no revert took it back; the audit's finding alone proposes asking
+    expect(reverts.flatMap((r) => r.reverted)).not.toContain(923);
+    const ps = proposals(prs, reverts, W).filter((x) => x.evidence.includes(923));
+    expect(ps.map((x) => [x.kind, x.audited])).toEqual([["size", [923]]]);
+    expect(formatProposals(ps)[0]).toContain("再チェックで自動マージして戻された / 監査の指摘: #923");
+    // no revert: no empty "戻したコミット" part
+    expect(formatProposals(ps)[0]).not.toContain("戻したコミット");
+    // a pass (#924), a finding on a PR with a review (not a recheck merge), or a finding after the window's end: nothing
+    expect(proposals(prs.filter((p) => p.number === 924), [], W)).toEqual([]);
+    const reviewed = prs.find((p) => p.number === 921)!;
+    const reviewedFinding = { ...reviewed, marks: [...reviewed.marks, ...parseMarks([c(`[post-audit] finding ${"d".repeat(40)}`, "2026-10-04T06:00:00Z")])] };
+    expect(proposals([reviewedFinding], [], W)).toEqual([]);
+    expect(proposals(prs, reverts, { ...W, until: "2026-10-04T05:00:00.000Z" }).some((x) => x.evidence.includes(923))).toBe(false);
+  });
+
+  test("別のリポジトリで、既定の枝の祖先でない短い sha は数えない", async () => {
+    const ahead = await readHistory(A.since, replayRemote().run, "other/repo");
+    const diverged = await readHistory(A.since, replayRemote("diverged").run, "other/repo");
+    const of = (h: typeof ahead) => h.reverts.flatMap((r) => r.reverted).sort((a, b) => a - b);
+    expect(of(diverged).length).toBeLessThan(of(ahead).length);
+  });
+
+  test("--repo が読みに渡る", async () => {
+    const { run: r, calls } = replayRemote();
+    await readHistory(A.since, r, "other/repo");
+    const gh = calls.filter((x) => x[0] === "gh").map((x) => x.join(" "));
+    expect(gh.length).toBeGreaterThan(0);
+    expect(gh.every((x) => x.includes("repos/other/repo/") || x.includes("repo:other/repo "))).toBe(true);
+    // a repository that is not this clone's: no git, main's commits come from the API
+    expect(calls.some((x) => x[0] === "git")).toBe(false);
+    expect(gh.some((x) => x.includes("repos/other/repo/commits "))).toBe(true);
+  });
+
+  test("main: --repo の表に監査の行が出る / owner/name でなければ exit 2 / --file-request は別のリポジトリでは起票しない", async () => {
+    const lines: string[] = [];
+    const log = console.log, err = console.error;
+    console.log = (x: string) => void lines.push(x);
+    console.error = () => {};
+    let filed = 0;
+    try {
+      const remote = replayRemote();
+      const code = await main(["--since", "2026-10-04", "--until", "2026-10-04", "--repo", "example/development", "--file-request"], remote.run, Date.parse("2026-10-05T12:00:00Z"), async () => (filed++, { filed: 1 }));
+      expect(code).toBe(1);
+      expect(remote.calls.find((x) => x.includes("search/issues"))).toContain("q=repo:example/development is:pr is:merged merged:>=2026-07-07");
+      expect(lines.filter((l) => l.startsWith("監査 example/development "))).toHaveLength(3);
+      expect(lines.at(-1)).toContain("別のリポジトリ");
+      expect(filed).toBe(0);
+      expect(await main(["--repo", "nope"], replay().run)).toBe(2);
+      expect(await main(["--repo"], replay().run)).toBe(2);
+    } finally {
+      console.log = log;
+      console.error = err;
+    }
+  });
 });
 
 describe("main", () => {
@@ -486,13 +603,13 @@ describe("main", () => {
 describe("requestFor", () => {
   const src = { date: "2026-10-05" };
   test("the 出典 says 誰の言葉: 定期の検査 (#1818)", () => {
-    expect(requestFor([{ kind: "size", evidence: [9], reverts: [] }], src)!.body).toContain("## 出典\n- 誰の言葉: 定期の検査\n");
+    expect(requestFor([{ kind: "size", evidence: [9], reverts: [], audited: [] }], src)!.body).toContain("## 出典\n- 誰の言葉: 定期の検査\n");
   });
   test("none → null; the title is the same whatever the proposals' order", () => {
     expect(requestFor([], src)).toBeNull();
-    const back = { kind: "migration", evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"] };
-    const a = requestFor([back, { kind: "rescue", evidence: [1, 2], reverts: ["1234567890"] }], src)!;
-    const b = requestFor([{ kind: "rescue", evidence: [1, 2], reverts: ["1234567890"] }, back], src)!;
+    const back = { kind: "migration", evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"], audited: [] };
+    const a = requestFor([back, { kind: "rescue", evidence: [1, 2], reverts: ["1234567890"], audited: [] }], src)!;
+    const b = requestFor([{ kind: "rescue", evidence: [1, 2], reverts: ["1234567890"], audited: [] }, back], src)!;
     expect(a.title).toBe("マージ規則の見直し: rescue を聞くへ / migration を聞くへ");
     expect(b.title).toBe(a.title);
     expect(a.body).toContain("- rescue を聞くへ（再チェックで自動マージして戻された: #1, #2。戻したコミット: 1234567）");
@@ -502,7 +619,7 @@ describe("requestFor", () => {
   });
 
   test("already filed request is detected: the same proposals' open request is not filed again", () => {
-    const title = requestFor([{ kind: "size", evidence: [9], reverts: [] }], src)!.title;
+    const title = requestFor([{ kind: "size", evidence: [9], reverts: [], audited: [] }], src)!.title;
     expect(alreadyFiled(title, [{ ref: "#601", title: "モデル一覧の設定化" }, { ref: "#900", title }])).toBe("#900");
     expect(alreadyFiled(title, [{ ref: "#901", title: `${title} / rescue を聞くへ` }])).toBeNull();
   });

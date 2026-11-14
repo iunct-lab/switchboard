@@ -11,7 +11,7 @@ import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import * as heavyModule from "../../../ops-kit/src/heavy.ts";
 import * as opsLoadModule from "./ops-load.ts";
-import { opsResources, readMemInfo } from "./ops-resources.ts";
+import { opsResources, readMemInfo, TASK_MIN_FREE_MB_DEFAULT } from "./ops-resources.ts";
 import { measureFootprint } from "./footprint.ts";
 import { seedNewHome, startServer as startDaemon } from "./server.ts";
 import type { suggestTitle } from "./suggest-title.ts";
@@ -5882,12 +5882,12 @@ describe("ops resources", () => {
       const raw = opsResources(db, { home: h, procRoot: proc, now: at });
       expect(reads).toHaveBeenCalledTimes(1); // the second read of an unchanged history uses the first's medians
       reads.mockRestore();
-      expect(Object.keys(raw)).toEqual(["memory", "slots", "eta", "consumers", "jobs"]); // the history's lines are not in the answer
+      expect(Object.keys(raw)).toEqual(["memory", "slots", "eta", "taskWaits", "consumers", "jobs"]); // the history's lines are not in the answer
       // a run ends: the history changes, and the next read takes it in
       appendFileSync(join(state, "history.jsonl"), `${entry("bun test", 20)}\n`);
       expect(opsResources(db, { home: h, procRoot: proc, now: at }).slots.waiting[0]!.samples).toBe(4);
       const r = OpsResources.parse(raw);
-      expect(r.memory).toEqual({ availableBytes: 1_000_000 * 1024, totalBytes: 3_921_000 * 1024, swapUsedBytes: 100_000 * 1024, floorBytes: 1536 * 1024 * 1024 });
+      expect(r.memory).toEqual({ availableBytes: 1_000_000 * 1024, totalBytes: 3_921_000 * 1024, swapUsedBytes: 100_000 * 1024, floorBytes: 1536 * 1024 * 1024, safetyBytes: 300 * 1024 * 1024 });
       expect(r.slots.max).toBe(1);
       expect(r.slots.running).toEqual([{ pid: live, name: "local-ci 3639", cwd: "/w", taskId: "t_ci", taskTitle: "PBI の local-ci", queuedAt: "2026-11-03T10:00:00.000Z", startedAt: "2026-11-03T10:00:05.000Z", typicalMs: 600_000, samples: 497, verdict: "long" }]);
       expect(r.slots.waiting).toEqual([{ pid: live, name: "bun test", cwd: "/w", taskId: null, taskTitle: null, queuedAt: "2026-11-03T10:01:00.000Z", reason: "slot", memoryOnly: false, typicalMs: 1_200_000, samples: 3 }]);
@@ -5914,6 +5914,73 @@ describe("ops resources", () => {
       rmSync(empty, { recursive: true, force: true });
     } finally {
       procs.mockRestore();
+      db.sqlite.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ops resources task waits", () => {
+  const queued = (id: string, title: string, queuedAt: number, h: string) => ({ id, workspaceId: null, title, runner: "claude" as const, cwd: h, scope: [h], status: "idle" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: queuedAt, createdAt: queuedAt, updatedAt: queuedAt });
+  test("taskWaits: only a memory wait lists the queue (in its order) and safetyBytes is heavy.json's taskMinFreeMb; slots and eta do not move; the reason is TaskManager's own", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-ops-taskwaits-"));
+    const db = new Db(join(h, "x.db"));
+    try {
+      mkdirSync(join(h, ".config", "ops-kit"), { recursive: true });
+      writeFileSync(join(h, ".config", "ops-kit", "heavy.json"), JSON.stringify({ max: 2, minFreeMb: 1536, taskMinFreeMb: 250 }));
+      const proc = join(h, "proc");
+      mkdirSync(proc);
+      writeFileSync(join(proc, "meminfo"), "MemTotal:        3921000 kB\nMemFree:          100000 kB\nMemAvailable:    1000000 kB\nSwapTotal:       2097148 kB\nSwapFree:        1997148 kB\n");
+      const t0 = Date.parse("2026-11-13T10:00:00.000Z");
+      db.insertTask(queued("t_second", "二つ目", t0 + 1000, h)); // inserted first, queued later
+      db.insertTask(queued("t_first", "一つ目", t0, h));
+      db.setQueued("t_second", "p", t0 + 1000);
+      db.setQueued("t_first", "p", t0);
+      const at = t0 + 60_000;
+      const read = (queueWait?: () => "slot" | "memory" | null) => OpsResources.parse(opsResources(db, { home: h, procRoot: proc, now: at, queueWait }));
+      // (a) a memory wait: both queued Tasks in the queue's order, the valve from heavy.json
+      const mem = read(() => "memory");
+      expect(mem.taskWaits).toEqual([
+        { taskId: "t_first", taskTitle: "一つ目", queuedAt: new Date(t0).toISOString(), reason: "memory" },
+        { taskId: "t_second", taskTitle: "二つ目", queuedAt: new Date(t0 + 1000).toISOString(), reason: "memory" },
+      ]);
+      expect(mem.memory!.safetyBytes).toBe(250 * 1024 * 1024);
+      // (b) a slot wait, null or no function: none
+      for (const w of [() => "slot" as const, () => null, undefined]) expect(read(w).taskWaits).toEqual([]);
+      // (c) slots and eta are the same with and without the Task waits
+      const { taskWaits: _a, ...withWaits } = mem;
+      const { taskWaits: _b, ...without } = read(() => "slot");
+      expect(withWaits).toEqual(without);
+      // no taskMinFreeMb in the file: the default valve
+      writeFileSync(join(h, ".config", "ops-kit", "heavy.json"), JSON.stringify({ max: 2 }));
+      expect(read().memory!.safetyBytes).toBe(TASK_MIN_FREE_MB_DEFAULT * 1024 * 1024);
+    } finally {
+      db.sqlite.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("taskWaits with a TaskManager held back by the safety valve: the second Task shows, and is gone once the memory is back and drain() has started it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-ops-taskwaits-tm-"));
+    const db = new Db(join(h, "x.db"));
+    const MB = 1048576;
+    let headroom: { free: number; floor: number; safety: number } = { free: 100 * MB, floor: 500 * MB, safety: 200 * MB };
+    const tm = new TaskManager(db, new Map([["claude", fakeAdapter(SCRIPT, { lingers: true })]]), () => undefined, { maxRunners: () => 8, memoryHeadroom: () => headroom });
+    try {
+      const input = (title: string) => ({ cwd: h, title, prompt: title, runner: "claude" as const });
+      const read = () => opsResources(db, { home: h, queueWait: () => tm.queueWait() }).taskWaits;
+      expect(tm.queueWait()).toBeNull(); // nothing queued: the memory is not read
+      tm.create(input("t1"));
+      expect(read()).toEqual([]); // the first Task is not held for memory
+      const t2 = tm.create(input("t2"));
+      expect(tm.queueWait()).toBe("memory");
+      expect(read().map((w) => `${w.taskId}/${w.taskTitle}/${w.reason}`)).toEqual([`${t2.id}/t2/memory`]);
+      headroom = { free: 300 * MB, floor: 500 * MB, safety: 200 * MB };
+      tm.drain();
+      expect(tm.queueWait()).toBeNull();
+      expect(read()).toEqual([]);
+    } finally {
+      await tm.shutdown();
       db.sqlite.close();
       rmSync(h, { recursive: true, force: true });
     }

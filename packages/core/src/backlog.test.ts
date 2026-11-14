@@ -493,8 +493,11 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   // the row reads replyWaiting from the daemon — Issue 305's last Task ended asking the person (needs_action, not reviewed)
   expect(mine(305).replyWaiting).toBe(false);
   core!.db.updateTask(done.id, { outcome: "needs_action" });
-  const asked = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.find((i) => i.number === 305 && i.workspaceId === metaId())!;
-  expect(asked.replyWaiting).toBe(true);
+  const askedOf = async () => (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items.find((i) => i.number === 305 && i.workspaceId === metaId())!;
+  // the newest stop (depends, waiting on CI) comes before the judge's needs_action: not waiting for the person
+  expect((await askedOf()).replyWaiting).toBe(false);
+  expect(core!.tasks.recordStop(done.id, { ...merge, id: "d", op: "ask", reason: "decision" }).ok).toBe(true);
+  expect((await askedOf()).replyWaiting).toBe(true);
   expect(mine(307).replyWaiting).toBe(false);
 });
 
@@ -5230,7 +5233,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, ...over });
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
-    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
   });
   const asked = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, updatedAt: at, lastTask: last() });
   const stopped = { ...asked, lastTask: last({ outcome: "unknown" }), stopSummary: [stopOf()] };
@@ -5241,15 +5244,19 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
     ["(c) (a) reviewed", { ...asked, lastTask: last({ reviewedAt: Date.parse(later) }) }, false, false],
     ["(d) (a) with the Issue newer than the Task", { ...asked, updatedAt: later }, false, false],
     ["(e) (a) with a newer ## 回答", { ...asked, answeredAt: later }, false, false],
-    ["(f) (b) answered (next = resume)", { ...stopped, stopSummary: [stopOf({ next: "resume", changes: [{ kind: "answer", detail: "はい" }] })] }, false, null],
+    ["(f) (b) answered: the answer leaves the stop waiting, with answered (moveOpenStops)", { ...stopped, stopSummary: [stopOf({ next: "resume", answered: true, lastAnswer: { ref: "seq:9", at: 3 }, changes: [{ kind: "answer", detail: "seq:9" }] })] }, false, false],
+    ["(f2) done + a decision stop answered, the Task resumed and ended done: not waiting", { ...asked, lastTask: last({ outcome: "done" }), stopSummary: [stopOf({ answered: true, lastAnswer: { ref: "seq:9", at: 3 } })] }, false, false],
+    // personWait: the judgment done with the newest stop waiting for a decision is waiting; needs_action with the newest stop only waiting on a condition (depends) is not, it is stopHeld's side
+    ["(g) done + newest stop decision waiting", { ...asked, lastTask: last({ outcome: "done" }), stopSummary: [stopOf()] }, true, null],
+    ["(h) needs_action + newest stop depends waiting", { ...asked, stopSummary: [stopOf({ reason: "depends", next: "wait" })] }, false, null],
   ];
   for (const [name, i, want, skip] of rows) {
     expect([name, isReplyWaiting(i)]).toEqual([name, want]);
     if (skip !== null) expect([name, awaitingReply(i)]).toEqual([name, skip]);
   }
-  // (b) is left by stopHeld, not awaitingReply; only the newest series of the last Task counts, and a running Task is not waiting
-  expect(awaitingReply(stopped)).toBe(false);
-  expect(isReplyWaiting({ ...stopped, stopSummary: [stopOf({ lastAt: 1 }), stopOf({ key: "k2", lastAt: 5, next: "wait" })] })).toBe(false);
+  // awaitingReply is the same judgment as isReplyWaiting now (the stop that waits for a decision is read by personWait too); only the newest series of the last Task counts, and a running Task is not waiting
+  expect(awaitingReply(stopped)).toBe(true);
+  expect(isReplyWaiting({ ...stopped, stopSummary: [stopOf({ lastAt: 1 }), stopOf({ key: "k2", lastAt: 5, reason: "depends", next: "wait" })] })).toBe(false);
   expect(isReplyWaiting({ ...stopped, stopSummary: [stopOf({ work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_old" } })] })).toBe(false);
   expect(isReplyWaiting({ ...stopped, lastTask: last({ status: "running", outcome: "unknown" }) })).toBe(false);
 });
@@ -5258,7 +5265,7 @@ test("a stop that came again with nothing changed holds the item through an unre
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "done" as const, reviewedAt: null, resumeAt: null };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
-    count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
+    count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
   });
   const touched = "2026-09-12T00:00:00Z"; // the Issue was updated after the Task ended
   const base = item({ number: 3, stage: "ready", lastTask: last, updatedAt: touched, stopSummary: [stopOf()] });
@@ -5680,7 +5687,7 @@ describe("flow-improvement limit", () => {
     const decided = { ...asked, outcome: "done" as const };
     const ask: BacklogItem["stopSummary"][number] = {
       key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
-      count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
+      count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
     };
     const free = flowItem({ number: 11, ...progress, lastTask: decided, updatedAt: "2026-09-29T00:00:00Z" }); // moved since the Task
     expect(flowRunning([free])).toBe(1);

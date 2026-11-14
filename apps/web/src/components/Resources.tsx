@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { OpsResources } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { atLabel, consumerRows, etaLine, jobRow, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
+import { atLabel, consumerRows, jobRow, latestAnswer, memoryLine, runOwner, since, slotsSummary, taskWaitLine, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
@@ -45,7 +45,8 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
       <span className="muted">{runOwner(x)}</span>
     );
   const mem = r && memoryLine(r.memory);
-  const eta = r && etaLine(r.eta, r.slots.running.length + r.slots.waiting.length);
+  const summary = r && slotsSummary(r);
+  const eta = summary && summary.eta;
   return (
     <main className="main resources">
       <section className="card">
@@ -80,9 +81,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                   {r.slots.running.length} / {r.slots.max}
                 </div>
                 <div className="hint">
-                  {t(m.resWaitingCount, { n: r.slots.waiting.length })}
-                  {r.slots.waiting.length > 0 &&
-                    t(m.resWaitingWhy, { slot: r.slots.waiting.filter((w) => w.reason === "slot").length, memory: r.slots.waiting.filter((w) => w.reason === "memory").length })}
+                  {summary!.waiting}
                 </div>
               </div>
               <div className="resources-stat" data-resources-eta>
@@ -94,7 +93,7 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
               </div>
             </div>
             <h5>{t(m.resWaitingHeading)}</h5>
-            {r.slots.waiting.length === 0 ? (
+            {r.slots.waiting.length + r.taskWaits.length === 0 ? (
               <div className="muted">{t(m.resNone)}</div>
             ) : (
               <div className="table-scroll">
@@ -116,6 +115,15 @@ export function Resources(props: { onOpenTask: (id: string) => void }) {
                       <td>{waitLine(w, r.slots.running, r.memory)}</td>
                       <td className="num">{since(w.queuedAt, now)}</td>
                       <td className="num" data-resources-typical>{typicalLabel(w)}</td>
+                    </tr>
+                  ))}
+                  {r.taskWaits.map((w) => (
+                    <tr key={`task/${w.taskId}/${w.queuedAt}`} data-resources-task-wait={w.taskId}>
+                      <td>{task(w)}</td>
+                      <td>{t(m.resTaskStart)}</td>
+                      <td>{taskWaitLine(r.memory)}</td>
+                      <td className="num">{since(w.queuedAt, now)}</td>
+                      <td className="num" data-resources-typical>—</td>
                     </tr>
                   ))}
                 </tbody>

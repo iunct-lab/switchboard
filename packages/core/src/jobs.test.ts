@@ -1,4 +1,5 @@
 // test-reads: none
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import { join } from "node:path";
 import type { Job, JobRequest, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
 
 // Jobs a Task asks the daemon to run: the daemon's child, not the Task's; its end is recorded once.
@@ -123,6 +124,23 @@ describe("jobs", () => {
     expect(sameRepository(repo, outside)).toBe(false);
   });
 
+  test("cwd of a registered workspace's clone is accepted / an unknown origin is refused", () => {
+    const other = join(root, "other-ws");
+    mkdirSync(other);
+    sh(other, "git", "init", "-q");
+    sh(other, "git", "remote", "add", "origin", "https://github.com/acme/capsule.git");
+    const clone = join(root, "capsule-clone");
+    mkdirSync(clone);
+    sh(clone, "git", "init", "-q");
+    sh(clone, "git", "remote", "add", "origin", "git@github.com:acme/capsule.git");
+    const { deps } = fake("true");
+    expect(() => requestJob(deps, local(clone))).toThrow("not a checkout"); // not registered yet
+    db.upsertWorkspace({ name: "capsule", path: other, kind: "repo" });
+    expect(requestJob(deps, local(clone)).status).toBe("running");
+    sh(clone, "git", "remote", "set-url", "origin", "https://github.com/acme/unknown.git");
+    expect(() => requestJob(deps, local(clone))).toThrow("not a checkout");
+  });
+
   test("a folder left by an earlier job of the same id starts empty; a relative cwd and a folder that cannot be made are refused", async () => {
     const { deps, ended } = fake('test -e "$J/exit" && echo stale; true');
     const next = (db.listJobs(0)[0]?.id ?? 0) + 1;
@@ -155,7 +173,16 @@ describe("jobs", () => {
     const codex = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
     expect(codex.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]); // no slot, only the memory floor
     expect(codex.argv).toContain("/o.md");
-    expect(codex.tail).toBe(' < "$JOB_PROMPT"');
+    expect(codex.argv).toContain("--json"); // its events are what the usage is read from
+    expect(codex.tail).toStartWith(' < "$JOB_PROMPT" | tee "$J/codex.jsonl" | jq ');
+    // the tail keeps every event in codex.jsonl and writes only codex's error events to the job log; a non-JSON line does not fail it
+    const j = mkdtempSync(join(tmpdir(), "jobs.codex-tail."));
+    writeFileSync(join(j, "events"), '{"type":"thread.started"}\nnot json\n{"type":"turn.failed","error":{"message":"usage limit"}}\n');
+    const tailRun = Bun.spawnSync(["bash", "-c", `set -o pipefail; cat${codex.tail}`], { env: { ...process.env, J: j, JOB_PROMPT: join(j, "events") } });
+    expect(tailRun.exitCode).toBe(0);
+    expect(tailRun.stdout.toString()).toBe("codex: usage limit\n");
+    expect(readFileSync(join(j, "codex.jsonl"), "utf8")).toContain("thread.started");
+    rmSync(j, { recursive: true, force: true });
     const claude = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
     expect(claude.argv).toContain("stream-json");
     expect(claude.tail).toContain('> "$JOB_OUT"');
@@ -165,6 +192,38 @@ describe("jobs", () => {
     expect(codex.argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
     // the host may need longer (SWITCHBOARD_JOB_REVIEW_IDLE_S)
     expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 1800).argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
+  });
+
+  test("review job usage goes to the ledger under the task", async () => {
+    const claudeResult = { type: "result", subtype: "success", result: "ok", usage: { input_tokens: 1, output_tokens: 1 }, modelUsage: { "claude-opus-5": { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 300, cacheCreationInputTokens: 40, costUSD: 0.5 } } };
+    const codexTurn = (i: number, c: number, o: number) => ({ type: "turn.completed", usage: { input_tokens: i, cached_input_tokens: c, output_tokens: o } });
+    const jsonl = (...o: unknown[]) => o.map((x) => JSON.stringify(x)).join("\n") + "\n";
+    const dir = join(root, "usage-dirs");
+    mkdirSync(join(dir, "c"), { recursive: true });
+    mkdirSync(join(dir, "x"), { recursive: true });
+    writeFileSync(join(dir, "c", "claude.jsonl"), "not json\n" + jsonl({ type: "system", model: "m" }, claudeResult));
+    writeFileSync(join(dir, "x", "codex.jsonl"), jsonl({ type: "thread.started" }, codexTurn(1000, 400, 50), codexTurn(500, 100, 25)));
+    expect(jobUsage("claude", join(dir, "c"))).toEqual([{ t: "usage", source: "reported", model: "claude-opus-5", inputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 40, costUsd: 0.5 }]);
+    expect(jobUsage("codex", join(dir, "x"))).toEqual([{ t: "usage", source: "reported", inputTokens: 1000, outputTokens: 75, cacheReadTokens: 500, cacheWriteTokens: 0 }]);
+    expect(jobUsage("codex", join(dir, "none"))).toEqual([]);
+    // through a real job: the review script leaves its events where the daemon looks; the row is the Task's, source job
+    writeFileSync(join(repo, "prompt.md"), "review");
+    for (const [runner, file, body] of [["claude", "claude.jsonl", jsonl(claudeResult)], ["codex", "codex.jsonl", jsonl(codexTurn(10, 4, 2))]] as const) {
+      const { deps, ended } = fake(`printf '%s' '${body.replace(/'/g, "")}' > "$J/${file}"`);
+      requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+      await ended;
+    }
+    const peek = new Database(join(root, "db.sqlite"), { readonly: true });
+    const ledger = () => peek.query("SELECT runner, source, input_tokens, cost_usd FROM ledger WHERE task_id = 't1' ORDER BY id").all() as { runner: string; source: string; input_tokens: number; cost_usd: number }[];
+    const rows = ledger();
+    expect(rows.map((r) => [r.runner, r.source, r.input_tokens])).toEqual([["claude", "job", 100], ["codex", "job", 6]]);
+    expect(rows[0]!.cost_usd).toBe(0.5);
+    // a review that left nothing readable books nothing and still ends
+    const { deps, ended } = fake("true");
+    requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+    expect((await ended).status).toBe("pass");
+    expect(ledger()).toHaveLength(2);
+    peek.close();
   });
 
   test("recoverJobs ends a job by its exit file, watches one still running, and aborts one whose process is gone or that started in another boot", async () => {

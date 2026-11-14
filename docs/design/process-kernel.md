@@ -117,6 +117,22 @@ Those three conditions are the premise: the mechanism exists. Whether the step i
 - In the window, some of the owner's requests were run outside `p0-pipeline`, and their rework is no worse than the rework on `p0-pipeline` in the same window (the baseline window is shown beside it).
 - The size of the instructions a Task starts reading (`provenance.instructionBytes`) is smaller than at the baseline.
 - The days until a request is closed are fewer than in the 4 weeks before the baseline date (2026-11-03).
+- (a) The share of quota consumption (ledger `cost_usd`) that goes to workspaces whose `workspaces.kind` is not `meta` is larger than in the baseline week.
+- (b) Quota consumption per delivered PBI, and the owner's interventions per delivered PBI, are no worse than in the baseline week.
+- (c) The rework on work that started from an agent's proposal or a scheduled check is no worse than the rework on work that started from an owner's request.
+- (d) The finding rate of the sampled audit of changes that shipped without waiting for review is no worse than the rate for changes that went through review.
+
+All seven outcome conditions are read together, over the same 4-week window. They are not split into gates in order: there is no rule that one must be met before the next is looked at. For (a) and (b), the share and the ratios are taken over the whole window and compared with the same share and ratios in the baseline week.
+
+Where each number is read:
+
+- The first three: the `成果の条件` section of `scripts/kernel-report.ts`.
+- (a): today, by a query over `ledger`, `tasks.workspace_id` and `workspaces.kind`. The per-workspace table of quota, interventions and delivered PBIs is `not yet built`.
+- (b): the same per-workspace table, `not yet built`.
+- (c): a table of results by origin of the work, `not yet built`.
+- (d): the sampled-audit marker (`[post-audit]`) and the finding rate split by changes with and without review are `not yet built`. `bun scripts/merge-audit.ts` today counts how large PRs were let through, per kind, but does not make this split.
+
+Baseline for (a): the week is Monday 2026-11-02 00:00 to Monday 2026-11-09 00:00 (JST), the week that contains 2026-11-03. On the owner's instance, `meta` workspaces took 90.0% of `cost_usd` in that week and all other workspaces 10.0%. This is that instance's starting point, not a target. The query joins `ledger` to `tasks` to `workspaces`, and rows that reach no workspace count as other (under 0.1% of the cost that week, too little to split out).
 
 The levels are decided by the owner from the record; only the direction is written here. The baseline date 2026-11-03 is the day the owner set this direction (the first paragraph).
 

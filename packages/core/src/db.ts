@@ -193,6 +193,10 @@ CREATE TABLE IF NOT EXISTS quota (
   runner TEXT NOT NULL, window TEXT NOT NULL, utilization REAL NOT NULL, resets_at INTEGER NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (runner, window)
 );
+CREATE TABLE IF NOT EXISTS quota_windows (
+  runner TEXT NOT NULL, window TEXT NOT NULL, resets_at INTEGER NOT NULL, peak REAL NOT NULL, first_ts INTEGER NOT NULL, last_ts INTEGER NOT NULL,
+  PRIMARY KEY (runner, window, resets_at)
+);
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, task_id TEXT, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL, created_at INTEGER NOT NULL
 );
@@ -498,6 +502,8 @@ export async function snapshotBeforeMigrate(path: string, home: string, now = ne
   }
   return `${name}.gz`;
 }
+
+export type QuotaWindowRow = { runner: RunnerId; window: string; resetsAt: number; peak: number; firstTs: number; lastTs: number };
 
 export class Db {
   readonly sqlite: Database;
@@ -1173,6 +1179,27 @@ export class Db {
     const q = this.sqlite.query(`SELECT ts, seq, json FROM events WHERE task_id = ? AND substr(json, 1, 19) = '{"t":"stop.record",'`);
     const rows = taskIds.flatMap((id) => q.all(id) as Array<{ ts: number; seq: number; json: string }>);
     return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => (JSON.parse(r.json) as { stop: StopRecord }).stop);
+  }
+
+  /**
+   * The `stop.record` events of every stopped Task (waiting / done / error / aborted) that is not reviewed (確認済み) nor archived, by Task id,
+   * oldest first, in one query (not one per Task). The same prefix compare as listStopRecords.
+   */
+  listStopRecordsOfStopped(): Map<string, StopRecord[]> {
+    const rows = this.sqlite
+      .query(
+        `SELECT e.task_id, e.ts, e.seq, e.json FROM events e JOIN tasks t ON t.id = e.task_id
+         WHERE substr(e.json, 1, 19) = '{"t":"stop.record",' AND t.reviewed_at IS NULL AND t.archived_at IS NULL AND t.status IN ('waiting', 'done', 'error', 'aborted')`,
+      )
+      .all() as Array<{ task_id: string; ts: number; seq: number; json: string }>;
+    rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+    const out = new Map<string, StopRecord[]>();
+    for (const r of rows) {
+      const list = out.get(r.task_id) ?? [];
+      list.push((JSON.parse(r.json) as { stop: StopRecord }).stop);
+      out.set(r.task_id, list);
+    }
+    return out;
   }
 
   /** The permission.ask / permission.resolved events of these tasks, oldest first; the same prefix compare as listStopRecords. */
@@ -1999,12 +2026,46 @@ export class Db {
   }
 
   upsertQuota(runner: RunnerId, window: string, utilization: number, resetsAt: number, ts = Date.now()) {
-    this.sqlite
+    this.sqlite.transaction(() => {
+      this.sqlite
+        .query(
+          `INSERT INTO quota (runner, window, utilization, resets_at, ts) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(runner, window) DO UPDATE SET utilization = excluded.utilization, resets_at = excluded.resets_at, ts = excluded.ts`,
+        )
+        .run(runner, window, utilization, resetsAt, ts);
+      // a report without a reset time (the adapters write 0) names no window
+      if (window !== "seven_day" || resetsAt <= 0) return;
+      // The reported reset time drifts by seconds between reports: a window kept within an hour of it is the same window (the kept key
+      // is rounded, so a drift across the half hour is up to an hour from it; windows are 7 days apart); a new one is keyed by the hour.
+      const near = this.sqlite
+        .query("SELECT resets_at AS at FROM quota_windows WHERE runner = ? AND window = ? AND ABS(resets_at - ?) <= 3600 ORDER BY ABS(resets_at - ?) LIMIT 1")
+        .get(runner, window, resetsAt, resetsAt) as { at: number } | null;
+      this.sqlite
+        .query(
+          `INSERT INTO quota_windows (runner, window, resets_at, peak, first_ts, last_ts) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(runner, window, resets_at) DO UPDATE SET peak = MAX(peak, excluded.peak), last_ts = excluded.last_ts`,
+        )
+        .run(runner, window, near?.at ?? Math.round(resetsAt / 3600) * 3600, utilization, ts, ts);
+    })();
+  }
+
+  /** The runners' weekly windows, newest first, each with the highest use it reached (`quota` keeps only the latest window). */
+  quotaWindows(limit = 8): QuotaWindowRow[] {
+    return this.sqlite
+      .query("SELECT runner, window, resets_at AS resetsAt, peak, first_ts AS firstTs, last_ts AS lastTs FROM quota_windows ORDER BY resets_at DESC, runner LIMIT ?")
+      .all(limit) as QuotaWindowRow[];
+  }
+
+  /** Spend in the 7 days before `resetsAt` (epoch s) split by workspace; empty when nothing was spent. */
+  windowShares(runner: RunnerId, resetsAt: number): Array<{ workspaceId: string | null; costUsd: number; share: number }> {
+    const rows = this.sqlite
       .query(
-        `INSERT INTO quota (runner, window, utilization, resets_at, ts) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(runner, window) DO UPDATE SET utilization = excluded.utilization, resets_at = excluded.resets_at, ts = excluded.ts`,
+        `SELECT t.workspace_id AS workspaceId, SUM(l.cost_usd) AS costUsd FROM ledger l LEFT JOIN tasks t ON t.id = l.task_id
+         WHERE l.runner = ? AND l.ts >= ? AND l.ts < ? GROUP BY t.workspace_id ORDER BY costUsd DESC`,
       )
-      .run(runner, window, utilization, resetsAt, ts);
+      .all(runner, (resetsAt - 7 * 86400) * 1000, resetsAt * 1000) as Array<{ workspaceId: string | null; costUsd: number }>;
+    const total = rows.reduce((a, r) => a + r.costUsd, 0);
+    return total > 0 ? rows.map((r) => ({ ...r, share: r.costUsd / total })) : [];
   }
 
   /** One minute of the host's load and its groups, dropping both tables' rows older than 7 days, in one transaction. */

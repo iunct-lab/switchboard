@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { main } from "./cli.ts";
 import { loadConfig } from "./config.ts";
 import { fakeGh, GhError, type FakeCall } from "./gh.ts";
-import { bodyLoss, formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
+import { askProceed, bodyLoss, formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
@@ -328,6 +328,49 @@ describe("lint", () => {
     await expect(lint(fakeGh([]), cfg, { records: { ...r, unread: [r.issues[0]!.number] } })).rejects.toThrow(LintFetchError);
     // a closed one is not checked, so it does not stop the check
     expect((await lint(fakeGh([]), cfg, { records: { ...r, unread: [99] } })).violations).toEqual([]);
+  });
+
+  test("the same from the app's stored records", async () => {
+    const r = recordsOf("ok");
+    const ask = (line: string) => `## 判断待ち\n**問い**: どちらか\n${line}\n**推奨**: A — 理由`;
+    const after = "2026-11-14T00:00:00+09:00";
+    r.comments = [{ issue: 11, body: ask(""), createdAt: after }, { issue: 11, body: ask("**進め方**: 推奨で進める"), createdAt: after }, { issue: 11, body: "## 回答\nA", createdAt: after }];
+    expect(formatLint((await lint(fakeGh([]), cfg, { records: r })).violations)).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+  });
+});
+
+describe("判断待ちの進め方の行", () => {
+  const ask = (line: string) => `## 判断待ち\n**問い**: どちらか\n${line}\n**推奨**: A — 理由`;
+  const after = "2026-11-14T00:00:00+09:00";
+  const before = "2026-11-13T23:59:59+09:00";
+  const run = async (comments: Array<{ body: string; createdAt: string }>) => {
+    const d = page("ok")();
+    d.repository.issues.nodes.find((n: any) => n.number === 11).comments = { nodes: comments };
+    return formatLint((await lint(fakeGh([() => d]), cfg, { sleep: noSleep })).violations);
+  };
+
+  test("askProceed reads 推奨で進める / 止めて待つ outside fences, and null when there is no line", () => {
+    expect(askProceed(ask("**進め方**: 推奨で進める"))).toBe("recommended");
+    expect(askProceed(ask("**進め方**: 止めて待つ — お金が動く"))).toBe("wait");
+    expect(askProceed(ask(""))).toBeNull();
+    expect(askProceed(ask("```\n**進め方**: 推奨で進める\n```"))).toBeNull();
+    expect(askProceed(ask("**進め方**: 推奨で進める — 戻せる変更"))).toBe("recommended");
+    expect(askProceed(ask("  **進め方**: 止めて待つ — 公開\r"))).toBe("wait");
+    expect(askProceed(ask("**進め方**: 推奨で進めるかは未定"))).toBeNull();
+  });
+
+  test("a new 判断待ち with either line passes; one without a line is a violation; an old one without a line is not; a line only inside a fence does not count", async () => {
+    expect(await run([{ body: ask("**進め方**: 推奨で進める"), createdAt: after }, { body: ask("**進め方**: 止めて待つ — 公開する"), createdAt: after }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask(""), createdAt: after }])).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask(""), createdAt: before }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect((await run([{ body: ask("```\n**進め方**: 推奨で進める\n```"), createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
+  });
+
+  test("an ask re-posted with the line makes the older ones without it not count; a lineless ask after one with a line is a violation", async () => {
+    const t1 = "2026-11-14T01:00:00+09:00";
+    const t2 = "2026-11-14T02:00:00+09:00";
+    expect(await run([{ body: ask(""), createdAt: t1 }, { body: ask("**進め方**: 推奨で進める"), createdAt: t2 }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask("**進め方**: 推奨で進める"), createdAt: t1 }, { body: ask(""), createdAt: t2 }])).toEqual([`#11: ## 判断待ち（${t2}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
   });
 });
 

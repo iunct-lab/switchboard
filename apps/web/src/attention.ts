@@ -1,14 +1,14 @@
-import { isWorkingStatus, type StopCondition, type StopReasonCode, type StopState, type Task, type TaskOutcome, type TaskStopMark, type TaskSummary, type TerminalStatus } from "@switchboard/protocol";
+import { personWait, type PersonWait, type StopCondition, type StopReasonCode, type StopState, type Task, type TaskOutcome, type TaskStopMark, type TaskSummary, type TerminalStatus } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
 /**
- * 要対応 (#492): the stopped tasks the person has not reviewed yet, except those that came to 完了 — a finished task needs
- * nothing from the person, and listing it buries the ones that do. Separate from whether the runner is running — a task
- * waiting on an approval is in both lists. Home and the rail both use these, below 実行中.
+ * The Tasks whose stop record `/api/tasks/stops` is read for: the ones not 確認済み that are stopped, or came to 完了 (a
+ * 完了 Task's stop on a human reason still needs the person). A Task at work or reviewed never has its mark read.
  */
-export function needsAttention(t: TaskSummary): boolean {
-  return t.reviewedAt === null && t.outcome !== "done" && (t.status === "waiting" || !isWorkingStatus(t.status)) && t.status !== "idle";
+export function stopCandidates(tasks: TaskSummary[]): TaskSummary[] {
+  // the outcome is set aside (`unknown`): a 完了 guess does not rule out a stop on a human reason
+  return tasks.filter((t) => personWait({ ...t, outcome: "unknown" }, null) !== "none");
 }
 
 /**
@@ -29,40 +29,32 @@ export function isActive(x: TaskSummary): boolean {
 
 const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, done: 2, unknown: 2 };
 
-/** 要対応 → 失敗 → 未判定; newest first within each. */
-export function attentionList(tasks: TaskSummary[]): TaskSummary[] {
-  return tasks.filter(needsAttention).sort((a, b) => RANK[a.outcome] - RANK[b.outcome] || b.updatedAt - a.updatedAt);
-}
-
 /** One row of 要対応 (#4480): the Tasks stopped by the same series (`TaskStopMark.key`), newest first; `tasks[0]` is the one the row opens. */
 export type AttentionGroup = { key: string; tasks: TaskSummary[]; count: number; reason: StopReasonCode | null; state: StopState | null };
 
 /** A Task that needs nothing from the person for now (the folded 待ち section): its stop went on, or waits on a condition. */
 export type WaitingRow = { task: TaskSummary; key: string; reason: StopReasonCode; state: StopState; conditions: StopCondition[] };
 
-// Reasons that wait for the person's decision or operation. `unknown` is here on purpose: not knowing is not a reason to hide it.
-const HUMAN_REASONS: ReadonlySet<StopReasonCode> = new Set(["decision", "auth", "permission", "input", "disk-full", "unknown"]);
-
-/**
- * Whether the last stop leaves the person nothing to do now. Only a stop still waiting / exhausted on a reason in
- * HUMAN_REASONS needs them (the PBI's criterion 1); the rest — resolved, retrying, and depends / usage-limit / github-limit /
- * transient whatever their state — go to the folded 待ち, where they are still listed.
- */
-function needsNothing(mark: TaskStopMark): boolean {
-  return !((mark.state === "waiting" || mark.state === "exhausted") && HUMAN_REASONS.has(mark.reason));
+/** 要対応 → 失敗 → 未判定 by `personWait`, newest first within each; a 完了 Task whose stop needs the person ranks as 要対応. */
+function sortedByWait(tasks: TaskSummary[], marks: Record<string, TaskStopMark> | null, keep: (w: PersonWait) => boolean): TaskSummary[] {
+  const wait = (t: TaskSummary) => personWait(t, marks?.[t.id] ?? null);
+  const rank = (t: TaskSummary) => (wait(t) === "needs" ? 0 : RANK[t.outcome]);
+  return tasks.filter((t) => keep(wait(t))).sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt);
 }
 
 /**
- * Splits the list `attentionList` gives (judged by `needsAttention`, which this does not change) into what needs the person
- * (grouped by stop series) and what only waits (#4480). Without a mark — no stop record, or the marks not loaded yet (`marks`
- * null) — and for a failed Task a Task stays under `needs`: nothing that may need a hand is hidden.
+ * Splits the Tasks into 要対応 (#492) — what `personWait` says waits on the person: needs them, failed, or not judged yet,
+ * grouped by stop series — and the folded 待ち (#4480), what only waits on something else. `personWait` is the one rule
+ * in the protocol, read with the Task's last stop mark. Separate from whether the runner is running — a task waiting on
+ * an approval is in both lists. Home and the rail read both here, below 実行中. Marks not
+ * loaded yet (`marks` null) hide nothing: a Task without a mark stays under `needs`, except a 完了 one (nothing to read).
  */
 export function attentionGroups(tasks: TaskSummary[], marks: Record<string, TaskStopMark> | null): { needs: AttentionGroup[]; waiting: WaitingRow[] } {
   const byKey = new Map<string, AttentionGroup>();
   const waiting: WaitingRow[] = [];
-  for (const task of attentionList(tasks)) {
+  for (const task of sortedByWait(tasks, marks, (w) => w !== "none")) {
     const mark = marks?.[task.id];
-    if (mark && task.outcome !== "failed" && needsNothing(mark)) {
+    if (mark && personWait(task, mark) === "waits") {
       waiting.push({ task, key: mark.key, reason: mark.reason, state: mark.state, conditions: mark.conditions });
       continue;
     }
@@ -73,7 +65,7 @@ export function attentionGroups(tasks: TaskSummary[], marks: Record<string, Task
       g.count++;
     } else byKey.set(key, { key, tasks: [task], count: 1, reason: mark?.reason ?? null, state: mark?.state ?? null });
   }
-  // attentionList is sorted (要対応 → 失敗 → 未判定, newest first), so a group sits where its first Task does
+  // sortedByWait is sorted (要対応 → 失敗 → 未判定, newest first), so a group sits where its first Task does
   return { needs: [...byKey.values()], waiting };
 }
 

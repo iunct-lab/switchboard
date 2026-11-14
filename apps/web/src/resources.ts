@@ -62,6 +62,14 @@ export function waitLine(wait: ResourceWait, running: ResourceRun[], memory: Ops
   return running.length ? t(common.resWaitSlot, { holders: running.map((r) => t(common.resSlotHolder, { owner: runOwner(r), name: r.name })).join(t(common.resSlotHolderSep)) }) : t(common.resWaitSlotGone);
 }
 
+/** What a Task waiting for free memory waits for: the free bytes against the Task start's safety valve (not the heavy floor). */
+export function taskWaitLine(memory: OpsResources["memory"]): string {
+  if (!memory) return t(common.resWaitTaskMemoryUnknown);
+  const vars = { free: fmtBytes(memory.availableBytes), safety: fmtBytes(memory.safetyBytes) };
+  // the Task start decided on its own read; this one may already be above the valve before its next look
+  return t(memory.availableBytes < memory.safetyBytes ? common.resWaitTaskMemoryBelow : common.resWaitTaskMemoryAbove, vars);
+}
+
 /** How long since `iso`: 「45 秒」 under a minute, 「12 分」 under an hour, then 「1 時間 5 分」. */
 export function since(iso: string, now: number): string {
   return duration(now - Date.parse(iso));
@@ -92,6 +100,13 @@ export function etaLine(eta: OpsResources["eta"], jobs: number): { value: string
   if (eta.etaMs === null) return { value: t(common.resNoWaits), note: null };
   if (eta.unknown >= jobs) return { value: t(common.resNoHistory), note: t(common.resUnknownAll, { n: eta.unknown }) };
   return { value: eta.etaMs < 60_000 ? t(common.resUnderMinute) : t(common.resAbout, { time: duration(eta.etaMs) }), note: eta.unknown > 0 ? t(common.resUnknownSome, { n: eta.unknown }) : null };
+}
+
+/** The 「重い処理の枠」 card's waiting count and the 「全部終わるまでの目安」: from the heavy slots only. A Task waiting for free memory (`taskWaits`) is not a slot's wait and counts in neither. */
+export function slotsSummary(r: Pick<OpsResources, "slots" | "eta">): { waiting: string; eta: { value: string; note: string | null } } {
+  const w = r.slots.waiting;
+  const why = w.length > 0 ? t(common.resWaitingWhy, { slot: w.filter((x) => x.reason === "slot").length, memory: w.filter((x) => x.reason === "memory").length }) : "";
+  return { waiting: t(common.resWaitingCount, { n: w.length }) + why, eta: etaLine(r.eta, r.slots.running.length + w.length) };
 }
 
 /** The latest minute's rows, named: the Task (a link when there is one), the daemon, or the rest. */

@@ -1,11 +1,11 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LoadKind, OpsLoad, OpsLoadGroup, OpsLoadHour } from "@switchboard/protocol";
 import { type Db, jstDayStart } from "./db.ts";
 import { DAEMON_JOB_MARK, HOME_MARK, read, statFields, TASK_MARK } from "./detached.ts";
-import { readMemInfo } from "./ops-resources.ts";
-import { HEAVY_DEFAULTS, heavyConfig, heavyConfigPath } from "../../../ops-kit/src/heavy.ts";
+import { readMemInfo, readTaskMinFreeMb } from "./ops-resources.ts";
+import { HEAVY_DEFAULTS, heavyConfig } from "../../../ops-kit/src/heavy.ts";
 
 /**
  * The host's load: one sample of the daemon's systemd unit — the cgroup's memory,
@@ -331,9 +331,6 @@ export function opsLoad(db: Db, days: number, opts: { now?: number; taskId?: str
   return { available: opts.available, days, hours: [...hours.values()], groups };
 }
 
-/** The default of `taskMinFreeMb` in `~/.config/ops-kit/heavy.json`: below this much free memory a Task start is held back. */
-export const TASK_MIN_FREE_MB_DEFAULT = 300;
-
 /**
  * The machine's free memory (MemAvailable), the floor of `ops-kit heavy` (`minFreeMb`) and the safety valve of a Task
  * start (`taskMinFreeMb`, default 300 MB), for TaskManager's start check: below the floor a start only gets a warning
@@ -350,10 +347,5 @@ export function memoryHeadroom(opts: { home?: string; procRoot?: string } = {}):
   try {
     minFreeMb = heavyConfig(home).minFreeMb;
   } catch {}
-  let safetyMb = TASK_MIN_FREE_MB_DEFAULT;
-  try {
-    const v = (JSON.parse(readFileSync(heavyConfigPath(home), "utf8")) as { taskMinFreeMb?: unknown }).taskMinFreeMb;
-    if (typeof v === "number" && Number.isFinite(v) && v >= 0) safetyMb = v;
-  } catch {}
-  return { free: mem.availableBytes, floor: minFreeMb * 1024 * 1024, safety: safetyMb * 1024 * 1024 };
+  return { free: mem.availableBytes, floor: minFreeMb * 1024 * 1024, safety: readTaskMinFreeMb(home) * 1024 * 1024 };
 }

@@ -473,7 +473,8 @@ describe("POST /api/asks/answer — task side", () => {
   test("task side: a check with a stop condition not met is still answered — an old stop does not take the options away", async () => {
     const base = await boot(fakeGh().gh, scripted([checkTurn(CONTINUE_QS), []]));
     const id = await checkTask(base, { workspaceId: undefined });
-    core!.db.appendEvent(id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: id }, op: "gh pr merge", target: "#12", reason: "depends", evidence: "CI", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() } });
+    // a stop that waits on the person (decision): a depends stop would make the Task wait on something else, with no check (personWait)
+    core!.db.appendEvent(id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: id }, op: "gh pr merge", target: "#12", reason: "decision", evidence: "CI", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() } });
     const ask = await askOf(base, (a) => a.kind === "check" && a.task?.id === id);
     expect(ask).toMatchObject({ answers: ["questions"], blockers: [] });
     expect((await answer(base, ask.id, { kind: "questions", answers: [{ choices: ["A: 続ける"] }] })).status).toBe(200);

@@ -4,6 +4,7 @@
  * scripts/setup/lint_backlog.sh) instead of one call per Issue, which is slow and runs into the secondary rate limit.
  */
 import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget } from "@switchboard/protocol";
+import { personWait } from "@switchboard/protocol";
 import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type BacklogOperation, type Db, type NewBacklogOperation } from "./db.ts";
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { TERMINAL } from "./task-status.ts";
@@ -535,6 +536,8 @@ export const isAnswered = (i: BacklogItem) => i.stage === "in-progress" && !!i.a
 
 // TERMINAL, not TURN_ENDED: a Task in `background` is still working, so its item is not stopped.
 const isFinished = (t: NonNullable<BacklogItem["lastTask"]>) => TERMINAL.has(t.status);
+/** The newest stop series (by `lastAt`) of the item's last stage Task; only that one decides. */
+const lastStopOf = (i: BacklogItem) => (i.lastTask ? i.stopSummary.filter((x) => x.work.taskId === i.lastTask!.id).sort((a, b) => b.lastAt - a.lastAt)[0] : undefined);
 /**
  * Its last stage Task stopped for a reason and nothing about that stop changed since: an open series (waiting /
  * exhausted) of that Task with no new cause, answer or condition met against its earlier stop, and it stopped before (or
@@ -548,7 +551,7 @@ export const stopHeld = (i: BacklogItem) => {
   const t = i.lastTask;
   if (!t || !isFinished(t) || releasedByReview(t) || isAnswered(i)) return false;
   // only the stop that came last decides: an older series that stayed the same does not hold back a new cause
-  const s = i.stopSummary.filter((x) => x.work.taskId === t.id).sort((a, b) => b.lastAt - a.lastAt)[0];
+  const s = lastStopOf(i);
   if (!s || (s.state !== "waiting" && s.state !== "exhausted")) return false;
   // a stop that waits for the person's decision (`next = "decide"`: a question, a login, a permission) holds from the first
   // time, a new cause too (CI waited on, then asked to merge, at the same place): starting again only asks the same, on
@@ -595,26 +598,15 @@ const touchedSince = (i: BacklogItem) => !!i.lastTask && (Date.parse(i.updatedAt
 const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome === "needs_action" && t.reviewedAt !== null;
 
 /**
- * Its last stage Task ended asking the person in its own conversation: outcome needs_action, not reviewed,
- * and the Issue not updated since. An operational question is asked in the Task, not on the Issue (CLAUDE.md), so the
- * Issue shows nothing; starting the stage again stops at the same question. A reply resumes the Task (then activeTaskId
- * holds the item), an update to the Issue — a ## 回答 too — or marking the Task reviewed lets it be picked again.
+ * Its last stage Task, finished, waits for the person (`personWait` = needs: approval open, a stop for the person's
+ * decision or operation as the last stop, or needs_action with no stop) and the Issue was not updated since. An operational
+ * question is asked in the Task, not on the Issue (CLAUDE.md), so the Issue shows nothing; starting the stage again stops at
+ * the same question. A reply resumes the Task (then activeTaskId holds the item), an update to the Issue — a ## 回答 too —
+ * or marking the Task reviewed lets it be picked again. The row's `replyWaiting` is the same judgment.
  */
-export const awaitingReply = (i: BacklogItem) => !!i.lastTask && isFinished(i.lastTask) && i.lastTask.outcome === "needs_action" && i.lastTask.reviewedAt === null && !touchedSince(i);
+export const awaitingReply = (i: BacklogItem) => !!i.lastTask && isFinished(i.lastTask) && personWait(i.lastTask, lastStopOf(i) ?? null) === "needs" && !touchedSince(i);
 
-/**
- * Its last stage Task, finished, stopped last on a series that waits for the person's decision (`next = "decide"`).
- * backlog-next leaves such an item by `stopHeld`; the row shows it as waiting for a reply.
- */
-const decidingStop = (i: BacklogItem) => {
-  const t = i.lastTask;
-  if (!t || !isFinished(t)) return false;
-  const s = i.stopSummary.filter((x) => x.work.taskId === t.id).sort((a, b) => b.lastAt - a.lastAt)[0];
-  return s?.next === "decide";
-};
-
-/** Its last stage Task waits for the person's reply: the item's `replyWaiting`, from the same judgment backlog-next skips by. */
-export const isReplyWaiting = (i: BacklogItem) => awaitingReply(i) || decidingStop(i);
+export const isReplyWaiting = awaitingReply;
 
 /** The stages a slot's firing picks from: its own, and for the implement slot the in-progress PBIs it resumes or closes. */
 const inSlot = (i: BacklogItem, slot: Slot) => SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && i.stage === "in-progress");

@@ -54,26 +54,29 @@ Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力�
 
 レビュアーには**この clone とこのファイルだけ**を見せる。自分の会話・Task 実装時の判断・memory は渡さない。
 
-clone の前に、切れたセッションが残した clone のうち終わった PR の分を消し、`/tmp` の空きを見る。消すのは**同じリポジトリ名**の `review<PR番号>` / `recheck<PR番号>` のうち `gh` で MERGED / CLOSED と確かめたものだけ（open の PR、`gh` で確かめられなかった番号、別のリポジトリ名の clone は残す。別のセッションが使っているかもしれない）。
+clone の前に、切れたセッションが残した clone のうち終わった PR の分を消し、置き場（`${XDG_CACHE_HOME:-$HOME/.cache}/ops-kit/review`。ディスク上で、RAM の `/tmp` ではない）の空きを見る。消すのは**同じリポジトリ名**の `review<PR番号>` / `recheck<PR番号>` のうち `gh` で MERGED / CLOSED と確かめたものだけ（open の PR、`gh` で確かめられなかった番号、別のリポジトリ名の clone は残す。別のセッションが使っているかもしれない）。
 `STOP:` が出たら clone せず、`du` の上位をそのまま利用者に報告して止まる（溜まっている分を消すのは利用者。別のリポジトリの分・動いているセッションの分を自分で消さない）。
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)            # 作業しているリポジトリの owner/name
 NAME=${REPO#*/}; MIN_KB=512000                                     # 同じリポジトリ名の分だけ。閾値 500 MB
-for d in /tmp/"$NAME".review[0-9]*.* /tmp/"$NAME".recheck[0-9]*.*; do  # 切れたセッションの残り。終わった PR の分だけ消す
+REVIEW_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/ops-kit/review"; mkdir -p "$REVIEW_ROOT"   # RAM でない所
+for d in "$REVIEW_ROOT/$NAME".review[0-9]* "$REVIEW_ROOT/$NAME".recheck[0-9]*; do  # 切れたセッションの残り。終わった PR の分だけ消す
   [ -d "$d" ] || continue
-  n=${d##*/}; n=${n#"$NAME".}; n=${n#review}; n=${n#recheck}; n=${n%%.*}
+  n=${d##*/}; n=${n#"$NAME".}; n=${n#review}; n=${n#recheck}
   case $n in ''|*[!0-9]*) continue;; esac
   s=$(gh pr view "$n" -R "$REPO" --json state -q .state) || continue   # 確かめられなければ残す
   case $s in MERGED|CLOSED) echo "rm $d ($s)"; rm -rf "$d";; esac
 done
-AVAIL=$(df -Pk /tmp | awk 'NR==2{print $4}')
-[ "$AVAIL" -ge "$MIN_KB" ] || { echo "STOP: /tmp の空きが ${AVAIL} KB（${MIN_KB} KB 未満）。clone しない"; du -sk /tmp/* 2>/dev/null | sort -rn | head -10; }
+AVAIL=$(df -Pk "$REVIEW_ROOT" | awk 'NR==2{print $4}')
+[ "$AVAIL" -ge "$MIN_KB" ] || { echo "STOP: $REVIEW_ROOT の空きが ${AVAIL} KB（${MIN_KB} KB 未満）。clone しない"; du -sk "$REVIEW_ROOT"/* 2>/dev/null | sort -rn | head -10; }
 ```
 
 ```bash
-N=<PR番号>; R=$(mktemp -d /tmp/<リポジトリ名>.review<PR番号>.XXXXXX); echo "$R"    # 自分だけのディレクトリ。表示されたパスを以後そのまま使う（固定の /tmp/review$N は別リポジトリの同じ番号の PR とぶつかる）
-# /tmp はホストの停止や片付けで消えうる。レビューの材料は再開したら作り直す前提で、作る手順（この節）をそのまま流せる形にしておく
+N=<PR番号>; KIND=review    # 再チェック（マージ判定の Recheck）で 1〜3 を流すときは KIND=recheck（主レビューの clone は 4 の見直しまで残すので消さない）
+R="${REVIEW_ROOT:?}/${NAME:?}.$KIND$N"; echo "$R"    # 名前はリポジトリ名 + PR 番号で決まる（別リポジトリの同じ番号の PR とはぶつからない）。再開して新しいシェルで R を作り直すときは、上の片付けのブロックの REVIEW_ROOT・NAME とこの行の代入まで（次の行は流さない）
+rm -rf "$R"    # 初回だけ: 同じ PR のやり直しは前のものを消して 1 つのまま。clone が作るので mkdir しない
+# 置き場は RAM でない所。ホストの作り直しで消えうるので、レビューの材料は再開したら作り直す前提で、作る手順（この節）をそのまま流せる形にしておく
 HEAD_REF=$(gh pr view $N --json headRefName -q .headRefName); BASE_REF=$(gh pr view $N --json baseRefName -q .baseRefName)
 gh repo clone "$REPO" "$R" -- -q --branch "$HEAD_REF"
 M="$R/_review"; mkdir -p "$M"                                     # untracked。レビュアーはここを読む
@@ -90,7 +93,7 @@ sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`R=$(mktemp -d …)` の中に。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・`/tmp` の古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(git rev-parse --show-toplevel)")`、`REVIEW_ROOT` の行はそのまま、`R` は上の `KIND` と `R=` の行のとおり（再チェックは `KIND=recheck`）。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune` で前のものを外してから。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・置き場の古い clone の片付けのループ（`REVIEW_ROOT` の行は除く）・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
 
@@ -103,6 +106,7 @@ beyond what the files below say. Read, in this order, under `_review/`: `pr.md` 
 issue it closes), `pbi.md` (the parent PBI: user story, acceptance criteria, out of scope, decision log), `design-rules.md`
 (the repository's design rules), then `diff.patch`. Then read the surrounding code in the working tree (this checkout is the
 PR's head branch) and any `docs/design/*.md` that covers the touched area (`_review/design-docs.txt` lists them). Do not skim.
+Do not install dependencies (no `bun install` / `npm install`): review without `node_modules`, and if a type check or a test run seems needed, do not run it; say so in a finding.
 
 Judge the PR on these, in this order:
 1. Intent: does the diff do what the Task's 手順 and the PBI's acceptance criteria ask — no less, and nothing beyond it?
@@ -222,13 +226,15 @@ gh pr view $N --json number,title,body,url -q '"# PR #\(.number) \(.title)\n\(.u
 NEW=$(git -C "$R" rev-parse "origin/$HEAD_REF")
 # 下の枝の修正を cascade した後でも、この PR のコミットだけを比べる（それぞれの base からの差分どうし）
 git -C "$R" range-diff "$(git -C "$R" merge-base "$OLD" "origin/$BASE_REF")..$OLD" "$(git -C "$R" merge-base "$NEW" "origin/$BASE_REF")..$NEW" > "$M/fix.range-diff"
+# range-diff は足しただけのコミットを 1 行（`-: -------- > 2: <sha> <題>`）でしか出さないので、修正の中身を同じファイルに足す（cascade の後は base の変化も混ざるので range-diff は残す）
+{ printf '\n# git diff %s %s (after a rebase this also carries base changes; the range-diff above has only this PR commits)\n' "$OLD" "$NEW"; git -C "$R" diff "$OLD" "$NEW"; } >> "$M/fix.range-diff"
 git -C "$R" checkout -q "$NEW"
 PREV=_review/codex.md                        # Claude が主レビュアーなら _review/claude.md
 { cat "$M/prompt.md"; echo; echo "This is a follow-up review. The PR was already reviewed at $OLD; your previous review is $PREV."; \
   echo "Review only _review/fix.range-diff (this PR's commits since then): do the fixes address the findings, and do they introduce new problems?"; \
   echo "Use the same output format."; } > "$M/prompt-fix.md"
 rm -f "$M/fix-review.md"                     # 切れたときに前回の出力を転記しない
-# アプリの Task の中では、下の直接の実行の代わりに仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し、WHO=<頼んだランナー>、RC=<結果の要約の exit> を置いて、下の最後の行（転記）から続ける:
+# アプリの Task の中では、下の直接の実行の代わりに仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し（R は 1 の代入の行まで。`rm -rf "$R"` の行は流さない）、WHO=<頼んだランナー>、RC=<結果の要約の exit> を置いて、下の最後の行（転記）から続ける:
 #   ops-kit job request review $N --runner codex --cwd "$R" --prompt "$M/prompt-fix.md" --out "$M/fix-review.md"   # Claude が主レビュアーなら --runner claude
 # アプリの Task の外では直接走らせる
 CODEX=$(command -v codex)
@@ -243,7 +249,7 @@ NOTE=                                         # 0 の代替・設定で同じラ
 
 走らせ方（Bash の timeout）と exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも `[codex] review` で始まる要約を書くので、マージ判定が「見直し済み」と数えてしまう）。
 rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（マージ判定はコミットの author date を見るので止めない）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
-見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`/tmp/review*` のような glob で消さない）。切れたセッションの残りは、次のレビューの 1 で同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。
+見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`review*` のような glob で消さない）。切れたセッションの残りは、次のレビューの 1 で同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。
 
 ## 報告（利用者への返事の型）
 

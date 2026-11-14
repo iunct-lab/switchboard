@@ -118,7 +118,7 @@ gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main �
 マージ直後:
 1. PR が `Refs #<Task>` なら、Task に途中経過のコメント（マージした PR と残りの手順）を書き、Status を `In review` から `In progress` に戻して閉じない（残りの手順は次の PR で終える。`issue-workflow` の記録の義務 3）。`Closes #<Task>` なら、Task に結果コメント（`issue-workflow` のテンプレ: PR / 変更 / 検証 / レビュー指摘と対応 / 残したもの。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）、`ops-kit backlog set <Task> Status Done`。Task は PR の `Closes` で自動では閉じないことがあるので、open のままなら続けて `ops-kit backlog edit <Task> --state closed`
 2. `git fetch -q origin && git ls-tree -r --name-only origin/main | grep -i <消したもの>` で復活ファイルが無いか（fetch しないと古い origin/main を見る。`-r` が無いと直下しか出ない）
-3. `cross-runner-review` で作ったレビュー用ディレクトリ（`/tmp/<リポジトリ名>.review<PR番号>.XXXXXX` の実際のパス）を消す。glob で消さない。切れたセッションの残りは、次のレビューの前（`cross-runner-review` の 1）に同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。worktree はスタックが全部入ってから `git worktree remove`
+3. `cross-runner-review` で作ったレビュー用ディレクトリ（`${XDG_CACHE_HOME:-$HOME/.cache}/ops-kit/review/<リポジトリ名>.review<PR番号>` の実際のパス）を消す。glob で消さない。切れたセッションの残りは、次のレビューの前（`cross-runner-review` の 1）に同じリポジトリ名 + `gh` で MERGED / CLOSED と確かめたものだけ消える。worktree はスタックが全部入ってから `git worktree remove`
 4. PBI の全 Task が Done なら PBI の結果節（`pbi-complete`）
 
 ## 報告（利用者への返事の型）

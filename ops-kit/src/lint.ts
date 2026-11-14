@@ -17,17 +17,20 @@ interface Row {
   labels: { nodes: Array<{ name: string }> };
   parent: { number: number; labels: { nodes: Array<{ name: string }> } } | null;
   subIssues: { totalCount: number };
+  comments: Array<{ body: string; createdAt: string }>;
   projectItems?: { nodes: Array<{ project: { number: number }; fieldValues: { nodes: Array<{ number?: number; name?: string; field?: { name?: string } }> } }> };
 }
 
 const PROJECT_FIELDS =
   "projectItems(first:10){ nodes{ project{ number } fieldValues(first:30){ nodes{ ... on ProjectV2ItemFieldNumberValue{ number field{ ... on ProjectV2FieldCommon{ name } } } ... on ProjectV2ItemFieldSingleSelectValue{ name field{ ... on ProjectV2FieldCommon{ name } } } } } } }";
 
+// comments(last:10): the 進め方 line check reads the last 10 comments of each Issue when it reads GitHub directly; the
+// app's stored records carry every comment
 /** With the Project, the query also reads its id, so a Project the config names wrongly fails the fetch (exit 2). */
 export function lintQuery(withProject: boolean, projectOwner = ""): string {
   const vars = withProject ? `${projectOwner === "@me" ? "" : ",$o:String!"},$p:Int!` : "";
   const project = withProject ? `${projectFragment(projectOwner, "")} ` : "";
-  return `query($ro:String!,$rn:String!,$after:String${vars}){ ${project}repository(owner:$ro,name:$rn){ issues(states:OPEN, labels:["type:pbi","type:task","type:request"], first:100, after:$after, orderBy:{field:CREATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ number body labels(first:50){ nodes{ name } } parent{ number labels(first:20){ nodes{ name } } } subIssues(first:1){ totalCount } ${withProject ? PROJECT_FIELDS : ""} } } } }`;
+  return `query($ro:String!,$rn:String!,$after:String${vars}){ ${project}repository(owner:$ro,name:$rn){ issues(states:OPEN, labels:["type:pbi","type:task","type:request"], first:100, after:$after, orderBy:{field:CREATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ number body labels(first:50){ nodes{ name } } parent{ number labels(first:20){ nodes{ name } } } subIssues(first:1){ totalCount } comments(last:10){ nodes{ body createdAt } } ${withProject ? PROJECT_FIELDS : ""} } } } }`;
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -124,6 +127,22 @@ export function freeTextPrereqs(body: string): number[] {
 
 export const freeTextPrereq = (named: number[]) => `本文の自由文に先行（${named.map((k) => `#${k}`).join(", ")}）があるが **前提**: 行に無い。定期実行と並列ガードは **前提**: 行だけを読む`;
 
+/** How a `## 判断待ち` says the work goes on: `recommended` = on with the recommended option, `wait` = stopped until the answer. */
+export type AskProceed = "recommended" | "wait";
+
+/** From this time on, a `## 判断待ち` comment without the 進め方 line is a violation; an older one is read as `wait`. */
+export const PROCEED_LINE_SINCE = "2026-11-14T00:00:00+09:00";
+
+/** The 進め方 line of a `## 判断待ち` body (outside fences): `**進め方**: 推奨で進める` or `**進め方**: 止めて待つ`, either
+ * followed by `— <理由>` or nothing; null when there is none. Both choices are read the same way (leading spaces, CR). */
+export function askProceed(body: string): AskProceed | null {
+  for (const line of unfenced(body)) {
+    const m = /^\*\*進め方\*\*:\s*(推奨で進める|止めて待つ)(?:\s|$)/.exec(line.trim());
+    if (m) return m[1] === "推奨で進める" ? "recommended" : "wait";
+  }
+  return null;
+}
+
 async function fetchAll(gh: GhClient, owner: string, name: string, project: { owner: string; number: number } | null, sleep: (ms: number) => Promise<void>): Promise<Row[]> {
   const withProject = project !== null;
   const projectVars = project === null ? {} : { ...(project.owner === "@me" ? {} : { o: project.owner }), p: project.number };
@@ -148,7 +167,7 @@ async function fetchAll(gh: GhClient, owner: string, name: string, project: { ow
     if (withProject && issues.nodes.some((n: Row) => !Array.isArray(n?.projectItems?.nodes) || n.projectItems!.nodes.some((i) => !Array.isArray(i?.fieldValues?.nodes)))) {
       throw new LintFetchError("open の Issue の取得結果の形が想定と違う（Project のフィールドが無い）");
     }
-    rows.push(...issues.nodes);
+    rows.push(...issues.nodes.map((n: Row & { comments?: { nodes?: Row["comments"] } }) => ({ ...n, comments: n.comments?.nodes ?? [] })));
     if (issues.pageInfo?.hasNextPage !== true) return rows;
     after = issues.pageInfo.endCursor;
   }
@@ -174,6 +193,7 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
     // a parent not stored has no type label (the import reads every typed Issue)
     parent: i.parent === null ? null : { number: i.parent, labels: nodes(byNumber.get(i.parent)?.labels ?? []) },
     subIssues: { totalCount: i.subIssues.length },
+    comments: r.comments.filter((c) => c.issue === i.number),
     ...(withProject && {
       projectItems: { nodes: i.fields ? [{ project: { number: r.project.number }, fieldValues: { nodes: Object.entries(i.fields).map(([name, v]) => (typeof v === "number" ? { number: v, field: { name } } : { name: v ?? undefined, field: { name } })) } }] : [] },
     }),
@@ -271,6 +291,16 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     else if (!labelsOf(row.parent).includes("type:pbi")) bad(row.number, `Task の親 #${row.parent.number} が type:pbi ではない`);
     freePrereqs(row, body);
     noteReleased(row, body);
+  }
+
+  for (const row of rows.filter((r) => labelsOf(r).some((l) => l === "type:pbi" || l === "type:task"))) {
+    const asks = row.comments.filter((c) => c.body.trimStart().startsWith("## 判断待ち"));
+    // an ask re-posted with the line replaces the older ones without it (a comment cannot be edited)
+    const lastWithLine = Math.max(-Infinity, ...asks.filter((c) => askProceed(c.body) !== null).map((c) => Date.parse(c.createdAt)));
+    for (const c of asks) {
+      if (Date.parse(c.createdAt) < Date.parse(PROCEED_LINE_SINCE) || askProceed(c.body) !== null || Date.parse(c.createdAt) < lastWithLine) continue;
+      bad(row.number, `## 判断待ち（${c.createdAt}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`);
+    }
   }
 
   // one REST call per distinct number: no `pull_request` = an Issue; not found (404) is no violation

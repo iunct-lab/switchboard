@@ -1,5 +1,5 @@
 {
- "_note": "Shapes of the REST API responses (issues/comments item, pulls, commits/<sha>/pulls) with made-up values; the PRs are made up with marks. merged = search/issues is:pr is:merged in the period. The last log entry reverts a commit made inside a PR's branch (its pre-rebase sha is not on main). #912 answered with no ask, #913 asked and merged with no answer, #914 asked once and answered yes twice on two heads.",
+ "_note": "Shapes of the REST API responses (issues/comments item, pulls, commits/<sha>/pulls) with made-up values; the PRs are made up with marks. merged = search/issues is:pr is:merged in the period. The last log entry reverts a commit made inside a PR's branch (its pre-rebase sha is not on main). #912 answered with no ask, #913 asked and merged with no answer, #914 asked once and answered yes twice on two heads. #921 (a main review) / #922 (none: direct) / #923 / #924 (a recheck of the merged head, no answer) merged on 2026-10-04 with a `[post-audit]` mark each: 921 and 922 pass, 923 finding, 924 pass.",
  "comments": [
   {
    "body": "[recheck] responsibility pass 0000000000000000000000000000000000000000\npatch-id x",
@@ -113,6 +113,48 @@
    "body": "[merge-answer] yes security:words dddddddddddddddddddddddddddddddddddddddd",
    "created_at": "2026-10-02T05:00:00Z",
    "issue_url": "https://api.github.com/repos/example/development/issues/914",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[codex] review\n\n指摘なし",
+   "created_at": "2026-10-04T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/921",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[post-audit] pass aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "created_at": "2026-10-04T05:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/921",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[post-audit] pass bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+   "created_at": "2026-10-04T05:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/922",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass 7777777777777777777777777777777777777777",
+   "created_at": "2026-10-04T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/923",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[post-audit] finding cccccccccccccccccccccccccccccccccccccccc\n\n- a.ts:1 入力の境界 x",
+   "created_at": "2026-10-04T05:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/923",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[recheck] size pass 8888888888888888888888888888888888888888",
+   "created_at": "2026-10-04T02:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/924",
+   "author_association": "MEMBER"
+  },
+  {
+   "body": "[post-audit] pass dddddddddddddddddddddddddddddddddddddddd",
+   "created_at": "2026-10-04T05:00:00Z",
+   "issue_url": "https://api.github.com/repos/example/development/issues/924",
    "author_association": "MEMBER"
   }
  ],
@@ -260,6 +302,54 @@
    "base": {
     "ref": "main"
    }
+  },
+  "921": {
+   "number": 921,
+   "state": "closed",
+   "merged_at": "2026-10-04T01:00:00Z",
+   "head": {
+    "ref": "sb/921-x",
+    "sha": "1111111111111111111111111111111111111111"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "922": {
+   "number": 922,
+   "state": "closed",
+   "merged_at": "2026-10-04T01:00:00Z",
+   "head": {
+    "ref": "sb/922-x",
+    "sha": "2222222222222222222222222222222222222222"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "923": {
+   "number": 923,
+   "state": "closed",
+   "merged_at": "2026-10-04T01:00:00Z",
+   "head": {
+    "ref": "sb/923-x",
+    "sha": "7777777777777777777777777777777777777777"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "924": {
+   "number": 924,
+   "state": "closed",
+   "merged_at": "2026-10-04T01:00:00Z",
+   "head": {
+    "ref": "sb/924-x",
+    "sha": "8888888888888888888888888888888888888888"
+   },
+   "base": {
+    "ref": "main"
+   }
   }
  },
  "revParse": {
@@ -303,6 +393,10 @@
   911,
   912,
   913,
-  914
+  914,
+  921,
+  922,
+  923,
+  924
  ]
 }

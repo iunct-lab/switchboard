@@ -54,7 +54,7 @@ Task に書く前に、案を次で削る。**通らない項目は Task の本�
 
 設計原則との衝突（承認を迂回する既定値、ベンダ CLI のコード取り込み、鍵やテレメトリ、ランナー必須化）は Task にしない。PBI の決定ログに書いて止める。
 
-PBI のユーザーストーリーが CLAUDE.md（`AGENTS.md`）の前提（信頼モデル・使い勝手）と矛盾していたら（この手順より前に作られた PBI など）、Task にしない。PBI に `## 判断待ち`（ラベル `needs-decision`）を出し、Ready にしない。照らし方は `request-to-backlog` の「2.5 前提と照らす」。
+PBI のユーザーストーリーが CLAUDE.md（`AGENTS.md`）の前提（信頼モデル・使い勝手）と矛盾していたら（この手順より前に作られた PBI など）、Task にしない。PBI に `## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`）を出し、Ready にしない。照らし方は `request-to-backlog` の「2.5 前提と照らす」。
 
 ### 4. Task を切る
 
@@ -73,7 +73,7 @@ Spike が要るなら timebox と成果物（`docs/design/<name>.md`）を書い
 …
 ```
 
-覆われない条件があれば Task を足す。**条件をスコープ外に移すのは利用者の判断**（要件の変更）: PBI の決定ログに理由を書き、`## 判断待ち`（ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）で利用者に聞き、返事があるまで Ready にしない（headless でも同じ。勝手に条件を削って Ready にしない）。画面に関わる問いは `issue-workflow` の「判断待ちの出し方」の画面イメージを添える。
+覆われない条件があれば Task を足す。**条件をスコープ外に移すのは利用者の判断**（要件の変更）: PBI の決定ログに理由を書き、`## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）で利用者に聞き、返事があるまで Ready にしない（headless でも同じ。勝手に条件を削って Ready にしない）。画面に関わる問いは `issue-workflow` の「判断待ちの出し方」の画面イメージを添える。
 
 ```bash
 ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号> --milestone "<PBI と同じ Milestone>"     # W=$(mktemp -d /tmp/<リポジトリ名>.tasks<PBI>.XXXXXX)。固定の /tmp/task.md にしない
