@@ -521,6 +521,11 @@ ${clone}`);
     expect(readFileSync(join(HERE, "bootstrap.sh"), "utf8")).toContain('-e "s|@REGION@|$REGION|g"');
   });
 
+  test("the replica syncs every 60s (a restore from S3 loses at most that; the default 1s costs far more PUTs)", () => {
+    const yml = readFileSync(join(HERE, "litestream.yml"), "utf8");
+    expect(yml).toMatch(/\n\s+sync-interval: 60s\n/);
+  });
+
   test("a failed restore stops the bootstrap instead of starting an empty database (review #342)", () => {
     const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
     const restore = boot.slice(boot.indexOf("litestream restore"), boot.indexOf("litestream restore") + 200);
@@ -1677,7 +1682,7 @@ describe("aws/host offload (#678)", () => {
 case "$1 $2" in
   "ssm get-parameter") case "$4" in */offload-ci-project) echo sb-host-offload-ci ;; */offload-image-project) echo sb-host-offload-image ;; */offload-image-repo) echo 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image ;; *) echo sb-host-offload ;; esac ;;
   "ecr describe-images") [ -f "$FAKE/noimage" ] && { echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation" >&2; exit 254; }; echo '{}' ;;
-  "s3 cp") cp "$3" "$S3OUT"; case "$4" in *.fixtures.tar.gz) cp "$3" "$S3OUT.fixtures" ;; *.names.json) cp "$3" "$S3OUT.names" ;; esac ;;
+  "s3 cp") cp "$3" "$S3OUT"; case "$4" in *.fixtures.tar.gz) cp "$3" "$S3OUT.fixtures" ;; *.names.json) cp "$3" "$S3OUT.names" ;; *.base.tar) cp "$3" "$S3OUT.base" ;; esac ;;
   "codebuild start-build") [ -f "$FAKE/busy" ] && { rm "$FAKE/busy"; echo "An error occurred (AccountLimitExceededException) when calling the StartBuild operation: Cannot have more than 2 active builds for the project" >&2; exit 254; }; echo "$4:build-1" ;;
   "codebuild batch-get-builds") if [ -f "$FAKE/status-$4" ]; then cat "$FAKE/status-$4"; else cat "$FAKE/status"; fi ;;
   "logs get-log-events") case "$*" in *--next-token*) echo '{"events":[],"nextForwardToken":"f/2"}' ;; *) if [ -f "$FAKE/events-$6.json" ]; then cat "$FAKE/events-$6.json"; elif [ -f "$FAKE/full.json" ] && [ -f "$FAKE/seen" ]; then cat "$FAKE/full.json"; else touch "$FAKE/seen"; cat "$FAKE/events.json"; fi ;; esac ;;
@@ -1786,7 +1791,7 @@ exit 0`,
     }
     const none = offload(["--size", "large"]);
     expect(none.code).toBe(2);
-    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>]] [--detach] <command…>");
+    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>] [--base-tree <tar>]] [--detach] <command…>");
     expect(calls()).toEqual([]);
   });
 
@@ -2051,6 +2056,55 @@ exit 0`);
     setLog("SUCCEEDED", ["sb-offload: exit 0"]);
     offload(["true"]);
     expect(calls().some((l) => l.includes("stop-build"))).toBe(false);
+  }, 30_000);
+
+  test("sb-offload --ci --base-tree puts the compared tag's tree next to the work tree, names it to the build, and removes it unless detached", () => {
+    mkdirSync(join(repo, "container"), { recursive: true });
+    writeFileSync(join(repo, "container", "Dockerfile"), "FROM scratch\n");
+    const src = join(dir, "base-src-4720");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, ".sb-sha"), "abc1234\n");
+    const tar = join(dir, "base-4720.tar");
+    Bun.spawnSync(["tar", "-cf", tar, "-C", src, "."]);
+    try {
+      awsFake();
+      setLog("SUCCEEDED", ["ok", "sb-offload: exit 0"]);
+      const r = offload(["--ci", "--base-tree", tar, "bun", "test"]);
+      expect(r.code).toBe(0);
+      const c = calls();
+      const cps = c.filter((l) => l.startsWith("aws s3 cp"));
+      expect(cps).toHaveLength(2);
+      const base = /s3:\/\/[^/]*\/(offload\/[^ ]*)\.tar\.gz /.exec(cps[0]!)![1]!;
+      expect(cps[1]).toContain(`aws s3 cp ${tar} s3://`);
+      expect(cps[1]).toContain(`/${base}.base.tar `);
+      // what was uploaded is the tar the host gave
+      expect(Bun.spawnSync(["tar", "-tf", `${out}.base`]).stdout.toString()).toContain(".sb-sha");
+      // the build is told the object's name, nothing else about it; both objects are removed
+      const ci = c.find((l) => l.startsWith("aws codebuild start-build"))!;
+      expect(ci).toContain(`"name":"SWITCHBOARD_BASE_TREE_KEY","value":"${base}.base.tar"`);
+      expect(c.filter((l) => l.startsWith("aws s3 rm")).map((l) => l.split(" ")[3]!.replace(/^s3:\/\/[^/]*\//, "")).sort()).toEqual([`${base}.base.tar`, `${base}.tar.gz`].sort());
+      // detached: uploaded too, and left for the build (offload/ expires after a day)
+      awsFake();
+      setLog("IN_PROGRESS", ["building"]);
+      const d = offload(["--ci", "--base-tree", tar, "--detach", "bun", "test"]);
+      expect(d.code).toBe(0);
+      expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toHaveLength(2);
+      expect(calls().filter((l) => l.startsWith("aws s3 rm"))).toEqual([]);
+      // without it: one object and no variable, as before
+      awsFake();
+      setLog("SUCCEEDED", ["sb-offload: exit 0"]);
+      offload(["--ci", "bun", "test"]);
+      expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toHaveLength(1);
+      expect(calls().join("\n")).not.toContain("SWITCHBOARD_BASE_TREE_KEY");
+      // only with --ci, and only a file: nothing is uploaded
+      for (const args of [["--base-tree", tar, "true"], ["--ci", "--base-tree", dir, "true"], ["--ci", "--base-tree"]]) {
+        const bad = offload(args);
+        expect(bad.code).toBe(2);
+        expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toEqual([]);
+      }
+    } finally {
+      rmSync(join(repo, "container"), { recursive: true, force: true });
+    }
   }, 30_000);
 
   test("sb-offload --detach prints the build id and returns without stopping the build or removing the uploads (#4712)", () => {

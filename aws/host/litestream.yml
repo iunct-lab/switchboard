@@ -6,3 +6,5 @@ dbs:
     replicas:
       - url: s3://@BUCKET@/litestream/switchboard.db
         region: @REGION@
+        # at most one S3 PUT per interval (default 1s); a restore from S3 loses at most this much
+        sync-interval: 60s

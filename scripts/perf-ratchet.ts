@@ -6,20 +6,23 @@
  *                                        once there (`--runs 1 --skip-loaded`: a response's size does not wobble) and
  *                                        writes `{ sha, bundle: { js, css }, journeys: { <open-task…>: { bytes, responses? } } }`
  *                                        (CI: origin/main → perf-base.json)
- *   bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local]
+ *   bun scripts/perf-ratchet.ts base --tree <dir> <out.json>   the same from a copy of <dir> (its sha in <dir>/.sb-sha), with
+ *                                        no git: the external build has no history; PERF_BASE_TREE=<dir> makes `check` read
+ *                                        <dir>/scripts/perf-budget.json as main's ceilings
+ *   bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local|offload]
  *                                        exit 1 if a count is over its ceiling, a count is better than its ceiling (lower
  *                                        it in the same PR), a ceiling is above main's, or the bundle (js or css, gzip) or
  *                                        a journey's `bytes` is BUNDLE_GROWTH_LIMIT or more above the base's (`grew:`); the
  *                                        `bundle:` and `bytes:` lines say the sizes and the difference either way, and the
  *                                        responses that differ (`/api/tasks/:id/evals +22 B × 2`)
- *   bun scripts/perf-ratchet.ts update [--env github|local] [--repo <owner/name>]   lowers a ceiling only when the last
+ *   bun scripts/perf-ratchet.ts update [--env github|local|offload] [--repo <owner/name>]   lowers a ceiling only when the last
  *                                        LOWER_AFTER tags' counts (`counts.tsv`, one read) are all below it by more than
  *                                        2 × the band, to their max + the band; a count with fewer tags is `waiting`; never
  *                                        raises one
- * The budget has one set of ceilings per environment (#644): `github` (Actions' ubuntu-latest Chrome) and `local` (the
- * host's Chromium, which local-ci uses). The same code draws a frame differently on a faster machine, so the counts differ
- * between the two by more than the bands. The environment is `github` when GITHUB_ACTIONS=true (local-ci sets CI=true but
- * not that), else `local`; --env picks it (`update` reads the tag CI's `local` rows unless asked).
+ * The budget has one set of ceilings per environment: `github` (Actions' ubuntu-latest Chrome), `local` (the
+ * host's Chromium, which local-ci uses) and `offload` (the external build's Chrome; the build's script sets PERF_ENV). The same code draws a frame differently on a faster machine, so the counts differ
+ * between them by more than the bands. The environment is `github` when GITHUB_ACTIONS=true (local-ci sets CI=true but
+ * not that), else `local`; PERF_ENV or --env picks it (`update` reads the tag CI's `local` rows unless asked).
  * Times (msMedian / msP90) are never compared: they wobble on a shared machine (docs/design/perf.md). The one time with a
  * ceiling is `loaded.healthMaxMs`, the daemon's delay under load, in `local` only, with a band measured for it, judged on
  * the high side only (`HIGH_SIDE_ONLY`: a quiet host runs it far below its ceiling, so `improved` would fail there).
@@ -37,14 +40,14 @@
  *                                        first row (#3169): one read of `bundle.tsv` on the `perf-records` branch; nothing
  *                                        is built again. A row is one measure, not one commit (docs/design/perf.md). Then
  *                                        main's `bytes` the same way from `bytes.tsv` (#3921), summed per measure.
- *   bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local] [--last N]
+ *   bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local|offload] [--last N]
  *                                        the counts the tag CI measured (`counts.tsv` on `perf-records`, one row per tag and
  *                                        count): per count the last N tags' values (default 10), their min / max / spread
  *                                        (max − min) against the band and the ceiling, marked when the spread is wider than
  *                                        the band. One read; nothing is built again.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 export interface Budget {
   journeys: Record<string, { requests?: number; layoutCount?: number; recalcStyleCount?: number; layoutShift?: number }>;
@@ -56,17 +59,18 @@ export interface Budget {
   durations?: { typecheck: number; test: number };
 }
 export interface Item { key: string; value: number; ceiling: number }
-export const ENVS = ["github", "local"] as const;
+export const ENVS = ["github", "local", "offload"] as const;
 export type Env = (typeof ENVS)[number];
 /** `key`: `<env>.journeys.<name>.<count>`, as raisedAgainst writes it. */
 export interface PerfException { key: string; issue: number }
 export type Budgets = Record<Env, Budget> & { exceptions?: PerfException[] };
 
-/** The environment whose ceilings apply: --env, else `github` in Actions, else `local`. */
+/** The environment whose ceilings apply: --env, else PERF_ENV (the external build's script sets it), else `github` in Actions, else `local`. */
 export function envOf(flag: string | undefined, env: Record<string, string | undefined> = process.env): Env {
-  if (flag === undefined) return env.GITHUB_ACTIONS === "true" ? "github" : "local";
-  if (!(ENVS as readonly string[]).includes(flag)) throw new Error(`--env is one of ${ENVS.join(" / ")}, not ${flag}`);
-  return flag as Env;
+  const given = flag ?? (env.PERF_ENV || undefined);
+  if (given === undefined) return env.GITHUB_ACTIONS === "true" ? "github" : "local";
+  if (!(ENVS as readonly string[]).includes(given)) throw new Error(`${flag === undefined ? "PERF_ENV" : "--env"} is one of ${ENVS.join(" / ")}, not ${given}`);
+  return given as Env;
 }
 
 export const BUDGET_PATH = join(import.meta.dir, "perf-budget.json");
@@ -248,27 +252,41 @@ export function bytesGrowth(merged: Partial<Record<string, JourneyBytes>>, base:
   return { lines, grew };
 }
 
+function runCmd(cmd: string[], cwd?: string): string {
+  const p = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+  const text = `${p.stdout.toString()}${p.stderr.toString()}`;
+  if (p.exitCode !== 0) throw new Error(`${cmd.join(" ")}: exit ${p.exitCode}\n${text.trim()}`);
+  return text;
+}
+
 /**
  * Builds `ref` in a worktree next to this checkout's top (not under /tmp, which is RAM: node_modules does not go there)
  * and writes `{ sha, bundle, journeys }` to `out`: `journeys` is `bytes` (and `responses`, when `ref`'s perf-bench has
  * them) of BYTES_JOURNEYS from one run of `ref`'s own perf-bench in the worktree. The worktree goes whatever happens.
- * Each command's output is printed.
+ * Each command's output is printed. `tree` (`--tree <dir>`): a copy of `<dir>` is measured instead, with no git (the
+ * external build has no history or credentials): the host wrote the sha on one line into `<dir>/.sb-sha`.
  */
-async function measureRef(ref: string, out: string): Promise<void> {
-  const run = (cmd: string[], cwd?: string) => {
-    const p = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
-    const text = `${p.stdout.toString()}${p.stderr.toString()}`;
-    if (p.exitCode !== 0) throw new Error(`${cmd.join(" ")}: exit ${p.exitCode}\n${text.trim()}`);
-    return text;
-  };
+export async function measureRef(ref: string | { tree: string }, out: string, run: (cmd: string[], cwd?: string) => string = runCmd): Promise<void> {
   // a measure that fails leaves no file: check must not compare with an older one
   rmSync(out, { force: true });
-  const top = run(["git", "rev-parse", "--show-toplevel"]).trim();
-  const sha = run(["git", "rev-parse", "--verify", `${ref}^{commit}`]).trim();
-  const dir = mkdtempSync(join(dirname(top), `${basename(top)}.perf-base.`));
+  let top = "";
+  let sha: string;
+  let dir: string;
+  if (typeof ref === "string") {
+    top = run(["git", "rev-parse", "--show-toplevel"]).trim();
+    sha = run(["git", "rev-parse", "--verify", `${ref}^{commit}`]).trim();
+    dir = mkdtempSync(join(dirname(top), `${basename(top)}.perf-base.`));
+  } else {
+    const shaFile = join(ref.tree, ".sb-sha");
+    if (!existsSync(shaFile)) throw new Error(`${shaFile} is missing: the host writes the tree's sha there`);
+    sha = readFileSync(shaFile, "utf8").trim();
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`${shaFile} does not hold a commit sha: ${JSON.stringify(sha)}`);
+    dir = mkdtempSync(`${resolve(ref.tree)}.perf-base.`);
+  }
   const started = Date.now();
   try {
-    run(["git", "-C", top, "worktree", "add", "-q", "--detach", dir, sha]);
+    if (typeof ref === "string") run(["git", "-C", top, "worktree", "add", "-q", "--detach", dir, sha]);
+    else run(["cp", "-a", `${ref.tree}/.`, dir]);
     console.log(run(["bun", "install", "--frozen-lockfile"], dir).trim());
     console.log(run(["bun", "run", "--cwd", "apps/web", "build"], dir).trim().split("\n").slice(-3).join("\n"));
     const bundle = bundleOf(join(dir, "apps/web/dist"));
@@ -279,7 +297,7 @@ async function measureRef(ref: string, out: string): Promise<void> {
     await Bun.write(out, `${JSON.stringify({ sha, bundle, journeys })}\n`);
     console.log(`base ${sha.slice(0, 7)}: js ${bundle.js} B, css ${bundle.css} B, ${BYTES_JOURNEYS.map((n) => `${n} ${journeys[n]!.bytes} B`).join(", ")} (${((Date.now() - started) / 1000).toFixed(0)} s)`);
   } finally {
-    Bun.spawnSync(["git", "-C", top, "worktree", "remove", "--force", dir], { stdout: "ignore", stderr: "ignore" });
+    if (typeof ref === "string") Bun.spawnSync(["git", "-C", top, "worktree", "remove", "--force", dir], { stdout: "ignore", stderr: "ignore" });
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -473,7 +491,13 @@ async function readRecords(repo: string, path: string): Promise<string> {
 const baseRef = () => process.env.PERF_BASE_REF || "origin/main";
 
 /** The base ref's budgets, or why there are none (no such ref in a shallow checkout, or it has no budget yet). */
-async function mainBudgets(): Promise<Partial<Budgets> | string> {
+export async function mainBudgets(): Promise<Partial<Budgets> | string> {
+  // PERF_BASE_TREE: the compared tag's tree the host handed over (the external build has no history)
+  const tree = process.env.PERF_BASE_TREE;
+  if (tree) {
+    const file = join(tree, "scripts/perf-budget.json");
+    return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<Budgets>) : `${file}: no such file`;
+  }
   const p = Bun.spawn(["git", "show", `${baseRef()}:scripts/perf-budget.json`], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" });
   const [out, err] = [await new Response(p.stdout).text(), await new Response(p.stderr).text()];
   return (await p.exited) === 0 ? (JSON.parse(out) as Partial<Budgets>) : err.trim().split("\n")[0]!;
@@ -488,7 +512,7 @@ if (import.meta.main && process.argv[2] === "spread") {
   const [repoFlag, envFlag, lastFlag] = [opt("--repo"), opt("--env"), opt("--last")];
   const last = lastFlag === undefined ? 10 : Number(lastFlag);
   if (args.length || repoFlag === "" || envFlag === "" || !Number.isInteger(last) || last < 1) {
-    console.error("usage: bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local] [--last N]");
+    console.error("usage: bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local|offload] [--last N]");
     process.exit(2);
   }
   const { remoteRepo } = await import("./local-ci.ts");
@@ -498,8 +522,7 @@ if (import.meta.main && process.argv[2] === "spread") {
     console.error("origin is not a GitHub owner/name: give --repo");
     process.exit(2);
   }
-  // the tag CI measures on the host: `local` unless asked (the same default as `envOf` outside Actions)
-  const env = envOf(envFlag ?? "local");
+  const env = envOf(envFlag);
   for (const l of spreadTable(parseCountsRows(await readRecords(repo, COUNTS_RECORDS_PATH)), (await Bun.file(BUDGET_PATH).json()) as Budgets, env, last)) console.log(l);
 } else if (import.meta.main && process.argv[2] === "update") {
   const args = process.argv.slice(3);
@@ -509,7 +532,7 @@ if (import.meta.main && process.argv[2] === "spread") {
   };
   const [repoFlag, envFlag] = [opt("--repo"), opt("--env")];
   if (args.length || repoFlag === "" || envFlag === "") {
-    console.error("usage: bun scripts/perf-ratchet.ts update [--env github|local] [--repo <owner/name>]");
+    console.error("usage: bun scripts/perf-ratchet.ts update [--env github|local|offload] [--repo <owner/name>]");
     process.exit(2);
   }
   const { remoteRepo } = await import("./local-ci.ts");
@@ -519,7 +542,7 @@ if (import.meta.main && process.argv[2] === "spread") {
     console.error("origin is not a GitHub owner/name: give --repo");
     process.exit(2);
   }
-  const env = envOf(envFlag ?? "local"); // the tag CI measures on the host: `local` unless asked
+  const env = envOf(envFlag); // the host runs it: `local` unless PERF_ENV or --env says otherwise
   const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
   const done = loweredBy(budgets[env], env, parseCountsRows(await readRecords(repo, COUNTS_RECORDS_PATH)));
   console.log(`ceilings: ${env}`);
@@ -550,12 +573,16 @@ if (import.meta.main && process.argv[2] === "spread") {
   console.log(`\nbytes（${BYTES_JOURNEYS.join(" / ")} の /api/ 応答の合計。応答ごとの行は ${RECORDS_BRANCH}/${BYTES_RECORDS_PATH}）`);
   for (const l of bytesHistoryTable(parseBytesRows(await readRecords(repo, BYTES_RECORDS_PATH)), since)) console.log(l);
 } else if (import.meta.main && process.argv[2] === "base") {
-  const [ref, out, ...rest] = process.argv.slice(3);
-  if (!ref || !out || rest.length) {
-    console.error("usage: bun scripts/perf-ratchet.ts base <ref> <out.json>");
+  const args = process.argv.slice(3);
+  const at = args.indexOf("--tree");
+  const tree = at < 0 ? undefined : args.splice(at, 2)[1];
+  const [first, second, ...rest] = args;
+  const [ref, out] = tree === undefined ? [first, second] : [undefined, first];
+  if ((tree === undefined ? !ref : !tree) || !out || rest.length || (tree === undefined && second === undefined) || (tree !== undefined && second !== undefined)) {
+    console.error("usage: bun scripts/perf-ratchet.ts base (<ref> | --tree <dir>) <out.json>");
     process.exit(2);
   }
-  await measureRef(ref, out);
+  await measureRef(tree === undefined ? ref! : { tree }, out);
 } else if (import.meta.main) {
   const args = process.argv.slice(2);
   const opt = (name: string): [boolean, string | undefined] => {
@@ -566,7 +593,7 @@ if (import.meta.main && process.argv[2] === "spread") {
   const [, baseFile] = opt("--base");
   const [cmd, file] = args;
   if (cmd !== "check" || !file || (envGiven && flag === undefined) || !baseFile) {
-    console.error("usage: bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local] | update [--env github|local] [--repo <owner/name>] | base <ref> <out.json> | history [--repo <owner/name>] [--since YYYY-MM-DD] | spread [--repo <owner/name>] [--env github|local] [--last N]");
+    console.error("usage: bun scripts/perf-ratchet.ts check <result.json> --base <base.json> [--env github|local|offload] | update [--env github|local|offload] [--repo <owner/name>] | base (<ref> | --tree <dir>) <out.json> | history [--repo <owner/name>] [--since YYYY-MM-DD] | spread [--repo <owner/name>] [--env github|local|offload] [--last N]");
     process.exit(2);
   }
   const env = envOf(flag);
@@ -579,7 +606,7 @@ if (import.meta.main && process.argv[2] === "spread") {
     const { over: above, improved } = judge(result, budget);
     const { known, over } = knownExceptions(above, env, budgets.exceptions ?? [], issueOpen);
     const base = await mainBudgets();
-    if (typeof base === "string") console.log(`ceilings are not compared with main's (${baseRef()}:scripts/perf-budget.json: ${base})`);
+    if (typeof base === "string") console.log(`ceilings are not compared with main's (${process.env.PERF_BASE_TREE ? "PERF_BASE_TREE" : `${baseRef()}:scripts/perf-budget.json`}: ${base})`);
     const raised = typeof base === "string" ? [] : raisedAgainst(budgets, base);
     const added = typeof base === "string" ? [] : addedExceptions(budgets, base);
     for (const i of known) console.log(`known exception: ${i.key} = ${i.value} > ceiling ${i.ceiling}（#${i.issue} が開いている）`);

@@ -139,14 +139,6 @@ Resources:
       # CloudFront's standard log (#1490) is written with an ACL for the delivery account, so ACLs must be usable; the
       # public-access block above still refuses a public one
       OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerPreferred }] }
-      # Request metrics per prefix, to see where the PUTs come from before choosing Litestream's sync-interval (#3242).
-      # Each filter publishes about 16 metrics, billed hourly as custom metrics (about $0.30 per metric-month, so up to
-      # about $14 a month for the three); remove these once the counts are recorded. In S3's order (by Id): a drift
-      # detection counts a different order as a difference.
-      MetricsConfigurations:
-        - { Id: archive, Prefix: archive/ }
-        - { Id: history, Prefix: history/ }
-        - { Id: litestream, Prefix: litestream/ }
       LifecycleConfiguration:
         Rules:
           # a delete (Litestream retention, an agent) only adds a marker; the data itself goes after 30 days
@@ -1183,6 +1175,8 @@ Resources:
                     rm -f /sb/names.json
                     chown -R switchboard: /home/switchboard/.aws && chmod 600 /home/switchboard/.aws/config
                   fi
+                # the tag a perf run is compared with, packed by the host: unpacked into a folder and named by PERF_BASE_TREE for the command; when it cannot be read the run goes on without it (perf is a record and a warning) and says so
+                - 'if [ -n "$SWITCHBOARD_BASE_TREE_KEY" ]; then B=/home/switchboard/perf-base-tree; mkdir -p "$B" && aws s3 cp "s3://${Data}/$SWITCHBOARD_BASE_TREE_KEY" - | tar -xf - -C "$B" && chown -R switchboard: "$B" && export PERF_BASE_TREE="$B" || echo "sb-offload: base tree not unpacked; perf is not compared with it"; fi'
                 - 'cd /sb/work && sh -c "$SB_OFFLOAD_CMD"; c=$?; echo; echo "sb-offload: exit $c"'
       Artifacts: { Type: NO_ARTIFACTS }
       Environment: { Type: ARM_CONTAINER, ComputeType: BUILD_GENERAL1_LARGE, Image: !Sub '${OffloadImageRepo.RepositoryUri}:latest', ImagePullCredentialsType: SERVICE_ROLE, PrivilegedMode: true }

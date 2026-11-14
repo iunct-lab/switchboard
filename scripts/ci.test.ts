@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { ciExit, ciSteps, runCi } from "./ci";
-import { checkoutSteps, runCheckout, stepEnv, type Deps } from "./local-ci";
+import { checkoutSteps, isPerfStep, runCheckout, stepEnv, withoutPerf, type Deps } from "./local-ci";
 
 const ROOT = mkdtempSync(join(tmpdir(), "sb-ci-test-"));
 afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -84,10 +84,43 @@ describe("ci", () => {
   test("the steps: home paths, install, public tree check, licenses, Codex CLI, typecheck, public docs, web build, perf, then test — in that order; only the perf steps keep going", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
     const at = (cmd: string) => first.findIndex((r) => r === cmd || r.startsWith(`${cmd} `) || (cmd.endsWith(" ") && r.startsWith(cmd)));
-    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "if command -v codex ", "bun run typecheck", "bun scripts/public-docs.ts check", "bun run --cwd apps/web build", "bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
+    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "if command -v codex ", "bun run typecheck", "bun scripts/public-docs.ts check", "bun run --cwd apps/web build", "if [ -n \"${PERF_BASE_TREE:-}\" ]; then bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
-    expect(ciSteps.filter((s) => s.keepGoing).map((s) => s.run.split(" ").slice(1, 3).join(" "))).toEqual(["scripts/perf-ratchet.ts base", "scripts/perf-bench.ts --runs", "scripts/perf-ratchet.ts check"]);
+    expect(ciSteps.filter((s) => s.keepGoing).map((s) => s.name)).toEqual(["bun scripts/perf-ratchet.ts base origin/main perf-base.json", "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json"]);
+  });
+
+  test("off the host (PERF_BASE_TREE given) fetch main fetches nothing and base measures the tree; otherwise the ref; the names and the perf range stay", async () => {
+    const fetch = ciSteps.find((s) => s.name === "fetch main")!;
+    const base = ciSteps.find((s) => s.name.startsWith("bun scripts/perf-ratchet.ts base"))!;
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.ci-test."));
+    try {
+      // no .git here: a fetch would fail
+      const p = Bun.spawnSync(["bash", "-e", "-c", fetch.run], { cwd: dir, env: { PATH: process.env.PATH!, PERF_BASE_TREE: "/x" } });
+      expect([p.exitCode, p.stdout.toString()]).toEqual([0, "PERF_BASE_TREE is given: main is not fetched\n"]);
+      // no tree and no .git (the tree could not be unpacked off the host): nothing fetched, the build goes on
+      const bare = Bun.spawnSync(["bash", "-e", "-c", fetch.run], { cwd: dir, env: { PATH: process.env.PATH! } });
+      expect([bare.exitCode, bare.stdout.toString()]).toEqual([0, "not a git work tree: main is not fetched\n"]);
+      // a git work tree without the remote still fetches (and fails here): the host's run is unchanged
+      Bun.spawnSync(["git", "init", "-q", dir]);
+      expect(Bun.spawnSync(["bash", "-e", "-c", fetch.run], { cwd: dir, env: { PATH: process.env.PATH! } }).exitCode).not.toBe(0);
+      // an origin that cannot be fetched (the offload build's git init + origin without credentials): PERF_ENV=offload skips, otherwise it fails
+      Bun.spawnSync(["git", "-C", dir, "remote", "add", "origin", "file:///nonexistent"]);
+      const offload = Bun.spawnSync(["bash", "-e", "-c", fetch.run], { cwd: dir, env: { PATH: process.env.PATH!, PERF_ENV: "offload" } });
+      expect([offload.exitCode, offload.stdout.toString()]).toEqual([0, "off the host (PERF_ENV=offload): main is not fetched\n"]);
+      expect(Bun.spawnSync(["bash", "-e", "-c", fetch.run], { cwd: dir, env: { PATH: process.env.PATH!, PERF_ENV: "local" } }).exitCode).not.toBe(0);
+      const shown = (env: Record<string, string>) => Bun.spawnSync(["bash", "-c", base.run.replaceAll("bun scripts/perf-ratchet.ts", "echo")], { env: { PATH: process.env.PATH!, ...env } }).stdout.toString().trim();
+      expect(shown({ PERF_BASE_TREE: "/t" })).toBe("base --tree /t perf-base.json");
+      expect(shown({ PERF_BASE_REF: "v1.0.0" })).toBe("base v1.0.0 perf-base.json");
+      expect(shown({})).toBe("base origin/main perf-base.json");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // a PR's local CI drops build..check, the tag CI keeps them: both read the run text of the perf steps
+    expect(ciSteps.filter(isPerfStep).map((s) => s.name)).toEqual([base.name, "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json"]);
+    const without = withoutPerf(ciSteps);
+    expect(without.some((s) => isPerfStep(s) || s.name === "fetch main")).toBe(false);
+    expect(without.at(-1)!.name).toBe("bun test");
   });
 
   test("the Codex CLI step installs it with npm when codex is not on PATH, and does not touch npm when it is", async () => {

@@ -18,16 +18,19 @@
 # directory's content, the recordings the tests read) and offload/<key>.names.json (the host's AWS names and account ids for the public-tree check):
 # the build reads them with the s3:GetObject it already has and gets SB_OFFLOAD_FIXTURES=1 / SB_OFFLOAD_NAMES=1. The names file is passed by path
 # only: its content is in no argument, no environment variable and no log. Both are removed with the work tree.
+# --base-tree <tar> (only with --ci) puts one more one-time object next to the work tree, offload/<key>.base.tar: the tree of the tag a perf run is
+# compared with, packed by the host (the build has no GitHub credentials, so it cannot fetch the tag). The build reads it with the same s3:GetObject,
+# unpacks it into a folder and gets PERF_BASE_TREE pointing there (the CI script carries it across its `su -` to the steps); the name of the object is in SWITCHBOARD_BASE_TREE_KEY. It is removed with the work tree.
 # --detach (#4712) returns once the build has started: `sb-offload: started <build-id>` on the output, exit 0, nothing stopped and no upload removed (the
 # build reads them later; offload/ expires after a day). --collect <build-id> waits for such a build, prints its log and exits as a call without
 # --detach would (the exit line, 124, 130, the 137 hint for the size the build ran on); it takes no --size, sends nothing, needs no git work tree, and Ctrl-C (or TERM) ends only the wait.
 # Explicit only: `docker` itself stays on the host (bind mounts and localhost ports are there). Only the work tree goes:
 # no credentials, no token, no other host file. What the command starts is not reachable from here — only the log is.
 set -euo pipefail
-USAGE="usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>]] [--detach] <command…> | sb-offload --collect <build-id>   e.g. sb-offload docker compose up --build --abort-on-container-exit (small; --size medium or large only when small runs out of memory)"
+USAGE="usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>] [--base-tree <tar>]] [--detach] <command…> | sb-offload --collect <build-id>   e.g. sb-offload docker compose up --build --abort-on-container-exit (small; --size medium or large only when small runs out of memory)"
 SIZE_NAME=small; SIZE_GIVEN=
-CI=; FIXTURES=; NAMES=; DETACH=; COLLECT=
-# --size, --ci, --fixtures, --names, --detach and --collect in any order, before the command
+CI=; FIXTURES=; NAMES=; BASE_TREE=; DETACH=; COLLECT=
+# --size, --ci, --fixtures, --names, --base-tree, --detach and --collect in any order, before the command
 while :; do
   case "${1:-}" in
     --size) SIZE_GIVEN=1; SIZE_NAME="${2:-}"; shift $(($# < 2 ? $# : 2)) ;;
@@ -35,6 +38,7 @@ while :; do
     --ci) CI=1; shift ;;
     --fixtures) FIXTURES="${2:-}"; [ -n "$FIXTURES" ] || { echo "sb-offload: --fixtures needs a directory" >&2; exit 2; }; shift 2 ;;
     --names) NAMES="${2:-}"; [ -n "$NAMES" ] || { echo "sb-offload: --names needs a file" >&2; exit 2; }; shift 2 ;;
+    --base-tree) BASE_TREE="${2:-}"; [ -n "$BASE_TREE" ] || { echo "sb-offload: --base-tree needs a tar file" >&2; exit 2; }; shift 2 ;;
     --detach) DETACH=1; shift ;;
     --collect) COLLECT="${2:-}"; [ -n "$COLLECT" ] || { echo "sb-offload: --collect needs a build id" >&2; exit 2; }; shift 2 ;;
     *) break ;;
@@ -46,12 +50,13 @@ case "$SIZE_NAME" in
   *) echo "sb-offload: --size is small, medium or large (default small), not '$SIZE_NAME'" >&2; exit 2 ;;
 esac
 if [ -n "$COLLECT" ]; then
-  { [ $# -eq 0 ] && [ -z "$DETACH$CI$FIXTURES$NAMES$SIZE_GIVEN" ]; } || { echo "sb-offload: --collect takes a build id only (the size is the build's own)" >&2; exit 2; }
+  { [ $# -eq 0 ] && [ -z "$DETACH$CI$FIXTURES$NAMES$BASE_TREE$SIZE_GIVEN" ]; } || { echo "sb-offload: --collect takes a build id only (the size is the build's own)" >&2; exit 2; }
 else
   [ $# -gt 0 ] || { echo "$USAGE" >&2; exit 2; }
 fi
-{ [ -z "$FIXTURES$NAMES" ] || [ -n "$CI" ]; } || { echo "sb-offload: --fixtures and --names go with --ci" >&2; exit 2; }
+{ [ -z "$FIXTURES$NAMES$BASE_TREE" ] || [ -n "$CI" ]; } || { echo "sb-offload: --fixtures, --names and --base-tree go with --ci" >&2; exit 2; }
 [ -z "$FIXTURES" ] || [ -d "$FIXTURES" ] || { echo "sb-offload: --fixtures: $FIXTURES is not a directory" >&2; exit 2; }
+[ -z "$BASE_TREE" ] || [ -f "$BASE_TREE" ] || { echo "sb-offload: --base-tree: $BASE_TREE is not a file" >&2; exit 2; }
 [ -z "$NAMES" ] || [ -f "$NAMES" ] || { echo "sb-offload: --names: $NAMES is not a file" >&2; exit 2; }
 ENV_FILE="${SB_HOST_ENV:-/etc/switchboard-host.env}"
 [ -f "$ENV_FILE" ] || { echo "sb-offload: no $ENV_FILE — this is not the cloud host; run docker here instead" >&2; exit 2; }
@@ -65,7 +70,7 @@ mkdir -p "$HOME/.cache"
 TMP="$(mktemp -d "$HOME/.cache/sb-offload.XXXXXX")"   # not /tmp: it is RAM here
 KEY="offload/$(date -u +%Y%m%dT%H%M%SZ)-${TMP##*.}.tar.gz"
 KEY_BASE="${KEY%.tar.gz}"
-UPLOADED=; BUILD=; ENDED=; UP_FIXTURES=; UP_NAMES=
+UPLOADED=; BUILD=; ENDED=; UP_FIXTURES=; UP_NAMES=; UP_BASE=
 cleanup() {
   # however this ends before the build does (Ctrl-C, a poll that keeps failing), the build is not left running
   # --collect only waits for a build that is not its own: Ctrl-C ends the wait, not the build
@@ -77,6 +82,7 @@ cleanup() {
   [ -z "$UPLOADED" ] || aws s3 rm "s3://$SB_DATA_BUCKET/$KEY" --only-show-errors >/dev/null 2>&1 || true
   [ -z "$UP_FIXTURES" ] || aws s3 rm "s3://$SB_DATA_BUCKET/$KEY_BASE.fixtures.tar.gz" --only-show-errors >/dev/null 2>&1 || true
   [ -z "$UP_NAMES" ] || aws s3 rm "s3://$SB_DATA_BUCKET/$KEY_BASE.names.json" --only-show-errors >/dev/null 2>&1 || true
+  [ -z "$UP_BASE" ] || aws s3 rm "s3://$SB_DATA_BUCKET/$KEY_BASE.base.tar" --only-show-errors >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'trap - INT TERM; exit 130' INT TERM
@@ -101,6 +107,10 @@ if [ -z "$COLLECT" ]; then
   if [ -n "$NAMES" ]; then
     UP_NAMES=1
     aws s3 cp "$NAMES" "s3://$SB_DATA_BUCKET/$KEY_BASE.names.json" --only-show-errors
+  fi
+  if [ -n "$BASE_TREE" ]; then
+    UP_BASE=1
+    aws s3 cp "$BASE_TREE" "s3://$SB_DATA_BUCKET/$KEY_BASE.base.tar" --only-show-errors
   fi
   ENVS="$(jq -cn --arg k "$KEY" --arg c "$CMD" '[{name:"SB_OFFLOAD_KEY",value:$k,type:"PLAINTEXT"},{name:"SB_OFFLOAD_CMD",value:$c,type:"PLAINTEXT"}]')"
 fi
@@ -210,15 +220,16 @@ if [ -n "$CI" ]; then
     run_build "$(param /switchboard/offload-image-project)" "no ci image $TAG yet; building it, started" "" "^sb-offload: image $TAG\$"
     [ "$STATUS" = SUCCEEDED ] || { echo "sb-offload: the ci image $TAG could not be built ($STATUS)" >&2; exit 1; }
   fi
-  ENVS="$(jq -cn --arg k "$KEY" --arg c "$CMD" --arg t "$TAG" --arg f "$UP_FIXTURES" --arg n "$UP_NAMES" '[{name:"SB_OFFLOAD_KEY",value:$k,type:"PLAINTEXT"},{name:"SB_OFFLOAD_CMD",value:$c,type:"PLAINTEXT"},{name:"SB_IMAGE_TAG",value:$t,type:"PLAINTEXT"}]
+  ENVS="$(jq -cn --arg k "$KEY" --arg c "$CMD" --arg t "$TAG" --arg f "$UP_FIXTURES" --arg n "$UP_NAMES" --arg b "${UP_BASE:+$KEY_BASE.base.tar}" '[{name:"SB_OFFLOAD_KEY",value:$k,type:"PLAINTEXT"},{name:"SB_OFFLOAD_CMD",value:$c,type:"PLAINTEXT"},{name:"SB_IMAGE_TAG",value:$t,type:"PLAINTEXT"}]
     + (if $f != "" then [{name:"SB_OFFLOAD_FIXTURES",value:"1",type:"PLAINTEXT"}] else [] end)
-    + (if $n != "" then [{name:"SB_OFFLOAD_NAMES",value:"1",type:"PLAINTEXT"}] else [] end)')"
+    + (if $n != "" then [{name:"SB_OFFLOAD_NAMES",value:"1",type:"PLAINTEXT"}] else [] end)
+    + (if $b != "" then [{name:"SWITCHBOARD_BASE_TREE_KEY",value:$b,type:"PLAINTEXT"}] else [] end)')"
   START_ARGS=(--compute-type-override "$COMPUTE" --image-override "$IMAGE_URI:$TAG" --environment-variables-override "$ENVS")
 fi
 start_build "$PROJECT" "sent the work tree ($FILES files, $((SIZE / 1024)) MB) and started" "($SIZE_NAME)"
 if [ -n "$DETACH" ]; then
   # the build reads the uploads after this returns: nothing is stopped or removed, offload/ expires after a day
-  ENDED=1; UPLOADED=; UP_FIXTURES=; UP_NAMES=
+  ENDED=1; UPLOADED=; UP_FIXTURES=; UP_NAMES=; UP_BASE=
   echo "sb-offload: started $BUILD"
   exit 0
 fi

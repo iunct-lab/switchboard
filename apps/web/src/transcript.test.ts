@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentEvent, EventEnvelope } from "@switchboard/protocol";
+import { REPLY_QUEUED, type AgentEvent, type EventEnvelope } from "@switchboard/protocol";
 import { firstInstruction, foldTranscript, itemText, spanText, transcriptMarkdown, turnReply } from "./transcript.ts";
 
 const env = (evs: AgentEvent[]): EventEnvelope[] => evs.map((ev, i) => ({ taskId: "t", seq: i + 1, ts: i, ev }));
@@ -16,6 +16,12 @@ test("auto-review decisions remain readable after later status and turn completi
   expect(transcript.items.filter((i) => i.kind === "note").map((i) => i.text)).toEqual([approved, denied]);
   expect(transcript.lastStatus).toBe("thread idle");
   expect(transcript.pending).toEqual([]);
+});
+
+test("a reply that waits for a run slot shows its queue line (reason, place, the text) as a note", () => {
+  const queued = `${REPLY_QUEUED}（実行枠が埋まっているため待機、実行中 1 / 上限 1、待ち 1 番目）: 「again」`;
+  const t = foldTranscript(env([{ t: "message.delta", role: "assistant", text: "ok" }, { t: "session.end", status: "ok" }, { t: "status", text: queued }]));
+  expect(t.items.at(-1)).toMatchObject({ kind: "note", tone: "info", text: queued });
 });
 
 describe("foldTranscript attachments (#125)", () => {

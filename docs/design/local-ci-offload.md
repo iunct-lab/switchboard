@@ -133,6 +133,11 @@ Seconds, sizes and costs are not written here: they change with the image, the m
 
 - The `sb-step: <n> begin <time>` and `sb-step: <n> exit <code> <time>` lines give each step's seconds in the build.
 - `sb-offload: image <tag>` names the image a run used. `sb-offload: started <build-id> …` gives when the build started; the time from there to the first `sb-step: 0 begin` is the provisioning, the image pull and the setup.
+- `sb-file: <name> <base64>` is a file the build hands back through its log, one line per file, after the last perf step: `perf-result.json` (the bench's result) and `perf-base.json` (the compared tag's bundle and ceilings). The host reads the lines to record the counts and judge the ceilings; any other name, or a line that is not JSON, is left out, and a missing file changes no step's result.
 - Billing is per started minute of the build, at the price of the machine's size in [aws/README.md](../../aws/README.md) "Offload" (local-ci asks for the small size).
 
-The `local` ceilings in `scripts/perf-budget.json` were measured on the host; a build is another machine, so the seconds of steps run off the host are not compared with them.
+The `local` ceilings in `scripts/perf-budget.json` were measured on the host; a build is another machine, so the seconds of steps run off the host are not compared with them. This holds for the tag CI too: a tag's run in a build lists no `所要時間が上限を超えた` lines, and `offload` in the budget has counts and `loaded` but no `durations`.
+
+## The tag CI uses the same runner
+
+`bun scripts/tag-ci.ts` chooses the place the way local-ci does: where `sb-offload` is on `PATH` every step of the CI, perf included, runs in one build, and the host holds no heavy-work slot while it waits; `--local`, or no `sb-offload`, runs the steps on the host inside the slot. Unlike a pull request's run, the tag's build includes the perf steps and the whole `bun test`. Because the build has no `.git` and no GitHub credentials, the host packs the tag the counts are compared with (`git archive`, with its commit in `.sb-sha`) and passes it by `--base-tree`; the build gets `PERF_BASE_TREE` and `PERF_ENV=offload`, so the counts are judged against the `offload` ceilings (see [perf.md](perf.md)). The host writes the Release's mark and the records after reading the log, as for a pull request. The build's id is written to a record under `~/.cache/switchboard.tag-ci-pending/` once the build has started, so a run that is gone does not lose the result (see "Tag CI" in [releases-and-rescue.md](releases-and-rescue.md)).

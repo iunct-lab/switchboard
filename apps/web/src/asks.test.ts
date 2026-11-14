@@ -216,6 +216,20 @@ test("policySummary warns on a target that matches every subcommand", () => {
   expect([broadTarget("exec", "bun"), broadTarget("exec", "b* test"), broadTarget("write", "src *")]).toEqual([null, null, null]);
 });
 
+test("policySummary warns on a program prefix wildcard", () => {
+  const a = ask({ subject });
+  const input = { scope: "repo" as const, target: "bun*", when: [], expiresAt: NOW + 30 * 86_400_000 };
+  const warn = (target: string, x = a) => policySummary(x, { ...input, target }, "許可", NOW).filter((l) => l.startsWith("広い指定"));
+  const line = (name: string, stem: string) => `広い指定: ${name} は ${stem} のどのサブコマンドにも、${stem} で始まる別のプログラムにも当たります`;
+  expect(warn("cmd:bun*")).toEqual([line("bun*", "bun")]);
+  expect(warn("cmd:git*")).toEqual([line("git*", "git")]);
+  expect(warn("cmd:npm{,x}*")).toEqual([line("npm* / npmx*", "npm / npmx")]);
+  expect(warn("bun* *")).toEqual([line("bun*", "bun")]);
+  // a bare `bun*` is a path pattern to core's globMatch (no command matches it); a trailing `?` is one character, not every subcommand
+  for (const target of ["bun*", "npm{,x}*", "cmd:bun?", "bun test*", "bun", "b* test", "bun* test", "*"]) expect(warn(target)).toEqual([]);
+  expect(warn("src*", ask({ subject: { ...subject, op: "write" } }))).toEqual([]);
+});
+
 test("policy: scope labels — the three ranges name the PBI number and the workspace", () => {
   const a = ask({ pbi: { number: 938, title: "t", url: "u" }, workspace: { id: "w", name: "switchboard" } });
   expect(["once", "pbi", "repo"].map((s) => scopeLabel(s as "once", a))).toEqual(["今回のみ", "この PBI 内（#938）", "このリポジトリ（switchboard）"]);

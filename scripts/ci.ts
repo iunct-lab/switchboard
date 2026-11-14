@@ -40,7 +40,14 @@ export const ciSteps: Step[] = [
   // --depth=1 only in Actions' shallow checkout: in local-ci's worktree it would make the developer's clone shallow
   {
     name: "fetch main",
-    run: `if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi
+    // off the host the build has no credentials (PERF_ENV=offload, which the offload script exports): the compared tag came as a tree
+    // (PERF_BASE_TREE), or could not be unpacked and perf goes uncompared; either way nothing is fetched and the build goes on
+    // (perf is a record and a warning). The offload script runs git init and adds an origin with no credentials, so the
+    // "not a git work tree" line below does not catch it and a fetch of a private repo would exit 128
+    run: `if [ -n "\${PERF_BASE_TREE:-}" ]; then echo "PERF_BASE_TREE is given: main is not fetched"; exit 0; fi
+if [ "\${PERF_ENV:-}" = offload ]; then echo "off the host (PERF_ENV=offload): main is not fetched"; exit 0; fi
+if ! git rev-parse --git-dir >/dev/null 2>&1; then echo "not a git work tree: main is not fetched"; exit 0; fi
+if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi
 git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`, // the tag CI compares perf with the tag before (PERF_BASE_REF), not this tip
   },
   // perf-bench shows Chrome only Noto Sans + Noto Sans CJK (the same text size everywhere); ubuntu-latest has neither
@@ -52,7 +59,7 @@ sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-core fonts-not
   // main's tip, built and measured for the bundle check: compared with origin/main's tip, not the PR's base branch, so a
   // stack's top compares the whole stack. The tag CI records it (perf-records/bundle.tsv) and compares with the tag before:
   // it passes PERF_BASE_REF (#4219), so the growth and raised ceilings are the tag's own
-  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json', keepGoing: true },
+  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'if [ -n "${PERF_BASE_TREE:-}" ]; then bun scripts/perf-ratchet.ts base --tree "$PERF_BASE_TREE" perf-base.json; else bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json; fi', keepGoing: true },
   // the perf steps run before bun test (their result does not wait 5 minutes for it) and keep going: a perf red still
   // runs bun test, so a run says both (#2945). Not in parallel: perf-bench is not measured next to another load.
   { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", keepGoing: true },

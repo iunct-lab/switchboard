@@ -3,7 +3,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { diskFullHit, diskFullText } from "./diskfull.ts";
 import { githubLimitHit, usesGraphql } from "./ratelimit.ts";
 import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, LlmSuggestion, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, Task } from "@switchboard/protocol";
-import { CloudSessionRef } from "@switchboard/protocol";
+import { CloudSessionRef, REPLY_QUEUED } from "@switchboard/protocol"; // REPLY_QUEUED: the queued reply's status line, which also answers the Task's open stops
 import { readCloudPreparation } from "./claude-cloud.ts";
 import { ledgerRowFor, usageSince } from "./pricing.ts";
 import { withAttachments, type AttachmentStore } from "./attachments.ts";
@@ -385,18 +385,16 @@ export class TaskManager {
    * Why a new start has to wait (null = it may start). The count is the limit; the memory is read only while something
    * runs — with nothing running no event would ever call drain() again, so a first Task is never held for memory.
    */
-  private slotBlock(): { wait: string; refuse: string; detail: string; hint: string; memory?: true } | null {
+  private slotBlock(): { wait: string; detail: string; memory?: true } | null {
     const occupied = this.occupied();
     const max = this.maxRunners();
-    if (occupied >= max) return { wait: "実行枠が埋まっているため待機", refuse: "実行枠が埋まっています", detail: `実行中 ${occupied} / 上限 ${max}`, hint: "空くまで待つか、Settings の同時に動かす Task の上限を上げてください" };
+    if (occupied >= max) return { wait: "実行枠が埋まっているため待機", detail: `実行中 ${occupied} / 上限 ${max}` };
     const mem = occupied > 0 ? this.memoryHeadroom?.() : null;
     if (mem && mem.free < mem.safety)
       return {
         memory: true,
         wait: "空きメモリ不足のため待機",
-        refuse: "空きメモリが足りません",
         detail: `空き ${Math.floor(mem.free / 1048576)} MB / 安全弁 ${Math.ceil(mem.safety / 1048576)} MB`,
-        hint: "空くまで待つか、安全弁（~/.config/ops-kit/heavy.json の taskMinFreeMb、既定 300）を下げてください",
       };
     return null;
   }
@@ -476,12 +474,14 @@ export class TaskManager {
           if (st && !IN_FLIGHT.has(st)) void this.release(id); // takes the entry out of `live` at once
         }
         this.record(next.id, { t: "status", text: "実行枠が空いたので開始" });
-        const atts = this.attachments?.listForTask(next.id) ?? [];
+        // the files this prompt names: the first prompt's, or the queued replies' (an earlier turn's files are not sent again)
+        const atts = (this.attachments?.listForTask(next.id) ?? []).filter((a) => prompt.includes(a.path));
         const task = this.mustGet(next.id);
         const warning = this.memoryWarning(task);
         if (warning) this.record(task.id, { t: "status", text: warning });
         try {
-          this.startOrFail(task, prompt, atts);
+          const { resume, preamble } = this.resumeArgs(task); // a queued reply continues the session the Task had
+          this.startOrFail(this.withResolvedMode(task), prompt, atts, resume, preamble);
         } catch {
           // startOrFail wrote the error on the row; the next one may still start
         }
@@ -1124,7 +1124,9 @@ export class TaskManager {
    * the shadow's runner was not stopped by that. `daemon` (the daemon continuing a task whose waits closed) is
    * the daemon's own turn with no plan behind it: it is not copied, answers no stop, clears no planned resume, and is
    * refused (ResumeSupersededError) while the task runs, waits or has a resume planned, or when 中断 or a reply came
-   * while it waited for the runner's process to close.
+   * while it waited for the runner's process to close. Any turn that needs a new process while the run slots or the
+   * memory are short (a person's reply, an `asResume` or a `daemon` turn alike) waits in the queue instead of failing:
+   * drain() starts it with --resume once there is room.
    */
   async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
     // Everything that can refuse the turn (unknown task, a superseded resume, the budget) runs before any file moves:
@@ -1138,7 +1140,9 @@ export class TaskManager {
     const task = await this.dispatch(taskId, text, atts);
     // The person's turn answers the task's open stops, by its user message (none echoed = nothing recorded).
     if (!opts.asResume && !opts.daemon) {
-      const said = this.db.listEvents(taskId, before - 1).find((e) => e.ev.t === "message.delta" && e.ev.role === "user");
+      // a reply put in the queue echoes no message yet (it is sent when the Task starts): the status line that says so is the answer
+      const added = this.db.listEvents(taskId, before - 1);
+      const said = added.find((e) => e.ev.t === "message.delta" && e.ev.role === "user") ?? added.find((e) => e.ev.t === "status" && e.ev.text.startsWith(REPLY_QUEUED));
       if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
     }
     const shadow = opts.asResume || opts.daemon || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
@@ -1200,17 +1204,34 @@ export class TaskManager {
       if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
     }
     if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
-    // the run slots, before the attachments move: a Task still in the queue starts with its first prompt, from
-    // drain() (a reply now would start it without that); a turn that needs a new process waits for a free slot
-    if (task.queuedAt !== null) throw new Error("実行枠待ちの Task です。始まるまで待つか、中断してください");
-    if (!this.live.has(taskId)) this.refuseWithoutSlot(task);
     return task;
   }
 
-  /** Throws when a new process for `task` would exceed the run slots. The API answers it with 409. */
-  private refuseWithoutSlot(task: Task): void {
-    const block = task.executionMode === "local" ? this.slotBlock() : null;
-    if (block !== null) throw new Error(`${block.refuse}（${block.detail}）。${block.hint}`);
+  /** The resume of a start that continues the Task's session: its id, or (when this machine has no record of it) a recap for a new session. */
+  private resumeArgs(task: Task): { resume?: string; preamble?: string } {
+    const resume = task.runnerSessionId ?? undefined;
+    // A task moved from another machine whose session record did not come along: `--resume` would fail at once
+    // (error_during_execution), so start a new session and hand it the transcript Switchboard kept.
+    if (resume && this.adapters.get(task.runner)?.hasSession?.(resume) === false) {
+      this.record(task.id, { t: "status", text: `前のセッション（${resume}）の記録がこの機械に無いため、これまでのやり取りを渡して新しいセッションで続けます` });
+      return { preamble: recapOf(this.db.listEvents(task.id).map((e) => e.ev)) };
+    }
+    return { resume };
+  }
+
+  /**
+   * A reply that cannot start a process now waits in the queue (the row stays `idle` with `queued_at`, so a restart
+   * keeps it). A Task already waiting gets the reply after its prompt; drain() starts it with --resume.
+   */
+  private queueReply(task: Task, text: string, block: ReturnType<TaskManager["slotBlock"]>): Task {
+    this.db.queueReply(task.id, text, Date.now());
+    const position = this.db.listQueuedTasks().findIndex((t) => t.id === task.id) + 1;
+    // the whole reply: the input box is cleared, and this line is where the text stays in the log until the Task starts
+    this.record(task.id, { t: "status", text: `${REPLY_QUEUED}（${block?.wait ?? "待ち列にいます"}${block ? `、${block.detail}` : ""}、待ち ${position} 番目）: 「${text.trim()}」` });
+    this.broadcast({ type: "task.updated", task: this.mustGet(task.id) });
+    // the same as a first prompt (admit): short of memory with a finished Task's process open = close it now, then look again
+    if (block?.memory && this.idleLive().length > 0) void this.releaseIdleForMemory().then(() => this.drain());
+    return this.mustGet(task.id);
   }
 
   /**
@@ -1222,6 +1243,8 @@ export class TaskManager {
     const dirs = Array.from(new Set(atts.map((a) => dirname(a.path))));
     let widened = false;
     if (dirs.length) ({ task, widened } = this.widenScope(task, dirs));
+    // a Task still in the queue starts from drain() with its first prompt: the reply goes after it
+    if (task.queuedAt !== null) return this.queueReply(task, text, task.executionMode === "local" ? this.slotBlock() : null);
     const live = this.live.get(taskId);
     // A process flagged for restart is released first; release() refuses while a turn is in flight, and then the
     // live process takes the text as before (the mode change waits for the next turn) — never two processes.
@@ -1238,16 +1261,10 @@ export class TaskManager {
     }
     if (widened && live) this.record(taskId, { t: "status", text: "添付ディレクトリを scope に加えたので、プロセスを再開します（--resume）" });
     task = this.mustGet(taskId); // the release above was awaited: a model or mode chosen meanwhile is the one to start with
-    let resume = task.runnerSessionId ?? undefined;
-    let preamble: string | undefined;
-    // A task moved from another machine whose session record did not come along: `--resume` would fail at once
-    // (error_during_execution), so start a new session and hand it the transcript Switchboard kept.
-    if (resume && this.adapters.get(task.runner)?.hasSession?.(resume) === false) {
-      preamble = recapOf(this.db.listEvents(taskId).map((e) => e.ev));
-      this.record(taskId, { t: "status", text: `前のセッション（${resume}）の記録がこの機械に無いため、これまでのやり取りを渡して新しいセッションで続けます` });
-      resume = undefined;
-    }
-    this.refuseWithoutSlot(task); // again: preflight saw a live process that a release above may have closed
+    // no process, and no slot for a new one (preflight saw a live process that a release above may have closed): wait in the queue
+    const block = task.executionMode === "local" ? this.slotBlock() : null;
+    if (block !== null) return this.queueReply(task, text, block);
+    const { resume, preamble } = this.resumeArgs(task);
     const warning = this.memoryWarning(task);
     if (warning) this.record(taskId, { t: "status", text: warning });
     this.startOrFail(this.withResolvedMode(task), text, atts, resume, preamble);

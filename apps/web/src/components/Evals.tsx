@@ -6,6 +6,7 @@ import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
 import { Reports } from "./Reports.tsx";
 import { Ops } from "./Ops.tsx";
+import { Sources } from "./Sources.tsx";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";
 
@@ -94,6 +95,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     <main className="main ledger evals-screen">
       <Reports openId={props.openReport} scope={props.scope} onScope={props.onScope} onOpenTask={props.onOpenArtifact} onError={props.onError} />
       <Ops onOpenTask={props.onOpenTask} />
+      <Sources />
       <section className="card">
         <h5>{t(m.askHeading)}</h5>
         {summaryFailed ? (

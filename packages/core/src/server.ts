@@ -48,6 +48,7 @@ import { capSnapshot, collectTaskDiff, mergeSnapshot, withSnapshot, WRITE_TOOLS 
 import { parseCron } from "./cron.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView, warmInterventions } from "./interventions.ts";
+import { SourceCache, sourceView } from "./sources.ts";
 import { branchTip, checkFieldChoices, checkLocalChange, checkLocalFields, checkLocalParent, localForgeOf, localProjectFields } from "./backlog-local.ts";
 import { readProjectFields } from "./backlog-send.ts";
 import { enableGithubSync, enablingOf } from "./backlog-enable.ts";
@@ -668,6 +669,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
   // the flow of the closed PBIs: the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
   const flowWorkspaces = (): FlowWorkspace[] => db.listWorkspaces().map((w) => ({ id: w.id, name: w.name, path: w.path, repository: db.getWorkspaceBacklogSource(w.id)?.repository ?? null }));
+  const sources = new SourceCache((days, now) => sourceView(db, flowWorkspaces(), days, now), () => flowScope(flowWorkspaces()));
   const flow = new FlowCache((now) => flowView(opts.gh ?? runGh, flowWorkspaces(), db, 30, now), () => flowScope(flowWorkspaces()));
   // a request that was out when the daemon stopped is looked for before it is sent again
   db.recoverBacklogOperations();
@@ -3402,6 +3404,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       /** People's interventions and why work stopped, the last 7 and 30 days against the period before each. Counted at each look from the records and the stored Issues: no GitHub call. */
       "/api/interventions": {
         GET: () => json(interventionView(db, db.listWorkspaces())),
+      },
+
+      /** What became of the requests of each speaker (and route) in the last ?days= days (default 30, 1 to 3650). Counted from the stored records and the Tasks (no GitHub call), held for an hour per ?days=. */
+      "/api/sources": {
+        GET: async (req) => {
+          const n = Number(new URL(req.url).searchParams.get("days") ?? 30);
+          const days = Number.isFinite(n) ? Math.min(3650, Math.max(1, Math.round(n))) : 30;
+          return json(await sources.get(days));
+        },
       },
 
       /** How long the PBIs closed in the last 30 days took, stage by stage, and in the 30 days before. Held for an hour; ?refresh=1 reads again. */

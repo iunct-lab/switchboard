@@ -17,7 +17,15 @@
  * on the open tag-CI requests (they stay open: the PBI that fixed it closes them). What an open request already says is
  * not said again. With --repo no request is filed: a fail prints the request's text to stderr on every run (the
  * scheduled Task reports it as its stop).
- * A run whose steps all ran and whose `bun test` passed (a perf-only fail too) also compares the type check's and bun
+ * Where it runs (the same choice as local-ci's): where `sb-offload` is on PATH (`deps.offload`) every step of the CI, perf included,
+ * runs in one build off the host (`runCheckout`), so no heavy slot is held; the compared tag goes to that build as a tar of
+ * `git archive` (`--base-tree`: the build has no history and no GitHub credentials), and perf is judged against the
+ * `offload` ceilings. `--local`, or a host without `sb-offload`, runs every step here inside the slot against the `local`
+ * ceilings. The fetch, the Releases, the requests and the records stay on the host either way (docs/design/releases-and-rescue.md).
+ * A build's id is written to `~/.cache/switchboard.tag-ci-pending/<owner>_<name>-<tag>.json` once it has started and removed after the mark is written: a run
+ * that is gone (the daemon restarted, the host stopped) leaves the result to the next run, which reads it before running the tag, writes the mark and starts no
+ * build. A record of another commit (the tag moved) is not used and the build's own record replaces it; one whose build's log is gone (kept 7 days) is removed; either way the tag runs again. Nothing picks it up at the daemon's start.
+ * A run here (not in a build off the host: its seconds are another machine's) whose steps all ran and whose `bun test` passed (a perf-only fail too) also compares the type check's and bun
  * test's seconds with the `local.durations` ceilings of scripts/perf-budget.json (local-ci's `durationOver`): the `over:`
  * lines stay in the Release's `## CI` under `所要時間が上限を超えた（結果は変えない）:`, and the result, the exit code and
  * the requests do not change (a budget that cannot be read compares nothing).
@@ -36,7 +44,7 @@
  * there is written to stderr and leaves the exit code alone.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { forgeTargetOf, originOf } from "../ops-kit/src/forge.ts";
@@ -47,7 +55,7 @@ import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
-import { durationOver, isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps } from "./local-ci.ts";
+import { BUILD_LOG_KEEP_MS, buildSpoke, durationOver, hostOffload, isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps, type Offload } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -262,7 +270,7 @@ export interface TagCiEntry { tag: string; sha: string; result: "pass" | "fail";
  * main's bundle and bytes as this tag's run measured them (perf-base.json in `dir`) and the tag's own counts
  * (perf-result.json), pass or fail, on the records branch (#4105; docs/design/perf.md "Bundle history"). A failure is logged and changes nothing; a GitLab target is not recorded.
  */
-export async function recordMeasures(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">): Promise<void> {
+export async function recordMeasures(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log" | "offload">): Promise<void> {
   const at = new Date().toISOString();
   await recordOne(root, d, "bundle", RECORDS_PATH, (r, dr, t, sh) => recordBundle(r, dr, t, sh), repo, dir, at);
   await recordOne(root, d, "bytes", BYTES_RECORDS_PATH, (r, dr, t, sh) => recordBytes(r, dr, t, sh), repo, dir, at);
@@ -270,8 +278,9 @@ export async function recordMeasures(repo: string, root: string, dir: string, ta
 }
 
 /** The counts of `dir`'s perf-result.json as `tag`'s row on the records branch. */
-async function recordCountsOf(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log">, at = new Date().toISOString()): Promise<void> {
-  await recordOne(root, d, "counts", COUNTS_RECORDS_PATH, (r, dr, t, sh) => recordCounts(r, dr, t, envOf(undefined), tag, sha, sh), repo, dir, at);
+async function recordCountsOf(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log" | "offload">, at = new Date().toISOString()): Promise<void> {
+  // the counts were measured in the build's environment when the build ran them; here, in the one PERF_ENV / Actions / `local` says
+  await recordOne(root, d, "counts", COUNTS_RECORDS_PATH, (r, dr, t, sh) => recordCounts(r, dr, t, envOf(d.offload ? "offload" : undefined), tag, sha, sh), repo, dir, at);
 }
 
 async function recordOne(
@@ -290,6 +299,65 @@ async function recordOne(
   );
 }
 
+/**
+ * The tree of `ref` (the tag before, or origin/main's tip for the first tag) as a tar at `out`, without node_modules, with
+ * its commit on one line in `.sb-sha` (`perf-ratchet.ts base --tree` reads it): what `sb-offload --base-tree` hands the build.
+ */
+export async function baseTreeTar(ref: string, root: string, out: string, sh: TagCiDeps["sh"]): Promise<string> {
+  const sha = (await sh(["git", "-C", root, "rev-parse", "--verify", `${ref}^{commit}`])).trim();
+  await sh(["git", "-C", root, "archive", "--format=tar", "-o", out, sha]);
+  const extra = mkdtempSync(`${out}.sha.`);
+  try {
+    writeFileSync(join(extra, ".sb-sha"), `${sha}\n`);
+    await sh(["tar", "-rf", out, "-C", extra, ".sb-sha"]);
+  } finally {
+    rmSync(extra, { recursive: true, force: true });
+  }
+  return out;
+}
+
+/**
+ * A build started for a tag and not yet written to its Release: what the result needs, no more (no token, no AWS name: the build's id names the build).
+ * One file per tag under `tagPendingDirOf`, written when the build has started and removed once the mark is written, so a run that is gone (the daemon
+ * restarted, the host stopped) leaves the result to the next run, which writes the mark from it and starts no build (the way local-ci's pending records go).
+ */
+export interface TagPending { repo: string; tag: string; sha: string; before: string | null; build: string; /** When the build started (ms): its log is kept 7 days. */ at: number }
+
+export const tagPendingDirOf = (cache: string): string => join(cache, "switchboard.tag-ci-pending");
+const tagPendingFile = (cache: string, repo: string, tag: string): string => join(tagPendingDirOf(cache), `${repo.replaceAll("/", "_")}-${tag}.json`);
+
+export function writeTagPending(cache: string, p: TagPending): void {
+  mkdirSync(tagPendingDirOf(cache), { recursive: true });
+  const file = tagPendingFile(cache, p.repo, p.tag);
+  writeFileSync(`${file}.tmp`, JSON.stringify(p), { mode: 0o600 });
+  renameSync(`${file}.tmp`, file);
+}
+
+export const clearTagPending = (cache: string, repo: string, tag: string): void => rmSync(tagPendingFile(cache, repo, tag), { force: true });
+
+function readTagPending(cache: string, repo: string, tag: string): TagPending | undefined {
+  try {
+    const p = JSON.parse(readFileSync(tagPendingFile(cache, repo, tag), "utf8")) as Partial<TagPending>;
+    return p.repo === repo && p.tag === tag && typeof p.sha === "string" && typeof p.build === "string" && typeof p.at === "number" ? (p as TagPending) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A build whose result cannot be read any more (its log is kept 7 days, or the build is not there). */
+class BuildGone extends Error {}
+
+/** `o` with a build already started: `start` hands back its id (nothing is started) and `collect` reads it, so the steps that follow are the ones of a build just started. */
+const resumed = (o: Offload, build: string): Offload => ({
+  ...o,
+  start: async () => ({ build }),
+  collect: async (b) => {
+    const out = await o.collect(b);
+    if (!buildSpoke(out.output)) throw new BuildGone();
+    return out;
+  },
+});
+
 /** One tag's CI in its own worktree; the result to record. */
 async function runTag(tag: string, before: string | undefined, sha: string, repo: string, root: string, d: TagCiDeps, cache: string) {
   mkdirSync(cache, { recursive: true });
@@ -297,16 +365,44 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
   const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
   try {
     await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
-    const env = { ...stepEnv(tmp), ...(before ? { PERF_BASE_REF: before } : {}) };
-    // a checkout without the list (another repository) has no recordings to ask for; one that cannot say is not judged
-    if (requireRecordings() && existsSync(join(dir, "scripts/fixtures.ts"))) {
-      const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
-      const listed = await d.sh(["env", "-i", ...vars, process.execPath, "scripts/fixtures.ts", "list"], dir).catch(() => null);
-      if (listed === null) return { missing: ["（録画の一覧を読めなかった）"] };
-      const missing = listed.split("\n").filter((l) => l.startsWith("missing ")).map((l) => l.slice("missing ".length));
-      if (missing.length > 0) return { missing };
+    // the host's run compares with the tag before by ref; off the host the build gets no env from here (the compared tag goes as a tar, `baseTreeTar`)
+    const env = { ...stepEnv(tmp), ...(before && !d.offload ? { PERF_BASE_REF: before } : {}) };
+    // a build of this tag left by a run that is gone: its result is read, no build starts (a tag that moved since is not the one it built)
+    const prior = d.offload ? readTagPending(cache, repo, tag) : undefined;
+    let run: Awaited<ReturnType<typeof runCheckout>> | undefined;
+    if (prior && prior.sha === sha) {
+      d.log(`${tag}: 始まっているビルド ${prior.build} の結果を待つ（新しくは始めない）`);
+      try {
+        run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, { ...d, offload: resumed(d.offload!, prior.build) }, cache, undefined, repo, true, false);
+      } catch (e) {
+        if (!(e instanceof BuildGone)) throw e;
+        // a younger one may be a blip (the read failed, the build still runs): the record stays for the next run, which reads it again (as local-ci's pending records)
+        if ((d.now?.() ?? Date.now()) - prior.at <= BUILD_LOG_KEEP_MS) {
+          d.log(`${tag}: ビルド ${prior.build} の結果を読めない。記録を残し、次の実行で読む（新しくは始めない）`);
+          return { held: prior.build };
+        }
+        d.log(`${tag}: ビルド ${prior.build} の結果を書けない（ログは 7 日で消える）。記録を消して回し直す`);
+        clearTagPending(cache, repo, tag);
+      }
     }
-    const run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache);
+    if (!run) {
+      // a checkout without the list (another repository) has no recordings to ask for; one that cannot say is not judged
+      if (requireRecordings() && existsSync(join(dir, "scripts/fixtures.ts"))) {
+        const vars = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+        const listed = await d.sh(["env", "-i", ...vars, process.execPath, "scripts/fixtures.ts", "list"], dir).catch(() => null);
+        if (listed === null) return { missing: ["（録画の一覧を読めなかった）"] };
+        const missing = listed.split("\n").filter((l) => l.startsWith("missing ")).map((l) => l.slice("missing ".length));
+        if (missing.length > 0) return { missing };
+      }
+      // the host installs sb-offload at its boot and this code comes with a merge: an older one would take --base-tree for the command
+      // (and every step would fail), so the tar goes only where sb-offload names the flag; the check stays for the next new flag
+      const knows = d.offload ? (await d.offload.knowsBaseTree?.()) !== false : false;
+      if (d.offload && !knows) d.log(`${tag}: sb-offload が --base-tree を知らない（ホストの次の起動で入る）。比べるタグを渡さずに回す`);
+      const baseTree = knows ? await baseTreeTar(before ?? "origin/main", root, join(tmp, "base.tar"), d.sh) : undefined;
+      // the build's id is written down as soon as it has started: a run cut off then leaves its result to the next run
+      const started = d.offload ? (build: string) => writeTagPending(cache, { repo, tag, sha, before: before ?? null, build, at: Date.now() }) : undefined;
+      run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache, undefined, repo, true, false, started, baseTree);
+    }
     await recordMeasures(repo, root, dir, tag, sha, d);
     // every failed step: a perf step's failure does not stop bun test (#2945)
     const failed = run.results.filter((x) => x.code !== 0);
@@ -335,7 +431,8 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     const selection = test !== undefined ? await selectionLine(test, before, dir, env, d) : undefined;
     // every step ran and bun test passed: its seconds and the type check's against the ceilings; a CI without those steps is not compared
     const bunTest = run.results.find((x) => x.name === "bun test");
-    const compared = run.results.length === run.steps.length && bunTest?.code === 0 && existsSync(join(dir, "scripts/ci.ts"));
+    // a build off the host is another machine: its seconds are not the host's `local` ceilings' (docs/design/local-ci-offload.md), as local-ci leaves them out too
+    const compared = !d.offload && run.results.length === run.steps.length && bunTest?.code === 0 && existsSync(join(dir, "scripts/ci.ts"));
     // a CI without those steps (stepSeconds throws) or a budget that cannot be read compares nothing: the result stays
     const durations = compared ? await (async () => durationOver(dir, stepSeconds(run.results)))().catch(() => []) : [];
     const step = counted.length ? counted.map((f) => f.name).join(" / ") : undefined;
@@ -354,8 +451,9 @@ export async function tagCi(d: TagCiDeps, repo: string, root: string, cache = jo
 }
 
 async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string, host: HostAws): Promise<TagCiEntry[]> {
-  // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test
-  return d.slot(`tag-ci ${repo}`, async () => {
+  // one heavy slot for the whole run (every tag it walks): the same as local-ci, whose steps it runs with every test; off the host the build holds the load, not this process
+  const slot: TagCiDeps["slot"] = d.offload ? (_name, fn) => fn() : d.slot;
+  return slot(`tag-ci ${repo}`, async () => {
     await d.sh(["git", "-C", root, "fetch", "-q", "origin", "--tags", "--force"]);
     // a recording made since the last run reaches the branch, and one this host lost comes back before the check reads the folder
     if (d.sync && requireRecordings()) {
@@ -407,7 +505,10 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
         d.onSkip?.(tag, r.missing);
         break;
       }
+      // a build of this tag whose result could not be read yet: no mark, the walk stops (the next run reads it)
+      if ("held" in r) break;
       await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
+      clearTagPending(cache, repo, tag);
       d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.warnings.length ? `（perf の警告 ${r.warnings.length} 件）` : ""}`);
       if (r.warnings.length && d.onPerfStreak) await perfStreakOf(d, tag, sha, r.warnings, tags.slice(i + 1), repo, root);
       out.push({ tag, sha, result: r.ok ? "pass" : "fail", ran: true, ...(r.ok ? {} : { step: hidePaths(r.step ?? ""), fails: r.fails }) });
@@ -461,15 +562,18 @@ export async function latestPassTag(sh: TagCiDeps["sh"], repo: string, root: str
   });
 }
 
-/** `--latest-pass` and `--contained-in <commit>` taken off the arguments; the rest is for resolveRepo. */
-export function parseArgs(args: string[]): { latestPass: boolean; containedIn: string | undefined; rest: string[] } {
+/** `--latest-pass`, `--contained-in <commit>` and `--local` (every step here, not in the build off the host) taken off the arguments; the rest is for resolveRepo. */
+export function parseArgs(args: string[]): { latestPass: boolean; containedIn: string | undefined; local: boolean; rest: string[] } {
   const at = args.indexOf("--contained-in");
   const containedIn = at < 0 ? undefined : args[at + 1];
   if (at >= 0 && (!containedIn || containedIn.startsWith("--"))) throw new TargetError("--contained-in の後にコミットを書く");
   const latestPass = args.includes("--latest-pass");
   if (at >= 0 && !latestPass) throw new TargetError("--contained-in は --latest-pass と一緒に使う");
-  return { latestPass, containedIn, rest: args.filter((a, i) => a !== "--latest-pass" && (at < 0 || (i !== at && i !== at + 1))) };
+  return { latestPass, containedIn, local: args.includes("--local"), rest: args.filter((a, i) => a !== "--latest-pass" && a !== "--local" && (at < 0 || (i !== at && i !== at + 1))) };
 }
+
+/** The builds off the host to run in: none with `--local`, else the host's (none where `sb-offload` is not on PATH), as local-ci chooses. */
+export const offloadFor = (local: boolean, host: () => Offload | undefined = hostOffload): Offload | undefined => (local ? undefined : host());
 
 /** 0 = the newest tag passed, 1 = it failed, 2 = nothing judged. */
 export const tagCiExit = (entries: TagCiEntry[]): number => (entries[0] === undefined ? 2 : entries[0].result === "pass" ? 0 : 1);
@@ -712,7 +816,7 @@ if (import.meta.main) {
     t = await resolveRepo(a.rest, process.cwd(), join(import.meta.dir, ".."), sh);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;
-    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>]\n       bun scripts/tag-ci.ts --latest-pass [--contained-in <commit>] [--repo <owner/name>]`);
+    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>] [--local]\n       bun scripts/tag-ci.ts --latest-pass [--contained-in <commit>] [--repo <owner/name>]`);
     process.exit(2);
   }
   if (a.latestPass) {
@@ -751,7 +855,8 @@ if (import.meta.main) {
   const self = !process.argv.includes("--repo");
   const onPerfStreak = (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) =>
     perfStreakFollow(tag, sha, keys, lines, { sh, log, file, comment: commentRequest, open: openRequests, text: requestText, print: log }, undefined, earlier);
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait, onPerfStreak } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const offload = offloadFor(a.local);
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait, onPerfStreak } : {}), ...(offload ? { offload } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {

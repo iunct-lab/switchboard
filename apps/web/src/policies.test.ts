@@ -37,6 +37,7 @@ test("useLines: newest first, a Task by its title or id and an Issue by its numb
 
 test("editWarnings: a broad target", () => {
   expect(editWarnings(policy(), "bun *")).toEqual(["広い指定: bun のどのサブコマンドにも当たります"]);
+  expect(editWarnings(policy(), "cmd:bun*")).toEqual(["広い指定: bun* は bun のどのサブコマンドにも、bun で始まる別のプログラムにも当たります"]);
   expect(editWarnings(policy(), "bun test*")).toEqual([]);
   expect(editWarnings(policy({ op: "write" }), "src *")).toEqual([]);
 });

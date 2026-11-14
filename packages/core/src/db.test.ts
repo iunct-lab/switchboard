@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
-import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
 // The stored backlog: records per repository, kept across a restart and a backup.
@@ -521,6 +521,29 @@ test("listEventsTail / listEventsBefore: the last `limit` events, and the page b
 /** A done task row for the events of the weekly request-count readers. */
 const eventsTask = (db: Db, id: string) =>
   db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run(id);
+
+test("scheduledIssuesSince: the Issues that a schedule's Tasks in any workspace opened since a time, under the schedule's title less a trailing parenthesis, oldest Task first", () => {
+  const db = new Db(join(dir, "scheduled.db"));
+  const schedule = (id: string, title: string, ws: string) =>
+    db.sqlite.query("INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, created_at) VALUES (?, ?, '0 * * * *', ?, 'claude', 'p', 1)").run(id, title, ws);
+  const task = (id: string, scheduleId: string | null, ws: string, createdAt: number, endAt: number, url: string) => {
+    db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, schedule_id, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', ?, ?, 1, 1)").run(id, ws, scheduleId, createdAt);
+    db.appendEventAt(id, { t: "tool.call", id: "a", name: "Bash", input: { command: "gh issue create --title x" }, summary: "create" }, endAt - 2);
+    db.appendEventAt(id, { t: "tool.result", id: "a", ok: true, summary: url }, endAt - 1);
+    db.appendEventAt(id, { t: "session.end", status: "ok" }, endAt);
+  };
+  schedule("s_trend", "動向からの案（全 workspace）", "ws_a");
+  schedule("s_audit", "merge-audit", "ws_a");
+  task("t_audit", "s_audit", "ws_a", 20, 2_000, "https://github.com/acme/app/issues/7");
+  task("t_trend", "s_trend", "ws_b", 10, 2_000, "https://github.com/acme/other/issues/7");
+  task("t_old", "s_audit", "ws_a", 5, 500, "https://github.com/acme/app/issues/8");
+  task("t_hand", null, "ws_a", 30, 2_000, "https://github.com/acme/app/issues/9");
+  expect(scheduledIssuesSince(db.sqlite, 1_000)).toEqual([
+    { schedule: "動向からの案", issues: [{ repo: "acme/other", number: 7 }] },
+    { schedule: "merge-audit", issues: [{ repo: "acme/app", number: 7 }] },
+  ]);
+  db.close();
+});
 
 test("created issues from events: the Issue URLs in the successful results of gh issue create / request_issue.sh, and the app's stored creates by localId, once each", () => {
   const db = new Db(join(dir, "created.db"));

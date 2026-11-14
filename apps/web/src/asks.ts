@@ -246,18 +246,28 @@ function expandBraces(word: string): string[] {
   return m[1]!.split(",").flatMap((alt) => expandBraces(word.slice(0, m.index) + alt + word.slice(m.index + m[0].length)));
 }
 
-/** An exec target that fixes only the program and wildcards the rest (`bun *`, `cmd:git *`): the program names, else null. */
+/**
+ * An exec target that fixes only the program and wildcards the rest (`bun *`, `cmd:git *`): the program names, else null.
+ * A program written as a prefix wildcard with a `*` (`cmd:bun*`, `cmd:npm{,x}*`, `bun* *`) may stand alone with `cmd:` or be followed by wildcards only; its names keep the trailing wildcard.
+ * A bare `bun*` (no `cmd:`, no space) is a path pattern to core's `globMatch` and never matches a command, so it is not broad.
+ */
 export function broadTarget(op: string, target: string): string[] | null {
   if (op !== "exec") return null;
-  const [program, ...rest] = target.trim().replace(/^cmd:/, "").split(/\s+/);
-  if (!program || /[*?[]/.test(program) || rest.length === 0 || !rest.every((w) => /^[*?]+$/.test(w))) return null;
+  const trimmed = target.trim();
+  const [program, ...rest] = trimmed.replace(/^cmd:/, "").split(/\s+/);
+  if (!program || !rest.every((w) => /^[*?]+$/.test(w))) return null;
+  const command = rest.length > 0 || trimmed.startsWith("cmd:");
+  if (/^[^*?[\s]+[*?]+$/.test(program) && program.includes("*") && command) return expandBraces(program);
+  if (/[*?[]/.test(program) || rest.length === 0) return null;
   return expandBraces(program);
 }
 
 /** The warning line for a broad target, or none. */
 export const broadLines = (op: string, target: string): string[] => {
   const names = broadTarget(op, target);
-  return names ? [t(m.broad, { names: names.join(" / ") })] : [];
+  if (!names) return [];
+  if (!/[*?]$/.test(names[0]!)) return [t(m.broad, { names: names.join(" / ") })];
+  return [t(m.broadPrefix, { names: names.join(" / "), stems: names.map((n) => n.replace(/[*?]+$/, "")).join(" / ") })];
 };
 
 /** What the person confirms before a policy is saved: operation, target (and a broad target's warning), conditions, expiry and what is answered. */

@@ -1,9 +1,9 @@
 // test-reads: scripts/perf-ratchet.ts
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, COUNTS_RECORDS_HEADER, countsRows, type CountsRow, parseBytesRows, parseCountsRows, spreadTable, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBy, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
+import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, COUNTS_RECORDS_HEADER, countsRows, type CountsRow, parseBytesRows, parseCountsRows, spreadTable, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBy, mainBudgets, measureRef, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
 
 const budget: Budget = {
   journeys: { send: { requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.0727 } },
@@ -185,16 +185,17 @@ describe("perf-ratchet raisedAgainst", () => {
         journeys: { send: { ...budget.journeys.send!, layoutCount: 5, requests: 5 }, launch: { requests: 99, layoutCount: 99, recalcStyleCount: 99, layoutShift: 1 } },
       },
       local: { journeys: { send: { ...budget.journeys.send!, recalcStyleCount: 6 } } },
+      offload: budget,
     };
-    expect(raisedAgainst(mine, { github: budget, local: budget })).toEqual([
+    expect(raisedAgainst(mine, { github: budget, local: budget, offload: budget })).toEqual([
       { key: "github.journeys.send.layoutCount", value: 5, ceiling: 4 },
       { key: "local.journeys.send.recalcStyleCount", value: 6, ceiling: 5 },
     ]);
     // main's bundle ceilings (before they went) are not raised by a budget without them
-    expect(raisedAgainst({ github: budget, local: budget }, { github: { ...budget, bundle: { js: 1, css: 1 } } as Budget, local: budget })).toEqual([]);
+    expect(raisedAgainst({ github: budget, local: budget, offload: budget }, { github: { ...budget, bundle: { js: 1, css: 1 } } as Budget, local: budget })).toEqual([]);
   });
   test("an environment main does not have yet is not a raise", () => {
-    expect(raisedAgainst({ github: budget, local: { journeys: { send: { ...budget.journeys.send!, requests: 1e9 } } } }, { github: budget })).toEqual([]);
+    expect(raisedAgainst({ github: budget, local: { journeys: { send: { ...budget.journeys.send!, requests: 1e9 } } }, offload: budget }, { github: budget })).toEqual([]);
   });
 });
 
@@ -248,7 +249,7 @@ describe("perf-ratchet durations (#1887)", () => {
   });
   test("test duration ceiling: raising one is raised; lowering one or adding the first is not", () => {
     const main = { github: budget, local: timed };
-    const mine = (durations: Budget["durations"]): Budgets => ({ github: budget, local: { ...budget, durations } });
+    const mine = (durations: Budget["durations"]): Budgets => ({ github: budget, local: { ...budget, durations }, offload: budget });
     expect(raisedAgainst(mine({ typecheck: 60, test: 51 }), main)).toEqual([{ key: "local.durations.test", value: 51, ceiling: 50 }]);
     expect(raisedAgainst(mine({ typecheck: 59, test: 50 }), main)).toEqual([]);
     expect(raisedAgainst(mine({ typecheck: 60, test: 50 }), { github: budget, local: budget })).toEqual([]);
@@ -310,6 +311,60 @@ describe("perf-ratchet environments (#644)", () => {
     expect(envOf("github", {})).toBe("github");
     expect(() => envOf("mac", {})).toThrow("--env");
   });
+  test("PERF_ENV picks the environment when there is no --env; --env wins; a bad PERF_ENV throws", () => {
+    expect(envOf(undefined, { PERF_ENV: "offload" })).toBe("offload");
+    expect(envOf(undefined, { PERF_ENV: "offload", GITHUB_ACTIONS: "true" })).toBe("offload");
+    expect(envOf("local", { PERF_ENV: "offload" })).toBe("local");
+    expect(envOf(undefined, { PERF_ENV: "" })).toBe("local");
+    expect(() => envOf(undefined, { PERF_ENV: "mac" })).toThrow("PERF_ENV");
+  });
+  test("base --tree measures a copy of the tree with no git and reads the sha from .sb-sha", async () => {
+    const work = mkdtempSync(join(tmpdir(), "perf-ratchet-tree."));
+    try {
+      const tree = join(work, "tree");
+      mkdirSync(join(tree, "apps/web/dist/assets"), { recursive: true });
+      writeFileSync(join(tree, ".sb-sha"), "abc1234\n");
+      writeFileSync(join(tree, "apps/web/dist/assets/a.js"), "console.log(1)");
+      writeFileSync(join(tree, "apps/web/dist/assets/a.css"), "a{}");
+      const calls: string[][] = [];
+      const run = (cmd: string[], cwd?: string) => {
+        calls.push(cmd);
+        if (cmd[0] === "cp") Bun.spawnSync(cmd);
+        if (cmd[1] === "scripts/perf-bench.ts") writeFileSync(join(cwd!, "perf-base-bench.json"), JSON.stringify({ journeys: { "open-task": { bytes: 7 }, "open-task-huge": { bytes: 9 } } }));
+        return "";
+      };
+      const out = join(work, "base.json");
+      await measureRef({ tree }, out, run);
+      expect(calls.some((c) => c[0] === "git")).toBe(false);
+      expect(calls.map((c) => c[0])).toEqual(["cp", "bun", "bun", "bun"]);
+      const got = JSON.parse(readFileSync(out, "utf8"));
+      expect(got.sha).toBe("abc1234");
+      expect(got.journeys["open-task"].bytes).toBe(7);
+      expect(got.bundle.js).toBeGreaterThan(0);
+      writeFileSync(join(tree, ".sb-sha"), "\n");
+      await expect(measureRef({ tree }, out, run)).rejects.toThrow("does not hold a commit sha");
+      rmSync(join(tree, ".sb-sha"));
+      await expect(measureRef({ tree }, out, run)).rejects.toThrow(".sb-sha");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+  test("PERF_BASE_TREE: mainBudgets reads that tree's perf-budget.json instead of git show", async () => {
+    const tree = mkdtempSync(join(tmpdir(), "perf-ratchet-base."));
+    const was = process.env.PERF_BASE_TREE;
+    try {
+      mkdirSync(join(tree, "scripts"));
+      writeFileSync(join(tree, "scripts/perf-budget.json"), JSON.stringify({ local: { journeys: { send: { requests: 3 } } } }));
+      process.env.PERF_BASE_TREE = tree;
+      expect(await mainBudgets()).toEqual({ local: { journeys: { send: { requests: 3 } } } });
+      rmSync(join(tree, "scripts/perf-budget.json"));
+      expect(typeof (await mainBudgets())).toBe("string");
+    } finally {
+      if (was === undefined) delete process.env.PERF_BASE_TREE;
+      else process.env.PERF_BASE_TREE = was;
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
   test("perf-budget.json has the four journeys for each environment and no bundle or bytes", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     expect(Object.keys(budgets).filter((k) => k !== "exceptions").sort()).toEqual([...ENVS].sort());
@@ -367,9 +422,9 @@ describe("perf-ratchet bundle growth (#3167)", () => {
       // no --base: usage, exit 2
       expect((await run({ js: 1, css: 1 }, budgets.local.journeys, [])).code).toBe(2);
       // base without its ref or its file: usage, exit 2, nothing built
-      for (const a of [["origin/main"], []]) {
+      for (const a of [["origin/main"], [], ["origin/main", "--tree", "d", "out.json"]]) {
         const p = Bun.spawnSync([process.execPath, "scripts/perf-ratchet.ts", "base", ...a], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: "/nonexistent" } });
-        expect([a.length, p.exitCode, p.stderr.toString().includes("usage: bun scripts/perf-ratchet.ts base <ref> <out.json>")]).toEqual([a.length, 2, true]);
+        expect([a.length, p.exitCode, p.stderr.toString().includes("usage: bun scripts/perf-ratchet.ts base (<ref> | --tree <dir>) <out.json>")]).toEqual([a.length, 2, true]);
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
