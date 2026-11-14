@@ -23,6 +23,8 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   ...over,
 });
 const off = { allowLarge: false };
+/** The security groups the owner moved from asking to a recheck (docs/design/merge-gate.md). */
+const MOVED: string[] = ["security:docs", "security:lockfile"];
 const HEAD = "a".repeat(40);
 /** The facts with the user's yes of the head (--allow-large lifts nothing without it). */
 const yes = (kinds: string, over: Partial<PrFacts> = {}) => base({
@@ -82,7 +84,7 @@ describe("merge-gate judge", () => {
     [".claude/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
     ["ops-kit/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
     ["package.json", "[再チェック size] 保護するパスに触れている"],
-    ["bun.lock", "[聞く] セキュリティ（security:lockfile）"],
+    ["bun.lock", "[再チェック security:lockfile] セキュリティ（security:lockfile）"],
   ])("one line in %s is large: %s", (path, why) => {
     const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
     expect(j.impact).toBe("large");
@@ -215,9 +217,11 @@ describe("security", () => {
     ["scripts/merge-gate.ts", "gates"],
     ["scripts/local-ci.ts", "gates"],
   ])("one line in %s stops as セキュリティ（security:%s）", (path, group) => {
+    const kind = `security:${group}`;
+    const moved = MOVED.includes(kind);
     const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
-    expect(j).toMatchObject({ verdict: "stop", impact: "large", ask: [`security:${group}`] });
-    expect(j.reasons).toEqual([`[聞く] セキュリティ（security:${group}）: ${path}`]);
+    expect(j).toMatchObject({ verdict: "stop", impact: "large", ask: moved ? [] : [kind], recheck: moved ? [kind] : [] });
+    expect(j.reasons).toEqual([`${moved ? `[再チェック ${kind}]` : "[聞く]"} セキュリティ（${kind}）: ${path}`]);
   });
 
   test("a security reason for aws/host/** points at #852; other security reasons do not change (#852)", () => {
@@ -235,20 +239,29 @@ describe("security", () => {
   test("the paths of a group go in one reason, in the PR's order; the groups in SECURITY_KINDS' order", () => {
     const files = ["src/a.ts", "go.sum", "src/token.ts", "src/secret.ts"].map((path) => ({ path, additions: 1, deletions: 0 }));
     expect(judge(base({ files }), off)).toMatchObject({
-      reasons: ["[聞く] セキュリティ（security:words）: src/token.ts, src/secret.ts", "[聞く] セキュリティ（security:lockfile）: go.sum"],
-      ask: ["security:words", "security:lockfile"],
+      reasons: ["[聞く] セキュリティ（security:words）: src/token.ts, src/secret.ts", "[再チェック security:lockfile] セキュリティ（security:lockfile）: go.sum"],
+      ask: ["security:words"],
+      recheck: ["security:lockfile"],
     });
   });
 });
 
 describe("security sub-kinds", () => {
   const one = (path: string) => judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
+  const groups = (j: ReturnType<typeof judge>) => [...j.ask, ...j.recheck];
 
   test.each([
     ["docs/design/secret-guard.md", "security:docs"],
+    ["bun.lock", "security:lockfile"],
+  ] as const)("%s → %s: the reason names the group, recheck has it (moved by the owner)", (path, kind) => {
+    const j = one(path);
+    expect(j).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: [kind] });
+    expect(j.reasons).toEqual([`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`]);
+  });
+
+  test.each([
     ["src/auth/x.ts", "security:words"],
     [".env.local", "security:words"],
-    ["bun.lock", "security:lockfile"],
     [".github/workflows/ci.yml", "security:github"],
     ["scripts/local-ci.ts", "security:gates"],
     ["scripts/forge-resync.ts", "security:gates"],
@@ -271,15 +284,15 @@ describe("security sub-kinds", () => {
 
   test("a document is security:docs alone, before the other groups; an instruction is not a document", () => {
     // a document under a group's paths is docs only, and the host note goes with security:host only
-    expect(one("aws/host/README.md")).toMatchObject({ reasons: ["[聞く] セキュリティ（security:docs）: aws/host/README.md"], ask: ["security:docs"] });
-    expect(one("docs/design/session-sandbox.md").ask).toEqual(["security:docs"]);
+    expect(one("aws/host/README.md")).toMatchObject({ reasons: ["[再チェック security:docs] セキュリティ（security:docs）: aws/host/README.md"], ask: [], recheck: ["security:docs"] });
+    expect(groups(one("docs/design/session-sandbox.md"))).toEqual(["security:docs"]);
     // skills, CLAUDE.md, AGENTS.md and the .github templates decide what a Task gets: their group, not docs
-    expect(one(".github/PULL_REQUEST_TEMPLATE.md").ask).toEqual(["security:github"]);
-    expect(one(".github/workflows/README.md").ask).toEqual(["security:github"]);
-    expect(one(".claude/skills/auth/SKILL.md").ask).toEqual(["security:words"]);
-    expect(one("ops-kit/skills/secret-x/SKILL.md").ask).toEqual(["security:words"]);
-    expect(one("aws/host/CLAUDE.md").ask).toEqual(["security:host"]);
-    expect(one("auth/AGENTS.md").ask).toEqual(["security:words"]);
+    expect(groups(one(".github/PULL_REQUEST_TEMPLATE.md"))).toEqual(["security:github"]);
+    expect(groups(one(".github/workflows/README.md"))).toEqual(["security:github"]);
+    expect(groups(one(".claude/skills/auth/SKILL.md"))).toEqual(["security:words"]);
+    expect(groups(one("ops-kit/skills/secret-x/SKILL.md"))).toEqual(["security:words"]);
+    expect(groups(one("aws/host/CLAUDE.md"))).toEqual(["security:host"]);
+    expect(groups(one("auth/AGENTS.md"))).toEqual(["security:words"]);
   });
 
   test("--allow-large needs a yes naming every group left", () => {
@@ -287,7 +300,39 @@ describe("security sub-kinds", () => {
     const allow = { allowLarge: true };
     expect(judge(yes("security:lockfile", { files }), allow).verdict).toBe("stop");
     expect(judge(yes("security", { files }), allow).verdict).toBe("stop");
-    expect(judge(yes("security:lockfile,security:gates", { files }), allow)).toMatchObject({ verdict: "merge", ask: ["security:lockfile", "security:gates"] });
+    expect(judge(yes("security:lockfile,security:gates", { files }), allow)).toMatchObject({ verdict: "merge", ask: ["security:gates"], recheck: ["security:lockfile"] });
+  });
+});
+
+describe("approved security sub-kind rechecks", () => {
+  const files = (...paths: string[]) => paths.map((path) => ({ path, additions: 1, deletions: 0 }));
+  const marked = (paths: string[], rechecks: RecheckKind[]) => judge(base({ files: files(...paths), rechecks }), off);
+
+  test.each([
+    ["docs/design/secret-guard.md", "security:docs"],
+    ["bun.lock", "security:lockfile"],
+  ] as const)("%s alone: [再チェック %s] stops, its mark of the head lifts it", (path, kind) => {
+    expect(marked([path], [])).toEqual({ verdict: "stop", impact: "large", reasons: [`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`], ask: [], recheck: [kind] });
+    expect(marked([path], [kind])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    // another kind's mark does not lift it
+    expect(marked([path], ["size"]).verdict).toBe("stop");
+  });
+
+  test("a group not moved is still asked, and a mark of the same shape is not read", () => {
+    expect(RECHECK_PASS.exec(`[recheck] security:lockfile pass ${HEAD}`)?.slice(1)).toEqual(["security:lockfile", HEAD]);
+    expect(RECHECK_PASS.exec(`[recheck] security:docs pass ${HEAD}`)?.slice(1)).toEqual(["security:docs", HEAD]);
+    for (const k of ["security:words", "security:github", "security:gates", "security:host"]) expect(RECHECK_PASS.exec(`[recheck] ${k} pass ${HEAD}`)).toBeNull();
+    expect(marked(["src/auth.ts"], [])).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], ask: ["security:words"] });
+  });
+
+  test("a PR touching a moved group and an asked one: the marks lift the moved group, the other is still asked", () => {
+    expect(marked(["bun.lock", "docs/design/secret-guard.md", "scripts/merge-gate.ts"], ["security:lockfile", "security:docs"])).toEqual({
+      verdict: "stop",
+      impact: "large",
+      reasons: ["[聞く] セキュリティ（security:gates）: scripts/merge-gate.ts"],
+      ask: ["security:gates"],
+      recheck: [],
+    });
   });
 });
 
@@ -374,16 +419,16 @@ describe("recheck", () => {
     expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck] });
   });
 
-  test("security stays an ask kind: a mark does not lift it, --allow-large does", () => {
+  test("an asked security group stays asked: a mark does not lift it, --allow-large does", () => {
     const files = [...one("src/auth.ts"), ...one("go.sum")];
-    const ask = ["security:words", "security:lockfile"];
-    expect(judge(base({ files }), off).ask).toEqual(ask);
-    expect(judge(base({ files, rechecks: ["size", "rescue"] }), off)).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts", "[聞く] セキュリティ（security:lockfile）: go.sum"], ask, recheck: [] });
+    const ask = ["security:words"];
+    expect(judge(base({ files }), off)).toMatchObject({ ask, recheck: ["security:lockfile"] });
+    expect(judge(base({ files, rechecks: ["size", "rescue", "security:lockfile"] }), off)).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], ask, recheck: [] });
     expect(judge(yes("security:words,security:lockfile", { files }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [], ask });
     // a yes for one group does not lift the other
     expect(judge(yes("security:words", { files }), { allowLarge: true })).toMatchObject({ verdict: "stop" });
     expect(RECHECK_PASS.exec(`[recheck] security pass ${"a".repeat(40)}`)).toBeNull();
-    expect(RECHECK_PASS.exec(`[recheck] security:lockfile pass ${"a".repeat(40)}`)).toBeNull();
+    expect(RECHECK_PASS.exec(`[recheck] security:words pass ${"a".repeat(40)}`)).toBeNull();
   });
 
   test("rescue is a recheck kind: its mark lifts it, another kind's or none does not", () => {
@@ -900,8 +945,10 @@ describe("merge-gate readPr", () => {
       `[recheck] size pass ${OTHER}`, // an older head
       `ok [recheck] size pass ${HEAD}`, // not at the start
       `[recheck] security pass ${HEAD}`, // not a kind
+      `[recheck] security:lockfile pass ${HEAD}`, // a security group the owner moved to a recheck
+      `[recheck] security:words pass ${HEAD}`, // an asked group: not a recheck kind
     ]);
-    expect(f.rechecks).toEqual(["responsibility", "migration", "rescue"]);
+    expect(f.rechecks).toEqual(["security:lockfile", "responsibility", "migration", "rescue"]);
     expect((await read([])).rechecks).toBeUndefined();
   });
 
@@ -1365,9 +1412,9 @@ describe("reversibility table", () => {
   const table = () => JSON.parse(require("node:fs").readFileSync(REVERSIBILITY_PATH, "utf8"));
   const write = (name: string, t: unknown) => { const p = join(W, name); writeFileSync(p, JSON.stringify(t)); return p; };
 
-  test("derives the ask and recheck kinds the gate has always had", () => {
-    expect(ASK_KINDS).toEqual([...SECURITY_KINDS]);
-    expect(RECHECK_KINDS).toEqual(["size", "responsibility", "migration", "rescue", "design-rules"]);
+  test("derives the ask and recheck kinds from the table (the owner moved security:docs and security:lockfile to a recheck)", () => {
+    expect(ASK_KINDS).toEqual(SECURITY_KINDS.filter((k) => !MOVED.includes(k)));
+    expect(RECHECK_KINDS).toEqual(["security:docs", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
     expect(RECHECK_PASS.test(`[recheck] design-rules pass ${"a".repeat(40)}`)).toBe(true);
     expect(RECHECK_PASS.test(`[recheck] security:gates pass ${"a".repeat(40)}`)).toBe(false);
   });

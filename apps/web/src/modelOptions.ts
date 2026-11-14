@@ -23,7 +23,7 @@ export function modelOptions(runner: Pick<RunnerInfo, "models" | "cliDefaultMode
 }
 
 /**
- * The choices of 実装's Task ごとのモデル（試験, #2769): 同じ ("" = the Task's own model does each Task) first, then the
+ * The choices of 実装's Task ごとのモデル: 同じ ("" = the Task's own model does each Task) first, then the
  * runner's list; a saved value no longer on the list stays, marked so.
  */
 export function taskModelOptions(runner: Pick<RunnerInfo, "models"> | undefined, current: string): ModelChoice[] {

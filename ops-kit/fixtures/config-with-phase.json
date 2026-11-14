@@ -2,8 +2,6 @@
   "projectUrl": "https://github.com/users/example/projects/1",
   "envPrefix": "EXAMPLE",
   "fields": {
-    "area": ["one", "two"],
-    "kind": ["bug", "feature"],
     "priority": ["P0", "P1", "P2", "P3"],
     "phase": ["Phase 0", "Phase 1"]
   },

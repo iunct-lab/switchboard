@@ -1,4 +1,4 @@
-// test-reads: ops.config.json
+// test-reads: ops-kit/fixtures/config-with-phase.json
 import { afterEach, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -252,29 +252,29 @@ test("close reason: closed with a reason is that reason, without one COMPLETED, 
   }
 });
 
-/** A local workspace with this repository's ops.config.json (its choices: Area / Kind / Priority / Phase, Story Points 1 2 3 5 8 13, the kit's scale, Milestone `^Phase \\d+ — `). */
+/** A local workspace with the kit's example config that uses Phase (Priority, Phase 0 / 1; Story Points are the kit's scale 1 2 3 5 8 13, not the fixture's list; Milestone `^Phase \\d+ — `). This repository's own config has no Phase. */
 async function configured(t: Awaited<ReturnType<typeof boot>>, name = "configured") {
   const ws = await t.local(name);
-  copyFileSync(join(import.meta.dir, "../../../ops.config.json"), join(ws.path, "ops.config.json"));
+  copyFileSync(join(import.meta.dir, "../../../ops-kit/fixtures/config-with-phase.json"), join(ws.path, "ops.config.json"));
   return ws;
 }
 
 test("local fields take the choices of ops.config.json", async () => {
   const t = await boot();
   const ws = await configured(t);
-  const pbi = await t.create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": "5" }, milestone: "Phase 2 — デスクトップ化と自己更新" });
+  const pbi = await t.create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": "5" }, milestone: "Phase 1 — first" });
   expect(pbi.status).toBe(202);
   // Story Points as a number, as GitHub's number field would read
   expect((await t.view(ws, 1)).fields).toEqual({ Status: "Ready", Priority: "P1", "Story Points": 5 });
-  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 3, Area: "core", Kind: "feature", Phase: "Phase 2" } })).status).toBe(202);
-  for (const bad of [{ fields: { Status: "Todo" } }, { fields: { Priority: "P9" } }, { fields: { "Story Points": 4 } }, { fields: { Size: "L" } }, { fields: { toString: "x" } }, { fields: { constructor: null } }, { milestone: "v1.0" }]) {
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 3, Phase: "Phase 1" } })).status).toBe(202);
+  for (const bad of [{ fields: { Status: "Todo" } }, { fields: { Priority: "P9" } }, { fields: { "Story Points": 4 } }, { fields: { Size: "L" } }, { fields: { Area: "one" } }, { fields: { Kind: "feature" } }, { fields: { toString: "x" } }, { fields: { constructor: null } }, { milestone: "v1.0" }]) {
     const r = await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, ...bad });
     expect([JSON.stringify(bad), r.status]).toEqual([JSON.stringify(bad), 422]);
   }
   expect((await t.create(ws, { title: "PBI: y", labels: ["type:pbi"], fields: { Status: "Todo" } })).status).toBe(422);
   // nothing of the refused ones was stored
-  expect((await t.view(ws, 1)).fields).toEqual({ Status: "Ready", Priority: "P1", "Story Points": 3, Area: "core", Kind: "feature", Phase: "Phase 2" });
-  expect((await t.view(ws, 1)).issue.milestone).toBe("Phase 2 — デスクトップ化と自己更新");
+  expect((await t.view(ws, 1)).fields).toEqual({ Status: "Ready", Priority: "P1", "Story Points": 3, Phase: "Phase 1" });
+  expect((await t.view(ws, 1)).issue.milestone).toBe("Phase 1 — first");
   expect((await fetch(`${t.base}/api/backlog/2?workspaceId=${ws.id}`)).status).toBe(404);
   // a value taken off passes
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Phase: null } })).status).toBe(202);
@@ -287,12 +287,12 @@ test("local fields take the choices of ops.config.json", async () => {
   // no ops.config.json: the kit's template gives the choices; what it has not, and any Milestone, is refused
   const bare = await t.local("bare");
   expect((await t.create(bare, { title: "PBI: z", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5 } })).status).toBe(202);
-  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: bare.id, fields: { Area: "app", Kind: "feature", Status: "In progress" } })).status).toBe(202);
-  for (const bad of [{ fields: { Area: "core" } }, { fields: { "Story Points": 4 } }, { fields: { Phase: "Phase 1" } }, { milestone: "Phase 1 — x" }]) {
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: bare.id, fields: { Status: "In progress" } })).status).toBe(202);
+  for (const bad of [{ fields: { Area: "app" } }, { fields: { Kind: "feature" } }, { fields: { "Story Points": 4 } }, { fields: { Phase: "Phase 1" } }, { milestone: "Phase 1 — x" }]) {
     const r = await t.send("PATCH", "/api/backlog/1", { workspaceId: bare.id, ...bad });
     expect([JSON.stringify(bad), r.status]).toEqual([JSON.stringify(bad), 422]);
   }
-  expect((await t.view(bare, 1)).fields).toEqual({ Status: "In progress", Priority: "P1", "Story Points": 5, Area: "app", Kind: "feature" });
+  expect((await t.view(bare, 1)).fields).toEqual({ Status: "In progress", Priority: "P1", "Story Points": 5 });
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: bare.id, title: "PBI: z2", labels: { add: ["needs-decision"], remove: [] } })).status).toBe(202);
   expect((await t.send("POST", "/api/backlog/1/comment", { workspaceId: bare.id, text: "c" })).status).toBe(202);
   // an ops.config.json that cannot be read is not replaced by the template
@@ -305,8 +305,8 @@ test("a local workspace without ops.config.json gets a PBI to ready", async () =
   const t = await boot();
   const ws = await t.local();
   expect((await t.create(ws, { title: "要望: x", labels: ["type:request"] })).status).toBe(202);
-  expect((await t.create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5, Area: "app", Kind: "feature" } })).status).toBe(202);
-  expect((await t.create(ws, { title: "Task: x", labels: ["type:task"], parent: 2, fields: { Status: "Backlog", Area: "app", Kind: "feature", Priority: "P1" } })).status).toBe(202);
+  expect((await t.create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5 } })).status).toBe(202);
+  expect((await t.create(ws, { title: "Task: x", labels: ["type:task"], parent: 2, fields: { Status: "Backlog", Priority: "P1" } })).status).toBe(202);
   const item = (((await (await fetch(`${t.base}/api/backlog`)).json()) as Backlog).items.find((i) => i.workspaceId === ws.id && i.number === 2)!);
   expect(item.stage).toBe("ready");
 });
@@ -514,7 +514,7 @@ test("project fields: a workspace without GitHub gets the field definitions from
   const made = await create(ws, { title: "題", body: "本文" });
   expect(made.status).toBe(202);
   const defs = (await view(ws, made.body.number)).projectFields;
-  expect(defs.map((f) => f.name)).toEqual(["Status", "Area", "Kind", "Priority", "Story Points"]);
+  expect(defs.map((f) => f.name)).toEqual(["Status", "Priority", "Story Points"]);
   expect(defs[0]).toMatchObject({ dataType: "SINGLE_SELECT", options: expect.arrayContaining(["Backlog", "Ready"]) });
-  expect(defs[4]).toEqual({ name: "Story Points", dataType: "NUMBER", options: [] });
+  expect(defs[2]).toEqual({ name: "Story Points", dataType: "NUMBER", options: [] });
 });

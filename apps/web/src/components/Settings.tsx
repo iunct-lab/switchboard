@@ -1037,7 +1037,7 @@ function KindRow(props: {
       <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start" }}>
         {name}
         <span className="muted">{t(settings.common)}</span>
-        {/* a trial model chosen while 実装 follows 共通 stays in sight; 変える opens its select (#2769) */}
+        {/* the Task ごと model chosen while 実装 follows 共通 stays in sight; 変える opens its select */}
         {props.kind === "complete" && props.auto.runner === "claude" && props.auto.completeTaskModel && <span className="muted">{t(settings.taskModelChoice, { label: props.auto.completeTaskModel })}</span>}
         <button className="ghost" disabled={props.disabled} onClick={() => setOpen(true)} title={t(settings.changeTitle)}>
           {t(settings.change)}
@@ -1055,7 +1055,7 @@ function KindRow(props: {
       </select>
       <ModelSelect runner={props.info(c.runner)} value={c.model} onChange={(model) => void pick({ model })} label={t(settings.model)} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
       <EffortSelect runner={props.info(c.runner)} value={c.effort} onChange={(effort) => void pick({ effort })} label={t(settings.effort)} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
-      {/* Task ごとのモデル（試験, #2769): 実装 on claude only */}
+      {/* Task ごとのモデル: 実装 on claude only */}
       {props.kind === "complete" && c.runner === "claude" && (
         <select className="model-select" value={props.auto.completeTaskModel} disabled={props.disabled} aria-label={t(settings.taskModel)} title={t(settings.taskModelTitle)} onChange={(e) => void props.save({ autoStart: { completeTaskModel: e.target.value } })}>
           {taskModelOptions(props.info(c.runner), props.auto.completeTaskModel).map((o) => (

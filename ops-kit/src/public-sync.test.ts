@@ -460,6 +460,17 @@ describe("public-sync", () => {
     expect(sent).not.toContain("CLAUDE.md");
   });
 
+  test("a document that include does not name is not in the tree", () => {
+    write("docs/named.md", "public\n");
+    write("docs/unnamed.md", "nobody decided\n");
+    commit("docs: two documents (#2)");
+    // docs/ is not an include entry: its documents come one by one, so only the named one is sent
+    sync(opts({ include: ["README.md", "SECURITY.md", "docs/named.md"] }), run);
+    const sent = pubGit("ls-tree", "-r", "--name-only", "main").split("\n");
+    expect(sent).toContain("docs/named.md");
+    expect(sent).not.toContain("docs/unnamed.md");
+  });
+
   test("an entry that names a directory without the trailing slash stops the sync, instead of matching nothing", () => {
     write("src/app.ts", "export {};\n");
     write("src/internal/notes.md", "the owner's notes\n");

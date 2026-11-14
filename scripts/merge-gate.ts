@@ -71,12 +71,13 @@ export const RESPONSIBILITY = [
 const DESIGN_RULES = "README.md の ## Design rules";
 
 /**
- * Two kinds of large reason (#751). Ask: only the user lifts it (--allow-large) — security. Recheck: a
- * `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line count and the other protected paths;
- * responsibility: the other responsibility files; migration: MIGRATION; rescue: RESCUE, the rollback itself;
- * design-rules: README.md's Design rules).
+ * Two kinds of large reason (#751). Ask: only the user lifts it (--allow-large) — the security groups the table answers
+ * irreversible. Recheck: a `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line count and the other
+ * protected paths; responsibility: the other responsibility files; migration: MIGRATION; rescue: RESCUE, the rollback itself;
+ * design-rules: README.md's Design rules; security:docs and security:lockfile: the security groups the owner moved to a
+ * recheck, docs/design/merge-gate.md).
  */
-export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules";
+export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules" | "security:docs" | "security:lockfile";
 export type AskKind = SecurityKind;
 /** The words of the record marks (#752), in this order: who lifted which kind of a large PR. */
 export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "responsibility", "migration"] as const;

@@ -2,8 +2,6 @@
   "projectUrl": "https://github.com/orgs/example-org/projects/7",
   "envPrefix": "SAMPLE",
   "fields": {
-    "area": ["one", "two"],
-    "kind": ["bug", "feature"],
     "priority": ["high", "low"]
   },
   "sections": {

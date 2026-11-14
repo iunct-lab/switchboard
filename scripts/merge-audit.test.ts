@@ -331,11 +331,13 @@ describe("security sub-kinds", () => {
     expect(format(tally(prs, [], P))[1]).toBe("security:lockfile 聞いた 1 / 認めた 1 / 認めなかった 0 / 返事まで 中央値 2h（合計 2h） / 再チェックで自動マージ 0 / 戻された 0");
   });
 
-  test("proposals: no security group is proposed (moving one is the user's call), even a recheck merge taken back", () => {
-    // RECHECK_PASS cannot read a security group; a hand-built mark checks that proposals looks at RECHECK_KINDS only
-    const rechecked: PrRecord = { number: 4, mergedAt: t(4), headSha: SHA, marks: [{ kind: "recheck", kinds: ["security:lockfile"], sha: SHA, at: t(3) }] };
-    expect(tally([rechecked], [], P).find((r) => r.kind === "security:lockfile")).toMatchObject({ recheckMerged: [4] });
-    expect(proposals([...prs, rechecked], [{ sha: "7".repeat(40), at: t(8), reverted: [1, 3, 4] }], P)).toEqual([]);
+  test("proposals: an asked security group is never proposed; a group moved to a recheck goes back to asking when its recheck merge is taken back", () => {
+    const rechecked = (number: number, kind: string): PrRecord => ({ number, mergedAt: t(4), headSha: SHA, marks: parseMarks([c(`[recheck] ${kind} pass ${SHA}`, t(3))]) });
+    const lock = rechecked(4, "security:lockfile");
+    expect(tally([lock], [], P).find((r) => r.kind === "security:lockfile")).toMatchObject({ recheckMerged: [4] });
+    // the asked groups' PRs (#1, #3) taken back: nothing; the moved group's PR taken back: back to asking
+    expect(proposals(prs, [{ sha: "7".repeat(40), at: t(8), reverted: [1, 3] }], P)).toEqual([]);
+    expect(proposals([...prs, lock], [{ sha: "7".repeat(40), at: t(8), reverted: [1, 3, 4] }], P)).toMatchObject([{ kind: "security:lockfile", evidence: [4], reverts: ["7".repeat(40)] }]);
   });
 });
 

@@ -268,6 +268,9 @@ export function policyOf(ask: Ask, input: { policies: AnswerPolicy[]; confirmHit
       ? [[], refused ? "ランナー側の拒否は保存した方針では解除できません" : null]
       : granted
         ? [[], GRANT_NOTE]
+        : // a stage Task's stop is answered by a reply in its conversation: never a policy
+        ask.kind === "stop" && ask.issue !== null
+        ? [[], null]
         : input.confirmHit
         ? [[], `都度確認のルール ${input.confirmHit.source}: ${input.confirmHit.pattern} に当たります`]
         : !subject
@@ -298,14 +301,14 @@ const withPolicy = (a: Ask, subject: PolicySubject | null, confirmHit: ApprovalR
 
 /** The answer fields of a built question: what it takes, and nothing in the way or going on yet. */
 const noPolicy: AskPolicy = { scopes: [], note: null, defaults: null, applied: null, previous: null };
-const unanswered = { questions: [] as AskQuestion[], grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], priority: null };
+const unanswered = { questions: [] as AskQuestion[], grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], priority: null, lastReply: null };
 /** Fills `answers` once the rest is known. */
 const withAnswers = (a: Ask): Ask => ({ ...a, answers: answersOf(a) });
 
 const issueUrl = (i: BacklogItem, n: number) => i.url.replace(/\d+$/, String(n));
 
 /** The fields every question of a backlog item shares. */
-const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "questions" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "priority"> => ({
+const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "questions" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "priority" | "lastReply"> => ({
   ...unanswered,
   workspace: { id: i.workspaceId, name: i.workspaceName },
   pbi: { number: i.number, title: i.title, url: i.url },
@@ -323,10 +326,20 @@ const dueOf = (s: StopSummary): string => {
   return due ? `（期日 ${due.value} まで）` : "";
 };
 
-function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "state" | "at" | "changedAt" | "reason" | "question" | "next" | "source" | "route" | "conditions" | "task">, next: string | null): Ask {
-  const answered = s.next === "resume" && s.lastAnswer !== null;
+/** The longest last reply an open stop carries (the Claude adapter's summary limit). */
+export const LAST_REPLY_MAX = 2000;
+
+/** A Task's last reply as shown on its stop: null when blank, cut to LAST_REPLY_MAX characters (then `…`). */
+export function lastReplyOf(text: string | null): string | null {
+  if (text === null || text.trim() === "") return null;
+  return text.length > LAST_REPLY_MAX ? `${text.slice(0, LAST_REPLY_MAX)}…` : text;
+}
+
+function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "state" | "at" | "changedAt" | "reason" | "question" | "next" | "source" | "route" | "conditions" | "task" | "lastReply">, next: string | null, lastReply?: (taskId: string) => string | null): Ask {
+  // a first stop has no earlier one to show the answer as a change (`next` stays decide): its `answered` says the person's reply came after it
+  const answered = s.lastAnswer !== null && (s.next === "resume" || (s.next === "decide" && s.answered));
   const [needs, state]: [Ask["needs"], Ask["state"]] =
-    s.next === "decide" ? ["person", "open"] : s.next === "none" ? [NEEDS_PERSON.has(s.reason) || s.lastAnswer ? "person" : "auto", "resolved"] : answered ? ["person", "answered"] : ["auto", "open"];
+    s.next === "decide" && !answered ? ["person", "open"] : s.next === "none" ? [NEEDS_PERSON.has(s.reason) || s.lastAnswer ? "person" : "auto", "resolved"] : answered ? ["person", "answered"] : ["auto", "open"];
   return {
     ...shared,
     id: `stop:${s.key.replaceAll("\u0000", "|")}`,
@@ -343,6 +356,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
     source: { label: "停止記録", url: null, taskId: s.work.taskId },
     route: "task",
     conditions: s.conditions,
+    lastReply: needs === "person" && state === "open" ? lastReplyOf(lastReply?.(s.work.taskId) ?? null) : null,
   };
 }
 
@@ -351,7 +365,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
  * user's check, their waits and their stage Tasks' stops — each with what stands in the way of the item, and an
  * answered one with how it goes on. `approvalPending`: a tool approval of the item's stage Task is waiting.
  */
-export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resumeFailures?: ResumeFailures; approvalPending?: (i: BacklogItem) => boolean; policy?: PolicyEnv; mockups?: MockupsOf; startedBy?: (workspaceId: string, pbi: number) => string | null } = {}): Ask[] {
+export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resumeFailures?: ResumeFailures; approvalPending?: (i: BacklogItem) => boolean; policy?: PolicyEnv; mockups?: MockupsOf; startedBy?: (workspaceId: string, pbi: number) => string | null; lastReply?: (taskId: string) => string | null; taskOf?: (id: string) => Task | null } = {}): Ask[] {
   const asks: Ask[] = [];
   for (const i of items) {
     const blockers = blockersOf({ waits: i.waits, stops: i.stopSummary, approvalPending: opts.approvalPending?.(i) ?? false });
@@ -451,8 +465,14 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
       });
     }
     for (const s of i.stopSummary) {
-      const a = stopAsk(s, shared, `#${i.number} の工程 Task が続く`);
-      asks.push(a.state === "answered" ? { ...a, resume: resume(a.id, s.lastAnswer!.at) } : a);
+      const a = stopAsk(s, shared, `#${i.number} の工程 Task が続く`, opts.lastReply);
+      // the person's reply went to the stage Task itself (a stop's answer is a reply in its conversation): it goes on as that Task does
+      const task = a.task ? (opts.taskOf?.(a.task.id) ?? null) : null;
+      // a failure of a reply to an earlier stop of the series is not this stop's
+      const failed = ((f) => (f && f.at >= s.lastAt ? f : null))(opts.resumeFailures?.(a.id) ?? null);
+      if (a.state === "answered") asks.push({ ...a, resume: task ? resumeOfTask({ task, repliedAt: s.lastAnswer!.at, failure: failed }) : resume(a.id, s.lastAnswer!.at) });
+      // a reply the Task refused (its budget) left the stop open; its failure stays visible
+      else asks.push(a.state === "open" && failed && task ? { ...a, resume: { state: "failed", reason: failed.reason, taskId: task.id, at: failed.at } } : a);
     }
     for (let k = from; k < asks.length; k++) asks[k] = withAnswers(asks[k]!);
     const env = opts.policy;
@@ -487,6 +507,8 @@ export interface TaskAskInput {
   policy?: PolicyEnv;
   /** The screen mockups of a Task, for the options that have one. */
   mockups?: MockupsOf;
+  /** A Task's last reply (the newest `session.end`'s summary); null = it never ended a turn. */
+  lastReply?: (taskId: string) => string | null;
 }
 
 /**
@@ -610,7 +632,11 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
       });
     }
     if (issueOf(t) === null)
-      for (const s of input.stops(t)) asks.push({ ...stopAsk(s, shared(t, t.id, t.title), `Task「${t.title}」が続く`), task: { id: t.id, title: t.title, stageIssue: t.stage?.issue ?? null } });
+      for (const s of input.stops(t)) {
+        const a = stopAsk(s, shared(t, t.id, t.title), `Task「${t.title}」が続く`, input.lastReply);
+        // an answered stop goes on as its Task does (running, the usage limit, failed), as the answer itself says
+        asks.push({ ...a, task: { id: t.id, title: t.title, stageIssue: t.stage?.issue ?? null }, ...(a.state === "answered" ? { resume: resumeOfTask({ task: t, repliedAt: s.lastAnswer!.at, failure: input.resumeFailures?.(a.id) ?? null }) } : {}) });
+      }
   }
   const env = input.policy;
   const policed = (a: Ask): Ask => {

@@ -16,9 +16,9 @@
       "op": "merge: security docs",
       "gateKind": "security:docs",
       "effect": "repository",
-      "beforeObserved": false,
-      "answer": "irreversible",
-      "why": "A merged change to the files that tell people or Tasks what is safe is read and acted on before anyone can revert it."
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "Only documents change (the instructions Tasks follow are other kinds), so a recheck by another runner reads that the diff is documents and inside the PBI before the merge, and a revert restores them."
     },
     {
       "op": "merge: security words",
@@ -32,9 +32,9 @@
       "op": "merge: security lockfile",
       "gateKind": "security:lockfile",
       "effect": "repository",
-      "beforeObserved": false,
-      "answer": "irreversible",
-      "why": "A changed dependency tree is installed and run on the next install before a revert reaches it."
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "A recheck installs the head's bun.lock without lifecycle scripts, checks the licenses and lists every changed entry (version, source, integrity) before the merge; other lock files fail the recheck and are asked. A revert restores the lock, but what an install already ran stays."
     },
     {
       "op": "merge: security github",

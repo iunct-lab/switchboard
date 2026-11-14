@@ -32,7 +32,7 @@ export function metricRows(e: TaskEvals): MetricRow[] {
     { label: t(m.duration), value: fmtDuration(x.durationMs) },
     // a last turn the daemon's stop cut ended that way by the stop, not by the task (#2089): デーモン停止 carries the mark
     { label: t(m.ending), value: endLabel(x.lastEnd), warn: (x.lastEnd === "error" || x.lastEnd === "aborted") && !x.lastCutByDaemon },
-    // the model an 実装 Task handed each Task to (試験, #2769); no row without one
+    // the model an 実装 Task handed each Task to; no row without one
     ...(x.delegatedModel ? [{ label: t(m.delegatedModel), value: t(m.delegatedModelValue, { model: x.delegatedModel }) }] : []),
   ];
 }

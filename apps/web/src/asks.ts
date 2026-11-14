@@ -2,6 +2,7 @@ import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switch
 import { issueHref } from "./backlogSync.ts";
 import { jstClock, jstDay } from "./time.ts";
 import { t } from "./i18n.ts";
+import { panels as pm } from "./i18n/panels.ts";
 import { task as m } from "./i18n/task.ts";
 
 /** 判断待ち (#935): what each kind of question is called on screen. */
@@ -18,18 +19,17 @@ export const KIND_LABEL: Record<Ask["kind"], string> = {
 // open is 未回答: 保留 is the person's hold (#936)
 export const STATE_LABEL: Record<Ask["state"], string> = { open: t(m.stateOpen), held: t(m.stateHeld), answered: t(m.stateAnswered), resolved: t(m.stateResolved) };
 
-type GroupKey = "person" | "auto" | "answered" | "resolved";
+type GroupKey = "person" | "auto" | "done";
 const GROUPS: Array<{ key: GroupKey; label: string }> = [
   { key: "person", label: t(m.groupPerson) },
   { key: "auto", label: t(m.groupAuto) },
-  { key: "answered", label: t(m.stateAnswered) },
-  { key: "resolved", label: t(m.stateResolved) },
+  { key: "done", label: t(m.groupDone) },
 ];
 
 // a held one (#936) is still the person's to answer
-const groupKeyOf = (a: Ask): GroupKey => (a.state === "open" ? a.needs : a.state === "held" ? "person" : a.state);
+const groupKeyOf = (a: Ask): GroupKey => (a.state === "open" ? a.needs : a.state === "held" ? "person" : "done");
 
-/** The screen's groups, in order and without the empty ones: open ones by who has to act, then answered, then resolved (whoever). */
+/** The screen's groups, in order and without the empty ones: open ones by who has to act, then the done ones (answered and resolved, whoever). */
 export function groupAsks(asks: Ask[]): Array<{ key: GroupKey; label: string; asks: Ask[] }> {
   return GROUPS.map((g) => ({ ...g, asks: asks.filter((a) => groupKeyOf(a) === g.key) })).filter((g) => g.asks.length > 0);
 }
@@ -55,9 +55,75 @@ export function workspaceSections(asks: Ask[]): Array<{ key: string; name: strin
   return [...by.values()].sort((x, y) => Number(x.key === "") - Number(y.key === "") || y.asks.length - x.asks.length || x.name.localeCompare(y.name));
 }
 
-/** The filter's buttons (#1673): every Workspace of the questions, in the headings' order, with how many are the person's to answer. */
+/**
+ * The filter's buttons: every Workspace of the questions, in the headings' order, with how many are the person's to
+ * answer — the rows (a PBI's, else a Task's questions are one) plus the tool approvals, which stay a card each.
+ */
 export const workspaceChips = (asks: Ask[]) =>
-  workspaceSections(asks).map((s) => ({ key: s.key, name: s.name, count: s.asks.filter((a) => groupKeyOf(a) === "person").length }));
+  workspaceSections(asks).map((s) => {
+    const mine = s.asks.filter((a) => groupKeyOf(a) === "person");
+    return { key: s.key, name: s.name, count: askRows(mine).filter((r) => r.open).length + mine.filter((a) => a.kind === "approval").length };
+  });
+
+/** One line of the 判断待ち screen: the questions of one Workspace that wait on the same PBI (else the same Task). */
+export interface AskRow {
+  key: string;
+  title: { text: string; href?: string };
+  /** The first question, else the first stop's reason. */
+  lead: string | null;
+  kinds: Ask["kind"][];
+  /** One of its questions answers with one press. */
+  quick: boolean;
+  unblocks: Ask["unblocks"];
+  asks: Ask[];
+  /** One of its questions is open or held, whoever it waits on (the screen passes only the person's). */
+  open: boolean;
+}
+
+/** What a question is grouped under: its Workspace and PBI, else its Task; one without either (a notice) is alone. */
+export const rowKey = (a: Ask): string => (a.pbi ? `${workspaceKey(a)}:pbi:${a.pbi.number}` : a.task ? `${workspaceKey(a)}:task:${a.task.id}` : `ask:${a.id}`);
+
+/** The questions but the tool approvals (each stays a card) as rows, in the order of the topmost question of each. */
+export function askRows(asks: Ask[]): AskRow[] {
+  const by = new Map<string, Ask[]>();
+  for (const a of asks) if (a.kind !== "approval") by.set(rowKey(a), [...(by.get(rowKey(a)) ?? []), a]);
+  return [...by].map(([key, list]) => {
+    const parts = list.map(askCardParts);
+    const lead = parts.find((p) => p.question)?.question ?? list.find((a) => a.kind === "stop" && a.reason)?.reason ?? null;
+    const unblocks = new Map<number, Ask["unblocks"][number]>();
+    for (const u of list.flatMap((a) => a.unblocks)) if (!unblocks.has(u.number)) unblocks.set(u.number, u);
+    return {
+      key,
+      title: parts[0]!.title ?? { text: parts[0]!.question ?? KIND_LABEL[list[0]!.kind] },
+      lead,
+      kinds: [...new Set(list.map((a) => a.kind))],
+      quick: list.some(isQuick),
+      unblocks: [...unblocks.values()],
+      asks: list,
+      open: list.some((a) => a.state === "open" || a.state === "held"),
+    };
+  });
+}
+
+/**
+ * A question answered here: its id and row, and the decisions the list already had answered in that row then. A decision is
+ * named anew once answered (the time of the answer, and the PBI's number where it was asked on a Task's Issue), so it is
+ * matched by its row instead of its id.
+ */
+export interface AnsweredHere { id: string; kind: Ask["kind"]; key: string; before: Set<string> }
+export const answeredHere = (list: Ask[], x: Ask): AnsweredHere => ({
+  id: x.id,
+  kind: x.kind,
+  key: rowKey(x),
+  before: new Set(list.filter((y) => y.kind === "decision" && y.state === "answered" && rowKey(y) === rowKey(x)).map((y) => y.id)),
+});
+
+/** A question the list has answered that was answered here (the same id, or the row's decision answered since): it stays in its row; one answered elsewhere goes where the list has it. */
+export const answeredInRow = (a: Ask, here: AnsweredHere[]) =>
+  a.kind !== "approval" && a.state === "answered" && here.some((h) => h.id === a.id || (h.kind === "decision" && a.kind === "decision" && h.key === rowKey(a) && !h.before.has(a.id)));
+
+/** The rows with a question that answers with one press, the order kept. */
+export const quickRows = (rows: AskRow[]): AskRow[] => rows.filter((r) => r.quick);
 
 /** What a fact the daemon did not record reads as; the 判断待ち screen greys it out. */
 export const UNKNOWN = t(m.unknown);
@@ -99,6 +165,8 @@ export interface AnswerButton {
   /** Where it goes: the Issue it is written on, or the Task it is sent to. */
   target: string;
   next: string;
+  /** The button's second line: a choice's impact, or what a hold / deny / dismiss does; null = none. */
+  sub: string | null;
   primary: boolean;
 }
 
@@ -112,15 +180,36 @@ export function grantOf(choice: string): string | null {
   return m ? m[1]!.trim() : null;
 }
 
-/** A choice's text before its grant: what the card shows on the 送る line, the grant going on the next. */
+/** A choice's text before its grant: the grant goes on a line of its own. */
 export const withoutGrant = (choice: string) => choice.replace(/ — 許可[:：]\s*.+$/, ""); // compared with the daemon's choice line
+
+/** A choice split into what the button says (`head`), its ` — 影響: ` (`impact`) and its ` — 許可: ` (`grant`). */
+export function choiceParts(choice: string): { head: string; impact: string | null; grant: string | null } {
+  const grant = grantOf(choice);
+  const rest = withoutGrant(choice);
+  const hit = / — 影響[:：]/.exec(rest); // compared with the daemon's choice line
+  if (!hit) return { head: rest.trim(), impact: null, grant };
+  const impact = rest.slice(hit.index + 3).trim();
+  return { head: rest.slice(0, hit.index).trim(), impact: impact || null, grant };
+}
+
+/** Whether a question's answer is written on an Issue: a decision's or a confirmation's, and a stage Task's stop that takes a grant (its grant goes on the stop's Issue). */
+const answersOnIssue = (a: Pick<Ask, "kind" | "issue" | "answers" | "grant">) =>
+  a.kind === "decision" || a.kind === "confirmation" || (a.kind === "stop" && !!a.issue && !!a.grant && a.answers.includes("grant"));
+
+/** The one line of a question that says where its answer goes and what goes on after it: the same target its buttons send to. */
+export function answerRoute(a: Ask): string {
+  const next = a.next ?? UNKNOWN;
+  if (!answersOnIssue(a)) return t(m.answerRouteTask, { target: answerTarget(a), next });
+  return t(m.answerRouteIssue, { target: a.issue ? `Issue #${a.issue.number}` : "Issue", next });
+}
 
 /** `A` of `A: 置き換える — 影響: …`; the whole choice when it has no short head. */
 const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ?? c;
 
 /**
  * The buttons of a question (#936), from what it takes (`answers`), its choices and its recommendation: a stop's grant
- * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (the recommended one first, as 推奨案で進める), 確認した, a notice's 誤検知として閉じる (#2866), and 保留. None when it takes
+ * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (its head, the recommended one first with （推奨）), 確認した, a notice's 誤検知として閉じる (#2866), and 保留. None when it takes
  * no answer; free text (and a confirmation's 違う) is the card's text box.
  */
 export function answerButtons(a: Ask): AnswerButton[] {
@@ -128,38 +217,35 @@ export function answerButtons(a: Ask): AnswerButton[] {
   const target = answerTarget(a);
   const next = a.next ?? t(m.unknown);
   const out: AnswerButton[] = [];
-  if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, primary: true });
+  if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, sub: null, primary: true });
   if (takes.has("allow")) {
     // `send` (here and below) is sent to the daemon as the answer: it stays Japanese in either language
     // ui-strings: value "ツール" — part of the answer sent to the daemon
     const tool = a.reason?.split(": ").at(-1) ?? "ツール";
-    out.push({ label: t(m.btnAllow), answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, primary: true });
+    out.push({ label: t(m.btnAllow), answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, sub: null, primary: true });
   }
-  if (takes.has("deny")) out.push({ label: t(m.deny), answer: { kind: "deny" }, send: "拒否" /* sent to the daemon */, grant: null, target, next: t(m.denyNext), primary: false });
+  if (takes.has("deny")) out.push({ label: t(m.deny), answer: { kind: "deny" }, send: "拒否" /* sent to the daemon */, grant: null, target, next: t(m.denyNext), sub: t(m.denyNext), primary: false });
   if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;
     const choices = [...a.choices].sort((x, y) => Number(choiceKey(y) === rec) - Number(choiceKey(x) === rec));
     for (const c of choices) {
       const recommended = choiceKey(c) === rec;
-      out.push({ label: recommended ? t(m.btnRecommended, { key: choiceKey(c) }) : t(m.btnChoice, { key: choiceKey(c) }), answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next, primary: recommended && !takes.has("grant") });
+      const { head, impact } = choiceParts(c);
+      out.push({ label: recommended ? head + t(m.recommendedSuffix) : head, answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next, sub: impact, primary: recommended && !takes.has("grant") });
     }
   }
-  if (takes.has("confirm")) out.push({ label: t(m.btnConfirm), answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました` /* sent to the daemon */, grant: null, target, next, primary: true });
-  if (takes.has("dismiss")) out.push({ label: t(m.btnDismiss), answer: { kind: "dismiss" }, send: "誤検知として閉じる" /* sent to the daemon */, grant: null, target, next: t(m.dismissNext), primary: false });
-  if (takes.has("hold")) out.push({ label: t(m.btnHold), answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま" /* sent to the daemon */, grant: null, target, next: t(m.holdNext), primary: false });
+  if (takes.has("confirm")) out.push({ label: t(m.btnConfirm), answer: { kind: "confirm", ok: true }, send: `受け入れ条件「${a.question ?? ""}」を確認しました` /* sent to the daemon */, grant: null, target, next, sub: null, primary: true });
+  if (takes.has("dismiss")) out.push({ label: t(m.btnDismiss), answer: { kind: "dismiss" }, send: "誤検知として閉じる" /* sent to the daemon */, grant: null, target, next: t(m.dismissNext), sub: t(m.dismissNext), primary: false });
+  if (takes.has("hold")) out.push({ label: t(m.btnHold), answer: { kind: "hold" }, send: "## 保留 を書く。判断待ちのまま" /* sent to the daemon */, grant: null, target, next: t(m.holdNext), sub: t(m.holdNext), primary: false });
   return out;
 }
 
 /**
  * 「すぐ答えられる」 (#1675): the person's to answer (open or held), nothing an answer does not take away, and a button
- * that answers it with one press (answerButtons' primary: 承認して続行, 推奨案で進める, 確認した). One that sends a
+ * that answers it with one press (answerButtons' primary: 承認して続行, the recommended choice, 確認した). One that sends a
  * grant (a stop's この操作だけ許可して続ける, a recommended choice's ` — 許可: `) is not: it widens what the Task may do.
  */
 export const isQuick = (a: Ask) => groupKeyOf(a) === "person" && a.blockers.length === 0 && answerButtons(a).some((b) => b.primary && b.grant === null);
-
-/** The groups with the person's narrowed to the quick ones (#1675): the other groups as they are, the order kept, an emptied group left out. */
-export const quickGroups = <G extends { key: GroupKey; asks: Ask[] }>(groups: G[]): G[] =>
-  groups.map((g) => (g.key === "person" ? { ...g, asks: g.asks.filter(isQuick) } : g)).filter((g) => g.asks.length > 0);
 
 /** The questions of one Task its screen answers (#2745): its open operational checks and stops a person answers. */
 export const taskAsks = (list: Ask[], taskId: string) => list.filter((a) => a.task?.id === taskId && (a.kind === "check" || a.kind === "stop") && a.state === "open" && a.needs === "person");
@@ -177,8 +263,8 @@ export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; t
 /** The Issues an Ask unblocks, each with its link — null when the Issue has no url (a workspace without GitHub sync, #2343). */
 export const unblockLinks = (unblocks: Ask["unblocks"]): Array<{ number: number; title: string; href: string | null }> => unblocks.map((u) => ({ number: u.number, title: u.title, href: issueHref(u.url) }));
 
-/** Where "open the Issue" goes: the Issue's url when the Ask routes to it and it has one, else null (no link to show). */
-export const issueOpenHref = (x: Pick<Ask, "route" | "issue">): string | null => (x.route === "issue" && x.issue ? issueHref(x.issue.url) : null);
+/** Where "open the Issue" goes: the url of the Issue the Ask has (a decision's or a confirmation's PBI, a stage Task's Issue) unless it routes nowhere, else null (no link to show). */
+export const issueOpenHref = (x: Pick<Ask, "route" | "issue">): string | null => (x.route !== "none" && x.issue ? issueHref(x.issue.url) : null);
 
 /** How many other PBIs wait on the question (#1674); null = none. */
 export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? t(m.unblocks, { count: a.unblocks.length }) : null);
@@ -370,3 +456,19 @@ export function questionHead(q: string): { head: string; more: boolean } {
   }
   return head.length < q.length ? { head: head.trimEnd() + " …", more: true } : { head: q, more: false };
 }
+
+/** How much of a Task's last reply a stop's row shows before 全文: six lines, and 400 characters. */
+export const REPLY_HEAD = 400;
+
+/** A last reply's first part and whether there is more: at most six lines and REPLY_HEAD characters (counted in characters, so an emoji is not split). */
+export function replyPreview(text: string): { head: string; more: boolean } {
+  const head = Array.from(text.split("\n").slice(0, 6).join("\n")).slice(0, REPLY_HEAD).join("");
+  // trailing blank lines are not more to read
+  return head.length < text.trimEnd().length ? { head: head.trimEnd(), more: true } : { head: text, more: false };
+}
+
+/** The line that says a stop's reply reaches the Task (its title, else its id) and the Task goes on. */
+export const replyTarget = (a: Pick<Ask, "task">): string => t(pm.replyTarget, { title: a.task?.title ?? a.task?.id ?? "Task" });
+
+/** A stop the person answers in words: the reply is sent to its Task. */
+export const takesReply = (a: Pick<Ask, "kind" | "answers">) => a.kind === "stop" && a.answers.includes("text");

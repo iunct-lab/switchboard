@@ -130,16 +130,14 @@ PBI を書く前に、切った価値ごとにユーザーストーリーと「�
 実装方法は書かない（Task の仕事）。
 
 ```bash
-ops-kit backlog create --title "PBI: <利用者から見た成果を 1 文で>" --label type:pbi --body-file "$W/pbi.md" --milestone "Phase N — …"
-ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N"          # 親は渡さない
+ops-kit backlog create --title "PBI: <利用者から見た成果を 1 文で>" --label type:pbi --body-file "$W/pbi.md"
+ops-kit backlog triage <num> <P0-P3>          # 親は渡さない
 ops-kit backlog set <num> "Story Points" <N>                          # 本文の N と同じ
 ```
 
-Phase も Milestone も無いリポジトリ（`ops.config.json` に `fields.phase` が無い）では、`create` の `--milestone` を付けず、`triage` の Phase の引数を省く（Phase の位置に空文字を置かない。空文字は親として読まれ、後ろに親と Status の両方を続けると引数が余って使い方を出して exit 1 になる）: `ops-kit backlog triage <num> <area> <kind> <P0-P3>`
-
 **自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。CLAUDE.md）。分解の後に sub-issue を 1 回見直し、二重の組があれば後の組を閉じる（`ops-kit backlog edit <Task> --state closed`）。
 
-Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。Phase は Milestone の到達点で選ぶ（迷ったら進行中の Phase。Phase の無いリポジトリでは選ばない）。
+Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。
 Story Points は `issue-workflow` の基準表（1 = 1 ファイル / 2 = 文書か局所 / 3 = 1 つの層、Task 1〜2 / 5 = 複数モジュール、Task 2〜4 / 8 = 横断 + 未知、Task 4〜6 / 13 = 8 を超える。分けずに付ける）。
 
 ### 4. 要望 Issue に戻る

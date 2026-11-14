@@ -226,13 +226,13 @@ test("a daemon older than the kit (404 on /syncs) still serves set and view thro
 
 test("triage without a Phase: an empty Phase position is skipped and parent / status are read; with a Phase it is a usage error (exit 1)", async () => {
   const ok = app((m, p) => (m === "GET" ? { body: LIST } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
-  expect((await run(["triage", "3", "core", "feature", "P2", "", "891", "Ready"], ok, {}, false)).code).toBe(0);
-  expect((await run(["triage", "3", "core", "feature", "P2", "", "Ready"], ok, {}, false)).code).toBe(0);
+  expect((await run(["triage", "3", "P2", "", "891", "Ready"], ok, {}, false)).code).toBe(0);
+  expect((await run(["triage", "3", "P2", "", "Ready"], ok, {}, false)).code).toBe(0);
   expect(ok.calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
-    { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Status: "Ready" }, parent: 891 },
-    { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Status: "Ready" } },
+    { workspaceId: "ws1", project: true, fields: { Priority: "P2", Status: "Ready" }, parent: 891 },
+    { workspaceId: "ws1", project: true, fields: { Priority: "P2", Status: "Ready" } },
   ]);
-  const phased = await run(["triage", "3", "core", "feature", "P2", "", "891", "Ready"], ok);
+  const phased = await run(["triage", "3", "P2", "", "891", "Ready"], ok);
   expect(phased.code).toBe(1);
   expect(phased.err).toContain(triageUsage(true));
 });
@@ -244,7 +244,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Code", "001"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", ""], ok)).code).toBe(0);
-  expect((await run(["triage", "3", "core", "feature", "P2", "Phase 2", "891", "Ready"], ok)).code).toBe(0);
+  expect((await run(["triage", "3", "P2", "Phase 2", "891", "Ready"], ok)).code).toBe(0);
   expect((await run(["comment", "3", "--body-file", "-"], ok)).code).toBe(0);
   expect((await run(["create", "--title", "New", "--label", "type:task", "--parent", "891", "--field", "Status=Backlog"], ok)).code).toBe(0);
   expect(ok.calls.filter((c) => c.method !== "GET").map((c) => [c.method, c.path, c.body])).toEqual([
@@ -254,7 +254,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
     ["PATCH", "/3", { workspaceId: "ws1", fields: { Code: "001" } }],
     // an empty value empties the field
     ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": null } }],
-    ["PATCH", "/3", { workspaceId: "ws1", project: true, fields: { Area: "core", Kind: "feature", Priority: "P2", Phase: "Phase 2", Status: "Ready" }, parent: 891 }],
+    ["PATCH", "/3", { workspaceId: "ws1", project: true, fields: { Priority: "P2", Phase: "Phase 2", Status: "Ready" }, parent: 891 }],
     ["POST", "/3/comment", { workspaceId: "ws1", text: "from stdin" }],
     ["POST", "", { workspaceId: "ws1", title: "New", body: "", labels: ["type:task"], milestone: null, parent: 891, fields: { Status: "Backlog" } }],
   ]);

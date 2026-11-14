@@ -48,7 +48,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       例: set 16 Status Ready / set 16 "Story Points" 5
       BACKLOG_URL がある（アプリの Task の中）なら GitHub に書かずアプリに保存する（backlog set / backlog triage と同じ。triage も）
   ${triageUsage(true)}
-      Issue を Project に入れ、Area / Kind / Priority /（Phase）/ Status と親（Task の親 PBI）を設定する
+      Issue を Project に入れ、Priority /（Phase）/ Status と親（Task の親 PBI）を設定する
       <phase> は設定に fields.phase があるときだけ渡す。<parent> を飛ばすなら "" を渡す。<status> の既定は Backlog
   reconcile-project [--dry-run]
       open の Issue / PR のうち Project に無いものだけを追加する（フィールドは付けない。既にある item は触らない）。
@@ -65,7 +65,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       GitHub 連携の無い workspace（BACKLOG_WORKSPACE があり GH_REPO が無い）で ops.config.json が無ければ、雛形 ops-kit/template/ops.config.json の値で検査する
 
   bootstrap <title> [--dry-run]
-      Project を用意する（設定の Project、無ければ同じ題の Project、それも無ければ作る）。設定の Area / Kind / Priority /
+      Project を用意する（設定の Project、無ければ同じ題の Project、それも無ければ作る）。設定の Priority /
       （Phase）の単一選択と数値の Story Points のうち、無いフィールドを作る。何度実行してもよい
       Status の選択肢は、この実行で作った Project にだけ Backlog / Ready / In progress / In review / Done を入れる（既存の
       Project の Status を書き換えると全 item の Status が消えるので、足りない選択肢を出すだけ）。ビューは UI で作る
@@ -524,15 +524,15 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         return 0;
       }
       case "triage": {
-        const [issue, area, kind, priority, ...tail] = rest;
+        const [issue, priority, ...tail] = rest;
         // a repository without a Phase: "" in its place means none; <parent> and <status> follow
         if (!cfg.fields.phase && tail[0] === "" && tail.length > 2) tail.shift();
         const phase = cfg.fields.phase ? tail.shift() : undefined;
         const [parent, status, ...extra] = tail;
-        if (!issue || !area || !kind || !priority || (cfg.fields.phase && !phase) || extra.length) {
+        if (!issue || !priority || (cfg.fields.phase && !phase) || extra.length) {
           return usage(err, triageUsage(!!cfg.fields.phase));
         }
-        await triage(gh, cfg, issueNumber(issue), { area, kind, priority, phase, parent: parent ? issueNumber(parent) : undefined, status: status || undefined }, out);
+        await triage(gh, cfg, issueNumber(issue), { priority, phase, parent: parent ? issueNumber(parent) : undefined, status: status || undefined }, out);
         return 0;
       }
       case "reconcile-project": {

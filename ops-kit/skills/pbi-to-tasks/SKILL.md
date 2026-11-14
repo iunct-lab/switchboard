@@ -12,7 +12,7 @@ Task の親は必ずその PBI（sub-issue）。Task は 1 PR で終わる大き
 
 ### 1. PBI を確かめる
 
-`ops-kit backlog view <num> --fresh` で本文を読む（Task の作成・Project・Milestone も `ops-kit backlog`。`issue-workflow` の「操作」）。無ければ**先に直す**（`request-to-backlog` の書式。決定ログに日付つきで「書き直し」）:
+`ops-kit backlog view <num> --fresh` で本文を読む（Task の作成・Project も `ops-kit backlog`。`issue-workflow` の「操作」）。無ければ**先に直す**（`request-to-backlog` の書式。決定ログに日付つきで「書き直し」）:
 ユーザーストーリー / 検証つき受け入れ条件 / スコープ外 / `**Story Points**: N` / `## 元要望`。`ops-kit lint --fresh` が exit 0。
 
 元要望（`## 元要望` の Issue）の原文も読む。PBI の解釈が原文からずれていたら PBI を直してから分解する。
@@ -76,11 +76,9 @@ Spike が要るなら timebox と成果物（`docs/design/<name>.md`）を書い
 覆われない条件があれば Task を足す。**条件をスコープ外に移すのは利用者の判断**（要件の変更）: PBI の決定ログに理由を書き、`## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）で利用者に聞き、返事があるまで Ready にしない（headless でも同じ。勝手に条件を削って Ready にしない）。画面に関わる問いは `issue-workflow` の「判断待ちの出し方」の画面イメージを添える。
 
 ```bash
-ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号> --milestone "<PBI と同じ Milestone>"     # W=$(mktemp -d /tmp/<リポジトリ名>.tasks<PBI>.XXXXXX)。固定の /tmp/task.md にしない
-ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" <PBI番号> Backlog     # 親 = PBI
+ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号>     # W=$(mktemp -d /tmp/<リポジトリ名>.tasks<PBI>.XXXXXX)。固定の /tmp/task.md にしない
+ops-kit backlog triage <num> <P0-P3> <PBI番号> Backlog     # 親 = PBI
 ```
-
-Phase の無いリポジトリでは `--milestone` を付けず、Phase の引数を省く（空文字を渡さない）: `ops-kit backlog triage <num> <area> <kind> <P0-P3> <PBI番号> Backlog`
 
 Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること」の末尾に設計チェックの 1 行）:
 

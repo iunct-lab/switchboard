@@ -19,11 +19,11 @@ export function isAutomaticUserText(text: string): boolean {
 /** The transcript note a daemon stop leaves (interrupted.ts); also how the resumer, its cap and the counts below recognise one. Here, not there, because interrupted.ts imports this file. */
 export const STOP_NOTE = "デーモンの停止でターンが中断されました";
 
-/** How the transcript note of Task ごとの実装のモデル（試験) begins; the model follows it. */
+/** How the transcript note of Task ごとの実装のモデル begins; the model follows it. */
 export const DELEGATED_HEAD = "Task ごとの実装は ";
-const DELEGATED_TAIL = " に任せます（試験）";
+const DELEGATED_TAIL = " に任せます";
 
-/** The note an 実装 Task started with the trial's model leaves (server.ts `startStage`): what was handed over, not what ran. */
+/** The note an 実装 Task started with a model for each Task's implementation leaves (server.ts `startStage`): what was handed over, not what ran. */
 export function delegatedNote(model: string): string {
   return `${DELEGATED_HEAD}${model}${DELEGATED_TAIL}`;
 }

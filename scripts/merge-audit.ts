@@ -214,8 +214,9 @@ export type Proposal = { kind: MergeKind; evidence: number[]; reverts: string[];
 /**
  * Against merge-gate's split now: a recheck kind with a recheck merge that was taken back, or that the post-merge audit
  * found something in (`[post-audit] finding`, posted in the window; the same weight as a revert) → back to asking (one is
- * enough). Only what happened in `window` (LOOKBACK_DAYS up to the table's --until) counts. Security, the asked kinds
- * (`security:<group>`), is never proposed (PBI #752: the user always answers it; PBI #1873: moving a group is the user's call).
+ * enough). Only what happened in `window` (LOOKBACK_DAYS up to the table's --until) counts. A security group the table
+ * still asks is never proposed (the user always answers it, and moving one is the user's call); a group moved to a recheck
+ * is a recheck kind here like the others.
  */
 export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: string; until: string }): Proposal[] {
   // by time, not by string: git's %cI carries the committer's offset (+09:00, -07:00), GitHub's times are UTC

@@ -76,10 +76,8 @@ export const OpsConfig = z
     owner: z.string().min(1).optional(),
     /** `<envPrefix>_PROJECT_URL` in the environment overrides `projectUrl`. */
     envPrefix: z.string().regex(/^[A-Z][A-Z0-9_]*$/, "envPrefix は大文字・数字・_"),
-    /** The choices of the single-select fields Area / Kind / Priority, and Phase if the Project has one. */
+    /** The choices of the single-select fields Priority, and Phase if the Project has one. */
     fields: z.object({
-      area: z.array(z.string().min(1)).min(1),
-      kind: z.array(z.string().min(1)).min(1),
       priority: z.array(z.string().min(1)).min(1),
       phase: z.array(z.string().min(1)).min(1).optional(),
     }),
@@ -144,10 +142,10 @@ export const TEMPLATE_CONFIG = join(import.meta.dir, "../template/ops.config.jso
 
 /**
  * The settings of a repository with no `ops.config.json` whose backlog the app keeps (no GitHub): the template
- * with its placeholders filled (Area `app`), so no Phase and no Milestone. Copy the template to change them.
+ * with its placeholders filled, so no Phase and no Milestone. Copy the template to change them.
  */
 export function defaultConfig(): OpsConfig {
-  const text = readFileSync(TEMPLATE_CONFIG, "utf8").replaceAll("__AREA__", "app").replaceAll("__PREFIX__", "BACKLOG");
+  const text = readFileSync(TEMPLATE_CONFIG, "utf8").replaceAll("__PREFIX__", "BACKLOG");
   return parseConfig(JSON.parse(text), TEMPLATE_CONFIG);
 }
 

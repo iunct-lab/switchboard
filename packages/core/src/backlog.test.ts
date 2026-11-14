@@ -684,7 +684,7 @@ test("start: complete on an in-progress item resumes it", async () => {
   expect(claude.starts[0]!.prompt).toContain("PBI #305 は実装中のまま止まっています");
 });
 
-test("complete task model: with the trial's model the 実装 Task's prompt hands each Task to a sonnet subagent and the transcript says so; another kind gets neither (同じ: the existing complete tests' prompts)", async () => {
+test("complete task model: with a model chosen the 実装 Task's prompt hands each Task to a sonnet subagent and the transcript says so; another kind gets neither (同じ: the existing complete tests' prompts)", async () => {
   const c2 = holdingClaude();
   const base2 = await boot(fakeGh().gh, { ...c2.adapter, models: [{ value: "claude-sonnet-5-5", label: "Sonnet 5.5" }] });
   const notes = (id: string) => core!.db.listEvents(id).flatMap((e) => (e.ev.t === "status" ? [e.ev.text] : []));
@@ -695,6 +695,8 @@ test("complete task model: with the trial's model the 実装 Task's prompt hands
   for (let i = 0; !c2.starts.length && i < 100; i++) await Bun.sleep(10);
   expect(c2.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 }, taskModel: "claude-sonnet-5-5" }));
   expect(c2.starts[0]!.prompt).toContain("Agent ツールの model に `sonnet` を指定したサブエージェントに前景で任せてください");
+  expect(c2.starts[0]!.prompt).toContain("並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください");
+  expect(c2.starts[0]!.prompt).not.toContain("試験");
   expect(notes(t.id)).toEqual([delegatedNote("claude-sonnet-5-5")]);
   // the mark reads back through the Task's evals
   expect(((await (await fetch(`${base2}/api/tasks/${t.id}/evals`)).json()) as { rules: { metrics: { delegatedModel: string | null } } }).rules.metrics.delegatedModel).toBe("claude-sonnet-5-5");
@@ -703,7 +705,7 @@ test("complete task model: with the trial's model the 実装 Task's prompt hands
   expect(check.status).toBe(201);
   const ct = (await check.json()) as Task;
   for (let i = 0; c2.starts.length < 2 && i < 100; i++) await Bun.sleep(10);
-  expect(c2.starts[1]!.prompt).not.toContain("試験:");
+  expect(c2.starts[1]!.prompt).not.toContain("Agent ツールの model");
   expect(notes(ct.id)).toEqual([]);
 });
 

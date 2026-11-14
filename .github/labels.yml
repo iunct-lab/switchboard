@@ -22,9 +22,6 @@
 - name: "type:request"
   color: e99695
   description: 利用者の要望の原文。PBI に分解され、派生 PBI が全部 Done で閉じる
-- name: "type:epic"
-  color: 3e4b9e
-  description: Phase の到達点。子は PBI（sub-issue）
 - name: "type:pbi"
   color: 5c7cfa
   description: 利用者から見た成果と受け入れ条件。Task に分解され sub-issue が揃ったら Ready
@@ -83,17 +80,3 @@
 - name: "area:infra"
   color: bfdadc
   description: .github / scripts / release
-
-# --- ロードマップ / Phase（Project の Phase フィールドと一致）---
-- name: "phase:0"
-  color: d4d4d4
-  description: 骨格
-- name: "phase:1"
-  color: 1d76db
-  description: 2 ランナーと正本
-- name: "phase:2"
-  color: "5319e7"
-  description: デスクトップ化と自己更新
-- name: "phase:3"
-  color: 0e8a16
-  description: 公開と学習

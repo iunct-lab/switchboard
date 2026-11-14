@@ -659,7 +659,6 @@ export function App() {
             approvals={approvals.map((a) => ({ ...a, taskTitle: tasks.find((t) => t.id === a.taskId)?.title ?? a.taskTitle }))}
             onAnswered={(a) => setApprovals((prev) => prev.filter((x) => !(x.taskId === a.taskId && x.id === a.id)))}
             onOpenTask={openTask}
-            onOpenBacklog={() => setView({ name: "backlog" })}
             onError={setError}
           />
         )}

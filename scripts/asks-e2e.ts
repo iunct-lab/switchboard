@@ -17,20 +17,25 @@
  * pressed one opened in the card, the same buttons over the Backlog's answer box — at 1280 and 390.
  * #3058: a question tool's three questions (two with options, one without) on one card — a free-text field only on the
  * one without, one 回答する once all are answered, one reply — on the 判断待ち screen at 1280 and the Task screen at 390;
- * a card whose one question has no options takes no answer (Task を開く); nothing sideways at 390.
+ * a card whose one question has no options takes no answer (its link 「Task の会話で答える」); nothing sideways at 390.
  * #3124: the operational checks are a question tool's question (`question.ask`), answered by choosing an option and 回答する.
+ * Rows: the person's questions are a row per PBI (else Task) that opens in place, the tool approvals cards of their own above them, and where to go is a
+ * link (「Task の会話を見る」 / 「Task の会話で答える」); the Workspace counts and the heading's are rows; an opened row stays opened when the list is read again.
  * #4786: a question tool's question is on its card once, line breaks kept, with no 次回も使う form; a Task whose PR moved, and one
  * with an old stop, are answered with the option and the reply reaches the Task — at 1280 and 390 (nothing sideways).
+ * A stage Task's stop that took a long last reply: its row opens to the reason, the last reply (six lines, 全文 for the rest), where the
+ * reply goes and the box; the reply reaches the Task once and it runs; at 390 nothing sideways and the button a 44px target.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AskQuestion, RunnerAdapter, RunnerId, Task } from "@switchboard/protocol";
+import type { AgentEvent, Ask, AskQuestion, RunnerAdapter, RunnerId, Task } from "@switchboard/protocol";
 import { importing, sending } from "../packages/core/fixtures/github-import.ts";
 import type { GhRunner } from "../packages/core/src/backlog.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
+import { rowKey } from "../apps/web/src/asks.ts";
 import { releaseBody } from "./parallel-guard.ts";
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -47,6 +52,8 @@ comments(304).push({ body: releaseBody("後回し: 前提 PR #779", [779]), crea
 // #1674: #309, a Ready PBI no other check uses, names #306 as its prerequisite, so #306's question is the first of the
 // person's, unblocking one
 pages[0].data.repository.issues.nodes.push({ ...structuredClone(issue(304)), number: 309, title: "PBI: #306 を待つ PBI", url: "https://github.com/acme/app/issues/309", body: "**Story Points**: 2\n\n**前提**: #306\n", subIssuesSummary: { total: 0, completed: 0 } });
+// two Ready PBIs whose stage Tasks stop below with a long last reply (they are in the first import: a PBI added later is not read)
+for (const [n, title] of [[310, "返信を待つ工程 Task"], [311, "スマホで見る工程 Task"]] as const) pages[0].data.repository.issues.nodes.push({ ...structuredClone(issue(304)), number: n, title: `PBI: ${title}`, url: `https://github.com/acme/app/issues/${n}`, body: "**Story Points**: 2\n", subIssuesSummary: { total: 0, completed: 0 } });
 const waitStates: Json = { w779: { __typename: "PullRequest", state: "OPEN" }, w306: { __typename: "Issue", state: "OPEN" } };
 
 const home = mkdtempSync(join(tmpdir(), "sb-asks-e2e-"));
@@ -97,6 +104,8 @@ const QUESTION_SCRIPTS: Record<string, AskQuestion[]> = {
   questionfree: [{ header: null, question: "何を直せばよいか", options: [], multiSelect: false }],
 };
 const replies: Array<{ prompt: string; text: string }> = [];
+// the last reply of a stage Task that stopped: eight lines, the last a long unbroken one (it wraps at 390), the end of it only under 全文
+const STOP_REPLY = ["調べた結果を報告します。", "- 1 つ目: 型は通りました", "- 2 つ目: テストは 1 件だけ落ちています", "- 3 つ目: 原因は設定の読み違いです", "- 4 つ目: 直し方は 2 通りあります", "- 5 つ目: どちらも小さな変更です", "- 6 つ目: 影響は画面だけです", "- 7 つ目: 続けてよいか教えてください https://example.com/a/very/long/path/that/does/not/break/anywhere/at/all/0123456789/0123456789", "以上です。返信を待ちます。"].join("\n");
 /**
  * Either runner: "write" asks for a Write and keeps running after the answer, a stage Task's /pbi-complete just runs, any
  * other prompt ends its turn with the prompt's reply ("check" / "check13": a merge check, "limit": a check whose reply's
@@ -110,11 +119,13 @@ const runner = (id: RunnerId): RunnerAdapter => ({
     const exited = new Promise<number | null>((r) => (exit = r));
     const execAsk = (command: string): AgentEvent[] => [{ t: "permission.ask", id: "perm1", kind: "exec", tool: "Bash", input: { command }, detail: command }];
     const asked = CHECKS[opts.prompt] ? [CHECKS[opts.prompt]!] : QUESTION_SCRIPTS[opts.prompt];
-    const script: AgentEvent[] = asked ? [{ t: "question.ask", id: "q1", questions: asked }, { t: "session.end", status: "ok", summary: "Waiting for your choices" }] : opts.prompt.includes("/pbi-complete") ? [] : opts.prompt === "exec" ? execAsk("bun test packages/core") : opts.prompt === "exec2" ? execAsk("bun test apps/web") : opts.prompt === "exec3" ? execAsk("git status --short") : opts.prompt === "write" ? [{ t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" }] : [{ t: "session.end", status: "ok", summary: "done" }];
+    const script: AgentEvent[] = asked ? [{ t: "question.ask", id: "q1", questions: asked }, { t: "session.end", status: "ok", summary: "Waiting for your choices" }] : opts.prompt.includes("/pbi-complete") ? [] : opts.prompt === "exec" ? execAsk("bun test packages/core") : opts.prompt === "exec2" ? execAsk("bun test apps/web") : opts.prompt === "exec3" ? execAsk("git status --short") : opts.prompt === "stopreply" ? [{ t: "session.end", status: "ok", summary: STOP_REPLY }] : opts.prompt === "write" ? [{ t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" }] : [{ t: "session.end", status: "ok", summary: "done" }];
     queueMicrotask(() => script.forEach((ev) => emit(ev)));
     return {
       send(text: string) {
         replies.push({ prompt: opts.prompt, text });
+        // a stage Task that goes on after a reply echoes it and says so, as a real runner does: the stop's answer is read from the echoed message
+        if (opts.prompt === "stopreply") queueMicrotask(() => [{ t: "message.delta", role: "user", text } as AgentEvent, { t: "message.delta", role: "assistant", text: "続けます" } as AgentEvent].forEach((ev) => emit(ev)));
         if (opts.prompt !== "limit") return;
         const resetsAt = Math.floor(Date.now() / 1000) + 3600;
         queueMicrotask(() => [{ t: "quota", runner: "claude", windows: { five_hour: { utilization: 1.06, resetsAt } }, status: "rejected", limitType: "five_hour" } as AgentEvent, { t: "message.delta", role: "assistant", text: LIMIT } as AgentEvent, { t: "session.end", status: "error", summary: LIMIT } as AgentEvent].forEach((ev) => emit(ev)));
@@ -212,9 +223,17 @@ try {
   };
   const call = (method: string, params: object = {}): Promise<Json> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws!.send(JSON.stringify({ id, method, params })); });
   const callIn = (sessionId: string, method: string, params: object = {}): Promise<Json> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws!.send(JSON.stringify({ id, method, params, sessionId })); });
-  const evaluate = async (expression: string) => {
+  // an expression that names a question's card (card(prefix) below) opens the row the card is in first: the rows are closed
+  // when the screen opens. A question the list does not have (answered here and kept, or not come yet) has no row to open;
+  // one the list has whose row does not open throws here, where the cause is
+  let openRowOf: (prefix: string) => Promise<void> = async () => undefined;
+  const evaluate = async (expression: string): Promise<Json> => {
+    for (const m of expression.matchAll(/dataset\.ask\.startsWith\(("(?:[^"\\]|\\.)*")\)/g)) await openRowOf(JSON.parse(m[1]!));
+    return evaluateNow(expression);
+  };
+  const evaluateNow = async (expression: string) => {
     const result = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails).slice(0, 300) + " in " + expression.slice(0, 260));
     return result.result.value;
   };
   /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
@@ -224,15 +243,38 @@ try {
   await call("Page.enable");
 
   /** The screen as groups of `<kind>` labels, e.g. { person: ["ツール承認", …] }. */
-  const groups = () => evaluate(`Object.fromEntries([...document.querySelectorAll('.ask-group')].map(g => [g.className.match(/ask-group-(\\w+)/)[1], [...g.querySelectorAll('.card.ask .ask-kind')].map(k => k.textContent).sort()]))`) as Promise<Record<string, string[]>>;
-  const card = (prefix: string) => `[...document.querySelectorAll('.card.ask')].find(c => c.dataset.ask.startsWith(${JSON.stringify(prefix)}))`;
-  const facts = (prefix: string) => evaluate(`Object.fromEntries([...${card(prefix)}.querySelectorAll('.ask-fact')].map(f => [f.querySelector('dt').textContent, { text: f.querySelector('dd').textContent, href: f.querySelector('a')?.href ?? null }]))`) as Promise<Record<string, { text: string; href: string | null }>>;
+  const groups = () => evaluate(`Object.fromEntries([...document.querySelectorAll('.ask-group')].map(g => [g.className.match(/ask-group-(\\w+)/)[1], [...g.querySelectorAll('.card.ask .ask-kind, .ask-row-head .ask-kind')].map(k => k.textContent).sort()]))`) as Promise<Record<string, string[]>>;
+  const card = (prefix: string) => `[...document.querySelectorAll('[data-ask]')].find(c => c.dataset.ask.startsWith(${JSON.stringify(prefix)}))`;
+  /** The folded group (`auto` / `done`) opened, so its cards are on the screen. */
+  const unfold = (key: string) => evaluate(`(() => { const d = document.querySelector('.ask-group-${key}'); if (!d.open) d.querySelector('summary').click(); })()`);
+  /** The row a question is in (a tool approval is a card of its own, so it has none): opened if it is closed, so the question's card is on the screen. */
+  const openRow = async (prefix: string) => {
+    if (await evaluateNow(`!!${card(prefix)}`)) return;
+    const found = ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.find((x) => x.id.startsWith(prefix));
+    assert(found, `no question ${prefix} among ${JSON.stringify(((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.map((x) => x.id.slice(0, 40)))}`);
+    const row = JSON.stringify(rowKey(found!));
+    // a question with no row (a tool approval, another group's card) is a card of its own once the screen has read the list
+    await until(() => evaluateNow(`!!document.querySelector('[data-row=' + JSON.stringify(${row}) + ']') || !!${card(prefix)}`), `the row or the card of ${prefix}`);
+    if (await evaluateNow(`!!${card(prefix)}`)) return;
+    await evaluateNow(`(() => { const b = document.querySelector('[data-row=' + JSON.stringify(${row}) + '] > button'); if (b.getAttribute('aria-expanded') !== 'true') b.click(); })()`);
+    await until(() => evaluateNow(`!!${card(prefix)}`), `the card of ${prefix}`);
+  };
+  /** openRow for a question the list has; one it does not have (answered here and kept, or not come yet) is left as it is. */
+  const openListed = async (prefix: string) => {
+    if (await evaluateNow(`!!${card(prefix)}`)) return;
+    const listed = ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.some((x) => x.id.startsWith(prefix));
+    if (listed) await openRow(prefix);
+  };
+  openRowOf = openListed;
+  const facts = async (prefix: string) => { await openListed(prefix); return evaluate(`Object.fromEntries([...${card(prefix)}.querySelectorAll('.ask-fact')].map(f => [f.querySelector('dt').textContent, { text: f.querySelector('dd').textContent, href: f.querySelector('a')?.href ?? null }]))`) as Promise<Record<string, { text: string; href: string | null }>> };
   /** #4068: the card's question (above the answer buttons, not a fact row) and the one 「不明: …」 line that names the facts the records do not have. */
-  const questionOf = (prefix: string) => evaluate(`${card(prefix)}.querySelector('.ask-question')?.textContent ?? null`) as Promise<string | null>;
-  const unknownOf = (prefix: string) => evaluate(`${card(prefix)}.querySelector('.ask-unknown')?.textContent ?? null`) as Promise<string | null>;
-  const press = (prefix: string, label: string) => evaluate(`(${card(prefix)}).querySelector('.approval-actions') && [...${card(prefix)}.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(label)}).click()`);
+  const questionOf = async (prefix: string) => { await openListed(prefix); return evaluate(`${card(prefix)}.querySelector('.ask-question')?.textContent ?? null`) as Promise<string | null> };
+  const unknownOf = async (prefix: string) => { await openListed(prefix); return evaluate(`${card(prefix)}.querySelector('.ask-unknown')?.textContent ?? null`) as Promise<string | null> };
+  /** A link under a row (or a card of its own): a button or an anchor with this text. */
+  const link = async (prefix: string, label: string) => { await openRow(prefix); return evaluate(`(() => { const c = ${card(prefix)}; (c.closest('.ask-row') ?? c.parentElement).querySelector('.ask-links') && [...(c.closest('.ask-row') ?? c.parentElement).querySelectorAll('.ask-links .link')].find(l => l.textContent.trim().startsWith(${JSON.stringify(label)})).click(); })()`); };
+  const press = async (prefix: string, label: string) => { await openRow(prefix); return evaluate(`[...${card(prefix)}.querySelectorAll('button')].find(b => (b.childNodes[0]?.textContent ?? '').trim() === ${JSON.stringify(label)}).click()`); };
   /** #3124: a question tool's check is answered by choosing an option and pressing 回答する. */
-  const choose = (prefix: string, label: string) => evaluate(`[...${card(prefix)}.querySelectorAll('.ask-questions label.opt')].find(l => l.textContent.trim().startsWith(${JSON.stringify(label)})).querySelector('input').click()`);
+  const choose = async (prefix: string, label: string) => { await openListed(prefix); return evaluate(`[...${card(prefix)}.querySelectorAll('.ask-questions label.opt')].find(l => l.textContent.trim().startsWith(${JSON.stringify(label)})).querySelector('input').click()`) };
   const answerCheck = async (prefix: string, label: string) => {
     await choose(prefix, label);
     await evaluate(`[...${card(prefix)}.querySelectorAll('.ask-questions button')].find(b => b.textContent.trim() === '回答する').click()`);
@@ -253,11 +295,36 @@ try {
   // one with 不明, the automatic two
   await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await open();
-  const before = await until(async () => { const g = await groups(); return g.person?.length === 7 ? g : null; }, "seven of the person's");
-  assert(same(before.person, ["ツール承認", "ツール承認", "利用者確認", "利用者確認", "実装の判断", "実装の判断", "質問"]), `person: ${JSON.stringify(before.person)}`);
+  const before = await until(async () => { const g = await groups(); return g.person?.length === 6 ? g : null; }, "six of the person's", groups);
+  // a row per target: the two approvals (a card each), #308's two criteria (one row), #306, #303 and the Task that asks (one row each)
+  assert(same(before.person, ["ツール承認", "ツール承認", "利用者確認", "実装の判断", "実装の判断", "質問"]), `person: ${JSON.stringify(before.person)}`);
   assert(same(before.auto, ["依存待ち", "停止"]), `auto: ${JSON.stringify(before.auto)}`);
-  assert(same(before.resolved, ["停止"]), `resolved: ${JSON.stringify(before.resolved)}`);
-  assert(await evaluate(`document.querySelector('.ask-group-auto').textContent.includes('操作は要りません')`), "the automatic group says no action is needed");
+  assert(same(before.done, ["停止"]), `done: ${JSON.stringify(before.done)}`);
+  // the two groups nothing is to be done in are folded into one line with their count: closed on opening, their cards not on the screen, no state kept
+  const folds = () => evaluate(`[...document.querySelectorAll('details.ask-fold')].map(d => ({ key: d.className.match(/ask-group-(\\w+)/)[1], open: d.open, head: d.querySelector('summary').textContent.trim(), h: d.querySelector('summary').getBoundingClientRect().height, shown: [...d.querySelectorAll('.card.ask')].filter(c => c.checkVisibility()).length }))`) as Promise<Array<{ key: string; open: boolean; head: string; h: number; shown: number }>>;
+  const closed = await folds();
+  assert(same(closed.map((f) => f.key), ["auto", "done"]) && closed.every((f) => !f.open && f.shown === 0 && f.h >= 44) && closed[0]!.head === "自動で待っている（操作不要） 2" && closed[1]!.head === "済んだもの 1", `the folded groups: ${JSON.stringify(closed)}`);
+  assert(await evaluate(`!document.querySelector('.ask-group-person details.ask-fold') && !document.querySelector('.ask-group-person summary.ask-fold-head')`), "the person's group is not folded");
+  // a Workspace that could not be read is told in one card after every group, not above the rows
+  const errs = await evaluate(`(() => { const e = document.querySelector('.ask-errors'); const p = document.querySelector('.ask-group-person'); return { text: e?.textContent ?? null, after: !!e && !!p && !!(p.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING), last: !!e && e === document.querySelector('main').lastElementChild, inHead: !!document.querySelector('main > section.card')?.textContent?.includes('second:') }; })()`) as { text: string | null; after: boolean; last: boolean; inHead: boolean };
+  assert(errs.text?.includes("second:") && errs.after && errs.last && !errs.inHead, `the Workspace error comes last: ${JSON.stringify(errs)}`);
+  // pressing the line opens the cards, the hint with them; pressing again closes them
+  await evaluate(`document.querySelector('.ask-group-auto > summary').click()`);
+  assert(await evaluate(`document.querySelector('.ask-group-auto').open && document.querySelector('.ask-group-auto').textContent.includes('操作は要りません') && [...document.querySelectorAll('.ask-group-auto .card.ask')].every(c => c.checkVisibility())`), "pressing the automatic group's line opens its cards and the hint");
+  await evaluate(`document.querySelector('.ask-group-auto > summary').click()`);
+  assert(await evaluate(`!document.querySelector('.ask-group-auto').open`), "pressing the line again closes the group");
+  // the rows are closed when the screen opens; a press opens one in place, another press closes it
+  const r306 = JSON.stringify(`${meta.id}:pbi:306`);
+  const rowState = () => evaluateNow(`(() => { const r = document.querySelector('[data-row=' + JSON.stringify(${r306}) + ']'); return { open: r.querySelector(':scope > button').getAttribute('aria-expanded'), cards: r.querySelectorAll('[data-ask]').length, anyOpen: document.querySelectorAll('.ask-row > button[aria-expanded="true"]').length, cardsInRows: document.querySelectorAll('.ask-row [data-ask]').length }; })()`) as Promise<{ open: string; cards: number; anyOpen: number; cardsInRows: number }>;
+  const rowClosed = await rowState();
+  assert(rowClosed.open === "false" && rowClosed.cards === 0 && rowClosed.anyOpen === 0 && rowClosed.cardsInRows === 0, `the rows are closed at first: ${JSON.stringify(rowClosed)}`);
+  await evaluateNow(`document.querySelector('[data-row=' + JSON.stringify(${r306}) + '] > button').click()`);
+  const opened = await until(async () => { const st = await rowState(); return st.open === "true" && st.cards === 1 ? st : null; }, "#306's row opens on a press", rowState);
+  await evaluateNow(`document.querySelector('[data-row=' + JSON.stringify(${r306}) + '] > button').click()`);
+  const closedAgain = await until(async () => { const st = await rowState(); return st.open === "false" && st.cards === 0 ? st : null; }, "#306's row closes on the second press", rowState);
+  report.toggle = { rowClosed, opened, closedAgain };
+  await openRow(`decision:${meta.id}#306@`);
+  await openRow(`decision:${meta.id}#303@`);
   const full = await facts(`decision:${meta.id}#306@`);
   assert((await questionOf(`decision:${meta.id}#306@`)) === "保存先をどちらにするか" && !((await unknownOf(`decision:${meta.id}#306@`)) ?? "").match(/問い|推奨と根拠|PBI|元の記録/) && full["推奨と根拠"]!.text === "B — 小さい" && full["PBI"]!.href === "https://github.com/acme/app/issues/306" && full["元の記録"]!.href === "https://github.com/acme/app/issues/306" && full["対象リポジトリ"]!.text === meta.name, `#306: ${JSON.stringify(full)} q=${await questionOf(`decision:${meta.id}#306@`)} u=${await unknownOf(`decision:${meta.id}#306@`)} name=${meta.name}`);
   const missing = await facts(`decision:${meta.id}#303@`);
@@ -267,9 +334,10 @@ try {
   const wait = await facts(`wait:${meta.id}#304@`);
   assert(wait["停止理由"]!.text === "PR #779 の完了待ち" && wait["条件"]!.text === "pr#779: open", `#304: ${JSON.stringify(wait)}`);
   // #1674: the question other PBIs wait on comes first, with how many and which
-  const first = await evaluate(`(() => { const c = document.querySelector('.ask-group-person .card.ask'); return { id: c.dataset.ask, line: c.querySelector('.ask-unblocks')?.textContent ?? null, links: [...c.querySelectorAll('.ask-unblocks-list a')].map(a => a.href) }; })()`) as { id: string; line: string | null; links: string[] };
-  assert(first.id.startsWith(`decision:${meta.id}#306@`) && first.line === "答えると 1 件が進められる" && same(first.links, ["https://github.com/acme/app/issues/309"]), `first of the person's: ${JSON.stringify(first)}`);
-  assert(await evaluate(`[...document.querySelectorAll('.card.ask')].filter(c => c.querySelector('.ask-unblocks')).length`) === 1, "only #306's card says how many it unblocks");
+  // the tool approvals go first (a card each); the first row is #306's, with how many it unblocks on its line and the PBI in its question
+  const first = await evaluate(`(() => { const r = document.querySelector('.ask-group-person .ask-row'); return { id: r.dataset.row, line: r.querySelector('.ask-row-head .ask-unblocks')?.textContent ?? null, links: [...r.querySelectorAll('.ask-unblocks-list a')].map(a => a.href), before: [...document.querySelectorAll('.ask-group-person > [data-ask]')].length }; })()`) as { id: string; line: string | null; links: string[]; before: number };
+  assert(first.id === `${meta.id}:pbi:306` && first.line === "答えると 1 件が進められる" && same(first.links, ["https://github.com/acme/app/issues/309"]) && first.before === 2, `first of the person's: ${JSON.stringify(first)}`);
+  assert(await evaluate(`[...document.querySelectorAll('.ask-row-head')].filter(c => c.querySelector('.ask-unblocks')).length`) === 1, "only #306's row says how many it unblocks");
   report.first = first;
   report.before = before;
   await shot("asks-1280.png");
@@ -277,32 +345,33 @@ try {
   // #1673: a button per Workspace with the person's count; second narrows every group to its one approval, すべて goes back
   const chips = () => evaluate(`[...document.querySelectorAll('.ask-workspaces button')].map(b => b.textContent.trim())`) as Promise<string[]>;
   const headCount = () => evaluate(`document.querySelector('.approvals .row.head h5 .hint').textContent`) as Promise<string>;
-  const shown = () => evaluate(`[...document.querySelectorAll('.card.ask')].map(c => c.dataset.ask)`) as Promise<string[]>;
+  const shown = () => evaluate(`[...document.querySelectorAll('.card.ask, .ask-row')].map(c => c.dataset.ask ?? c.dataset.row)`) as Promise<string[]>;
   const all = await chips();
-  assert(same(all, ["すべて", `${meta.name} 6`, "second 1"]), `Workspace buttons: ${JSON.stringify(all)}`);
-  assert((await headCount()) === "7", `the heading's count: ${await headCount()}`);
+  // the count is the rows (a PBI's, else a Task's questions) and the tool approvals, which stay a card each
+  assert(same(all, ["すべて", `${meta.name} 5`, "second 1"]), `Workspace buttons: ${JSON.stringify(all)}`);
+  assert((await headCount()) === "6", `the heading's count: ${await headCount()}`);
   const sections = await evaluate(`[...document.querySelectorAll('.ask-group-person .ask-workspace-head')].map(h => h.textContent)`) as string[];
-  assert(same(sections, [`${meta.name} 6`, "second 1"]), `the person's Workspace headings: ${JSON.stringify(sections)}`);
+  assert(same(sections, [`${meta.name} 4`]), `the person's Workspace headings (rows; the approvals are cards above them): ${JSON.stringify(sections)}`);
   await evaluate(`[...document.querySelectorAll('.ask-workspaces button')].find(b => b.textContent.trim() === 'second 1').click()`);
   const narrowed = await until(async () => { const s = await shown(); return s.length === 1 ? s : null; }, "only the second Workspace's card");
   assert(narrowed[0]!.startsWith(`approval:${s2}:`), `narrowed to: ${JSON.stringify(narrowed)}`);
   assert(same(await groups(), { person: ["ツール承認"] }) && (await headCount()) === "1", `narrowed groups: ${JSON.stringify(await groups())}, count ${await headCount()}`);
   await shot("asks-workspace-1280.png");
   await evaluate(`[...document.querySelectorAll('.ask-workspaces button')].find(b => b.textContent.trim() === 'すべて').click()`);
-  await until(async () => (await groups()).person?.length === 7 && (await headCount()) === "7", "すべて shows every Workspace again");
+  await until(async () => (await groups()).person?.length === 6 && (await headCount()) === "6", "すべて shows every Workspace again");
   report.workspaces = { buttons: all, narrowed: narrowed.length };
 
   // #1675: すぐ答えられる — the tool approval and #306 (recommended) have the badge, #303 (its question 不明) not; the toggle
   // counts the person's badged cards, narrows the person's to them (#303 goes), stacks with the Workspace filter, and goes back
   const quickButton = `document.querySelector('.ask-quick-row button')`;
   const quickOf = (prefix: string) => evaluate(`!!${card(prefix)}?.querySelector('.ask-tags .ask-quick')`) as Promise<boolean>;
-  const personIds = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask')].map(c => c.dataset.ask)`) as Promise<string[]>;
-  const personQuick = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask')].filter(c => c.querySelector('.ask-tags .ask-quick')).length`) as Promise<number>;
+  const personIds = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask, .ask-group-person .ask-row')].map(c => c.dataset.ask ?? c.dataset.row)`) as Promise<string[]>;
+  const personQuick = () => evaluate(`[...document.querySelectorAll('.ask-group-person .card.ask, .ask-group-person .ask-row')].filter(c => c.querySelector('.ask-tags .ask-quick, .ask-row-head .ask-quick')).length`) as Promise<number>;
   const quick303 = `decision:${meta.id}#303@`;
   assert((await quickOf(`approval:${a}:`)) && (await quickOf(`decision:${meta.id}#306@`)) && !(await quickOf(quick303)), "the approval and #306 are すぐ答えられる, #303 is not");
   const quickCount = await personQuick();
   const quickLabel = await evaluate(`${quickButton}.textContent.trim()`) as string;
-  assert(quickLabel === `すぐ答えられる ${quickCount}` && quickCount < 7, `the toggle: ${quickLabel}, badged ${quickCount}`);
+  assert(quickLabel === `すぐ答えられる ${quickCount}` && quickCount < 6, `the toggle: ${quickLabel}, badged ${quickCount}`);
   // the screen's half: the fixture has one card without the badge (#303), so this shows the toggle, the count and the
   // stacking work; which questions are quick (and the order kept) is asks.test.ts' -t "quick"
   const order = await personIds();
@@ -321,59 +390,98 @@ try {
   report.quick = { count: quickCount, shown: quickOnly.length, withSecond: both.length };
 
   // 3. answer (#936): the approval with 承認して続行, tapped twice at once → the runner hears once, the card says 実行中;
-  // #306 with 推奨案で進める (B), whose line says what is written where → ## 回答 and the label off, one 実装 starts, 実行中.
+  // #306 with its button B: ファイル（推奨） and the one line that says what is written where → ## 回答 and the label off, one 実装 starts, 実行中.
   // The stop that went on is 解消済み
-  const badge = (prefix: string) => evaluate(`${card(prefix)}?.querySelector('.ask-resume')?.textContent ?? null`) as Promise<string | null>;
+  const badge = async (prefix: string) => { await openListed(prefix); return evaluate(`${card(prefix)}?.querySelector('.ask-resume')?.textContent ?? null`) as Promise<string | null> };
   await evaluate(`(() => { const b = [...${card(`approval:${a}:`)}.querySelectorAll('button')].find(b => b.textContent.trim() === '承認して続行'); b.click(); b.click(); })()`);
   await until(() => answered.includes("perm1:allow"), "the runner got allow");
   await until(async () => (await badge(`approval:${a}:`))?.startsWith("実行中"), "the approval's card says 実行中");
   assert(answered.filter((x) => x === "perm1:allow").length === 1, `allow sent ${answered.length} times`);
   stop(a, "permission", "resolved"); // as a runner reports once it went on: the stop of the approval is resolved
   const d306 = `decision:${meta.id}#306@`;
-  const line306 = await evaluate(`[...${card(d306)}.querySelectorAll('.ask-button')].find(b => b.querySelector('button').textContent.startsWith('推奨案で進める')).textContent`) as string;
-  assert(line306.includes("推奨案で進める（B）") && line306.includes("送る: B: ファイル — 影響: 移行が要らない → Issue #306、続き: #306 の続きの工程 Task"), `#306's button: ${line306}`);
-  await press(d306, "推奨案で進める（B）");
+  const line306 = await evaluate(`(() => { const c = ${card(d306)}; return { button: [...c.querySelectorAll('.ask-button button')].find(b => b.firstChild.textContent === 'B: ファイル（推奨）')?.textContent ?? null, route: [...c.querySelectorAll('.ask-answer-route')].map(r => r.textContent), text: c.textContent }; })()`) as Json;
+  assert(line306.button === "B: ファイル（推奨）影響: 移行が要らない", `#306's button: ${line306.button}`);
+  assert(line306.route.length === 1 && line306.route[0].includes("答えは Issue #306 に書かれます。続き: #306 の続きの工程 Task"), `#306's route: ${line306.route}`);
+  assert(!line306.text.includes("送る:"), "#306's card repeats a 送る line");
+  const asked306 = "保存先をどちらにするか";
+  assert(line306.text.split(asked306).length - 1 === 1, `#306's question appears ${line306.text.split(asked306).length - 1} times in its card`);
+  await press(d306, "B: ファイル（推奨）");
   await until(async () => (await badge(d306))?.startsWith("実行中"), "#306's card says 実行中", () => badge(d306));
   await until(async () => (await windowOver()) && comments(306).some((c: Json) => c.body === "## 回答\n\nB: ファイル — 影響: 移行が要らない") && !issue(306).labels.nodes.some((l: Json) => l.name === "needs-decision"), "#306's ## 回答 and its label off reach GitHub");
   const impl306 = core.db.listTasks().filter((t) => t.title.startsWith("#306 実装: "));
   assert(impl306.length === 1, `#306 実装 Tasks: ${impl306.length}`);
   await imported(true);
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '再読込').click()`);
-  const after = await until(async () => { const g = await groups(); return g.answered?.includes("実装の判断") ? g : null; }, "#306 is answered");
-  assert(same(after.person, ["ツール承認", "利用者確認", "利用者確認", "実装の判断", "質問"]), `person after: ${JSON.stringify(after.person)}`);
-  assert(same(after.answered, ["ツール承認", "実装の判断"]), `answered: ${JSON.stringify(after.answered)}`);
-  assert(same(after.resolved, ["停止", "停止"]), `resolved after: ${JSON.stringify(after.resolved)}`);
+  // #306's answered question stays in its row (with the result), not in the answered group
+  const after = await until(async () => { const g = await groups(); return (await evaluate(`${card(d306)}?.querySelector('.ask-state')?.textContent === '回答済み'`)) ? g : null; }, "#306 is answered");
+  assert(same(after.person, ["ツール承認", "利用者確認", "実装の判断", "実装の判断", "質問"]), `person after: ${JSON.stringify(after.person)}`);
+  assert(same(after.done, ["ツール承認", "停止", "停止"]), `done after: ${JSON.stringify(after.done)}`);
   report.after = after;
-  // the way to answer and the record, from each state: an open decision → Backlog, a resolved stop → its Task
+  // one PBI's two criteria waiting on the user's check are one row, not two cards; opened in place, one is answered with 確認した
+  const c308 = `confirm:${meta.id}#308:`;
+  await openRow(c308);
+  const row308 = await evaluate(`(() => { const r = document.querySelector('[data-row=${JSON.stringify(`${meta.id}:pbi:308`)}]'); return { cards: [...r.querySelectorAll('[data-ask]')].map(c => c.dataset.ask), rows: document.querySelectorAll('.ask-group-person [data-row$=":pbi:308"]').length, open: r.querySelector('button').getAttribute('aria-expanded') }; })()`) as { cards: string[]; rows: number; open: string };
+  assert(row308.rows === 1 && row308.open === "true" && row308.cards.length === 2 && row308.cards.every((id) => id.startsWith(c308)), `#308's row: ${JSON.stringify(row308)}`);
+  await press(`${c308}2`, "確認した");
+  await until(() => evaluate(`${card(`${c308}2`)}?.querySelector('.ask-state')?.textContent === '回答済み'`), "the first criterion of #308 (its line 2) is answered here");
+  // the daemon no longer asks it (what reaches GitHub is backlog.test.ts's answerStoredConfirmation)
+  await until(async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.find((x) => x.id === `${c308}2`)?.state !== "open", "#308's criterion is no longer open in the list");
+  // a list read again (再読込, and a tool approval that comes) does not close the opened row, and the answered criterion stays in it
+  await evaluate(`window.__asksReads = 0; const f = window.fetch; window.fetch = (...a) => { if (String(a[0]).includes('/api/asks')) window.__asksReads++; return f(...a); }`);
+  await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '再読込').click()`);
+  const arriving = await task("読み直しの間に来る承認", "claude", "write", (st) => st === "waiting");
+  await until(() => evaluate(`window.__asksReads >= 2 && !!document.querySelector('[data-ask^="approval:${arriving}:"]')`), "the list is read again for the reload and the approval", () => evaluate("window.__asksReads"));
+  await Bun.sleep(300);
+  const kept308 = await evaluate(`(() => { const r = document.querySelector('[data-row=${JSON.stringify(`${meta.id}:pbi:308`)}]'); return { open: r.querySelector('button').getAttribute('aria-expanded'), cards: r.querySelectorAll('[data-ask]').length }; })()`) as { open: string; cards: number };
+  assert(kept308.open === "true" && kept308.cards >= 2, `the opened row after the list was read again: ${JSON.stringify(kept308)}`);
+  // the tool approvals are open cards of their own, before every row (never inside one, never folded)
+  const firstOrder = await evaluate(`(() => { const g = document.querySelector('.ask-group-person'); const kids = [...g.children].filter(e => e.matches('[data-ask], .ask-workspace')).map(e => e.matches('[data-ask]') ? 'approval' : 'rows'); return { kids, inRow: document.querySelectorAll('.ask-row [data-ask^="approval:"]').length, folded: document.querySelectorAll('.ask-group-person details:not(.ask-record):not(.ask-policy):not(.ask-question)').length }; })()`) as { kids: string[]; inRow: number; folded: number };
+  assert(firstOrder.kids.lastIndexOf("approval") < firstOrder.kids.indexOf("rows") && firstOrder.kids.filter((k) => k === "approval").length >= 2 && firstOrder.inRow === 0 && firstOrder.folded === 0, `the approvals go first, open: ${JSON.stringify(firstOrder)}`);
+  await Promise.all([post(`/api/tasks/${arriving}/abort`, {})]);
+  // where to go is a link, from each state: a row's Issue and Task, a resolved stop's Task, an answered approval's Task; none of them leads to the Backlog tab
   assert((await facts(`decision:${meta.id}#303@`))["元の記録"]!.href === "https://github.com/acme/app/issues/303", "#303's record");
-  await press(`decision:${meta.id}#303@`, "Backlog で答える");
-  await until(() => evaluate(`!!document.querySelector('main.backlog')`), "Backlog で答える opens the backlog");
+  const links = async (prefix: string) => { await openRow(prefix); return evaluate(`(() => { const c = ${card(prefix)}; const s = c.closest('.ask-row') ?? c.parentElement; return [...s.querySelectorAll('.ask-links .link')].map(l => ({ tag: l.tagName, text: l.textContent.trim(), href: l.href ?? null })); })()`) as Promise<Array<{ tag: string; text: string; href: string | null }>>; };
+  const l303 = await links(`decision:${meta.id}#303@`);
+  // a decision has no Task of its own: its Issue is the one link of its row; the Task that asks is the one link of its row
+  const l306 = await links(`decision:${meta.id}#306@`);
+  const lb = await links(`check:${b}:`);
+  const issueLink = (n: number) => [["A", "Issue を開く", `https://github.com/acme/app/issues/${n}`]];
+  assert(same(l303.map((l) => [l.tag, l.text, l.href]), issueLink(303)) && same(l306.map((l) => [l.tag, l.text, l.href]), issueLink(306)) && same(lb.map((l) => [l.tag, l.text]), [["BUTTON", "Task の会話を見る"]]), `links: #303 ${JSON.stringify(l303)}, #306 ${JSON.stringify(l306)}, the Task's ${JSON.stringify(lb)}`);
+  assert(await evaluate(`!/Backlog\\sで答える/.test(document.body.textContent)`), "the screen has a way to answer in the Backlog tab");
+  await link(`check:${b}:`, "Task の会話を見る");
+  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task の会話を見る opens the row's Task");
   await open();
-  await press(`stop:task:${d}`, "Task を開く");
-  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task を開く opens the task");
+  await unfold("done");
+  await link(`stop:task:${d}`, "Task の会話を見る");
+  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task の会話を見る opens the task of a stop that went on");
   await open();
-  await press(`approval:${a}:`, "Task を開く");
+  await link(`approval:${a}:`, "Task の会話を見る");
   await until(() => evaluate(`!!document.querySelector('main.task')`), "an answered approval opens its task");
 
   // 4. 390 × 844: the same groups, nothing sideways, every button a 44px target; the routes again
   await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
   await call("Emulation.setTouchEmulationEnabled", { enabled: true });
   await open();
-  const phone = await until(async () => { const g = await groups(); return g.person?.length === 5 ? g : null; }, "the groups at 390");
-  assert(same(phone, after), `390: ${JSON.stringify(phone)}`);
+  const phone = await until(async () => { const g = await groups(); return g.person?.length === 4 ? g : null; }, "the groups at 390");
+  // opened again, #306 and #308 answered here (the comment of #308 writes its own ## 回答) are in the done group (it stayed in its row only while the screen was open)
+  assert(same(phone, { ...after, person: ["ツール承認", "利用者確認", "実装の判断", "質問"], done: ["ツール承認", "停止", "停止", "実装の判断", "実装の判断"] }), `390: ${JSON.stringify(phone)}`);
   const width = await evaluate("document.documentElement.scrollWidth") as number;
   const wide = width > 390 ? await evaluate(`[...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > 391).slice(0, 6).map(e => e.tagName + '.' + e.className)`) : [];
   assert(width <= 390, `scrolls sideways at 390px (${width}): ${JSON.stringify(wide)}`);
   assert(await evaluate(`!!document.querySelector('.ask-workspaces')`), "the Workspace buttons at 390");
   assert(await evaluate(`!!document.querySelector('.ask-quick-row button')`), "the すぐ答えられる toggle at 390");
-  const small = await evaluate(`[...document.querySelectorAll('.ask .approval-actions button, .ask-workspaces button, .ask-quick-row button')].filter(b => b.getBoundingClientRect().height < 44).length`);
+  // the toggle comes first in the sideways row: however many Workspaces there are, it is on the first screen
+  assert(await evaluate(`(() => { const f = document.querySelector('.ask-filters'); const r = document.querySelector('.ask-quick-row button').getBoundingClientRect(); return f.firstElementChild.matches('.ask-quick-row') && r.left >= 0 && r.right <= window.innerWidth; })()`), "the すぐ答えられる toggle is first in the row, not scrolled off at 390");
+  const small = await evaluate(`[...document.querySelectorAll('.ask-row-head, .ask .approval-actions button, .ask-workspaces button, .ask-quick-row button')].filter(b => b.getBoundingClientRect().height < 44).length`);
   assert(small === 0, `${small} button(s) shorter than 44px`);
   await shot("asks-390.png");
-  await press(`decision:${meta.id}#303@`, "Backlog で答える");
-  await until(() => evaluate(`!!document.querySelector('main.backlog')`), "Backlog で答える at 390");
-  await open();
-  await press(`stop:task:${d}`, "Task を開く");
-  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task を開く at 390");
+  // a row opens in place at 390 too, its links 44px targets and nothing sideways; then a resolved stop's Task
+  await openRow(`decision:${meta.id}#303@`);
+  const smallLinks = await evaluate(`[...document.querySelectorAll('.ask-links .link')].filter(b => b.getBoundingClientRect().height < 44).length`);
+  assert(smallLinks === 0 && (await evaluate("document.documentElement.scrollWidth")) <= 390, `the opened row at 390: ${smallLinks} short link(s)`);
+  await unfold("done");
+  await link(`stop:task:${d}`, "Task の会話を見る");
+  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task の会話を見る at 390");
   report.scrollWidth = width;
 
   // 5. 1280 × 800 (#936): merge checks, a refused reply, the usage limit, a hold, a decision a stop condition holds, the runner's refusal
@@ -400,7 +508,7 @@ stageOf(ci, 304);
   core.db.appendEvent(ci, { t: "stop.record", stop: { id: "s-ci", work: { workspaceId: meta.id, issue: 304, taskId: ci }, op: "gh pr merge", target: "#20", reason: "depends", evidence: "CI が失敗", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() } } as AgentEvent);
   await imported(true);
   await open();
-  const cardOf = (prefix: string) => until(() => evaluate(`!!${card(prefix)}`), `card ${prefix}`);
+  const cardOf = (prefix: string) => until(async () => { await openListed(prefix); return evaluate(`!!${card(prefix)}`); }, `card ${prefix}`);
   // the merge check whose PR is as its [merge-ask] named: the reply goes, 実行中
   await cardOf(`check:${m12}:`);
   await answerCheck(`check:${m12}:`, OPTION);
@@ -413,7 +521,7 @@ stageOf(ci, 304);
   assert(replies.filter((r) => r.prompt === "check13").length === 1, "#13 got more than one reply");
   // a Task with an old stop (CI failed): its question is answered as any other
   const stale = await checkTask("古い停止のある Task", "checkstale");
-  core.db.appendEvent(stale, { t: "stop.record", stop: { id: "s-stale", work: { workspaceId: meta.id, issue: null, taskId: stale }, op: "gh pr merge", target: "#15", reason: "depends", evidence: "CI が失敗", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
+  core.db.appendEvent(stale, { t: "stop.record", stop: { id: "s-stale", work: { workspaceId: meta.id, issue: null, taskId: stale }, op: "gh pr merge", target: "#15", reason: "input", evidence: "CI が失敗", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
   await open();
   await cardOf(`check:${stale}:`);
   assert(await evaluate(`!${card(`check:${stale}:`)}.querySelector('.ask-blocker')`), "an old stop shows a blocker on a question card");
@@ -428,6 +536,7 @@ stageOf(ci, 304);
   await answerCheck(`check:${lim}:`, "続ける");
   await until(() => core.db.getTask(lim)!.resumeAt !== null, "the limit's resumeAt");
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '再読込').click()`);
+  await unfold("auto");
   await until(() => evaluate(`!![...document.querySelectorAll('.ask-group-auto .card.ask')].find(c => c.dataset.ask.startsWith('resume:${lim}@') && c.textContent.includes('使用上限の解除待ち'))`), "the usage limit's wait among the automatic ones");
   // 保留 on #303: only a ## 保留 is written, the label stays, the card is 保留 and still the person's
   const d303 = `decision:${meta.id}#303@`;
@@ -443,13 +552,18 @@ stageOf(ci, 304);
   await cardOf(d304);
   const blocked = await evaluate(`${card(d304)}.querySelector('.ask-blocker')?.textContent ?? ''`) as string;
   assert(blocked === "回答だけでは解除されません: ci: failure", `#304 blocker: ${blocked}`);
-  await press(d304, "推奨案で進める（A）");
+  await press(d304, "A: 小さく（推奨）");
   const queued = await until(() => badge(d304).then((b) => (b?.startsWith("再開待ち") ? b : null)), "#304 says 再開待ち");
   assert(queued.includes("ci: failure") && core.db.listTasks().filter((t) => t.title.startsWith("#304 実装: ")).length === 1, `#304: ${queued}`);
   // a Task the runner refused: no answer buttons, and why
-  const ref = await evaluate(`(() => { const c = ${card(`stop:task:${refused}`)}; return { buttons: c.querySelectorAll('.ask-button, .ask-text').length, blocker: c.querySelector('.ask-blocker')?.textContent ?? '' }; })()`) as Json;
-  assert(ref.buttons === 0 && ref.blocker === "op : permission の停止（ランナー側の拒否。回答では解除されません）", `refused: ${JSON.stringify(ref)}`);
+  await openRow(`stop:task:${refused}`);
+  const ref = await evaluate(`(() => { const c = ${card(`stop:task:${refused}`)}; return { buttons: c.querySelectorAll('.ask-button, .ask-text').length, blocker: c.querySelector('.ask-blocker')?.textContent ?? '', talk: [...c.querySelectorAll('.ask-talk')].map(b => b.textContent.trim()) }; })()`) as Json;
+  assert(ref.buttons === 0 && ref.blocker === "op : permission の停止（ランナー側の拒否。回答では解除されません）" && same(ref.talk, ["Task の会話で答える"]), `refused: ${JSON.stringify(ref)}`);
   await shot("asks-answer-1280.png");
+  // the one way to answer it is a link to the Task's conversation: pressing it opens that Task's screen
+  await evaluate(`${card(`stop:task:${refused}`)}.querySelector('.ask-talk').click()`);
+  await until(() => evaluate(`!!document.querySelector('main.task')`), "Task の会話で答える opens the Task");
+  await open();
   report.answered1280 = { m12: "実行中", m13: "replied", budget: failed, limit: "usage-limit", hold: "#303", blocked: queued };
 
   // 6. 390 × 844: an approval and a decision answered, nothing sideways
@@ -514,7 +628,7 @@ stageOf(ci, 304);
   assert(scopes305.length === 3 && scopes305[1]!.startsWith("この PBI 内（#305）"), `#305 scopes: ${JSON.stringify(scopes305)}`);
   await openForm(d305);
   await pickScope(d305, "この PBI 内");
-  await press(d305, "推奨案で進める（A）");
+  await press(d305, "A: 小さく（推奨）");
   await until(async () => (await policies()).length === 2, "the PBI policy is saved");
   const pbi = (await policies()).find((p) => p.scope === "pbi")!;
   assert(pbi.pbi === 305 && pbi.op === "decide" && pbi.target === "approach" && pbi.answer.choice.startsWith("A:"), `pbi policy: ${JSON.stringify(pbi)}`);
@@ -696,8 +810,8 @@ stageOf(ci, 304);
     await shot(`asks-mockups-${width}.png`);
     const w = await evaluate("document.documentElement.scrollWidth") as number;
     assert(w <= width, `the 判断待ち screen with a mockup scrolls sideways at ${width}px (${w})`);
-    // the Backlog's answer box for #307: the same buttons over it, B opens, the answer box is still there
-    await press(`decision:${meta.id}#307@`, "Backlog で答える");
+    // the Backlog's own answer box for #307 (reached by its tab; the 判断待ち screen no longer leads there): the same buttons over it, B opens, the answer box is still there
+    await evaluate(`[...document.querySelectorAll('button, a')].find(b => b.textContent.trim() === 'Backlog').click()`);
     const decisionCard = `[...document.querySelectorAll('section[data-stage="needs-decision"] .decision-card')].find(c => c.querySelector('a').href.endsWith('/307'))`;
     await until(() => evaluate(`!!(${decisionCard})?.querySelector('.decision')`).catch(() => false), "#307 in the Backlog");
     const inBacklog = await until(async () => { const n = await mockButtons(decisionCard); return n.length ? n : null; }, "mockup buttons in the Backlog");
@@ -728,7 +842,7 @@ stageOf(ci, 304);
   const q2 = await qTask("質問ツールの Task（Task 画面）", "questions");
   const qf = await qTask("選択肢の無い問いだけの Task", "questionfree");
   const REPLY = "- どこを直すか: core\n- 何を足すか: テスト, 文書\n- ほかに: 急ぎで";
-  const shape = (scope: string) => evaluate(`(() => { const c = ${scope}; const fs = [...c.querySelectorAll('.ask-questions fieldset')]; return { fieldsets: fs.length, free: fs.map(f => !!f.querySelector('textarea')), textareas: c.querySelectorAll('textarea').length, submit: [...c.querySelectorAll('button')].some(b => b.textContent.trim() === '回答する'), openTask: [...c.querySelectorAll('button')].some(b => b.textContent.trim() === 'Task を開く') }; })()`) as Promise<Json>;
+  const shape = (scope: string) => evaluate(`(() => { const c = ${scope}; const fs = [...c.querySelectorAll('.ask-questions fieldset')]; return { fieldsets: fs.length, free: fs.map(f => !!f.querySelector('textarea')), textareas: c.querySelectorAll('textarea').length, submit: [...c.querySelectorAll('button')].some(b => b.textContent.trim() === '回答する'), talk: !!c.querySelector('.ask-talk') }; })()`) as Promise<Json>;
   const submitOff = (scope: string) => evaluate(`[...(${scope}).querySelectorAll('.ask-questions button')].find(b => b.textContent.trim() === '回答する').disabled`) as Promise<boolean>;
   const answerAll = async (scope: string, where: string) => {
     assert(await submitOff(scope), `${where}: 回答する is off before any answer`);
@@ -748,9 +862,9 @@ stageOf(ci, 304);
   await cardOf(`check:${q1}:`);
   await cardOf(`check:${qf}:`);
   const q1Shape = await shape(card(`check:${q1}:`));
-  assert(same(q1Shape, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, openTask: true }), `the questions' card: ${JSON.stringify(q1Shape)}`);
+  assert(same(q1Shape, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, talk: false }), `the questions' card: ${JSON.stringify(q1Shape)}`);
   const qfShape = await shape(card(`check:${qf}:`));
-  assert(same(qfShape, { fieldsets: 0, free: [], textareas: 0, submit: false, openTask: true }), `the card of a question without options: ${JSON.stringify(qfShape)}`);
+  assert(same(qfShape, { fieldsets: 0, free: [], textareas: 0, submit: false, talk: true }), `the card of a question without options (its one way is the link to the Task's conversation): ${JSON.stringify(qfShape)}`);
   await evaluate(`${card(`check:${q1}:`)}.scrollIntoView({ block: "start" })`);
   await shot("asks-questions-1280.png");
   await answerAll(card(`check:${q1}:`), "判断待ち");
@@ -763,11 +877,11 @@ stageOf(ci, 304);
   await sideways(390, "the 判断待ち screen with the questions' cards");
   await evaluate(`${card(`check:${qf}:`)}.scrollIntoView({ block: "start" })`);
   await shot("asks-questions-390.png");
-  await press(`check:${q2}:`, "Task を開く");
+  await link(`check:${q2}:`, "Task の会話を見る");
   const taskAsks = "document.querySelector('.task-asks')";
   await until(() => evaluate(`!!${taskAsks}?.querySelector('.ask-questions')`), "the questions on the Task screen");
   const onTask = await shape(taskAsks);
-  assert(same({ ...onTask, openTask: undefined }, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, openTask: undefined }), `the questions on the Task screen: ${JSON.stringify(onTask)}`);
+  assert(same({ ...onTask, talk: undefined }, { fieldsets: 3, free: [false, false, true], textareas: 1, submit: true, talk: undefined }), `the questions on the Task screen: ${JSON.stringify(onTask)}`);
   await sideways(390, "the Task screen with the questions");
   await evaluate(`${taskAsks}.scrollIntoView({ block: "start" })`);
   await shot("task-questions-390.png");
@@ -775,6 +889,54 @@ stageOf(ci, 304);
   await until(() => replies.filter((r) => r.prompt === "questions").length === 2, "the answers on the Task screen reach the Task");
   assert(replies.filter((r) => r.prompt === "questions")[1]!.text === REPLY, "the reply from the Task screen");
   report.questions = { tasks: [q1, q2, qf], reply: REPLY, widths: [1280, 390] };
+
+  // a stage Task that stopped and ended its turn with a long reply: the stop's row opens to the reason, the Task's last reply
+  // (six lines, 全文 for the rest), the line that says where the reply goes, and the box that sends it to the Task
+  const stageStop = async (n: number) => {
+    const id = await qTask(`#${n} 実装`, "stopreply");
+    stageOf(id, n);
+    core.db.appendEvent(id, { t: "stop.record", stop: { id: `s-${n}`, work: { workspaceId: meta.id, issue: n, taskId: id }, op: "ask", target: "", reason: "input", evidence: "返信が要る", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
+    await imported(true);
+    const ask = ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.find((x) => x.kind === "stop" && x.task?.id === id);
+    assert(ask && ask.state === "open" && ask.answers.includes("text") && ask.lastReply === STOP_REPLY, `the stage Task's stop: ${JSON.stringify(ask)}`);
+    return { id, ask: ask!.id };
+  };
+  const stopA = await stageStop(310);
+  const stopB = await stageStop(311);
+  const replyShape = (prefix: string) => evaluate(`(() => { const c = ${card(prefix)}; const d = c.querySelector('details.ask-lastreply-text'); const b = [...c.querySelectorAll('.ask-text button')][0]; return { reason: c.querySelector('.ask-stop-reason')?.textContent ?? null, label: c.querySelector('.ask-lastreply-label')?.textContent ?? null, open: d?.open ?? null, shown: d ? d.querySelector('summary').innerText : null, whole: d?.innerText ?? null, pre: d ? getComputedStyle(d).whiteSpace : null, target: c.querySelector('.ask-reply-target')?.textContent ?? null, route: !!c.querySelector('.ask-answer-route'), box: !!c.querySelector('.ask-text textarea'), button: b?.textContent.trim() ?? null, height: b?.getBoundingClientRect().height ?? 0, policy: !!c.querySelector('.ask-policy') || c.textContent.includes('次回も使う') }; })()`) as Promise<Json>;
+  const stageReply = async (who: { id: string; ask: string }, width: number) => {
+    await open();
+    await cardOf(who.ask);
+    await evaluate(`${card(who.ask)}.scrollIntoView({ block: "start" })`);
+    const r = await replyShape(who.ask);
+    assert(r.reason === "input: 返信が要る" && r.label === "Task の最後の返答" && r.open === false && r.target === `返信は Task「${who.id}」に届き、その Task が続きます` && r.box && r.button === "返信して続ける" && !r.route && !r.policy && r.pre.startsWith("pre"), `the stop's row at ${width}: ${JSON.stringify(r)}`);
+    assert(r.shown.includes("調べた結果を報告します。") && r.shown.includes("全文") && !r.shown.includes("以上です"), `the last reply's head at ${width}: ${r.shown}`);
+    await sideways(width, "the opened stop row");
+    await shot(`asks-stop-reply-${width}.png`);
+    await evaluate(`${card(who.ask)}.querySelector('details.ask-lastreply-text > summary').click()`);
+    const whole = await replyShape(who.ask);
+    assert(whole.open === true && whole.whole.includes("以上です。返信を待ちます。") && whole.whole.includes("/0123456789/0123456789"), `全文 at ${width}: ${JSON.stringify(whole)}`);
+    await sideways(width, "the opened stop row with the whole reply");
+    assert(r.height >= 44 || width > 390, `the 返信して続ける button is ${r.height}px at ${width}`);
+    return r;
+  };
+  // 1280: the whole reply opens, a reply reaches the Task once and it runs
+  await call("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await stageReply(stopA, 1280);
+  assert(await evaluate(`${card(stopA.ask)}.querySelector('.ask-text button').disabled`), "返信して続ける is off with nothing typed");
+  await evaluate(`(() => { const t = ${card(stopA.ask)}.querySelector('.ask-text textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(t, '2 通りのうち小さい方で進めてください'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evaluate(`${card(stopA.ask)}.querySelector('.ask-text button').click()`);
+  await until(() => replies.some((r) => r.prompt === "stopreply" && r.text === "2 通りのうち小さい方で進めてください"), "the reply reaches the stage Task", () => replies);
+  await until(async () => (await badge(stopA.ask))?.startsWith("実行中"), "the stage Task runs after the reply", () => badge(stopA.ask));
+  assert(replies.filter((r) => r.prompt === "stopreply").length === 1, "the stage Task got more than one reply");
+  // 390: the other stop's row, nothing sideways, the button a 44px target
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await call("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await stageReply(stopB, 390);
+  assert((await evaluate("document.documentElement.scrollWidth") as number) <= 390, "the stop row scrolls sideways at 390px");
+  report.stopReply = { tasks: [stopA.id, stopB.id], widths: [1280, 390] };
+  await Promise.all([stopA.id, stopB.id].map((id) => post(`/api/tasks/${id}/abort`, {})));
 
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);

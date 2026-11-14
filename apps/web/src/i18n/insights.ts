@@ -168,7 +168,7 @@ export const insights = msgs({
   stops: { ja: "停止", en: "Stops" },
   daemonStopsShort: { ja: "デーモン停止", en: "Daemon stops" },
   delegatedModel: { ja: "Task ごとの実装", en: "Per-Task implementation" },
-  delegatedModelValue: { ja: "{model}（試験）", en: "{model} (trial)" },
+  delegatedModelValue: { ja: "{model}", en: "{model}" },
   turns: { ja: "ターン", en: "Turns" },
   duration: { ja: "所要時間", en: "Duration" },
   ending: { ja: "終わり方", en: "Ending" },
