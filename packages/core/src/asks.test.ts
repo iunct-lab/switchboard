@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, noticeAsks, ON_HOLD_RESUME, parseAskBlock, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, noticeAsks, ON_HOLD_RESUME, parseAskBlock, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { approvalBatches } from "./approval-batch.ts";
 import { heldSince, type GhRunner } from "./backlog.ts";
 import { reduceStops } from "./stops.ts";
@@ -194,6 +194,39 @@ describe("answers", () => {
   });
 });
 
+describe("lastReply", () => {
+  const reply = (text: string | null) => (id: string) => (id === "tk_5" ? text : null);
+  const noTurn = { lastTurnQuestions: () => null, permissionEvents: () => [], workspaceName: () => null, approvals: [] as PendingApproval[], now: NOW };
+  const issueTask = { id: "tk_5", workspaceId: null, title: "t", status: "done", outcome: "needs_action", reviewedAt: null, resumeAt: null, stage: null, createdAt: NOW - 600_000, updatedAt: NOW - 60_000 } as unknown as Task;
+
+  test("an open stop a person has to answer carries the Task's last reply: a stage Task's and a Task with no Issue's", () => {
+    const [stage] = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({})] })], NOW, { lastReply: reply("マージ判定は CI だけが赤です。どうしますか。") });
+    expect(stage).toMatchObject({ kind: "stop", needs: "person", state: "open", lastReply: "マージ判定は CI だけが赤です。どうしますか。" });
+    const [plain] = asksFromTasks({ ...noTurn, tasks: [issueTask], stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" } })], lastReply: reply("途中までです。") });
+    expect(plain).toMatchObject({ kind: "stop", needs: "person", state: "open", lastReply: "途中までです。" });
+  });
+
+  test("a Task that never ended a turn, a blank reply, and a source with no reader give null", () => {
+    expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW, { lastReply: reply(null) })[0]!.lastReply).toBeNull();
+    expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW, { lastReply: reply(" \n ") })[0]!.lastReply).toBeNull();
+    expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW)[0]!.lastReply).toBeNull();
+  });
+
+  test("a reply over the limit is cut to LAST_REPLY_MAX characters and an ellipsis; one at the limit is whole", () => {
+    expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX))).toBe("あ".repeat(LAST_REPLY_MAX));
+    expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX + 1))).toBe(`${"あ".repeat(LAST_REPLY_MAX)}…`);
+    const [s] = asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW, { lastReply: reply("x".repeat(LAST_REPLY_MAX + 1)) });
+    expect(s!.lastReply).toBe(`${"x".repeat(LAST_REPLY_MAX)}…`);
+  });
+
+  test("an automatic wait, an answered stop and a resolved stop carry no reply", () => {
+    const answer = { ref: "seq:12", at: NOW - 600_000 };
+    const stops = [stop({ reason: "usage-limit", next: "wait" }), stop({ next: "resume", lastAnswer: answer }), stop({ state: "resolved", next: "none", lastAt: NOW - 60_000 })];
+    for (const s of stops) expect(asksFromBacklog([item({ number: 5, stopSummary: [s] })], NOW, { lastReply: reply("返答") })[0]!.lastReply).toBeNull();
+    expect(asksFromTasks({ ...noTurn, tasks: [issueTask], stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" }, next: "wait" })], lastReply: reply("返答") })[0]!.lastReply).toBeNull();
+  });
+});
+
 describe("grants", () => {
   const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
   const OPTIONS: Array<[string, string]> = [["A: 登録しない", "何もしない"], ["B: 登録する (Recommended)", `確かめるため — 許可: ${GRANT}`]];
@@ -300,6 +333,20 @@ describe("asksFromBacklog", () => {
     const answer = { ref: "seq:12", at: NOW - 600_000 };
     const [answered] = asksFromBacklog([item({ number: 5, stopSummary: [stop({ next: "resume", lastAnswer: answer })] })], NOW);
     expect(answered).toMatchObject({ kind: "stop", needs: "person", state: "answered", changedAt: answer.at });
+    // a first stop answered in its Task stays `decide` (no earlier stop shows the answer as a change): answered by its own `answered`, going on as the Task does
+    const replied = item({ number: 5, stopSummary: [stop({ answered: true, lastAnswer: answer })] });
+    const task = { id: "tk_5", status: "running", resumeAt: null, updatedAt: NOW } as Task;
+    expect(asksFromBacklog([replied], NOW, { taskOf: () => task })[0]).toMatchObject({ state: "answered", changedAt: answer.at, resume: { state: "running", taskId: "tk_5" } });
+    expect(asksFromBacklog([replied], NOW, { taskOf: () => ({ ...task, status: "error" }) })[0]!.resume).toMatchObject({ state: "failed", reason: "Task が error" });
+    // a reply the Task refused leaves the stop open with the failure
+    const failure = { at: NOW - 1000, reason: "budget exceeded" };
+    expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW, { taskOf: () => task, resumeFailures: () => failure })[0]).toMatchObject({ state: "open", resume: { state: "failed", reason: "budget exceeded", taskId: "tk_5" } });
+    // a failure of a reply to an earlier stop of the series is not the newer stop's
+    expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({ lastAt: NOW })] })], NOW, { taskOf: () => task, resumeFailures: () => failure })[0]!.resume).toBeNull();
+    // a Task with no Issue: its first stop answered in its conversation goes on as the Task does, as the stage Task's does
+    const plain = { ...task, workspaceId: null, title: "t", outcome: null, reviewedAt: null, stage: null, createdAt: NOW - 600_000 } as unknown as Task;
+    const noIssue = asksFromTasks({ approvals: [], tasks: [plain], lastTurnQuestions: () => null, permissionEvents: () => [], workspaceName: () => null, now: NOW, stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" }, answered: true, lastAnswer: answer })] });
+    expect(noIssue.find((a) => a.kind === "stop")).toMatchObject({ state: "answered", resume: { state: "running", taskId: "tk_5" } });
     const [resume] = asksFromBacklog([item({ number: 5, stopSummary: [stop({ next: "resume" })] })], NOW);
     expect(resume).toMatchObject({ needs: "auto", state: "open" });
     const [limit] = asksFromBacklog([item({ number: 5, stopSummary: [stop({ reason: "usage-limit", state: "resolved", next: "none", lastAt: NOW - 60_000 })] })], NOW);
@@ -846,6 +893,9 @@ describe("policy", () => {
     expect(decide([], []).policy).toMatchObject({ scopes: ["once"], note: "操作と対象が記録されていないため、今回のみ" });
     const refused = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({ reason: "permission", evidence: "denied by the runner", next: "decide" })] })], NOW, { policy: env() })[0]!;
     expect(refused.policy).toMatchObject({ scopes: [], note: "ランナー側の拒否は保存した方針では解除できません", defaults: null });
+    // a stage Task's stop (on an Issue) is answered by a reply in its conversation: no scope, no note, though a decision of a PBI takes three
+    const stageStop = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [decisionStop()] })], NOW, { policy: env() })[0]!;
+    expect(stageStop).toMatchObject({ kind: "stop", answers: ["text"], policy: { scopes: [], note: null, defaults: null } });
     const hit: ApprovalRuleMatch = { source: "rules/a.md", pattern: "bun*", mode: "confirm", subject: "bun test" };
     expect(fromTasks([exec("bun test")], [], hit)[0]!.policy).toMatchObject({ scopes: [], note: "都度確認のルール rules/a.md: bun* に当たります" });
   });

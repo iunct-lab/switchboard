@@ -41,7 +41,7 @@ describe("cli", () => {
     const r = await run(["--help"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("set <issue> <field> <value>");
-    expect(r.out).toContain("triage <issue> <area> <kind> <priority>");
+    expect(r.out).toContain("triage <issue> <priority>");
     expect(r.out).toContain('"projectUrl"');
     expect((await run([])).code).toBe(1);
   });
@@ -59,13 +59,15 @@ describe("cli", () => {
       const [name, opt] = s.split(":");
       return { id: name, name, options: [{ id: `${name}:${opt}`, name: opt }] };
     });
-    const r = await run(["triage", "3", "one", "bug", "P1", "Phase 0", "", "Ready", "--config", config], [
+    const r = await run(["triage", "3", "P1", "Phase 0", "", "Ready", "--config", config], [
       () => ({ repositoryOwner: { projectV2: { id: "P1", fields: { nodes: fields } } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }),
       () => ({}),
     ]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("   Phase = Phase 0");
     expect(r.out).toContain("   Status = Ready");
+    // the Project has Area and Kind fields (the mock lists them): triage leaves them alone
+    expect(r.out).not.toMatch(/Area|Kind/);
     expect(r.gh.calls).toHaveLength(2);
   });
 
@@ -75,7 +77,7 @@ describe("cli", () => {
       const [name, opt] = s.split(":");
       return { id: name, name, options: [{ id: `${name}:${opt}`, name: opt }] };
     });
-    const r = await run(["triage", "3", "one", "bug", "high", "", "891", "Ready", "--config", noPhase], [
+    const r = await run(["triage", "3", "high", "", "891", "Ready", "--config", noPhase], [
       () => ({ repositoryOwner: { projectV2: { id: "P1", fields: { nodes: fields } } }, repository: { issue: { id: "I1", projectItems: { nodes: [{ id: "IT1", project: { number: 7 } }] } }, parent: { id: "I891" } } }),
       () => ({}),
       () => ({}),
@@ -84,7 +86,7 @@ describe("cli", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("   Status = Ready");
     expect(r.out).toContain("   parent = #891");
-    const withPhase = await run(["triage", "3", "one", "bug", "P1", "", "891", "Ready", "--config", config]);
+    const withPhase = await run(["triage", "3", "P1", "", "891", "Ready", "--config", config]);
     expect(withPhase.code).toBe(1);
     expect(withPhase.err).toContain(triageUsage(true));
   });
@@ -432,11 +434,11 @@ describe("set / triage with BACKLOG_URL", () => {
       const gh = fakeGh([]);
       const out: string[] = [];
       expect(await main(["set", "12", "Status", "In progress", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
-      expect(await main(["triage", "12", "one", "bug", "P1", "Phase 0", "", "Ready", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
+      expect(await main(["triage", "12", "P1", "Phase 0", "", "Ready", "--config", config], gh, (s) => out.push(s), () => {}, async () => {}, app.env)).toBe(0);
       expect(out).toEqual(["#12 を保存しました", "#12 を保存しました"]);
       expect(patches(app.calls)).toEqual([
         { workspaceId: "ws_1", fields: { Status: "In progress" } },
-        { workspaceId: "ws_1", project: true, fields: { Area: "one", Kind: "bug", Priority: "P1", Phase: "Phase 0", Status: "Ready" } },
+        { workspaceId: "ws_1", project: true, fields: { Priority: "P1", Phase: "Phase 0", Status: "Ready" } },
       ]);
       expect(gh.calls).toHaveLength(0);
     } finally {
@@ -454,10 +456,10 @@ describe("set / triage with BACKLOG_URL", () => {
       writeFileSync(join(dir, "ops.config.json"), JSON.stringify(cfg));
       const gh = fakeGh([]);
       expect(await main(["set", "12", "Story Points", "5", "--config", join(dir, "ops.config.json")], gh, () => {}, () => {}, async () => {}, app.env)).toBe(0);
-      expect(await main(["triage", "12", "one", "bug", "P1", "", "Ready", "--config", join(dir, "ops.config.json")], gh, () => {}, () => {}, async () => {}, app.env)).toBe(0);
+      expect(await main(["triage", "12", "P1", "", "Ready", "--config", join(dir, "ops.config.json")], gh, () => {}, () => {}, async () => {}, app.env)).toBe(0);
       expect(patches(app.calls)).toEqual([
         { workspaceId: "ws_1", fields: { "Story Points": 5 } },
-        { workspaceId: "ws_1", project: true, fields: { Area: "one", Kind: "bug", Priority: "P1", Status: "Ready" } },
+        { workspaceId: "ws_1", project: true, fields: { Priority: "P1", Status: "Ready" } },
       ]);
       expect(gh.calls).toHaveLength(0);
     } finally {
@@ -731,12 +733,12 @@ describe("backlog without BACKLOG_URL", () => {
       expect(graphql(set.gh.calls[1])?.vars).toMatchObject({ p: "P1", i: "IT1", f: "F1", value: "O2" });
 
       const select = (name: string, value: string) => ({ id: `F_${name}`, name, options: [{ id: `O_${value}`, name: value }] });
-      const triage = await cli(["backlog", "triage", "12", "one", "bug", "P1", "Phase 0", "", "Ready"], { BACKLOG_URL: undefined }, [
+      const triage = await cli(["backlog", "triage", "12", "P1", "Phase 0", "", "Ready"], { BACKLOG_URL: undefined }, [
         () => ({ repositoryOwner: { projectV2: { id: "P1", fields: { nodes: [select("Area", "one"), select("Kind", "bug"), select("Priority", "P1"), select("Phase", "Phase 0"), select("Status", "Ready")] } } }, repository: { issue: { id: "I12", projectItems: { nodes: [{ id: "IT1", project: { number: 1 } }] } } } }),
         () => ({}),
       ]);
       expect([triage.code, triage.lines]).toEqual([0, ["#12 を保存しました"]]);
-      expect(graphql(triage.gh.calls[1])?.vars).toMatchObject({ o0: "O_one", o1: "O_bug", o2: "O_P1", o3: "O_Phase 0", o4: "O_Ready" });
+      expect(graphql(triage.gh.calls[1])?.vars).toMatchObject({ o0: "O_P1", o1: "O_Phase 0", o2: "O_Ready" });
 
       // a value that signs in is refused before gh is asked
       writeFileSync(join(dir, "secret.md"), "ghp_" + "a".repeat(36));
@@ -746,7 +748,7 @@ describe("backlog without BACKLOG_URL", () => {
       }
       // triage's values too: one that signs in never reaches gh, nor the lines it prints
       const token = "ghp_" + "a".repeat(36);
-      const secret = await cli(["backlog", "triage", "12", token, "bug", "P1", "Phase 0"], { BACKLOG_URL: undefined }, []);
+      const secret = await cli(["backlog", "triage", "12", token, "Phase 0"], { BACKLOG_URL: undefined }, []);
       expect([secret.code, secret.gh.calls.length, secret.err.includes(token)]).toEqual([1, 0, false]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -822,7 +824,7 @@ describe("backlog without BACKLOG_URL", () => {
       const novar = () => {
         throw new Error("variable not found");
       };
-      for (const argv of [["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "one", "bug", "P1", "Phase 0"], ["backlog", "create", "--title", "t", "--field", "Status=Ready"]]) {
+      for (const argv of [["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "P1", "Phase 0"], ["backlog", "create", "--title", "t", "--field", "Status=Ready"]]) {
         const gh = fakeGh([novar]);
         const err: string[] = [];
         expect(await main([...argv, "--config", noProject], gh, () => {}, (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_URL: undefined, GH_REPO: "example/repo", EXAMPLE_PROJECT_URL: undefined })).toBe(1);
@@ -840,7 +842,7 @@ describe("backlog without BACKLOG_URL", () => {
   });
 
   test("an app that cannot be reached is not replaced by GitHub (exit 2, no gh call)", async () => {
-    for (const argv of [["backlog", "list"], ["backlog", "view", "12"], ["backlog", "comment", "12", "--body-file", config], ["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "one", "bug", "P1", "Phase 0"]]) {
+    for (const argv of [["backlog", "list"], ["backlog", "view", "12"], ["backlog", "comment", "12", "--body-file", config], ["backlog", "set", "12", "Status", "Ready"], ["backlog", "triage", "12", "P1", "Phase 0"]]) {
       const r = await cli(argv, { BACKLOG_URL: "http://127.0.0.1:1/api/backlog" }, []);
       expect(r.code).toBe(2);
       expect(r.err).toContain("アプリに届きません");

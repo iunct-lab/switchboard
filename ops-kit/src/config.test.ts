@@ -22,12 +22,18 @@ describe("config", () => {
     expect(defaultConfig().storyPoints).toBeUndefined();
   });
 
-  test("defaultConfig is the kit's template with Area app, no Phase and no Milestone", () => {
+  test("defaultConfig is the kit's template with no Phase and no Milestone", () => {
     const template = JSON.parse(require("node:fs").readFileSync(TEMPLATE_CONFIG, "utf8"));
     const cfg = defaultConfig();
-    expect(cfg.fields).toEqual({ area: ["app"], kind: template.fields.kind, priority: template.fields.priority });
+    expect(cfg.fields).toEqual({ priority: template.fields.priority });
     expect([cfg.sections, cfg.envPrefix]).toEqual([template.sections, "BACKLOG"]);
     expect([cfg.fields.phase, cfg.milestone]).toEqual([undefined, undefined]);
+  });
+
+  test("a config that still has fields.area and fields.kind loads without them: they are dropped, not read", () => {
+    const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
+    const old = { ...base, fields: { ...base.fields, area: ["one", "two"], kind: ["bug", "feature"] } };
+    expect(parseConfig(old).fields).toEqual(base.fields);
   });
 
   test("a config with forge parses; its keys are checked", () => {
@@ -67,7 +73,7 @@ describe("config", () => {
   test("an invalid config is refused with the path of each problem", () => {
     const base = withPhase();
     expect(() => parseConfig({ ...base, projectUrl: "https://example.com/p/1" })).toThrow(/projectUrl/);
-    expect(() => parseConfig({ ...base, fields: { ...base.fields, area: [] } })).toThrow(/fields\.area/);
+    expect(() => parseConfig({ ...base, fields: { ...base.fields, priority: [] } })).toThrow(/fields\.priority/);
     expect(() => parseConfig({ ...base, extra: 1 })).toThrow(/extra|Unrecognized/);
     expect(() => parseConfig({ ...base, envPrefix: "lower" })).toThrow(/envPrefix/);
     expect(() => parseConfig({ ...base, milestone: { pattern: "(" } })).toThrow(/milestone\.pattern/);

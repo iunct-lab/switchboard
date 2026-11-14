@@ -4,17 +4,17 @@
 
 ## リポジトリと Project
 
-- リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける。Issue・コメント・ラベル・Project・Milestone は `ops-kit backlog`（Task の中でも外でも同じ）
-- Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority / Phase）・必須の節: root の `ops.config.json`。Milestone は Phase ごと（`Phase N — …`）。自分の Project URL を登録する。新しい Issue は `ops-kit backlog create` で作ると Task の中ではアプリが Project に入れる。フィールドは `ops-kit backlog triage` / `set`（Status は自分で付ける）
+- リポジトリ: このリポジトリ（`gh repo view --json nameWithOwner -q .nameWithOwner`）。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R "$(gh repo view --json nameWithOwner -q .nameWithOwner)"` を付ける。Issue・コメント・ラベル・Project は `ops-kit backlog`（Task の中でも外でも同じ）
+- Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Area / Kind / Priority）・必須の節: root の `ops.config.json`。自分の Project URL を登録する。新しい Issue は `ops-kit backlog create` で作ると Task の中ではアプリが Project に入れる。フィールドは `ops-kit backlog triage` / `set`（Status は自分で付ける）
 - バックログの道具: `ops-kit backlog`（`--help`）と `ops-kit lint --fresh`。ほかのリポジトリのバックログは、Task の中では `--workspace <id>`、Task の外では `GH_REPO=<owner/name> SWITCHBOARD_PROJECT_URL=<URL>`。`scripts/setup/` の入口はブートストラップと検査（`bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）の用で、中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）
-- 公開リポジトリへの同期: 開発元の手順は `private/CLAUDE.md` に移した。公開の写しを作るなら、公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`（仕組みはキットの README の「Syncing to the public repository」）
+- 公開リポジトリへの同期: 開発元の手順は `private/CLAUDE.md` に移した。公開の写しを作るなら、公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`（仕組みはキットの README の「Syncing to the public repository」）。文書（`*.md`・`*.html`）を足したら、公開なら `include` に、非公開なら `exclude` にファイルのパスで書く（書かないと `scripts/public-include.test.ts` が落ちる。コードのディレクトリはディレクトリのまま出る）
 - 認証に使える値（ホストの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（`SWITCHBOARD_ACTIONS` が `on` のリポジトリでは週に 1 回 `.github/workflows/secret-scan.yml` も走る）
 - Story Points の目安: 尺度と目安は `issue-workflow` の「### Story Points」。このリポジトリで基準にする閉じた PBI は `private/CLAUDE.md`
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
 - 互換層の前提: 利用者は 1 人、外部クライアントは無い。旧形式を読む層は作らず、データは `packages/core/src/db.ts` の migration で 1 回移す
 - 並列ガード: `bun scripts/parallel-guard.ts`（`claim` / `overlap` / `release`。スキルの `<guard>`）。アプリが同期しているリポジトリでは `--repo` を付けなくてよい（付けてもアプリの保存に書く）。Task の外でほかのリポジトリの PBI を扱うときだけ `--repo` で名指しする
 - 言語: 公開に出る文書（README・公開する `docs/design/`・`aws/README.md`・`SECURITY.md`）は英語で、本文に Issue 番号 `#N` を書かない（公開側では開けない。根拠は日付と中身の文で書く）。確かめ方は `bun scripts/public-docs.ts check [file…]`（既定は `publicSync.exclude` を除いた `docs/` 以下・`aws/README.md`・`SECURITY.md`。README は含まないので `check README.md` と渡す）。画面の文言・コマンド・工程の prompt は原文のまま backtick かコードブロックに入れる。開発に入る入力（このファイル・スキル・Issue テンプレート・工程のプロンプト）と画面は日本語。ただしヘッダーのタブの名前（Home・Backlog・Schedules など）は英語で、タブを足すときもほかのタブに合わせる（2026-11-03 の利用者の指摘）。共通キットの `ops-kit/public/`（英語）は変えない。言語や体裁を揃える提案は、見た目でない実益の理由があるときだけ、その理由で Issue にする
-- 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはホスト・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 6）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
+- 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはホスト・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 5）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
 
 ## 前提（要望を PBI にする前に照らすもの）
 

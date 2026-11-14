@@ -387,7 +387,7 @@ Trust boundary: main's `aws/host/` runs as root. If a token that can write to ma
 
 #### When to revisit
 
-- Main can now be protected. How to check: `gh api repos/<owner>/<repo>/rulesets` no longer returns 403 "Upgrade to GitHub Pro …". A check looks at it: `bun scripts/host-trust-check.ts [--file-request]` (exit 0 = no trigger / 1 = trigger / 2 = cannot judge. `--file-request` files one request for a review at a trigger, and does not pile on if an open request with the same title exists). It is not scheduled by itself: if you register it, a monthly scheduled run (for example the one that runs merge-audit) is enough, and `GET /api/schedules` shows what is registered
+- Main can now be protected. How to check: `gh api repos/<owner>/<repo>/rulesets` no longer returns 403 "Upgrade to GitHub Pro …". Check it by hand (the `gh api` call above) when you change the plan.
 - The repositories and permissions the instance's token can write have widened. How to check: shown on the `/switchboard/github-token` row of `aws/README.md` when the token is changed
 - The range that runs as root has grown. How to check: the table above and the main-trust-path test in `host.test.ts`, and merge-gate marking `[聞く] セキュリティ` on a PR touching `aws/host/**`
 

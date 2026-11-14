@@ -286,13 +286,17 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "git push", target: "sb/x", reason: "permission", evidence: "denied", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     expect(ask).toMatchObject({ grant: GRANT, answers: ["grant", "text"], blockers: [] });
-    // only the grant is answered here; a text to a stage Task's stop is still not
-    expect((await answer(base, ask.id, { kind: "text", text: "x" })).status).toBe(422);
+    // the grant is written on the Issue; a text goes to the Task as a reply (the tests below)
     const r = await answer(base, ask.id, { kind: "grant" });
     expect(r.status).toBe(200);
     expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n${GRANT}`, screen: true }]);
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     expect(prompts.at(-1)).toContain(`利用者が画面で答えた Issue #306 の最新の回答（利用者の言葉）:\n\n\`\`\`\`text\n${GRANT}\n\`\`\`\``);
+    // a resend of the grant keeps how it goes on: the next stage Task, not the stopped one read again
+    const first = ((await r.json()) as AskAnswerResult).ask!.resume;
+    expect(first?.taskId).not.toBe(t.id);
+    const again = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    expect(again).toMatchObject({ already: true, ask: { resume: first } });
     expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
   });
 
@@ -308,16 +312,55 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(stageTasks(308)).toHaveLength(0);
   });
 
-  test("kinds: a question this side does not answer is 422, an unknown id 409, a malformed answer 400", async () => {
+  test("kinds: an unknown id is 409, a malformed answer 400", async () => {
     const base = await boot(fakeGh().gh);
     expect((await answer(base, "nothing:here", { kind: "text", text: "x" })).status).toBe(409);
     expect((await answer(base, "x", { kind: "nope" })).status).toBe(400);
-    // a stop of Issue 305's stage Task waits for the person, but its answer is not written from here yet
-    const t = insertStage("#305 実装: PBI: 実装中の PBI", "done", { issue: 305, action: "complete" });
-    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 305, taskId: t.id }, op: "ask", target: "", reason: "input", evidence: "どちらか", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 1000 } });
-    const stop = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 305)!;
-    expect(stop.answers).toEqual(["text"]);
-    expect((await answer(base, stop.id, { kind: "text", text: "x" })).status).toBe(422);
+  });
+
+  /** A stage Task of Issue `n` stopped for the person (`input`), with no process: a reply resumes it. */
+  const stoppedStage = (n: number, over: { budgetUsd?: number } = {}) => {
+    const t = insertStage(`#${n} 実装: PBI: 実装中の PBI`, "done", { issue: n, action: "complete" });
+    if (over.budgetUsd !== undefined) core!.db.updateTask(t.id, { budgetUsd: over.budgetUsd });
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: n, taskId: t.id }, op: "ask", target: "", reason: "input", evidence: "どちらか", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 1000 } });
+    return t;
+  };
+  const userTurnsOf = (id: string) => core!.db.listEvents(id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").map((e) => (e.ev as { text: string }).text);
+  const stopOf = async (base: string, n: number) => (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === n)!;
+
+  test("stage Task stop reply: a text is one reply to the Task, nothing on the Issue, no policy; the answer says it runs; a resend sends nothing more", async () => {
+    const prompts: string[] = [];
+    const base = await boot(fakeGh().gh, { ...holding, start: (o, emit) => (prompts.push(o.prompt), emit({ t: "message.delta", role: "user", text: o.prompt }), holding.start(o, emit)) });
+    const t = stoppedStage(305);
+    const stop = await stopOf(base, 305);
+    expect(stop).toMatchObject({ answers: ["text"], policy: { scopes: [] }, task: { id: t.id } });
+    const r = await answer(base, stop.id, { kind: "text", text: "A で進めて" });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as AskAnswerResult;
+    expect(body).toMatchObject({ already: false, ask: { state: "answered", resume: { state: "running", taskId: t.id } } });
+    for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
+    expect(prompts).toEqual(["A で進めて"]);
+    expect(queued().filter((o) => o[0] === 305)).toEqual([]);
+    // the list reads the same Task: answered, going on
+    expect(await stopOf(base, 305)).toMatchObject({ state: "answered", resume: { state: "running", taskId: t.id } });
+    const again = (await (await answer(base, stop.id, { kind: "text", text: "A で進めて" })).json()) as AskAnswerResult;
+    expect(again).toMatchObject({ already: true, ask: { state: "answered" } });
+    await Bun.sleep(50);
+    expect(prompts).toEqual(["A で進めて"]);
+    expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
+  });
+
+  test("stage Task stop reply: over the Task's budget the reply is refused — resume failed, the stop still open and answerable again", async () => {
+    const base = await boot(fakeGh().gh);
+    const t = stoppedStage(305, { budgetUsd: 0.01 });
+    core!.db.insertLedger({ taskId: t.id, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
+    const stop = await stopOf(base, 305);
+    const body = (await (await answer(base, stop.id, { kind: "text", text: "A で進めて" })).json()) as AskAnswerResult;
+    expect(body.ask).toMatchObject({ state: "open", resume: { state: "failed", taskId: t.id } });
+    expect(body.ask!.resume!.reason).toContain("budget exceeded");
+    expect(userTurnsOf(t.id)).toEqual([]);
+    expect(await stopOf(base, 305)).toMatchObject({ state: "open", resume: { state: "failed", taskId: t.id } });
+    expect(((await (await answer(base, stop.id, { kind: "text", text: "A で進めて" })).json()) as AskAnswerResult).already).toBe(false);
   });
 });
 

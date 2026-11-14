@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey } from "@switchboard/protocol";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { delegatedNote, ruleMetrics } from "./evals.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
 // The stored backlog: records per repository, kept across a restart and a backup.
@@ -1119,6 +1120,27 @@ test("outbound: an existing DB keeps both on, a new DB has both off", () => {
   reopened.close();
 });
 
+test("delegated model note migration: the （試験） tail of the status note is dropped once; a tool call that quotes it stays", () => {
+  const path = join(dir, "db.sqlite");
+  const oldNote = "Task ごとの実装は claude-sonnet-5-5 に任せます（試験）";
+  const d = new Db(path);
+  d.appendEvent("t1", { t: "status", text: oldNote });
+  d.appendEvent("t1", { t: "tool.call", id: "c1", name: "Bash", input: { command: `echo "${oldNote}"` } } as AgentEvent);
+  d.appendEvent("t1", { t: "status", text: "Task ごとの実装は  に任せます（試験）" }); // no model: not a note
+  d.close();
+  const old = new Database(path);
+  old.exec("PRAGMA user_version = 4");
+  old.close();
+  const again = new Db(path);
+  const evs = again.listEvents("t1");
+  expect(evs[0]!.ev).toEqual({ t: "status", text: delegatedNote("claude-sonnet-5-5") });
+  expect(ruleMetrics(evs).delegatedModel).toBe("claude-sonnet-5-5");
+  expect(JSON.stringify(evs[1]!.ev)).toContain(oldNote);
+  expect(evs[2]!.ev).toEqual({ t: "status", text: "Task ごとの実装は  に任せます（試験）" });
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+  again.close();
+});
+
 test("repeated thinking status is folded once at open", () => {
   const path = join(dir, "db.sqlite");
   const thinking = { t: "status", text: "thinking" } as const;
@@ -1141,7 +1163,7 @@ test("repeated thinking status is folded once at open", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();

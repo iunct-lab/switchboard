@@ -541,12 +541,17 @@ label.toggle.off { opacity: .45; cursor: default; }
 /* 判断待ち (#935): a group per who acts, a card per question; its facts in two columns, one on a phone */
 .ask-group { margin-top: 12px; }
 .ask-group-head { margin: 0 0 4px; }
+.ask-fold { margin-top: 8px; }
+.ask-fold-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 4px; cursor: pointer; font-weight: 600; }
+.ask-fold[open] > .ask-fold-head { margin-bottom: 4px; }
 /* #1673: under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
-.ask-workspaces { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.ask-workspaces button { min-height: 44px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
-/* #1675: the 「すぐ答えられる」 toggle under them */
-.ask-quick-row { display: flex; margin-top: 6px; }
-.ask-quick-row button { min-height: 44px; max-width: 100%; }
+.ask-filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.ask-filters:not(:empty) { margin-top: 8px; }
+.ask-filters > * { display: contents; }
+.ask-filters button { flex: none; }
+.ask-workspaces button { min-height: 44px; text-align: left; white-space: nowrap; }
+/* #1675: the 「すぐ答えられる」 toggle, first in the same row */
+.ask-quick-row button { min-height: 44px; white-space: nowrap; }
 .ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
 .ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
@@ -566,7 +571,6 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-fact { display: contents; }
 .ask-fact dt { color: var(--ink3); }
 .ask-fact dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.approval-actions a.button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; flex: 1; text-decoration: none; }
 .rail .rail-tasks { display: none; }
 .brief-toggle, .brief-close { display: none; }
 /* Phones (#26, #359): the rail shrinks to its 判断待ち and 一覧 buttons at the bottom, the tabs wrap, cards take the full width.
@@ -682,6 +686,8 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-button { flex: 1 1 200px; min-width: 0; }
 .ask-button, .ask-text, .ask-resume { overflow-wrap: anywhere; }
 .ask-button button, .ask-text button { min-height: 44px; width: 100%; }
+/* a choice's impact on the button's second line */
+.ask-button-sub { display: block; margin-top: 2px; font-size: 0.8em; font-weight: 400; text-align: left; opacity: 0.85; }
 /* a question tool's questions on a card (#3058): a fieldset each, one 回答する; wraps on a phone */
 .ask-questions { display: grid; gap: 8px; margin: 6px 0; min-width: 0; overflow-wrap: anywhere; }
 .ask-questions fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -792,6 +798,14 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 /* open: the first lines and 全文 give way to 畳む, the whole question under it */
 .ask details.ask-question[open] .q-head, .ask details.ask-question[open] .q-more { display: none; }
 .ask details.ask-question[open] .q-less { display: inline; }
+/* a stop's Task's last reply: as it was written, wrapping at 390 wide */
+.ask .ask-lastreply { margin: 4px 0 8px; min-width: 0; }
+.ask .ask-lastreply-text { white-space: pre-wrap; overflow-wrap: anywhere; border-left: 3px solid var(--line2); padding-left: 8px; margin-top: 2px; }
+.ask details.ask-lastreply-text > summary { cursor: pointer; }
+.ask details.ask-lastreply-text .q-less { display: none; }
+.ask details.ask-lastreply-text[open] .q-head, .ask details.ask-lastreply-text[open] .q-more { display: none; }
+.ask details.ask-lastreply-text[open] .q-less { display: inline; }
+.ask .ask-reply-target { margin: 2px 0; overflow-wrap: anywhere; }
 .ask .ask-unknown { margin-top: 2px; }
 /* a number of Settings (#4068): name, box, unit, default — the unit next to its box and the boxes in one column */
 .settings .num-field { display: grid; grid-template-columns: minmax(0, 1fr) 88px 2.5em minmax(8em, auto); align-items: center; gap: 6px; justify-content: stretch; }
@@ -807,3 +821,18 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 /* Knowledge's 書き出し先 (#4068): the heading on one line, the choice beside or under it */
 .kn-mat > .row.head { flex-wrap: wrap; justify-content: flex-start; }
 .kn-mat > .row.head h5 { flex: none; white-space: nowrap; }
+/* the 判断待ち screen's rows: a line per target that opens in place to its questions; a link goes elsewhere, a button answers */
+.ask-row { padding: 0; margin-top: 6px; min-width: 0; }
+.ask-row-head { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; min-height: 44px; padding: 8px 12px 8px 28px; text-align: left; border: 0; background: transparent; position: relative; font: inherit; color: inherit; cursor: pointer; }
+.ask-row-head::before { content: ""; position: absolute; left: 12px; top: 15px; width: 7px; height: 7px; border-right: 2px solid var(--ink3); border-bottom: 2px solid var(--ink3); transform: rotate(-45deg); }
+.ask-row-head[aria-expanded="true"]::before { top: 12px; transform: rotate(45deg); }
+.ask-row-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ask-row-lead { color: var(--ink2); font-size: 13px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.ask-row-head .ask-tags { margin: 2px 0 0; }
+.ask-row-body { padding: 0 12px 10px; border-top: 1px solid var(--line); }
+.ask-item { padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.ask-item:last-of-type { border-bottom: 0; }
+.ask-record > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--ink3); }
+.ask-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+.ask-links .link, .ask .ask-talk { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; background: transparent; border: 0; color: var(--acc); text-decoration: underline; text-align: left; font: inherit; overflow-wrap: anywhere; }
+.ask-talk { margin: 4px 0; }

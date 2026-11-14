@@ -44,7 +44,7 @@ export async function ensureItem(gh: GhClient, projectId: string, projectNumber:
  * pass as they are. No other spelling is guessed: only the case, which names one choice.
  */
 export function fieldChoice(cfg: OpsConfig, name: string, value: string | number | null): string | number | null {
-  const choices: Record<string, ReadonlyArray<string | number> | undefined> = { Status: STATUS_OPTIONS, Area: cfg.fields.area, Kind: cfg.fields.kind, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS };
+  const choices: Record<string, ReadonlyArray<string | number> | undefined> = { Status: STATUS_OPTIONS, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS };
   const options = Object.hasOwn(choices, name) ? choices[name] : undefined;
   if (!options || value === null) return value;
   const given = typeof value === "string" && /^[0-9]+$/.test(value) && options.every((o) => typeof o === "number") ? Number(value) : value;

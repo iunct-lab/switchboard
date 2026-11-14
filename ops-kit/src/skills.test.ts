@@ -401,8 +401,13 @@ test("skills: the five delivery skills say what a workspace without a remote doe
   }
   expect(read("pbi-complete")).toContain("<ローカル CI> --change <変更>");
   expect(read("pbi-complete")).toContain("を回し直してから判定する（前の合格は新しい base では数えられない）");
-  // a repository without a Phase leaves the argument out; an empty one is refused
-  for (const name of ["request-to-backlog", "pbi-to-tasks"]) expect(read(name)).toContain("`ops-kit backlog triage <num> <area> <kind> <P0-P3>");
+  // the examples carry no Phase or Milestone; a repository that uses Phase is pointed to the kit fixture once, in issue-workflow
+  for (const name of ["request-to-backlog", "pbi-to-tasks"]) expect(read(name)).toContain("ops-kit backlog triage <num> <P0-P3>");
+  for (const name of ["issue-workflow", "request-to-backlog", "pbi-to-tasks"]) expect(read(name)).not.toContain("<area> <kind>");
+  expect(read("issue-workflow")).toContain("例: ops-kit backlog triage 56 P1 \"\" \"In review\"");
+  for (const name of ["issue-workflow", "request-to-backlog", "pbi-to-tasks", "pbi-complete"]) expect(read(name)).not.toMatch(/Phase N|--milestone/);
+  expect(read("issue-workflow")).toContain("（形はキットの `ops-kit/fixtures/config-with-phase.json`）");
+  for (const name of ["request-to-backlog", "pbi-to-tasks", "pbi-complete"]) expect(read(name)).not.toMatch(/Phase|Milestone/);
   expect(read("cross-runner-review")).toContain("ops-kit backlog comment <変更> --body-file");
   expect(read("cross-runner-review")).toContain("`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない");
   expect(read("review-triage-and-merge")).toContain("CI 緑は `<ローカル CI> --change <変更>` の合格");

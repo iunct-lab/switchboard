@@ -136,7 +136,7 @@ Your repository needs no `ops.config.json`; without one the choices come from th
 
 ## Use the Project and PR flow
 
-The next step after the one above: to run the same flow on GitHub's Issues, Project, PRs, reviews and Releases, follow [the fork setup](docs/development.md). Before `bun ops-kit/src/cli.ts bootstrap`, set `fields.area`, `fields.phase` and `milestone.pattern` in `ops.config.json` to your own values: the values in this repository are Switchboard's own packages and Phases, and `bootstrap` would copy them into your Project.
+The next step after the one above: to run the same flow on GitHub's Issues, Project, PRs, reviews and Releases, follow [the fork setup](docs/development.md). Before `bun ops-kit/src/cli.ts bootstrap`, set `fields.area` in `ops.config.json` to your own values: the values in this repository are Switchboard's own packages, and `bootstrap` would copy them into your Project.
 
 Optional, instead of or beside GitHub: a self-managed GitLab Community Edition. Compare installing it, running it beside GitHub, moving to it and recovering it in [`docs/design/gitlab-adoption.md`](docs/design/gitlab-adoption.md) before starting anything; each step that starts, costs, exposes, logs in or moves waits for your OK.
 

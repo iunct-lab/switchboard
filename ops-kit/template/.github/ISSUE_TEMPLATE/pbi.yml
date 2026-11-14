@@ -63,7 +63,7 @@ body:
       value: |
         **作成したあとにやること**（この Issue には書かない）
 
-        - `ops-kit backlog triage <num> <area> <kind> <prio>` で Project のフィールドを付ける
+        - `ops-kit backlog triage <num> <prio>` で Project のフィールドを付ける
         - 今のゴールに効く PBI なら `ops-kit backlog edit <num> --milestone "<今のゴール>"`。効かないなら Milestone は付けない（着手順は Priority が決める）
         - **PBI に親 Issue は付けない**（付けると Project の Backlog ビューから消える）
         - triage は Status も毎回上書きする。最後の引数を省くと `Backlog` になるので、着手済みの Issue には `… <prio> "" "In progress"` のように今の Status を渡す

@@ -3,8 +3,6 @@ import { repoOf, type GhClient } from "./gh.ts";
 import { ensureItem, projectFragment, selectProject, UsageError, type IssueRef } from "./set.ts";
 
 export interface TriageInput {
-  area: string;
-  kind: string;
   priority: string;
   /** Required when the config has `fields.phase`, refused when it does not. */
   phase?: string;
@@ -16,7 +14,7 @@ export interface TriageInput {
 const FIELDS_Q = "fields(first:50){ nodes{ ... on ProjectV2SingleSelectField{ id name options{ id name } } } }";
 
 /**
- * Put one Issue in the Project and set Area / Kind / Priority / (Phase) / Status, and its parent. One query reads the
+ * Put one Issue in the Project and set Priority / (Phase) / Status, and its parent. One query reads the
  * Project's fields, the Issue and the parent; one mutation sets every field; one more links the parent.
  */
 export async function triage(gh: GhClient, cfg: OpsConfig, num: number, input: TriageInput, log: (s: string) => void = console.log): Promise<void> {
@@ -28,8 +26,6 @@ export async function triage(gh: GhClient, cfg: OpsConfig, num: number, input: T
     throw new UsageError("この設定には Phase が無いので phase は渡せません");
   }
   const want: Array<[string, string]> = [
-    ["Area", input.area],
-    ["Kind", input.kind],
     ["Priority", input.priority],
     ...(input.phase === undefined ? [] : ([["Phase", input.phase]] as Array<[string, string]>)),
     ["Status", input.status ?? "Backlog"],

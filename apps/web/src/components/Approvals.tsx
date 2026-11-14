@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingApproval, PolicyInput } from "@switchboard/protocol";
 import { api } from "../api.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
@@ -8,7 +8,7 @@ import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answerTarget, withoutGrant, appliedLine, askCardParts, questionHead, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, quickGroups, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, resumeLabel, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type PolicyForm } from "../asks.ts";
+import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
 
 /** The 「次回も使う」 form of a card (#938): the range, target, conditions and expiry, and what would be saved. */
 function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setForm: Dispatch<SetStateAction<PolicyForm | null>>; policy: PolicyInput | undefined; answerText: string }) {
@@ -94,9 +94,7 @@ function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswe
       <button className="pri" disabled={busy || !answer} title={answer ? "" : t(tm.answerAllTitle)} onClick={() => answer && props.onAnswer(answer)}>
         {t(tm.answer)}
       </button>
-      <div className="hint ask-send">
-        {t(tm.sendChosen, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}
-      </div>
+      <div className="hint ask-answer-route">{answerRoute(x)}</div>
     </div>
   );
 }
@@ -130,12 +128,13 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
   const policy = policyInput(form);
   const answer = (a: AskAnswer) => props.onAnswer(a, a.kind === "hold" || a.kind === "deny" || a.kind === "confirm" ? undefined : policy);
   const buttons = answerButtons(x);
-  // a stage Task's stop is the Issue's: its answer is not written from here (the API answers 422), so no box
-  const takesText = x.answers.includes("text") && !(x.kind === "stop" && x.issue);
+  const takesText = x.answers.includes("text");
+  const reply = takesReply(x);
   const confirm = x.answers.includes("confirm");
   if (!buttons.length && !takesText && !confirm && !x.blockers.length && !x.policy.note) return null;
   return (
     <div className="ask-answer">
+      {x.kind === "stop" && x.lastReply && <LastReply text={x.lastReply} />}
       {blockerLines(x).map((l) => (
         <div key={l} className="hint warn ask-blocker">
           {l}
@@ -150,39 +149,27 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
             <div key={b.label} className="ask-button">
               <button className={b.primary ? "pri" : undefined} disabled={busy} onClick={() => answer(b.answer)}>
                 {b.label}
+                {b.sub && <span className="ask-button-sub">{b.sub}</span>}
               </button>
-              {/* closing a notice (#2866) sends nothing anywhere */}
-              {b.answer.kind !== "dismiss" && (
-                <div className="hint ask-send">
-                  {t(m.sends)}
-                  {b.grant === b.send ? (
-                    <span className="ask-grant">{b.grant}</span>
-                  ) : b.grant ? (
-                    <>
-                      {withoutGrant(b.send)}
-                      <br />
-                      <span className="ask-grant">{t(m.grant, { grant: b.grant })}</span>
-                    </>
-                  ) : (
-                    b.send
-                  )}{" "}
-                  {t(m.sendTarget, { target: b.target, next: b.next })}
-                  {policy && b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm" ? t(m.savePolicy, { scope: scopeLabel(form!.scope, x) }) : ""}
-                </div>
-              )}
+              {b.grant && <div className="ask-grant">{t(m.grant, { grant: b.grant })}</div>}
             </div>
           ))}
         </div>
       )}
+      {(takesText || confirm || buttons.some((b) => b.answer.kind !== "dismiss")) && !(reply && buttons.length === 0) && (
+        <div className="hint ask-answer-route">
+          {answerRoute(x)}
+          {policy && (takesText || buttons.some((b) => b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm")) ? t(m.savePolicy, { scope: scopeLabel(form!.scope, x) }) : ""}
+        </div>
+      )}
+      {/* the reply goes to the Task: said right above its box, under the grant's route to the Issue when it has one */}
+      {reply && <div className="hint ask-reply-target">{replyTarget(x)}</div>}
       {(takesText || confirm) && (
         <div className="ask-text">
           <textarea value={text} placeholder={confirm ? t(m.reasonPlaceholder) : t(m.textPlaceholder)} onChange={(e) => setText(e.target.value)} disabled={busy} />
           <button disabled={busy || !text.trim()} onClick={() => answer(confirm ? { kind: "confirm", ok: false, text: text.trim() } : { kind: "text", text: text.trim() })}>
-            {confirm ? t(m.sendWrong) : t(m.sendAnswer)}
+            {confirm ? t(m.sendWrong) : reply ? t(m.replyAndContinue) : t(m.sendAnswer)}
           </button>
-          <div className="hint ask-send">
-            {t(m.sendTyped, { target: answerTarget(x), next: x.next ?? t(m.unknown) })}
-          </div>
         </div>
       )}
     </div>
@@ -190,21 +177,170 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
 }
 
 /**
- * 判断待ち (#935, was 承認 #26): every question waiting on the user — tool approvals, the backlog's decisions and
- * confirmations, a Task's operational check, stops and waits — split into the person's, the automatic ones, answered and
- * resolved. A tool approval is still answered here with one tap; the rest send the person where it is answered.
+ * One question as a card: what it is about and the question first, what changed or went on after an answer, the screen
+ * mockups, the answer, and the facts the records have folded in 記録. `liveHead` is a live approval's own head (its title
+ * and command); `standalone` is a card of its own (a row's questions are drawn inside the row).
  */
-export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a: PendingApproval) => void; onOpenTask: (id: string) => void; onOpenBacklog: () => void; onError: (msg: string) => void }) {
+function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; liveHead: ReactNode; sending: boolean; standalone: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void; onOpenTask: (id: string) => void }) {
+  const { ask: x, was, live, sending } = props;
+  const resume = resumeLabel(x);
+  const parts = askCardParts(x);
+  const taskId = x.source.taskId ?? x.task?.id ?? null;
+  // a question no button answers (a stop that takes no answer, a question tool's question without options) is answered in the Task's conversation
+  const talk = !live && !x.answers.length && x.needs === "person" && (x.state === "open" || x.state === "held") && taskId !== null;
+  return (
+    <section className={`ask${props.standalone ? " card" : " ask-item"}${live ? " approval" : ""}`} data-ask={x.id}>
+      <div className="ask-tags">
+        <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
+        <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
+        {isQuick(x) && <span className="badge ask-quick">{t(m.quick)}</span>}
+        {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
+      </div>
+      {x.unblocks.length > 0 && (
+        <div className="hint ask-unblocks-list">
+          {unblockLinks(x.unblocks).map((u) =>
+            u.href ? (
+              <a key={u.number} href={u.href} target="_blank" rel="noreferrer">
+                #{u.number} {u.title}
+              </a>
+            ) : (
+              <span key={u.number}>
+                #{u.number} {u.title}
+              </span>
+            ),
+          )}
+        </div>
+      )}
+      {/* what it is about and the question, before the answer buttons: a card read from its buttons up */}
+      {parts.title && (
+        <div className="ask-title">
+          {parts.title.href ? (
+            <a href={parts.title.href} target="_blank" rel="noreferrer">
+              {parts.title.text}
+            </a>
+          ) : (
+            parts.title.text
+          )}
+        </div>
+      )}
+      {/* a live approval's own head says what it asks; a long question shows its first lines, 全文 opens it */}
+      {parts.question && !live && <AskQuestion text={parts.question} />}
+      {/* a stop has no question: the reason it stopped is what is read first */}
+      {x.kind === "stop" && x.needs === "person" && x.reason && (x.state === "open" || x.state === "held") && !live && <div className="ask-question ask-stop-reason">{x.reason}</div>}
+      {props.liveHead}
+      {was?.changes && (
+        <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
+          {was.changed ? t(m.askChanged) : t(m.changedAtAnswer)}
+          <ul>
+            {was.changes.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {previousLines(x).length > 0 && (x.state === "open" || x.state === "held") && (
+        <div className="hint warn ask-previous">
+          {t(m.previousDiffers)}
+          <ul>
+            {previousLines(x).map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {appliedLine(x) && <div className="hint ask-applied">{appliedLine(x)}</div>}
+      {resume && (
+        <div className={`badge ask-resume ask-resume-${resume.tone}`}>
+          {resume.text}
+          {x.resume?.state === "running" && x.resume.taskId && (
+            <button className="ghost link" onClick={() => props.onOpenTask(x.resume!.taskId!)}>
+              {t(m.openTask)}
+            </button>
+          )}
+        </div>
+      )}
+      {/* seen before the answer buttons, to compare and then choose */}
+      <Mockups list={x.mockups} />
+      {/* before the facts: on a phone the buttons stay in the first screenful */}
+      <AnswerArea key={x.id} ask={x} busy={sending} onAnswer={props.onAnswer} />
+      {talk && (
+        <button className="ghost link ask-talk" onClick={() => props.onOpenTask(taskId)}>
+          {t(m.answerInTask)}
+        </button>
+      )}
+      <details className="ask-record">
+        <summary>{t(m.record)}</summary>
+        <dl className="ask-facts">
+          {parts.facts.map((f) => (
+            <div key={f.label} className="ask-fact">
+              <dt>{f.label}</dt>
+              <dd>
+                {f.href ? (
+                  <a href={f.href} target="_blank" rel="noreferrer">
+                    {f.value}
+                  </a>
+                ) : (
+                  f.value
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {parts.unknown.length > 0 && <div className="hint ask-unknown">{t(m.unknownFacts, { labels: parts.unknown.join("・") })}</div>}
+      </details>
+    </section>
+  );
+}
+
+/** Where a question's card leads to, as links (not answers): the Task's conversation and the Issue, each once however many questions share it. */
+function AskLinks(props: { asks: Ask[]; onOpenTask: (id: string) => void }) {
+  const tasks = new Map<string, string>();
+  const issues = new Set<string>();
+  for (const x of props.asks) {
+    const id = x.source.taskId ?? x.task?.id ?? null;
+    if (id && !tasks.has(id)) tasks.set(id, x.task?.title ?? id);
+    const href = issueOpenHref(x);
+    if (href) issues.add(href);
+  }
+  if (tasks.size === 0 && issues.size === 0) return null;
+  return (
+    <div className="ask-links">
+      {[...tasks].map(([id, title]) => (
+        <button key={id} className="ghost link" onClick={() => props.onOpenTask(id)}>
+          {tasks.size > 1 ? `${t(m.seeTaskTalk)}: ${title}` : t(m.seeTaskTalk)}
+        </button>
+      ))}
+      {[...issues].map((href) => (
+        <a key={href} className="ghost link" href={href} target="_blank" rel="noreferrer">
+          {t(m.openIssue)}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 判断待ち: every question waiting on the user — tool approvals, the backlog's decisions and confirmations, a Task's
+ * operational check, stops and waits — split into the person's, the automatic ones, answered and resolved. The person's
+ * are a line per target (a PBI, else a Task) that opens in place to the questions and their answers; a tool approval stays
+ * a card of its own, answered with one tap, and goes first. Elsewhere is a link (the Task's conversation, the Issue).
+ */
+export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a: PendingApproval) => void; onOpenTask: (id: string) => void; onError: (msg: string) => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [list, setList] = useState<AskList | null>(null);
   const [failed, setFailed] = useState(false);
-  // #936: the cards answered here, by the id they were shown with, and the one being sent
+  // the cards answered here, by the id they were shown with, and the one being sent
   const [answered, setAnswered] = useState<Map<string, Answered>>(new Map());
   const [sending, setSending] = useState<string | null>(null);
-  // #1673: the Workspace the cards are narrowed to (its id, "" = not known), null = all; only while the screen is open
+  // the Workspace the cards are narrowed to (its id, "" = not known), null = all; only while the screen is open
   const [workspace, setWorkspace] = useState<string | null>(null);
-  // #1675: the person's narrowed to the ones answered with one press; only while the screen is open
+  // the person's narrowed to the ones answered with one press; only while the screen is open
   const [quickOnly, setQuickOnly] = useState(false);
+  // the rows opened, by row key; only while the screen is open, and a list read again does not close one
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // the questions answered here, each with the ids the list already had answered for it then: the answer's result stays in
+  // its row when the list has it (a decision under a new id); one answered elsewhere goes where the list has it
+  const [answeredRows, setAnsweredRows] = useState<AnsweredHere[]>([]);
   const { onError } = props;
   const seq = useRef(0);
   const load = useCallback(() => {
@@ -226,7 +362,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // on open, and when an approval comes or goes (the live list moves first; the rest is read again with it)
   const approvalKeys = props.approvals.map((a) => `${a.taskId}/${a.id}`).join(" ");
   useEffect(load, [load, approvalKeys]);
-  // while a Task logs in for an SSO batch (#2046): its device code, and the rest going on after it, are read again
+  // while a Task logs in for an SSO batch: its device code, and the rest going on after it, are read again
   const loggingIn = list?.batches.some((b) => b.loggingIn) ?? false;
   useEffect(() => {
     if (!loggingIn) return;
@@ -246,7 +382,12 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const send = (x: Ask, answer: AskAnswer, policy?: PolicyInput) => {
     if (sending) return;
     setSending(x.id);
-    const done = (v: Answered) => setAnswered((m) => new Map(m).set(x.id, v));
+    const done = (v: Answered) => {
+      setAnswered((m) => new Map(m).set(x.id, v));
+      if (x.kind === "approval") return;
+      const here = answeredHere(list?.asks ?? [], x);
+      setAnsweredRows((r) => [...r, here]);
+    };
     api
       .answerAsk(x.id, answer, policy)
       .then((r) => {
@@ -270,7 +411,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const live = (x: Ask) => (x.kind === "approval" && x.state === "open" ? props.approvals.find((a) => x.id === askId(a)) : undefined);
   // the live approvals the list does not have yet (it is loading, failed, or older): still answered with one tap
   const unlisted = props.approvals.filter((a) => !list?.asks.some((x) => x.id === askId(a)));
-  // `buttons` false: the card's answer buttons answer it (#936); the title and the command stay
+  // `buttons` false: the card's answer buttons answer it; the title and the command stay
   const approvalHead = (a: PendingApproval, buttons = true) => (
     <>
       <button className="ghost link t" onClick={() => props.onOpenTask(a.taskId)}>
@@ -297,15 +438,57 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const narrowed = workspace !== null && chips.some((c) => c.key === workspace) ? workspace : null;
   const inScope = (a: Ask) => narrowed === null || workspaceKey(a) === narrowed;
   const batches = list?.batches ?? [];
-  // a batch's questions are answered on its card (#2046)
-  const scoped = groupAsks(hiddenByBatches(all, batches).filter(inScope));
+  // a batch's questions are answered on its card
+  const visible = hiddenByBatches(all, batches).filter(inScope);
   // the cards' badge is on the question as answered here (a kept answer is not the person's any more)
   const cardOf = (shown: Ask) => { const was = answered.get(shown.id); return was && !was.changed ? was.ask : shown; };
-  const quick = (scoped.find((g) => g.key === "person")?.asks.filter((a) => isQuick(cardOf(a))).length ?? 0) + unlisted.length;
-  // narrowed by the list's question: a card answered here stays where it was, with what the answer did, until the list is read again
-  const groups = quickOnly ? quickGroups(scoped) : scoped;
+  // a question answered here stays in the person's row, with what the answer did, until the screen is opened again (a tool approval is a card of its own: it goes where the list has it)
+  const stays = (a: Ask) => { const was = answered.get(a.id); return a.kind !== "approval" && (!!was && !was.changed || answeredInRow(a, answeredRows)); };
+  const others = groupAsks(visible.filter((a) => !stays(a)));
+  const personBase = others.find((g) => g.key === "person");
+  const personAsks = visible.filter((a) => stays(a) || personBase?.asks.includes(a)).map(cardOf);
+  const person = personAsks.length > 0 ? { key: "person" as const, label: personBase?.label ?? t(tm.groupPerson), asks: personAsks } : null;
+  const scoped = [...(person ? [person] : []), ...others.filter((g) => g.key !== "person")];
+  const toolApprovals = personAsks.filter((a) => a.kind === "approval" && (!quickOnly || isQuick(a)));
+  const personSections = workspaceSections(personAsks.filter((a) => a.kind !== "approval"))
+    .map((s) => { const rows = askRows(s.asks); const quickKeys = new Set(quickRows(rows).map((r) => r.key)); return { ...s, rows: rows.filter((r) => !quickOnly || quickKeys.has(r.key) || r.asks.some(stays)) }; })
+    .filter((s) => s.rows.length > 0);
+  const quick = quickRows(askRows(personAsks)).length + personAsks.filter((a) => a.kind === "approval" && isQuick(a)).length + unlisted.length;
+  const personShown = toolApprovals.length + personSections.reduce((n, s) => n + s.rows.length, 0);
+  // the group's heading counts as the screen's does: the rows still open, and the tool approvals still open
+  const isOpenAsk = (a: Ask) => a.state === "open" || a.state === "held";
+  const personOpen = toolApprovals.filter(isOpenAsk).length + personSections.reduce((n, s) => n + s.rows.filter((r) => r.open).length, 0);
   // the live approvals not in the list yet have no Workspace: shown (and counted) whatever the filter
-  const open = (list ? list.asks.filter((a) => inScope(a) && (a.state === "open" || a.state === "held") && a.needs === "person").length : 0) + unlisted.length;
+  const open = (narrowed === null ? chips.reduce((n, c) => n + c.count, 0) : (chips.find((c) => c.key === narrowed)?.count ?? 0)) + unlisted.length;
+  const toggle = (key: string) => setExpanded((s) => { const n = new Set(s); if (!n.delete(key)) n.add(key); return n; });
+  const card = (x: Ask, standalone: boolean) => {
+    const a = live(x);
+    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={sending !== null} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
+  };
+  const rowView = (r: AskRow) => {
+    const isOpen = expanded.has(r.key);
+    return (
+      <section key={r.key} className="card ask-row" data-row={r.key}>
+        <button className="ask-row-head" aria-expanded={isOpen} onClick={() => toggle(r.key)}>
+          <span className="ask-row-title">{r.title.text}</span>
+          {r.lead && <span className="ask-row-lead">{r.lead}</span>}
+          <span className="ask-tags">
+            {r.kinds.map((k) => (
+              <span key={k} className={`badge ask-kind ask-kind-${k}`}>{KIND_LABEL[k]}</span>
+            ))}
+            {r.quick && <span className="badge ask-quick">{t(m.quick)}</span>}
+            {unblocksLine({ unblocks: r.unblocks }) && <span className="badge ask-unblocks">{unblocksLine({ unblocks: r.unblocks })}</span>}
+          </span>
+        </button>
+        {isOpen && (
+          <div className="ask-row-body">
+            {r.asks.map((x) => card(cardOf(x), false))}
+            <AskLinks asks={r.asks} onOpenTask={props.onOpenTask} />
+          </div>
+        )}
+      </section>
+    );
+  };
 
   return (
     <main className="main approvals">
@@ -318,35 +501,33 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
             {t(m.reload)}
           </button>
         </div>
-        {chips.length > 0 && (
-          <div className="ask-workspaces">
-            <button className={narrowed === null ? "pri" : undefined} onClick={() => setWorkspace(null)}>
-              {t(m.all)}
-            </button>
-            {chips.map((c) => (
-              <button key={c.key} className={narrowed === c.key ? "pri" : undefined} data-workspace={c.key} onClick={() => setWorkspace(c.key)}>
-                {c.name} {c.count}
+        {/* the Workspace buttons and the toggle on one line (it scrolls sideways when they do not fit): they take no more of the first screen than one line */}
+        <div className="ask-filters">
+          {/* a toggle of its own, not one of the Workspace's choices: it narrows on top of them; first, so a long row of Workspaces never scrolls it off a phone's screen */}
+          {(chips.length > 0 || unlisted.length > 0) && (
+            <div className="ask-quick-row">
+              <button className={quickOnly ? "pri" : undefined} aria-pressed={quickOnly} onClick={() => setQuickOnly((q) => !q)}>
+                {t(m.quick)} {quick}
               </button>
-            ))}
-          </div>
-        )}
-        {/* a toggle of its own (#1675), not one of the Workspace's choices: it narrows on top of them */}
-        {(chips.length > 0 || unlisted.length > 0) && (
-          <div className="ask-quick-row">
-            <button className={quickOnly ? "pri" : undefined} aria-pressed={quickOnly} onClick={() => setQuickOnly((q) => !q)}>
-              {t(m.quick)} {quick}
-            </button>
-          </div>
-        )}
-        {quickOnly && unlisted.length === 0 && !groups.some((g) => g.key === "person") && <div className="hint ask-quick-none">{t(m.quickNone)}</div>}
+            </div>
+          )}
+          {chips.length > 0 && (
+            <div className="ask-workspaces">
+              <button className={narrowed === null ? "pri" : undefined} onClick={() => setWorkspace(null)}>
+                {t(m.all)}
+              </button>
+              {chips.map((c) => (
+                <button key={c.key} className={narrowed === c.key ? "pri" : undefined} data-workspace={c.key} onClick={() => setWorkspace(c.key)}>
+                  {c.name} {c.count}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {quickOnly && unlisted.length === 0 && personShown === 0 && <div className="hint ask-quick-none">{t(m.quickNone)}</div>}
         {failed && <div className="hint warn ask-failed">{list ? t(m.failedStale) : t(m.failedNone)}{t(m.failedRetry)}</div>}
         {!list && !failed && <div className="muted">{t(m.loading)}</div>}
         {list && list.asks.length === 0 && <div className="muted">{t(m.noAsks)}</div>}
-        {list?.errors.map((e) => (
-          <div key={e.workspaceId} className="hint">
-            {e.workspaceName}: {e.message}
-          </div>
-        ))}
       </section>
       {batches.map((b) => (
         <BatchCard key={b.id} batch={b} onOpenTask={props.onOpenTask} onError={props.onError} onDone={load} />
@@ -361,139 +542,72 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
           {approvalHead(a)}
         </section>
       ))}
-      {groups.map((g) => (
-        <section key={g.key} className={`ask-group ask-group-${g.key}`}>
-          <h5 className="ask-group-head">
-            {g.label} <span className="hint">{g.asks.length}</span>
-          </h5>
-          {g.key === "auto" && <div className="hint">{t(m.autoHint)}</div>}
-          {workspaceSections(g.asks).map((ws) => (
-            <div key={ws.key} className="ask-workspace" data-workspace={ws.key}>
-              <h6 className="ask-workspace-head">
-                {ws.name} <span className="hint">{ws.asks.length}</span>
-              </h6>
-              {ws.asks.map((shown) => {
-                const was = answered.get(shown.id);
-                // a 409's notice goes on the question as the list has it (read again after the 409)
-                const x = was && !was.changed ? was.ask : shown;
-                const a = live(x);
-                const resume = resumeLabel(x);
-                const taskId = x.source.taskId ?? x.task?.id ?? null;
-                const parts = askCardParts(x);
-                return (
-                  <section key={x.id} className={`card ask${a ? " approval" : ""}`} data-ask={x.id}>
-                    <div className="ask-tags">
-                      <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
-                      <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
-                      {isQuick(x) && <span className="badge ask-quick">{t(m.quick)}</span>}
-                      {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
+      {scoped.map((g) => {
+        const isPerson = g.key === "person";
+        if (isPerson && personShown === 0) return null;
+        const body = isPerson ? (
+          <>
+            {/* an approval the live list does not have yet has no Task heading of its own: the link leads to its Task */}
+            {toolApprovals.map((x) => (live(x) ? card(x, true) : <div key={x.id}>{card(x, true)}<AskLinks asks={[x]} onOpenTask={props.onOpenTask} /></div>))}
+            {personSections.map((ws) => (
+              <div key={ws.key} className="ask-workspace" data-workspace={ws.key}>
+                <h6 className="ask-workspace-head">
+                  {ws.name} <span className="hint">{ws.rows.filter((r) => r.open).length}</span>
+                </h6>
+                {ws.rows.map(rowView)}
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            {g.key === "auto" && <div className="hint">{t(m.autoHint)}</div>}
+            {workspaceSections(g.asks).map((ws) => (
+              <div key={ws.key} className="ask-workspace" data-workspace={ws.key}>
+                <h6 className="ask-workspace-head">
+                  {ws.name} <span className="hint">{ws.asks.length}</span>
+                </h6>
+                {ws.asks.map((shown) => {
+                  const x = cardOf(shown);
+                  return (
+                    <div key={x.id}>
+                      {card(x, true)}
+                      {!live(x) && <AskLinks asks={[x]} onOpenTask={props.onOpenTask} />}
                     </div>
-                    {x.unblocks.length > 0 && (
-                      <div className="hint ask-unblocks-list">
-                        {unblockLinks(x.unblocks).map((u) =>
-                          u.href ? (
-                            <a key={u.number} href={u.href} target="_blank" rel="noreferrer">
-                              #{u.number} {u.title}
-                            </a>
-                          ) : (
-                            <span key={u.number}>
-                              #{u.number} {u.title}
-                            </span>
-                          ),
-                        )}
-                      </div>
-                    )}
-                    {/* #4068: what it is about and the question, before the answer buttons — a card read from its buttons up */}
-                    {parts.title && (
-                      <div className="ask-title">
-                        {parts.title.href ? (
-                          <a href={parts.title.href} target="_blank" rel="noreferrer">
-                            {parts.title.text}
-                          </a>
-                        ) : (
-                          parts.title.text
-                        )}
-                      </div>
-                    )}
-                    {/* a live approval's own head says what it asks (approvalHead); a long question shows its first lines, 全文 opens it */}
-                    {parts.question && !a && <AskQuestion text={parts.question} />}
-                    {a && approvalHead(a, !x.answers.length)}
-                    {was?.changes && (
-                      <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
-                        {was.changed ? t(m.askChanged) : t(m.changedAtAnswer)}
-                        <ul>
-                          {was.changes.map((c) => (
-                            <li key={c}>{c}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {previousLines(x).length > 0 && (x.state === "open" || x.state === "held") && (
-                      <div className="hint warn ask-previous">
-                        {t(m.previousDiffers)}
-                        <ul>
-                          {previousLines(x).map((l) => (
-                            <li key={l}>{l}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {appliedLine(x) && <div className="hint ask-applied">{appliedLine(x)}</div>}
-                    {resume && (
-                      <div className={`badge ask-resume ask-resume-${resume.tone}`}>
-                        {resume.text}
-                        {x.resume?.state === "running" && x.resume.taskId && (
-                          <button className="ghost link" onClick={() => props.onOpenTask(x.resume!.taskId!)}>
-                            {t(m.openTask)}
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    {/* seen before the answer buttons, to compare and then choose (#2221) */}
-                    <Mockups list={x.mockups} />
-                    {/* before the facts: on a phone the buttons stay in the first screenful (#26) */}
-                    <AnswerArea key={x.id} ask={x} busy={sending !== null} onAnswer={(answer, policy) => send(x, answer, policy)} />
-                    <dl className="ask-facts">
-                      {parts.facts.map((f) => (
-                        <div key={f.label} className="ask-fact">
-                          <dt>{f.label}</dt>
-                          <dd>
-                            {f.href ? (
-                              <a href={f.href} target="_blank" rel="noreferrer">
-                                {f.value}
-                              </a>
-                            ) : (
-                              f.value
-                            )}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
-                    {parts.unknown.length > 0 && <div className="hint ask-unknown">{t(m.unknownFacts, { labels: parts.unknown.join("・") })}</div>}
-                    <div className="approval-actions">
-                      {x.route === "backlog" && (x.state === "open" || x.state === "held") && (
-                        <button className="pri ask-route" onClick={props.onOpenBacklog}>
-                          {t(m.answerInBacklog)}
-                        </button>
-                      )}
-                      {!a && taskId && (
-                        <button className="ask-route" onClick={() => props.onOpenTask(taskId)}>
-                          {t(m.openTask)}
-                        </button>
-                      )}
-                      {issueOpenHref(x) && (
-                        <a className="button ask-route" href={issueOpenHref(x) ?? undefined} target="_blank" rel="noreferrer">
-                          {t(m.openIssue)}
-                        </a>
-                      )}
-                    </div>
-                  </section>
-                );
-              })}
+                  );
+                })}
+              </div>
+            ))}
+          </>
+        );
+        // the groups with nothing to do are folded into one line with their count: open only while the screen is (no state kept)
+        if (!isPerson)
+          return (
+            <details key={g.key} className={`ask-group ask-fold ask-group-${g.key}`}>
+              <summary className="ask-fold-head">
+                {g.label} <span className="hint">{g.asks.length}</span>
+              </summary>
+              {body}
+            </details>
+          );
+        return (
+          <section key={g.key} className={`ask-group ask-group-${g.key}`}>
+            <h5 className="ask-group-head">
+              {g.label} <span className="hint">{personOpen}</span>
+            </h5>
+            {body}
+          </section>
+        );
+      })}
+      {/* what a Workspace could not read is no help in answering, so it comes after every row instead of pushing them down */}
+      {list && list.errors.length > 0 && (
+        <section className="card ask-errors">
+          {list.errors.map((e) => (
+            <div key={e.workspaceId} className="hint">
+              {e.workspaceName}: {e.message}
             </div>
           ))}
         </section>
-      ))}
+      )}
     </main>
   );
 }
@@ -588,5 +702,27 @@ function AskQuestion(props: { text: string }) {
       </summary>
       {props.text}
     </details>
+  );
+}
+
+/** A stop's Task's last reply, as it is (never read for questions): the first lines, 全文 opens the rest; open only while the screen is. */
+function LastReply(props: { text: string }) {
+  const r = replyPreview(props.text);
+  return (
+    <div className="ask-lastreply">
+      <div className="hint ask-lastreply-label">{t(m.lastReply)}</div>
+      {!r.more ? (
+        <div className="ask-lastreply-text">{props.text}</div>
+      ) : (
+        <details className="ask-lastreply-text">
+          <summary>
+            <span className="q-head">{r.head} …</span>
+            <span className="hint q-more"> {t(m.lastReplyAll)}</span>
+            <span className="hint q-less">{t(m.lastReplyFold)}</span>
+          </summary>
+          {props.text}
+        </details>
+      )}
+    </div>
   );
 }

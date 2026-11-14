@@ -35,6 +35,7 @@ export const task = msgs({
   stateAnswered: { ja: "回答済み", en: "Answered" },
   stateResolved: { ja: "解消済み", en: "Resolved" },
   groupPerson: { ja: "あなたの判断待ち", en: "Awaiting your decision" },
+  groupDone: { ja: "済んだもの", en: "Done" },
   groupAuto: { ja: "自動で待っている（操作不要）", en: "Waiting on its own (nothing to do)" },
   unknownWorkspace: { ja: "Workspace 不明", en: "Workspace unknown" },
 
@@ -57,8 +58,9 @@ export const task = msgs({
   btnGrant: { ja: "この操作だけ許可して続ける", en: "Allow just this operation and continue" },
   btnAllow: { ja: "承認して続行", en: "Approve and continue" },
   denyNext: { ja: "Task は許可されずに続く", en: "The Task goes on without the permission" },
-  btnRecommended: { ja: "推奨案で進める（{key}）", en: "Go with the recommendation ({key})" },
-  btnChoice: { ja: "{key} で進める", en: "Go with {key}" },
+  answerRouteIssue: { ja: "答えは {target} に書かれます。続き: {next}", en: "The answer is written on {target}. Then: {next}" },
+  answerRouteTask: { ja: "答えは {target}に送られます。続き: {next}", en: "The answer is sent to {target}. Then: {next}" },
+  recommendedSuffix: { ja: "（推奨）", en: " (recommended)" },
   btnConfirm: { ja: "確認した", en: "Confirmed" },
   btnDismiss: { ja: "誤検知として閉じる", en: "Close as a false positive" },
   dismissNext: { ja: "同じ当たりは次の検査でも出ない", en: "The same hit does not come up in the next scan" },
@@ -320,7 +322,6 @@ export const task = msgs({
   writeAnswer: { ja: "回答を書く", en: "Write an answer" },
   answerAllTitle: { ja: "すべての質問に答えると送れます", en: "Answer every question to send" },
   answer: { ja: "回答する", en: "Answer" },
-  sendChosen: { ja: "送る: 回答 → {target}、続き: {next}", en: "Sends: your answers → {target}, then: {next}" },
 
   // DeviceAuth.tsx
   approveAt: { ja: "{host} で承認してください", en: "Approve at {host}" },

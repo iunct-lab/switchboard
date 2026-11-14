@@ -402,7 +402,7 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
         : action;
   // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
   const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
-  // Task ごとの実装のモデル（試験）: every complete entry, a resume too; a model without an alias adds nothing
+  // Task ごとの実装のモデル: every complete entry, a resume too; a model without an alias adds nothing
   const alias = action === "complete" && opts.taskModel ? subagentModelAlias(opts.taskModel) : null;
   const body = alias ? `${rendered}\n\n${taskModelParagraph(alias)}` : rendered;
   const elsewhere = opts.local
@@ -422,9 +422,9 @@ export function subagentModelAlias(model: string): string | null {
   return /^claude-(sonnet|opus|haiku|fable)-/.exec(model)?.[1] ?? null;
 }
 
-/** The trial's paragraph of an 実装 Task's prompt: each Task's implementation on a foreground subagent of `alias`; the rest stays here. */
+/** The paragraph of an 実装 Task's prompt: each Task's implementation on a foreground subagent of `alias`; the rest stays here. */
 function taskModelParagraph(alias: string): string {
-  return `試験: Task ごとの実装（task-to-pr の着手コメントから PR を出して In review にするまで）は、Agent ツールの model に \`${alias}\` を指定したサブエージェントに前景で任せてください（\`run_in_background\` にしない）。並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください。`;
+  return `Task ごとの実装（task-to-pr の着手コメントから PR を出して In review にするまで）は、Agent ツールの model に \`${alias}\` を指定したサブエージェントに前景で任せてください（\`run_in_background\` にしない）。並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください。`;
 }
 
 /** The person's newest answer on the screen as their words, in a fence longer than any run of backticks in it, so the answer cannot close it. */

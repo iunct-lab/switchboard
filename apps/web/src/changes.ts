@@ -8,7 +8,7 @@ import { common } from "./i18n/common.ts";
  * those modules run git and cannot go in the web bundle, so they are written here and changes.test.ts holds them equal.
  */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
-export const RECHECK_PASS = /^\[recheck\] (size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
+export const RECHECK_PASS = /^\[recheck\] (security:docs|security:lockfile|size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
 /** A main review: the other runner's (merge-gate's `REVIEW`). */
 export const REVIEW = /^\[(codex|claude)\] review/;
 

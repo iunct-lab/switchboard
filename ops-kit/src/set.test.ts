@@ -103,7 +103,6 @@ describe("fieldChoice", () => {
   test("a value that differs from a choice only in case is that choice; Story Points' digits are its number", () => {
     expect(fieldChoice(withPhase, "Status", "In Progress")).toBe("In progress");
     expect(fieldChoice(withPhase, "Priority", "p2")).toBe("P2");
-    expect(fieldChoice(withPhase, "Area", "ONE")).toBe("one");
     expect(fieldChoice(withPhase, "Phase", "phase 1")).toBe("Phase 1");
     expect(fieldChoice(withPhase, "Status", "Ready")).toBe("Ready");
     expect(fieldChoice(withPhase, "Story Points", "5")).toBe(5);
@@ -115,7 +114,7 @@ describe("fieldChoice", () => {
       ["Status", "Doing", "'Status' に選択肢 'Doing' がありません: Backlog / Ready / In progress / In review / Done"],
       ["Story Points", "4", "'Story Points' に選択肢 '4' がありません: 1 / 2 / 3 / 5 / 8 / 13"],
       ["Story Points", "", "'Story Points' に選択肢 '' がありません: 1 / 2 / 3 / 5 / 8 / 13"],
-      ["Kind", "InProgress", "'Kind' に選択肢 'InProgress' がありません: bug / feature"],
+      ["Priority", "P9", "'Priority' に選択肢 'P9' がありません: P0 / P1 / P2 / P3"],
     ] as const) {
       expect(() => fieldChoice(withPhase, name, value)).toThrow(new UsageError(msg));
     }

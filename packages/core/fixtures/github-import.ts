@@ -1,7 +1,7 @@
 /**
  * A fake GitHub for the backlog import, built on a gh that answers like the fixtures of the GitHub read before it
- * (`backlog-graphql.json` pages, `backlog-decisions.json` comments): tests and scripts/github-api-bench.ts keep those
- * fixtures and their per-test variations.
+ * (`backlog-graphql.json` pages, `backlog-decisions.json` comments): tests keep those fixtures and their per-test
+ * variations.
  */
 import type { GhRunner } from "../src/backlog.ts";
 

@@ -7,7 +7,7 @@ body:
     id: parent
     attributes:
       label: 親 PBI
-      description: "覚え書き。ここに #番号を書いただけでは親は付かない。作成後に `ops-kit backlog triage <num> <area> <kind> <prio> <PBI番号>` で sub-issue として紐づけること（Ready 判定は sub-issue を見る）。triage は Status も毎回上書きし、最後の引数を省くと `Backlog` になる。着手済みの Issue には `… <PBI番号> \"In progress\"` のように今の Status を渡すこと"
+      description: "覚え書き。ここに #番号を書いただけでは親は付かない。作成後に `ops-kit backlog triage <num> <prio> <PBI番号>` で sub-issue として紐づけること（Ready 判定は sub-issue を見る）。triage は Status も毎回上書きし、最後の引数を省くと `Backlog` になる。着手済みの Issue には `… <PBI番号> \"In progress\"` のように今の Status を渡すこと"
       placeholder: "#21"
     validations:
       required: true

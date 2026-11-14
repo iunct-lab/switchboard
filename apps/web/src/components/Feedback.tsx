@@ -218,12 +218,17 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   );
 }
 
+/** `owner/name` of a GitHub form link, so the link says whose form it opens. */
+export function formRepo(url: string): string {
+  return new URL(url).pathname.split("/").slice(1, 3).join("/");
+}
+
 /** Where a request for Switchboard itself goes when this instance does not develop it (#2459): the form link, else the text to copy. */
 export function FeedbackUpstreamBox({ upstream, onCopyError }: { upstream: FeedbackUpstream["upstream"]; onCopyError: (message: string) => void }) {
   return (
     <div className="feedback-upstream" role="status">
       {upstream.url
-        ? <a href={upstream.url} target="_blank" rel="noreferrer">{t(m.upstreamOpen)}</a>
+        ? <a href={upstream.url} target="_blank" rel="noreferrer">{t(m.upstreamOpen, { repo: formRepo(upstream.url) })}</a>
         : <>
             <p className="hint">{t(m.upstreamCopyHint)}</p>
             <pre className="feedback-upstream-text">{upstream.text}</pre>

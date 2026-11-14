@@ -17,7 +17,7 @@ import { findSecrets, hostAws } from "./secrets.ts";
  */
 
 /** triage's usage, one text for the list and the errors: `<phase>` is read only when the configuration has fields.phase. */
-export const triageUsage = (phase: boolean) => `triage <issue> <area> <kind> <priority> ${phase ? "[<phase>] " : ""}[<parent>] [<status>]`;
+export const triageUsage = (phase: boolean) => `triage <issue> <priority> ${phase ? "[<phase>] " : ""}[<parent>] [<status>]`;
 
 export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]
       保存済みの Issue を、取得の時刻と同期の状態つきで出す（行: #番号 type OPEN|CLOSED Status 題）。GitHub には問い合わせない
@@ -362,20 +362,20 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         return await edit(ref, { fields: { [field]: numeric ? Number(value) : value } });
       }
       case "triage": {
-        const [ref, area, kind, priority, ...tail] = args;
+        const [ref, priority, ...tail] = args;
         // a repository without a Phase: "" in its place means none; <parent> and <status> follow
         if (!opts.phase && tail[0] === "" && tail.length > 2) tail.shift();
         const phase = opts.phase ? tail.shift() : undefined;
         const [parent, status, ...extra] = tail;
-        if (!ref || !area || !kind || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog ${triageUsage(!!opts.phase)}`);
-        noSecrets(area, kind, priority, phase, status);
+        if (!ref || !priority || (opts.phase && !phase) || extra.length) throw new Refused(`backlog ${triageUsage(!!opts.phase)}`);
+        noSecrets(priority, phase, status);
         if (direct) {
-          const c = await choose({ Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" });
-          await triage(direct.gh, await config(), number(ref), { area: c.Area!, kind: c.Kind!, priority: c.Priority!, ...(phase !== undefined && { phase: c.Phase! }), ...(parent ? { parent: number(parent) } : {}), status: c.Status! }, note);
+          const c = await choose({ Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" });
+          await triage(direct.gh, await config(), number(ref), { priority: c.Priority!, ...(phase !== undefined && { phase: c.Phase! }), ...(parent ? { parent: number(parent) } : {}), status: c.Status! }, note);
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
-        const fields: Record<string, string> = { Area: area, Kind: kind, Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" };
+        const fields: Record<string, string> = { Priority: priority, ...(phase !== undefined && { Phase: phase }), Status: status || "Backlog" };
         return await edit(ref, { project: true, fields, ...(parent ? { parent: number(parent) } : {}) });
       }
       case "retry": {

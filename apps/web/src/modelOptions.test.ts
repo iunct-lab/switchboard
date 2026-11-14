@@ -23,14 +23,14 @@ describe("modelOptions (#155)", () => {
   });
 });
 
-describe("taskModelOptions (#2769)", () => {
-  test("complete task model: 同じ first, then the runner's models marked （試験）; a saved value off the list stays, marked so; one on the list is not doubled", () => {
+describe("taskModelOptions", () => {
+  test("complete task model: 同じ first, then the runner's models; a saved value off the list stays, marked so; one on the list is not doubled", () => {
     expect(taskModelOptions(claude, "")).toEqual([
       { value: "", label: "Task ごと: 同じ" },
-      { value: "claude-fable-5-1", label: "Task ごと: Fable 5.1（試験）" },
-      { value: "claude-haiku-4-5", label: "Task ごと: Haiku 4.5（試験）" },
+      { value: "claude-fable-5-1", label: "Task ごと: Fable 5.1" },
+      { value: "claude-haiku-4-5", label: "Task ごと: Haiku 4.5" },
     ]);
-    expect(taskModelOptions(claude, "claude-sonnet-5-5").at(-1)).toEqual({ value: "claude-sonnet-5-5", label: "Task ごと: claude-sonnet-5-5（試験・一覧に無い）" });
+    expect(taskModelOptions(claude, "claude-sonnet-5-5").at(-1)).toEqual({ value: "claude-sonnet-5-5", label: "Task ごと: claude-sonnet-5-5（一覧に無い）" });
     expect(taskModelOptions(claude, "claude-haiku-4-5")).toHaveLength(3);
     expect(taskModelOptions(undefined, "")).toEqual([{ value: "", label: "Task ごと: 同じ" }]);
   });

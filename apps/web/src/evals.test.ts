@@ -30,9 +30,9 @@ describe("evals rows (#1218)", () => {
     expect(metricRows(evals(rules({ daemonStops: 2 }))).find((r) => r.label === "デーモン停止")?.value).toBe("2");
   });
 
-  test("metricRows: delegated model — a row with the model and （試験） only when the Task handed its Tasks to one (#2769)", () => {
+  test("metricRows: delegated model — a row with the model only when the Task handed its Tasks to one", () => {
     expect(metricRows(evals(rules())).some((r) => r.label === "Task ごとの実装")).toBe(false);
-    expect(metricRows(evals(rules({ delegatedModel: "claude-sonnet-5-5" }))).at(-1)).toEqual({ label: "Task ごとの実装", value: "claude-sonnet-5-5（試験）" });
+    expect(metricRows(evals(rules({ delegatedModel: "claude-sonnet-5-5" }))).at(-1)).toEqual({ label: "Task ごとの実装", value: "claude-sonnet-5-5" });
   });
 
   test("metricRows: classifier — counts with categories, unknown when none (#2236)", () => {

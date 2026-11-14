@@ -120,7 +120,12 @@ describe("ruleMetrics", () => {
     expect(ruleMetrics(envelopes([user("x"), note("。…")]))).toMatchObject({ daemonStops: 1, lastCutByDaemon: false, lastEnd: null });
   });
 
-  test("delegated model: the model of the trial's note; null without one or for another status line; a rules@3 row is counted again", () => {
+  test("delegated model: the note names the model and carries no 試験", () => {
+    expect(delegatedNote("claude-sonnet-5-5")).toBe("Task ごとの実装は claude-sonnet-5-5 に任せます");
+    expect(delegatedNote("claude-sonnet-5-5")).not.toContain("試験");
+  });
+
+  test("delegated model: the model of the note; null without one or for another status line; a rules@3 row is counted again", () => {
     expect(ruleMetrics(envelopes([{ t: "status", text: delegatedNote("claude-sonnet-5-5") }, user("x"), end("ok")])).delegatedModel).toBe("claude-sonnet-5-5");
     expect(ruleMetrics(envelopes([user("x"), end("ok")])).delegatedModel).toBeNull();
     expect(ruleMetrics(envelopes([{ t: "status", text: "Task ごとの実装は 自分で行います" }, user("x"), end("ok")])).delegatedModel).toBeNull();

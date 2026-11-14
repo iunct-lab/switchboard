@@ -807,7 +807,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return startMetaTask({ kind: "request", ws, title: feedbackTitle(input.text), prompt, attachmentIds: input.attachmentIds });
   };
   /**
-   * Task ごとの実装のモデル（試験） of an 実装 Task that starts now: the saved one while the Task starts on claude
+   * Task ごとの実装のモデル of an 実装 Task that starts now: the saved one while the Task starts on claude
    * (its kind's runner, after 上限のときの代わり) and the model has a subagent alias; else "" — the prompt as before.
    */
   const completeTaskModelFor = (runner?: RunnerId): string => {
@@ -1038,8 +1038,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       resumeFailures: failed,
       policy,
       mockups: mockupsOf,
+      lastReply: (id) => db.lastReply(id)?.text ?? null,
     });
-    const all = rankAsks(dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf, startedBy: (w, n) => db.askAnswer(`started:${w}#${n}`)?.result?.ask?.resume?.taskId ?? null }), ...fromTasks]), b.items);
+    const all = rankAsks(dedupeAsks([...asksFromBacklog(b.items, now, { approvalPending: approvalPendingOf(), resumeFailures: failed, policy, mockups: mockupsOf, startedBy: (w, n) => db.askAnswer(`started:${w}#${n}`)?.result?.ask?.resume?.taskId ?? null, lastReply: (id) => db.lastReply(id)?.text ?? null, taskOf: (id) => db.getTask(id) }), ...fromTasks]), b.items);
     tieAnswers(all);
     for (const id of headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) headMisses.delete(id);
     const asks = all.map((a) => (headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: headMisses.get(a.id)! } } : a));
@@ -1065,7 +1066,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   /** A Task's answer as it goes on now: its resume read again from the Task (running, the usage limit, failed). */
   const nowOf = (r: AskAnswerResult): AskAnswerResult => {
     const a = r.ask;
-    const t = a && !a.issue && a.task && a.state === "answered" ? db.getTask(a.task.id) : null;
+    // a stage Task's stop answered in words goes on as that Task; one answered by its grant goes on as the next stage Task (its stored resume)
+    const t = a && a.task && a.state === "answered" && (!a.issue || (a.kind === "stop" && a.resume?.taskId === a.task.id)) ? db.getTask(a.task.id) : null;
     return t && a ? { ...r, ask: { ...a, resume: resumeOfTask({ task: t, repliedAt: a.changedAt, failure: failed(a.id) }) } } : r;
   };
   /** An answer being written, by the question's id: a second answer to the same question waits for it. */
@@ -1101,8 +1103,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       // the question as it is after the answer: closed, so the screen keeps no button on it
       return { status: 200, body: { ask: { ...ask, state: "resolved", changedAt: Date.now(), answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
     }
-    if (!ask.issue && ask.task && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) return answerTask(id, ask, answer, by);
-    // a stage Task's stop is answered on its Issue by its grant only: the ## 回答 the next stage Task gets as the person's words
+    // a stage Task's stop answered in words is a reply to that Task, as a Task's own stop is
+    if (ask.task && ((!ask.issue && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) || (ask.kind === "stop" && answer.kind !== "grant"))) return answerTask(id, ask, answer, by);
+    // what a stage Task's stop writes on its Issue is its grant only: the ## 回答 the next stage Task gets as the person's words
     const granted = ask.kind === "stop" && answer.kind === "grant";
     if (ask.kind !== "decision" && ask.kind !== "confirmation" && !granted) return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
     if (granted && !ask.grant) return { status: 409, body: { error: "許可文がありません" } };
@@ -2801,10 +2804,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
               if (kindWhy) return bad(kindWhy);
               next.autoStart.byKind[kind] = choice;
             }
-            // Task ごとの実装のモデル（試験）: a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
+            // Task ごとの実装のモデル: a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
             const taskModel = patch.completeTaskModel;
             if (taskModel) {
-              if ((next.autoStart.byKind.complete ?? next.autoStart).runner !== "claude") return bad("Task ごとのモデル（試験）は「実装」のランナーが claude のときだけ選べます");
+              if ((next.autoStart.byKind.complete ?? next.autoStart).runner !== "claude") return bad("Task ごとのモデルは「実装」のランナーが claude のときだけ選べます");
               const listed = (savedModels("claude") ?? adapterMap.get("claude")?.models ?? []).map((m) => m.value);
               if (!listed.includes(taskModel) || !subagentModelAlias(taskModel)) return bad(`model "${taskModel}" is not one of claude's`);
             }

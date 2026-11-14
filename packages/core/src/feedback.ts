@@ -103,7 +103,7 @@ export function fixTitle(text: string): string {
 }
 
 /**
- * Where a request for Switchboard itself goes when this instance does not develop it: the upstream's request form
+ * Where a request for Switchboard itself goes when this instance does not develop it: the request form of the meta workspace's origin
  * with the text filled in (`what` of the public repository's request.yml) when the origin is on GitHub, else only the text to copy.
  * Nothing is created through the API; the person files it from their own account.
  */

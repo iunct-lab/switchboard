@@ -2588,9 +2588,9 @@ describe("aws/host sb-node: the pinned Node.js reaches a running host", () => {
     return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString(), root, version };
   }
 
-  test("the pin is the 2026-10-21 security release of 24.x (CVE-2026-111497 and others) or later", () => {
+  test("the pin is the 2026-11-10 security release of 24.x (24.22.3) or later", () => {
     const v = read("node.sh").match(/\nNODE_VERSION=24\.(\d+)\.(\d+)\n/)!;
-    expect(Number(v[1]) * 1000 + Number(v[2])).toBeGreaterThanOrEqual(22 * 1000 + 1);
+    expect(Number(v[1]) * 1000 + Number(v[2])).toBeGreaterThanOrEqual(22 * 1000 + 3);
     expect(read("node.sh")).toContain('"https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-arm64.tar.xz"');
   });
 

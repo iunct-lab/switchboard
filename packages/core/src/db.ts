@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
 import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
-import { RULES_BY } from "./evals.ts";
+import { RULES_BY, delegatedNote } from "./evals.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, outcomeOnStatus, type WorkPurpose, workingSql } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
@@ -2313,6 +2313,23 @@ function migrate(db: Database) {
         db.query("INSERT INTO settings (key, json) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json").run(JSON.stringify(saved));
       }
       db.exec("PRAGMA user_version = 4");
+    })();
+  }
+  // The 実装 Task's note of the model it handed each Task to lost its "（試験）" tail: rows written with it are rewritten once, here
+  // (the old tail lives only in this block; evals.ts reads one form). Only a `status` row of that exact shape: a tool call that quotes the sentence stays.
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 5) {
+    db.transaction(() => {
+      const head = "Task ごとの実装は ";
+      const oldTail = " に任せます（試験）";
+      const rows = db.query("SELECT task_id AS taskId, seq, json FROM events WHERE json LIKE '%に任せます（試験）%'").all() as Array<{ taskId: string; seq: number; json: string }>;
+      const set = db.query("UPDATE events SET json = ? WHERE task_id = ? AND seq = ?");
+      for (const r of rows) {
+        const ev = safeJson<{ t?: string; text?: unknown } | null>(r.json, null);
+        if (!ev || ev.t !== "status" || typeof ev.text !== "string" || !ev.text.startsWith(head) || !ev.text.endsWith(oldTail)) continue;
+        const model = ev.text.slice(head.length, -oldTail.length);
+        if (model) set.run(JSON.stringify({ ...ev, text: delegatedNote(model) }), r.taskId, r.seq);
+      }
+      db.exec("PRAGMA user_version = 5");
     })();
   }
   if (!cols.has("shadow_stopped")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_stopped INTEGER NOT NULL DEFAULT 0");

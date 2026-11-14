@@ -1,9 +1,9 @@
 ---
 name: issue-workflow
-description: Issue 運用ルール。要望（type:request、要望の正本）→ PBI → Task の階層（Phase は Milestone、Epic は置かない）、PBI の書き方（ユーザーストーリー・検証つき受け入れ条件・Story Points）、Task の書き方（実装者が迷わない粒度）、PBI が Ready になる条件、着手・逸脱・完了時に Issue へ何を記録するか、`ops-kit backlog` の操作コマンドと lint。Issue を作る・着手する・閉じる・Project を触るときに必ず読む。
+description: Issue 運用ルール。要望（type:request、要望の正本）→ PBI → Task の階層（Epic は置かない）、PBI の書き方（ユーザーストーリー・検証つき受け入れ条件・Story Points）、Task の書き方（実装者が迷わない粒度）、PBI が Ready になる条件、着手・逸脱・完了時に Issue へ何を記録するか、`ops-kit backlog` の操作コマンドと lint。Issue を作る・着手する・閉じる・Project を触るときに必ず読む。
 ---
 
-# Issue workflow（PBI → Task、Phase は Milestone）
+# Issue workflow（PBI → Task）
 
 Scrum の基本に沿う。ただし **Sprint / Sprint Backlog は置かない**（一人開発 + LLM が実装する前提では、計画単位としての Sprint に意味がない。
 Product Backlog を Priority 順に上から取るだけ）。
@@ -15,7 +15,7 @@ Product Backlog を Priority 順に上から取るだけ）。
 スキルに「CLAUDE.md の〜」とあれば、作業しているリポジトリの root の `CLAUDE.md`（Codex は `AGENTS.md`。中身は CLAUDE.md を指す）を読む。
 スキルと CLAUDE.md が食い違えば CLAUDE.md に従う。
 
-- `ops.config.json`（root）: Project の URL（`projectUrl`）、フィールドの選択肢（Area / Kind / Priority / Phase）、Milestone の名前の形、
+- `ops.config.json`（root）: Project の URL（`projectUrl`）、フィールドの選択肢（Area / Kind / Priority）、
   種類ごとの必須の節（PBI / Task / 要望）、元要望の節の名前と形、環境変数の接頭辞（`envPrefix`）。バックログの道具はここを読む
 - `scripts/setup/` の入口: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `bootstrap_project.sh` / `request_issue.sh`。
   中身は共有のキットで、入口はそのリポジトリの `ops.config.json` を渡して呼ぶだけの薄いもの。バックログの読み書きと検査は入口ではなく `ops-kit backlog` / `ops-kit lint --fresh`（「操作」）
@@ -50,8 +50,7 @@ Product Backlog を Priority 順に上から取るだけ）。
 - **PBI に親 Issue を付けない。Task の親は必ず PBI。** Project（`ops.config.json` の `projectUrl`）の Backlog ビューは `no:parent-issue`、
   Task Board は `has:parent-issue`（親でグループ化）なので、この 2 層にすると Backlog = PBI、Task Board = PBI ごとの Task になる。
   親を付けた PBI は Task Board に落ちて Backlog から消える（Epic を親にすると、Backlog には Epic しか出ない）。
-- **Epic 層は置かない。** Phase（リポジトリの計画の到達点）は GitHub **Milestone**（`Phase 1 — …` / `Phase 2 — …` …）と
-  Project の Phase フィールドで束ねる。到達点と進捗は Milestone の説明に書く。前に Epic を置いていたなら、Milestone に移して close する（閉じた PBI は履歴として旧 Epic の子のままでよい）。
+- **Epic 層は置かない。** Phase（Milestone と Project の Phase フィールド）は、使うリポジトリだけが `fields.phase` と `milestone` を置く（形はキットの `ops-kit/fixtures/config-with-phase.json`）。置かないリポジトリでは、起票に Phase も Milestone も付けない。
 - Ready の PBI は Backlog ビューで Status=Ready を見る。
 - **1 Task = 1 PR**。1 つの PR が複数 Task を閉じるなら、それは分解が粗かったということ。PBI 側の決定ログに残す。
   例外は「運用 Task」（Issue の書き直し、DB の取り込み、Public 切替など PR を伴わない作業）。本文に「運用作業、PR なし」と書き、結果コメントで閉じる。
@@ -240,8 +239,7 @@ Issue は「何をやったか」の正本。PR の説明は補助。**本文 1 
 3. **完了時（Task）**: PR の `Closes #N` でマージ時に自動 close される（それで良い）。手順が残る PR は `Refs #N` で、マージしても Task は閉じず、Status を In review から In progress に戻して残りを次の PR で終える（`task-to-pr` の 5）。GitHub 連携の無い workspace（`BACKLOG_WORKSPACE` がある）の Task は GitHub に無く自動では閉じないので、マージの後に `ops-kit backlog edit <Task> --state closed` で閉じる（PR は `Backlog-Task: <Task>`。`pbi-complete` はこの Task も閉じてから PBI を閉じる）。**マージ直後に結果コメント**（下のテンプレ、マージ日入り。`ops-kit backlog comment <Task> --body-file "$W/result.md"`）
    を書き、Project の Status を Done にする（`ops-kit backlog set <Task> Status Done`）。`Refs #N` の PR では結果コメントは途中経過（マージした PR と残りの手順）にし、Status は In review から In progress に戻す（Done にしない）。結果コメントの無い Task は「閉じているが未完了」として扱う。
 4. **完了時（PBI）**: 受け入れ条件のチェックボックスを埋め、各行の行末に証跡の在りかを書く — その条件を満たした Task の結果コメントか PR の URL、実行したコマンドと出力（テスト名、画面で見た事実も）、利用者の判断で決まった条件は `## 回答` のコメントの URL。在りかを書けない行は `- [ ]` のまま理由を書き、その PBI は閉じない（後から満たしたかを辿れないまま閉じない）。`（利用者確認: …）` の行は利用者の返事が無いまま自分でチェックしない（返事の記録は「利用者確認の項目」の「会話で返事を受けたら」。名指しした判断待ちが全部回答済みの行は、同じ節の「判断待ちへの回答で確かめる行」でチェックする）。「結果」節を書いてから**手動で** close（`ops-kit backlog edit <PBI> --state closed`。PR から Closes しない）。
-5. **Milestone**: PBI が閉じるたびに Milestone の説明を更新する（残り / やらないと決めたもの）。全 PBI が Done か「やらない」なら Milestone を close。
-6. **決まりはメモリではなく記載に**: 利用者の指摘から決まり（どう振る舞うか）ができたら、記載（スキル・テンプレート・CLAUDE.md・docs）に書く。どのリポジトリでも同じなら共通キットのスキル、そのリポジトリだけなら CLAUDE.md か docs。ランナーのメモリ（Claude Code の auto memory など）には、ホスト・アカウント・経緯の事実だけを置く。メモリは書いたランナーにしか届かず（Codex は Claude のメモリを読まない）、記載と食い違っても誰も気づかない。記載と食い違うメモリを見つけたら、記載に揃えて直すか消す
+5. **決まりはメモリではなく記載に**: 利用者の指摘から決まり（どう振る舞うか）ができたら、記載（スキル・テンプレート・CLAUDE.md・docs）に書く。どのリポジトリでも同じなら共通キットのスキル、そのリポジトリだけなら CLAUDE.md か docs。ランナーのメモリ（Claude Code の auto memory など）には、ホスト・アカウント・経緯の事実だけを置く。メモリは書いたランナーにしか届かず（Codex は Claude のメモリを読まない）、記載と食い違っても誰も気づかない。記載と食い違うメモリを見つけたら、記載に揃えて直すか消す
 
 ### 判断待ちの出し方
 
@@ -360,18 +358,17 @@ Issue・Project の照会と編集は、どの環境でも `ops-kit backlog`（`
 ops-kit backlog view <num> [--fresh]          # 本文・コメント・Project のフィールドと「最終取得 … 同期 …」
 ops-kit backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--type issue|change|all] [--fresh]
 ops-kit backlog create --title "要望: <題>" --body-file "$W/request.md" --label type:request --field Status=Backlog   # 要望は 4 バッククォートの text フェンスに。--field が無いと Project に入らない
-ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --milestone "Phase N — …" --field Status=Backlog
-ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --milestone "Phase N — …" --field Status=Backlog
+ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --field Status=Backlog
+ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --field Status=Backlog
 ops-kit backlog edit <num> --body-file "$W/body.md" | --add-label needs-decision | --state closed
 ops-kit backlog edit <num> --state closed --reason not-planned   # 重複・やらないと決めた Issue（--reason completed|not-planned。閉じている Issue の理由の付け替えも同じ）
 ops-kit backlog edit <num> --add-label on-hold | --remove-label on-hold   # 保留の付け外し（「保留」の小節）
 ops-kit backlog edit <num> --parent <PBI> | --no-parent   # sub-issue の付け替え
-ops-kit backlog edit <num> --milestone "Phase N — …"      # PBI と Task の両方に Phase の Milestone
 ops-kit backlog comment <num> --body-file "$W/comment.md"
 ops-kit backlog set <num> Status Ready         # フィールドを 1 つだけ（Story Points / Status など）
-ops-kit backlog triage <num> <area> <kind> <P0-P3> "Phase N" [<parent>] [<Status>]   # Project のフィールド + 親。親は Task のときだけ（PBI に親を付けない）。"Phase N" は ops.config.json に fields.phase があるリポジトリだけ
-#   注意: triage は毎回 5 フィールド全部を上書きする（Status を省くと Backlog）。Status だけ変えたいときは set を使う
-#   （未知の選択肢は、BACKLOG_URL が無ければ stderr に出すだけで exit 0 で進み、GitHub 連携の無い workspace では断られ、GitHub 同期の workspace では送信で失敗する）。親を飛ばすなら "" を渡す。例: ops-kit backlog triage 56 infra chore P1 "Phase 2" "" "In review"
+ops-kit backlog triage <num> <P0-P3> [<parent>] [<Status>]   # Project のフィールド + 親。親は Task のときだけ（PBI に親を付けない）
+#   注意: triage は毎回 Priority と Status（Phase を使うリポジトリでは Phase も）を上書きする（Status を省くと Backlog）。Status だけ変えたいときは set を使う
+#   （未知の選択肢は、BACKLOG_URL が無ければ stderr に出すだけで exit 0 で進み、GitHub 連携の無い workspace では断られ、GitHub 同期の workspace では送信で失敗する）。親を飛ばすなら "" を渡す。例: ops-kit backlog triage 56 P1 "" "In review"
 ops-kit backlog retry <num>   # GitHub が断った（failed）編集を、原因を直した後に送り直す
 ops-kit lint --fresh                           # 規約の検査（作った・書き直したら必ず。violations: 0 かつ exit 0 で合格）
 ```
@@ -419,7 +416,7 @@ Ready は「Task が全部 sub-issue で揃った PBI」にだけ付ける。Tas
 
 ## 振る舞いの決まり（LLM 向け）
 
-利用者の指摘からできた、どのリポジトリでも同じ決まり（「記録の義務」の 6）:
+利用者の指摘からできた、どのリポジトリでも同じ決まり（「記録の義務」の 5）:
 
 - **進め方はスキルに従い、そのたびに聞かない**: commit・push・PR・Issue の作成はスキルの手順で自分で進める。止めて聞くのはスキルが定めるときだけ（「判断待ちの出し方」）
 - **コマンドは自分で走らせる**: 利用者に手元での実行を頼まない。本人にしかできない一手（承認のコードの入力など）だけを頼む。実行環境の権限で止められたときは、その事実と要る許可を書く

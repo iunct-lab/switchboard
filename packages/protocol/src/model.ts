@@ -390,7 +390,7 @@ export const RuleMetrics = z.object({
    */
   classifier: z.object({ allowed: z.number(), denied: z.number(), byCategory: z.record(z.string(), z.number()) }).nullable(),
   /**
-   * Task ごとの実装のモデル（試験）: the model an 実装 Task handed each Task's implementation to, from the note it
+   * Task ごとの実装のモデル: the model an 実装 Task handed each Task's implementation to, from the note it
    * started with — what was handed over, not what ran. null = none (同じ, another kind, a row counted before it).
    */
   delegatedModel: z.string().nullable().default(null),
@@ -778,7 +778,7 @@ export const AutoStartSettings = z
     fallback: z.array(RunnerId).default([]),
     fallbackAt: z.number().min(0.5).max(1).default(0.9),
     /**
-     * Task ごとの実装のモデル（試験）: the model an 実装 Task (/pbi-complete) hands each Task's implementation
+     * Task ごとの実装のモデル: the model an 実装 Task (/pbi-complete) hands each Task's implementation
      * to, as a subagent; reviews, merge decisions and closing stay on the kind's own model. Empty = 同じ (no paragraph,
      * as before). Claude only.
      */
@@ -1646,6 +1646,8 @@ export const Ask = z.object({
   unblocks: z.array(z.object({ number: z.number(), title: z.string(), url: z.string() })),
   /** The Project Priority of the question's PBI; null = unset or not found. */
   priority: z.string().nullable(),
+  /** The last reply (the last `session.end`'s summary, up to 2000 characters) of the Task of a stop a person has to answer and has not; shown as it is, never read for questions. null for the other questions. */
+  lastReply: z.string().nullable(),
 });
 export type Ask = z.infer<typeof Ask>;
 
