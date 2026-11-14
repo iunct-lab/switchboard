@@ -245,8 +245,8 @@ export interface Deps {
 /** The size of an off-host build, `sb-offload --size`. */
 export type OffloadSize = "small" | "medium" | "large";
 
-/** What a build is given besides its script: its size, the directory of recordings (`--fixtures`) and the file of the host's AWS names (`--names`, a path only: its content is in no script, argument or log). */
-export interface OffloadRun { size: OffloadSize; fixtures?: string; names?: string }
+/** What a build is given besides its script: its size, the directory of recordings (`--fixtures`), the file of the host's AWS names (`--names`, a path only: its content is in no script, argument or log) and the tar of the tag a perf run compares with (`--base-tree`). */
+export interface OffloadRun { size: OffloadSize; fixtures?: string; names?: string; baseTree?: string }
 
 /** `start` could not start the build: sb-offload's exit code and what it printed (`runBuild` makes it the failed result of the build's first step). */
 export class OffloadStartError extends Error {
@@ -264,6 +264,8 @@ export interface Offload {
   fixtures?: { dir: string; required: boolean };
   start: (script: string, cwd: string, o: OffloadRun) => Promise<{ build: string }>;
   collect: (build: string) => Promise<{ code: number; output: string }>;
+  /** Whether the installed `sb-offload` takes `--base-tree` (its usage names it; the host's is replaced only at boot, so an older one may not). Not given = it does. */
+  knowsBaseTree?: () => Promise<boolean>;
 }
 
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
@@ -286,19 +288,23 @@ const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
  * alive and the child-cleanup tests fail. The namespace's init is a bash that reaps them; `exit $?` keeps bash from
  * replacing itself with su (then su would be PID 1 and reap nothing).
  */
-export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { required: boolean } }): string {
+export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { required: boolean }; perf?: true }): string {
+  const lastPerf = o.perf ? steps.map((s) => isPerfStep(s)).lastIndexOf(true) : -1;
   const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
   const user = [
     "set -u",
     "cd /sb/work",
     'export CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
     ...(o.fixtures?.required ? ["export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures"] : []),
+    ...(o.perf ? ["export PERF_ENV=offload"] : []),
     "git config --global user.name local-ci && git config --global user.email local-ci@localhost && git config --global init.defaultBranch main",
     `{ git init -q${origin} && git add -A && git commit -qm local-ci; } || { echo "sb-setup: git の作業ツリーを作れない"; exit 1; }`,
     'bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }',
     ...steps.flatMap((s, i) => [
       `echo "sb-step: ${i} begin $(date +%s.%N)"`,
       `bash -e -c ${quote(s.run)}; c=$?; echo; echo "sb-step: ${i} exit $c $(date +%s.%N)"${s.keepGoing ? "" : '; [ "$c" -eq 0 ] || exit "$c"'}`,
+      // after the last perf step: the files the host's records and judgement read, one line each (a missing file or a failure here changes no step's result)
+      ...(i === lastPerf ? [`for f in ${BUILD_FILES.join(" ")}; do [ -f "$f" ] && echo "sb-file: $f $(base64 -w0 "$f")"; done; true`] : []),
     ]),
   ].join("\n");
   return [
@@ -309,8 +315,30 @@ export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { require
     'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
     'chown -R switchboard /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: 作業ツリーの持ち主を switchboard にできない"; exit 1; }',
     'unshare --pid --fork --mount-proc true || { echo "sb-setup: PID 名前空間を作れない"; exit 1; }',
-    `unshare --pid --fork --mount-proc bash -c 'su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"; exit $?'`,
+    `unshare --pid --fork --mount-proc bash -c 'su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=\${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"; exit $?'`,
   ].join("\n");
+}
+
+/** The files a perf build gives back in its log (`sb-file: <name> <base64>`); no other name is taken. */
+const BUILD_FILES = ["perf-result.json", "perf-base.json"];
+
+/** The files a build's log carries (`ciScript` with `perf`) by name, the last line of a name winning; a name that is not one of `BUILD_FILES` (a path included) is ignored. */
+export function buildFiles(output: string): Record<string, Buffer> {
+  const files: Record<string, Buffer> = {};
+  for (const l of output.split("\n")) {
+    const m = /^sb-file: (\S+) ([A-Za-z0-9+/=]*)$/.exec(l.trim());
+    if (!m || !BUILD_FILES.includes(m[1]!)) continue;
+    const bytes = Buffer.from(m[2]!, "base64");
+    // a line the log cut or split decodes to broken JSON: leave the file out (perf then reads as not measured) instead of writing it
+    try {
+      JSON.parse(bytes.toString("utf8"));
+    } catch {
+      console.error(`sb-file: ${m[1]} is not JSON (the log line was cut?): left out`);
+      continue;
+    }
+    files[m[1]!] = bytes;
+  }
+  return files;
 }
 
 /** What sb-offload's own exit means when a step has no exit mark. */
@@ -362,10 +390,10 @@ export function parseBuild(output: string, steps: Step[], code: number): Array<S
  * A host with no AWS config (or a `host` with none, as test-changed passes: its build runs no public-tree check) gives no file.
  * `started` is told the build's id before the wait, to be written down (`writePending`); a build that did not start is a failed one (sb-offload's code and output).
  */
-export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { repo?: string; size?: OffloadSize; host?: HostAws; started?: (build: string) => void } = {}): Promise<{ code: number; output: string }> {
+export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; started?: (build: string) => void } = {}): Promise<{ code: number; output: string }> {
   const host = o.host ?? hostAws();
   const hasNames = host.names.length + host.accountIds.length > 0;
-  const script = ciScript(steps, { ...(o.repo ? { repo: o.repo } : {}), ...(offload.fixtures ? { fixtures: { required: offload.fixtures.required } } : {}) });
+  const script = ciScript(steps, { ...(o.repo ? { repo: o.repo } : {}), ...(offload.fixtures ? { fixtures: { required: offload.fixtures.required } } : {}), ...(o.perf ? { perf: true as const } : {}) });
   const dir = hasNames ? mkdtempSync(join(tmpdir(), "switchboard.names.")) : undefined;
   let build: string;
   try {
@@ -374,7 +402,7 @@ export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: 
       names = join(dir, "names.json");
       writeFileSync(names, JSON.stringify({ names: host.names, accountIds: host.accountIds }), { mode: 0o600 });
     }
-    build = (await offload.start(script, cwd, { size: o.size ?? "small", ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}) })).build;
+    build = (await offload.start(script, cwd, { size: o.size ?? "small", ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}) })).build;
   } catch (e) {
     if (e instanceof OffloadStartError) return { code: e.code, output: e.output };
     throw e;
@@ -396,10 +424,23 @@ export function hostOffload(): Offload | undefined {
   const given = process.env.SWITCHBOARD_FIXTURES;
   const usual = join(process.env.HOME || homedir(), ".switchboard", "fixtures");
   const fixtures = given ? { dir: given, required: true } : existsSync(usual) ? { dir: usual, required: false } : undefined;
+  let usage: Promise<boolean> | undefined;
   return {
     ...(fixtures ? { fixtures } : {}),
+    // called with no arguments sb-offload prints its usage (stderr, exit 2): read once per process
+    knowsBaseTree: () =>
+      (usage ??= (async () => {
+        try {
+          const p = Bun.spawn([bin], { env, stdout: "pipe", stderr: "pipe" });
+          const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+          return `${out}${err}`.includes("--base-tree");
+        } catch {
+          // it cannot be run: no base tree; the build's start then fails and says why
+          return false;
+        }
+      })()),
     start: async (script, cwd, o) => {
-      const p = Bun.spawn([bin, "--ci", "--detach", ...(o.fixtures ? ["--fixtures", o.fixtures] : []), ...(o.names ? ["--names", o.names] : []), "--size", o.size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
+      const p = Bun.spawn([bin, "--ci", "--detach", ...(o.fixtures ? ["--fixtures", o.fixtures] : []), ...(o.names ? ["--names", o.names] : []), ...(o.baseTree ? ["--base-tree", o.baseTree] : []), "--size", o.size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
       const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       // the image build's log may come before it: only the started line names the build
       const build = out.split("\n").map((l) => /^sb-offload: started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
@@ -590,7 +631,7 @@ export const buildSpoke = (output: string): boolean => /^(sb-step: |sb-offload: 
 export const pendingDirOf = (cache: string): string => join(cache, "switchboard.local-ci-pending");
 const pendingFile = (cache: string, repo: string, pr: number): string => join(pendingDirOf(cache), `${repo.replaceAll("/", "_")}-${pr}.json`);
 /** How long the build's log is kept (CodeBuild's, 7 days). */
-const BUILD_LOG_KEEP_MS = 7 * 24 * 3600 * 1000;
+export const BUILD_LOG_KEEP_MS = 7 * 24 * 3600 * 1000;
 
 export function writePending(cache: string, p: Pending): void {
   mkdirSync(pendingDirOf(cache), { recursive: true });
@@ -884,8 +925,9 @@ async function appendRecord(repo: string, path: string, header: string, rows: st
  * `bundle`: the perf check's `bundle:` and `grew:` lines, whether it passed or not (none without that check).
  * `incremental`: `tests` choose the steps of `incrementalSteps` only (a PR's local CI after an earlier pass); `incremental` in the result says whether that happened.
  * `withPerf`: false = the steps without the perf ones (`withoutPerf`): a PR's local CI; the tag CI measures (#4076).
+ * `baseTree`: off the host only, the tar of the tag the perf steps compare with (`sb-offload --base-tree`).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean) => void): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean }> {
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean) => void, baseTree?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean }> {
   // a perf step never stops the steps after it, whatever the repository's CI says: perf does not decide the result (docs/design/perf.md)
   const all = (await checkoutSteps(dir, env)).map((s) => (isPerfStep(s) ? { ...s, keepGoing: true } : s));
   const listed = withPerf ? all : withoutPerf(all);
@@ -905,8 +947,10 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   // sb-offload: every step in one build, whatever the CI's step names are; here only the work tree is made and the result read (no step, no slot)
   else {
     d.log(`▶ 外: ${steps.map((s) => s.name).join(" → ")}`);
-    const r = await runBuild(offload, steps, dir, { ...(repo ? { repo } : {}), ...(started ? { started: (build) => started(build, steps, !!inc) } : {}) });
+    const r = await runBuild(offload, steps, dir, { ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(started ? { started: (build) => started(build, steps, !!inc) } : {}) });
     ran = parseBuild(r.output, steps, r.code);
+    // a perf run's files come back in the log: written into `dir` as a run here would leave them, for the records and the judgement
+    if (withPerf) for (const [name, bytes] of Object.entries(buildFiles(r.output))) writeFileSync(join(dir, name), bytes);
   }
   const offloaded = offload ? steps.map((s) => s.name) : [];
   const settled = await settle(ran, d, label, cache, dir);

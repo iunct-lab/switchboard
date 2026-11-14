@@ -1,4 +1,4 @@
-import type { AgentEvent, EventEnvelope } from "@switchboard/protocol";
+import { REPLY_QUEUED, type AgentEvent, type EventEnvelope } from "@switchboard/protocol";
 import { fmtDuration } from "./evals.ts";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
@@ -148,7 +148,8 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
       case "status":
         lastStatus = ev.text;
         // compared with the daemon's status line
-        if (ev.text.startsWith("Codex 自動審査: ")) items.push({ kind: "note", key, at: ts, tone: "info", text: ev.text });
+        // and a reply put in the queue (#4595): the log says where it waits and what it said, until the runner echoes it
+        if (ev.text.startsWith("Codex 自動審査: ") || ev.text.startsWith(REPLY_QUEUED)) items.push({ kind: "note", key, at: ts, tone: "info", text: ev.text });
         break;
       case "artifact.saved":
         items.push({ kind: "artifact", key, at: ts, id: ev.id, title: ev.title });

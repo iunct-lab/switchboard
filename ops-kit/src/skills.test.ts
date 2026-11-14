@@ -566,6 +566,16 @@ test("task-to-pr: the PR body's verification checks only what has a result, name
   expect(skill).toContain("「していない」の行（後回しの検証を含む");
 });
 
+test("task-to-pr: raising a performance ceiling named in CLAUDE.md gives the reason and the increase, and is the user's call", () => {
+  const skill = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const heading = skill.split("\n").find((l) => l.startsWith("## チェックリスト / Checklist")) ?? "";
+  expect(heading).toContain("性能の上限を上げた PR は、上げた項目ごとに理由と増分（前 → 後、%）を本文に書く");
+  expect(heading).toContain("上げるのは利用者の判断なので、マージの前に聞く");
+  expect(heading).toContain("理由をコミットにだけ書かない");
+  const workflow = readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8");
+  expect(workflow).toContain("- [ ] 性能の上限のファイルと、上げるときの規則の文書（あれば）");
+});
+
 function triageStep3(): string {
   const skill = readFileSync(join(skills, "review-triage-and-merge", "SKILL.md"), "utf8");
   return skill.slice(skill.indexOf("## 3. 直す"), skill.indexOf("## 4. 返信する"));

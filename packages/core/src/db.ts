@@ -398,6 +398,21 @@ export function deferredTasksSince(sqlite: Database, workspaceIds: string[], sin
   return rows.filter((r) => deferredOf(sqlite, r.id)).map((r) => ({ ...r, issues: createdIssuesOf(sqlite, r.id) }));
 }
 
+/**
+ * The Tasks a schedule started whose last `session.end` is at `since` or later, in any workspace (a schedule for "all workspaces" opens
+ * Issues in the others), oldest Task first, with the schedule's name (its title less a trailing `（…）`) and the Issues they opened (createdIssuesOf). Reads only.
+ */
+export function scheduledIssuesSince(sqlite: Database, since: number): Array<{ schedule: string; issues: CreatedIssue[] }> {
+  const prefix = '{"t":"session.end",';
+  const rows = sqlite
+    .query(
+      `SELECT t.id AS id, s.title AS title FROM tasks t JOIN schedules s ON s.id = t.schedule_id JOIN events e ON e.task_id = t.id AND substr(e.json, 1, length(?)) = ?
+       GROUP BY t.id HAVING MAX(e.ts) >= ? ORDER BY t.created_at, t.id`,
+    )
+    .all(prefix, prefix, since) as Array<{ id: string; title: string }>;
+  return rows.map((r) => ({ schedule: r.title.replace(/[（(][^（(）)]*[）)]$/, "").trim(), issues: createdIssuesOf(sqlite, r.id) })).filter((r) => r.issues.length > 0);
+}
+
 /** The most events one page of a Task's conversation returns: `limit` is clamped to it, and a page that reaches back to a message's start stops there. */
 export const EVENTS_PAGE_MAX = 5000;
 
@@ -1108,6 +1123,25 @@ export class Db {
   /** Put a Task in the wait for a run slot with the prompt it will start with. */
   setQueued(id: string, prompt: string, at: number): void {
     this.sqlite.query("UPDATE tasks SET queued_at = ?, queued_prompt = ?, updated_at = ? WHERE id = ?").run(at, prompt, Date.now(), id);
+  }
+
+  /**
+   * A reply to a Task whose process is closed, waiting for a run slot: the queue is the idle rows with `queued_at`, so a
+   * done / error / aborted row moves to idle through updateTask (the transition table applies, and it shows again if
+   * archived). A new turn is coming, so the outcome is written as a start would (unknown, 確認済み and the judgement off).
+   * A row already waiting gets the reply after its prompt and keeps its place.
+   */
+  queueReply(id: string, text: string, at: number): void {
+    const cur = this.getTask(id);
+    if (!cur) return;
+    if (cur.queuedAt !== null) {
+      this.sqlite.query("UPDATE tasks SET queued_prompt = COALESCE(queued_prompt, '') || char(10) || char(10) || ?, updated_at = ? WHERE id = ?").run(text, at, id);
+      return;
+    }
+    this.sqlite.transaction(() => {
+      this.updateTask(id, { status: "idle", outcome: "unknown", reviewedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, updatedAt: at });
+      this.setQueued(id, text, at);
+    })();
   }
 
   /** Take a Task out of the wait: returns the prompt it was queued with (null = it was not waiting) and clears both columns. */

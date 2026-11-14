@@ -105,6 +105,23 @@ Free-tier machines (Oracle Always Free and the like) are not adopted: the tier c
 An hourly scheduled run wakes the stopped instance every hour. If the next schedule is within 30 minutes, it does not stop. Total the running hours from the journal and compare them with the estimate.
 The budget alerts are `<stack>-1000jpy` ($7) and `<stack>-3000jpy` ($20). Enable the cost allocation tag `Project`. Check the actual cost in Cost Explorer. The instance role can read only `ce:GetCostAndUsage` / `ce:GetCostForecast` and `budgets:ViewBudget` (added in 2026-10; there is no write access; the periodic task "the weekly AWS cost report" uses it).
 
+#### Litestream `sync-interval`
+
+Litestream copies the database's WAL to S3 once per `sync-interval`, and only when the WAL changed in that interval. Its default is 1 s. One example, a single-user host measured for 7 days with the default: the `litestream/` prefix received 20,892 PUTs a day on average (25,368 on the busiest day). Your own count depends on your load: to count it, add an S3 request-metrics filter for the `litestream/` prefix on the data bucket for a few days and read its `PutRequests` in CloudWatch (Cost Explorer's `Requests-Tier1` is not split by prefix), then remove the filter, which is billed while it exists. For an interval of T seconds, an average day's PUTs are about `min(<PUTs a day at 1 s>, 86,400 / T)`, and the monthly cost about `PUTs a day × 30 × $0.0047 / 1,000` (S3 Standard PUT in Tokyo, ap-northeast-1; check the price of your region). Snapshot and retention requests are a few a day and left out.
+
+| `sync-interval` | Data that can be lost when restoring from S3 (at most) | PUTs a day (average day, example host) | Monthly cost (estimate) |
+|---|---|---|---|
+| `sync-interval: 1s` (Litestream default) | about 1 s | 20,892 (measured) | about $2.95 |
+| `sync-interval: 10s` | about 10 s | 8,640 | about $1.22 |
+| `sync-interval: 60s` (chosen) | about 1 min | 1,440 | about $0.20 |
+| `sync-interval: 300s` | about 5 min | 288 | about $0.04 |
+
+The chosen value is 60 s: it cuts the default's PUT cost by about 93 % and can lose at most about a minute of records (Task conversations and state). The value is the `sync-interval` of the replica in `aws/host/litestream.yml`; a fork that wants another loss window edits that line.
+
+The loss applies only when the database comes back from S3, which happens only when the disk itself is rebuilt (`aws/host/bootstrap.sh` runs `litestream restore`). Stopping and starting the instance keep the database on the disk. On stop, `litestream.service` syncs one last time (`aws/README.md`), so a disk that ends after a clean stop loses only the writes made after Litestream stopped. Up to one interval is lost when the disk ends without that stop: a crash, a lost volume, or a reboot that does not stop the unit cleanly. The Starter's rebuild (`/rebuild`) runs on a running instance and has EC2 reboot it; whether that reboot stops `litestream.service` cleanly is not verified, so count a rebuild as losing up to one interval.
+
+`aws/host/litestream.yml` is written to `/etc/litestream.yml` only by `bootstrap.sh`; `sb-host-update` does not replace it (`aws/README.md`). A changed interval therefore reaches a running host at its next rebuild.
+
 ### 3.3 Separation of permissions
 
 - What goes on the instance is only the repositories cloned from GitHub, the migrated history, and the runners' credentials

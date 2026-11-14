@@ -19,17 +19,17 @@ export const IN_FLIGHT: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["running"
 
 /**
  * Moves to a different status (staying put is always allowed). `idle` is where a Cloud Task lands when its start
- * process is over (and a waiting one that a daemon restart cut); `done` from `waiting` is a turn that ended with an
- * approval left open.
+ * process is over (and a waiting one that a daemon restart cut), and where a stopped local Task waits in the run-slot
+ * queue with a reply; `done` from `waiting` is a turn that ended with an approval left open.
  */
 export const TASK_TRANSITIONS: Readonly<Record<TaskStatus, ReadonlySet<TaskStatus>>> = {
   idle: new Set<TaskStatus>(["running", "error", "aborted"]),
   running: new Set<TaskStatus>(["waiting", "background", "done", "error", "aborted", "idle"]),
   waiting: new Set<TaskStatus>(["running", "background", "done", "error", "aborted", "idle"]),
   background: new Set<TaskStatus>(["running", "done", "error", "aborted"]),
-  done: new Set<TaskStatus>(["running", "background", "error"]),
-  error: new Set<TaskStatus>(["running"]),
-  aborted: new Set<TaskStatus>(["running", "error"]),
+  done: new Set<TaskStatus>(["running", "background", "error", "idle"]),
+  error: new Set<TaskStatus>(["running", "idle"]),
+  aborted: new Set<TaskStatus>(["running", "error", "idle"]),
 };
 
 /** Where a Task is in its work, from its status and `resumeAt` (docs/design/task-work-phase.md). `resume` is not a status: a stopped Task with a planned resume. */

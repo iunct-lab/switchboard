@@ -9,7 +9,7 @@ import type { GhRunner } from "./backlog.ts";
 import { fakeGithub, type Issue } from "./backlog-fake-github.ts";
 import { renumberRefs } from "./backlog-enable.ts";
 
-// Turning a workspace's GitHub sync on (#2266): what was made here goes to GitHub, numbered there, nothing lost.
+// Turning a workspace's GitHub sync on: what was made here goes to GitHub, numbered there, nothing lost.
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -90,7 +90,7 @@ async function boot(gh: GhRunner) {
     }
     throw new Error(`not settled: ${JSON.stringify(await syncOf(ws))}`);
   };
-  /** A workspace kept here only with Issues #1 (a request), #2 (Ready, with a stage Task) and #3 (closed). */
+  /** A workspace kept here only with Issues 1 (a request), 2 (Ready, with a stage Task) and 3 (closed). */
   const local = async () => {
     const ws = (await send("POST", "/api/workspaces", { path: dir("local"), backlog: "switchboard" })).body as Workspace;
     for (const [title, fields] of [["要望: a", undefined], ["PBI: b", { Status: "Ready" }], ["PBI: c", undefined]] as const)
@@ -106,7 +106,7 @@ async function boot(gh: GhRunner) {
 const sourceOf = (ws: Workspace) => core!.db.getWorkspaceBacklogSource(ws.id) as BacklogSource;
 const posts = (writes: string[]) => writes.filter((w) => w === "POST repos/acme/app/issues").length;
 
-test("enabling a local workspace makes its Issues on GitHub and keeps the numbers (#2266)", async () => {
+test("enabling a local workspace makes its Issues on GitHub and keeps the numbers", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, view, settled, local } = await boot(g.gh);
   const ws = await local();
@@ -123,7 +123,7 @@ test("enabling a local workspace makes its Issues on GitHub and keeps the number
   expect((await view(ws, 58)).fields).toMatchObject({ Status: "Ready" });
   expect((await view(ws, 59)).issue.state).toBe("CLOSED");
   expect((await view(ws, 57)).issue.labels).toEqual(["type:request"]);
-  // GitHub's own #1–#3 are its own; the stage Task follows its Issue
+  // GitHub's own Issues 1–3 are its own; the stage Task follows its Issue
   expect((await view(ws, 2)).issue.title).toBe("GitHub 2");
   expect(core!.db.listTasks().map((t) => t.stage?.issue)).toEqual([58]);
   // nothing made here is left under the workspace's own key
@@ -131,7 +131,7 @@ test("enabling a local workspace makes its Issues on GitHub and keeps the number
   expect(core!.db.listBacklogRecords(sourceOf(ws), "issue").filter((r) => r.externalId.startsWith("sb:"))).toEqual([]);
 });
 
-test("re-enabling sends what was made and edited while off; a conflict is held (#2266)", async () => {
+test("re-enabling sends what was made and edited while off; a conflict is held", async () => {
   const g = github([10]);
   g.items.set("PVTI_I_10", { issue: "I_10", fields: { Status: "Backlog" } });
   const { send, view, settled, dir } = await boot(g.gh);
@@ -142,7 +142,7 @@ test("re-enabling sends what was made and edited while off; a conflict is held (
   expect((await send("POST", "/api/backlog", { workspaceId: ws.id, title: "PBI: 無効の間", labels: ["type:pbi"] })).body.number).toBe(11);
   expect((await send("PATCH", "/api/backlog/10", { workspaceId: ws.id, fields: { Status: "Ready" } })).status).toBe(202);
   expect(g.writes).toEqual([]);
-  // GitHub moved on meanwhile: #10's Status changed there, and #11 / #12 were made by someone else
+  // GitHub moved on meanwhile: Issue 10's Status changed there, and Issues 11 / 12 were made by someone else
   g.items.get("PVTI_I_10")!.fields.Status = "Done";
   g.state.next = 13;
   expect((await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "github" })).status).toBe(202);
@@ -156,7 +156,7 @@ test("re-enabling sends what was made and edited while off; a conflict is held (
   expect((await view(ws, 10)).held.map((h) => [h.field, h.status])).toEqual([["field:Status", "conflict"]]);
 });
 
-test("a 502 halfway keeps every record; the next press goes on without making one twice (#2266)", async () => {
+test("a 502 halfway keeps every record; the next press goes on without making one twice", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, view, settled, local } = await boot(g.gh);
   const ws = await local();
@@ -179,7 +179,7 @@ test("a 502 halfway keeps every record; the next press goes on without making on
   expect(core!.db.listTasks().map((t) => t.stage?.issue)).toEqual([58]);
 });
 
-test("an import that fails leaves a local workspace as it was (#2266)", async () => {
+test("an import that fails leaves a local workspace as it was", async () => {
   const g = github([1]);
   const { send, local } = await boot(g.gh);
   const ws = await local();
@@ -193,7 +193,7 @@ test("an import that fails leaves a local workspace as it was (#2266)", async ()
   expect((await send("GET", "/api/workspaces")).body.find((w: Workspace) => w.id === ws.id).backlog).toBe("switchboard");
 });
 
-test("turned off halfway and on again through another checkout, the turning on goes on as it was; every checkout comes back (#2266)", async () => {
+test("turned off halfway and on again through another checkout, the turning on goes on as it was; every checkout comes back", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, view, settled, local, dir } = await boot(g.gh);
   const ws = await local();
@@ -219,14 +219,14 @@ test("turned off halfway and on again through another checkout, the turning on g
   expect((await view(other, 58)).issue.title).toBe("PBI: b");
 });
 
-test("a comment made here moves with its Issue to GitHub's number, not to GitHub's Issue of its old number (#2266)", async () => {
+test("a comment made here moves with its Issue to GitHub's number, not to GitHub's Issue of its old number", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, view, settled, local } = await boot(g.gh);
   const ws = await local();
   expect((await send("POST", "/api/backlog/2/comment", { workspaceId: ws.id, text: "ここで書いた" })).status).toBe(202);
   expect((await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "github" })).status).toBe(202);
   await settled(ws);
-  // on the Issue made from #2, sent to it; not on GitHub's #2
+  // on the Issue made from Issue 2, sent to it; not on GitHub's Issue 2
   expect((await view(ws, 58)).comments.map((c) => c.body.split("\n")[0])).toEqual(["ここで書いた"]);
   expect(g.issues.get(58)!.comments).toHaveLength(1);
   expect((await view(ws, 2)).comments).toEqual([]);
@@ -234,7 +234,7 @@ test("a comment made here moves with its Issue to GitHub's number, not to GitHub
   expect(core!.db.getBacklogRepository(sourceOf(ws))?.cursor).not.toBeNull();
 });
 
-test("two presses while GitHub is read turn it on once (#2266)", async () => {
+test("two presses while GitHub is read turn it on once", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   let slow = false;
   const gh: GhRunner = async (args, cwd) => {
@@ -252,15 +252,15 @@ test("two presses while GitHub is read turn it on once (#2266)", async () => {
   expect(core!.db.listTasks().map((t) => t.stage?.issue)).toEqual([58]);
 });
 
-test("renumberRefs rewrites #N by the map only (#2266)", () => {
+test("renumberRefs rewrites #N by the map only", () => {
   const m = [{ from: 1, to: 57 }, { from: 57, to: 60 }];
   expect(renumberRefs("#1", m)).toBe("#57");
-  // each once: the #57 #1 became is not rewritten again
+  // each once: the Issue 57 that Issue 1 became is not rewritten again
   expect(renumberRefs("#1 と #57", m)).toBe("#57 と #60");
   expect(renumberRefs("acme/app#1、https://github.com/acme/app/issues/1、#10、&#1;、(#1)、#1.", m)).toBe("acme/app#1、https://github.com/acme/app/issues/1、#10、&#1;、(#57)、#57.");
 });
 
-/** A workspace kept here only: request #1, PBI #2 naming it, Task #3 under #2 with a comment naming #2. */
+/** A workspace kept here only: request 1, PBI 2 naming it, Task 3 under 2 with a comment naming 2. */
 async function family(send: (method: string, path: string, body?: object) => Promise<{ status: number; body: any }>, path: string) {
   const ws = (await send("POST", "/api/workspaces", { path, backlog: "switchboard" })).body as Workspace;
   await send("POST", "/api/backlog", { workspaceId: ws.id, title: "要望: a", labels: ["type:request"] });
@@ -270,7 +270,7 @@ async function family(send: (method: string, path: string, body?: object) => Pro
   return ws;
 }
 
-test("bodies, parents and comments go after numbering, with #N rewritten (#2266)", async () => {
+test("bodies, parents and comments go after numbering, with #N rewritten", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const bodies: string[] = [];
   const gh: GhRunner = async (args, cwd) => {
@@ -293,13 +293,13 @@ test("bodies, parents and comments go after numbering, with #N rewritten (#2266)
   expect(core!.db.listBacklogRecords(sourceOf(ws), "comment").filter((r) => r.externalId.startsWith("sb:"))).toEqual([]);
 });
 
-test("a 502 in the follow-ups goes on at the next press (#2266)", async () => {
+test("a 502 in the follow-ups goes on at the next press", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, view, settled, dir } = await boot(g.gh);
   const ws = await family(send, dir("local"));
   g.fail.push({ match: (a) => a[1] === "repos/acme/app/issues/58" && a.includes("PATCH"), status: 502 });
   expect((await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "github" })).status).toBe(202);
-  // the comment went; #58's body waits for its time, and the turning on with it
+  // the comment went; Issue 58's body waits for its time, and the turning on with it
   await settled(ws, (s) => !!s.enabling && g.issues.get(59)!.comments.length === 1);
   expect(core!.db.listPendingBacklogOperations().map((o) => [o.kind, o.field, o.status, !!o.retryAt])).toEqual([["set", "body", "pending", true]]);
   expect(sourceOf(ws).enabling).toMatchObject({ queued: true });
@@ -314,7 +314,7 @@ test("a 502 in the follow-ups goes on at the next press (#2266)", async () => {
   expect((await view(ws, 59)).issue.parent).toBe(58);
 });
 
-test("a create GitHub refused is tried again at the next press (#2266)", async () => {
+test("a create GitHub refused is tried again at the next press", async () => {
   const g = github(Array.from({ length: 56 }, (_, i) => i + 1));
   const { send, settled, local } = await boot(g.gh);
   const ws = await local();
@@ -331,7 +331,7 @@ test("a create GitHub refused is tried again at the next press (#2266)", async (
   expect(sourceOf(ws).numbers?.map((m) => m.from)).toEqual([1, 2, 3]);
 });
 
-test("a body edited while off that names an Issue made then is sent with GitHub's number (#2266)", async () => {
+test("a body edited while off that names an Issue made then is sent with GitHub's number", async () => {
   const g = github([10]);
   const { send, view, settled, dir } = await boot(g.gh);
   const ws = (await send("POST", "/api/workspaces", { path: dir("app") })).body as Workspace;
@@ -348,8 +348,8 @@ test("a body edited while off that names an Issue made then is sent with GitHub'
   expect((await view(ws, 10)).issue.body).toBe("続きは #13");
 });
 
-test("an Issue made here and not on GitHub yet is not asked of GitHub by its number (#2266)", async () => {
-  // GitHub has no #1–#3: an import that asked for them would mark the ones made here as gone
+test("an Issue made here and not on GitHub yet is not asked of GitHub by its number", async () => {
+  // GitHub has no Issues 1–3: an import that asked for them would mark the ones made here as gone
   const g = github([5]);
   const { send, view, settled, local } = await boot(g.gh);
   const ws = await local();
@@ -358,7 +358,7 @@ test("an Issue made here and not on GitHub yet is not asked of GitHub by its num
   expect((await send("PATCH", `/api/workspaces/${ws.id}`, { backlog: "github" })).status).toBe(202);
   await settled(ws, (s) => s.enabling?.done === 2);
   await send("POST", "/api/backlog/sync", { workspaceId: ws.id });
-  // #2 is still Switchboard's, shown as it was
+  // Issue 2 is still Switchboard's, shown as it was
   expect((await view(ws, 2)).issue.title).toBe("PBI: b");
   expect(core!.db.listBacklogRecords(sourceOf(ws), "issue").filter((r) => r.externalId.startsWith("sb:")).map((r) => r.fetchState)).toEqual(["fetched"]);
 });

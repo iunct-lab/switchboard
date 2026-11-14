@@ -2,11 +2,11 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, type Deps, type LocalCiResult, type Offload } from "./local-ci";
+import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, type Deps, type LocalCiResult, type Offload } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -1225,6 +1225,19 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\necho "sb-offload: image abc"\necho "args: $*"\n[ "$1" = --collect ] && { echo "sb-step: 0 exit 0 5"; echo "sb-offload: exit 0"; exit 0; }\necho "sb-offload: started proj:1234"\n', { mode: 0o755 });
         expect(await real.start("echo x", bin, { size: "small" })).toEqual({ build: "proj:1234" });
         expect(await real.collect("proj:1234")).toEqual({ code: 0, output: "sb-offload: image abc\nargs: --collect proj:1234\nsb-step: 0 exit 0 5\nsb-offload: exit 0\n" });
+        // --base-tree: read from the usage sb-offload prints with no arguments (stderr, exit 2), once per process
+        const calls = join(bin, "calls");
+        const usage = (flags: string) => writeFileSync(join(bin, "sb-offload"), `#!/bin/sh\necho x >> '${calls}'\necho "usage: sb-offload [--ci [--fixtures <dir>] [--names <file>]${flags}] <command…>" >&2\nexit 2\n`, { mode: 0o755 });
+        usage(" [--base-tree <tar>]");
+        const knows = hostOffload()!;
+        expect([await knows.knowsBaseTree!(), await knows.knowsBaseTree!()]).toEqual([true, true]);
+        expect(readFileSync(calls, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+        usage("");
+        expect(await hostOffload()!.knowsBaseTree!()).toBe(false);
+        // one that cannot be run says it does not know (the start then says why), not a thrown read
+        writeFileSync(join(bin, "sb-offload"), "\x7fELF not really");
+        chmodSync(join(bin, "sb-offload"), 0o755);
+        expect(await hostOffload()!.knowsBaseTree!()).toBe(false);
         // not given: the usual directory, only when it exists, and not required
         delete process.env.SWITCHBOARD_FIXTURES;
         const home = mkdtempSync(join(CACHE, "home-"));
@@ -1679,9 +1692,107 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       });
     });
 
+    describe("perf: the files a perf build gives back", () => {
+      const b64 = (t: string) => Buffer.from(t).toString("base64");
+      const perfRun = async (output: string, withPerf = true) => {
+        const { d } = deps();
+        let script = "";
+        let run: { baseTree?: string } = {};
+        d.offload = {
+          start: async (s, _c, r) => ((script = s), (run = r), { build: "b1" }),
+          collect: async () => ({ code: 0, output }),
+        };
+        const dir = mkdtempSync(join(CACHE, "perf-files-"));
+        await Bun.write(join(dir, ".github/workflows/ci.yml"), ciYml);
+        await Bun.write(join(dir, "scripts/ci.ts"), ciTs);
+        const r = await runCheckout(dir, stepEnv(dir), "perf-files", d, CACHE, undefined, undefined, withPerf);
+        return { dir, script, run, r };
+      };
+
+      test("perf: sb-file lines in the log are written into dir; perf-base.json is read by recordBundle", async () => {
+        const base = JSON.stringify({ sha: "a".repeat(40), bundle: { js: 100, css: 20 } });
+        const { dir } = await perfRun(`noise\nsb-file: perf-result.json ${b64('{"a":1}')}\nsb-file: perf-base.json ${b64(base)}\n`);
+        expect(readFileSync(join(dir, "perf-result.json"), "utf8")).toBe('{"a":1}');
+        expect(readFileSync(join(dir, "perf-base.json"), "utf8")).toBe(base);
+        expect(buildFiles(`sb-file: perf-base.json ${b64(base)}\n`)["perf-base.json"]!.toString()).toBe(base);
+        // the records find the written file (without it they return "none" and never call gh)
+        let called = 0;
+        await recordBundle("o/r", dir, "2026-11-14", async () => (called++, "f".repeat(40))).catch(() => {});
+        expect(called).toBeGreaterThan(0);
+      });
+
+      test("perf: no sb-file line writes nothing and is no failure", async () => {
+        const { dir, r } = await perfRun("");
+        expect(existsSync(join(dir, "perf-result.json"))).toBe(false);
+        expect(existsSync(join(dir, "perf-base.json"))).toBe(false);
+        expect(buildFiles("no marks here")).toEqual({});
+        // the steps are read as before: the same codes as a run that gave the files back
+        const given = await perfRun(`sb-file: perf-base.json ${b64("{}")}\n`);
+        expect(r.results.length).toBeGreaterThan(0);
+        expect(r.results.map((x) => x.code)).toEqual(given.r.results.map((x) => x.code));
+        expect(r.ok).toBe(given.r.ok);
+      });
+
+      test("perf: a name with a path or another name is not written", async () => {
+        const { dir } = await perfRun(`sb-file: ../x ${b64("x")}\nsb-file: sub/perf-base.json ${b64("x")}\nsb-file: other.json ${b64("x")}\n`);
+        expect(existsSync(join(dir, "../x"))).toBe(false);
+        expect(existsSync(join(dir, "other.json"))).toBe(false);
+        expect(existsSync(join(dir, "sub/perf-base.json"))).toBe(false);
+        expect(existsSync(join(dir, "perf-base.json"))).toBe(false);
+        // a cut line (broken JSON) is left out too
+        expect(Object.keys(buildFiles(`sb-file: perf-result.json ${b64('{"a":1')}`))).toEqual([]);
+        expect(Object.keys(buildFiles(`sb-file: ../x ${b64("x")}\nsb-file: other.json ${b64("x")}`))).toEqual([]);
+      });
+
+      test("perf: a PR's run (no perf) writes no file even when the log has one", async () => {
+        const { dir, script } = await perfRun(`sb-file: perf-base.json ${b64("{}")}\n`, false);
+        expect(existsSync(join(dir, "perf-base.json"))).toBe(false);
+        expect(script).not.toContain("PERF_ENV");
+        expect(script).not.toContain("sb-file");
+      });
+
+      test("perf: ciScript exports PERF_ENV=offload and emits the files after the last perf step only with perf", () => {
+        const steps = [{ name: "a", run: "bun scripts/perf-bench.ts" }, { name: "b", run: "bun scripts/perf-ratchet.ts check" }, { name: "c", run: "bun test" }];
+        const on = ciScript(steps, { perf: true });
+        expect(on).toContain("export PERF_ENV=offload\n");
+        expect(on).toContain("PERF_BASE_TREE=${PERF_BASE_TREE:-}");
+        expect(on.split("\n").filter((l) => l.startsWith("for f in perf-result.json perf-base.json"))).toHaveLength(1);
+        // after step 1's exit mark and before step 2's begin mark
+        expect(on.indexOf("sb-step: 1 exit")).toBeLessThan(on.indexOf("sb-file:"));
+        expect(on.indexOf("sb-file:")).toBeLessThan(on.indexOf("sb-step: 2 begin"));
+        const off = ciScript(steps, {});
+        expect(off).not.toContain("PERF_ENV");
+        expect(off).not.toContain("sb-file");
+        // no perf step: no file line
+        expect(ciScript([{ name: "c", run: "bun test" }], { perf: true })).not.toContain("sb-file");
+      });
+
+      test("perf: runBuild hands the base tree to start and sb-offload, and the script carries no token", async () => {
+        const got: Array<{ script: string; baseTree?: string }> = [];
+        const offload: Offload = { start: async (script, _c, o) => (got.push({ script, ...(o.baseTree ? { baseTree: o.baseTree } : {}) }), { build: "b" }), collect: async () => ({ code: 0, output: "" }) };
+        await runBuild(offload, [{ name: "p", run: "bun scripts/perf-bench.ts" }], "/repo", { perf: true, baseTree: "/x/base.tar", host: { names: [], accountIds: [] } });
+        expect(got[0]!.baseTree).toBe("/x/base.tar");
+        expect(got[0]!.script).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|gho_|ghs_/);
+        await runBuild(offload, [], "/repo", { host: { names: [], accountIds: [] } });
+        expect(got[1]!.baseTree).toBeUndefined();
+        // the real sb-offload gets --base-tree
+        const bin = mkdtempSync(join(CACHE, "bin-bt-"));
+        writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\necho "$*" > "$0.args"\necho "sb-offload: started b9"\n', { mode: 0o755 });
+        const saved = process.env.PATH;
+        process.env.PATH = `${bin}:${saved}`;
+        try {
+          const real = hostOffload()!;
+          expect(await real.start("true", bin, { size: "small", baseTree: "/x/base.tar" })).toEqual({ build: "b9" });
+          expect(readFileSync(join(bin, "sb-offload.args"), "utf8")).toContain("--ci --detach --base-tree /x/base.tar --size small");
+        } finally {
+          process.env.PATH = saved;
+        }
+      });
+    });
+
     test("ciScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
       const script = ciScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
-      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
       // the steps run in a new PID namespace whose init reaps orphans (the build's PID 1 does not)
       expect(script).toContain("unshare --pid --fork --mount-proc bash -c 'su - switchboard -c ");
       expect(script).toContain('sb-setup: PID 名前空間を作れない');

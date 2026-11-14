@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 
-// One field of an edit against GitHub's (#887, 初期方式 A): base = what the edit was made on, local = made here, remote = GitHub.
+// One field of an edit against GitHub's (初期方式 A): base = what the edit was made on, local = made here, remote = GitHub.
 
 test("the 3-way table: unchanged, one side, both to the same value, both to different values", () => {
   const rows: Array<[string, unknown, unknown, unknown, string]> = [

@@ -23,7 +23,7 @@ const withDb = (fn: (db: Db) => void) => {
   }
 };
 
-describe("backlog queue (#3955)", () => {
+describe("backlog queue", () => {
   test("readQueue: none stored, or a row that does not parse, is the empty disabled queue", () =>
     withDb((db) => {
       expect(readQueue(db)).toEqual(EMPTY_QUEUE);
@@ -31,7 +31,7 @@ describe("backlog queue (#3955)", () => {
       expect(readQueue(db)).toEqual(EMPTY_QUEUE);
     }));
 
-  test("a queue stored before lastNoteAt existed is read with it null after the migration (#4055)", () => {
+  test("a queue stored before lastNoteAt existed is read with it null after the migration", () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-queue-migrate-"));
     try {
       const first = new Db(join(h, "db.sqlite"));
@@ -47,7 +47,7 @@ describe("backlog queue (#3955)", () => {
     }
   });
 
-  test("noteQueue keeps the lines and their time (#4055)", () =>
+  test("noteQueue keeps the lines and their time", () =>
     withDb((db) => {
       saveQueue(db, { items: [{ workspaceId: "w", number: 1 }] });
       expect(noteQueue(db, ["a", "b"], 42)).toMatchObject({ lastNote: "a\nb", lastNoteAt: 42, items: [{ workspaceId: "w", number: 1 }] });

@@ -15,6 +15,7 @@ import { opsResources, readMemInfo, TASK_MIN_FREE_MB_DEFAULT } from "./ops-resou
 import { measureFootprint } from "./footprint.ts";
 import { seedNewHome, startServer as startDaemon } from "./server.ts";
 import type { suggestTitle } from "./suggest-title.ts";
+import { AttachmentStore } from "./attachments.ts";
 
 /**
  * The judge is on by default and would ask these daemons' fake runners to judge every finished turn, adding
@@ -1519,9 +1520,10 @@ describe("core daemon", () => {
       }
     }, 20000);
 
-    test("maxRunners (e) 枠が埋まっているとき、プロセスの無い Task への返信は 409。上限を上げれば通る", async () => {
+    test("maxRunners (e) 返信: 枠が埋まっているとき、プロセスの無い Task への返信は断らず待ち列に入り、枠が空くと前のセッションで返信から始まる", async () => {
       const fast = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
-      const { c, home, b } = await boot([fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(fast, { id: "codex" })]);
+      const starts: StartOptions[] = [];
+      const { c, home, b } = await boot([fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(fast, { id: "codex", starts })]);
       try {
         const done = await create(b, home, "done", "codex");
         await waitFor(async () => (await statusOf(b, done.id)) === "done");
@@ -1529,14 +1531,72 @@ describe("core daemon", () => {
         const busy = await create(b, home, "busy");
         await waitFor(async () => (await statusOf(b, busy.id)) === "waiting");
         await c.tasks.releaseAndWait(done.id);
-        const r = await post(b, `/api/tasks/${done.id}/send`, { text: "again" });
-        expect(r.status).toBe(409);
-        expect(JSON.stringify(await r.json())).toContain("実行枠が埋まっています（実行中 1 / 上限 1）。空くまで待つか、Settings の同時に動かす Task の上限を上げてください");
-        expect(await statusOf(b, done.id)).toBe("done");
-        await patchRunners(b, 2);
-        expect((await post(b, `/api/tasks/${done.id}/send`, { text: "again" })).status).toBe(200);
+        c.db.updateTask(done.id, { outcome: "done", reviewedAt: Date.now(), archivedAt: Date.now() }); // 確認済み and archived before the reply
+        const reply = `again\n${"long ".repeat(40).trim()}`; // longer than a line, with a break: the log keeps it whole
+        const r = await post(b, `/api/tasks/${done.id}/send`, { text: reply });
+        expect(r.status).toBe(200);
+        const queued = c.db.getTask(done.id)!;
+        expect(queued.status).toBe("idle");
+        expect(queued.queuedAt).not.toBeNull();
+        // through the transition table: written as a coming turn (unknown, 確認済み off), and the Task shows again
+        expect(queued).toMatchObject({ outcome: "unknown", reviewedAt: null, archivedAt: null });
+        expect(c.db.listEvents(done.id).some((e) => e.ev.t === "status" && e.ev.text === `実行枠待ちに返信を入れました（実行枠が埋まっているため待機、実行中 1 / 上限 1、待ち 1 番目）: 「${reply}」`)).toBe(true);
+        expect(starts).toHaveLength(1); // not started: the slot is full
+        await patchRunners(b, 2); // a slot is free: the queue starts the reply
+        await waitFor(async () => starts.length === 2);
+        expect(starts[1]!.resumeSessionId).toBe("sess-1");
+        expect(starts[1]!.prompt).toBe(reply);
+        expect(c.db.getTask(done.id)!.queuedAt).toBeNull();
       } finally {
         await c.stop();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
+    test("maxRunners 返信: 待ち列の Task への返信は待ちの prompt の後ろに足され、添付は返信ぶんだけが渡り、中断すれば待ちごと消える", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-reply-"));
+      const starts: StartOptions[] = [];
+      const db = new Db(join(home, "t.sqlite"));
+      const store = new AttachmentStore(db, join(home, "attachments"));
+      const hold = new Promise<never>(() => undefined);
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { lingers: true, starts })],
+        ["codex", fakeAdapter(SCRIPT, { id: "codex", lingers: true, gate: hold })], // its turn stays in flight: it holds a slot
+      ]);
+      const tm = new TaskManager(db, adapters, () => undefined, { maxRunners: () => 2, attachments: store });
+      const upload = (name: string) => store.save({ name, bytes: new TextEncoder().encode(name) }).id;
+      try {
+        const input = (title: string, runner: RunnerId, attachmentIds?: string[]) => ({ cwd: home, title, prompt: title, runner, attachmentIds });
+        const t1 = tm.create(input("t1", "claude", [upload("first.txt")]));
+        await waitFor(async () => !["running", "waiting"].includes(db.getTask(t1.id)!.status));
+        await tm.releaseAndWait(t1.id);
+        const busy1 = tm.create(input("busy1", "codex"));
+        tm.create(input("busy2", "codex")); // two run: the limit
+        await tm.send(t1.id, "reply one", { attachmentIds: [upload("second.txt")] });
+        await tm.send(t1.id, "reply two");
+        expect(db.listQueuedTasks().map((t) => t.id)).toEqual([t1.id]); // one place in the queue, not two
+        expect(starts).toHaveLength(1);
+        // a slot opens: one start with both replies; first.txt went with the first turn and is not sent again
+        const second = store.listForTask(t1.id).find((a) => a.name === "second.txt")!;
+        await tm.abort(busy1.id);
+        await waitFor(async () => starts.length === 2);
+        expect(starts[1]!.resumeSessionId).toBe("sess-1");
+        expect(starts[1]!.prompt).toBe(`reply one\n\n添付ファイル（このマシン上のパス。必要なら読んでください）:\n- ${second.path} (${second.mime}, ${second.size} B)\n\nreply two`);
+        expect(starts[1]!.attachments?.map((a) => a.name)).toEqual(["second.txt"]);
+        // 中断 of a Task waiting with a reply takes the reply out of the queue
+        await waitFor(async () => !["running", "waiting"].includes(db.getTask(t1.id)!.status));
+        await tm.releaseAndWait(t1.id);
+        tm.create(input("busy3", "codex")); // the limit again
+        await tm.send(t1.id, "never sent");
+        expect(db.getTask(t1.id)!.queuedAt).not.toBeNull();
+        await tm.abort(t1.id);
+        expect(db.getTask(t1.id)!.queuedAt).toBeNull();
+        expect(db.listQueuedTasks()).toEqual([]);
+        tm.drain();
+        expect(starts).toHaveLength(2);
+      } finally {
+        await tm.shutdown();
+        db.close();
         rmSync(home, { recursive: true, force: true });
       }
     }, 20000);
@@ -1594,10 +1654,13 @@ describe("core daemon", () => {
         await tm.send(t3.id, "reply");
         expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2", "t3", "reply"]);
         expect(warnings(t3.id)).toBe(2);
-        // (d) below the valve the reply is refused, naming the value and where it lives
+        // (d) below the valve the reply waits in the queue, the line naming the value
         await tm.abort(t3.id);
         headroom = { free: 100 * MB, floor: 500 * MB, safety: 200 * MB };
-        await expect(tm.send(t3.id, "again")).rejects.toThrow("空きメモリが足りません（空き 100 MB / 安全弁 200 MB）。空くまで待つか、安全弁（~/.config/ops-kit/heavy.json の taskMinFreeMb、既定 300）を下げてください");
+        await tm.send(t3.id, "again");
+        expect(db.getTask(t3.id)!.queuedAt).not.toBeNull();
+        expect(db.listEvents(t3.id).some((e) => e.ev.t === "status" && e.ev.text.startsWith("実行枠待ちに返信を入れました（空きメモリ不足のため待機、空き 100 MB / 安全弁 200 MB、待ち 1 番目）"))).toBe(true);
+        expect(starts.map((s) => s.prompt)).toEqual(["t1", "t2", "t3", "reply"]);
         // (e) unreadable: the count alone
         headroom = null;
         expect(tm.freeSlots()).toBe(6);
@@ -1676,7 +1739,47 @@ describe("core daemon", () => {
         rmSync(home, { recursive: true, force: true });
       }
     }, 20000);
-    test("maxRunners holdQueue（候補のデーモン）: 枠が空いても待ち列を始めず、待ち列の Task への返信は添付を動かす前に断る", async () => {
+    test("maxRunners 返信の空きメモリ: ターンの終わった Task のプロセスが残るときは先に閉じ、待ち列に入った返信が前のセッションで始まる", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-reply-idle-"));
+      const starts: StartOptions[] = [];
+      const MB = 1048576;
+      const db = new Db(join(home, "t.sqlite"));
+      const hold = new Promise<never>(() => undefined);
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { lingers: true, starts })],
+        ["codex", fakeAdapter(SCRIPT, { id: "codex", lingers: true, starts, gate: hold })], // its turn stays in flight
+      ]);
+      let idleId = "";
+      // the memory is back once the idle Task's process is gone
+      const tm = new TaskManager(db, adapters, () => undefined, {
+        maxRunners: () => 8,
+        memoryHeadroom: () => ({ free: idleId && tm.holdsProcess(idleId) ? 100 * MB : 400 * MB, floor: 500 * MB, safety: 200 * MB }),
+        drainTickMs: 3_600_000, // no tick: only the release can start the queue
+      });
+      try {
+        const input = (title: string, runner: RunnerId) => ({ cwd: home, title, prompt: title, runner });
+        const ended = (id: string) => !["running", "waiting"].includes(db.getTask(id)!.status);
+        const t0 = tm.create(input("t0", "claude"));
+        await waitFor(async () => ended(t0.id));
+        await tm.releaseAndWait(t0.id); // its process is closed: a reply needs a new one
+        const t1 = tm.create(input("t1", "claude"));
+        idleId = t1.id;
+        await waitFor(async () => ended(t1.id)); // the turn ended; the process stays open
+        expect(tm.holdsProcess(t1.id)).toBe(true);
+        tm.create(input("running", "codex"));
+        const r = await tm.send(t0.id, "again");
+        expect(r.queuedAt).not.toBeNull(); // short of memory: queued, and the idle process is closed at once
+        await waitFor(async () => db.getTask(t0.id)!.queuedAt === null);
+        expect(tm.holdsProcess(t1.id)).toBe(false);
+        expect(starts.map((s) => s.prompt)).toEqual(["t0", "t1", "running", "again"]);
+        expect(starts[3]!.resumeSessionId).toBe("sess-1");
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+    test("maxRunners holdQueue（候補のデーモン）: 枠が空いても待ち列を始めず、待ち列の Task への返信は待ちに足されて始めない", async () => {
       const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-hold-"));
       const starts: StartOptions[] = [];
       const db = new Db(join(home, "t.sqlite"));
@@ -1686,8 +1789,7 @@ describe("core daemon", () => {
         const t1 = tm.create(input("t1"));
         const t2 = tm.create(input("t2"));
         expect(t2.queuedAt).not.toBeNull();
-        // refused before the attachments are taken (this daemon has none: taking them first would throw another error)
-        await expect(tm.send(t2.id, "reply", { attachmentIds: ["att_x"] })).rejects.toThrow("実行枠待ち");
+        await tm.send(t2.id, "reply"); // goes after the queued prompt
         expect(db.getTask(t2.id)!.queuedAt).not.toBeNull(); // the reply did not start it nor take it out of the queue
         await tm.abort(t1.id); // a slot is free, but a candidate leaves the live daemon's queue alone
         tm.drain();

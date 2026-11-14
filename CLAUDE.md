@@ -27,6 +27,7 @@
 - パスキーのログインはインターネット越しの構成（CloudFront 経由）だけ。ホストの中（loopback）では求めない（`docs/design/cloud-hosting.md` の「3. Architecture: start EC2 only when it is used」のログインの流れ、#748）
 - 頼まれていない OS や環境（Mac・launchd など）の対応・手順・検証を PBI・Task・文書に足さない（実行環境は 1 つで、OS ごとの対応や分岐を足さない。別のマシンでは同じ実行環境をコンテナで動かす）
 - 画面の見た目・操作を変える PBI は `**置き場所**: 床|天井|壁 — 理由` を書く。毎回は触らない値を床（Home など最初の画面）に並べる案は、天井（Settings・畳んだ節）へ置くか、床に置く理由を書く。安全に関わる確認は畳まず、機能は消さない（原則は `docs/design/ui-layers.md`）
+- 今は動いていない仕組み（Actions・無効にした定期実行など）を理由に、安全の検討を省かない。動かしたときに起きることで判断する。権限は、自動化に使われたときと乗っ取られたときで考える（2026-11-07 の利用者の指摘。共通キットの `pbi-to-tasks` の設計チェックにも同じ趣旨の行がある）
 
 ## テスト
 
@@ -60,6 +61,11 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承�
 - main の作業ツリーでは作業しない（利用者の `bun run dev` か release のデーモンがそこを見ている。`packages/core` を触るとセッションごと再起動する）。`git worktree add --detach ../switchboard-<topic> origin/main` → `bun install`。PBI を丸ごとなら `../switchboard-pbi<PBI>`
 - 枝: `sb/<Task番号>-<topic>`。Task を積むときは `gh stack`（`stacked-pr-delivery`）
 - 作業ファイル: `W=$(mktemp -d /tmp/switchboard.<用途>.XXXXXX)`。`/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションとぶつかる）。`ops-kit/bin/deny-shared-tmp`（Claude Code の PreToolUse。Task にはデーモンが `--settings` で渡し（#773）、このリポジトリでは `.claude/settings.json` でも登録。Codex の Task は hook ではなく、`/tmp` を閉じたサンドボックスで止める（#787。Codex の Task は `W=$(mktemp -d)` で `$TMPDIR` の下に作る。`/tmp/…` は失敗する）。`docs/design/shared-tmp-guard.md`）が反するコマンドを止める。`/tmp` は RAM で、ホストの停止・作り直しと満杯の片付け（#1720）で消える。再開してから読むもの（Issue・PR 本文の下書き、レビューの材料）はすぐ投稿するか、消える前提で作り直せる形にする（#1988）
+
+## コードのコメントと Issue 番号
+
+- 公開に出すコードのコメント・テストの名前・人やエージェントに見せる文に Issue 番号 `#N` を書かない（公開側は番号を開けない）。根拠は文で書き、長ければ `docs/design/<file>.md` の節の名前で指す。値としての番号（テストのデータ、入力欄の例）は書いてよい。検査は `bun ops-kit/src/cli.ts issue-refs <path…>`
+- 番号を外した行の経緯の辿り方は開発元の運用（`private/CLAUDE.md` の「コードのコメントと Issue 番号」）
 
 ## Switchboard の Task と動いているコード
 
@@ -106,6 +112,7 @@ Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で
 - マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge|--merge-stack]`（exit 0 = merge / 1 = stop / 2 = 判定不能。`--merge`（単発）/ `--merge-stack`（スタックの最下段）は判定が merge のときだけマージまで進む。Task の許可に入る既定のマージはこれ。利用者が Task の会話で判定の外のマージを認めたときは `gh pr merge` / `gh stack merge`（`pbi-complete` の 5）。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「Recheck」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
 - ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「When to run local CI and how it counts」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「Branch protection and local results」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。クラウドのホストでは重い手順（型検査・`bun test`）を外で回す（`docs/design/local-ci-offload.md`）。詳細は `docs/merge-gate.md`
 - Task の中のローカル CI とレビューは、自分のシェルで回して待たず `ops-kit job request local-ci <PR>` / `ops-kit job request review <PR> --runner … --prompt … --out …` でアプリに頼み、`job#<id>` を止まりの理由（reason `depends`）に書いてターンを終える（背景の `sleep` の待ちのループで待たない。仕組みは `docs/design/daemon-jobs.md`）。Task の外は従来どおり直接回す
+- 性能の上限: `scripts/perf-budget.json`。上げるときの規則は `docs/design/perf.md` の「Ratchet」の **Raising**（上げた PR の書き方は `task-to-pr` のチェックリスト）
 
 ## 追加のレビュアー
 

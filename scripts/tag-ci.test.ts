@@ -1,13 +1,13 @@
 // test-reads: .github/workflows/ci.yml scripts/ci.ts
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
-import { stepWithIdle } from "./local-ci";
-import { classifyMiss, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
+import { stepWithIdle, type Offload } from "./local-ci";
+import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -223,8 +223,8 @@ describe("tag-ci", () => {
       expect(puts.map((p) => p.replace(/.*\/contents\//, ""))).toEqual(recordFails ? [] : ["bundle.tsv", "bytes.tsv", "counts.tsv"]);
       // the bytes record has the journey's per-path row, not only its header
       if (!recordFails) expect(contents[1]!).toContain(["open-task", "/a", "1", "5", "a".repeat(40)].join("\t"));
-      // counts.tsv: a row per count of the tag (no times), with the tag and its commit
-      if (!recordFails) expect(contents[2]!.split("\n").filter((l) => l.includes("\tjourneys.new-task.layoutCount\t"))).toEqual([expect.stringMatching(/^\S+\t(github|local)\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t6$/)]);
+      // counts.tsv: a row per count of the tag (no times), with the tag and its commit; the environment is the run's (PERF_ENV=offload inside the external build)
+      if (!recordFails) expect(contents[2]!.split("\n").filter((l) => l.includes("\tjourneys.new-task.layoutCount\t"))).toEqual([expect.stringMatching(/^\S+\t(github|local|offload)\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t6$/)]);
       expect(logged.filter((l) => l.includes("の記録")).length).toBe(3);
       expect(logged.some((l) => l.includes("の記録に失敗（結果は変えない）"))).toBe(recordFails);
       expect(removed).toBe(true);
@@ -762,8 +762,8 @@ describe("tag-ci --latest-pass", () => {
   });
 
   test("the arguments: --latest-pass and --contained-in come off before --repo is read", () => {
-    expect(parseArgs(["--latest-pass", "--contained-in", "abc", "--repo", "o/r"])).toEqual({ latestPass: true, containedIn: "abc", rest: ["--repo", "o/r"] });
-    expect(parseArgs(["--repo", "o/r"])).toEqual({ latestPass: false, containedIn: undefined, rest: ["--repo", "o/r"] });
+    expect(parseArgs(["--latest-pass", "--contained-in", "abc", "--repo", "o/r"])).toEqual({ latestPass: true, containedIn: "abc", local: false, rest: ["--repo", "o/r"] });
+    expect(parseArgs(["--repo", "o/r"])).toEqual({ latestPass: false, containedIn: undefined, local: false, rest: ["--repo", "o/r"] });
     expect(() => parseArgs(["--contained-in", "abc"])).toThrow("--latest-pass");
     expect(() => parseArgs(["--latest-pass", "--contained-in"])).toThrow("コミット");
   });
@@ -1072,5 +1072,304 @@ describe("tag-ci: known failures (known-failures.json at the tag's commit)", () 
     const r = await tagCi({ ...d, step: async (s, c, ...rest) => (s.trim() === "bun run typecheck" ? { code: 1, output: "error TS1" } : step(s, c, ...rest)) }, "o/r", "/repo", CACHE, NO_HOST);
     expect(r.map((x) => x.result)).toEqual(["fail"]);
     expect(f.bodies.get("v1.0.0")).not.toContain("既知の失敗を差し引いた");
+  });
+});
+
+describe("tag-ci: the build off the host", () => {
+  const WARNING = "perf の警告（合否には数えない）:";
+  const lines = (script: string) => [...script.matchAll(/bash -e -c '((?:[^']|'\\'')*)'; c=\$\?(; \[ "\$c" -eq 0 \] \|\| exit "\$c")?/g)].map((m) => ({ run: m[1]!.replaceAll("'\\''", "'"), stops: m[2] !== undefined }));
+
+  /** A build that runs nothing: the log it would leave, with `fail`'s step failing (a step that stops the build ends the log) and `files` as the log's `sb-file:` lines. */
+  function fakeOffload(fail?: { at: string; output: string }, files: Record<string, string> = {}) {
+    const started: Array<{ script: string; cwd: string; baseTree?: string; size: string }> = [];
+    const offload: Offload = {
+      start: async (script, cwd, o) => {
+        started.push({ script, cwd, size: o.size, ...(o.baseTree ? { baseTree: o.baseTree } : {}) });
+        return { build: `b${started.length}` };
+      },
+      collect: async (build) => {
+        const script = started[Number(build.slice(1)) - 1]!.script;
+        const out: string[] = [];
+        let code = 0;
+        for (const [i, s] of lines(script).entries()) {
+          const failed = fail !== undefined && s.run.trim() === fail.at;
+          out.push(`sb-step: ${i} begin 1.0`, failed ? fail.output : "ok", "", `sb-step: ${i} exit ${failed ? 1 : 0} 2.0`);
+          if (failed && s.stops) {
+            code = 1;
+            break;
+          }
+        }
+        for (const [name, text] of Object.entries(files)) out.push(`sb-file: ${name} ${Buffer.from(text).toString("base64")}`);
+        return { code, output: out.join("\n") };
+      },
+    };
+    return { offload, started };
+  }
+
+  /** `fake`'s deps with the build: the host's `step` and `slot` fail the test, and `git archive` / `tar` are recorded. */
+  function offloaded(tags: Parameters<typeof fake>[0], o: ReturnType<typeof fakeOffload>) {
+    const f = fake(tags);
+    const calls: string[] = [];
+    const archived: string[] = [];
+    const shaFiles: string[] = [];
+    const d: TagCiDeps = {
+      ...f.d,
+      offload: o.offload,
+      step: async () => {
+        calls.push("step");
+        return { code: 0, output: "" };
+      },
+      slot: async () => {
+        calls.push("slot");
+        throw new Error("the host's slot is not taken");
+      },
+      sh: async (cmd, cwd, input) => {
+        if (cmd.includes("archive")) {
+          archived.push(cmd.at(-1)!);
+          await Bun.write(cmd[cmd.indexOf("-o") + 1]!, "tar");
+          return "";
+        }
+        if (cmd[0] === "tar") {
+          shaFiles.push(readFileSync(join(cmd[cmd.indexOf("-C") + 1]!, cmd.at(-1)!), "utf8"));
+          return "";
+        }
+        return f.d.sh(cmd, cwd, input);
+      },
+    };
+    return { f, d, calls, archived, shaFiles };
+  }
+
+  test("a build given: no slot and no step of the host's CI; the one build holds the CI's every step and PERF_ENV=offload", async () => {
+    const o = fakeOffload();
+    const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], o);
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v2.0.0 pass true"]);
+    expect(h.calls).toEqual([]);
+    expect(o.started).toHaveLength(1);
+    const script = o.started[0]!.script;
+    expect(script).toContain("export PERF_ENV=offload");
+    expect(lines(script).map((l) => l.run.trim())).toContain("bun test");
+    expect(lines(script).some((l) => l.run.includes("scripts/perf-bench.ts"))).toBe(true);
+    expect(h.f.bodies.get("v2.0.0")).toContain(`[tag-ci] pass ${shaOf("v2.0.0")}`);
+  });
+
+  test("a build given gets the repository: the build's checkout has an origin (the public tree check asks for it)", async () => {
+    const o = fakeOffload();
+    await tagCi(offloaded([{ tag: "v1.0.0", body: "" }], o).d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(o.started[0]!.script).toContain("git remote add origin 'https://github.com/o/r.git'");
+  });
+
+  test("the seconds of a build off the host are not compared with the host's local.durations", async () => {
+    const o = fakeOffload();
+    const h = offloaded([{ tag: "v1.0.0", body: "", budget: JSON.stringify({ local: { journeys: {}, durations: { typecheck: 0, test: 0 } } }) }], o);
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => x.result)).toEqual(["pass"]);
+    expect(h.f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+    expect(h.f.bodies.get("v1.0.0")).not.toContain("所要時間");
+  });
+
+  test("the compared tag goes to the build as a tar of the tag before, with its commit in .sb-sha; the first tag gets origin/main's tip", async () => {
+    const o = fakeOffload();
+    const h = offloaded([{ tag: "v3.0.0", body: "", fail: undefined }, { tag: "v2.0.0", body: "" }], o);
+    await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(h.archived).toEqual([shaOf("v2.0.0")]);
+    expect(h.shaFiles).toEqual([`${shaOf("v2.0.0")}\n`]);
+    expect(o.started[0]!.baseTree).toMatch(/base\.tar$/);
+    const first = fakeOffload();
+    const g = offloaded([{ tag: "v1.0.0", body: "" }], first);
+    await tagCi(g.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(g.archived).toEqual([shaOf("origin/main")]);
+    expect(first.started[0]!.baseTree).toMatch(/base\.tar$/);
+  });
+
+  test("an sb-offload that does not know --base-tree gets no tar: the build runs without the compared tag, and the tag's result is the other steps'", async () => {
+    const o = fakeOffload();
+    let asked = 0;
+    o.offload.knowsBaseTree = async () => (asked++, false);
+    const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], o);
+    const logs: string[] = [];
+    h.d.log = (l) => void logs.push(l);
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v2.0.0 pass true"]);
+    expect(o.started).toHaveLength(1);
+    expect(o.started[0]!.baseTree).toBeUndefined();
+    expect(h.archived).toEqual([]);
+    expect(asked).toBe(1);
+    expect(logs.filter((l) => l.includes("--base-tree を知らない"))).toHaveLength(1);
+    const known = fakeOffload();
+    known.offload.knowsBaseTree = async () => true;
+    await tagCi(offloaded([{ tag: "v1.0.0", body: "" }], known).d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(known.started[0]!.baseTree).toMatch(/base\.tar$/);
+  });
+
+  test("baseTreeTar: the tar of the commit, then .sb-sha added from a folder it removes", async () => {
+    const dir = mkdtempSync(join(CACHE, "tar-"));
+    const out = join(dir, "base.tar");
+    const cmds: string[][] = [];
+    const sh: TagCiDeps["sh"] = async (cmd) => {
+      cmds.push(cmd);
+      return cmd.includes("rev-parse") ? `${"b".repeat(40)}\n` : "";
+    };
+    expect(await baseTreeTar("v1.0.0", "/repo", out, sh)).toBe(out);
+    expect(cmds.map((c) => c.slice(0, 4).join(" "))).toEqual(["git -C /repo rev-parse", "git -C /repo archive", "tar -rf " + out + " -C"]);
+    expect(cmds[1]!.at(-1)).toBe("b".repeat(40));
+    expect(existsSync(cmds[2]![4]!)).toBe(false);
+  });
+
+  describe("perf's warning and a fail are the same as on the host (the rules of the perf warning)", () => {
+    const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
+    const raised = "raised: launch.ms = 900 (main 800)";
+    const run = async (output: string) => {
+      const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], fakeOffload({ at: CHECK, output }));
+      return { r: await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST), body: h.f.bodies.get("v2.0.0")! };
+    };
+
+    test("over, raised and grew alone: a pass, the lines are the warning", async () => {
+      for (const ls of [["over: launch.ms = 900 > 800"], [raised], [grew], [raised, grew]]) {
+        const { r, body } = await run(`ceilings: offload\n${ls.join("\n")}\n`);
+        expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v2.0.0 pass"]);
+        expect(body).toContain(`\n${WARNING}\n${ls.map((l) => `    ${l}`).join("\n")}`);
+        expect(body).not.toContain("が落ちた:");
+      }
+    });
+
+    test("a perf step with no verdict is a pass with a note; a failed bun test is a fail that names it, the perf line staying as the warning", async () => {
+      const { r, body } = await run("bench failed\n");
+      expect(r.map((x) => x.result)).toEqual(["pass"]);
+      expect(body).toContain(`${WARNING}\n    perf の判定ができなかった`);
+      const over = { at: CHECK, output: "ceilings: offload\nover: launch.ms = 900 > 800\n" };
+      const o = fakeOffload(over);
+      const collect = o.offload.collect;
+      o.offload.collect = async (b) => {
+        const c = await collect(b);
+        return { code: 1, output: `${c.output}\nsb-step: ${lines(o.started[0]!.script).length - 1} begin 3.0\n(fail) a > b\n1 fail\n\nsb-step: ${lines(o.started[0]!.script).length - 1} exit 1 4.0` };
+      };
+      const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+      const f = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+      expect(f.map((x) => `${x.result} ${x.step}`)).toEqual(["fail bun test"]);
+      expect(h.f.bodies.get("v1.0.0")).toContain(`${WARNING}\n    over: launch.ms = 900 > 800`);
+    });
+  });
+
+  test("the counts of a build's run are recorded for the offload environment", async () => {
+    const files = { "perf-result.json": JSON.stringify({ runs: 5, journeys: { "new-task": { msMedian: 9, msP90: 9, requests: 7, layoutCount: 6, recalcStyleCount: 8, layoutShift: 0.01, bytes: 5 } } }) };
+    const h = offloaded([{ tag: "v1.0.0", body: "" }], fakeOffload(undefined, files));
+    const contents: string[] = [];
+    const d: TagCiDeps = {
+      ...h.d,
+      sh: async (cmd, cwd, input) => {
+        if (cmd[0] !== "gh" || cmd[1] !== "api") return h.d.sh(cmd, cwd, input);
+        if (cmd.includes("PUT")) {
+          contents.push(Buffer.from((JSON.parse(readFileSync(cmd[cmd.indexOf("--input") + 1]!, "utf8")) as { content: string }).content, "base64").toString("utf8"));
+          return "{}";
+        }
+        if (cmd.some((a) => a.includes("/contents/"))) throw new Error("gh api failed: gh: Not Found (HTTP 404)");
+        return "{}";
+      },
+    };
+    await tagCi(d, "o/r", "/repo", CACHE);
+    expect(contents.find((c) => c.includes("layoutCount"))!.split("\n").filter((l) => l.includes("\tjourneys.new-task.layoutCount\t"))).toEqual([expect.stringMatching(/^\S+\toffload\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t6$/)]);
+  });
+
+  describe("pending: a build started and its run gone", () => {
+    const pendingFiles = (cache: string) => (existsSync(tagPendingDirOf(cache)) ? readdirSync(tagPendingDirOf(cache)) : []);
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 200 && !ok(); i++) await Bun.sleep(5);
+      expect(ok()).toBe(true);
+    };
+
+    test("pending: the run after one cut off while waiting writes the mark from the build's result, starts no build and removes the record", async () => {
+      const cache = mkdtempSync(join(CACHE, "pending-"));
+      const o = fakeOffload();
+      const collect = o.offload.collect;
+      const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+      // the first run's wait never ends: the process is gone
+      o.offload.collect = () => new Promise(() => undefined);
+      void tagCi(h.d, "o/r", "/repo", cache, NO_HOST).catch(() => undefined);
+      await until(() => pendingFiles(cache).length === 1);
+      expect(JSON.parse(readFileSync(join(tagPendingDirOf(cache), pendingFiles(cache)[0]!), "utf8"))).toEqual({ repo: "o/r", tag: "v1.0.0", sha: shaOf("v1.0.0"), before: null, build: "b1", at: expect.any(Number) });
+      expect(h.f.bodies.get("v1.0.0")).toBe("");
+      o.offload.collect = collect;
+      const r = await tagCi(h.d, "o/r", "/repo", cache, NO_HOST);
+      expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v1.0.0 pass true"]);
+      expect(o.started).toHaveLength(1);
+      expect(h.f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+      expect(pendingFiles(cache)).toEqual([]);
+    });
+
+    test("pending: a record of another commit (the tag moved) is not used: the tag runs again with a build of its own and the record is gone after the mark", async () => {
+      const cache = mkdtempSync(join(CACHE, "pending-"));
+      writeTagPending(cache, { repo: "o/r", tag: "v1.0.0", sha: "0".repeat(40), before: null, build: "b7", at: Date.now() });
+      const o = fakeOffload();
+      const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+      await tagCi(h.d, "o/r", "/repo", cache, NO_HOST);
+      expect(o.started).toHaveLength(1);
+      expect(h.f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+      expect(pendingFiles(cache)).toEqual([]);
+    });
+
+    test("pending: a record whose build's log is gone says so on one line, is removed and the tag runs again", async () => {
+      const cache = mkdtempSync(join(CACHE, "pending-"));
+      writeTagPending(cache, { repo: "o/r", tag: "v1.0.0", sha: shaOf("v1.0.0"), before: null, build: "b7", at: Date.now() - 8 * 24 * 3600 * 1000 });
+      const o = fakeOffload();
+      const collect = o.offload.collect;
+      o.offload.collect = async (b) => (b === "b7" ? { code: 1, output: "sb-offload: b7 ended SUCCEEDED without the command's exit code" } : collect(b));
+      const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+      const logs: string[] = [];
+      await tagCi({ ...h.d, log: (l) => (logs.push(l), h.d.log(l)) }, "o/r", "/repo", cache, NO_HOST);
+      expect(logs.filter((l) => l.includes("結果を書けない"))).toHaveLength(1);
+      expect(o.started).toHaveLength(1);
+      expect(h.f.bodies.get("v1.0.0")).toContain(`[tag-ci] pass ${shaOf("v1.0.0")}`);
+      expect(pendingFiles(cache)).toEqual([]);
+    });
+
+    test("pending: a younger record whose result cannot be read stays, starts no build and writes no mark", async () => {
+      const cache = mkdtempSync(join(CACHE, "pending-"));
+      writeTagPending(cache, { repo: "o/r", tag: "v1.0.0", sha: shaOf("v1.0.0"), before: null, build: "b8", at: Date.now() - 24 * 3600 * 1000 });
+      const o = fakeOffload();
+      const collect = o.offload.collect;
+      o.offload.collect = async (b) => (b === "b8" ? { code: 255, output: "" } : collect(b));
+      const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+      const logs: string[] = [];
+      await tagCi({ ...h.d, log: (l) => (logs.push(l), h.d.log(l)) }, "o/r", "/repo", cache, NO_HOST);
+      expect(logs.filter((l) => l.includes("記録を残し"))).toHaveLength(1);
+      expect(o.started).toHaveLength(0);
+      expect(h.f.bodies.get("v1.0.0") ?? "").not.toContain("[tag-ci]");
+      expect(pendingFiles(cache)).toHaveLength(1);
+    });
+  });
+
+  describe("where it runs: a build, --local, no build on the host", () => {
+    const build = fakeOffload().offload;
+
+    test("--local is read by parseArgs and keeps the arguments for resolveRepo; with it the build is not used even where there is one", () => {
+      expect(parseArgs(["--local", "--repo", "o/r"])).toMatchObject({ local: true, rest: ["--repo", "o/r"] });
+      expect(parseArgs([]).local).toBe(false);
+      expect(offloadFor(true, () => build)).toBeUndefined();
+      expect(offloadFor(false, () => build)).toBe(build);
+      expect(offloadFor(false, () => undefined)).toBeUndefined();
+    });
+
+    test("without a build (--local, or none on the host): one slot, the host's steps, PERF_BASE_REF and no PERF_ENV; the counts go to the `local` ceilings", async () => {
+      const f = fake([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
+      const slots: string[] = [];
+      const envs: Array<Record<string, string>> = [];
+      const d: TagCiDeps = {
+        ...f.d,
+        slot: (name, fn) => (slots.push(name), fn()),
+        step: (script, cwd, env) => (envs.push(env), f.d.step(script, cwd, env)),
+      };
+      for (const offload of [offloadFor(true, () => build), offloadFor(false, () => undefined)]) {
+        slots.length = 0;
+        envs.length = 0;
+        f.ran.length = 0;
+        f.bodies.set("v2.0.0", "");
+        await tagCi({ ...d, ...(offload ? { offload } : {}) }, "o/r", "/repo", CACHE, NO_HOST);
+        expect(slots).toEqual(["tag-ci o/r"]);
+        expect(f.ran.some((x) => x.script === "bun test")).toBe(true);
+        expect(envs.length).toBeGreaterThan(0);
+        for (const e of envs) expect([e.PERF_BASE_REF, "PERF_ENV" in e]).toEqual(["v1.0.0", false]);
+      }
+    });
   });
 });

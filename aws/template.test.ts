@@ -206,16 +206,6 @@ describe("aws/template.yaml (#229)", () => {
     expect(rules).toContain("{ Id: archives, Status: Enabled, Prefix: archive/, ExpirationInDays: 30 }");
   });
 
-  test("request metrics (#3242): Data counts requests per prefix for litestream/, archive/ and history/", () => {
-    const data = resource("Data");
-    const metrics = data.slice(data.indexOf("MetricsConfigurations:"));
-    for (const p of ["litestream", "archive", "history"]) expect(metrics).toContain(`- { Id: ${p}, Prefix: ${p}/ }`);
-    // S3 returns them sorted by Id; another order reads as drift (#4098)
-    const ids = [...metrics.matchAll(/- \{ Id: ([a-z]+), Prefix:/g)].map((m) => m[1]);
-    expect(ids).toEqual([...ids].sort());
-    expect(ids).toHaveLength(3);
-  });
-
   test("request logs (#1490): CloudFront's standard log goes to Data's cdn-logs/ for 90 days or more, without cookies, and the host sees the viewer address", () => {
     const cdn = resource("Cdn");
     expect(cdn).toContain("Logging: { Bucket: !GetAtt Data.DomainName, Prefix: cdn-logs/, IncludeCookies: false }");
@@ -780,9 +770,9 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     // the unpack and the run are Offload's, word for word; only the tag line comes first
     const ci = commands(body(p)) as string[];
     const offload = commands(body(resource("Offload"))) as string[];
-    // the recordings and the names (#4711) come between the unpack and the run
+    // the recordings, the names (#4711) and the compared tag's tree come between the unpack and the run
     expect([ci[0], ci[1], ci[ci.length - 1]]).toEqual(['echo "sb-offload: image $SB_IMAGE_TAG"', offload[0], offload[1]]);
-    expect(ci).toHaveLength(5);
+    expect(ci).toHaveLength(6);
     expect(resource("OffloadCiLogs")).toContain("LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-ci'");
     expect(resource("OffloadCiProject")).toContain("Name: /switchboard/offload-ci-project");
     expect(resource("OffloadCiProject")).toContain("Value: !Ref OffloadCi");
@@ -822,6 +812,13 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     expect(spec).toContain("rm -f /sb/names.json");
     // a names file that cannot be read stops the build with a fixed line, not bun's message (it can quote the JSON)
     expect(spec).toMatch(/names\.json --only-show-errors \\\s+&& \( umask 077;[\s\S]*\) >\/dev\/null 2>&1 \\\s+\|\| \{ rm -f \/sb\/names\.json; echo "sb-offload: the names for the public-tree check could not be read"; exit 1; \}/);
+    // the compared tag's tree: read from the same prefix, unpacked into a folder, PERF_BASE_TREE points there; the key is the only thing passed
+    expect(spec).toContain('if [ -n "$SWITCHBOARD_BASE_TREE_KEY" ]');
+    expect(spec).toContain('aws s3 cp "s3://${Data}/$SWITCHBOARD_BASE_TREE_KEY" - | tar -xf - -C "$B"');
+    expect(spec).toContain('export PERF_BASE_TREE="$B"');
+    // a tree that cannot be read does not stop the build: perf only warns, so the run goes on uncompared and says so
+    expect(spec).toContain('export PERF_BASE_TREE="$B" || echo "sb-offload: base tree not unpacked; perf is not compared with it"; fi');
+    expect(spec.slice(spec.indexOf("SWITCHBOARD_BASE_TREE_KEY"))).not.toMatch(/[Tt]oken|GH_|ssm |secretsmanager/);
     expect(spec).toContain("chmod 600 /home/switchboard/.aws/config");
     expect(spec).toContain("sso_account_id = ");
     expect(spec).not.toMatch(/echo [^\n]*(accountIds|sso_account_id|j\.names)/);

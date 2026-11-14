@@ -77,6 +77,7 @@ export const task = msgs({
   scopePbi: { ja: "この PBI 内（{ref}）", en: "Within this PBI ({ref})" },
   scopeRepo: { ja: "このリポジトリ（{name}）", en: "This repository ({name})" },
   broad: { ja: "広い指定: {names} のどのサブコマンドにも当たります", en: "Broad target: matches every subcommand of {names}" },
+  broadPrefix: { ja: "広い指定: {names} は {stems} のどのサブコマンドにも、{stems} で始まる別のプログラムにも当たります", en: "Broad target: {names} matches every subcommand of {stems} and also other programs starting with {stems}" },
   sumOp: { ja: "操作: {op}", en: "Operation: {op}" },
   sumTarget: { ja: "対象: {target}", en: "Target: {target}" },
   sumWhen: { ja: "条件: {when}", en: "Conditions: {when}" },

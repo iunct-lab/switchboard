@@ -58,5 +58,34 @@
       "test": 513.7
     }
   },
+  "offload": {
+    "journeys": {
+      "launch": {
+        "requests": 16,
+        "layoutCount": 7,
+        "recalcStyleCount": 8,
+        "layoutShift": 0.0366
+      },
+      "new-task": {
+        "requests": 18,
+        "layoutCount": 10,
+        "recalcStyleCount": 8,
+        "layoutShift": 0.042
+      },
+      "open-task": {
+        "requests": 8,
+        "layoutCount": 4,
+        "recalcStyleCount": 4
+      },
+      "send": {
+        "requests": 9,
+        "recalcStyleCount": 5,
+        "layoutShift": 0.075
+      }
+    },
+    "loaded": {
+      "healthMaxMs": 1150
+    }
+  },
   "exceptions": []
 }

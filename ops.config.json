@@ -18,8 +18,9 @@
   },
   "publicSync": {
     "target": "iunct-lab/switchboard",
-    "include": [".claude/", ".dockerignore", ".gitattributes", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "container/", "docs/", "known-failures.json", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
+    "include": [".claude/", ".dockerignore", ".gitattributes", ".git-blame-ignore-revs", ".github/", ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md", "apps/", "aws/", "bun.lock", "bunfig.toml", "container/", "docs/", "known-failures.json", "ops-kit/", "ops.config.json", "package.json", "packages/", "rescue/", "scripts/", "tsconfig.base.json"],
     "exclude": [
+      ".git-blame-ignore-revs",
       ".github/workflows/project-autoadd.yml",
       "docs/design/asks.md",
       "docs/design/attachments.md",

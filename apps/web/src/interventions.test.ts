@@ -6,7 +6,7 @@ import { interventionRows, populationLine, reasonRows, unknownLine } from "./int
 const window = (over: Partial<InterventionWindow> = {}): InterventionWindow => ({
   days: 7, from: 0, to: 1, total: 10, byKind: { approval: 2, decision: 5, resume: 3, classifier: 1 }, unknown: 0, reAsks: 4,
   resumesAfterWaits: { count: 1, unknown: 0 }, open: { pbis: 2, interventions: 6 }, done: { pbis: 3, interventions: 4 },
-  completed: { pbis: 3, perPbi: 2.5, unknownPbis: 0 }, reasons: [], ...over,
+  completed: { pbis: 3, perPbi: 2.5, unknownPbis: 0 }, reasons: [], questions: [], ...over,
 });
 const byKey = (rows: ReturnType<typeof interventionRows>) => Object.fromEntries(rows.map((r) => [r.key, r]));
 

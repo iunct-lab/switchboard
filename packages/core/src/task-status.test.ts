@@ -14,9 +14,9 @@ const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
   running: ["waiting", "background", "done", "error", "aborted", "idle"],
   waiting: ["running", "background", "done", "error", "aborted", "idle"],
   background: ["running", "done", "error", "aborted"],
-  done: ["running", "background", "error"],
-  error: ["running"],
-  aborted: ["running", "error"],
+  done: ["running", "background", "error", "idle"],
+  error: ["running", "idle"],
+  aborted: ["running", "error", "idle"],
 };
 
 describe("task status transitions", () => {
