@@ -35,8 +35,11 @@ There are two kinds, `local-ci` and `review`. A request names a kind, a PR and (
 it never carries a command. The daemon builds the argv itself (`jobCommand` in `packages/core/src/jobs.ts`). A command
 taken from the request would let a Task run anything the daemon can run, going around the permissions the Task runs
 under. The `cwd` is accepted only if it is a checkout of the Task's repository (under the Task's folder, a worktree of
-it, or a clone of the same origin, which is what a review's fresh clone is); the prompt and output files must be inside
-that `cwd`. This guards against mistakes. It is not a boundary against the Task itself, which runs as the same OS user.
+it, a clone of the same origin, which is what a review's fresh clone is, or a clone of the origin of any workspace
+registered in the app, which is what an audit Task needs to read another repository's PR); the prompt and output files must be inside
+that `cwd`. When a review ends, the usage it left (`claude.jsonl`, `codex.jsonl`) goes to the ledger under the Task that
+asked, with source `job`, so what a review cost can be told; a review that left nothing readable books nothing and still
+ends normally. This guards against mistakes. It is not a boundary against the Task itself, which runs as the same OS user.
 
 A job is a detached child of the daemon, started through a small wrapper that writes the exit code to
 `<jobs dir>/<id>/exit`. Local CI takes a heavy-work slot like any other heavy run. A review waits only for the

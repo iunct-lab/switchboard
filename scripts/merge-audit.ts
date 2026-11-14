@@ -1,6 +1,6 @@
 import { currentRepo } from "./repo.ts";
 /**
- * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] — who lifted which kind of a large PR, per kind
+ * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] — who lifted which kind of a large PR, per kind
  * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「Record marks」: `[merge-ask]`, `[merge-answer]`,
  * `[recheck]`) and main's commits; keeps nothing (the marks are the record). REST only (the GraphQL budget is shared).
  *
@@ -9,6 +9,10 @@ import { currentRepo } from "./repo.ts";
  *   <kind> 聞いた N / 認めた N / 認めなかった N / 返事まで 中央値 Nh / 再チェックで自動マージ N / 戻された N（#a, #b）
  * After the table, one line `印の欠け: 聞かずに返事 #a / 返事なしでマージ #b` when a PR in the period was answered with no
  * recorded `[merge-ask]`, or merged with an ask and no recorded answer (#1069); nothing when there are none.
+ * Then one line per route of the weekly post-merge audit (PBI #4838; the `[post-audit]` marks, scripts/post-audit.ts), a route with
+ * nothing sampled as 0: `監査 <owner/name> <recheck|direct|review> 抜き取り N / finding N / 率 N%`. A recheck-merged PR the
+ * audit found something in counts as evidence for the proposals like a revert (`戻された / 監査の指摘`).
+ * `--repo` reads another repository (default: this one); its reverts come from the API, not from this clone's git.
  * Each table line ends its wait with the sum: `返事まで 中央値 Nh（合計 Nh）` (#1272) — how long the person was waited for in all.
  * Then the proposals to change merge-gate's split, one `案: …` line each, or `案なし`; with
  * --file-request, one `要望: …` line: 起票した #N / 同じ題の開いた要望 #N があるので起票しない / 案が無いので起票しない (#1272).
@@ -18,10 +22,15 @@ import { currentRepo } from "./repo.ts";
  * unless an open request has the same title (the same proposals). The exit code is the same with or without it.
  */
 import { type Filed, fileRequest } from "./file-request";
-import { MARK_AUTHORS, MERGE_ANSWER, MERGE_ASK, MERGE_KINDS, RECHECK_KINDS, RECHECK_PASS, type MergeKind } from "./merge-gate";
+import { MARK_AUTHORS, MERGE_ANSWER, MERGE_ASK, MERGE_KINDS, RECHECK_KINDS, RECHECK_PASS, REVIEW, type MergeKind } from "./merge-gate";
 
-export type Mark = { kind: "ask" | "yes" | "no" | "recheck"; kinds: MergeKind[]; sha: string; at: string };
-export interface PrRecord { number: number; mergedAt: string | null; headSha: string; marks: Mark[] }
+/** The weekly post-merge audit's record on a PR: `[post-audit] pass|finding <merge sha>` (scripts/post-audit.ts; a PR with one is not selected again). */
+export const POST_AUDIT = /^\[post-audit\] (pass|finding) ([0-9a-f]{40})\b/;
+
+/** `post-audit` has no merge kind (`kinds` is empty) and says its verdict in `verdict`; `sha` is the merge commit it read. */
+export type Mark = { kind: "ask" | "yes" | "no" | "recheck" | "post-audit"; kinds: MergeKind[]; sha: string; at: string; verdict?: "pass" | "finding" };
+/** `reviewed`: a main review mark (`REVIEW`) exists on the PR — what tells a `review` route from a `direct` one (routeOf). */
+export interface PrRecord { number: number; mergedAt: string | null; headSha: string; marks: Mark[]; reviewed: boolean }
 /** A commit on main that takes merged PRs back: `git revert`, or rollback-pr.ts's tree replacement. */
 export interface Revert { sha: string; at: string; reverted: number[] }
 export interface Row {
@@ -53,7 +62,8 @@ export function parseMarks(comments: { body: string; created_at: string }[]): Ma
     if ((m = MERGE_ASK.exec(c.body))) mark = { kind: "ask", kinds: kindsOf(m[1]!), sha: m[2]!, at: c.created_at };
     else if ((m = MERGE_ANSWER.exec(c.body))) mark = { kind: m[1] as "yes" | "no", kinds: kindsOf(m[2]!), sha: m[3]!, at: c.created_at };
     else if ((m = RECHECK_PASS.exec(c.body))) mark = { kind: "recheck", kinds: [m[1] as MergeKind], sha: m[2]!, at: c.created_at };
-    if (mark && mark.kinds.length > 0) marks.push(mark);
+    else if ((m = POST_AUDIT.exec(c.body))) mark = { kind: "post-audit", kinds: [], sha: m[2]!, at: c.created_at, verdict: m[1] as "pass" | "finding" };
+    if (mark && (mark.kind === "post-audit" || mark.kinds.length > 0)) marks.push(mark);
   }
   return marks;
 }
@@ -98,8 +108,16 @@ const median = (xs: number[]): number | null => {
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 };
 
+export type Route = "recheck" | "direct" | "review";
+
+/** recheck (a kind lifted by a recheck of the merged head, no yes) → direct (no main review mark: nobody read it) → review. */
+export function routeOf(pr: PrRecord): Route {
+  if (RECHECK_KINDS.some((k) => recheckMerged(pr, k))) return "recheck";
+  return pr.reviewed ? "review" : "direct";
+}
+
 /** Merged with this kind lifted by a recheck: its `[recheck] pass` is of the merged head, and no user's yes covered it. */
-function recheckMerged(pr: PrRecord, kind: MergeKind): boolean {
+export function recheckMerged(pr: PrRecord, kind: MergeKind): boolean {
   const marks = pr.marks.filter((m) => m.kinds.includes(kind));
   return pr.mergedAt !== null && marks.some((m) => m.kind === "recheck" && m.sha === pr.headSha) && !marks.some((m) => m.kind === "yes");
 }
@@ -162,14 +180,40 @@ export function formatGaps(g: Gaps): string[] {
   return parts.length ? [`印の欠け: ${parts.join(" / ")}`] : [];
 }
 
+/** One route's line of the audit (PBI #4838): the PRs the audit read in the period, how many it found something in, and the rate. */
+export interface AuditRow { route: Route; sampled: number; findings: number; rate: number }
+
+export const ROUTES: Route[] = ["review", "direct", "recheck"];
+
+/** A route with nothing sampled is a row of 0 (a route nobody takes yet still shows). A PR counts once, by its latest `[post-audit]` mark in the period. */
+export function auditRows(prs: PrRecord[], period: { since: string; until: string }): AuditRow[] {
+  return ROUTES.map((route) => {
+    let sampled = 0;
+    let findings = 0;
+    for (const pr of prs) {
+      const last = pr.marks.filter((m) => m.kind === "post-audit" && m.at >= period.since && m.at < period.until).at(-1);
+      if (!last || routeOf(pr) !== route) continue;
+      sampled++;
+      if (last.verdict === "finding") findings++;
+    }
+    return { route, sampled, findings, rate: sampled === 0 ? 0 : findings / sampled };
+  });
+}
+
+/** `監査 <owner/name> <通り方> 抜き取り N / finding N / 率 N%`, one line per route. */
+export function formatAudit(repo: string, rows: AuditRow[]): string[] {
+  return rows.map((r) => `監査 ${repo} ${r.route} 抜き取り ${r.sampled} / finding ${r.findings} / 率 ${Math.round(r.rate * 1000) / 10}%`);
+}
+
 /** How far back the proposals look (a recheck merge taken back is rare: a week is too few). */
 export const LOOKBACK_DAYS = 90;
 
-/** evidence: the PRs behind the proposal; reverts: the commits that took them back. */
-export type Proposal = { kind: MergeKind; evidence: number[]; reverts: string[] };
+/** evidence: the PRs behind the proposal; reverts: the commits that took them back; audited: of evidence, those the audit found something in. */
+export type Proposal = { kind: MergeKind; evidence: number[]; reverts: string[]; audited: number[] };
 
 /**
- * Against merge-gate's split now: a recheck kind with a recheck merge that was taken back → back to asking (one is
+ * Against merge-gate's split now: a recheck kind with a recheck merge that was taken back, or that the post-merge audit
+ * found something in (`[post-audit] finding`, posted in the window; the same weight as a revert) → back to asking (one is
  * enough). Only what happened in `window` (LOOKBACK_DAYS up to the table's --until) counts. Security, the asked kinds
  * (`security:<group>`), is never proposed (PBI #752: the user always answers it; PBI #1873: moving a group is the user's call).
  */
@@ -181,9 +225,12 @@ export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: s
   const takenBack = new Set(inTime.flatMap((r) => r.reverted));
   const out: Proposal[] = [];
   for (const kind of RECHECK_KINDS) {
-    const back = prs.filter((p) => p.mergedAt !== null && inWindow(p.mergedAt) && recheckMerged(p, kind) && takenBack.has(p.number)).map((p) => p.number);
+    const found = (p: PrRecord) => p.marks.some((m) => m.kind === "post-audit" && m.verdict === "finding" && inWindow(m.at));
+    const lifted = prs.filter((p) => p.mergedAt !== null && inWindow(p.mergedAt) && recheckMerged(p, kind));
+    const back = lifted.filter((p) => takenBack.has(p.number) || found(p)).map((p) => p.number);
     const by = inTime.filter((r) => r.reverted.some((n) => back.includes(n))).map((r) => r.sha);
-    if (back.length > 0) out.push({ kind, evidence: back, reverts: by });
+    const audited = lifted.filter((p) => found(p)).map((p) => p.number);
+    if (back.length > 0) out.push({ kind, evidence: back, reverts: by, audited });
   }
   return out.sort((a, b) => MERGE_KINDS.indexOf(a.kind) - MERGE_KINDS.indexOf(b.kind));
 }
@@ -201,7 +248,7 @@ export function formatProposals(ps: Proposal[]): string[] {
 }
 
 const proposalText = (p: Proposal) =>
-  `${p.kind} を聞くへ（再チェックで自動マージして戻された: ${p.evidence.map((n) => `#${n}`).join(", ")}。戻したコミット: ${p.reverts.map((x) => x.slice(0, 7)).join(", ")}）`;
+  `${p.kind} を聞くへ（再チェックで自動マージして戻された${p.audited.length > 0 ? " / 監査の指摘" : ""}: ${p.evidence.map((n) => `#${n}`).join(", ")}${p.reverts.length > 0 ? `。戻したコミット: ${p.reverts.map((x) => x.slice(0, 7)).join(", ")}` : ""}）`;
 
 /** The request Issue for the proposals, or null. The same proposals always get the same title (alreadyFiled compares it). */
 export function requestFor(ps: Proposal[], source: { date: string }): { title: string; body: string } | null {
@@ -243,14 +290,14 @@ export class RunError extends Error {
   }
 }
 
-async function spawnRun(cmd: string[]): Promise<string> {
+export async function spawnRun(cmd: string[]): Promise<string> {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   if (code !== 0) throw new RunError(`${cmd.slice(0, 3).join(" ")} failed (exit ${code}): ${err.trim()}`, code);
   return out;
 }
 
-const ANY_MARK = [MERGE_ASK, MERGE_ANSWER, RECHECK_PASS];
+const ANY_MARK = [MERGE_ASK, MERGE_ANSWER, RECHECK_PASS, POST_AUDIT];
 
 /**
  * The PRs merged on or after `from` (a UTC day). Search answers 1,000 results at most and may say a page is incomplete. So
@@ -311,6 +358,7 @@ export async function readHistory(since: string, run: Run = spawnRun, repo = cur
     const comments = jsonLines<Comment>(await run(["gh", "api", `repos/${repo}/issues/${n}/comments`, "--paginate", "-q", ".[] | {body, created_at, author_association}"]));
     const marks = parseMarks(comments.filter(isMark));
     if (marks.length === 0) continue;
+    const reviewed = comments.some((c) => MARK_AUTHORS.includes(c.author_association) && REVIEW.test(c.body));
     let pull: { merged_at: string | null; head: { sha: string } };
     try {
       pull = JSON.parse(await run(["gh", "api", `repos/${repo}/pulls/${n}`]));
@@ -318,8 +366,16 @@ export async function readHistory(since: string, run: Run = spawnRun, repo = cur
       if (/HTTP 404/.test((e as Error).message)) continue;
       throw e;
     }
-    prs.push({ number: n, mergedAt: pull.merged_at, headSha: pull.head.sha, marks });
+    prs.push({ number: n, mergedAt: pull.merged_at, headSha: pull.head.sha, marks, reviewed });
   }
+  const { commits, prOf } = repo === currentRepo() ? await localCommits(since, run, repo) : await remoteCommits(since, run, repo);
+  return { prs, reverts: parseReverts(commits, (s) => prOf.get(s) ?? []) };
+}
+
+type Commits = { commits: { sha: string; at: string; message: string }[]; prOf: Map<string, number[]> };
+
+/** The repository this clone is of: main's commits from `git log`, a short sha resolved in the clone. */
+async function localCommits(since: string, run: Run, repo: string): Promise<Commits> {
   await run(["git", "fetch", "-q", "origin", "main"]);
   const log = await run(["git", "log", "origin/main", `--since=${since}`, "--format=%H%x09%cI%x09%B%x00"]);
   const commits = log.split("\0").map((x) => x.replace(/^\n/, "")).filter(Boolean).map((x) => {
@@ -349,7 +405,31 @@ export async function readHistory(since: string, run: Run = spawnRun, repo = cur
     const pulls = JSON.parse(await run(["gh", "api", `repos/${repo}/commits/${sha}/pulls`])) as { number: number }[];
     prOf.set(short, pulls.map((p) => p.number));
   }
-  return { prs, reverts: parseReverts(commits, (s) => prOf.get(s) ?? []) };
+  return { commits, prOf };
+}
+
+/** Another repository (`--repo`): this clone has no such history, so the default branch's commits come from the API (REST). */
+async function remoteCommits(since: string, run: Run, repo: string): Promise<Commits> {
+  const out = await run(["gh", "api", "-X", "GET", `repos/${repo}/commits`, "-f", `since=${since}`, "-f", "per_page=100", "--paginate",
+    "-q", ".[] | {sha, at: .commit.committer.date, message: .commit.message}"]);
+  const commits = out.split("\n").filter(Boolean).map((l) => JSON.parse(l) as { sha: string; at: string; message: string });
+  const prOf = new Map<string, number[]>();
+  for (const short of new Set(commits.flatMap((c) => revertedShas(c.message)))) {
+    // a short sha resolves in the API too; one that is no commit of the repository (404, a branch-only commit) or is not
+    // an ancestor of the default branch took nothing merged back. compare's status: ahead / identical = an ancestor
+    let sha: string;
+    try {
+      sha = (await run(["gh", "api", `repos/${repo}/commits/${short}`, "-q", ".sha"])).trim();
+      const status = (await run(["gh", "api", `repos/${repo}/compare/${sha}...HEAD`, "-q", ".status"])).trim();
+      if (status !== "ahead" && status !== "identical") continue;
+    } catch (e) {
+      if (/HTTP (404|422)/.test((e as Error).message)) continue;
+      throw e;
+    }
+    const pulls = JSON.parse(await run(["gh", "api", `repos/${repo}/commits/${sha}/pulls`])) as { number: number }[];
+    prOf.set(short, pulls.map((p) => p.number));
+  }
+  return { commits, prOf };
 }
 
 const DAY = 86_400_000;
@@ -379,14 +459,21 @@ export async function main(
 ): Promise<number> {
   let code = 0;
   let ps: Proposal[] = [];
+  let other = false;
   try {
     const p = period(args, now);
+    const i = args.indexOf("--repo");
+    // `--repo` without a value is an error, not the current repository
+    const repo = i < 0 ? currentRepo() : args[i + 1] ?? "";
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("--repo は owner/name");
+    other = repo !== currentRepo();
     // the proposals look back LOOKBACK_DAYS from the table's end, so a past --until gives that time's proposals
     const lookback = new Date(Date.parse(p.until) - LOOKBACK_DAYS * DAY).toISOString();
-    const { prs, reverts } = await readHistory(p.since < lookback ? p.since : lookback, run);
+    const { prs, reverts } = await readHistory(p.since < lookback ? p.since : lookback, run, repo);
     console.log(`${p.since.slice(0, 10)}〜${new Date(Date.parse(p.until) - DAY).toISOString().slice(0, 10)}`);
     for (const line of format(tally(prs, reverts, p))) console.log(line);
     for (const line of formatGaps(gaps(prs, p))) console.log(line);
+    for (const line of formatAudit(repo, auditRows(prs, p))) console.log(line);
     ps = proposals(prs, reverts, { since: lookback, until: p.until });
     for (const line of formatProposals(ps)) console.log(line);
     code = ps.length > 0 ? 1 : 0;
@@ -395,7 +482,10 @@ export async function main(
     return 2;
   }
   const req = requestFor(ps, { date: day(now) });
-  if (args.includes("--file-request")) {
+  if (args.includes("--file-request") && other) {
+    // the request goes to this repository's backlog: a proposal about another repository's merges is not filed here
+    console.log("要望: 別のリポジトリの集計なので起票しない");
+  } else if (args.includes("--file-request")) {
     try {
       console.log(filingLine(req ? await file(req) : null));
     } catch (e) {

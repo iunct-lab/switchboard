@@ -1,4 +1,5 @@
 import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskQuestion, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ScheduleResult, StopSummary, Task } from "@switchboard/protocol";
+import { personWait } from "@switchboard/protocol";
 import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
 import { isAnswered, isUnblocked, priorityRank, type GhRunner } from "./backlog.ts";
@@ -559,7 +560,7 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     // a stage Task's check is gone once another stage Task of its Issue started after it stopped: the work went on past it
     const n = issueOf(t);
     const superseded = n !== null && tasks.some((o) => o.id !== t.id && o.workspaceId === t.workspaceId && issueOf(o) === n && o.createdAt > t.updatedAt);
-    if (t.outcome === "needs_action" && t.reviewedAt === null && t.status !== "running" && t.status !== "idle" && !superseded) {
+    if (!superseded && personWait(t, input.stops(t)[0] ?? null) === "needs") {
       // the check is the question tool's questions, and only those: what the reply's text says makes none
       const turn = input.lastTurnQuestions(t.id);
       if (turn?.questions.length) {
@@ -583,7 +584,7 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
           state: "open",
           at: t.updatedAt,
           changedAt: t.updatedAt,
-          reason: "運用の確認",
+          reason: "質問",
           next: `Task「${t.title}」の続き`,
           source: { label: "Task の質問ツールの問い", url: null, taskId: t.id },
           route: "task",

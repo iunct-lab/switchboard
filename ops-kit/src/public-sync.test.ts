@@ -816,6 +816,11 @@ describe("public-sync", () => {
     commit("docs: whole names");
     const words = "a document names a path the sync leaves out (fix the line, or name the path in publicSync.allowRefs):\nREADME.md:3 private/計画.md\nREADME.md:4 private/plan+draft.md";
     expect(() => check({ ...opts({ exclude: ex, allowRefs: ["private/plan", "private/plan.md"] }), source: "HEAD" }, run)).toThrow(words);
+    // Japanese text directly after an allowRefs name is outside the name; `private/計画.md` and `private/plan+draft.md` still hit
+    write("README.md", "# App\n\nsee private/CLAUDE.mdに書く。\nand `private/計画.md`。\nand private/plan+draft.md.\n");
+    commit("docs: allowRefs then Japanese");
+    const words2 = "a document names a path the sync leaves out (fix the line, or name the path in publicSync.allowRefs):\nREADME.md:4 private/計画.md\nREADME.md:5 private/plan+draft.md";
+    expect(() => check({ ...opts({ exclude: ex, allowRefs: ["private/CLAUDE.md"] }), source: "HEAD" }, run)).toThrow(words2);
   });
 
   test("a tree stop gets the stale-source line only when origin/main's tree, by origin/main's own options, passes check", () => {

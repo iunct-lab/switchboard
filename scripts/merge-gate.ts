@@ -131,7 +131,7 @@ const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;
 
 const TESTS = ["**/*.test.ts", "scripts/*-e2e.ts"].map((p) => new Bun.Glob(p));
 const DOCS = ["docs/**", "**/*.md"].map((p) => new Bun.Glob(p));
-const REVIEW = /^\[(codex|claude)\] review/;
+export const REVIEW = /^\[(codex|claude)\] review/;
 /** Only these comment authors' marks count (review, [local-ci], [recheck]): on a public --repo anyone can comment. */
 export const MARK_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
 

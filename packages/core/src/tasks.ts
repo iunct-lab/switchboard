@@ -409,6 +409,13 @@ export class TaskManager {
     return `空きメモリが少ない（空き ${Math.floor(mem.free / 1048576)} MB / 下限 ${Math.ceil(mem.floor / 1048576)} MB）が、安全弁（${Math.ceil(mem.safety / 1048576)} MB）以上なので続けます`;
   }
 
+  /** Why the queue waits: null = nothing queued or no block (the memory is not read for an empty queue), "memory" = free memory below the safety valve, "slot" = the run count. */
+  queueWait(): "slot" | "memory" | null {
+    if (!this.db.listQueuedTasks()[0]) return null;
+    const block = this.slotBlock();
+    return block === null ? null : block.memory ? "memory" : "slot";
+  }
+
   /** How many more Tasks may start now (0 while the memory is short too). */
   freeSlots(): number {
     return this.slotBlock() === null ? Math.max(0, this.maxRunners() - this.occupied()) : 0;

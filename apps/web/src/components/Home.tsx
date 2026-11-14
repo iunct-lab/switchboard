@@ -5,7 +5,7 @@ import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.t
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
-import { activeLabel, attentionGroups, isActive, type AttentionGroup, needsAttention, outcomeDotClass, outcomeLabel } from "../attention.ts";
+import { activeLabel, attentionGroups, isActive, type AttentionGroup, outcomeDotClass, outcomeLabel } from "../attention.ts";
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
@@ -272,7 +272,10 @@ export function Home(props: {
   const stuck = useMemo(() => stuckSchedules(schedules), [schedules]);
   // the first ones (#4066): 60 rows pushed the cost and the reports five screens down on a phone
   const [allAttention, setAllAttention] = useState(false);
-  const recent = useMemo(() => props.tasks.filter((t) => !isActive(t) && !needsAttention(t)).slice(0, 6), [props.tasks]);
+  const recent = useMemo(() => {
+    const listed = new Set([...needs.flatMap((g) => g.tasks), ...waiting.map((w) => w.task)].map((t) => t.id));
+    return props.tasks.filter((t) => !isActive(t) && !listed.has(t.id)).slice(0, 6);
+  }, [props.tasks, needs, waiting]);
 
   // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
   const offRunners = unavailableNotices(props.health?.runners);

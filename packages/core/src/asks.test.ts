@@ -25,7 +25,7 @@ const item = (over: Partial<BacklogItem>): BacklogItem => ({
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
   key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
-  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, lastAnswer: null, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
 });
 
 const DECISION = ["## 判断待ち", "**問い**: どちらの読みで作るか", "**選択肢**:", "- A: 既存の画面を置き換える — 影響: URL はそのまま", "- B: 新しい画面 — 影響: Rail が増える", "**推奨**: A — 画面を増やさない", "**止めた場所**: Task #9"].join("\n");
@@ -208,7 +208,7 @@ describe("grants", () => {
     expect(grantOfChoice("A: 登録しない — 影響: なし")).toBeNull();
     expect(grantOfChoice("A: x — 許可：全角の区切り")).toBe("全角の区切り");
     const [check] = fromTasks(task(), [], "定期実行を登録してよいか", OPTIONS);
-    expect(check).toMatchObject({ kind: "check", grant: null, answers: ["questions"] });
+    expect(check).toMatchObject({ kind: "check", reason: "質問", grant: null, answers: ["questions"] });
     const qs = check!.questions;
     expect(questionsReply(qs, [{ choices: ["B: 登録する (Recommended)"] }])).toBe(`- 定期実行を登録してよいか: B: 登録する (Recommended) — 許可: ${GRANT}`);
     expect(questionsReply(qs, [{ choices: ["A: 登録しない"] }])).toBe("- 定期実行を登録してよいか: A: 登録しない");
@@ -476,6 +476,16 @@ describe("asksFromTasks", () => {
     const list = asksFromTasks({ approvals: [], tasks: [task({ outcome: "needs_action", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW });
     const check = dedupeAsks(list).find((a) => a.kind === "check")!;
     expect(check).toMatchObject({ answers: ["questions"], blockers: [] });
+  });
+
+  test("a check waits on personWait: a depends stop after the question makes no check", () => {
+    const asked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "needs_action", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
+    expect(asked([])).toBe(true);
+    expect(asked([stop({ reason: "depends", next: "wait", conditions: [{ key: "ci", value: "success", met: false }] })])).toBe(false);
+    // a decision stop the person already answered asks nothing again once the Task ended done
+    const doneAsked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "done", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
+    expect(doneAsked([stop({ reason: "decision" })])).toBe(true);
+    expect(doneAsked([stop({ reason: "decision", answered: true, lastAnswer: { ref: "seq:9", at: NOW } })])).toBe(false);
   });
 
   test("a resumeAt in the past is the resume after an interruption, its condition met", () => {

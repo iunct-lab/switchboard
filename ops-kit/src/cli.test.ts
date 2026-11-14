@@ -381,7 +381,7 @@ test("lint without ops.config.json checks a workspace without GitHub with the te
   const task = "## 親 PBI\n#2\n## やること\nx\n## 手順\nx\n## 検証\nx\n## 完了条件\nx\n";
   const issue = { state: "OPEN", stateReason: null, updatedAt: "", parent: null, subIssues: [] as number[] };
   const records = {
-    workspaceId: "ws_local", service: "app", repository: "ws_local", project: { owner: "app", number: 0 }, fetchedAt: 1, unread: [], pulls: [],
+    workspaceId: "ws_local", service: "app", repository: "ws_local", project: { owner: "app", number: 0 }, fetchedAt: 1, unread: [], pulls: [], comments: [],
     issues: [
       { ...issue, number: 2, title: "PBI: x", body: pbi, labels: ["type:pbi"], subIssues: [3], fields: { Status: "Ready", Area: "app", Kind: "feature", Priority: "P1", "Story Points": 5 } },
       { ...issue, number: 3, title: "Task: x", body: task, labels: ["type:task"], parent: 2, fields: { Status: "Backlog" } },

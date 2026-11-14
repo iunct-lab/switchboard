@@ -254,7 +254,7 @@ try {
   await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await open();
   const before = await until(async () => { const g = await groups(); return g.person?.length === 7 ? g : null; }, "seven of the person's");
-  assert(same(before.person, ["ツール承認", "ツール承認", "利用者確認", "利用者確認", "実装の判断", "実装の判断", "運用の確認"]), `person: ${JSON.stringify(before.person)}`);
+  assert(same(before.person, ["ツール承認", "ツール承認", "利用者確認", "利用者確認", "実装の判断", "実装の判断", "質問"]), `person: ${JSON.stringify(before.person)}`);
   assert(same(before.auto, ["依存待ち", "停止"]), `auto: ${JSON.stringify(before.auto)}`);
   assert(same(before.resolved, ["停止"]), `resolved: ${JSON.stringify(before.resolved)}`);
   assert(await evaluate(`document.querySelector('.ask-group-auto').textContent.includes('操作は要りません')`), "the automatic group says no action is needed");
@@ -340,7 +340,7 @@ try {
   await imported(true);
   await evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '再読込').click()`);
   const after = await until(async () => { const g = await groups(); return g.answered?.includes("実装の判断") ? g : null; }, "#306 is answered");
-  assert(same(after.person, ["ツール承認", "利用者確認", "利用者確認", "実装の判断", "運用の確認"]), `person after: ${JSON.stringify(after.person)}`);
+  assert(same(after.person, ["ツール承認", "利用者確認", "利用者確認", "実装の判断", "質問"]), `person after: ${JSON.stringify(after.person)}`);
   assert(same(after.answered, ["ツール承認", "実装の判断"]), `answered: ${JSON.stringify(after.answered)}`);
   assert(same(after.resolved, ["停止", "停止"]), `resolved after: ${JSON.stringify(after.resolved)}`);
   report.after = after;
@@ -630,7 +630,7 @@ stageOf(ci, 304);
   report.policies390 = { form: w390, list: wList };
 
   // #4786: a question tool's question on its card at 390 — once, line breaks kept, no 次回も使う form, nothing sideways
-  const c390 = await checkTask("390 の運用の確認", "checkmulti");
+  const c390 = await checkTask("390 の質問", "checkmulti");
   await open();
   await cardOf(`check:${c390}:`);
   await evaluate(`${card(`check:${c390}:`)}.scrollIntoView()`);

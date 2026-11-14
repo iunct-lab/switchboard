@@ -1163,6 +1163,9 @@ export type ResourceRun = z.infer<typeof ResourceRun>;
 /** A job waiting for a slot (`slot`) or for the free memory to rise above the floor (`memory`). `memoryOnly`: it takes no slot, so it does not count in when the slots are free. */
 export const ResourceWait = z.object({ pid: z.number(), name: z.string(), cwd: z.string(), taskId: z.string().nullable(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.enum(["slot", "memory"]), memoryOnly: z.boolean(), typicalMs: z.number().nullable(), samples: z.number() });
 export type ResourceWait = z.infer<typeof ResourceWait>;
+/** A Task that waits for free memory (not for a run slot): the Task start's own judgment, in the queue's order. */
+export const TaskWait = z.object({ taskId: z.string(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.literal("memory") });
+export type TaskWait = z.infer<typeof TaskWait>;
 /** What a Task can ask the daemon to run for it: the kinds are fixed and the daemon builds their argv — no command is taken. */
 export const JobKind = z.enum(["local-ci", "review"]);
 export type JobKind = z.infer<typeof JobKind>;
@@ -1205,9 +1208,11 @@ export type OpsJob = z.infer<typeof OpsJob>;
  * waiting for one would be done (`beside` runs and `memoryOnly` waits take no slot and are left out) by their kinds' medians (null: nothing running or waiting); `unknown` runs had no median and are left out.
  */
 export const OpsResources = z.object({
-  memory: z.object({ availableBytes: z.number(), totalBytes: z.number(), swapUsedBytes: z.number(), floorBytes: z.number() }).nullable(),
+  memory: z.object({ availableBytes: z.number(), totalBytes: z.number(), swapUsedBytes: z.number(), floorBytes: z.number(), safetyBytes: z.number() }).nullable(),
   slots: z.object({ max: z.number(), running: z.array(ResourceRun), beside: z.array(ResourceRun), waiting: z.array(ResourceWait) }),
   eta: z.object({ etaMs: z.number().nullable(), unknown: z.number() }),
+  /** The Tasks waiting for free memory (below the start's safety valve), in the queue's order. A wait for the run count is not in it. */
+  taskWaits: z.array(TaskWait),
   consumers: z
     .object({
       at: z.number(),
@@ -1720,6 +1725,8 @@ export const StopSummary = z.object({
   firstAt: z.number(),
   lastAt: z.number(),
   lastAnswer: StopRecord.shape.answer,
+  /** The newest stop has the person's answer, given after it came (one the daemon saw them give, to this series): the person already acted on it. An answer carried over from an earlier stop is not one. */
+  answered: z.boolean(),
   /** The newest stop's grant. */
   grant: z.string().nullable(),
   conditions: z.array(StopCondition),
@@ -1731,10 +1738,10 @@ export const StopSummary = z.object({
 export type StopSummary = z.infer<typeof StopSummary>;
 
 /**
- * The last stop of a Task, for the 要対応 list: the newest series' key, reason, state, conditions and how many
- * times it stopped. Read from the `stop.record` events by `GET /api/tasks/stops`; it is not on `Task`.
+ * The last stop of a Task, for the 要対応 list: the newest series' key, reason, state, conditions, how many
+ * times it stopped and whether the person answered it. Read from the `stop.record` events by `GET /api/tasks/stops`; it is not on `Task`.
  */
-export const TaskStopMark = StopSummary.pick({ key: true, reason: true, state: true, conditions: true, count: true });
+export const TaskStopMark = StopSummary.pick({ key: true, reason: true, state: true, conditions: true, count: true, answered: true });
 export type TaskStopMark = z.infer<typeof TaskStopMark>;
 
 /** One session log the daemon follows: which task it feeds and how far it has been read. */
@@ -2600,3 +2607,41 @@ export const InterventionView = z.object({
   windows: z.array(z.object({ current: InterventionWindow, previous: InterventionWindow })),
 });
 export type InterventionView = z.infer<typeof InterventionView>;
+
+/** What a workspace's Tasks of a period were for: the Tasks created in it and the ledger cost spent in it, by the kind of work. The four add up to the row's `tasks` and `costUsd`. */
+const BalanceKind = z.object({ tasks: z.number(), costUsd: z.number() });
+export const BalanceKinds = z.object({
+  /** The Issue's Kind is `feature`. */
+  build: BalanceKind,
+  /** The Kind is `bug`, `deps`, `chore`, `tech-watch` or `eval`. */
+  maintain: BalanceKind,
+  /** The Issue carries the `flow-improvement` label. */
+  selfImprove: BalanceKind,
+  /** No stored Issue to read (no Issue, or not stored), no Kind, or a Kind outside the six above. */
+  unlinked: BalanceKind,
+});
+export type BalanceKinds = z.infer<typeof BalanceKinds>;
+
+/**
+ * One workspace's balance over the last 7 or 30 days: what its Tasks spent (`costUsd` is the quota used, `costShare` its share of
+ * every workspace's; `billedUsd` the API charge), how often the person stepped in, and what reached the end (`deliveredPbis`, the
+ * PBIs closed in exactly the period; `net` the PBIs and requests opened minus closed, summed over the weeks of the growth chart from
+ * the Monday on or before the period's start, so it can reach up to 6 days further back than `deliveredPbis`). A workspace whose Issues
+ * are not stored has no `interventions` / `deliveredPbis` / `net` (null, not 0: its interventions cannot be placed), and a ratio over no
+ * delivered PBI is null.
+ */
+export const BalanceRow = z.object({
+  workspaceId: z.string(),
+  name: z.string(),
+  tasks: z.number(),
+  costUsd: z.number(),
+  costShare: z.number(),
+  billedUsd: z.number(),
+  interventions: z.number().nullable(),
+  deliveredPbis: z.number().nullable(),
+  net: z.number().nullable(),
+  costPerPbi: z.number().nullable(),
+  interventionsPerPbi: z.number().nullable(),
+  kinds: BalanceKinds,
+});
+export type BalanceRow = z.infer<typeof BalanceRow>;

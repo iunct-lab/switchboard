@@ -6,7 +6,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { LoadKind, OpsResources, RunVerdict } from "@switchboard/protocol";
-import { type HeavyHistoryEntry, heavyHistoryPath, readHeavyHistory, readHeavyState } from "../../../ops-kit/src/heavy.ts";
+import { type HeavyHistoryEntry, heavyConfigPath, heavyHistoryPath, readHeavyHistory, readHeavyState } from "../../../ops-kit/src/heavy.ts";
 import type { Db } from "./db.ts";
 import { JOBS_KEEP_MS } from "./jobs.ts";
 
@@ -29,6 +29,18 @@ export function readMemInfo(procRoot = "/proc"): { availableBytes: number; total
 }
 
 const MB = 1024 * 1024;
+
+/** The default of `taskMinFreeMb` in `~/.config/ops-kit/heavy.json`: below this much free memory a Task start is held back. */
+export const TASK_MIN_FREE_MB_DEFAULT = 300;
+
+/** The Task start's safety valve in MB (`taskMinFreeMb`); the default where the file or the value cannot be read. Read apart from `minFreeMb`: a wrong one does not spoil the other. */
+export function readTaskMinFreeMb(home: string): number {
+  try {
+    const v = (JSON.parse(readFileSync(heavyConfigPath(home), "utf8")) as { taskMinFreeMb?: unknown }).taskMinFreeMb;
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  } catch {}
+  return TASK_MIN_FREE_MB_DEFAULT;
+}
 
 /** A run is long past this many times its kind's median. Not a setting (the PBI's 決定ログ). */
 export const LONG_RATIO = 2;
@@ -116,7 +128,7 @@ function typicalFromHistory(home: string): Map<string, Typical> {
   return typical;
 }
 
-export function opsResources(db: Db, opts: { home: string; procRoot?: string; now?: number }): OpsResources {
+export function opsResources(db: Db, opts: { home: string; procRoot?: string; now?: number; queueWait?: () => "slot" | "memory" | null }): OpsResources {
   const heavy = readHeavyState(opts.home);
   const typical = typicalFromHistory(opts.home);
   const now = opts.now ?? Date.now();
@@ -140,7 +152,7 @@ export function opsResources(db: Db, opts: { home: string; procRoot?: string; no
     return titles.get(id)!;
   };
   return {
-    memory: mem && { ...mem, floorBytes: heavy.config.minFreeMb * MB },
+    memory: mem && { ...mem, floorBytes: heavy.config.minFreeMb * MB, safetyBytes: readTaskMinFreeMb(opts.home) * MB },
     slots: {
       max: heavy.config.max,
       running: heavy.running.map((r) => ({ ...r, taskTitle: title(r.taskId), ...of(r.name), verdict: verdict(now - Date.parse(r.startedAt), of(r.name)) })),
@@ -148,6 +160,9 @@ export function opsResources(db: Db, opts: { home: string; procRoot?: string; no
       waiting: heavy.waiting.map((w) => ({ ...w, memoryOnly: w.memoryOnly === true, taskTitle: title(w.taskId), ...of(w.name) })),
     },
     eta: estimateDone(heavy.running, heavy.waiting, heavy.config.max, typical, now),
+    // the Tasks the start holds back for memory: the reason is TaskManager's own (`slotBlock`), not compared again here
+    taskWaits:
+      opts.queueWait?.() === "memory" ? db.listQueuedTasks().map((t) => ({ taskId: t.id, taskTitle: title(t.id), queuedAt: new Date(t.queuedAt ?? t.createdAt).toISOString(), reason: "memory" as const })) : [],
     consumers: latest?.ts
       ? { at: latest.ts, groups: rows.map((g) => ({ taskId: g.task_id, taskTitle: title(g.task_id), owner: g.owner, kind: g.kind, rssBytes: g.rss, procs: g.procs })) }
       : null,

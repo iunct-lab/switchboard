@@ -123,6 +123,18 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
 });
 
+test("cross-runner-review: step 4 appends the fix commits' diff to fix.range-diff after the range-diff (a fix commit added on top shows only as one line in range-diff)", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const step = text.slice(text.indexOf("## 4. 修正後の見直し"));
+  const rangeDiff = step.indexOf('> "$M/fix.range-diff"');
+  const diff = step.indexOf('git -C "$R" diff "$OLD" "$NEW"; } >> "$M/fix.range-diff"');
+  // a heading separates the appended diff from the range-diff: after a rebase the diff also carries base changes
+  expect(step).toContain("printf '\\n# git diff %s %s");
+  expect(rangeDiff).toBeGreaterThan(-1);
+  expect(diff).toBeGreaterThan(rangeDiff);
+  expect(diff).toBeLessThan(step.indexOf('> "$M/prompt-fix.md"'));
+});
+
 test("cross-runner-review: the Intent check also asks whether design document changes are in scope", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   expect(text).toContain("design documents");
@@ -143,42 +155,71 @@ test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with
   expect(text).toContain("printf '[%s] review%s\\n\\n' \"$who\" \"$note\"");
 });
 
-/** cross-runner-review's step 1 before the clone, run as written with /tmp moved under `root` and a fake gh / df first on PATH. */
+/** cross-runner-review's step 1 before the clone, run as written with REVIEW_ROOT moved under `root` and a fake gh / df first on PATH. */
 function runCloneSweep(availKb: number) {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const lines = text.split("\n");
   const from = lines.findIndex((l) => l.startsWith("NAME="));
-  const to = lines.findIndex((l, i) => i > from && l.includes("du -sk /tmp/*"));
+  const to = lines.findIndex((l, i) => i > from && l.includes("du -sk"));
   expect(from).toBeGreaterThan(-1);
   expect(to).toBeGreaterThan(from);
   const root = mkdtempSync(join(tmpdir(), "skills-sweep-"));
   const bin = join(root, "bin");
   mkdirSync(bin);
-  const tmp = join(root, "tmp");
-  mkdirSync(tmp);
+  const reviewRoot = join(root, "cache", "ops-kit", "review");
+  mkdirSync(reviewRoot, { recursive: true });
   // PR 1 merged, 2 closed, 3 open, 4: gh fails
   writeFileSync(join(bin, "gh"), `#!/bin/bash\ncase $3 in 1) echo MERGED;; 2) echo CLOSED;; 3) echo OPEN;; *) echo "not found" >&2; exit 1;; esac\n`, { mode: 0o755 });
-  writeFileSync(join(bin, "df"), `#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "tmpfs 1900000 0 ${availKb} 1% /tmp"\n`, { mode: 0o755 });
-  const dirs = ["app.review1.Abc123", "app.recheck2.Def456", "app.review3.Ghi789", "app.review4.Jkl012", "other.review1.Abc123", "app.reviewx.Mno345"];
-  for (const d of dirs) mkdirSync(join(tmp, d));
-  const block = lines.slice(from, to + 1).join("\n").replaceAll("/tmp/", `${tmp}/`); // paths only: df is faked, the STOP line keeps its words
-  const run = spawnSync("bash", ["-c", `REPO=acme/app\n${block}`], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
-  const left = readdirSync(tmp).sort();
+  // only the review root has the given free space: a check of another place (e.g. /tmp) sees 0 and stops
+  writeFileSync(join(bin, "df"), `#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\n[ "$2" = "${reviewRoot}" ] && echo "disk 1900000 0 ${availKb} 1% ${reviewRoot}" || echo "tmpfs 1900000 0 0 100% $2"\n`, { mode: 0o755 });
+  const dirs = ["app.review1", "app.recheck2", "app.review3", "app.review4", "other.review1", "app.reviewx"];
+  for (const d of dirs) mkdirSync(join(reviewRoot, d));
+  const run = spawnSync("bash", ["-c", `REPO=acme/app\n${lines.slice(from, to + 1).join("\n")}`], { encoding: "utf8", env: { ...process.env, XDG_CACHE_HOME: join(root, "cache"), PATH: `${bin}:${process.env.PATH}` } });
+  const left = readdirSync(reviewRoot).sort();
   rmSync(root, { recursive: true, force: true });
-  return { status: run.status, out: run.stdout, left };
+  return { status: run.status, out: run.stdout, left, reviewRoot };
 }
 
 test("cross-runner-review: step 1 removes only this repository's clones of merged or closed PRs", () => {
   const { status, out, left } = runCloneSweep(1_000_000);
   expect(status).toBe(0);
-  expect(left).toEqual(["app.review3.Ghi789", "app.review4.Jkl012", "app.reviewx.Mno345", "other.review1.Abc123"]);
+  expect(left).toEqual(["app.review3", "app.review4", "app.reviewx", "other.review1"]);
   expect(out).not.toContain("STOP:");
 });
 
-test("cross-runner-review: step 1 stops before cloning when /tmp has less than MIN_KB free", () => {
-  const { out } = runCloneSweep(100);
-  expect(out).toContain("STOP: /tmp の空きが 100 KB");
-  expect(out).toMatch(/^\d+\t.*other\.review1\.Abc123$/m); // du's top entries are reported
+test("cross-runner-review: step 1 stops before cloning when the review root has less than MIN_KB free", () => {
+  const { out, reviewRoot } = runCloneSweep(100);
+  expect(out).toContain(`STOP: ${reviewRoot} の空きが 100 KB`);
+  expect(out).toMatch(/^\d+\t.*other\.review1$/m); // du's top entries are reported
+});
+
+test("cross-runner-review: running the clone lines twice for one PR leaves one directory; a recheck keeps the review's clone", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("N=<PR番号>; KIND=review"));
+  expect(at).toBeGreaterThan(-1);
+  expect(lines[at + 1]).toStartWith('R="${REVIEW_ROOT:?}/${NAME:?}.$KIND$N";');
+  expect(lines[at + 1]).not.toContain("rm -rf"); // rebuilding R on resume only assigns
+  expect(lines[at + 2]).toStartWith('rm -rf "$R"');
+  const block = lines.slice(at, at + 3).map((l) => l.split("#")[0]).join("\n");
+  expect(block).not.toContain("/tmp");
+  const root = mkdtempSync(join(tmpdir(), "skills-same-pr-"));
+  try {
+    const reviewRoot = join(root, "review");
+    mkdirSync(reviewRoot);
+    // the clone itself is `gh repo clone`, which makes $R; stand in with mkdir and a file the first run left
+    const once = block.replace("N=<PR番号>;", "N=7;");
+    const recheck = once.replace("KIND=review", "KIND=recheck");
+    const script = `REVIEW_ROOT=${reviewRoot}; NAME=app\n${once}\nmkdir "$R" && touch "$R/old"\n${once}\nmkdir "$R"\nls "$R" | wc -l\n${recheck}\nmkdir "$R"`;
+    const run = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(readdirSync(reviewRoot).sort()).toEqual(["app.recheck7", "app.review7"]);
+    expect(run.stdout.trim().split("\n")).toContain("0"); // the previous run's file is gone
+    const unset = spawnSync("bash", ["-c", once], { encoding: "utf8" }); // a new shell without REVIEW_ROOT / NAME stops instead of using /
+    expect(unset.status).not.toBe(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /** A home whose `ops-kit heavy` has its own state and no memory floor. */
@@ -472,7 +513,8 @@ test("skills: a PR with a step left undone says Refs, not Closes, and no skill c
   expect(skill).toContain("後回し・改変した検証の書き方は「レビュアーへ」の「検証」と「対応表」");
   expect(rule).toContain("マージの後に書く結果コメントの行は「マージ後」と書き、数えない");
   expect(rule).toContain("`Closes` ではなく `Refs #<Task>` にし、残りの手順を Task にコメントする");
-  expect(rule).toContain("利用者の判断を待つ Task（`## 判断待ち` に回答が無い、`（利用者確認: …）` の行が残る）の PR は");
+  expect(rule).toContain("利用者の判断を待つ Task（`**進め方**: 止めて待つ` の `## 判断待ち` に回答が無い、`（利用者確認: …）` の行が残る）の PR は");
+  expect(rule).toContain("`**進め方**: 推奨で進める` の問いだけなら、推奨の案で終えたものとして `Closes` にする");
   expect(skill).toContain("未実施の手順が残る PR は `Refs #N`");
   const close: [string, string][] = [
     ["review-triage-and-merge", "PR が `Refs #<Task>` なら、Task に途中経過のコメント（マージした PR と残りの手順）を書き、Status を `In review` から `In progress` に戻して閉じない"],

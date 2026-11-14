@@ -70,6 +70,63 @@ An earlier design kept some steps on the host: the public-tree check (it reads t
 
 Unlike local-ci, which sends a fresh checkout, test-changed sends the Task's work tree as it is: `sb-offload` ships the tracked files and the untracked files that are not ignored. Do not leave a file with a secret in the work tree (keep scratch files in a `mktemp -d` directory outside it). It sends no AWS names: its build runs no public-tree check.
 
+## Lambda builds
+
+The CI build runs on the small ARM machine of the offload CI project, as a container with privileges (the build mounts a tmpfs, changes the work tree's owner and enters a new PID namespace as root). CodeBuild also has a Lambda environment (an ARM Lambda container). The question was whether the same CI image and the same steps can run there, so that the build moves to it. It cannot, and the build stays on the small machine. This section keeps what was tried, so the question is not asked again from the start.
+
+### What was tried
+
+The existing offload CI project was started by hand with start-build overrides, with no change to the template and no new project: environment type `ARM_LAMBDA_CONTAINER`, a Lambda compute type, privileged mode off, the CI image of the same tag, and a buildspec given with `--buildspec-override`. The buildspec is the project's own, with the root-only parts replaced: the work tree, the recordings and the names go under `/tmp/sb` (the one place a Lambda build can write), and the steps run through `env -i`. The CI's steps were the ones local-ci sends for a pull request (the perf steps left out), run in one build as `ciScript` writes them, except for these lines, which replace the root part and the `su -`:
+
+```bash
+mkdir -p /tmp/sb/work /tmp/sb/home /tmp/sb/tmp
+# in the steps' script: cd /tmp/sb/work; TMPDIR="$(mktemp -d /tmp/sb/tmp/t.XXXXXX)"; the install log under $TMPDIR
+env -i HOME=/tmp/sb/home PATH="$PATH" TMPDIR=/tmp/sb/tmp CI=true \
+  CHROME_BIN="${CHROME_BIN:-}" PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-}" bash /tmp/sb/ci.sh
+```
+
+The recordings were unpacked to `$HOME/.switchboard/fixtures` and the names written to `$HOME/.aws/config` as the project's buildspec does. The same steps were also run in the small build, from the same commit, to tell what is the machine's and what is the code's: the small build passed every test each time.
+
+### What a Lambda build is
+
+Measured from inside the build, not read from documentation:
+
+- It runs as an unprivileged user with no capabilities, with no-new-privileges and a seccomp filter. `unshare` and `su` are refused and nothing can be mounted.
+- The root file system is read-only; only `/tmp` is writable, and it is a disk, not a tmpfs.
+- `/dev` is a small tmpfs holding only `null`, `zero`, `full`, `random`, `urandom`, `stdin`, `stdout` and `stderr`: no `/dev/fd`, no `/dev/ptmx`, no `/dev/pts`. There is no `/etc/hostname`.
+- Process 1 is an `init` that reaps orphans, so the child-cleanup tests pass without the PID namespace and no `tini` or similar is needed in the image.
+- The build's credentials come from `AWS_CONTAINER_CREDENTIALS_FULL_URI` and the `CODEBUILD_*` variables. `env -i` drops them, as the login `su -` does on the small machine, and no step needs them, so they are not passed on.
+
+The install, the type check, the public-tree check (the names) and the tests that read recordings behave as on the small machine. The tests are not slower on the Lambda build's `/tmp` disk than in the small machine's tmpfs.
+
+### What does not run, and why it cannot be fixed without root
+
+The full test run on a Lambda build failed a few dozen tests at every size tried; the small build failed none. Each cause below is the environment's, and none has a line in a root-free script that removes it:
+
+| Cause | Tests (one example run) | Why there is no root-free fix |
+|---|---|---|
+| No `/dev/fd`: bash process substitution `<(...)` and `< <(...)` fail (`/dev/fd/63: No such file`), in the host scripts that use them and in the guard test that reads a pipe as a file | 22 | `/dev` belongs to the build's root; a link cannot be added |
+| No pseudo-terminal (`/dev/ptmx`, `/dev/pts`): the terminal tab, the Teleport and Cloud sessions and the cookie test that opens `/ws/pty` | 22 | the device nodes cannot be created or mounted |
+| No `/etc/hostname`: two tests use it as a file outside the allowed scope and expect a 403 | 2 | `/etc` is read-only |
+| `HOME` has to be under `/tmp` (the only writable place), which the code treats as a temp area, so the test of a data folder outside it fails | 1 | no writable place outside `/tmp` |
+| A process that made itself non-dumpable still has a readable `/proc/<pid>/cwd` | 1 | a property of the sandbox's kernel |
+
+Changing the tests to skip or to use other files would make the same code pass on one machine and be untested on the other for exactly the places where this repository's own code meets a terminal, a pipe and the host's files, so it was not done.
+
+### Sizes
+
+With the failures above held equal, three sizes were run on the full steps.
+
+- The largest size tried (4 GB) and 2 GB took about the same time, and 2 GB used about a third of its memory at the peak.
+- 1 GB took about a third longer than 2 GB, used a little over half of its memory at the peak, failed one test more and ended past 80% of the 15-minute limit of a Lambda build, so it is not a size to choose.
+- No size was killed by the memory limit, so the failures are not a matter of size.
+
+A Lambda build at the two larger sizes was also somewhat faster than the small machine for the same steps, but speed was not what decided it.
+
+### Decision
+
+The build stays on the small machine. The rule was: move only if every test that fails only on Lambda can be fixed without root, the time is within a fifth of the small machine's, and the build ends within 80% of the 15-minute limit. The first condition is not met (the table), so nothing else decides it. If a later change needs the build to be cheaper, the place to start is the tests in the table: each would need to run without a terminal, a `/dev/fd`, `/etc/hostname`, a `HOME` outside `/tmp` and an unreadable `/proc/<pid>/cwd` of a non-dumpable process, and a size of 2 GB is the smallest that held.
+
 ## Measuring
 
 Seconds, sizes and costs are not written here: they change with the image, the machine and the price list. To measure them, read the log of a run.

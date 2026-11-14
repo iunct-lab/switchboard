@@ -1,4 +1,4 @@
-import type { Job, JobRequest } from "@switchboard/protocol";
+import type { AgentEvent, Job, JobRequest, PricingTable, RunnerId } from "@switchboard/protocol";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -6,6 +6,7 @@ import { childEnv } from "@switchboard/adapter-claude";
 import type { Db } from "./db.ts";
 import { TASK_MARK } from "./detached.ts";
 import { readBootId } from "./ops-stops.ts";
+import { ledgerRowFor } from "./pricing.ts";
 
 /**
  * Jobs a Task asks the daemon to run for it: local CI and a review, the long waits a Task used to
@@ -66,17 +67,68 @@ export type JobDeps = {
   pendingDir?: string;
   /** Collects the results of builds that outlived their daemon (production: `spawnCollectPending`). Called once by `recoverJobs`. */
   collectPending?: () => void;
+  /** The price table a review job's usage is priced with (production: the daemon's); without it the rows are unpriced. */
+  pricing?: () => PricingTable;
   now?: () => number;
 };
+
+// codex's events go to codex.jsonl (the usage); its error events also go to the job log, so the summary a Task reads says why it failed.
+// `fromjson?` skips a line that is not JSON, so jq does not fail the pipeline (pipefail) on it.
+const CODEX_TAIL = ` < "$JOB_PROMPT" | tee "$J/codex.jsonl" | jq -rR 'fromjson? | select(.type == "error" or .type == "turn.failed") | "codex: \\(.message // .error.message // tostring)"'`;
 
 /** The argv of each kind, as `cross-runner-review` runs a review and CLAUDE.md runs local CI. */
 export function jobCommand(req: JobRequest, idleS = 900): JobCommand {
   if (req.kind === "local-ci") return { argv: ["bun", "scripts/local-ci.ts", String(req.pr), ...(req.local ? ["--local"] : [])], tail: "" };
   // a review takes no heavy slot, only waits for the memory floor (the kit README, Heavy-process slots): local CI keeps its slot
   const head = ["ops-kit", "heavy", "--memory-only", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
-  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", req.outFile, "-"], tail: ' < "$JOB_PROMPT"' };
+  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--json", "-o", req.outFile, "-"], tail: CODEX_TAIL };
   // stream-json: text output says nothing until the end, and idle-run would cut it
   return { argv: [...head, "claude", "-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
+}
+
+type UsageEvent = Extract<AgentEvent, { t: "usage" }>;
+
+const jsonLines = (path: string): Record<string, any>[] => {
+  try {
+    return readFileSync(path, "utf8").split("\n").flatMap((l) => {
+      try {
+        const o = JSON.parse(l);
+        return o && typeof o === "object" ? [o] : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+};
+const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+/**
+ * What a review job used, from the events it left (`claude.jsonl`, `codex.jsonl`), in the form the adapters give a Task's
+ * usage. Claude: one usage per model of the `result` line's `modelUsage` with the runner's own cost, as the adapter reads it
+ * (`usage` of the result when there is no `modelUsage`). Codex: the `turn.completed` usages added up (its `input_tokens`
+ * includes the cached part). An unreadable or missing file gives none.
+ */
+export function jobUsage(runner: RunnerId, jobDir: string): UsageEvent[] {
+  if (runner === "codex") {
+    const turns = jsonLines(join(jobDir, "codex.jsonl")).filter((e) => e.type === "turn.completed" && e.usage && typeof e.usage === "object");
+    if (!turns.length) return [];
+    const sum = (k: string) => turns.reduce((a, e) => a + n(e.usage[k]), 0);
+    const cached = sum("cached_input_tokens");
+    return [{ t: "usage", source: "reported", inputTokens: Math.max(0, sum("input_tokens") - cached), outputTokens: sum("output_tokens"), cacheReadTokens: cached, cacheWriteTokens: 0 }];
+  }
+  const lines = jsonLines(join(jobDir, "claude.jsonl"));
+  const result = lines.filter((e) => e.type === "result").at(-1);
+  if (!result) return [];
+  const mu = result.modelUsage && typeof result.modelUsage === "object" ? Object.entries<any>(result.modelUsage) : [];
+  if (mu.length) {
+    return mu.map(([model, v]) => ({ t: "usage", source: "reported", model, inputTokens: n(v?.inputTokens), outputTokens: n(v?.outputTokens), cacheReadTokens: n(v?.cacheReadInputTokens), cacheWriteTokens: n(v?.cacheCreationInputTokens), costUsd: n(v?.costUSD) }));
+  }
+  const u = result.usage;
+  if (!u || typeof u !== "object") return [];
+  const model = lines.find((e) => e.type === "system" && typeof e.model === "string")?.model as string | undefined;
+  return [{ t: "usage", source: "reported", model, inputTokens: n(u.input_tokens), outputTokens: n(u.output_tokens), cacheReadTokens: n(u.cache_read_input_tokens), cacheWriteTokens: n(u.cache_creation_input_tokens) }];
 }
 
 const WRAPPER = (tail: string) => `set -o pipefail; "$@"${tail}; echo $? > "$J/exit.tmp" && mv "$J/exit.tmp" "$J/exit"`;
@@ -93,11 +145,12 @@ const inside = (root: string, p: string) => {
 
 /**
  * Whether `cwd` is a checkout of the Task's repository: under the Task's folder, a worktree of it (the same Git
- * common dir), or a clone of the same origin (a review's fresh clone). Anything else is refused. This keeps a mistake
+ * common dir), or a clone of the same origin (a review's fresh clone) — the Task's, or that of a workspace registered in
+ * the app (`workspaceOrigins`: the workspaces' folders, whose origin is read). Anything else is refused. This keeps a mistake
  * (another repository's folder) from running; it is no boundary against the Task itself — a Task runs as the same OS
  * user and could run that checkout's scripts directly (the loopback owner is trusted, CLAUDE.md's premises).
  */
-export function sameRepository(taskCwd: string, cwd: string): boolean {
+export function sameRepository(taskCwd: string, cwd: string, workspaceOrigins: string[] = []): boolean {
   let a: string, b: string;
   try {
     a = realpathSync(taskCwd);
@@ -110,8 +163,11 @@ export function sameRepository(taskCwd: string, cwd: string): boolean {
   const common = (d: string) => git(d, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const ca = common(a);
   if (ca && ca === common(b)) return true;
-  const ra = remoteKey(git(a, "remote", "get-url", "origin"));
-  return !!ra && ra === remoteKey(git(b, "remote", "get-url", "origin"));
+  const rb = remoteKey(git(b, "remote", "get-url", "origin"));
+  if (!rb) return false;
+  if (rb === remoteKey(git(a, "remote", "get-url", "origin"))) return true;
+  // a clone of a repository registered in the app (an audit Task runs in one repository and reads another's PR)
+  return workspaceOrigins.some((w) => remoteKey(git(w, "remote", "get-url", "origin")) === rb);
 }
 
 /** Whether `p` (it, or else its folder, as the links resolve) is inside `root`. */
@@ -168,13 +224,25 @@ const pruneQuietly = (deps: JobDeps) => {
   }
 };
 
+/** A review's usage goes to the ledger under the Task that asked (source `job`), so what an audit cost can be told. Not readable = nothing booked; the job's end is not failed for it. */
+function recordUsage(deps: JobDeps, job: Job, jobDir: string, ts: number): void {
+  try {
+    // the job's runner and model, not the Task's: an audit Task on one runner asks for a review by the other
+    for (const u of jobUsage(job.runner!, jobDir)) deps.db.insertLedger({ ...ledgerRowFor(deps.pricing?.(), { id: job.taskId, runner: job.runner!, model: null }, u, ts), source: "job" });
+  } catch (e) {
+    console.error(`[jobs] usage of job#${job.id}: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
 function finish(deps: JobDeps, id: number): Job | null {
   const jobDir = join(deps.dir, String(id));
   const code = readExit(jobDir);
   const status = code === null ? "aborted" : code === 0 ? "pass" : "fail";
   const log = join(jobDir, "log");
   const summary = [`${status}（終了コード ${code ?? "なし"}）`, tailLines(log, 20), `ログ: ${log}`].filter(Boolean).join("\n");
-  const job = deps.db.finishJob(id, { status, exitCode: code, summary, endedAt: (deps.now ?? Date.now)() });
+  const endedAt = (deps.now ?? Date.now)();
+  const job = deps.db.finishJob(id, { status, exitCode: code, summary, endedAt });
+  if (job?.kind === "review" && job.runner) recordUsage(deps, job, jobDir, endedAt);
   pruneQuietly(deps);
   if (job) deps.onFinish?.(job);
   return job;
@@ -190,7 +258,7 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
   // relative to the daemon's own folder would be a mistake: the Task names its checkout
   if (!isAbsolute(req.cwd)) throw new JobError(`cwd must be absolute: ${req.cwd}`, 400);
   const cwd = resolve(req.cwd);
-  if (!sameRepository(task.cwd, cwd)) throw new JobError(`cwd is not a checkout of the task's repository: ${req.cwd}`, 400);
+  if (!sameRepository(task.cwd, cwd, deps.db.listWorkspaces().map((w) => w.path))) throw new JobError(`cwd is not a checkout of the task's repository: ${req.cwd}`, 400);
   const files: Record<string, string> = {};
   if (req.kind === "review") {
     const prompt = resolve(cwd, req.promptFile);

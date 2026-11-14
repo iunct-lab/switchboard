@@ -292,6 +292,11 @@ export function checkTree(tree: string, privateRepo: string, { raw, git }: Git, 
 /** A character of a path a document names: not whitespace, not a Markdown or sentence delimiter (ASCII or Japanese). */
 const PATH_CHAR = String.raw`[^\s\x60'"()<>\[\]{},;:|*#?!、。，．「」『』（）【】]`;
 
+/** An allowRefs name is meant when it is the whole name, or when Japanese text follows it directly (`private/CLAUDE.mdに書く`): that text is outside the name. */
+function allowed(name: string, allowRefs: string[]): boolean {
+  return allowRefs.some((a) => name === a || (name.startsWith(a) && /^[^\x00-\x7f]/.test(name.slice(a.length)) && /[\x00-\x7f]$/.test(a)));
+}
+
 /**
  * The lines of the tree's Markdown documents that name a path the sync leaves out (`exclude`), as `<file>:<line> <path>`:
  * a reader of the public copy cannot open it. A file entry is named by its path, a directory entry (`dir/`) by a path
@@ -302,7 +307,8 @@ export function leftOutRefs(tree: string, exclude: string[], allowRefs: string[]
   if (!exclude.length) return [];
   // a path character before the name makes it part of a longer path; one after a file entry too (but not a full stop that ends
   // the sentence). A path under a directory entry runs to whitespace or a Markdown / sentence delimiter, so `+` and non-ASCII
-  // names stay whole (`private/計画.md`, `private/plan+draft.md`) and are matched against allowRefs in full.
+  // names stay whole (`private/計画.md`, `private/plan+draft.md`) and are matched against allowRefs in full, except that
+  // Japanese text directly after an allowRefs name is outside that name.
   const names = exclude.map((e) => (e.endsWith("/") ? `${literal(e)}${PATH_CHAR}+` : `${literal(e)}(?![A-Za-z0-9_/+~@%-]|\\.[A-Za-z0-9_])`));
   const re = new RegExp(`(?<![A-Za-z0-9_./-])(?:${names.join("|")})`, "g");
   const hits: string[] = [];
@@ -310,7 +316,7 @@ export function leftOutRefs(tree: string, exclude: string[], allowRefs: string[]
     git(["show", `${tree}:${path}`]).split("\n").forEach((line, i) => {
       for (const m of line.matchAll(re)) {
         const name = m[0].replace(/\.+$/, "");
-        if (name.endsWith("/") || allowRefs.includes(name)) continue;
+        if (name.endsWith("/") || allowed(name, allowRefs)) continue;
         hits.push(`${path}:${i + 1} ${name}`);
       }
     });

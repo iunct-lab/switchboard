@@ -303,6 +303,7 @@ test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じ
   const b = answerButtons(ask({ kind: "notice", answers: ["dismiss"], question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ" }));
   expect(b.map((x) => [x.label, x.answer])).toEqual([["誤検知として閉じる", { kind: "dismiss" }]]);
   expect(KIND_LABEL.notice).toBe("お知らせ");
+  expect(KIND_LABEL.check).toBe("質問");
   expect(answerButtons(ask({ kind: "notice", answers: [] }))).toEqual([]);
 });
 

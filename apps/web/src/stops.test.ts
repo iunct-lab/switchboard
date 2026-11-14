@@ -59,7 +59,7 @@ const d = stopDisplay(${JSON.stringify(s({ count: 2, changes: [{ kind: "answer",
 console.log(JSON.stringify([d.count, d.changes, d.next, d.actions, resumeLabel({ state: "answered", resume: { state: "queued", reason: "budget" } }).text, KIND_LABEL.check, ago(0, 3 * 3_600_000), afterClose(1000, null, 0).message]));`;
     const r = Bun.spawnSync([process.execPath, "-e", code]);
     expect(r.stderr.toString()).toBe("");
-    expect(JSON.parse(r.stdout.toString())).toEqual(["seen 2 times", "A new answer (x)", "Needs your decision", ["Attempt 1: retry (failed)"], "Waiting to resume: budget", "Operations check", "3 h ago", "The terminal has exited."]);
+    expect(JSON.parse(r.stdout.toString())).toEqual(["seen 2 times", "A new answer (x)", "Needs your decision", ["Attempt 1: retry (failed)"], "Waiting to resume: budget", "Question", "3 h ago", "The terminal has exited."]);
   });
 });
 

@@ -2074,6 +2074,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return { ...process.env, PATH: kitPath(meta?.path ?? null) };
     },
     command: opts.jobCommand,
+    pricing: pricingTable,
     reviewIdleS: cfg.jobReviewIdleS,
     // a build that ended while the daemon was down: its result is written to the PR at the next start (recoverJobs)
     ...(opts.collectPending ? { collectPending: () => opts.collectPending!(jobDeps.env, join(jobDeps.dir, "collect-pending.log")) } : {}),
@@ -4303,7 +4304,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         return json(opsLoad(db, days, { taskId: sp.get("task") ?? undefined, available: readCgroup() !== null }));
       },
       // now, for the resources screen: read when asked; the screen asks every 5 s only while it is shown
-      "/api/ops/resources": () => json(opsResources(db, { home: homedir() })),
+      "/api/ops/resources": () => json(opsResources(db, { home: homedir(), queueWait: () => tasks.queueWait() })),
       /**
        * Jobs a Task asks the daemon to run (jobs.ts): local CI or a review, as the daemon's child. POST answers
        * 202 with the job (its `id` is what the Task waits on as `job#<id>`); GET lists the running ones and those that

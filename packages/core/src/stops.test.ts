@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule } from "./stops.ts";
+import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -412,20 +412,25 @@ describe("stopMarks", () => {
     ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, ...over }) as Task;
   const own = (t: Task, over: Partial<Omit<StopRecord, "work">> = {}) => stop({ ...over, work: { workspaceId: null, issue: null, taskId: t.id } });
 
-  test("the newest series of a stopped Task; no record, 確認済み and 完了 are left out", () => {
+  test("the newest series of a stopped Task; no record and 確認済み are left out; a Task judged done is read too", () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.t4520."));
     const db = new Db(join(dir, "t.db"));
     try {
-      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "done" }), running = mk("rn", { status: "running" }), idle = mk("id", { status: "idle" });
-      for (const t of [a, none, reviewed, done, running, idle]) {
+      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "done" }), running = mk("rn", { status: "running" }), idle = mk("id", { status: "idle" }), archived = mk("ar", { archivedAt: 5 });
+      for (const t of [a, none, reviewed, done, running, idle, archived]) {
         db.insertTask(t);
         if (t.id !== "none") db.appendEvent(t.id, { t: "stop.record", stop: own(t, { reason: "transient", evidence: "HTTP 503" }) });
       }
       db.appendEvent("a", { t: "stop.record", stop: own(a, { reason: "decision", evidence: "どちらか決めてください", conditions: [{ key: "pr#7", value: "open", met: false }] }) });
-      // the Task's own stops are read only for the Tasks that may need the person
+      // the Task's own stops are read, in one query, only for the stopped Tasks that are not 確認済み
       const marks = stopMarks(db, db.listTasks());
-      expect(Object.keys(marks)).toEqual(["a"]);
-      expect(marks.a).toEqual({ key: expect.any(String), reason: "decision", state: "waiting", conditions: [{ key: "pr#7", value: "open", met: false }], count: 1 });
+      expect(Object.keys(marks).sort()).toEqual(["a", "dn"]);
+      // an archived Task is not on the list, and its records are not read either
+      expect([...db.listStopRecordsOfStopped().keys()].sort()).toEqual(["a", "dn"]);
+      expect(marks.dn).toMatchObject({ reason: "transient", state: "waiting" });
+      expect(marks.a).toEqual({ key: expect.any(String), reason: "decision", state: "waiting", conditions: [{ key: "pr#7", value: "open", met: false }], count: 1, answered: false });
+      // the Tasks passed in decide too, by personWait: one reviewed or back at work since the read has no mark
+      expect(stopMarks(db, [{ ...a, reviewedAt: 9 }, { ...done, status: "running" }])).toEqual({});
     } finally {
       db.close?.();
       rmSync(dir, { recursive: true, force: true });
@@ -448,6 +453,53 @@ describe("stopMarks", () => {
     } finally {
       db.close?.();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("answered", () => {
+  const seq = (at: number) => ({ ref: "seq:9", at });
+  test("the newest stop answered after it came; not a URL answer, not one carried over to a stop that came after it", () => {
+    const answered = (rs: StopRecord[]) => [reduceStops(rs)[0]!.answered, lastStopMark(rs)!.answered];
+    // the person answered stop 1 (the answer is recorded on it)
+    expect(answered([stop({ id: "s1", at: 1 }), stop({ id: "s1", at: 3, answer: seq(2) })])).toEqual([true, true]);
+    // a runner's URL is a pointer, not the person's answer
+    expect(answered([stop({ id: "s1", at: 1 }), stop({ id: "s1", at: 3, answer: { ref: "https://github.com/o/r/issues/1#issuecomment-1", at: 2 } })])).toEqual([false, false]);
+    // stopped again after the answer: the new stop carries the old answer (recordStop), and is not answered
+    expect(answered([stop({ id: "s1", at: 1 }), stop({ id: "s1", at: 3, answer: seq(2) }), stop({ id: "s2", at: 5, answer: seq(2) })])).toEqual([false, false]);
+  });
+});
+
+describe("lastStopMark", () => {
+  const mark = (records: StopRecord[]) => {
+    const s = reduceStops(records)[0];
+    return s ? { key: s.key, reason: s.reason, state: s.state, conditions: s.conditions, count: s.count, answered: s.answered } : null;
+  };
+  const reasons = ["decision", "depends", "unknown", "transient"] as const;
+  const states = ["waiting", "retrying", "resolved", "exhausted"] as const;
+
+  test("is the mark of reduceStops(...)[0]: none, one series, a new cause, a state moving on the same id, ties, unknown evidence", () => {
+    expect(lastStopMark([])).toBeNull();
+    const a = stop({ id: "a", reason: "depends", at: 10 });
+    const cases: StopRecord[][] = [
+      [a],
+      [a, stop({ id: "a", reason: "depends", state: "resolved", at: 20 })],
+      [a, stop({ id: "b", reason: "decision", at: 30, conditions: [{ key: "pr#7", value: "open", met: false }] })],
+      [stop({ id: "c", reason: "unknown", evidence: "exit 1", at: 5 }), stop({ id: "d", reason: "unknown", evidence: "segfault", at: 5 })],
+      [stop({ id: "e", reason: "transient", at: 1 }), stop({ id: "f", reason: "transient", at: 2 }), stop({ id: "g", reason: "decision", at: 3 }), stop({ id: "h", reason: "transient", at: 4 })],
+    ];
+    for (const c of cases) expect(lastStopMark(c)).toEqual(mark(c));
+  });
+
+  test("agrees with reduceStops over many generated records", () => {
+    let seed = 7;
+    const rnd = (k: number) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % k);
+    for (let round = 0; round < 200; round++) {
+      const rs: StopRecord[] = [];
+      for (let i = 0, len = 1 + rnd(8); i < len; i++) {
+        rs.push(stop({ id: `r${rnd(4)}`, reason: reasons[rnd(4)]!, state: states[rnd(4)]!, evidence: `e${rnd(2)}`, at: rnd(6) * 10, op: rnd(2) ? "op1" : "op2", answer: rnd(3) ? null : { ref: rnd(2) ? `seq:${rnd(9)}` : "https://github.com/o/r/issues/1#issuecomment-1", at: rnd(6) * 10 } }));
+      }
+      expect(lastStopMark(rs)).toEqual(mark(rs));
     }
   });
 });

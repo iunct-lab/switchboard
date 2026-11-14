@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import type { OpsJob, OpsResources, ResourceRun, ResourceWait } from "@switchboard/protocol";
-import { atLabel, consumerRows, etaLine, jobRow, latestAnswer, memoryLine, runOwner, since, typicalLabel, verdictLabel, waitLine, watchResources } from "./resources.ts";
+import { atLabel, consumerRows, etaLine, jobRow, latestAnswer, memoryLine, runOwner, since, slotsSummary, taskWaitLine, typicalLabel, verdictLabel, waitLine, watchResources } from "./resources.ts";
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
-const memory: NonNullable<OpsResources["memory"]> = { availableBytes: 1 * GB, totalBytes: 3.7 * GB, swapUsedBytes: 1.1 * GB, floorBytes: 1.5 * GB };
+const memory: NonNullable<OpsResources["memory"]> = { availableBytes: 1 * GB, totalBytes: 3.7 * GB, swapUsedBytes: 1.1 * GB, floorBytes: 1.5 * GB, safetyBytes: 2 * GB };
 const run = (o: Partial<ResourceRun>): ResourceRun => ({ pid: 1, name: "local-ci 3320", cwd: "/w", taskId: "t1", taskTitle: "キャッシュの読みを直す", queuedAt: "2026-11-03T10:00:00Z", startedAt: "2026-11-03T10:00:00Z", typicalMs: null, samples: 0, verdict: "none", ...o });
 const wait = (o: Partial<ResourceWait>): ResourceWait => ({ pid: 2, name: "review codex", cwd: "/w", taskId: "t2", taskTitle: "リソース画面の実装", queuedAt: "2026-11-03T10:05:00Z", reason: "slot", memoryOnly: false, typicalMs: null, samples: 0, ...o });
 
@@ -24,6 +24,26 @@ test("resources: the free-memory line, below the floor or not, and none where th
   expect(memoryLine(memory)).toEqual({ free: "1.0 GB", floor: "1.5 GB", below: true, usedRatio: 1 - 1 / 3.7, detail: "全体 3.7 GB · スワップ 1.1 GB 使用" });
   expect(memoryLine({ ...memory, availableBytes: 2 * GB })!.below).toBe(false);
   expect(memoryLine(null)).toBeNull();
+});
+
+test("resources: a Task waiting for free memory names the free bytes against the safety valve, from the same read as the card", () => {
+  expect(taskWaitLine(memory)).toBe("空きメモリ 1.0 GB < 安全弁 2.0 GB（heavy.json の taskMinFreeMb）");
+  expect(taskWaitLine({ ...memory, availableBytes: 3 * GB })).toBe("空きメモリ 3.0 GB（安全弁 2.0 GB を超えた。次の見回りで始まる）"); // read after the free memory rose, before the next check
+  expect(taskWaitLine({ ...memory, availableBytes: 1.7 * GB })).toBe("空きメモリ 1.7 GB < 安全弁 2.0 GB（heavy.json の taskMinFreeMb）"); // above the heavy floor, still below the valve
+  expect(taskWaitLine(null)).toBe("空きメモリ（安全弁未満）");
+  expect(taskWaitLine(memory)).toContain(memoryLine(memory)!.free); // the row and the card show the same free bytes
+  const rose = { ...memory, availableBytes: 3 * GB };
+  expect(taskWaitLine(rose)).toContain(memoryLine(rose)!.free);
+  expect(taskWaitLine(rose)).not.toBe(taskWaitLine(memory)); // above the valve reads differently, not by color
+});
+
+test("resources: the slots card's waiting count and the ETA leave out the Tasks waiting for free memory", () => {
+  const base = { slots: { max: 2, running: [run({})], beside: [], waiting: [wait({}), wait({ reason: "memory" })] }, eta: { etaMs: 5 * 60_000, unknown: 3 } }; // every one of the 3 jobs has no record: one more counted job would change the line
+  const withTasks = { ...base, taskWaits: [{ taskId: "t9", taskTitle: "待つ Task", queuedAt: "2026-11-03T10:06:00Z", reason: "memory" as const }] };
+  expect(slotsSummary(base).waiting).toBe(slotsSummary(withTasks).waiting);
+  expect(slotsSummary(base).eta).toEqual(slotsSummary(withTasks).eta);
+  expect(slotsSummary(base).eta).toEqual(etaLine(base.eta, 3)); // running 1 + slot waits 2, no Task wait
+  expect(slotsSummary(base).waiting).toContain("2");
 });
 
 test("resources: how long, and the minute the memory rows are from", () => {

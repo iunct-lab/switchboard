@@ -25,7 +25,7 @@ export const task = msgs({
   // asks.ts: kinds, states and groups of a question
   kindApproval: { ja: "ツール承認", en: "Tool approval" },
   kindDecision: { ja: "実装の判断", en: "Implementation decision" },
-  kindCheck: { ja: "運用の確認", en: "Operations check" },
+  kindCheck: { ja: "質問", en: "Question" },
   kindConfirmation: { ja: "利用者確認", en: "User confirmation" },
   kindStop: { ja: "停止", en: "Stop" },
   kindWait: { ja: "依存待ち", en: "Waiting on a dependency" },
