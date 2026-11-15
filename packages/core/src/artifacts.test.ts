@@ -1,9 +1,9 @@
 // test-reads: docs/design/scratch-apps.md
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Artifact, Task } from "@switchboard/protocol";
+import type { Artifact, RunnerAdapter, Task } from "@switchboard/protocol";
 import { ArtifactStore, artifactPrompt, checkViewKey, SCRATCH_APPS_DOC, MAX_ARTIFACT_DIR_FILES, MAX_ARTIFACT_FILE_BYTES, viewKey } from "./artifacts.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
@@ -454,5 +454,48 @@ describe("artifactPrompt", () => {
     expect(artifactPrompt("/x/docs/design/scratch-apps.md")).toContain("/x/docs/design/scratch-apps.md");
     expect(artifactPrompt()).toContain(SCRATCH_APPS_DOC);
     expect(existsSync(SCRATCH_APPS_DOC)).toBe(true);
+  });
+});
+
+describe("app-use on an instance that does not develop Switchboard", () => {
+  test("the 3rd day starts no Task and sets no request; after the setting turns on, the next counting day starts one", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-art-dev-"));
+    const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(h, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+    const adapters: RunnerAdapter[] = (["claude", "codex"] as const).map((id) => ({
+      id, detect: async () => ({ available: true }), efforts: [{ value: "high", label: "high" }],
+      start(_opts, emit) {
+        queueMicrotask(() => emit({ t: "session.end", status: "ok" }));
+        return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: Promise.resolve(0) };
+      },
+    }));
+    const c = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      c.db.insertTask(mkTask("tsk_dev", h));
+      c.db.insertArtifact({ id: "art_dev", taskId: "tsk_dev", title: "ボード", kind: "file", source: "/w/b.html", entry: "b.html", mime: "text/html", size: 1, removedAt: null, createdAt: 1, updatedAt: 1, appDays: 0, appRequestTaskId: null });
+      const use = async (day: string) => {
+        setSystemTime(new Date(`${day}T12:00:00`));
+        try {
+          return await (await fetch(`${b}/api/artifacts/art_dev/app-use`, { method: "POST" })).json() as { appDays: number; appRequestTaskId: string | null };
+        } finally {
+          setSystemTime();
+        }
+      };
+      expect((await fetch(`${b}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);
+      await use("2026-11-01");
+      await use("2026-11-02");
+      const before = c.db.listTasks(false).length;
+      expect(await use("2026-11-03")).toEqual({ appDays: 3, appRequestTaskId: null });
+      expect(c.db.listTasks(false).length).toBe(before);
+      expect(c.db.getArtifact("art_dev")!.appRequestTaskId).toBeNull();
+      expect((await fetch(`${b}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: true }) })).status).toBe(200);
+      const next = await use("2026-11-04");
+      expect(next.appDays).toBe(4);
+      expect(next.appRequestTaskId).not.toBeNull();
+      expect(c.db.listTasks(false).length).toBe(before + 1);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 });

@@ -119,3 +119,30 @@ export function noteSummary(lastNote: string): { line: string; rest: number } {
   const rest = lines.length - started.length;
   return { line: started.length ? started.join(" ・ ") : lines.find((l) => l === "進められる項目が無い") ?? lines[0]!, rest: started.length ? rest : rest - 1 };
 }
+
+/**
+ * One line of the queue's last decision as parts: the numbers in it (`Task #N`, `PR #N`, `#N`) become links to the
+ * Issue / PR of the workspace the line starts with (`<name>: `), found by `urlOf` from one of its Issue URLs. A line
+ * whose workspace is not known stays a sentence.
+ */
+export function noteParts(line: string, urlOf: (workspaceName: string) => string | null): Array<string | { text: string; url: string }> {
+  const ws = /^([^:：]+)[:：] /.exec(line)?.[1];
+  const base = ws ? urlOf(ws) : null;
+  if (!base || !/\/(issues|pull)\/\d+$/.test(base)) return [line];
+  const parts: Array<string | { text: string; url: string }> = [];
+  let last = 0;
+  for (const m of line.matchAll(/(Task |PR )?#(\d+)/g)) {
+    if (m.index > last) parts.push(line.slice(last, m.index));
+    parts.push({ text: m[0], url: base.replace(/\/(issues|pull)\/\d+$/, `/${m[1] === "PR " ? "pull" : "issues"}/${m[2]}`) });
+    last = m.index + m[0].length;
+  }
+  if (last < line.length) parts.push(line.slice(last));
+  return parts;
+}
+
+/** An Issue URL of the workspace named `name` in `items`, or null when no item has it or two workspaces share the name. */
+export function noteUrlOf(items: Array<{ workspaceId: string; workspaceName: string; url?: string | null }>, name: string): string | null {
+  const named = items.filter((i) => i.workspaceName === name);
+  if (new Set(named.map((i) => i.workspaceId)).size !== 1) return null;
+  return named.find((i) => i.url && /\/(issues|pull)\/\d+$/.test(i.url))?.url ?? null;
+}

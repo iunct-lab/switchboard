@@ -138,11 +138,13 @@ export class WorkspaceClones {
   /**
    * Checks the target, then clones in the background; a repository the caller cannot push to is added as someone else's:
    * its backlog is here, and it writes nothing back to `full_name`, the name it has now (a renamed one answers
-   * under the old name too). `ownCopy` also creates a private `<you>/<name>` and makes it the clone's origin and
-   * gh's default, the backlog as asked (GitHub when absent). A path that a workspace keeps stays as it is. Throws
+   * under the old name too). `ownCopy` also creates a private `<owner or you>/<name>` and makes it the clone's origin and
+   * gh's default, the backlog as asked (GitHub when absent). `owner` is where it is created (empty = your account);
+   * an org is checked first (you are an active member, and may create private repositories there) and refused
+   * before anything is cloned, created or pushed. A path that a workspace keeps stays as it is. Throws
    * CloneError for what the request got wrong.
    */
-  async start(repo: { owner: string; name: string }, opts: { backlog?: "github" | "switchboard"; ownCopy?: boolean }): Promise<WorkspaceClone> {
+  async start(repo: { owner: string; name: string }, opts: { backlog?: "github" | "switchboard"; ownCopy?: boolean; owner?: string }): Promise<WorkspaceClone> {
     const full = `${repo.owner}/${repo.name}`;
     const cwd = dirname(this.repoRoot);
     const path = join(cwd, repo.name);
@@ -173,10 +175,23 @@ export class WorkspaceClones {
       const me = await this.gh(["api", "user", "--jq", ".login"], cwd);
       const login = me.stdout.trim();
       if (me.code !== 0 || !login) throw refuse(`自分の GitHub のアカウントが分かりません: ${me.stderr.trim().split("\n").pop() ?? ""}`, 502);
-      mine = `${login}/${repo.name}`;
-      // an existing one of yours is never pushed over (a 404 is the only answer that lets it go on)
+      const owner = opts.owner && opts.owner.toLowerCase() !== login.toLowerCase() ? opts.owner : login;
+      if (owner !== login) {
+        const member = await this.gh(["api", `user/memberships/orgs/${owner}`, "--jq", '"\\(.state) \\(.role)"'], cwd);
+        if (member.code !== 0) throw /HTTP 404/.test(member.stderr) ? refuse(`作り先 ${owner} は自分が入っている org ではありません（無いか、入っていません）`, 400) : refuse(`作り先 ${owner} の所属を確かめられません: ${member.stderr.trim().split("\n").pop() ?? ""}`, 502);
+        const [state, role] = member.stdout.trim().split(" ");
+        if (state !== "active") throw refuse(`作り先 ${owner} への参加が済んでいません（${state || "不明"}）`, 400);
+        if (role !== "admin") {
+          const can = await this.gh(["api", `orgs/${owner}`, "--jq", ".members_can_create_private_repositories"], cwd);
+          if (can.code !== 0) throw refuse(`作り先 ${owner} で作れるか確かめられません: ${can.stderr.trim().split("\n").pop() ?? ""}`, 502);
+          // GitHub shows this setting to org owners only; a member reads null, which is not a refusal (a create that then fails is named as created or not, as for your account)
+          if (can.stdout.trim() === "false") throw refuse(`${owner} では非公開のリポジトリを作れません`, 403);
+        }
+      }
+      mine = `${owner}/${repo.name}`;
+      // an existing one is never pushed over (a 404 is the only answer that lets it go on)
       const there = await this.gh(["api", `repos/${mine}`, "--jq", ".full_name"], cwd);
-      if (there.code === 0) throw refuse(`自分のアカウントに ${mine} が既にあります。作らず写しません`, 409);
+      if (there.code === 0) throw refuse(`作り先に ${mine} が既にあります。作らず写しません`, 409);
       if (!/HTTP 404/.test(there.stderr)) throw refuse(`${mine} があるか確かめられません: ${there.stderr.trim().split("\n").pop() ?? ""}`, 502);
     }
     const started = { ...row };

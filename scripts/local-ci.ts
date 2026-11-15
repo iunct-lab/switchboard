@@ -46,6 +46,7 @@ import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
 import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
 import { isTest } from "./test-select.ts";
+import { buildKey, fileLog, offloadRecordPath, type OffloadCaller, type OffloadLog } from "./offload-record.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 
 export type { Step };
@@ -258,11 +259,14 @@ export class OffloadStartError extends Error {
 /**
  * `start`: one build of `script` with `cwd`'s work tree in the ci image (`sb-offload --ci --detach`), returning its id as soon as it has started (throws `OffloadStartError` when it did not).
  * `collect`: waits for that build (`sb-offload --collect <id>`, from any process, later too): its code is sb-offload's (the script's, or 124 timed out / 130 stopped / 1 failed before it) and its log.
+ * `start` also returns `image` (the id of the image build it had to start first) when there was one.
  * `fixtures`: the recordings the build reads (read only there) and whether the run needs them (`required`: `SWITCHBOARD_FIXTURES` given here, so a missing recording fails a test).
  */
 export interface Offload {
   fixtures?: { dir: string; required: boolean };
-  start: (script: string, cwd: string, o: OffloadRun) => Promise<{ build: string }>;
+  start: (script: string, cwd: string, o: OffloadRun) => Promise<{ build: string; image?: string }>;
+  /** 外のビルドを始めるたびに 1 行足す記録（`hostOffload` だけが持つ。無ければ記録も入力の鍵の計算もしない）。 */
+  log?: OffloadLog;
   collect: (build: string) => Promise<{ code: number; output: string }>;
   /** Whether the installed `sb-offload` takes `--base-tree` (its usage names it; the host's is replaced only at boot, so an older one may not). Not given = it does. */
   knowsBaseTree?: () => Promise<boolean>;
@@ -390,19 +394,34 @@ export function parseBuild(output: string, steps: Step[], code: number): Array<S
  * A host with no AWS config (or a `host` with none, as test-changed passes: its build runs no public-tree check) gives no file.
  * `started` is told the build's id before the wait, to be written down (`writePending`); a build that did not start is a failed one (sb-offload's code and output).
  */
-export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; started?: (build: string) => void } = {}): Promise<{ code: number; output: string }> {
+export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { caller: OffloadCaller; repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; started?: (build: string) => void }): Promise<{ code: number; output: string }> {
   const host = o.host ?? hostAws();
   const hasNames = host.names.length + host.accountIds.length > 0;
   const script = ciScript(steps, { ...(o.repo ? { repo: o.repo } : {}), ...(offload.fixtures ? { fixtures: { required: offload.fixtures.required } } : {}), ...(o.perf ? { perf: true as const } : {}) });
   const dir = hasNames ? mkdtempSync(join(tmpdir(), "switchboard.names.")) : undefined;
   let build: string;
+  let image: string | undefined;
+  const size = o.size ?? "small";
   try {
     let names: string | undefined;
     if (dir) {
       names = join(dir, "names.json");
       writeFileSync(names, JSON.stringify({ names: host.names, accountIds: host.accountIds }), { mode: 0o600 });
     }
-    build = (await offload.start(script, cwd, { size: o.size ?? "small", ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}) })).build;
+    // the key is read from the work tree as it is when the build starts
+    const key = offload.log ? await buildKey(cwd, script, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}) }).catch(() => undefined) : undefined;
+    const started = await offload.start(script, cwd, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}) });
+    build = started.build;
+    image = started.image;
+    if (offload.log) {
+      const at = new Date().toISOString();
+      try {
+        if (image) offload.log.append({ at, caller: o.caller, kind: "image", build: image, size, tree: cwd });
+        offload.log.append({ at, caller: o.caller, kind: "ci", build, size, ...(key ? { key } : {}), tree: cwd });
+      } catch (e) {
+        console.error(`offload-record: 記録を書けなかった（${e instanceof Error ? e.message : String(e)}）`);
+      }
+    }
   } catch (e) {
     if (e instanceof OffloadStartError) return { code: e.code, output: e.output };
     throw e;
@@ -427,6 +446,7 @@ export function hostOffload(): Offload | undefined {
   let usage: Promise<boolean> | undefined;
   return {
     ...(fixtures ? { fixtures } : {}),
+    log: fileLog(offloadRecordPath()),
     // called with no arguments sb-offload prints its usage (stderr, exit 2): read once per process
     knowsBaseTree: () =>
       (usage ??= (async () => {
@@ -445,7 +465,9 @@ export function hostOffload(): Offload | undefined {
       // the image build's log may come before it: only the started line names the build
       const build = out.split("\n").map((l) => /^sb-offload: started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
       if (code !== 0 || !build) throw new OffloadStartError(code === 0 ? 1 : code, `${out}${err}`);
-      return { build };
+      // sb-offload writes the image build's started line to stderr (only the ci build's goes to stdout)
+      const image = `${out}\n${err}`.split("\n").map((l) => /^sb-offload: no ci image \S+ yet; building it, started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
+      return { build, ...(image ? { image } : {}) };
     },
     collect: async (build) => {
       const p = Bun.spawn([bin, "--collect", build], { env, stdout: "pipe", stderr: "pipe" });
@@ -957,7 +979,7 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   // sb-offload: every step in one build, whatever the CI's step names are; here only the work tree is made and the result read (no step, no slot)
   else {
     d.log(`▶ 外: ${steps.map((s) => s.name).join(" → ")}`);
-    const r = await runBuild(offload, steps, dir, { ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(started ? { started: (build) => started(build, steps, !!inc) } : {}) });
+    const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(started ? { started: (build) => started(build, steps, !!inc) } : {}) });
     ran = parseBuild(r.output, steps, r.code);
     // a perf run's files come back in the log: written into `dir` as a run here would leave them, for the records and the judgement
     if (withPerf) for (const [name, bytes] of Object.entries(buildFiles(r.output))) writeFileSync(join(dir, name), bytes);

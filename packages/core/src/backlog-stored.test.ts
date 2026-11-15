@@ -83,7 +83,7 @@ test("stages, Project fields of the workspace's Project and Task counts come fro
   const ws = imported([
     issue(1, ["type:request"]),
     issue(2, ["type:request"], { body: "## 派生 PBI\n- #3" }),
-    issue(3, ["type:pbi"], { subIssues: [30, 31] }), item(3, { Status: "Ready", Priority: "P1", "Story Points": 5 }),
+    issue(3, ["type:pbi"], { subIssues: [30, 31] }), item(3, { Status: "Ready", Priority: "P1", "Story Points": 5, Kind: "bug" }),
     issue(30, ["type:task"], { state: "CLOSED" }), issue(31, ["type:task"]),
     issue(4, ["type:pbi"]), item(4, { Status: "Ready" }, "other"), // another owner's Project 1
     issue(5, ["type:pbi"]), item(5, { Status: "In review" }),
@@ -93,8 +93,8 @@ test("stages, Project fields of the workspace's Project and Task counts come fro
   const got = readStoredBacklog(db, ws);
   expect(got.fetchedAt).toBe(5000);
   expect(got.items.map((i) => [i.number, i.stage])).toEqual([[5, "in-progress"], [4, "needs-tasks"], [3, "ready"], [1, "request"]]);
-  expect(got.items.find((i) => i.number === 3)).toMatchObject({ priority: "P1", storyPoints: 5, projectStatus: "Ready", tasks: { total: 2, done: 1 }, workspaceId: ws.id, workspaceName: "app" });
-  expect(got.items.find((i) => i.number === 4)).toMatchObject({ projectStatus: null, priority: null });
+  expect(got.items.find((i) => i.number === 3)).toMatchObject({ priority: "P1", storyPoints: 5, kind: "bug", projectStatus: "Ready", tasks: { total: 2, done: 1 }, workspaceId: ws.id, workspaceName: "app" });
+  expect(got.items.find((i) => i.number === 4)).toMatchObject({ projectStatus: null, priority: null, kind: null });
 });
 
 test("questions, reports and answers are read from every stored comment, a Task's question holding its PBI", () => {

@@ -7,6 +7,7 @@ import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
 import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Deps, type LocalCiResult, type Offload } from "./local-ci";
+import type { OffloadLog, OffloadRecord } from "./offload-record";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -1231,7 +1232,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       try {
         let path = "";
         const offload: Offload = { start: async (_s, _c, o) => ((path = o.names ?? ""), Promise.reject(new Error("no build"))), collect: () => Promise.reject(new Error("unused")) };
-        await expect(runBuild(offload, [{ name: "x", run: "x" }], "/repo")).rejects.toThrow("no build");
+        await expect(runBuild(offload, [{ name: "x", run: "x" }], "/repo", { caller: "local-ci" })).rejects.toThrow("no build");
         expect(path).not.toBe("");
         expect(existsSync(path)).toBe(false);
       } finally {
@@ -1817,13 +1818,61 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(ciScript([{ name: "c", run: "bun test" }], { perf: true })).not.toContain("sb-file");
       });
 
+      test("record: runBuild writes a ci line per caller, an image line first when start returns one, and no key without a log", async () => {
+        const rows: OffloadRecord[] = [];
+        const log: OffloadLog = { append: (r) => void rows.push(r), read: () => rows };
+        const repo = mkdtempSync(join(CACHE, "rec-"));
+        await Bun.$`git init -q ${repo} && echo a > ${repo}/a.txt`.quiet();
+        let image: string | undefined = "img-1";
+        const offload: Offload = { log, start: async () => ({ build: "b7", ...(image ? { image } : {}) }), collect: async () => ({ code: 0, output: "" }) };
+        const host = { names: [], accountIds: [] };
+        await runBuild(offload, [{ name: "x", run: "x" }], repo, { caller: "test-changed", size: "medium", host });
+        expect(rows.map((r) => [r.caller, r.kind, r.build, r.size, r.tree])).toEqual([["test-changed", "image", "img-1", "medium", repo], ["test-changed", "ci", "b7", "medium", repo]]);
+        expect(rows[0]!.key).toBeUndefined();
+        expect(rows[1]!.key).toMatch(/^[0-9a-f]{64}$/);
+        rows.length = 0;
+        image = undefined;
+        await runBuild(offload, [{ name: "x", run: "x" }], repo, { caller: "typecheck", host });
+        expect(rows.map((r) => [r.caller, r.kind, r.size])).toEqual([["typecheck", "ci", "small"]]);
+        // a log that cannot be written does not stop the build
+        const failing: Offload = { ...offload, log: { append: () => { throw new Error("disk full"); }, read: () => [] } };
+        expect((await runBuild(failing, [{ name: "x", run: "x" }], repo, { caller: "local-ci", host })).code).toBe(0);
+        // no log: no key is computed. git's trace file shows whether the key read the tree
+        const mark = join(mkdtempSync(join(CACHE, "trace-")), "git.trace");
+        const saved = process.env.GIT_TRACE;
+        process.env.GIT_TRACE = mark;
+        try {
+          const none: Offload = { start: async () => ({ build: "b8" }), collect: async () => ({ code: 0, output: "" }) };
+          expect((await runBuild(none, [{ name: "x", run: "x" }], repo, { caller: "local-ci", host })).code).toBe(0);
+          expect(existsSync(mark)).toBe(false);
+          await runBuild(offload, [{ name: "x", run: "x" }], repo, { caller: "local-ci", host });
+          expect(existsSync(mark)).toBe(true);
+        } finally {
+          if (saved === undefined) delete process.env.GIT_TRACE;
+          else process.env.GIT_TRACE = saved;
+        }
+      });
+
+      test("record: hostOffload's start reads the image id from the sb-offload line on stderr", async () => {
+        const bin = mkdtempSync(join(CACHE, "bin-img-"));
+        // as aws/host/offload.sh: the image build's started line goes to stderr, the ci build's to stdout
+        writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\necho "sb-offload: no ci image t1 yet; building it, started sb-img:9" >&2\necho "sb-offload: started b10"\n', { mode: 0o755 });
+        const saved = process.env.PATH;
+        process.env.PATH = `${bin}:${saved}`;
+        try {
+          expect(await hostOffload()!.start("true", bin, { size: "small" })).toEqual({ build: "b10", image: "sb-img:9" });
+        } finally {
+          process.env.PATH = saved;
+        }
+      });
+
       test("perf: runBuild hands the base tree to start and sb-offload, and the script carries no token", async () => {
         const got: Array<{ script: string; baseTree?: string }> = [];
         const offload: Offload = { start: async (script, _c, o) => (got.push({ script, ...(o.baseTree ? { baseTree: o.baseTree } : {}) }), { build: "b" }), collect: async () => ({ code: 0, output: "" }) };
-        await runBuild(offload, [{ name: "p", run: "bun scripts/perf-bench.ts" }], "/repo", { perf: true, baseTree: "/x/base.tar", host: { names: [], accountIds: [] } });
+        await runBuild(offload, [{ name: "p", run: "bun scripts/perf-bench.ts" }], "/repo", { caller: "tag-ci", perf: true, baseTree: "/x/base.tar", host: { names: [], accountIds: [] } });
         expect(got[0]!.baseTree).toBe("/x/base.tar");
         expect(got[0]!.script).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|gho_|ghs_/);
-        await runBuild(offload, [], "/repo", { host: { names: [], accountIds: [] } });
+        await runBuild(offload, [], "/repo", { caller: "local-ci", host: { names: [], accountIds: [] } });
         expect(got[1]!.baseTree).toBeUndefined();
         // the real sb-offload gets --base-tree
         const bin = mkdtempSync(join(CACHE, "bin-bt-"));

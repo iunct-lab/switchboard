@@ -23,7 +23,7 @@ afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 const RUNNERS = ["claude", "codex"] as const;
-const ws = (path: string, kind: Workspace["kind"] = "repo", name = "proj"): Workspace => ({ id: "ws_x", name, path, kind, createdAt: 0, backlog: "github", sweep: { implement: 1, plan: 1 } });
+const ws = (path: string, kind: Workspace["kind"] = "repo", name = "proj"): Workspace => ({ id: "ws_x", name, path, kind, createdAt: 0, backlog: "github", sweep: { implement: 1, plan: 1 }, allocation: { share: null, mode: "continuing" } });
 
 describe("workspace brief", () => {
   test("the meta workspace keeps the Switchboard architecture map and this repository's real check commands", () => {

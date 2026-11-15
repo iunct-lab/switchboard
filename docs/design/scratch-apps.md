@@ -76,7 +76,8 @@ each local day once per artifact (`appDays` on the artifact).
 - On the 3rd separate day (`APP_REQUEST_DAYS` in `packages/core/src/artifacts.ts`, not a setting) Switchboard starts
   that request Task itself, once per artifact; its `## 出典` says Switchboard filed it. The row then shows
   `要望の Task を始めました` with a link to that Task. If the Task cannot start (no meta workspace), the next day that
-  counts tries again.
+  counts tries again. On an instance that does not develop Switchboard itself (`developSelf` off) no Task is made for the
+  meta workspace, and the request starts on the next counting day after the setting is turned on.
 - The request Task reads the page from the copy's folder, which stays as the artifact's copy. A removed artifact is
   not counted and starts no request. Turning the app into a feature is the ordinary request → PBI → Task flow.
 

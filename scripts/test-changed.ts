@@ -58,7 +58,7 @@ export async function runTests(picked: Picked, d: RunDeps): Promise<number> {
     return code;
   }
   const steps = [{ name: "bun test", run: tests ? testRun(tests) : "bun test" }];
-  const { code, output } = await runBuild(d.offload, steps, ROOT, { ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
+  const { code, output } = await runBuild(d.offload, steps, ROOT, { caller: "test-changed", ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
   let offCode = 0;
   let passed = 0;
   let counted = false;

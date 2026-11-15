@@ -140,6 +140,18 @@ Seconds, sizes and costs are not written here: they change with the image, the m
 - `sb-file: <name> <base64>` is a file the build hands back through its log, one line per file, after the last perf step: `perf-result.json` (the bench's result) and `perf-base.json` (the compared tag's bundle and ceilings). The host reads the lines to record the counts and judge the ceilings; any other name, or a line that is not JSON, is left out, and a missing file changes no step's result.
 - Billing is per started minute of the build, at the price of the machine's size in [aws/README.md](../../aws/README.md) "Offload" (local-ci asks for the small size).
 
+### The record of builds
+
+Every build the host starts appends one line to `~/.cache/switchboard.offload-builds.jsonl` (JSON Lines, written by `scripts/offload-record.ts`): the time, the caller (`local-ci`, `tag-ci`, `test-changed` or `typecheck`), the kind (`ci`, or `image` for a CI image build), the build's id, the size, the input key and the worktree. Lines older than 30 days are dropped when a line is appended; `SWITCHBOARD_OFFLOAD_RECORD_DAYS` changes the number of days. The input key is a hash of the script, the size, every tracked file and every untracked file that is not ignored in the worktree (path and content) and, when recordings are passed, each recording's relative path, size and mtime; two builds with the same key had the same input. An image build has no key. Nothing in the daemon reads the record.
+
+`bun scripts/offload-usage.ts --days <N>` (default 7) reads the record and asks CodeBuild for each build's start and end time (100 ids per call), then prints one table. `--window-hours` (default 24) and `--gap-minutes` (default 10) set the two values below; the records of the window before the range are read too, only to compare the range's first builds with. The rows are callers; image builds are one row of their own.
+
+- `builds`: the number of records.
+- `minutes (small / medium / large)`: billed minutes, each build rounded up to a started minute, by size. A build that has not ended adds no minutes.
+- `duplicates (builds / minutes)`: `ci` builds whose key was already built within the window; the minutes are the repeated builds' own.
+- `followed within the gap`: `ci` builds on the same caller and worktree that started within the gap after the previous one, with a different key or no key (a change made right after a run).
+- `running`: builds with no end time yet. A line `unreadable builds` counts records CodeBuild did not return. The price of a minute is in "Offload" of the AWS README, not here.
+
 The `local` ceilings in `scripts/perf-budget.json` were measured on the host; a build is another machine, so the seconds of steps run off the host are not compared with them. This holds for the tag CI too: a tag's run in a build lists no `所要時間が上限を超えた` lines, and `offload` in the budget has counts and `loaded` but no `durations`.
 
 ## The tag CI uses the same runner

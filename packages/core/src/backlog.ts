@@ -3,7 +3,7 @@
  * source of truth; the DB keeps a copy of it (backlog-sync.ts) that `readStoredBacklog` reads. One GraphQL query (100 Issues a page, the same shape as
  * scripts/setup/lint_backlog.sh) instead of one call per Issue, which is slow and runs into the secondary rate limit.
  */
-import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget } from "@switchboard/protocol";
+import type { Backlog, BacklogAction, BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogPrereq, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogStage, BacklogSyncInfo, BacklogSyncState, GithubBudget, WorkspaceMode } from "@switchboard/protocol";
 import { personWait } from "@switchboard/protocol";
 import { applyBacklogField, BacklogResolveError, type BacklogLocalEntry, type BacklogOperation, type Db, type NewBacklogOperation } from "./db.ts";
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
@@ -132,6 +132,22 @@ export function requestTextChars(body: string): number | null {
   }
   const n = kept.join("\n").trim().length;
   return n > 0 ? n : null;
+}
+
+/**
+ * Who said a request's words: the first `- 誰の言葉: <value>` line of the `## 出典` section (fence lines left out, as in
+ * `requestTextChars`), when the value starts with one of the three; null otherwise.
+ */
+export function requestFromOf(body: string): BacklogItem["requestFrom"] {
+  let fence: string | null = null;
+  for (const line of section(body.replace(/\r\n/g, "\n"), "出典").split("\n")) {
+    const before: string | null = fence;
+    fence = fenceAfter(fence, line);
+    if (before !== fence || fence) continue;
+    const m = /^- 誰の言葉:\s*(利用者|エージェント|定期の検査)/.exec(line);
+    if (m) return m[1] as NonNullable<BacklogItem["requestFrom"]>;
+  }
+  return null;
 }
 
 const CRITERIA = "## 到達点 / 受け入れ条件";
@@ -310,6 +326,8 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     flow: raw.labels.nodes.some((l) => l.name === FLOW_LABEL),
     bodyChars: raw.body.length,
     requestChars: requestTextChars(raw.body),
+    kind: field(raw, project, "Kind")?.name ?? null,
+    requestFrom: requestFromOf(raw.body),
     origin: pbi ? requestOf(raw.body) : null,
     labels: raw.labels.nodes.map((l) => l.name),
     waits: [],
@@ -660,6 +678,32 @@ export function flowHeldIn(items: BacklogItem[], slot: Slot, flow?: FlowLimit): 
   if (!flow || flow.running < flow.limit) return [];
   return items.filter((i) => i.flow && !i.onHold && i.stage === "ready" && i.priority !== "P0" && inSlot(i, slot) && !i.activeTaskId);
 }
+/**
+ * What a workspace's share of the week holds back from backlog-next: `flowShare` = flow-improvement's part of the spend
+ * against its limit; `mode` = the workspace's mode. Only the firing's pick passes it (not a button, the re-read before a
+ * start, or the queue).
+ */
+export type AllocationHold = { flowShare?: { actual: number; limit: number }; mode?: WorkspaceMode };
+/** A flow-improvement PBI (not P0) not yet started is left while its part of the spend is at or over the limit. An in-progress one goes on. */
+export function flowShareHeldIn(items: BacklogItem[], slot: Slot, hold?: AllocationHold): BacklogItem[] {
+  const f = hold?.flowShare;
+  if (!f || f.actual < f.limit) return [];
+  return items.filter((i) => i.flow && i.priority !== "P0" && SLOT_STAGES[slot].includes(i.stage) && !i.activeTaskId);
+}
+/** In maintenance mode a PBI not started is left unless its Kind is bug / deps, and a request unless its words are a routine check's. */
+export function maintenanceHeldIn(items: BacklogItem[], slot: Slot, hold?: AllocationHold): BacklogItem[] {
+  if (hold?.mode !== "maintenance") return [];
+  return items.filter((i) => SLOT_STAGES[slot].includes(i.stage) && !i.activeTaskId && (i.type === "pbi" ? i.kind !== "bug" && i.kind !== "deps" : i.requestFrom !== "定期の検査"));
+}
+/** The report lines for what `flowShareHeldIn` and `maintenanceHeldIn` leave. */
+export function allocationHeldLines(items: BacklogItem[], slot: Slot, hold?: AllocationHold): string[] {
+  const f = hold?.flowShare;
+  const pct = (n: number) => Math.round(n * 100);
+  return [
+    ...flowShareHeldIn(items, slot, hold).map((i) => `飛ばした: #${i.number}: 自己改善の上限（実績 ${pct(f!.actual)}% / 上限 ${pct(f!.limit)}%）`),
+    ...maintenanceHeldIn(items, slot, hold).map((i) => `飛ばした: #${i.number}: メンテのモード（Kind ${i.kind ?? "未設定"}）`),
+  ];
+}
 /** The report line for the flow PBIs `flowHeldIn` leaves; null when none is left. */
 export function flowHeldLine(held: BacklogItem[], { limit, running, stopped }: FlowLimit): string | null {
   if (!held.length) return null;
@@ -791,13 +835,13 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
  * any stage (`failedIn`, `replyWaitingIn`).
  * An item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
-export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set()): Picked | null {
+export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set(), hold?: AllocationHold): Picked | null {
   // An 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
-  return candidates(items, slot, order, flow, defs, dueSoon).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
+  return candidates(items, slot, order, flow, defs, dueSoon, hold).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
 }
 
 /** The items of the 実装 slot backlog-next leaves for their files overlapping other work, or for that not being judged. */
-export const overlapIn = (items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit) => candidates(items, slot, order, flow).filter((c) => c.action === "complete" && isOverlapped(c.item)).map((c) => c.item);
+export const overlapIn = (items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, hold?: AllocationHold) => candidates(items, slot, order, flow, [], new Set(), hold).filter((c) => c.action === "complete" && isOverlapped(c.item)).map((c) => c.item);
 
 export type Picked = { item: BacklogItem; action: BacklogAction; resume?: true; reason?: string };
 
@@ -806,7 +850,7 @@ export type Picked = { item: BacklogItem; action: BacklogAction; resume?: true; 
  * backlog queue's numbers) the 実装 slot takes only the items in it, in its order; what holds an item is judged as
  * without it.
  */
-function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set()): Picked[] {
+function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set(), hold?: AllocationHold): Picked[] {
   const resumed = (i: BacklogItem) =>
     isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
@@ -815,7 +859,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
   // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`)
-  const flowHeld = new Set(flowHeldIn(items, slot, flow));
+  const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
   const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
   // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
@@ -1719,6 +1763,17 @@ export function storedIssueHeads(db: Db, ws: Pick<BacklogWorkspace, "id">): Map<
     if (!heads.has(value.number) || (heads.get(value.number)!.own && !own)) heads.set(value.number, { state: value.state, title: value.title, own });
   }
   return new Map([...heads].map(([n, h]) => [n, { state: h.state, title: h.title }]));
+}
+
+/** The numbers of the workspace's stored Issues (closed ones too) that carry the flow-improvement label. Unlike `storedIssueHeads`, a number counts when either of its records (one made here, or GitHub's) carries the label. */
+export function storedFlowIssues(db: Db, ws: Pick<BacklogWorkspace, "id">): Set<number> {
+  const source = db.getWorkspaceBacklogSource(ws.id);
+  const out = new Set<number>();
+  for (const rec of source ? db.listBacklogRecords(source, "issue") : []) {
+    const value = (shown(rec) ?? rec.local ?? rec.remote) as BacklogIssueData | null;
+    if (value?.number && value.labels.includes(FLOW_LABEL)) out.add(value.number);
+  }
+  return out;
 }
 
 /** What `storedIssueReader` reads: an Issue as `readStoredIssue` shows it, and its Project fields as shown. */

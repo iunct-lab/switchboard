@@ -31,7 +31,7 @@ const groupTitle = (id: string) => t(settingsGroup(id).title);
  * changes (a partial PATCH /api/settings), so a value takes effect on the next use. The per-Task choices (mode, model,
  * budget, shadow for one Task) stay on the Home form; what is saved here is only what they start from.
  */
-export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; knowledgeRev: number; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
+export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean, ownCopyOwner: string) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; knowledgeRev: number; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
   const [s, setS] = useState<SettingsResponse | null>(null);
   const [saving, setSaving] = useState(false);
   // 端末通知 (#1138): the browser's permission is the only switch; asked for only from the button

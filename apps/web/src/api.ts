@@ -226,7 +226,10 @@ export const api = {
   /** `backlog`: `switchboard` keeps the workspace's Issues and Project in Switchboard only (#2265); PRs stay with the repository. */
   addWorkspace: (path: string, backlog: "github" | "switchboard" = "github") => req<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify({ path, backlog }) }),
   /** A GitHub repository added by name (#2575): answers at once (202); the clone goes on in the daemon, see `workspaceClones`. */
-  addWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard" = "github", ownCopy = false) => req<{ repo: string; path: string; state: "cloning" }>("/api/workspaces", { method: "POST", body: JSON.stringify({ repo, backlog, ownCopy }) }),
+  addWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard" = "github", ownCopy = false, ownCopyOwner = "") => {
+    const owner = ownCopyOwner.trim();
+    return req<{ repo: string; path: string; state: "cloning" }>("/api/workspaces", { method: "POST", body: JSON.stringify({ repo, backlog, ownCopy, ...(ownCopy && owner ? { ownCopyOwner: owner } : {}) }) });
+  },
   workspaceRemoval: (id: string) => req<WorkspaceRemoval>(`/api/workspaces/${id}/removal`),
   removeWorkspace: (id: string, deleteCopy: boolean) => req<{ ok: true }>(`/api/workspaces/${id}`, { method: "DELETE", body: JSON.stringify({ deleteCopy }) }),
   workspaceClones: () => req<WorkspaceClone[]>("/api/workspaces/clones"),

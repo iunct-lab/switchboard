@@ -68,13 +68,15 @@ describe("telemetryEnv", () => {
     expect(telemetryEnv({ runnerTelemetry: true })).toEqual({});
   });
 
-  test("telemetryEnv: the child gets the disabling variables by default and no OTEL_ name, even if the parent env has one", async () => {
+  test("telemetryEnv: the child gets the disabling variables by default and no OTEL_ name, even if the parent env has one, and with runnerTelemetry on it adds none but keeps what the parent set", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-claude-telemetry-"));
     const bin = join(dir, "claude");
     writeFileSync(bin, `#!/bin/sh\nhead -n 2 >/dev/null\nenv > "$OUT"\nexit 0\n`);
     chmodSync(bin, 0o755);
     const out = join(dir, "env.txt");
+    const offVars = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "DISABLE_AUTOUPDATER"] as const;
     const before = { out: process.env.OUT, otel: process.env.OTEL_EXPORTER_OTLP_ENDPOINT };
+    const beforeOff = offVars.map((k) => [k, process.env[k]] as const);
     const names = async (runnerTelemetry?: boolean) => {
       const s = createClaudeAdapter({ bin }).start({ cwd: dir, scope: [dir], prompt: "p", runnerTelemetry }, () => undefined);
       await s.exited;
@@ -83,6 +85,7 @@ describe("telemetryEnv", () => {
       return v;
     };
     try {
+      for (const k of offVars) delete process.env[k];
       process.env.OUT = out;
       process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
       const off = await names();
@@ -90,8 +93,10 @@ describe("telemetryEnv", () => {
       expect(off).toContain("DISABLE_TELEMETRY");
       expect(off).toContain("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
       expect(await names(true)).not.toContain("DISABLE_TELEMETRY");
+      process.env.DISABLE_TELEMETRY = "1";
+      expect(await names(true)).toContain("DISABLE_TELEMETRY");
     } finally {
-      for (const [k, v] of [["OUT", before.out], ["OTEL_EXPORTER_OTLP_ENDPOINT", before.otel]] as const) {
+      for (const [k, v] of [["OUT", before.out], ["OTEL_EXPORTER_OTLP_ENDPOINT", before.otel], ...beforeOff] as const) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }

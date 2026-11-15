@@ -1,8 +1,9 @@
+// test-reads: none
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extraRows, frameCount, judge, parseArgs, screens, staleBuild, type Box } from "./screens-audit.ts";
+import { extraRows, frameCount, judge, parseArgs, removeIfEmpty, screens, staleBuild, type Box } from "./screens-audit.ts";
 
 const box = (over: Partial<Box>): Box => ({ left: 0, right: 100, width: 100, contentWidth: 100, height: 20, textLines: 1, fontSize: 13, text: "", inHeaderTabs: false, hidden: false, inSideScroller: false, ...over });
 
@@ -74,5 +75,21 @@ describe("screens-audit (#4030)", () => {
     expect(frameCount(300, 844)).toBe(1);
     expect(frameCount(100000, 844)).toBe(8);
     expect(frameCount(2000, 844, 3)).toBe(3);
+  });
+
+  test("removeIfEmpty removes an empty work directory and keeps one with shots", () => {
+    const root = mkdtempSync(join(tmpdir(), "screens-audit-rmdir-"));
+    try {
+      mkdirSync(join(root, "empty"));
+      mkdirSync(join(root, "kept", "shots"), { recursive: true });
+      writeFileSync(join(root, "kept", "shots", "a.png"), "x");
+      expect(removeIfEmpty(join(root, "empty"))).toBe(true);
+      expect(existsSync(join(root, "empty"))).toBe(false);
+      expect(removeIfEmpty(join(root, "kept"))).toBe(false);
+      expect(existsSync(join(root, "kept", "shots", "a.png"))).toBe(true);
+      expect(removeIfEmpty(join(root, "missing"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

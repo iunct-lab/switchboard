@@ -62,6 +62,8 @@ interface World {
   /** The Project items of the Issues named: per number, its `projectItems`, or none. */
   items?: (n: number) => unknown;
   recheck?: (numbers: number[]) => { body: unknown; code?: number };
+  /** The Project's own definition (single-select fields besides Title and Status); none by default. */
+  extraFields?: () => string[];
 }
 
 function fakeGh(world: World) {
@@ -70,7 +72,7 @@ function fakeGh(world: World) {
     if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
     if (args[0] === "variable") return { code: 0, stdout: "https://github.com/orgs/acme/projects/1\n", stderr: "" };
     const query = args.find((a) => a.startsWith("query="))!.slice(6);
-    if (query.includes("ProjectV2FieldCommon{ name dataType }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1", fields: { nodes: [{ name: "Title", dataType: "TITLE" }, { name: "Status", dataType: "SINGLE_SELECT", options: [{ name: "Ready" }] }] } } } } }), stderr: "" };
+    if (query.includes("ProjectV2FieldCommon{ name dataType }")) return { code: 0, stdout: JSON.stringify({ data: { repositoryOwner: { projectV2: { id: "PVT_1", fields: { nodes: [{ name: "Title", dataType: "TITLE" }, { name: "Status", dataType: "SINGLE_SELECT", options: [{ name: "Ready" }] }, ...(world.extraFields?.() ?? []).map((name) => ({ name, dataType: "SINGLE_SELECT", options: [{ name: "x" }] }))] } } } } }), stderr: "" };
     const vars = Object.fromEntries(args.flatMap((a, i) => (args[i - 1] === "-f" || args[i - 1] === "-F") && !a.startsWith("query=") ? [a.split(/=(.*)/s).slice(0, 2)] : []));
     if (/w\d+: issue\(number:/.test(query)) {
       const numbers = [...query.matchAll(/w(\d+): /g)].map((m) => Number(m[1]));
@@ -182,6 +184,38 @@ test("the next import asks since the cursor; a close, a Project field change and
   await importGithubSnapshot(moved.gh, db, WS, 3000);
   expect(stored()["project-item:PVTI_14"]).toEqual({ state: "fetched", remote: { issue: 14, owner: "acme", project: 1, fields: { Status: "In progress", "Story Points": 5 } } });
   expect(db.getBacklogRepository(KEY)).toMatchObject({ cursor: "2026-10-05T00:00:00Z", lastSuccessfulSync: 3000 });
+});
+
+test("a full import clears a Milestone deleted on GitHub (its updatedAt did not move); a light import leaves it", async () => {
+  await importGithubSnapshot(fakeGh({ changed: () => pageOf([raw(12)]), open: () => pageOf([{ number: 12, milestone: { title: "Phase 2" }, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) }).gh, db, WS, 1000);
+  expect(stored()["issue:I_12"]!.remote).toMatchObject({ milestone: "Phase 2" });
+
+  // the Milestone is deleted: the Issue's updatedAt stays, so the cursor's list is empty and only the open list shows it
+  const world = { changed: () => pageOf([]), open: () => pageOf([{ number: 12, milestone: null, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) };
+  await importGithubSnapshot(fakeGh(world).gh, db, WS, 2000, undefined, false, false);
+  expect(stored()["issue:I_12"]!.remote).toMatchObject({ milestone: "Phase 2" });
+
+  await importGithubSnapshot(fakeGh(world).gh, db, WS, 3000);
+  expect(stored()["issue:I_12"]).toMatchObject({ state: "fetched", remote: { number: 12, milestone: null, updatedAt: raw(12).updatedAt } });
+});
+
+test("a Project field deleted on GitHub leaves an open Issue's stored item and the Project's fields at the next full import", async () => {
+  db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
+  const withPhase = (n: number) => ({ id: `PVTI_${n}`, project: { number: 1, owner: { login: "acme" } }, fieldValues: { totalCount: 2, nodes: [{ name: "Ready", field: { name: "Status" } }, { name: "Phase 2", field: { name: "Phase" } }] } });
+  await importGithubSnapshot(fakeGh({
+    changed: () => pageOf([raw(12, { projectItems: { totalCount: 1, nodes: [withPhase(12)] } })]),
+    open: () => pageOf([{ number: 12, milestone: { title: "Phase 2" }, projectItems: { totalCount: 1, nodes: [withPhase(12)] } }]),
+    extraFields: () => ["Phase"],
+  }).gh, db, WS, 1000);
+  expect(stored()["project-item:PVTI_12"]!.remote).toMatchObject({ fields: { Status: "Ready", Phase: "Phase 2" } });
+  expect(db.getWorkspaceBacklogSource(WS.id)!.projectFields!.map((f) => f.name)).toContain("Phase");
+
+  // Phase is deleted from the Project: the Issue's updatedAt did not move, so only the open list and the definition show it
+  const imported = await importGithubSnapshot(fakeGh({ changed: () => pageOf([]), open: () => pageOf([{ number: 12, milestone: { title: "Phase 2" }, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]) }).gh, db, WS, 2000);
+  expect(stored()["project-item:PVTI_12"]).toMatchObject({ state: "fetched", remote: { issue: 12, fields: { Status: "Ready", "Story Points": 5 } } });
+  expect(stored()["project-item:PVTI_12"]!.remote).not.toHaveProperty("fields.Phase");
+  expect(imported.project).toEqual({ owner: "acme", number: 1 });
+  expect(db.getWorkspaceBacklogSource(WS.id)!.projectFields!.map((f) => f.name)).not.toContain("Phase");
 });
 
 test("an open Issue gone from both lists is asked by number: 404 and 403 mark it, an answer replaces it, nothing is erased", async () => {

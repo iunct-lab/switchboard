@@ -5,9 +5,10 @@
  * last complete one left them.
  *
  * One import is up to four reads. 1. The Issues updated since the cursor (all of them the first time), in full. 2. The
- * open Issues with their Project items only: a Project field change does not touch the Issue's updatedAt. This one is
- * read only by a full import (`full`): it costs what the open Issues number. 3. The open pull requests with their
- * changed files (the pages after the first only when there are more than 50), by every import. In place of
+ * open Issues with their Project items and Milestone only: a Project field change and a deleted Milestone do not
+ * touch the Issue's updatedAt. This one is read only by a full import (`full`): it costs what the open Issues number.
+ * 3. The open pull requests with their changed files (the pages after the first only when there are more than 50),
+ * by every import. In place of
  * 2, the Project items of the Issues named only (`items`). 4. Per number,
  * the stored open Issues (full imports only) and open PRs the lists no longer have (closed into another label, moved, deleted, hidden), the
  * targets of the PBIs' waits, of the Tasks' depends stops and the prerequisites open PBIs and Tasks name (`**前提**:`; a pull request with its
@@ -45,8 +46,8 @@ const changedQuery = (since: boolean) =>
   `query($o:String!,$r:String!,$after:String${since ? ",$since:DateTime!" : ""}){ repository(owner:$o,name:$r){ issues(first:50, after:$after, states:[OPEN,CLOSED], ${LABELS}${since ? ", filterBy:{since:$since}" : ""}, orderBy:{field:UPDATED_AT, direction:ASC}){ pageInfo{ hasNextPage endCursor } nodes{ ${ISSUE} } } } }`;
 const PR_FILES = "files(first:100){ totalCount nodes{ path } }";
 const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefName body labels(first:100){ totalCount nodes{ name } } ${PR_FILES}`;
-/** The open Issues with their Project items. */
-const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number ${PROJECT_ITEMS} } } } }`;
+/** The open Issues with their Project items and Milestone. */
+const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number milestone{ title } ${PROJECT_ITEMS} } } } }`;
 const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ pullRequests(first:50, after:$after, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } } } }`;
 const PROJECT_ID = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ name dataType } ... on ProjectV2SingleSelectField{ options{ name } } } } } } } }";
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
@@ -248,14 +249,14 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     }
     return found;
   };
-  /** List 2: the open Issues with their Project items. */
+  /** List 2: the open Issues with their Project items and Milestone. */
   const open = new Set<number>();
   const listsOpen = full || !since;
   const listOpen = async () => {
-    const found: Array<{ number: number; projectItems: Counted<RawItem> }> = [];
+    const found: Array<{ number: number; milestone: { title: string } | null; projectItems: Counted<RawItem> }> = [];
     for (let after: string | null = null; listsOpen; ) {
       const { data } = await graphql(gh, cwd, OPEN_ISSUES, { ...vars, ...(after ? { after } : {}) });
-      const issues = page<{ number: number; projectItems: Counted<RawItem> }>(data?.repository?.issues, "開いた Issue");
+      const issues = page<{ number: number; milestone: { title: string } | null; projectItems: Counted<RawItem> }>(data?.repository?.issues, "開いた Issue");
       found.push(...issues.nodes);
       if (!issues.pageInfo.hasNextPage) break;
       after = issues.pageInfo.endCursor;
@@ -282,9 +283,16 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     putIssue(raw.number, await entries);
     if (!cursor || raw.updatedAt > cursor) cursor = raw.updatedAt;
   }
+  // the stored Issue records by number, made once: a Milestone deleted on GitHub leaves the Issue's updatedAt where it was
+  const storedIssues = new Map<number, BacklogRecord>();
+  for (const r of stored) if (r.objectKind === "issue" && r.fetchState === "fetched" && !r.externalId.startsWith("sb:") && r.remote) storedIssues.set(issueNumber(r) as number, r);
   for (const raw of opened) {
     open.add(raw.number);
-    if (!read.has(raw.number)) replace(raw.number, ["project-item"], itemEntries(raw.number, raw.projectItems));
+    if (read.has(raw.number)) continue;
+    replace(raw.number, ["project-item"], itemEntries(raw.number, raw.projectItems));
+    const record = storedIssues.get(raw.number);
+    const milestone = raw.milestone?.title ?? null;
+    if (record && (record.remote as BacklogIssueData).milestone !== milestone) put({ objectKind: "issue", externalId: record.externalId, remote: { ...(record.remote as BacklogIssueData), milestone }, fetchState: "fetched" });
   }
   // without the list, an open Issue is one stored as read and open with the list's labels: closing it moved its
   // updatedAt, so the first read has it. Any other (a wait on an Issue of no type) is asked by number, as it was
