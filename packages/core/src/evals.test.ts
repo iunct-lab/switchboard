@@ -4,9 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClaudeParser } from "@switchboard/adapter-claude";
-import type { AgentEvent, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
+import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSource, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { AUTO_RESUME_HEAD, delegatedNote, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { storedIssueReader } from "./backlog.ts";
+import { AUTO_RESUME_HEAD, delegatedNote, EVAL_CONTEXT_CHARS, EVAL_REQUEST_CHARS, evalContext, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
@@ -43,6 +44,14 @@ describe("ruleMetrics", () => {
       ]),
     );
     expect(m).toEqual({ turns: 2, toolCalls: 2, toolFailures: 1, errors: 1, asks: 2, denials: 1, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 14_000, classifier: null, delegatedModel: null });
+  });
+
+  test("a status after the last real event (the cleanup note) does not move the duration", () => {
+    const evs: AgentEvent[] = [{ t: "session.start", runner: "claude", cwd: "/w" }, user("do it"), end("ok")];
+    const base = ruleMetrics(envelopes(evs)).durationMs;
+    expect(base).toBe(2000);
+    expect(ruleMetrics(envelopes([...evs, { t: "status", text: "cleanup skipped" }, { t: "status", text: "later" }])).durationMs).toBe(base);
+    expect(ruleMetrics(envelopes([{ t: "status", text: "only" }, { t: "status", text: "notes" }])).durationMs).toBe(1000);
   });
 
   test("user instructions: the first message is the request; the daemon's resume messages do not count; a streamed message counts once; different messageIds split", () => {
@@ -175,7 +184,7 @@ describe("ruleMetrics", () => {
     try {
       const db = new Db(join(dir, "switchboard.db"));
       const now = 1_700_000_000_000;
-      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
+      const task: Task = { id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
       db.insertTask(task);
       const events = envelopes([user("go"), { t: "tool.call", id: "a", name: "Read", input: {}, summary: "f" }, { t: "tool.result", id: "a", ok: true, summary: "" }, end("ok")]);
       const first = rulesEvalOf(task, events, { costUsd: 0.5 }, now);
@@ -281,5 +290,152 @@ describe("judge vs human gap", () => {
   });
   test("none with both → mean null", () => {
     expect(judgeHumanGap([listRow("a", 3), listRow("b", null, { rating: 2 })])).toEqual({ count: 0, mean: null });
+  });
+});
+
+describe("evalContext", () => {
+  const SRC: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  const issue = (number: number, labels: string[], body: string, parent: number | null = null): BacklogIssueData => ({ number, title: `題 ${number}`, url: "", state: "OPEN", stateReason: null, body, labels, milestone: null, parent, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null });
+  const taskOf = (id: string, workspaceId: string | null, stage: Task["stage"]): Task => ({ id, workspaceId, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  const pull = (number: number, state: "OPEN" | "CLOSED" | "MERGED"): BacklogPullRequestData => ({ number, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null });
+  const pbiBody = (source: string) => `## ユーザーストーリー\n${"あ".repeat(EVAL_CONTEXT_CHARS + 50)}\n\n## スコープ外\n- やらない\n\n${source}## 前提\nなし`;
+  const read = (db: Db) => storedIssueReader(db);
+  const withDb = (run: (db: Db, wsId: string, dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-evals-"));
+    try {
+      const db = new Db(join(dir, "switchboard.db"));
+      const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+      db.setWorkspaceBacklogSource(ws.id, SRC);
+      db.putBacklogSnapshot(SRC, { records: [
+        { objectKind: "issue", externalId: "I_10", remote: issue(10, ["type:pbi"], pbiBody("## 元要望\n#9（1 と 2）\n\n")), fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_11", remote: issue(11, ["type:task"], "## 親 PBI\n#10", 10), fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_12", remote: issue(12, ["type:pbi"], pbiBody("")), fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_13", remote: issue(13, ["type:task"], "## 親 PBI\n#77", 77), fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_14", remote: issue(14, ["type:pbi"], pbiBody("## 元要望\nother/repo#5 と acme/app#6（元は #9）\n\n")), fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_9", remote: issue(9, ["type:request"], `## 要望\n${"い".repeat(EVAL_REQUEST_CHARS + 50)}\n\n## 補足\nx`), fetchState: "fetched" },
+        { objectKind: "project-item", externalId: "P_10", remote: { issue: 10, owner: "acme", project: 1, fields: { Status: "In progress", Priority: "P2" } }, fetchState: "fetched" },
+        { objectKind: "issue", externalId: "I_20", remote: issue(20, ["type:task"], "x"), fetchState: "fetched" },
+        { objectKind: "pull-request", externalId: "PR_30", remote: pull(30, "MERGED"), fetchState: "fetched" },
+        { objectKind: "pull-request", externalId: "PR_31", remote: pull(31, "OPEN"), fetchState: "fetched" },
+      ], cursor: null, syncedAt: 1 });
+      run(db, ws.id, dir);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("a stage Task of a type:task Issue reads its parent PBI (story and out-of-scope cut) and the source request's head; the counts come from its events", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s1", ws, { issue: 11, action: "complete" });
+      db.insertTask(t);
+      for (const ev of [user("go"), stop("a", "decision"), stop("b", "other" as StopRecord["reason"]), user("やり直して", "m2"), end("ok")]) db.appendEvent("s1", ev);
+      const c = evalContext(db, t, read(db));
+      expect(c.interventions).toEqual({ userInstructions: 1, decisionStops: 1 });
+      expect(c.request).toEqual({
+        kind: "stage",
+        pbi: { number: 10, title: "題 10", story: `${"あ".repeat(EVAL_CONTEXT_CHARS)}…`, outOfScope: "- やらない" },
+        source: { number: 9, head: `${"い".repeat(EVAL_REQUEST_CHARS)}…` },
+      });
+    });
+  });
+
+  test("an ordinary Task shows the head of its first message, cut", () => {
+    withDb((db, ws) => {
+      const t = taskOf("p1", ws, null);
+      db.insertTask(t);
+      db.appendEvent("p1", user("x".repeat(EVAL_CONTEXT_CHARS + 10)));
+      expect(evalContext(db, t, read(db))).toEqual({ request: { kind: "prompt", text: `${"x".repeat(EVAL_CONTEXT_CHARS)}…` }, interventions: { userInstructions: 0, decisionStops: 0 }, outputs: [], pbiStatus: null });
+    });
+  });
+
+  test("a stage Task of a PBI without 元要望 has source null; one whose Issue is not stored has no PBI either", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s2", ws, { issue: 12, action: "complete" });
+      db.insertTask(t);
+      expect(evalContext(db, t, read(db)).request).toMatchObject({ kind: "stage", pbi: { number: 12, title: "題 12", outOfScope: "- やらない" }, source: null });
+      const gone = taskOf("s3", ws, { issue: 99, action: "complete" });
+      db.insertTask(gone);
+      expect(evalContext(db, gone, read(db)).request).toEqual({ kind: "stage", pbi: null, source: null });
+    });
+  });
+  test("a stage Task of a request Issue (to-pbi, direct) has no PBI; its own 要望 head is the source", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s4", ws, { issue: 9, action: "to-pbi" });
+      db.insertTask(t);
+      expect(evalContext(db, t, read(db)).request).toEqual({ kind: "stage", pbi: null, source: { number: 9, head: `${"い".repeat(EVAL_REQUEST_CHARS)}…` } });
+    });
+  });
+
+  test("a type:task Issue whose parent is not stored has no PBI (not the Task Issue itself)", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s5", ws, { issue: 13, action: "complete" });
+      db.insertTask(t);
+      expect(evalContext(db, t, read(db)).request).toEqual({ kind: "stage", pbi: null, source: null });
+    });
+  });
+
+  test("a #N that is part of owner/repo#N in 元要望 is not the source request", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s6", ws, { issue: 14, action: "complete" });
+      db.insertTask(t);
+      expect(evalContext(db, t, read(db)).request).toMatchObject({ kind: "stage", pbi: { number: 14 }, source: { number: 9 } });
+    });
+  });
+
+  test("the counts come from the stored rules row when there is one (not counted again)", () => {
+    withDb((db, ws) => {
+      const t = taskOf("s7", ws, null);
+      db.insertTask(t);
+      db.appendEvent("s7", user("go"));
+      const counted = rulesEvalOf(t, db.listEvents("s7"), db.taskCost("s7"));
+      db.upsertEval({ taskId: "s7", source: "rules", by: counted.by, rubric: null, json: { ...counted, metrics: { ...counted.metrics, userInstructions: 7, stopReasons: { decision: 3 } } }, ts: 1 });
+      expect(evalContext(db, t, read(db)).interventions).toEqual({ userInstructions: 7, decisionStops: 3 });
+    });
+  });
+
+  test("outputs: the pull requests, local changes and Issues a Task opened with their stored state, and the PBI's Project Status of a stage Task", () => {
+    withDb((db, ws) => {
+      const t = taskOf("o1", ws, { issue: 11, action: "complete" });
+      db.insertTask(t);
+      const call = (id: string, command: string, summary: string) => {
+        db.appendEvent("o1", { t: "tool.call", id, name: "Bash", input: { command }, summary: command });
+        db.appendEvent("o1", { t: "tool.result", id, ok: true, summary });
+      };
+      call("a", "gh pr create --fill", "https://github.com/acme/app/pull/30");
+      call("b", "gh pr create --fill", "https://github.com/acme/app/pull/31\nhttps://github.com/other/tool/pull/7");
+      call("c", "gh issue create --title x", "https://github.com/acme/app/issues/20");
+      call("d", "gh pr view 31", "https://github.com/acme/app/pull/99");
+      // a local change: its create is stored first, then read back by localId once it has a number
+      const localId = "33333333-3333-4333-8333-333333333333";
+      const draft = { ...issue(0, [], "変更"), number: 0, change: { head: "sb/1", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null } };
+      db.appendEventAt("o1", { t: "tool.call", id: "e", name: "Bash", input: { command: "ops-kit backlog create --head sb/1" }, summary: "create" }, Date.now() - 1);
+      const [create] = db.applyBacklogEdit(SRC, { records: [{ objectKind: "issue", externalId: `local:${localId}`, local: draft }], operations: [{ id: localId, issue: `local:${localId}`, targetKind: "issue", target: `local:${localId}`, kind: "create", payload: draft }] });
+      db.setBacklogOperationResult(create!, { status: "done", remoteId: "I_21", record: { externalId: "I_21", remote: { ...draft, number: 21, title: "手元の変更", state: "CLOSED", change: { ...draft.change, mergedAt: "2026-10-02T00:00:00Z" } } } });
+      db.appendEvent("o1", { t: "tool.result", id: "e", ok: true, summary: `#21 を作りました（localId ${localId}）` });
+      const c = evalContext(db, t, read(db));
+      expect(c.outputs).toEqual([
+        { kind: "pr", repo: "acme/app", number: 30, title: null, state: "merged" },
+        { kind: "pr", repo: "acme/app", number: 31, title: null, state: "open" },
+        { kind: "pr", repo: "other/tool", number: 7, title: null, state: null },
+        { kind: "issue", repo: "acme/app", number: 20, title: "題 20", state: "open" },
+        { kind: "change", repo: "acme/app", number: 21, title: "手元の変更", state: "merged" },
+      ]);
+      expect(c.pbiStatus).toBe("In progress");
+      // an ordinary Task has no PBI, so no Status
+      const p = taskOf("o2", ws, null);
+      db.insertTask(p);
+      expect(evalContext(db, p, read(db))).toMatchObject({ outputs: [], pbiStatus: null });
+    });
+  });
+
+  test("a pending remove from the Project hides the PBI's Status, as the stored Issue shows it", () => {
+    withDb((db, ws) => {
+      const t = taskOf("o3", ws, { issue: 11, action: "complete" });
+      db.insertTask(t);
+      expect(evalContext(db, t, read(db)).pbiStatus).toBe("In progress");
+      db.applyBacklogEdit(SRC, { records: [], operations: [{ issue: "I_10", targetKind: "project-item", target: "P_10", kind: "set", field: "member", payload: false, base: true }] });
+      expect(evalContext(db, t, read(db)).pbiStatus).toBeNull();
+    });
   });
 });

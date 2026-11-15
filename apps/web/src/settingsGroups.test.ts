@@ -11,11 +11,11 @@ const body = source.slice(source.indexOf('<main className="main settings">\n'), 
 /** The screen in source order: a group's heading as "group:<id>", a card by its heading (the two cards drawn by their own component by name). */
 function screenOrder(): string[] {
   const out: string[] = [];
-  for (const m of body.matchAll(/<SettingsGroupHeading id="([\w-]+)"|<h5>(.*?)<\/h5>|<SettingsCard title=\{t\(settings\.(\w+)\)\}|<(WorkspaceCard|PolicySettings)\b/g)) {
+  for (const m of body.matchAll(/<SettingsGroupHeading id="([\w-]+)"|<h5>(.*?)<\/h5>|<SettingsCard title=\{t\(settings\.(\w+)\)\}|<(McpCard|WorkspaceCard|PolicySettings)\b/g)) {
     if (m[1]) out.push(`group:${m[1]}`);
     else if (m[2]) out.push(m[2].replace(/^\{t\(settings\.(\w+)\)\}$/, (_, k: keyof typeof settings) => settings[k].ja)); // a heading from the dictionary reads as its Japanese
     else if (m[3]) out.push(settings[m[3] as keyof typeof settings].ja); // a folded card (#3849) by its title
-    else out.push(m[4] === "WorkspaceCard" ? "Workspace" : "回答の方針");
+    else out.push(m[4] === "McpCard" ? "Workspace MCP" : m[4] === "WorkspaceCard" ? "Workspace" : "回答の方針");
   }
   return out;
 }
@@ -55,7 +55,7 @@ describe("SETTINGS_GROUPS", () => {
       expect(own).not.toMatch(/<section className="card/);
     }
     expect(source).toContain("<SettingsCard title={t(settings.adk)}>");
-    const folded = [...body.matchAll(/<SettingsCard title=/g)].length + 2; // + Workspace, 回答の方針
+    const folded = [...body.matchAll(/<SettingsCard title=/g)].length + 3; // + Workspace, Workspace MCP, 回答の方針
     expect(folded).toBe(SETTINGS_GROUPS.flatMap((g) => g.sections).length - 1);
   });
 
@@ -73,6 +73,17 @@ describe("SETTINGS_GROUPS", () => {
     expect(source).toContain("{ other: settings.reviewRunnerOther, same: settings.reviewRunnerSame }");
     expect(card).toContain("save({ reviewRunner: value })");
     expect(settings.reviewRunnerHint.ja).toContain("次の開始・再開から効く");
+  });
+
+  test("Knowledge is a folded card of 接続とアプリ that draws its body only once opened", () => {
+    expect(settingsGroup("settings-connect").sections.at(-1)).toBe("Knowledge");
+    const from = body.indexOf("<SettingsCard title={t(settings.knowledge)}");
+    expect(from).toBeGreaterThan(-1);
+    const card = body.slice(from, body.indexOf("</SettingsCard>", from));
+    expect(card.slice(0, card.indexOf(">\n"))).toMatch(/\blazy\b/); // the opening tag
+    expect(card).toContain("<Knowledge ");
+    // the card draws its children only when not lazy or already opened
+    expect(source).toContain("(!props.lazy || opened) && props.children");
   });
 
   test("an unknown group id throws", () => {

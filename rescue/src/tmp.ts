@@ -27,7 +27,7 @@ const AUTO: TmpMode = { kind: "auto" };
  */
 export const CLEANABLE: { own: RegExp[]; shared: RegExp[] } = {
   own: [
-    /^[\w.-]+\.(review|recheck)\d+[A-Za-z]*\.[A-Za-z0-9]{6}$/, // cross-runner-review's clone: mktemp -d /tmp/<repo>.review<PR>.XXXXXX (also review3212r), and the recheck's
+    /^[\w.-]+\.(review|recheck)\d+[A-Za-z]*\.[A-Za-z0-9]{6}$/, // an old review clone left in /tmp from before they moved: mktemp -d /tmp/<repo>.review<PR>.XXXXXX (also review3212r), and the recheck's. Today's live under ~/.cache/ops-kit/review, swept by sweepCacheWork
     /^sb-candidate-[A-Za-z0-9]{6}$/, // promote.ts's mkdtemp, left when its finally did not run
   ],
   shared: [

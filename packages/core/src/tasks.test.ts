@@ -5,10 +5,10 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
+import type { AgentEvent, RunnerAdapter, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd } from "./tasks.ts";
+import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd, versionAtLeast } from "./tasks.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -467,7 +467,7 @@ describe("task allow rules", () => {
   });
 });
 
-describe("fable default budget (#1989)", () => {
+describe("fable default budget", () => {
   let fableBudget: number | null;
   beforeEach(() => {
     fableBudget = 200;
@@ -524,5 +524,95 @@ describe("fable default budget (#1989)", () => {
   test("isFableModel reads every Fable version, the context tag, the Bedrock form and the alias", () => {
     for (const m of ["claude-fable-5-1", "claude-fable-5-2", "claude-fable-5-1[1m]", "global.anthropic.claude-fable-5-2", "anthropic.claude-fable-5-1", "fable"]) expect(isFableModel(m)).toBe(true);
     for (const m of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "opus", "gpt-6", "", null, undefined]) expect(isFableModel(m)).toBe(false);
+  });
+});
+
+describe("fork", () => {
+  /** Every start is recorded; a start with `fork` opens a session of its own (`sess-fork`), the others `sess-parent`. */
+  function forkAdapter(starts: StartOptions[], hasSession: (id: string) => boolean = () => true, parentSid: () => string = () => "sess-parent"): RunnerAdapter {
+    return {
+      id: "claude",
+      forks: true,
+      forkMinVersion: "2.1.314",
+      hasSession,
+      async detect() {
+        return { available: true, version: "2.1.320" };
+      },
+      start(opts, emit) {
+        starts.push(opts);
+        queueMicrotask(() => {
+          emit({ t: "session.start", runner: "claude", runnerSessionId: opts.fork ? "sess-fork" : parentSid(), cwd: "/" });
+          emit({ t: "session.end", status: "ok", turn: `turn-${starts.length}` });
+        });
+        return { send: () => undefined, respondPermission: () => undefined, abort: async () => undefined, close: async () => undefined, exited: Promise.resolve(0) };
+      },
+    };
+  }
+  const setup = async (hasSession?: (id: string) => boolean, parentSid?: () => string) => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", forkAdapter(starts, hasSession, parentSid)]]), () => undefined, { idleMs: 0 });
+    const parent = m.create({ cwd: home, title: "親", prompt: "p", runner: "claude" });
+    await sleep(5);
+    const seq = db.listEvents(parent.id).find((e) => e.ev.t === "session.end")!.seq;
+    return { m, starts, parent, seq };
+  };
+
+  test("fork keeps the parent's session: the child's first reply forks it, the parent's next reply resumes the same session without fork", async () => {
+    const { m, starts, parent, seq } = await setup();
+    const child = m.forkTask(parent.id, seq);
+    expect(starts).toHaveLength(1); // forking starts nothing
+    expect(child).toMatchObject({ forkOf: parent.id, forkSeq: seq, forkTurn: "turn-1", status: "idle", runnerSessionId: null, cwd: parent.cwd });
+    expect(db.listEvents(child.id).map((e) => e.ev)).toEqual([{ t: "status", text: "分岐元の Task の、分岐したターンまでの会話を引き継いでいます。ファイルは分岐元と同じ作業ツリーです" }]);
+
+    await m.send(child.id, "child reply");
+    await sleep(5);
+    expect(starts[1]).toMatchObject({ resumeSessionId: "sess-parent", fork: { turn: "turn-1" } });
+    expect(db.getTask(child.id)!.runnerSessionId).toBe("sess-fork");
+
+    await m.send(parent.id, "parent reply");
+    await sleep(5);
+    expect(starts[2]!.resumeSessionId).toBe("sess-parent");
+    expect(starts[2]!.fork).toBeUndefined();
+    expect(db.getTask(parent.id)!.runnerSessionId).toBe("sess-parent");
+
+    await m.send(child.id, "child again"); // the child has its own session now: a plain resume of it
+    await sleep(5);
+    expect(starts[3]!.resumeSessionId).toBe("sess-fork");
+    expect(starts[3]!.fork).toBeUndefined();
+  });
+
+  test("a parent session that is not on this machine: no fork Task, and a child whose parent lost it fails to start instead of starting empty", async () => {
+    let here = true;
+    const { m, starts, parent, seq } = await setup((id) => here || id !== "sess-parent");
+    const child = m.forkTask(parent.id, seq);
+    here = false;
+    expect(() => m.forkTask(parent.id, seq)).toThrow("セッション");
+    await expect(m.send(child.id, "hi")).rejects.toThrow("分岐");
+    expect(starts).toHaveLength(1);
+    expect(db.getTask(child.id)!.status).toBe("error");
+  });
+
+  test("a fork resumes the session its turn ran in, not the session the parent has moved on to", async () => {
+    let sid = "sess-parent";
+    const { m, starts, parent, seq } = await setup(undefined, () => sid);
+    sid = "sess-parent-2"; // the parent's next turn runs in another session (e.g. it came from another machine)
+    await m.send(parent.id, "parent reply");
+    await sleep(5);
+    expect(db.getTask(parent.id)!.runnerSessionId).toBe("sess-parent-2");
+    const child = m.forkTask(parent.id, seq);
+    await m.send(child.id, "child reply");
+    await sleep(5);
+    expect(starts.at(-1)).toMatchObject({ resumeSessionId: "sess-parent", fork: { turn: "turn-1" } });
+  });
+
+  test("versionAtLeast: compares a.b.c numerically; an unknown version or minimum is not enough", () => {
+    expect(versionAtLeast("2.1.314", "2.1.314")).toBe(true);
+    expect(versionAtLeast("2.1.1000", "2.1.314")).toBe(true);
+    expect(versionAtLeast("2.2.0", "2.1.314")).toBe(true);
+    expect(versionAtLeast("2.1.99", "2.1.314")).toBe(false);
+    expect(versionAtLeast("10.0.0", "9.9.9")).toBe(true);
+    expect(versionAtLeast(undefined, "2.1.314")).toBe(false);
+    expect(versionAtLeast("fake", "2.1.314")).toBe(false);
+    expect(versionAtLeast("2.1.314", undefined)).toBe(false);
   });
 });

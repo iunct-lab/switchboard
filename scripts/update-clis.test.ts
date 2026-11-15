@@ -84,6 +84,41 @@ describe("updateClis", () => {
     expect(r.failures[0]!.restored).toBe(true);
   });
 
+  test("a turn stopped by the usage limit rolls back without counting as a failure", async () => {
+    const d = deps({ smoke: async () => { throw new Error("You’ve hit your usage limit. Upgrade to Pro"); } });
+    const r = await updateClis(d, links);
+    expect(r.lines[0]).toBe("claude rolled back: 1.1.0 → 1.0.0（確認 できない: 使用上限で 1 ターンが通らない: You’ve hit your usage limit. Upgrade to Pro）");
+    expect(await installedFrom(links.claude)).toBe("1.0.0");
+    expect(r.code).toBe(2);
+    expect(r.failures).toHaveLength(0);
+  });
+
+  test("codex's usage-limit text is read as the limit too", async () => {
+    const base = hostDeps();
+    base.swapLink(links.codex, join(dir, "codex", "2.0.0", "cli"));
+    const d = deps({
+      latest: { claude: "1.0.0", codex: "2.1.0" },
+      update: async (r) => (base.swapLink(links[r], join(dir, r, "2.1.0", "cli")), { code: 0, out: "" }),
+      smoke: async () => { throw new Error("You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits"); },
+    });
+    const r = await updateClis(d, links);
+    expect(r.lines[1]).toStartWith("codex rolled back: 2.1.0 → 2.0.0（確認 できない: 使用上限で");
+    expect(await installedFrom(links.codex)).toBe("2.0.0");
+    expect(r.code).toBe(2);
+    expect(r.failures).toHaveLength(0);
+  });
+
+  test("a usage-limit check that cannot be rolled back is still a failure", async () => {
+    const d = deps({
+      smoke: async () => { throw new Error("You’ve hit your usage limit."); },
+      swapLink: () => { throw new Error("read-only"); },
+    });
+    const r = await updateClis(d, links);
+    expect(r.lines[0]).toContain("claude 戻せなかった");
+    expect(r.failures[0]!.restored).toBe(false);
+    expect(r.code).toBe(1);
+  });
+
   test("rolls back when update leaves the version unchanged", async () => {
     const d = deps({ update: async () => ({ code: 0, out: "" }) });
     const r = await updateClis(d, links);

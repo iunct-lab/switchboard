@@ -1,6 +1,6 @@
 ---
 name: new-repo
-description: 新しいリポジトリを雛形から作り、GitHub 側（リポジトリ・Project・変数・ラベル）と Switchboard への登録まで済ませる手順。設定タブの「新しいリポジトリ」から始まった Task、利用者に新しいリポジトリを頼まれたときに読む。GitHub を使わないリポジトリの作成（7-1）と、前の雛形で作った既存リポジトリへの写し方（7-2）も扱う。次は request-to-backlog
+description: 新しいリポジトリを雛形から作り、GitHub 側（リポジトリ・Project・変数・ラベル）と Switchboard への登録まで済ませる手順。設定タブの「新しいリポジトリ」から始まった Task、利用者に新しいリポジトリを頼まれたときに読む。GitHub を使わないリポジトリの作成（7-1）と、前の雛形で作った既存リポジトリへの写し方（7-2）も扱う。次は、構想があれば立ち上げ型 p2-baseline、無ければ request-to-backlog
 ---
 
 # 新しいリポジトリを作る（雛形 → GitHub 側 → 初期コミット → 登録 → 開始条件 → 報告）
@@ -20,7 +20,6 @@ description: 新しいリポジトリを雛形から作り、GitHub 側（リポ
 | 名前・owner | `<owner>/<name>`。owner が組織かユーザーか（Project の URL の `orgs` / `users`） |
 | 可視性 | **private 固定**。public が要るなら作らず止めて聞く（`issue-workflow` の Task 粒度チェック 6 の Public 切替） |
 | `envPrefix` | 変数 `<PREFIX>_PROJECT_URL` の接頭辞（`ops.config.json` の `envPrefix`）。大文字・英数字と `_` |
-| Area | 値の一覧（`__AREA__` を数だけ増やす）。ラベル `area:<値>` も同じ数 |
 | Phase | 使うか。使うなら `ops-kit/fixtures/config-with-phase.json` の `phase` / `milestone` を `ops.config.json` に、`pbi.yml` に Phase の dropdown を足す。使わないなら何もしない |
 | テストの 3 コマンド | 型検査 `__TEST_TYPECHECK__` / 全体 `__TEST_ALL__`（`ci.yml` の `run:` にも入る。別の言語ならその step に書き換える）/ 1 件 `__TEST_ONE__` |
 | 互換の前提・動いている実物と反映の OK | `__COMPAT__` / `__LIVE_CHECK__` / `__DEPLOY_OK__`。用途ごとの違いは `docs/design/new-repo.md` の「Differences by purpose」の表から選ぶ |
@@ -84,7 +83,7 @@ mv <dir>/CLAUDE.md.tmpl <dir>/CLAUDE.md; mv <dir>/AGENTS.md.tmpl <dir>/AGENTS.md
 rm <dir>/.github/workflows/project-autoadd.yml     # 1 で「置かない」としたとき。置くなら残して `__PREFIX__` を置換する
 ```
 
-`ops-kit/README.md` の「Templates (new repositories)」の表の `__NAME__` を、1 で決めた値で全ファイルに置換する（`__KIT_HOME_VAR__` は `SWITCHBOARD_REPO_ROOT`。`__AREA__` は 1 行 / 1 要素のところを Area の数だけ増やす）。仕組みは `sed` で足りる。置換のコマンドは作らない。
+`ops-kit/README.md` の「Templates (new repositories)」の表の `__NAME__` を、1 で決めた値で全ファイルに置換する（`__KIT_HOME_VAR__` は `SWITCHBOARD_REPO_ROOT`）。仕組みは `sed` で足りる。置換のコマンドは作らない。
 
 ```bash
 grep -rnE '__[A-Z_]+__' <dir> --exclude-dir=.git                                  # 期待: 0 件
@@ -127,9 +126,10 @@ curl -s -X PATCH $B/api/workspaces/$ID -H "authorization: Bearer $K" -H 'content
 作ったもの: リポジトリ <URL> / Project <URL> / 変数 <PREFIX>_PROJECT_URL / ラベル <n> 件 / 初期コミット <sha> / workspace <id>（<dir>）
 | 開始してよい条件 | 結果 |
 利用者確認: Project のビュー 2 つを手で作る（Backlog = `no:parent-issue`、Task Board = `has:parent-issue`。`docs/design/new-repo.md` の「What stays manual」の 1）。project-autoadd を置いたときだけ PAT の登録（同 3）
+次: 構想（何を作るか・範囲）が用途の文や会話にあれば、立ち上げ型 `p2-baseline`（構想から最初のベースラインを PBI・Task を書かずに作る。`docs/design/new-repo.md` の「After the repository is made: the baseline」）。無ければ `request-to-backlog` で要望から
 ```
 
-Project のリポジトリへのひも付けとラベルは 2 で済ませているので、利用者確認に入れない。秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認の 3 つが埋まっている。
+Project のリポジトリへのひも付けとラベルは 2 で済ませているので、利用者確認に入れない。秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。期待: 作ったもの・条件の表・利用者確認・次の 4 つが埋まっている。
 
 ## 7. GitHub を使わないリポジトリ
 
@@ -142,7 +142,7 @@ mkdir -p <dir> && cp -R "$SWITCHBOARD_REPO_ROOT/ops-kit/template-local/." <dir>
 mv <dir>/CLAUDE.md.tmpl <dir>/CLAUDE.md; mv <dir>/AGENTS.md.tmpl <dir>/AGENTS.md; mv <dir>/README.md.tmpl <dir>/README.md
 ```
 
-`__REPO__`（リポジトリ名）・`__PREFIX__`（`envPrefix`）・`__AREA__`（`ops.config.json` の 1 要素。Area の数だけ増やす）・`__COMPAT__`・`__TEST_TYPECHECK__` / `__TEST_ALL__` / `__TEST_ONE__`（テストのコマンドが 1 で決まっていなければ、3 つとも次のシェルのコメント 1 行に置換する。コードブロックの中で実行しても何も起きず、下の `grep` の 0 件も保てる。空・「なし」・存在しないコマンドは置かない: `# テストなし。最初のテストを足す変更で、この行を実際のコマンドに置き換える`）・`__LIVE_CHECK__`・`__DEPLOY_OK__`・`__TASK_CHECK__` を 1 で決めた値で `sed` などで置換する。置換のコマンドは作らない。置換してからコミットする:
+`__REPO__`（リポジトリ名）・`__PREFIX__`（`envPrefix`）・`__COMPAT__`・`__TEST_TYPECHECK__` / `__TEST_ALL__` / `__TEST_ONE__`（テストのコマンドが 1 で決まっていなければ、3 つとも次のシェルのコメント 1 行に置換する。コードブロックの中で実行しても何も起きず、下の `grep` の 0 件も保てる。空・「なし」・存在しないコマンドは置かない: `# テストなし。最初のテストを足す変更で、この行を実際のコマンドに置き換える`）・`__LIVE_CHECK__`・`__DEPLOY_OK__`・`__TASK_CHECK__` を 1 で決めた値で `sed` などで置換する。置換のコマンドは作らない。置換してからコミットする:
 
 ```bash
 grep -rnE '__[A-Z_]+__' <dir> --exclude-dir=.git                                  # 期待: 0 件（出たら置換し直す。コミットしない）

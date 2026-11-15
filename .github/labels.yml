@@ -1,5 +1,5 @@
 # ラベル体系（宣言的）。`.github/workflows/labels.yml` が main への push で同期する。
-# 色は 6桁hex（# なし）。DAK の体系を踏襲し、Area をこのリポジトリのパッケージ構成に合わせている。
+# 色は 6桁hex（# なし）。DAK の体系を踏襲している。
 
 # --- 種別 / Type ---
 - name: bug
@@ -51,32 +51,3 @@
 - name: automation
   color: ededed
   description: 自動化ワークフロー由来
-
-# --- 対象コンポーネント / Area（Project の Area フィールドと一致）---
-- name: "area:protocol"
-  color: bfdadc
-  description: packages/protocol
-- name: "area:core"
-  color: bfdadc
-  description: packages/core（デーモン・ストア・Workspace MCP）
-- name: "area:adapter-claude"
-  color: bfdadc
-  description: packages/adapters/claude
-- name: "area:adapter-codex"
-  color: bfdadc
-  description: packages/adapters/codex
-- name: "area:adapter-dak"
-  color: bfdadc
-  description: packages/adapters/adk
-- name: "area:web"
-  color: bfdadc
-  description: apps/web
-- name: "area:knowledge"
-  color: bfdadc
-  description: Knowledge Store / Materializer / Inbox
-- name: "area:ledger"
-  color: bfdadc
-  description: コスト台帳・枠・価格表
-- name: "area:infra"
-  color: bfdadc
-  description: .github / scripts / release

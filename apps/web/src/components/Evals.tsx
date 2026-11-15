@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { EvalsListRow, EvalsSummary, RunnerId, RunnerInfo, Workspace } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
+import { contextLines, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
 import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
+import { HumanEvalForm, humanEvalKey } from "./HumanEvalForm.tsx";
 import { Reports } from "./Reports.tsx";
 import { Ops } from "./Ops.tsx";
+import { Balance } from "./Balance.tsx";
 import { Sources } from "./Sources.tsx";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";
@@ -95,6 +97,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     <main className="main ledger evals-screen">
       <Reports openId={props.openReport} scope={props.scope} onScope={props.onScope} onOpenTask={props.onOpenArtifact} onError={props.onError} />
       <Ops onOpenTask={props.onOpenTask} />
+      <Balance onError={props.onError} />
       <Sources />
       <section className="card">
         <h5>{t(m.askHeading)}</h5>
@@ -107,25 +110,37 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
             {summary.sample.length === 0 ? (
               <div className="muted">{t(m.noneJudgedLastWeek)}</div>
             ) : (
-              <div className="table-scroll">
-              <table className="pricing evals-table evals-ask">
-                <tbody>
-                  {summary.sample.map((r) => (
-                    <tr key={r.taskId}>
-                      <td>
-                        <button className="ghost open" onClick={() => props.onRateTask(r.taskId)} title={r.taskId}>
-                          {r.title}
-                        </button>
-                      </td>
-                      <td>
-                        <RunnerPill runner={r.runner as RunnerId} />
-                      </td>
-                      <td className="num">{r.judge ? r.judge.average.toFixed(1) : "-"}</td>
-                      <td className="num">{r.human ? `${r.human.rating} / 5` : t(m.notYet)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="evals-ask">
+                {summary.sample.map((r) => (
+                  <div key={r.taskId} style={{ borderTop: "1px solid var(--line)", padding: "8px 0" }}>
+                    <div>
+                      <button className="ghost open" onClick={() => props.onRateTask(r.taskId)} title={r.taskId} style={{ textAlign: "left", whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                        {r.title}
+                      </button>
+                    </div>
+                    <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <RunnerPill runner={r.runner as RunnerId} />
+                      <span>{t(m.colRubric)} {r.judge ? r.judge.average.toFixed(1) : "-"}</span>
+                      <span>{t(m.colHuman)} {r.human ? `${r.human.rating} / 5` : t(m.notYet)}</span>
+                    </div>
+                    <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 8px", margin: "6px 0" }}>
+                      {contextLines(r.context).map((l) => (
+                        <Fragment key={l.label}>
+                          <dt className="muted">{l.label}</dt>
+                          <dd className={l.warn ? "warn" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>
+                            {l.text}
+                          </dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                    <HumanEvalForm
+                      key={humanEvalKey(r.taskId, r.human)}
+                      taskId={r.taskId}
+                      human={r.human}
+                      onSaved={(e) => setSummary((s) => (s ? { ...s, sample: s.sample.map((x) => (x.taskId === r.taskId ? { ...x, human: e.human } : x)) } : s))}
+                    />
+                  </div>
+                ))}
               </div>
             )}
             <div className="hint">{t(m.gapLine, { gap: gapLabel(summary.gap) })}</div>

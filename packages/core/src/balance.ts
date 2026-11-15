@@ -1,7 +1,7 @@
-import type { BalanceKinds, BalanceRow, Workspace } from "@switchboard/protocol";
+import type { BalanceCapacity, BalanceKinds, BalanceRow, BalanceView, RunnerId, Workspace } from "@switchboard/protocol";
 import { FLOW_LABEL, readStoredRecords } from "./backlog.ts";
-import type { Db } from "./db.ts";
-import { backlogGrowth, closedPbis, flowOfStored } from "./flow.ts";
+import type { Db, QuotaWindowRow } from "./db.ts";
+import { backlogGrowth, closedPbis, flowOfStored, median } from "./flow.ts";
 import { collectInterventions, issueOfTask } from "./interventions.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 
@@ -80,4 +80,46 @@ export function balanceRows(db: Db, workspaces: Workspace[], days: 7 | 30, now =
     row.interventionsPerPbi = row.interventions === null ? null : perDelivered(row.interventions, row.deliveredPbis);
   }
   return rows.map((r) => r.row);
+}
+
+/**
+ * What the weekly quota leaves, from the 7-day rows, the runners' windows (newest first) and the interventions of the last 7 days.
+ * `spent` is what each runner's current window has cost so far. A runner's remaining money is `spent / use * (1 - use)`; a runner with no
+ * window, a window already reset, or no spend gives no estimate (null, not 0). Any runner whose current or previous window (one that reset
+ * within the last 7 days) reached 100% limits the capacity: `moreRepos` is 0 then.
+ */
+export function capacityOf(rows7: BalanceRow[], windows: QuotaWindowRow[], interventions7: number, now: number, spent: ReadonlyMap<RunnerId, number> = new Map()): BalanceCapacity {
+  const byRunner = new Map<RunnerId, QuotaWindowRow[]>();
+  for (const w of windows) byRunner.set(w.runner, [...(byRunner.get(w.runner) ?? []), w]);
+  let remaining = 0;
+  let known = false;
+  const runners = [...byRunner].map(([runner, ws]) => {
+    const live = ws[0]!.resetsAt * 1000 > now; // newest first: an expired newest window means the current one has no record yet
+    const current = live ? ws[0]! : null;
+    // the previous window counts only when it reset within the last 7 days: an old window of a runner not used since is not "recent"
+    const before = live ? ws[1] : ws[0];
+    const previous = before && before.resetsAt * 1000 > now - 7 * DAY ? before : undefined;
+    const utilization = current ? current.peak : 0;
+    const saturated = (current?.peak ?? 0) >= 1 || (previous?.peak ?? 0) >= 1;
+    const cost = spent.get(runner) ?? 0;
+    if (current && utilization > 0 && cost > 0) {
+      remaining += utilization >= 1 ? 0 : (cost / utilization) * (1 - utilization);
+      known = true;
+    }
+    return { runner, utilization, resetsAt: current?.resetsAt ?? null, saturated };
+  });
+  const medianWeeklyUsd = median(rows7.filter((r) => r.costUsd > 0).map((r) => r.costUsd));
+  const limited = runners.some((r) => r.saturated);
+  const moreRepos = limited ? 0 : known && medianWeeklyUsd ? Math.floor(remaining / medianWeeklyUsd) : null;
+  return { runners, interventionsPerDay: interventions7 / 7, medianWeeklyUsd, moreRepos, limitedBy: limited ? "quota" : null };
+}
+
+/** The `days` rows and the capacity (always from the last 7 days), counted at each call. */
+export function balanceView(db: Db, workspaces: Workspace[], days: 7 | 30, now = Date.now()): BalanceView {
+  const rows7 = balanceRows(db, workspaces, 7, now);
+  const windows = db.quotaWindows();
+  const spent = new Map<RunnerId, number>();
+  for (const w of windows) if (w.resetsAt * 1000 > now && !spent.has(w.runner)) spent.set(w.runner, db.windowShares(w.runner, w.resetsAt).reduce((s, x) => s + x.costUsd, 0));
+  const interventions7 = rows7.reduce((s, r) => s + (r.interventions ?? 0), 0);
+  return { days, rows: days === 7 ? rows7 : balanceRows(db, workspaces, 30, now), capacity: capacityOf(rows7, windows, interventions7, now, spent) };
 }

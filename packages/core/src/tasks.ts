@@ -166,7 +166,19 @@ export function isFableModel(model: string | null | undefined): boolean {
   return name === "fable" || name.startsWith("claude-fable-");
 }
 
+/** Whether a CLI version `a.b.c` is at least `min`. An unknown version (or no minimum recorded) is not. */
+export function versionAtLeast(version: string | undefined, min: string | undefined): boolean {
+  const parse = (v: string | undefined) => v?.match(/^(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  const have = parse(version);
+  const need = parse(min);
+  if (!have || !need) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i]! > need[i]!;
+  return true;
+}
+
 export interface TaskManagerOptions {
+  /** Whether a runner can start from a past turn: the adapter's `forks` and the detected version. Unset = the adapter's `forks`. */
+  runnerForks?: (runner: RunnerId) => boolean;
   /** How a checkout's origin URL is read for the start check (originMismatch). Unset = git. */
   originOf?: (path: string) => string | null;
   /** Where a Codex task's own temp directory is made: `<daemon home>/tmp`. Unset = none is made. */
@@ -200,7 +212,7 @@ export interface TaskManagerOptions {
   subagentEffort?: (runner: RunnerId) => string | undefined;
   /** Saved shadow runner, used when a creation does not say; null / undefined = no shadow by default. */
   defaultShadowRunner?: () => RunnerId | null | undefined;
-  /** Settings `quotaAndResume.fableBudgetUsd`: the budget a Fable Task gets when it has none (#1989). Unset / null = none. */
+  /** Settings `quotaAndResume.fableBudgetUsd`: the budget a Fable Task gets when it has none. Unset / null = none. */
   defaultFableBudget?: () => number | null;
   /** Files attached to turns. Absent = `attachmentIds` are refused. */
   attachments?: AttachmentStore;
@@ -298,6 +310,7 @@ export class TaskManager {
 
   private beforeResume: TaskManagerOptions["beforeResume"];
   private originOf: TaskManagerOptions["originOf"];
+  private runnerForks: TaskManagerOptions["runnerForks"];
   private idleMs: number;
   private suggest: TaskManagerOptions["suggest"];
   private approval: TaskManagerOptions["approval"];
@@ -340,6 +353,7 @@ export class TaskManager {
   ) {
     this.beforeResume = opts.beforeResume;
     this.originOf = opts.originOf;
+    this.runnerForks = opts.runnerForks;
     this.idleMs = opts.idleMs ?? 10 * 60 * 1000;
     this.suggest = opts.suggest;
     this.approval = opts.approval;
@@ -604,7 +618,7 @@ export class TaskManager {
   }
 
   /**
-   * The settings' Fable budget (#1989) for a local Task without a budget whose model has just become Fable (`before` was
+   * The settings' Fable budget for a local Task without a budget whose model has just become Fable (`before` was
    * not Fable); null = nothing to add. Only the change to Fable adds it, so a budget the user removed later stays removed.
    */
   private fableBudgetFor(task: Task, before: string | null | undefined): number | null {
@@ -828,6 +842,67 @@ export class TaskManager {
     return t;
   }
 
+  /**
+   * Fork: a new Task that continues `parentId`'s conversation up to the turn that ended at `seq` (a `session.end`),
+   * then goes its own way. Nothing starts here: the child is idle with no session, and its first reply starts a
+   * forked runner session (startSession). The child shares the parent's working tree. Throws when the turn cannot
+   * be forked from (the message says why).
+   */
+  forkTask(parentId: string, seq: number): Task {
+    const parent = this.mustGet(parentId);
+    if (parent.executionMode === "cloud") throw new Error("Cloud Task は分岐できません");
+    const adapter = this.adapters.get(parent.runner);
+    if (!adapter) throw new Error(`runner "${parent.runner}" is not installed`);
+    if (!(this.runnerForks ? this.runnerForks(parent.runner) : adapter.forks === true)) throw new Error(`${parent.runner} は過去のターンからの分岐に対応していません`);
+    const end = this.db.getEvent(parentId, seq)?.ev;
+    if (end?.t !== "session.end") throw new Error(`seq ${seq} はターンの終わりではありません`);
+    if (end.status !== "ok") throw new Error("エラーまたは中断で終わったターンからは分岐できません");
+    if (!end.turn) throw new Error("このターンには分岐の目印がありません（古い記録です）");
+    // the turn's pointer belongs to the session that turn ran in, which need not be the parent's current one
+    const sid = this.db.sessionAt(parentId, seq);
+    if (!sid || adapter.hasSession?.(sid) === false) throw new Error("分岐元のセッションがこの機械にありません");
+    const now = Date.now();
+    const child: Task = {
+      id: newId("task"),
+      workspaceId: parent.workspaceId,
+      title: `${parent.title}（分岐）`,
+      runner: parent.runner,
+      cwd: parent.cwd,
+      scope: parent.scope,
+      status: "idle",
+      runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null,
+      model: parent.model,
+      routing: null,
+      budgetUsd: parent.budgetUsd,
+      scheduleId: null,
+      permissionMode: parent.permissionMode,
+      effort: parent.effort,
+      subagentEffort: parent.subagentEffort,
+      origin: "switchboard",
+      resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
+      forkOf: parent.id, forkSeq: seq, forkTurn: end.turn,
+      shadowOf: null,
+      shadowStopped: false,
+      workspaceReason: parent.workspaceReason,
+      titlePending: false,
+      outcome: "unknown",
+      reviewedAt: null,
+      archivedAt: null,
+      judgedResult: null,
+      judgedReason: null,
+      judgedBy: null, judgingAt: null,
+      stage: null,
+      statusAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insertTask(child);
+    this.record(child.id, { t: "status", text: "分岐元の Task の、分岐したターンまでの会話を引き継いでいます。ファイルは分岐元と同じ作業ツリーです" });
+    const created = this.mustGet(child.id);
+    this.broadcast({ type: "task.updated", task: created });
+    return created;
+  }
+
   /** Hide a stopped Task from the list, or bring it back. Like setOutcome, the list order does not move. */
   setArchived(taskId: string, archived: boolean): Task {
     const cur = this.mustGet(taskId);
@@ -934,7 +1009,7 @@ export class TaskManager {
       origin: input.origin ?? "switchboard",
       resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
       shadowOf: null,
-      shadowStopped: false,
+      forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false,
       workspaceReason: input.workspaceReason ?? null,
       titlePending: input.title === undefined,
       outcome: "unknown",
@@ -1078,7 +1153,7 @@ export class TaskManager {
       origin: "switchboard",
       resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
       shadowOf: primary.id,
-      shadowStopped: false,
+      forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false,
       workspaceReason: primary.workspaceReason,
       titlePending: false, // the list shows the primary's title
       outcome: "unknown",
@@ -1468,6 +1543,20 @@ export class TaskManager {
       throw unconfirmed;
     }
     if (task.executionMode === "cloud") { this.startCloudSession(task, prompt, adapter); return; }
+    // A fork's first start: a new session branched from the parent's, at the turn the fork was taken at. Never a
+    // new session without the parent's conversation: when this machine has no record of it, the start fails.
+    let fork: { turn: string } | undefined;
+    if (task.forkOf && !task.runnerSessionId) {
+      const parentSession = task.forkSeq === null ? null : this.db.sessionAt(task.forkOf, task.forkSeq);
+      if (!parentSession || adapter.hasSession?.(parentSession) === false || !task.forkTurn) {
+        const msg = "分岐元のセッションがこの機械に無いため、分岐を始められません";
+        this.record(task.id, { t: "status", text: msg });
+        this.setStatus(task.id, "error");
+        throw new Error(msg);
+      }
+      resumeSessionId = parentSession;
+      fork = { turn: task.forkTurn };
+    }
     // Development-standard skills where the runner reads them. A skill that cannot be placed never stops the task.
     const meta = this.db.listWorkspaces().find((w) => w.kind === "meta");
     if (meta) {
@@ -1516,7 +1605,7 @@ export class TaskManager {
       // The heavy slots are writable to the sandbox too: only for this start, never into the saved scope
       const heavy = meta && task.runner === "codex" ? this.heavySlotsDir(task.id) : undefined;
       live.session = adapter.start(
-        { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, subagentEffort: task.subagentEffort ?? undefined, resumeSessionId, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id), runnerTelemetry: this.runnerTelemetry?.() ?? false },
+        { cwd: task.cwd, scope: heavy && !task.scope.includes(heavy) ? [...task.scope, heavy] : task.scope, prompt, model: task.model ?? undefined, permissionMode: task.permissionMode ?? undefined, effort: task.effort ?? undefined, subagentEffort: task.subagentEffort ?? undefined, resumeSessionId, fork, preamble, env, guards, allow, privateTmp, bedrock: this.bedrock?.(task), attachments, attachmentDir: this.attachments?.taskDir(task.id), mcpServers: this.mcpServers?.(task), otel: this.otelFor?.(task.id), runnerTelemetry: this.runnerTelemetry?.() ?? false },
         (ev) => this.fromRunner(task.id, live, ev),
       );
     } catch (e) {

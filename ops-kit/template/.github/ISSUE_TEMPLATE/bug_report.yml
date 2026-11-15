@@ -12,15 +12,6 @@ body:
         期待: ...
     validations:
       required: true
-  - type: dropdown
-    id: area
-    attributes:
-      label: 影響コンポーネント / Affected component
-      multiple: true
-      options:
-        - __AREA__
-    validations:
-      required: true
   - type: textarea
     id: repro
     attributes:

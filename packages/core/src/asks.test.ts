@@ -16,11 +16,11 @@ const NOW = Date.parse("2026-10-07T12:00:00Z");
 const ISSUES = "https://github.com/o/r/issues";
 
 /** `lastTurnQuestions` of a Task whose last turn asked one question tool question; options are `label` or `[label, description]`; a null question = it never ended a turn. */
-const turnOf = (question: string | null, options: Array<string | [string, string]> = []) => (): { questions: AskQuestion[]; seq: number } | null =>
-  question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9 };
+const turnOf = (question: string | null, options: Array<string | [string, string]> = [], askedAt: number | null = NOW) => (): { questions: AskQuestion[]; seq: number; askedAt: number | null } | null =>
+  question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9, askedAt };
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
@@ -231,7 +231,7 @@ describe("grants", () => {
   const GRANT = "定期実行 sch_x を enabled: false で POST /api/schedules に登録することだけ許可します";
   const OPTIONS: Array<[string, string]> = [["A: 登録しない", "何もしない"], ["B: 登録する (Recommended)", `確かめるため — 許可: ${GRANT}`]];
   const task = (over: Partial<Task> = {}): Task =>
-    ({ id: "tk_g", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
+    ({ id: "tk_g", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
   const fromTasks = (t: Task, stops: StopSummary[], reply: string | null, options: Array<string | [string, string]> = ["A: はい", "B: いいえ"]) =>
     asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: turnOf(reply, options), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: { policies: [], pbiOpen: () => true, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null } });
   const refused = (over: Partial<StopSummary> = {}) =>
@@ -493,7 +493,7 @@ describe("mockups", () => {
 describe("asksFromTasks", () => {
   const task = (over: Partial<Task>): Task => ({
     id: "tk_1", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "waiting", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard",
-    resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over,
+    resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over,
   }) as Task;
   const approval = (taskId: string, id: string, askedAt: number): PendingApproval => ({ taskId, taskTitle: "t", workspace: null, id, kind: "write", tool: "Write", input: {}, detail: `write ${id}`, askedAt });
   const taskStop = (taskId: string, over: Partial<StopSummary>) => stop({ key: `task:${taskId}\u0000${over.op ?? "op"}\u0000\u0000${over.reason ?? "decision"}\u0000`, work: { workspaceId: null, issue: null, taskId }, ...over });
@@ -504,7 +504,7 @@ describe("asksFromTasks", () => {
     // the reply carries a `**確認**:` block but the turn asked no question tool question: nothing is asked of the person
     const reply = "PR を出しました。\n\n**確認**: PR #12 をマージしてよいか\n**選択肢**:\n- A: マージする\n- B: 待つ";
     const t = task({ outcome: "needs_action", status: "done" });
-    const list = asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => ({ questions: [], seq: 9 }), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW });
+    const list = asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => ({ questions: [], seq: 9, askedAt: null }), permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW });
     expect(reply).toContain("**確認**");
     expect(list.filter((a) => a.kind === "check")).toEqual([]);
     expect(build([t])).toEqual([]);
@@ -528,11 +528,14 @@ describe("asksFromTasks", () => {
   test("a check waits on personWait: a depends stop after the question makes no check", () => {
     const asked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "needs_action", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
     expect(asked([])).toBe(true);
-    expect(asked([stop({ reason: "depends", next: "wait", conditions: [{ key: "ci", value: "success", met: false }] })])).toBe(false);
+    const depends = (lastAt: number) => stop({ reason: "depends", next: "wait", lastAt, conditions: [{ key: "ci", value: "success", met: false }] });
+    expect(asked([depends(NOW + 1_000)])).toBe(false);
+    // a depends stop from before the question is an old one: the question is newer, so the check stays
+    expect(asked([depends(NOW - 1_000)])).toBe(true);
     // a decision stop the person already answered asks nothing again once the Task ended done
     const doneAsked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "done", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
-    expect(doneAsked([stop({ reason: "decision" })])).toBe(true);
-    expect(doneAsked([stop({ reason: "decision", answered: true, lastAnswer: { ref: "seq:9", at: NOW } })])).toBe(false);
+    expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000 })])).toBe(true);
+    expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000, answered: true, lastAnswer: { ref: "seq:9", at: NOW } })])).toBe(false);
   });
 
   test("a resumeAt in the past is the resume after an interruption, its condition met", () => {
@@ -860,7 +863,7 @@ describe("policy", () => {
   const decide = (policies: AnswerPolicy[], stops: StopSummary[], confirmHit: ApprovalRuleMatch | null = null) =>
     asksFromBacklog([item({ number: 5, stage: "needs-decision", decision: { body: DECIDE, at: "2026-10-07T10:00:00Z", issue: 5 }, stopSummary: stops })], NOW, { policy: env(policies, confirmHit) })[0]!;
   const task = (over: Partial<Task>) =>
-    ({ id: "tk_1", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "waiting", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
+    ({ id: "tk_1", workspaceId: null, title: "t", runner: "claude", cwd: "/tmp", scope: [], status: "waiting", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
   const fromTasks = (approvals: PendingApproval[], policies: AnswerPolicy[] = [], confirmHit: ApprovalRuleMatch | null = null, stops: StopSummary[] = [], tasks: Task[] = [task({})], reply: string | null = null) =>
     asksFromTasks({ approvals, tasks, lastTurnQuestions: turnOf(reply, ["A: はい", "B: いいえ"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW, policy: env(policies, confirmHit) });
   const exec = (command: string, id = "p1"): PendingApproval => ({ taskId: "tk_1", taskTitle: "t", workspace: null, id, kind: "exec", tool: "Bash", input: { command }, detail: command, askedAt: NOW - 1000 });
@@ -918,7 +921,7 @@ describe("policy", () => {
 
 describe("approvalBatches", () => {
   const task = (id: string, over: Partial<Task> = {}): Task =>
-    ({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
+    ({ id, workspaceId: null, title: `title ${id}`, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: NOW - 600_000, createdAt: NOW - 600_000, updatedAt: NOW - 60_000, ...over }) as Task;
   const rec = (t: Task, over: Partial<StopRecord>): StopRecord => ({ id: `${t.id}/x`, work: { workspaceId: t.workspaceId, issue: null, taskId: t.id }, op: "op", target: "", reason: "decision", evidence: "e", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", grant: null, at: NOW - 60_000, ...over });
   const sso = (t: Task, at: number, over: Partial<StopRecord> = {}) => rec(t, { id: `${t.id}/sso`, op: "aws sso login", reason: "auth", at, ...over });
 

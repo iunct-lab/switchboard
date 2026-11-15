@@ -19,7 +19,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   { id: "settings-resume", title: settings.groupResume, sections: ["使用量と自動再開", "回答の方針"] },
   { id: "settings-judge", title: settings.groupJudge, sections: ["判定と自動選択", "LLM 提案", "タスク名の自動付与"] },
   { id: "settings-model", title: settings.groupModel, sections: ["モデルの選択肢", "モデルの価格"] },
-  { id: "settings-connect", title: settings.groupConnect, sections: ["Workspace", "端末通知", "言語", "動いている版", "バックログを進める", "GitHub 同期", "Terminal の履歴（Claude Code）", "海外から使う", "ログイン", "外への送信"] },
+  { id: "settings-connect", title: settings.groupConnect, sections: ["Workspace", "Workspace MCP", "端末通知", "言語", "動いている版", "バックログを進める", "GitHub 同期", "Terminal の履歴（Claude Code）", "海外から使う", "ログイン", "外への送信", "Knowledge"] },
 ];
 
 /** The group by its id; Settings.tsx names each block by id, so a typo fails at render rather than showing nothing. */

@@ -478,6 +478,14 @@ export async function readTarget(pr: number, repoRoot: string, repo: string, d: 
   return { head, base };
 }
 
+/** The tip of the default branch of `repo`, fetched into the clone `repoRoot` (under the PR's refs/local-ci/<pr>/). */
+export async function defaultTip(pr: number, repoRoot: string, repo: string, d: Pick<Deps, "sh">): Promise<string> {
+  const name = (await d.sh(["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
+  const into = `refs/local-ci/${pr}/default`;
+  await d.sh(["git", "-C", repoRoot, "fetch", "-q", "origin", `+refs/heads/${name}:${into}`]);
+  return (await d.sh(["git", "-C", repoRoot, "rev-parse", into])).trim();
+}
+
 /** `files: null` = every test; `total` = the checkout's test files; `reason` = why these tests, or why all of them; `unjudged`: the selection itself did not run or could not be read. */
 export interface TestSelection { files: string[] | null; total: number; reason: string; unjudged?: true }
 
@@ -790,7 +798,9 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       }
       const env = stepEnv(tmp);
       // the commits since the PR's newest pass, when there is one to build on (never for --all or a local change)
-      const inc = opts.all || opts.force || change ? undefined : await incrementalBase(pr, repo, repoRoot, sha, base, d);
+      const since = opts.all || opts.force || change ? undefined : await incrementalBase(pr, repo, repoRoot, sha, base, d);
+      // no commit added (a rebase only) has no files to choose tests from: every step, as without a pass
+      const inc = since && since.commits.length > 0 ? since : undefined;
       const picked = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d, inc?.files);
       // a CI without the incremental steps ran every test, whatever the commits since the pass chose
       const selectionOf = (incremental: boolean) => (picked && inc && picked.files && !incremental ? { files: null, total: picked.total, reason: "増分に使える手順が無い", unjudged: true as const } : picked);
@@ -1229,6 +1239,20 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     if (left) clearPending(cache ?? join(homedir(), ".cache"), t.repo, t.pr, left.build);
     d.log(`既に pass（${url}）。回し直すなら --force`);
     return 0;
+  }
+  // a rebase that kept every diff since the newest pass: that pass is the one merge-gate counts, nothing is built or posted.
+  // The commits are counted from the default branch's tip, not the base's: a stacked PR's base is the branch below it, and
+  // a fix added there is one merge-gate asks the top's pass to hold (a count from the base would not see it)
+  if (!t.all && !t.force) {
+    const now = await readTarget(t.pr, t.root, t.repo, d).catch(() => undefined);
+    const tip = now && await defaultTip(t.pr, t.root, t.repo, d).catch(() => undefined);
+    const inc = now && tip && await incrementalBase(t.pr, t.repo, t.root, now.head, tip, d);
+    if (now && inc && inc.commits.length === 0) {
+      const left = pendingFor(cache ?? join(homedir(), ".cache"), t.repo, t.pr, now.head, now.base);
+      if (left) clearPending(cache ?? join(homedir(), ".cache"), t.repo, t.pr, left.build);
+      d.log(`前の pass（${inc.pass.slice(0, 7)}）の後に足されたコミットが無い（rebase だけ）。merge-gate はその pass を数える。回し直すなら --force`);
+      return 0;
+    }
   }
   let r: LocalCiResult;
   try {

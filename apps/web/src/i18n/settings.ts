@@ -19,6 +19,16 @@ export const settings = msgs({
   groupConnect: { ja: "接続とアプリ", en: "Connection and app" },
   tocLabel: { ja: "Settings の目次", en: "Settings contents" },
 
+  // the Workspace MCP card
+  mcpNoTask: { ja: "動いている Task がありません", en: "No running Task" },
+  mcpIssue: { ja: "エンドポイントを発行", en: "Issue an endpoint" },
+  mcpIssueTitle: { ja: "この Task のスコープに封じ込めた MCP エンドポイントを発行する（Task 終了で失効）", en: "Issues an MCP endpoint confined to this Task's scope (expires when the Task ends)" },
+  mcpToken: { ja: "トークン", en: "Token" },
+  mcpCopy: { ja: "URL+token をコピー", en: "Copy URL+token" },
+  mcpRotate: { ja: "失効して再発行", en: "Revoke and reissue" },
+  mcpRotateTitle: { ja: "今のトークンを失効させて新しく発行する", en: "Revokes the current token and issues a new one" },
+  mcpHint: { ja: "fs.list / fs.read / fs.grep はスコープ内のみ。fs.write / fs.patch はステージングに積まれ、Task の Brief で適用。exec.run は読み取り系だけ即時、他は Brief で承認。Task 終了で失効。ホストの外の端末からは 401 になる。", en: "fs.list / fs.read / fs.grep stay within the scope. fs.write / fs.patch go to staging and are applied in the Task's Brief. exec.run runs read-only commands at once; others are approved in the Brief. Expires when the Task ends. From a device outside the host it answers 401." },
+
   // shared words of the screen
   loading: { ja: "読み込み中…", en: "Loading…" },
   runner: { ja: "ランナー", en: "Runner" },
@@ -82,6 +92,8 @@ export const settings = msgs({
   kindCheck: { ja: "状況確認", en: "Status check" },
   kindClose: { ja: "閉じる", en: "Close" },
   kindNewRepo: { ja: "新しいリポジトリ", en: "New repository" },
+  kindAdoptRepo: { ja: "取り込み", en: "Adopt" },
+  kindBaseline: { ja: "立ち上げ", en: "Launch" },
   common: { ja: "共通", en: "Common" },
   change: { ja: "変える", en: "Change" },
   changeTitle: { ja: "この種類だけ別のランナー・モデル・思考の深さにします", en: "Gives only this kind its own runner, model and thinking effort" },
@@ -237,6 +249,7 @@ export const settings = msgs({
   abroadHint: { ja: "出発前に、許可する国と期間を設定します。期間が過ぎると自動で元の国の制限に戻ります。保存にはパスキーの確認が要ります。", en: "Before leaving, set the countries to allow and for how long. After that period it goes back to the original country restriction by itself. Saving needs a passkey check." },
   abroadLink: { ja: "国の一時許可を設定する", en: "Set temporary country access" },
   login: { ja: "ログイン", en: "Login" },
+  knowledge: { ja: "Knowledge", en: "Knowledge" },
   outbound: { ja: "外への送信", en: "Outbound data" },
   outboundHint: { ja: "モデルの呼び出しのほかに、ランナーとデーモンが送るもの。既定はどちらも送らない。", en: "What the runners and the daemon send besides model calls. Both are off by default." },
   classifierLogToggle: { ja: "分類器の判定を数える（Claude Code の OpenTelemetry のログを、このデーモンの loopback に送る）", en: "Count the classifier's decisions (Claude Code sends its OpenTelemetry logs to this daemon's loopback)" },

@@ -494,8 +494,8 @@ export interface TaskAskInput {
   approvals: PendingApproval[];
   /** The Tasks changed within ASK_HISTORY_MS, and the live ones. */
   tasks: Task[];
-  /** The question tool's questions of the Task's last turn and the seq of the `session.end` that ended it (`Db.lastTurnQuestions`); null = it never ended a turn. */
-  lastTurnQuestions: (taskId: string) => { questions: AskQuestion[]; seq: number } | null;
+  /** The question tool's questions of the Task's last turn and the seq of the `session.end` that ended it and the ts of its last `question.ask` (`askedAt`, null = none) (`Db.lastTurnQuestions`); null = it never ended a turn. */
+  lastTurnQuestions: (taskId: string) => { questions: AskQuestion[]; seq: number; askedAt: number | null } | null;
   /** The permission.ask / permission.resolved events of these Tasks, oldest first. */
   permissionEvents: (taskIds: string[]) => EventEnvelope[];
   stops: (task: Task) => StopSummary[];
@@ -582,9 +582,12 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     // a stage Task's check is gone once another stage Task of its Issue started after it stopped: the work went on past it
     const n = issueOf(t);
     const superseded = n !== null && tasks.some((o) => o.id !== t.id && o.workspaceId === t.workspaceId && issueOf(o) === n && o.createdAt > t.updatedAt);
-    if (!superseded && personWait(t, input.stops(t)[0] ?? null) === "needs") {
+    // a stop from before the question is an old one: the question is newer, so only a stop after it can hide the check
+    const turn = input.lastTurnQuestions(t.id);
+    const last = input.stops(t)[0] ?? null;
+    const stop = last && turn?.askedAt != null && last.lastAt < turn.askedAt ? null : last;
+    if (!superseded && personWait(t, stop) === "needs") {
       // the check is the question tool's questions, and only those: what the reply's text says makes none
-      const turn = input.lastTurnQuestions(t.id);
       if (turn?.questions.length) {
         const { questions } = turn;
         const checkId = `check:${t.id}:${turn.seq}`;
@@ -594,7 +597,7 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
           question: questions[0]!.question,
           questions,
           // nothing is read from the question's text: no place, and the recommended option is seen by its label's ` (Recommended)`
-          // nothing stands in its way either: a Task that stopped to ask is answered, an older stop's unmet condition does not take the options away
+          // nothing stands in its way either: a Task that stopped to ask is answered, a stop from before the question neither hides the check nor takes the options away
           blockers: [],
           // the screen mockups are the asking Task's own artifacts
           mockups: input.mockups?.(t.id).filter((a) => a.title.startsWith("画面イメージ")) ?? [],

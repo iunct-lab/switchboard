@@ -92,7 +92,7 @@ export const REVERSIBILITY_PATH = join(import.meta.dir, "..", "ops-kit", "revers
 /** The fixed vocabulary of the table: the file must list exactly these, so a table cannot widen its own words. */
 const EFFECTS = ["repository", "state", "external", "person"];
 const ANSWERS = ["reversible", "compensable", "irreversible"];
-export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; recheck: RecheckKind[] } {
+export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; recheck: RecheckKind[]; reversible: string[] } {
   const t = JSON.parse(readFileSync(path, "utf8"));
   const bad = (m: string): never => { throw new Error(`reversibility table ${path}: ${m}`); };
   if (t?.v !== 1 || !Array.isArray(t.effects) || !Array.isArray(t.answers) || !Array.isArray(t.rows)) bad("expected { v: 1, effects, answers, rows }");
@@ -100,6 +100,7 @@ export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; 
   if (JSON.stringify(t.answers) !== JSON.stringify(ANSWERS)) bad(`answers must be ${JSON.stringify(ANSWERS)}`);
   const ask: string[] = [];
   const recheck: string[] = [];
+  const reversible: string[] = [];
   const seen = new Set<string>();
   for (const row of t.rows) {
     if (!t.effects.includes(row.effect)) bad(`unknown effect ${JSON.stringify(row.effect)} in "${row.op}"`);
@@ -108,16 +109,22 @@ export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; 
     if (seen.has(row.gateKind)) bad(`kind ${row.gateKind} appears twice`);
     seen.add(row.gateKind);
     (row.answer === "irreversible" ? ask : recheck).push(row.gateKind);
+    if (row.answer === "reversible") reversible.push(row.gateKind);
   }
   const missing = MERGE_KINDS.filter((k) => !seen.has(k));
   if (missing.length) bad(`kinds missing: ${missing.join(", ")}`);
   const unknown = [...seen].filter((k) => !(MERGE_KINDS as readonly string[]).includes(k));
   if (unknown.length) bad(`unknown kinds: ${unknown.join(", ")}`);
-  return { ask: ask as AskKind[], recheck: recheck as RecheckKind[] };
+  return { ask: ask as AskKind[], recheck: recheck as RecheckKind[], reversible };
 }
 const REVERSIBILITY = loadReversibility();
 export const RECHECK_KINDS: RecheckKind[] = REVERSIBILITY.recheck;
 export const ASK_KINDS: AskKind[] = REVERSIBILITY.ask;
+/** The kinds the table answers `reversible`: a direct PR (branch sb/direct-) touching only these skips the main review. */
+const REVERSIBLE_KINDS: string[] = REVERSIBILITY.reversible;
+/** The mark `mergePr` puts on a PR merged without a main review (direct, no large reason): `[merge-direct] <head sha>`. */
+export const MERGE_DIRECT = /^\[merge-direct\] ([0-9a-f]{40})\b/;
+const DIRECT_BRANCH = "sb/direct-";
 export const RECHECK_PASS = new RegExp(`^\\[recheck\\] (${RECHECK_KINDS.join("|")}) pass ([0-9a-f]{40})\\b`);
 /**
  * Record marks for the user's side (#761; the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
@@ -154,6 +161,8 @@ export interface PrFacts {
   reviewComments: { body: string; createdAt: string }[];
   /** The head's sha (a `[merge-answer] yes` must name it for --allow-large; --merge merges only this head); absent = not read. */
   head?: string;
+  /** The branch is a direct one (named sb/direct-): with no large reason it needs no main review. GitHub PRs only: a local change has no place for the mark, so it keeps the review. */
+  direct?: boolean;
   /** The base branch (--merge-stack merges only a PR on the default branch: the bottom of its stack); absent = not read. */
   base?: string;
   /** The Tasks the PR closes: the paths their bodies name, and what the other Tasks of their PBIs name; absent = the PR closes no Task. */
@@ -170,6 +179,8 @@ export interface Judgement {
   recheck: RecheckKind[];
   /** What was not checked: it does not stop the merge. Absent = nothing. */
   notes?: string[];
+  /** The main review was not asked for: a direct PR with no large reason (mergePr marks it). Absent = it was asked for. */
+  reviewSkipped?: true;
 }
 
 const matches = (globs: Bun.Glob[], path: string) => globs.some((g) => g.match(path));
@@ -263,6 +274,9 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   add("responsibility", "責務", paths.filter((p) => classify(p) === "responsibility" && !rescue(p)));
   add("migration", "保護するパスに触れている", touched.filter((p) => matches(MIGRATION, p)));
   add("size", "保護するパスに触れている", touched.filter((p) => !matches(MIGRATION, p)));
+  // a direct PR skips the main review when no large reason is left once the kinds the table answers reversible are set aside;
+  // those kinds stay large for the impact, the recheck and the ask
+  const reviewSkipped = f.direct === true && large.every((l) => REVERSIBLE_KINDS.includes(l.kind));
   const impact = large.length > 0 ? "large" : "small";
   const marked = new Set(f.rechecks ?? []);
   const recheck = RECHECK_KINDS.filter((k) => !marked.has(k) && large.some((l) => l.kind === k));
@@ -291,7 +305,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   if (f.localCiNote && reasons.some((r) => r.startsWith("CI のチェック"))) reasons.push(f.localCiNote);
   if (f.unresolvedThreads > 0) reasons.push(`解決していないレビュースレッドが ${f.unresolvedThreads} 件ある`);
   const head = Date.parse(f.headCommittedAt);
-  if (!f.reviewComments.some((c) => REVIEW.test(c.body) && Date.parse(c.createdAt) > head)) {
+  if (!reviewSkipped && !f.reviewComments.some((c) => REVIEW.test(c.body) && Date.parse(c.createdAt) > head)) {
     reasons.push(`最後のコミット（${f.headCommittedAt}）より新しい主レビュー（[codex] review / [claude] review）が無い`);
   }
   const unstableForLocalCi = f.mergeState === "UNSTABLE" && f.localCi === true;
@@ -300,7 +314,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
-  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.note ? { notes: [scope.note] } : {}) };
+  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.note ? { notes: [scope.note] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}) };
 }
 
 async function gh(args: string[]): Promise<string> {
@@ -524,6 +538,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
     mergeState: pr.mergeStateStatus,
     reviewComments: comments.map((c) => ({ body: c.body, createdAt: c.createdAt })),
     head: pr.headRefOid,
+    ...(pr.headRefName?.startsWith(DIRECT_BRANCH) ? { direct: true } : {}),
     base: pr.baseRefName,
     ...(task ? { task } : {}),
   };
@@ -670,9 +685,11 @@ export type MergeMode = "merge" | "merge-stack";
  * no head to match: it runs in the stack's worktree, whose origin must be the judged repository, and the head is read again
  * just before it (a push in between stops it; one in the last moment is not caught).
  */
-export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: (args: string[]) => Promise<string>, stackRepo: () => string | undefined = originRepo): Promise<void> {
+export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: (args: string[]) => Promise<string>, stackRepo: () => string | undefined = originRepo, reviewSkipped = false): Promise<void> {
   if (!facts.head) throw new Error("head の sha が読めていない");
+  const mark = () => reviewSkipped ? run(["pr", "comment", String(n), "-R", repo, "--body", `[merge-direct] ${facts.head}`]) : undefined;
   if (mode === "merge") {
+    await mark();
     await run(["pr", "merge", String(n), "-R", repo, "--rebase", "--delete-branch", "--match-head-commit", facts.head]);
     return;
   }
@@ -682,6 +699,7 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   if (facts.base !== branch) throw new Error(`--merge-stack はスタックの最下段（base が ${branch}）だけ。この PR の base は ${facts.base}（下の PR も一緒にマージされる）`);
   const now = (await run(["pr", "view", String(n), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"])).trim();
   if (now !== facts.head) throw new Error(`判定の後に head が変わった（${facts.head} → ${now}）。判定し直す`);
+  await mark();
   await run(["stack", "merge", String(n), "--rebase", "-y"]);
 }
 
@@ -724,7 +742,7 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
   const mode = modes[0];
   if (!mode) return 0;
   try {
-    await mergePr(n, repo, mode, facts, run, stackRepo);
+    await mergePr(n, repo, mode, facts, run, stackRepo, j.reviewSkipped === true);
   } catch (e) {
     err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
     return 1;

@@ -8,7 +8,7 @@
  * dropped, so clock times, timings and the order of measured rows do not show up as changes.
  * The running build's sha (Insights' `いまの起動: N:N（<sha>）`) reads `<sha>`, so two builds compare equal.
  * With `--lang en` the lines with kana or kanji are listed per screen and any one that is not expected (`EXPECTED_JA`, the
- * fixture's Issue comments) exits 1. Screens: home task backlog settings ledger knowledge insights schedules (all by default).
+ * fixture's Issue comments) exits 1. Screens: home task backlog settings ledger insights schedules (all by default).
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +20,7 @@ import type { GhRunner } from "../packages/core/src/backlog.ts";
 import { importing, sending } from "../packages/core/fixtures/github-import.ts";
 import type { RunnerAdapter } from "@switchboard/protocol";
 
-const SCREENS = { home: ["/", "home"], task: ["/task/", "task"], backlog: ["/backlog", "backlog"], settings: ["/settings", "settings"], ledger: ["/ledger", "ledger"], knowledge: ["/knowledge", "knowledge"], insights: ["/insights", "evals-screen"], schedules: ["/schedules", "schedules"] } as const;
+const SCREENS = { home: ["/", "home"], task: ["/task/", "task"], backlog: ["/backlog", "backlog"], settings: ["/settings", "settings"], ledger: ["/ledger", "ledger"], insights: ["/insights", "evals-screen"], schedules: ["/schedules", "schedules"] } as const;
 type Screen = keyof typeof SCREENS;
 /** A screen's text as its wording: the data directory as `<home>`, numbers as `N`, lines sorted without repeats, blanks or lone paths. */
 export function wording(text: string, home: string): string[] {

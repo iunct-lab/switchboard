@@ -8,7 +8,7 @@
 
 ## 影響コンポーネント / Affected components
 
-- [ ] __AREA__
+- [ ] コード / Code
 - [ ] 文書 (docs/)
 - [ ] 文書 / infra (.github, scripts)
 

@@ -94,6 +94,8 @@ echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 
 **ローカル CI を回すとき**（CLAUDE.md がローカル CI を名指しし、アプリの Task の中のとき）: 自分のシェルで回して待たず、`ops-kit job request local-ci <PR>` でアプリに頼む。仕事はアプリの子として重い処理の枠を取って走る。request は `job#<id>` の 1 行と、止まりの報告（アプリが Task に渡す書式）に書く JSON を出す。それを reason `depends`・conditions に `job#<id>` で書いてターンを終える。仕事が終わるとアプリが pass / fail の要約を添えて再開するので、その結果を読んで続ける（fail なら直して出し直し、再度頼む）。背景の `sleep` の繰り返しで結果を待たない — ターンを終えても背景の作業が残るとセッションが閉じず、1 本 150〜250 MB を何時間も開いたままにする。`gh pr view` で足りる数秒の確認は今まで通り直接でよい。アプリの Task の外では `ops-kit job` は使えないので、CLAUDE.md のコマンドを直接回す。
 
+**ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら**（CLAUDE.md が既知の失敗の登録を名指しするとき）: (1) その失敗の要望を探し、無ければ作る (2) その場で P1 以上の PBI にするか、Priority の付いた open の既存の PBI に紐づける（`ops-kit lint` が、指す要望に Priority の付いた open の PBI が無い登録を違反にする） (3) 要望の番号で、登録に期限つきで足す PR を出す (4) 判定の外のマージの承認を利用者に求めない（登録がマージされれば、ローカル CI が差し引く） (5) 登録はローカル CI が PR の base の枝から読むので、登録の PR がマージされたら、スタックなら全部の枝を main に rebase して push し（`gh stack rebase` → `gh stack push`）base に登録を届かせてから、base が main の単発の PR ならそのまま、ローカル CI を頼み直す。base で落ちるかを手で確かめる手順は、登録に無い失敗を最初に見つけたときの 1 回だけ。
+
 **ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:

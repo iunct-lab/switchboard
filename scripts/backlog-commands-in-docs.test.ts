@@ -11,8 +11,16 @@ import { join } from "node:path";
  */
 const root = join(import.meta.dir, "..");
 const BACKLOG_BY_GH = /gh issue (create|edit|comment|close|reopen|view|list|delete|transfer)|gh api [^\n]*\/issues|addSubIssue|removeSubIssue|updateProjectV2|gh project (item-|field-)|scripts\/setup\/(triage_issue|set_project_field|lint_backlog)/;
-/** new-repo checks the entry of a repository that has no workspace yet, so it is not the backlog of a synced repository. */
-const ALLOWED = [{ file: ".claude/skills/new-repo/SKILL.md", has: "scripts/setup/lint_backlog.sh" }];
+/**
+ * new-repo checks the entry of a repository that has no workspace yet, so it is not the backlog of a synced repository.
+ * adopt-repo reads, without writing, the Issues and the Project of a repository before it is adopted: the app may not import
+ * it yet (no Project it can read), and the original Project is the one being diagnosed, not Switchboard's.
+ */
+const ALLOWED = [
+  { file: ".claude/skills/new-repo/SKILL.md", has: "scripts/setup/lint_backlog.sh" },
+  { file: ".claude/skills/adopt-repo/SKILL.md", has: "gh project field-list <n> --owner <owner> --format json" },
+  { file: ".claude/skills/adopt-repo/SKILL.md", has: "gh issue list -R <repo> --state open --limit 1000 --json labels" },
+];
 const read = (file: string) => readFileSync(join(root, file), "utf8");
 const privateRules = "private/CLAUDE.md"; // the public copy has no private/
 const ls = spawnSync("git", ["ls-files", ".claude/skills", ".github/ISSUE_TEMPLATE"], { cwd: root, encoding: "utf8" });

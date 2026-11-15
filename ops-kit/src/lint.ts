@@ -2,6 +2,7 @@ import { projectOf, sectionName, STORY_POINTS, type OpsConfig, type Section } fr
 import { GhError, repoOf, type GhClient } from "./gh.ts";
 import { projectFragment, selectProject } from "./set.ts";
 import type { StoredRecords } from "./backlog-client.ts";
+import { KNOWN_FAILURES_FILE, type KnownFailure } from "./known-failures.ts";
 
 export interface Violation {
   issue: number;
@@ -204,8 +205,11 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
  * Check the open PBIs, Tasks and requests against the writing rules, reading every one of them with one paged query —
  * or, given `records`, from what the app stored, with the Project the app reads for the workspace.
  * `withProject: false` skips what needs the Project (Story Points there, Status) — for a gh without the project scope.
+ * `knownFailures` is the repository's registry of failures tolerated until a date: each row's Issue must be an open PBI with a
+ * Priority, or an open request with such a PBI (no extra API calls: an Issue not among the open rows is read as closed).
+ * Without the Project (`withProject: false`) the Priority is not checked, only that the Issue and a PBI are open.
  */
-export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
+export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords; knownFailures?: KnownFailure[] } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
   const withProject = opts.withProject ?? true;
   const project = !withProject ? null : opts.records ? opts.records.project : projectOf(cfg);
   const projectNumber = project?.number ?? 0;
@@ -322,6 +326,26 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const body = row.body.replace(/\r\n/g, "\n");
     for (const s of cfg.sections.request) if (!hasSection(body, sectionName(s))) bad(row.number, missing("要望", s));
     if (hasSection(body, "出典") && !speakerOf(body)) bad(row.number, SPEAKER_MISSING);
+  }
+
+  for (const k of opts.knownFailures ?? []) {
+    const at = `${KNOWN_FAILURES_FILE} の登録（${k.test}、期限 ${k.until}）`;
+    const fix = `登録を消す PR を出すか、#${k.issue} に Priority の付いた PBI を用意する`;
+    const target = rows.find((r) => r.number === k.issue);
+    if (!target || !labelsOf(target).some((l) => l === "type:pbi" || l === "type:request")) {
+      bad(k.issue, `${at}が指す #${k.issue} は open の要望・PBI に無い（閉じているか、要望・PBI でない）。${fix}`);
+      continue;
+    }
+    // the PBIs a request leads to name it on the first line of their 元要望 section
+    const derived = (r: Row) => {
+      const lines = r.body.replace(/\r\n/g, "\n").split("\n");
+      const start = lines.findIndex((l) => new RegExp(`^##+ *${escape(origin?.name ?? "元要望")}`).test(l));
+      const first = start < 0 ? "" : (lines.slice(start + 1).find((l) => l.trim() !== "") ?? "");
+      return [...first.matchAll(/#(\d+)(?!\d)/g)].some((m) => Number(m[1]) === k.issue);
+    };
+    const hasPriority = (r: Row) => !withProject || r.projectItems?.nodes.some((i) => i.project.number === projectNumber && i.fieldValues.nodes.some((v) => v.field?.name === "Priority" && !!v.name)) === true;
+    const pbis = labelsOf(target).includes("type:pbi") ? [target] : rows.filter((r) => labelsOf(r).includes("type:pbi") && derived(r));
+    if (!pbis.some(hasPriority)) bad(k.issue, `${at}が指す #${k.issue} に、Priority の付いた open の PBI が無い（${pbis.length === 0 ? "PBI が無いか、閉じている" : "Priority が未設定"}）。${fix}`);
   }
 
   return { violations, warnings, fetched: rows.length };

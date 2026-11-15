@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, BacklogIssueData, BacklogSource, Task } from "@switchboard/protocol";
-import { balanceRows, issuesByNumber, kindOf, perDelivered } from "./balance.ts";
-import { Db, type BacklogSnapshotEntry } from "./db.ts";
+import type { AgentEvent, BacklogIssueData, BacklogSource, BalanceRow, RunnerId, Task } from "@switchboard/protocol";
+import { balanceRows, balanceView, capacityOf, issuesByNumber, kindOf, perDelivered } from "./balance.ts";
+import { Db, type BacklogSnapshotEntry, type QuotaWindowRow } from "./db.ts";
 import { readStoredRecords } from "./backlog.ts";
 
 let dir: string;
@@ -44,7 +44,7 @@ function task(workspaceId: string, title: string, createdAt: number, ledger: Arr
   const id = `t${++n}`;
   db.insertTask({
     id, workspaceId, title, runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null,
-    permissionMode: "default", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null,
+    permissionMode: "default", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null,
     judgedResult: null, judgedReason: null, judgedBy: null, statusAt: createdAt, createdAt, updatedAt: createdAt, executionMode: "local", cloudSession: null, sourceCloudTaskId: null,
     stage: null, judgingAt: null,
   } as unknown as Task);
@@ -133,5 +133,55 @@ describe("kindOf / perDelivered", () => {
 
   test("a ratio over no delivered PBI is null", () => {
     expect([perDelivered(5, 2), perDelivered(5, 0), perDelivered(5, null), perDelivered(0, 3)]).toEqual([2.5, null, null, 0]);
+  });
+});
+
+describe("capacityOf / balanceView", () => {
+  const NOW_S = NOW / 1000;
+  const THIS = NOW_S + 3 * 86400; // the current window resets in 3 days
+  const LAST = THIS - 7 * 86400;
+  const win = (peak: number, resetsAt: number, runner: RunnerId = "claude"): QuotaWindowRow => ({ runner, window: "seven_day", resetsAt, peak, firstTs: 0, lastTs: 0 });
+  const rows = (...costs: number[]) => costs.map((costUsd, i) => ({ workspaceId: `w${i}`, costUsd, interventions: null }) as unknown as BalanceRow);
+
+  test("a window that reached 100% (the current or the previous one) is limited by the quota, with no room", () => {
+    for (const windows of [[win(1, THIS)], [win(0.2, THIS), win(1, LAST)]]) {
+      const c = capacityOf(rows(2, 3, 4), windows, 7, NOW, new Map([["claude", 20]]));
+      expect(c).toMatchObject({ limitedBy: "quota", moreRepos: 0, interventionsPerDay: 1, runners: [{ runner: "claude", saturated: true }] });
+    }
+  });
+
+  test("a window that reached 100% more than a week ago does not limit the capacity", () => {
+    // the runner has not reported since: its newest window reset 3 weeks ago, and the one before that is older still
+    for (const windows of [[win(1, NOW_S - 21 * 86400)], [win(0.5, THIS), win(1, LAST - 14 * 86400)]]) {
+      const c = capacityOf(rows(2, 3, 4), windows, 7, NOW, new Map([["claude", 20]]));
+      expect(c.limitedBy).toBeNull();
+      expect(c.runners[0]!.saturated).toBe(false);
+    }
+  });
+
+  test("moreRepos is the remaining money over the median weekly spend of the workspaces that spent", () => {
+    // 20 spent at 50% leaves 20; the median of 2, 3, 4 is 3 (a workspace with 0 is not counted): floor(20 / 3) = 6
+    const c = capacityOf(rows(0, 2, 3, 4), [win(0.5, THIS), win(0.9, LAST)], 14, NOW, new Map([["claude", 20]]));
+    expect(c).toEqual({ runners: [{ runner: "claude", utilization: 0.5, resetsAt: THIS, saturated: false }], interventionsPerDay: 2, medianWeeklyUsd: 3, moreRepos: 6, limitedBy: null });
+  });
+
+  test("no record of use, a reset window or no spend gives null, not 0", () => {
+    expect(capacityOf(rows(2), [], 0, NOW)).toMatchObject({ runners: [], moreRepos: null, limitedBy: null });
+    expect(capacityOf(rows(2), [win(0.5, NOW_S - 10)], 0, NOW, new Map([["claude", 5]]))).toMatchObject({ runners: [{ utilization: 0, resetsAt: null, saturated: false }], moreRepos: null });
+    expect(capacityOf(rows(2), [win(0.5, THIS)], 0, NOW)).toMatchObject({ moreRepos: null });
+    expect(capacityOf(rows(), [win(0.5, THIS)], 0, NOW, new Map([["claude", 5]]))).toMatchObject({ medianWeeklyUsd: null, moreRepos: null });
+  });
+
+  test("balanceView: the days' rows with the capacity of the last 7 days from the stored window and the ledger", () => {
+    fixture();
+    db.upsertQuota("claude", "seven_day", 0.5, THIS, NOW - DAY);
+    const v7 = balanceView(db, db.listWorkspaces(), 7, NOW);
+    // the window's spend is 11 (the Task rows of the last 3 days of the fixture), left 11; the 7-day spend of the workspaces is 11, 2, 1: median 2
+    expect(v7.capacity).toMatchObject({ medianWeeklyUsd: 2, moreRepos: 5, limitedBy: null, runners: [{ runner: "claude", utilization: 0.5, resetsAt: THIS }] });
+    expect(v7.capacity.interventionsPerDay).toBeCloseTo(1 / 7);
+    const v30 = balanceView(db, db.listWorkspaces(), 30, NOW);
+    expect(v30.days).toBe(30);
+    expect(v30.rows).toEqual(balanceRows(db, db.listWorkspaces(), 30, NOW));
+    expect(v30.capacity).toEqual(v7.capacity);
   });
 });

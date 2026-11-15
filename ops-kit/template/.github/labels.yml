@@ -1,7 +1,7 @@
 # ラベル体系（宣言的）。`.github/workflows/labels.yml` が main への push で同期する。
 # ただし同期は `skip-delete: true` なので、**ここから消しても GitHub 上のラベルは消えない**。
 # 削除は `gh label delete <name> --yes` で手で行う（付いている Issue が 0 件であることを先に確かめる）。
-# 色は 6桁hex（# なし）。Area は `__AREA__` を実際の値に置き換え、1 つにつき 1 件ずつ足す。
+# 色は 6桁hex（# なし）。
 
 # --- 種別 / Type ---
 - name: bug
@@ -50,8 +50,3 @@
 - name: automation
   color: ededed
   description: 自動化ワークフロー由来
-
-# --- 対象コンポーネント / Area（Project の Area フィールドと一致。値の数だけ足す）---
-- name: "area:__AREA__"
-  color: "bfdadc"
-  description: __AREA__ の説明

@@ -117,7 +117,7 @@ test("the body: 要望 / 出典 / 更新の条件, the tool's sentence then extr
   const dir = mkdtempSync(join(tmpdir(), "deps-check.test."));
   try {
     writeFileSync(join(dir, "b.md"), plain);
-    const cfg = parseConfig(JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../template/ops.config.json"), "utf8").replaceAll("__AREA__", "app").replaceAll("__PREFIX__", "X")));
+    const cfg = parseConfig(JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../template/ops.config.json"), "utf8").replaceAll("__PREFIX__", "X")));
     expect(() => checkRequestBody(cfg, join(dir, "b.md"))).not.toThrow();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -125,7 +125,7 @@ test("the body: 要望 / 出典 / 更新の条件, the tool's sentence then extr
 });
 
 test("depsCheck.extraConditions is optional in the config", () => {
-  const base = JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../template/ops.config.json"), "utf8").replaceAll("__AREA__", "app").replaceAll("__PREFIX__", "X"));
+  const base = JSON.parse(require("node:fs").readFileSync(join(import.meta.dir, "../template/ops.config.json"), "utf8").replaceAll("__PREFIX__", "X"));
   expect(parseConfig(base).depsCheck).toBeUndefined();
   expect(parseConfig({ ...base, depsCheck: { extraConditions: ["a"] } }).depsCheck?.extraConditions).toEqual(["a"]);
   expect(() => parseConfig({ ...base, depsCheck: { extraConditions: [""] } })).toThrow();

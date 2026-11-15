@@ -36,7 +36,6 @@ export function screens(taskId: string | null): Screen[] {
   return [
     { name: "home", path: "/" },
     ...(taskId ? [{ name: "task", path: `/task/${taskId}` }] : []),
-    { name: "knowledge", path: "/knowledge" },
     { name: "ledger", path: "/ledger" },
     { name: "insights", path: "/insights" },
     { name: "backlog-list", path: "/backlog", layout: "list" as const },

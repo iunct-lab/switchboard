@@ -352,6 +352,45 @@ test("lint --no-project does not resolve a missing Project URL", async () => {
   expect(await main(["lint", "--no-project", "--config", path], gh, () => {}, () => {}, Bun.sleep, { ...process.env, BACKLOG_URL: undefined })).toBe(0);
 });
 
+test("lint reads the registry of known failures next to ops.config.json, only for the checkout's own repository", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ops-kit.known."));
+  const records = (repository: string) => ({ workspaceId: "ws_k", service: "github", repository, project: { owner: "acme", number: 1 }, fetchedAt: 1, unread: [], pulls: [], top: [], comments: [], issues: [] });
+  let stored = records("acme/own");
+  const server = Bun.serve({ port: 0, fetch: (req) => Response.json(new URL(req.url).pathname.endsWith("/records") ? stored : req.method === "POST" ? {} : { syncs: [{ workspaceId: "ws_k", repository: stored.repository, syncedAt: 1, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }], items: [] }) });
+  try {
+    const path = join(dir, "ops.config.json");
+    writeFileSync(path, readFileSync(config, "utf8"));
+    const empty = () => ({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+    const run = async (env: Record<string, string | undefined>) => {
+      const out: string[] = [], err: string[] = [];
+      const code = await main(["lint", "--no-project", "--config", path], fakeGh([empty]), (s) => out.push(s), (s) => err.push(s), Bun.sleep, { ...process.env, BACKLOG_URL: undefined, BACKLOG_WORKSPACE: undefined, BACKLOG_TOKEN_FILE: undefined, GH_REPO: undefined, ...env });
+      return { code, out: out.join("\n"), err: err.join("\n") };
+    };
+    const app = { BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_WORKSPACE: "ws_k", GH_REPO: undefined };
+    expect((await run({ GH_REPO: "acme/own" })).code).toBe(0); // no file: not checked
+    writeFileSync(join(dir, "known-failures.json"), JSON.stringify([{ test: "a.test.ts > flaky", issue: 99, until: "2026-12-01" }]));
+    // not a checkout (no origin): whose numbers they are is not known, so not read
+    expect(await run({ GH_REPO: "acme/own" })).toMatchObject({ code: 0, err: expect.stringContaining("known-failures.json は検査しない") });
+    Bun.spawnSync(["git", "init", "-q", dir]);
+    Bun.spawnSync(["git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/own.git"]);
+    // the checkout's own repository: by origin, GH_REPO (with or without the host) and the app's stored values
+    for (const env of [{}, { GH_REPO: "acme/own" }, { GH_REPO: "github.com/acme/own" }, app]) {
+      const own = await run(env);
+      expect(own.code).toBe(1);
+      expect(own.out).toContain("#99: known-failures.json の登録");
+    }
+    // another repository (GH_REPO, the stored values of another workspace): its numbers are not this registry's
+    expect(await run({ GH_REPO: "acme/other" })).toMatchObject({ code: 0, err: expect.stringContaining("known-failures.json は検査しない") });
+    stored = records("acme/other");
+    expect(await run(app)).toMatchObject({ code: 0, err: expect.stringContaining("known-failures.json は検査しない") });
+    writeFileSync(join(dir, "known-failures.json"), JSON.stringify([{ test: "a.test.ts > flaky", issue: 99 }]));
+    expect((await run({})).code).toBe(2); // an entry without until cannot be read
+  } finally {
+    server.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("lint names another workspace by the app's stored values and checks （リリース）on an Issue against that repository", async () => {
   const pbi = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1. x\n## スコープ外\nx\n## 元要望\n#1（x）\n\n**Story Points**: 5\n";
   const task = "## 親 PBI\n#2\n**前提**: #7（リリース）\n## やること\nx\n## 手順\nx\n## 検証\nx\n## 完了条件\nx\n";

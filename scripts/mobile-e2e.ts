@@ -3,7 +3,7 @@
  * The phone layout (#359): at 390 × 844 (iPhone 14), 844 × 390 (its landscape) and a PC window narrowed to 390px, the task list
  * opens from the bottom bar, a task opens from it, and the list opens again to go to another task. On a phone the task screen
  * does not scroll sideways with long lines in it, a reply and an approval reach the runner, and 詳細 opens the task's Brief.
- * Home's new-task form fits a phone and 開始 starts a task from it (#391). Knowledge stacks its list, the note and its
+ * Home's new-task form fits a phone and 開始 starts a task from it (#391). Knowledge (a folded card in Settings) stacks its list, the note and its
  * details, and a note picked from the list can be read (#392). Ledger, Backlog and Schedules (its form open too) do not
  * scroll sideways, and a schedule is added from a phone (#393). Settings does not either, its toggles' labels wrapping inside
  * the screen, with the LLM suggestions' "not detected" note shown too (#3819); its folded cards' titles are 44px or taller (#3849). At 1280 and 390 the top bar's Rescue opens the rescue page
@@ -291,11 +291,12 @@ try {
   for (const [width, height] of [[390, 844], [844, 390]] as const) {
     const label = `knowledge ${width}x${height}`;
     await size(width, height, true);
-    await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === 'Knowledge')`, true);
+    await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === 'Settings')`, true);
+    await tap(`document.querySelector('#knowledge > summary')`, true); // Knowledge is a folded card in Settings
     await until(() => evaluate(`!!document.querySelector('.kn-tree button.it')`), `${label}: the list`);
     await tap(`[...document.querySelectorAll('.kn-tree button.it')].find(b => b.textContent.includes('mobile note'))`, true);
     await until(() => evaluate(`!!document.querySelector('.kn-doc .kn-body')?.textContent.includes('Read on a phone')`), `${label}: the note shows`);
-    const layout = await evaluate(`(() => { const m = document.querySelector('.main.knowledge'); const list = document.querySelector('.kn-list').getBoundingClientRect(), doc = document.querySelector('.kn-doc').getBoundingClientRect(), mat = document.querySelector('.kn-mat').getBoundingClientRect(); return { over: Math.max(document.documentElement.scrollWidth - ${width}, m.scrollWidth - m.clientWidth), below: doc.top >= list.bottom && mat.top >= doc.bottom, short: [...document.querySelectorAll('.kn-tree .it')].filter(b => b.getBoundingClientRect().height < 44).length, wide: [...m.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > ${width + 1} && !e.closest('.kn-body, .diff')).slice(0, 6).map(e => e.tagName + '.' + e.className) }; })()`);
+    const layout = await evaluate(`(() => { const m = document.querySelector('.knowledge'); const list = document.querySelector('.kn-list').getBoundingClientRect(), doc = document.querySelector('.kn-doc').getBoundingClientRect(), mat = document.querySelector('.kn-mat').getBoundingClientRect(); return { over: Math.max(document.documentElement.scrollWidth - ${width}, m.scrollWidth - m.clientWidth), below: doc.top >= list.bottom && mat.top >= doc.bottom, short: [...document.querySelectorAll('.kn-tree .it')].filter(b => b.getBoundingClientRect().height < 44).length, wide: [...m.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > ${width + 1} && !e.closest('.kn-body, .diff')).slice(0, 6).map(e => e.tagName + '.' + e.className) }; })()`);
     assert(layout.over <= 0 && layout.below && layout.short === 0, `${label}: ${JSON.stringify(layout)}`); // list, note, details in that order; 44px items
     if (shots) await shoot(`knowledge-${width}x${height}.png`);
     results[label] = { sideways: layout.over, listNoteDetails: layout.below, itemsUnder44px: layout.short };

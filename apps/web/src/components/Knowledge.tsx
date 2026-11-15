@@ -73,7 +73,7 @@ export function Knowledge(props: { refreshKey: number; workspaces: Workspace[]; 
   }, [index]);
 
   return (
-    <main className="main knowledge">
+    <div className="knowledge">
       <section className="card kn-list">
         <div className="row head">
           <h5>Knowledge</h5>
@@ -139,7 +139,7 @@ export function Knowledge(props: { refreshKey: number; workspaces: Workspace[]; 
         <Materialize workspaces={props.workspaces} refreshKey={props.refreshKey} onError={props.onError} />
         <Materialize cleanup workspaces={props.workspaces} refreshKey={props.refreshKey} onError={props.onError} />
       </div>
-    </main>
+    </div>
   );
 }
 

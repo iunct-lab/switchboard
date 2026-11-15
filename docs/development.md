@@ -22,14 +22,13 @@ The replay tests read recordings kept outside Git (see the README's Develop sect
 ## 3. Your own Project and `ops.config.json`
 
 1. Create a GitHub Project of your own and set the repository variable that matches `envPrefix` in `ops.config.json`: `gh variable set <PREFIX>_PROJECT_URL --repo <owner/name> --body <Project URL>`. A variable of the same name in the environment takes precedence, so update it too.
-2. Before `bun ops-kit/src/cli.ts bootstrap`, set `fields.area` in `ops.config.json` to your own values. The values in this repository are Switchboard's own packages, and `bootstrap` would copy them into your Project.
-3. Check the fields and the required sections in `ops.config.json`, then run `bun ops-kit/src/cli.ts bootstrap <Project title>` to create the fields.
-4. If you want new Issues added to the Project automatically, copy `ops-kit/template/.github/workflows/project-autoadd.yml` to `.github/workflows/`, replace `__PREFIX__` with your `envPrefix`, and set the `<PREFIX>_PROJECT_URL` variable and a repository secret `<PREFIX>_PROJECT_TOKEN` that can write the Project. The workflow never runs code from a PR.
-5. Keep `publicSync` in `ops.config.json`. Its `target` is the upstream public repository, and the kit's tools, the `gh` front end and the app's backlog refuse writes when a clone's default write target is that repository. If you publish to a public repository of your own, change `target` to it; you have no permission to `public-sync` to upstream. If a write is refused, see [the kit's note](../ops-kit/README.md#when-writes-to-the-public-side-are-refused).
+2. Check the fields and the required sections in `ops.config.json`, then run `bun ops-kit/src/cli.ts bootstrap <Project title>` to create the fields.
+3. If you want new Issues added to the Project automatically, copy `ops-kit/template/.github/workflows/project-autoadd.yml` to `.github/workflows/`, replace `__PREFIX__` with your `envPrefix`, and set the `<PREFIX>_PROJECT_URL` variable and a repository secret `<PREFIX>_PROJECT_TOKEN` that can write the Project. The workflow never runs code from a PR.
+4. Keep `publicSync` in `ops.config.json`. Its `target` is the upstream public repository, and the kit's tools, the `gh` front end and the app's backlog refuse writes when a clone's default write target is that repository. If you publish to a public repository of your own, change `target` to it; you have no permission to `public-sync` to upstream. If a write is refused, see [the kit's note](../ops-kit/README.md#when-writes-to-the-public-side-are-refused).
 
 ## 4. Issue and PR templates
 
-Replace the request-only forms in `.github/ISSUE_TEMPLATE/` with the development forms in `ops-kit/template/.github/ISSUE_TEMPLATE/`. Fill `__OWNER__`, `__REPO__`, `__AREA__` and `__TEST_ALL__` with your values and make the Area options and required sections match `ops.config.json`. Take the PR body template from `ops-kit/template/.github/PULL_REQUEST_TEMPLATE.md`, and check `.github/labels.yml` before syncing the labels.
+Replace the request-only forms in `.github/ISSUE_TEMPLATE/` with the development forms in `ops-kit/template/.github/ISSUE_TEMPLATE/`. Fill `__OWNER__`, `__REPO__` and `__TEST_ALL__` with your values and make the required sections match `ops.config.json`. Take the PR body template from `ops-kit/template/.github/PULL_REQUEST_TEMPLATE.md`, and check `.github/labels.yml` before syncing the labels.
 
 ## 5. Stop the PR auto-close workflow
 

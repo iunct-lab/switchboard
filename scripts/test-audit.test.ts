@@ -1,6 +1,6 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { failureLines, formatCandidates, formatGrowth, growthAlert, parseJunit, quietCandidates, similarCandidates, slowCandidates, type GrowthCounts, type GrowthWeek, type TestCase } from "./test-audit";
+import { failureLines, formatCandidates, formatGrowth, growthAlert, parseJunit, dayStart, quietCandidates, ratio, similarCandidates, slowCandidates, type GrowthCounts, type GrowthWeek, type TestCase } from "./test-audit";
 
 const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <testsuites name="bun test" tests="2">
@@ -105,4 +105,25 @@ test("formatGrowth has one row per week and the verdict line", () => {
   expect(out).toContain("棚卸しを早める");
   expect(formatGrowth(weeks.slice(0, 1))).toContain("判定できません");
   expect(formatGrowth([weeks[0]!, { ...weeks[1]!, tools: counts(100, 500) }])).toContain("早めません");
+});
+
+test("ratio counts test and body lines added and removed separately", () => {
+  const numstat = [
+    "10\t2\tscripts/a.test.ts",
+    "5\t1\tapps/web/src/b.test.tsx",
+    "7\t3\tscripts/a.ts",
+    "4\t0\tapps/web/src/c.tsx",
+    "20\t5\tscripts/x-e2e.ts",
+    "-\t-\tpackages/img.ts",
+    "3\t3\tREADME.md",
+    "2\t1\tscripts/{old => new}/d.test.ts",
+    "",
+  ].join("\n");
+  expect(ratio(numstat)).toEqual({ testAdded: 17, testRemoved: 4, bodyAdded: 31, bodyRemoved: 8 });
+  expect(ratio("")).toEqual({ testAdded: 0, testRemoved: 0, bodyAdded: 0, bodyRemoved: 0 });
+});
+
+test("dayStart pins a date-only bound to midnight UTC and keeps a time", () => {
+  expect(dayStart("2026-10-17")).toBe("2026-10-17T00:00:00Z");
+  expect(dayStart("2026-11-01T01:50:41Z")).toBe("2026-11-01T01:50:41Z");
 });

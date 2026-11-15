@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, NewRepoInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -20,7 +20,7 @@ import { AttachmentError, AttachmentStore, extValue, formatBytes, isActiveConten
 import { MAX_PTY_SESSIONS, type PtyAttached, type PtyClient, PtyClientMessage, PtyManager } from "./pty.ts";
 import { accessLine, authKind, opLine } from "./accesslog.ts";
 import { addressKey, EDGE_HEADER, edgeOk, hostAllowed, isLoopback, isLoopbackAddress, LOOPBACK_HOSTNAMES, loadOrCreateToken, makeFailureLimit, makeSessionCheck, recentOk, sameOrigin, SESSION_COOKIE, SESSION_RECHECK_MS, sessionTimes, tokenEquals, tokenFromRequest } from "./auth.ts";
-import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, type FeedbackSource, feedbackTitle, fixTitle, newRepoTitle, upstreamRequest } from "./feedback.ts";
+import { adoptTitle, baselineTitle, buildAdoptPrompt, buildBaselinePrompt, buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, type FeedbackSource, feedbackTitle, fixTitle, newRepoTitle, upstreamRequest } from "./feedback.ts";
 import { measureFootprint } from "./footprint.ts";
 import { loadMcpPolicy, mcpServersFor, WorkspaceMcp } from "./mcp.ts";
 import { decisionsFromOtlp } from "./otel.ts";
@@ -28,7 +28,7 @@ import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
 import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
-import { delegatedNote, evalRequestDraft, judgeHumanGap, personMessages, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { delegatedNote, evalContext, evalRequestDraft, judgeHumanGap, personMessages, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
 import { claudeCatalog, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS, type CatalogRunner } from "./model-catalog.ts";
@@ -46,6 +46,7 @@ import { collectProvenance } from "./provenance.ts";
 import { Staging } from "./staging.ts";
 import { capSnapshot, collectTaskDiff, mergeSnapshot, withSnapshot, WRITE_TOOLS } from "./taskdiff.ts";
 import { parseCron } from "./cron.ts";
+import { balanceView } from "./balance.ts";
 import { FlowCache, flowScope, flowView, type FlowWorkspace } from "./flow.ts";
 import { interventionView, warmInterventions } from "./interventions.ts";
 import { SourceCache, sourceView } from "./sources.ts";
@@ -56,7 +57,7 @@ import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
-import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, dueSoonOf, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, storedIssueReader, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -70,7 +71,7 @@ import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { IN_FLIGHT, isWorking, TURN_DONE, workPhase } from "./task-status.ts";
-import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager } from "./tasks.ts";
+import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager, versionAtLeast } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { createDockerdIdle } from "./dockerd-idle.ts";
@@ -124,6 +125,8 @@ export interface CoreServer {
   stop(): Promise<void>;
 }
 
+/** Bun's default 10 s cut a response still waiting on GitHub (backlog, answer, start) → CloudFront 502 → stopped page → Home. */
+export const IDLE_TIMEOUT_SECONDS = 120;
 const TOPIC = "events";
 /** How often the buffered API requests are written to api_requests. */
 const API_REQUESTS_FLUSH_MS = 10_000;
@@ -220,7 +223,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const detected: Array<{ adapter: RunnerAdapter; info: RunnerInfo }> = [];
   for (const a of adapters) {
     const d = await a.detect();
-    detected.push({ adapter: a, info: { id: a.id, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
+    detected.push({ adapter: a, info: { id: a.id, forks: false, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
     if (d.available) adapterMap.set(a.id, a);
   }
   // Login: the runner's own status command runs again when /api/health is read and its last answer is over a
@@ -314,7 +317,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const login = bedrock ? "ok" : info.login !== undefined && loginExpired.has(adapter.id) ? "expired" : info.login;
       const loginKind = bedrock ? "bedrock" : login === "ok" ? info.loginKind : undefined;
       const loginExpiresAt = !bedrock && login === "ok" ? info.loginExpiresAt : undefined; // an expiry beside "expired" or Bedrock would mislead
-      const base = { ...info, login, loginKind, loginExpiresAt, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
+      const forks = adapter.forks === true && versionAtLeast(info.version, adapter.forkMinVersion);
+      const base = { ...info, forks, login, loginKind, loginExpiresAt, bedrockAvailable: adapter.bedrockModels !== undefined, autoResume: savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
       if (!info.permissionModes.length) return base;
       const saved = savedDefaultMode(adapter.id);
       const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);
@@ -426,7 +430,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
     }
   };
-  /** The settings' default budget for a Task of this model: a Fable Task takes `fableBudgetUsd` first (#1989), then `defaultBudgetUsd` (null = none). */
+  /** The settings' default budget for a Task of this model: a Fable Task takes `fableBudgetUsd` first, then `defaultBudgetUsd` (null = none). */
   const defaultBudgetFor = (model: string | null | undefined): number | null => {
     const qr = settings().quotaAndResume;
     return (isFableModel(model) ? qr.fableBudgetUsd : null) ?? qr.defaultBudgetUsd;
@@ -582,7 +586,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const wsId = db.getTask(id)?.workspaceId;
     return wsId && db.getWorkspace(wsId)?.backlog === "switchboard" ? { BACKLOG_WORKSPACE: wsId } : {};
   };
-  const tasks = new TaskManager(db, adapterMap, broadcast, { artifacts, originOf: opts.gitOrigin, beforeResume: t => { if (t.runner === "claude" && teleportCwds.has(teleportCwd(t.cwd))) throw new Error("Teleport Terminalが使用中です。終了後にLocal Taskを再開してください。"); }, idleMs: cfg.runnerIdleMs, suggest: (input) => suggestFor(input), approval: (task, ask) => {
+  const tasks = new TaskManager(db, adapterMap, broadcast, { runnerForks: (runner) => runnerInfo().find((r) => r.id === runner)?.forks === true, artifacts, originOf: opts.gitOrigin, beforeResume: t => { if (t.runner === "claude" && teleportCwds.has(teleportCwd(t.cwd))) throw new Error("Teleport Terminalが使用中です。終了後にLocal Taskを再開してください。"); }, idleMs: cfg.runnerIdleMs, suggest: (input) => suggestFor(input), approval: (task, ask) => {
       const v = approval.evaluate(task, ask);
       // a saved policy answered it: the use is kept with the policy
       if (v.decision === "allow" && v.match.source.startsWith("policy:")) {
@@ -1645,6 +1649,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // each is left with why; 直行で直す is the meta workspace's only, like its button (server.ts /start)
     let defsError = "";
     const defs = (() => { try { return listProcesses(meta?.path); } catch (e) { defsError = (e as Error).message ?? String(e); return []; } })();
+    const dueSoonAt = Date.now(); // the registry of each workspace's checkout, read once per firing
+    const dueSoonBy = new Map<string, Set<number>>();
+    const dueSoon = (ws: Workspace) => dueSoonBy.get(ws.id) ?? (dueSoonBy.set(ws.id, dueSoonOf(ws.path, dueSoonAt)), dueSoonBy.get(ws.id)!);
     const defsFor = (ws: Workspace) => (ws.kind === "meta" ? defs : defs.filter((d) => !d.auto));
     const targetOf = Object.fromEntries(sweepActions.map((a) => [a, ((d) => (d ? autoRunner(d).runner : null))(decidedRunner(a, schedule?.runner))])) as Record<BacklogAction, RunnerId | null>;
     // Only a window that has not reset yet counts: a row from before the reset would otherwise hold the sweep for good,
@@ -1742,7 +1749,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${lines(slotHeld).join(" / ")}`);
             break;
           }
-          const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws));
+          const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws), dueSoon(ws));
           if (n === 0) skipped.push(...leftLines(r.items, slot, flow()).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
           if (n === 0) reported = true;
           if (!next) {
@@ -1956,6 +1963,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const picked = new Set<string>();
     // flow PBIs started from Ready in this run: still ready in `items`, so counted as in progress here
     const flowStarted = new Set<string>();
+    const dueSoonBy = new Map<string, Set<number>>(); // each workspace's registry, read once per firing
+    const dueSoon = (ws: Workspace) => dueSoonBy.get(ws.id) ?? (dueSoonBy.set(ws.id, dueSoonOf(ws.path)), dueSoonBy.get(ws.id)!);
     const flowOf = (ws: Workspace, running: number, stopped: number): FlowLimit => ({ limit: settings().quotaAndResume.flowLimit, running: running + [...flowStarted].filter((k) => k.startsWith(`${ws.id}:`)).length, stopped });
     let startedAny = false;
     const reread = new Set<string>();
@@ -1968,7 +1977,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const next = read
         .flatMap(({ ws, items, flowRunning: running, flowStopped: stopped }) => {
           const order = live.items.filter((e) => e.workspaceId === ws.id).map((e) => e.number);
-          const p = pickNext(items.filter((i) => !picked.has(queueKey(ws.id, i.number))), "implement", order, flowOf(ws, running, stopped));
+          const p = pickNext(items.filter((i) => !picked.has(queueKey(ws.id, i.number))), "implement", order, flowOf(ws, running, stopped), undefined, dueSoon(ws));
           return p ? [{ ws, p }] : [];
         })
         .sort((a, b) => at(a.ws.id, a.p.item.number) - at(b.ws.id, b.p.item.number))[0];
@@ -2577,8 +2586,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   server = Bun.serve({
     hostname: cfg.host,
     port: opts.port ?? cfg.port,
-    // Bun's default 10 s cut a response still waiting on GitHub (backlog, answer, start) → CloudFront 502 → stopped page → Home.
-    idleTimeout: 120,
+    idleTimeout: IDLE_TIMEOUT_SECONDS,
     // One upload may carry MAX_ATTACHMENTS_PER_REQUEST files of MAX_ATTACHMENT_BYTES each, plus multipart overhead.
     maxRequestBodySize: MAX_ATTACHMENTS_PER_REQUEST * MAX_ATTACHMENT_BYTES + 1024 * 1024,
     routes: guardAll({
@@ -3356,6 +3364,50 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
+      /**
+       * 取り込み: one meta Task that runs the adopt-repo skill on the workspace (the skill is Switchboard's own and stays in the meta
+       * checkout). Only a repository of your own that syncs with GitHub: someone else's has 元の更新を取り込む, and one without
+       * GitHub has nothing of GitHub's to adopt.
+       */
+      "/api/workspaces/:id/adopt": {
+        POST: async (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws || ws.kind !== "repo" || ws.upstream) return bad("not found", 404);
+          if (ws.backlog === "switchboard") return bad("GitHub と連携しない workspace は取り込みの対象外です", 409);
+          if (!existsSync(ws.path)) return bad("workspace directory does not exist", 409);
+          const r = await startMetaTask({ kind: "adopt-repo", title: adoptTitle(ws.name), prompt: buildAdoptPrompt({ name: ws.name, path: ws.path, when: new Date() }) });
+          return "error" in r ? bad(r.error, r.status) : json(r.task, 201);
+        },
+      },
+
+      /**
+       * 立ち上げ: one Task in the workspace under the p2-baseline candidate, the concept as data. The definition is the meta
+       * checkout's, like a stage's; a checkout without it answers 409 and starts nothing.
+       */
+      "/api/workspaces/:id/baseline": {
+        POST: async (req) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws || ws.kind !== "repo" || ws.upstream) return bad("not found", 404);
+          const parsed = BaselineInput.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          const meta = metaWorkspace();
+          if (!meta) return bad("meta workspace がありません", 409);
+          const other = otherRepo(meta, ws);
+          if (!other) return bad("not found", 404);
+          const local = ws.backlog === "switchboard";
+          // a definition that cannot be read or rendered (no entry, another hole) starts nothing, like a stage's
+          let def, prompt;
+          try {
+            def = loadProcess("p2-baseline", meta.path);
+            prompt = buildBaselinePrompt(parsed.data.concept, { other, local, localForge: local && localForgeOf(ws.path) }, def);
+          } catch (e) {
+            return bad(`候補の定義を読めません: ${(e as Error).message ?? e}`, 409);
+          }
+          const r = await startMetaTask({ kind: "baseline", ws, title: baselineTitle(ws.name), prompt, process: def.id, processReason: "baseline button" });
+          return "error" in r ? bad(r.error, r.status) : json(r.task, 201);
+        },
+      },
+
       /** The prompt prefix Home puts before an improvement request; written per workspace (meta = Switchboard's own map). */
       "/api/workspaces/:id/brief": (req) => {
         const ws = db.getWorkspace(String(req.params.id));
@@ -3407,6 +3459,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       /** People's interventions and why work stopped, the last 7 and 30 days against the period before each. Counted at each look from the records and the stored Issues: no GitHub call. */
       "/api/interventions": {
         GET: () => json(interventionView(db, db.listWorkspaces())),
+      },
+
+      /** The workspaces' balance over ?days=7|30 and the capacity the weekly quota leaves (any other days is 400). Counted at each look from the tables: no GitHub call. */
+      "/api/balance": {
+        GET: (req) => {
+          const days = Number(new URL(req.url).searchParams.get("days") ?? 7);
+          if (days !== 7 && days !== 30) return bad("days must be 7 or 30", 400);
+          return json(balanceView(db, db.listWorkspaces(), days));
+        },
       },
 
       /** What became of the requests of each speaker (and route) in the last ?days= days (default 30, 1 to 3650). Counted from the stored records and the Tasks (no GitHub call), held for an hour per ?days=. */
@@ -4379,7 +4440,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const sample = weeklyHumanSample(db.evalsList({ workspaceId, judgedFrom: weekStart - 7 * 86_400_000, judgedTo: weekStart, limit: 500 }));
         // every rated task, not the list's 500: ratings are given by hand, so they stay few, and a cut would drop the oldest
         const gap = judgeHumanGap(db.evalsList({ workspaceId, rated: true, limit: Number.MAX_SAFE_INTEGER }));
-        return json({ weekStart, sample, gap } satisfies EvalsSummary);
+        const readIssue = storedIssueReader(db); // the workspace's Issue records are read once for all rows
+        return json({ weekStart, sample: sample.map((r) => ({ ...r, context: evalContext(db, db.getTask(r.taskId)!, readIssue) })), gap } satisfies EvalsSummary);
       },
 
       "/api/tasks/:id/evals": (req) => {
@@ -4450,6 +4512,21 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             return json(tasks.setArchived(t.id, parsed.data.archived));
           } catch (e) {
             return bad(String((e as Error).message ?? e), 409);
+          }
+        },
+      },
+
+      // Fork: a new Task that continues this one's conversation up to a finished turn. Nothing starts until its first reply.
+      "/api/tasks/:id/fork": {
+        POST: async (req) => {
+          const t = db.getTask(String(req.params.id));
+          if (!t) return bad("not found", 404);
+          const parsed = ForkTaskInput.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          try {
+            return json(tasks.forkTask(t.id, parsed.data.seq), 201);
+          } catch (e) {
+            return bad(String((e as Error).message ?? e));
           }
         },
       },

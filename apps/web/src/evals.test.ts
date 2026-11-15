@@ -1,8 +1,8 @@
 // test-reads: apps/web/src/ops.ts apps/web/src/perf.ts apps/web/src/quota.ts apps/web/src/runnerStats.ts apps/web/src/reports.ts apps/web/src/i18n.ts apps/web/src/i18n/insights.ts
 import { describe, expect, test } from "bun:test";
-import type { EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
+import type { EvalContext, EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
-import { endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
+import { contextLines, endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, HUMAN_QUESTIONS, humanAnswerMark, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
   metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, delegatedModel: null, ...over },
@@ -89,6 +89,17 @@ describe("human label (#1220)", () => {
   });
 });
 
+describe("humanAnswerMark", () => {
+  test("empty without answers; each answer given as a short word; one left out is skipped", () => {
+    expect(humanAnswerMark(null)).toBe("");
+    expect(humanAnswerMark({})).toBe("");
+    expect(humanAnswerMark({ intent: "fit", extra: "none", value: "unknown" })).toBe("意図○ 余分なし 価値?");
+    expect(humanAnswerMark({ intent: "partial", extra: "some", value: "unused" })).toBe("意図△ 余分あり 価値×");
+    expect(humanAnswerMark({ intent: "wrong", value: "used" })).toBe("意図× 価値○");
+    expect(humanAnswerMark({ extra: "some" })).toBe("余分あり");
+  });
+});
+
 describe("evals list rows (#1221)", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
     taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null,
@@ -116,6 +127,12 @@ describe("evals list rows (#1221)", () => {
     expect(["toolFailures", "costUsd", "updatedAt"].map((k) => firstSortDir(k as EvalsSortKey))).toEqual(["desc", "desc", "desc"]);
   });
 
+  test("evalCells human: the rating alone without answers, the rating with the mark after it with some", () => {
+    expect(evalCells(row("p", { human: { rating: 4, comment: "" } })).human).toBe("4 / 5");
+    expect(evalCells(row("q", { human: { rating: 4, comment: "", intent: "fit", extra: "none", value: "unknown" } })).human).toBe("4 / 5 意図○ 余分なし 価値?");
+    expect(evalCells(row("r", { human: { rating: 2, comment: "", value: "unused" } })).human).toBe("2 / 5 価値×");
+    expect(evalCells(row("s")).human).toBe("-");
+  });
   test("evalCells and evalRowWarn", () => {
     expect(evalCells(rows[0]!)).toEqual({ judge: "4.2", human: "-", end: "正常", model: "-", mixed: false, effort: "—", effortMixed: false, subagentEffort: "-" });
     expect(evalCells(rows[1]!)).toEqual({ judge: "-", human: "-", end: "-", model: "-", mixed: false, effort: "—", effortMixed: false, subagentEffort: "-" });
@@ -234,5 +251,37 @@ console.log(JSON.stringify([
       "2 min",
       "Folder",
     ]);
+  });
+});
+
+describe("contextLines", () => {
+  const base = { interventions: { userInstructions: 0, decisionStops: 0 }, outputs: [], pbiStatus: null };
+  test("a Stage Task: the source request, the PBI with its out-of-scope, the outputs with their states, the PBI status and the interventions", () => {
+    const ctx: EvalContext = {
+      request: { kind: "stage", pbi: { number: 2, title: "文書で読める", story: "運用者として読みたい", outOfScope: "自動の検査" }, source: { number: 1, head: "GitHub に頼らない流れ" } },
+      interventions: { userInstructions: 3, decisionStops: 2 },
+      outputs: [{ kind: "change", repo: "r", number: 7, title: null, state: "merged" }, { kind: "pr", repo: "r", number: 3, title: null, state: "open" }, { kind: "issue", repo: "r", number: 9, title: null, state: null }],
+      pbiStatus: "Done",
+    };
+    expect(contextLines(ctx)).toEqual([
+      { label: "元の要望", text: "#1 GitHub に頼らない流れ" },
+      { label: "解釈（PBI）", text: "#2 文書で読める · 運用者として読みたい · スコープ外: 自動の検査" },
+      { label: "成果", text: "変更 #7 マージ済み · PR #3 未マージ · Issue #9 · PBI Done" },
+      { label: "利用者の介入", text: "追加指示 3 · 判断待ち 2", warn: true },
+    ]);
+  });
+  test("an ordinary Task: the first request text, no outputs, no intervention is not a warning", () => {
+    expect(contextLines({ ...base, request: { kind: "prompt", text: "zenn の記事を書いて" } })).toEqual([
+      { label: "元の依頼", text: "zenn の記事を書いて" },
+      { label: "成果", text: "なし" },
+      { label: "利用者の介入", text: "追加指示 0 · 判断待ち 0", warn: false },
+    ]);
+  });
+  test("a Stage Task whose PBI is not stored says so; a closed PR shows its state", () => {
+    const lines = contextLines({ ...base, request: { kind: "stage", pbi: null, source: null }, outputs: [{ kind: "pr", repo: "r", number: 4, title: null, state: "closed" }] });
+    expect(lines.map((l) => [l.label, l.text])).toEqual([["解釈（PBI）", "PBI なし"], ["成果", "PR #4 閉じた"], ["利用者の介入", "追加指示 0 · 判断待ち 0"]]);
+  });
+  test("the three questions keep the values the daemon accepts", () => {
+    expect(HUMAN_QUESTIONS.map((q) => [q.key, q.options.map((o) => o.value)])).toEqual([["intent", ["fit", "partial", "wrong", "unknown"]], ["extra", ["none", "some"]], ["value", ["used", "unused", "unknown"]]]);
   });
 });

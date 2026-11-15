@@ -23,7 +23,6 @@ const values: Record<string, string> = {
   __OWNER__: "example",
   __REPO__: "sample-app",
   __PREFIX__: "SAMPLE",
-  __AREA__: "app",
   __TEST_ALL__: "bun test",
   __TEST_TYPECHECK__: "bun run typecheck",
   __TEST_ONE__: "bun test <file> -t \"<name>\"",

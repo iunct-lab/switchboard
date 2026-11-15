@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, type Deps, type LocalCiResult, type Offload } from "./local-ci";
+import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Deps, type LocalCiResult, type Offload } from "./local-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -294,6 +294,56 @@ describe("local-ci", () => {
       expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, broken)).toBeUndefined();
       // a rebase that kept every diff: no commit added, nothing to select
       expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, mk({ cherry: `- ${c1}\n` }))).toEqual({ pass: PASS, commits: [], files: [] });
+    });
+
+    test("main: no commit added since the pass (a rebase only) exits 0 without a slot, a worktree or a post; --force and --all go on to run", async () => {
+      const root = mkdtempSync(join(CACHE, "main-root-"));
+      Bun.spawnSync(["git", "init", "-q", root]);
+      Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+      const TIP = "e".repeat(40);
+      try {
+        const mk = () => {
+          const f = incDeps("selected: 1\na.test.ts  x", { cherry: `- ${"d".repeat(40)}\n` });
+          const inner = f.d.sh;
+          f.d.sh = async (cmd, cwd) => {
+            if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
+            // existingPass reads the head with the comments: the pass is of an earlier head
+            if (cmd[0] === "gh" && cmd.includes("headRefOid,comments")) return JSON.stringify({ headRefOid: SHA, comments: [] });
+            if (cmd.includes("defaultBranchRef")) return "main\n";
+            if (cmd.includes("rev-parse") && cmd.includes("refs/local-ci/42/default")) return `${TIP}\n`;
+            return inner(cmd, cwd);
+          };
+          const slots: string[] = [];
+          const slot = f.d.slot;
+          f.d.slot = (name, fn) => (slots.push(name), slot(name, fn));
+          return { ...f, slots };
+        };
+        const x = mk();
+        const posted: string[] = [];
+        // a build of this head and base sent off the host before: --collect must not post it after this exit
+        writePending(CACHE, { repo: "example/development", pr: 42, root, head: SHA, base: BASE, build: "b-rebase-only", at: Date.now(), steps: [] });
+        expect(await main(["42"], root, x.d, async (_t, body) => void posted.push(body), root, CACHE)).toBe(0);
+        expect([x.slots, posted, x.calls.some((c) => c.includes("worktree") && c.includes("add"))]).toEqual([[], [], false]);
+        expect(x.logged.join("\n")).toContain("前の pass（aaaaaaa）の後に足されたコミットが無い（rebase だけ）");
+        expect(pendingFor(CACHE, "example/development", 42, SHA, BASE)).toBeUndefined();
+        // counted from the default branch's tip, not the base's: in a stack the base is the PR below, whose fixes the pass must hold
+        expect(x.calls.filter((c) => c.includes("merge-base") && !c.includes("--is-ancestor"))).toEqual([["git", "-C", root, "merge-base", TIP, SHA]]);
+        for (const flag of ["--force", "--all"]) {
+          const y = mk();
+          const out: string[] = [];
+          expect(await main(["42", flag], root, y.d, async (_t, body) => void out.push(body), root, CACHE)).toBe(0);
+          expect([flag, y.slots.length > 0, out.length]).toEqual([flag, true, 1]);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("localCi: an incremental base with no added commit runs every step, not an empty list", async () => {
+      const { d, ran } = incDeps("selected: 1\na.test.ts  x", { cherry: `- ${"d".repeat(40)}\n` });
+      const r = await localCi(42, "/repo", d, "example/development", CACHE);
+      expect(names(ran)).toEqual(prSteps.map((s) => s.run.trim()));
+      expect(r.incremental).toBeUndefined();
     });
 
     test("incrementalSteps keeps the install, type check and the narrowed test; a CI lacking one gives none", () => {
@@ -1604,8 +1654,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
           let gh = 0;
           x.d.sh = async (cmd, cwd) => {
             if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
-            // reusablePass, localCi's read, then notify's read fails
-            if (cmd[0] === "gh" && ++gh >= 3) throw new Error("gh: temporary failure");
+            // reusablePass, main's read, default branch and incrementalBase, localCi's read and incrementalBase, then notify's read fails
+            if (cmd[0] === "gh" && ++gh >= 7) throw new Error("gh: temporary failure");
             return fake(cmd, cwd);
           };
           expect(await main(["42"], root, x.d, async () => undefined, root, CACHE)).toBe(1);

@@ -22,12 +22,12 @@ const withDb = (fn: (db: Db) => void) => {
 
 const task = (db: Db, id: string, workspaceId: string | null) => {
   const at = Date.now();
-  db.insertTask({ id, workspaceId, title: "t", stage: null, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at } as unknown as Task);
+  db.insertTask({ id, workspaceId, title: "t", stage: null, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at } as unknown as Task);
 };
 const spend = (db: Db, taskId: string, costUsd: number, tsSec: number) =>
   db.insertLedger({ taskId, runner: "claude", model: null, inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd: 0, source: "reported", ts: tsSec * 1000 });
 
-describe("quota_windows (#4900)", () => {
+describe("quota_windows", () => {
   test("a window keeps its peak after the quota resets into the next window", () =>
     withDb((db) => {
       db.upsertQuota("claude", "seven_day", 0.4, WEEK_A, 1_000);

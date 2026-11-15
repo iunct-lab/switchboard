@@ -1,8 +1,9 @@
-// test-reads: ops-kit/processes/p0-pipeline.md ops-kit/processes/p1-direct.md
+// test-reads: ops-kit/processes/p0-pipeline.md ops-kit/processes/p1-direct.md ops-kit/processes/p2-baseline.md
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chooseProcess } from "./backlog.ts";
 import { listProcesses, loadProcess, parseProcessDef, renderEntry, PROCESS_SOURCE } from "./process-defs.ts";
 
 const P0_ENTRIES = ["to-pbi", "to-tasks", "to-tasks-ready", "complete", "complete-other", "complete-resume", "check", "close"];
@@ -27,12 +28,59 @@ test("p1-direct's entry carries the work through review and merge, closes the re
   const text = renderEntry(loadProcess("p1-direct"), "direct", { signal: "#1" });
   expect(text).toContain("cross-runner-review");
   expect(text).toContain("merge-gate.ts <PR> --merge");
+  // review is left to the merge-gate verdict: it runs the gate first and reviews only when the reason says 主レビュー
+  expect(text).toContain("`bun scripts/merge-gate.ts <PR>`（`--merge` なし）");
+  expect(text).toContain("理由に「主レビュー」が出たときだけ");
+  expect(text).toContain("要否を自分で決めない");
+  // skipping the review does not skip CI, and a gate that cannot judge stops the work instead of reading as "no review"
+  expect(text).toContain("レビューを通さないときも CI は要る");
+  expect(text).toContain("exit 2（判定できない）なら");
+  expect(loadProcess("p1-direct").version).toBe(2);
   expect(text).toContain("--state closed");
   expect(text).toContain("--add-label direct-returned");
   expect(text).toContain("`直行から戻す: <理由>`");
   // a request touching an invariant goes back the same way, never just stops (without the label it is left for good)
   expect(text).toContain("触れるなら次の行のとおり戻す");
   expect(text).not.toContain("作らずに止め、理由を返答に書く");
+});
+
+test("p2-baseline: one entry that takes the concept as data, plans in docs/concept.md instead of Issues, and keeps the review, the merge gate and the invariants", () => {
+  const def = loadProcess("p2-baseline");
+  expect(Object.keys(def.entries)).toEqual(["baseline"]);
+  const text = renderEntry(def, "baseline", { concept: "````text\n旅行の予定を同行者と共有する\n````" });
+  expect(text).not.toContain("{{");
+  expect(text).toContain("旅行の予定を同行者と共有する");
+  expect(text).toContain("要望・PBI・Task の Issue は作らない");
+  expect(text).toContain("`docs/concept.md`");
+  expect(text).toContain("cross-runner-review");
+  expect(text).toContain("マージ判定 `scripts/merge-gate.ts` が merge を返したときだけ");
+  expect(text).toContain("`--repo <このリポジトリの owner/name>`");
+  expect(text).toContain("自分の確認だけでマージしない");
+  // a resume looks at the open pull requests first and does not make a second one for the same step
+  expect(text).toContain("開いている `sb/baseline-*` の PR");
+  // it builds only up to the graduation's phase, files the rest as requests only (no PBI), and does not graduate twice
+  expect(text).toContain("`## 卒業の条件` の Phase までの行に、チェックの無い行があるとき");
+  expect(text).toContain("PBI にはしない");
+  // the concept merges with the skeleton while there are no CI steps to pass
+  expect(text).toContain("骨組み）のコミットをその PR の枝に足して、1 本の PR としてマージする");
+  expect(text).toContain("`卒業:` の行が既にあれば、何もせずに終える");
+  // the definition promises the rules for that repository after the entry: the entry leaves the merge gate's place to them
+  expect(readFileSync(def.path, "utf8")).toContain("読み替えを付けない開始でこの入口を始めない");
+  expect(text).toContain("ops-kit/invariants.md");
+  // the four steps, resumed from the document's state
+  for (const step of ["**構想の文書**", "**答え**", "**ロードマップ**", "**卒業**"]) expect(text).toContain(step);
+  // a concept is required: rendering without it is refused, not sent with a literal hole
+  expect(() => renderEntry(def, "baseline", {})).toThrow("uses {{concept}}, which was not given");
+});
+
+test("p2-baseline is never chosen by the backlog's automatic processing, whatever the request", () => {
+  const kit = listProcesses();
+  expect(kit.map((d) => d.id)).toContain("p2-baseline");
+  expect(loadProcess("p2-baseline").auto).toBeNull();
+  const request = (bodyChars: number, labels: string[] = ["type:request"]) => ({ bodyChars, requestChars: bodyChars, labels });
+  for (const item of [request(100), request(5000), request(100, ["type:request", "flow-improvement"]), request(100, ["direct-returned"])]) {
+    expect(chooseProcess(item, kit).process).not.toBe("p2-baseline");
+  }
 });
 
 test("a definition without id, version or title is refused with the path and the reason", () => {

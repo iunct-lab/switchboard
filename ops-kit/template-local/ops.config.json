@@ -1,8 +1,6 @@
 {
   "envPrefix": "__PREFIX__",
   "fields": {
-    "area": ["__AREA__"],
-    "kind": ["bug", "feature", "deps", "tech-watch", "eval", "chore"],
     "priority": ["P0", "P1", "P2", "P3"]
   },
   "sections": {

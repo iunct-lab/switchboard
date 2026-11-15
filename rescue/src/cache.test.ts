@@ -102,6 +102,77 @@ test("sweepCacheWork: old local-CI worktrees, base worktrees and any PR's old lo
   }
 });
 
+/** A review clone under ops-kit/review: a git directory with `origin` (none when `origin` is null); old unless `fresh`. */
+async function clone(name: string, origin: string | null, o: { fresh?: boolean } = {}) {
+  const d = join(cache, "ops-kit", "review", name);
+  mkdirSync(d, { recursive: true });
+  await run(["git", "init", "-q", "-b", "main"], d);
+  if (origin) await run(["git", "remote", "add", "origin", origin], d);
+  writeFileSync(join(d, "f.txt"), "x".repeat(4096));
+  if (!o.fresh) age(d);
+  return d;
+}
+const reviews = () => readdirSync(join(cache, "ops-kit", "review")).sort();
+
+test("sweepCacheWork: an old review clone goes once GitHub says its PR is closed; open, not told, new, in use, no or non-GitHub origin and unlike names stay", async () => {
+  await clone("switchboard.review10", "https://github.com/acme/app.git");
+  await clone("my.app.recheck11", "git@github.com:acme/my.app.git");
+  await clone("switchboard.review12", "https://github.com/acme/app"); // open
+  await clone("switchboard.review13", "https://github.com/acme/app"); // gh failed
+  await clone("switchboard.review14", "https://github.com/acme/app", { fresh: true });
+  await clone("switchboard.review15", "https://github.com/acme/app"); // in use
+  await clone("switchboard.review16", null);
+  await clone("switchboard.review17", "https://gitlab.com/acme/switchboard.git");
+  await clone("switchboard.reviewx", "https://github.com/acme/app");
+  await clone("switchboard.review18r", "https://github.com/acme/app"); // a letter after the number: the old /tmp type, not this one
+  const odd = join(cache, "ops-kit", "review", "switchboard.review19"); // a .git file that names no worktree
+  mkdirSync(odd);
+  await run(["git", "init", "-q", "--separate-git-dir", join(home, "separate.git"), odd], home); // a gh clone's .git is a directory; this one is a file, and its origin answers
+  await run(["git", "remote", "add", "origin", "https://github.com/acme/app"], odd);
+  age(odd);
+  await clone("switchboard.review23", "https://github.com/acme/app"); // starts being used while GitHub is asked
+  await clone("switchboard.review24", "https://gitlab.example.com/github.com/acme/app.git"); // github.com only in the path: not GitHub
+  await clone("switchboard.review22", "https://github.com/acme/app").then((d) => rmSync(join(d, ".git"), { recursive: true })); // no .git at all
+  const note = join(cache, "ops-kit", "review", "x.review7-claude-1.md");
+  writeFileSync(note, "notes");
+  utimesSync(note, OLD, OLD);
+  const asked: string[] = [];
+  let late: ReturnType<typeof Bun.spawn> | undefined;
+  const state = async (repo: string, n: number) => {
+    asked.push(`${repo}#${n}`);
+    if (n === 23) late = Bun.spawn(["sleep", "30"], { cwd: join(cache, "ops-kit", "review", "switchboard.review23") });
+    return n === 12 ? "open" : n === 13 ? null : "closed";
+  };
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(cache, "ops-kit", "review", "switchboard.review15") });
+  try {
+    const r = await sweepCacheWork(cache, { owned: false }, Date.now(), state);
+    expect(reviews()).toEqual(["switchboard.review12", "switchboard.review13", "switchboard.review14", "switchboard.review15", "switchboard.review16", "switchboard.review17", "switchboard.review18r", "switchboard.review19", "switchboard.review22", "switchboard.review23", "switchboard.review24", "switchboard.reviewx", "x.review7-claude-1.md"]);
+    expect(r.removed).toBe(2);
+    expect(r.freedBytes).toBeGreaterThan(0);
+    expect(asked.sort()).toEqual(["acme/app#10", "acme/app#12", "acme/app#13", "acme/app#23", "acme/my.app#11"]); // not the new, the busy, nor the ones with no GitHub origin
+  } finally {
+    child.kill();
+    await child.exited;
+    late?.kill();
+    await late?.exited;
+  }
+});
+
+test("sweepCacheWork: an old review worktree of a local change goes without asking GitHub and the repository forgets it; a new one stays", async () => {
+  const root = join(cache, "ops-kit", "review");
+  mkdirSync(root, { recursive: true });
+  await run(["git", "-C", repo, "worktree", "add", "-q", "--detach", join(root, "switchboard.review20")], repo);
+  await run(["git", "-C", repo, "worktree", "add", "-q", "--detach", join(root, "switchboard.review21")], repo);
+  age(join(root, "switchboard.review20"));
+  expect(await worktrees()).toHaveLength(3);
+  const r = await sweepCacheWork(cache, { owned: false }, Date.now(), async () => {
+    throw new Error("a local change's worktree is not a GitHub PR");
+  });
+  expect(reviews()).toEqual(["switchboard.review21"]);
+  expect(r.removed).toBe(1);
+  expect(await worktrees()).toEqual([repo, join(root, "switchboard.review21")]);
+});
+
 test("sweepCacheWork: no ~/.cache is nothing to do, and without the running processes nothing goes", async () => {
   expect((await sweepCacheWork(join(home, "missing"), { owned: false })).removed).toBe(0);
   dir("switchboard.local-ci-2518.Ab12Cd");

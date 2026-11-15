@@ -50,14 +50,6 @@ body:
       options: ["1", "2", "3", "5", "8", "13"]
     validations:
       required: true
-  - type: dropdown
-    id: area
-    attributes:
-      label: 対象コンポーネント / Area
-      multiple: true
-      options: [__AREA__]
-    validations:
-      required: true
   - type: markdown
     attributes:
       value: |

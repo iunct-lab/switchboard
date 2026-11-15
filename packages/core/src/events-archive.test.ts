@@ -17,7 +17,7 @@ const NOW = 1_800_000_000_000;
 const LONG_AGO = NOW - (EVENTS_ARCHIVE_DAYS + 1) * DAY;
 
 function task(id: string, status: TaskStatus, updatedAt: number): Task {
-  return { id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt - 10_000, createdAt: updatedAt - 10_000, updatedAt };
+  return { id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt - 10_000, createdAt: updatedAt - 10_000, updatedAt };
 }
 
 const BIG = "x".repeat(2_000);
@@ -114,6 +114,20 @@ describe("events archive", () => {
       expect(snap()).toEqual(before);
       db.close();
     }
+  });
+
+  test("the last assistant row stays when only status rows follow it, so the duration end does not move", async () => {
+    const db = open("trailing-status");
+    seed(db, "t", "done", LONG_AGO, { endsOnAssistant: true });
+    db.appendEventAt("t", { t: "status", text: "cleanup skipped" }, LONG_AGO + 5000);
+    const lastWorkTs = () => db.listEvents("t").filter((e) => e.ev.t !== "status").at(-1)!.ts;
+    const before = { ts: lastWorkTs(), last: db.listEvents("t").filter((e) => e.ev.t !== "status").at(-1)!.seq };
+    const dir = join(tmp, "trailing-status-out");
+    commitEventsArchive(db.sqlite, dir, upload(await prepareEventsArchive(db.sqlite, dir, { now: NOW })), { now: NOW });
+    expect(db.listEvents("t").at(-1)!.ev).toEqual({ t: "status", text: "cleanup skipped" });
+    expect(lastWorkTs()).toBe(before.ts);
+    expect(db.listEvents("t").filter((e) => e.ev.t !== "status").at(-1)!.seq).toBe(before.last);
+    db.close();
   });
 
   test("a task that got new events after prepare is not removed", async () => {

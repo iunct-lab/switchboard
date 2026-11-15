@@ -147,7 +147,7 @@ describe("scheduler", () => {
     const started = await sc.tick();
     expect(started.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBe(3);
     expect(started.find((t) => t.scheduleId === own.id)!.budgetUsd).toBe(1);
-    expect(asked).toEqual([undefined]); // the default is asked with the schedule's model (none here), for the Fable value (#1989)
+    expect(asked).toEqual([undefined]); // the default is asked with the schedule's model (none here), for the Fable value
     dflt = null; // no default: no budget, as before
     now = Date.parse("2026-09-07T03:00:00");
     db.updateTask(started[0]!.id, { status: "done" });
@@ -577,7 +577,7 @@ describe("scheduler secret-scan", () => {
     expect(db.getSchedule(s.id)!.lastResult!.cursors).toEqual(kept);
   });
 
-  test("secret-scan: a firing while the previous scan still reads is skipped and kept with its schedule id (#3770)", async () => {
+  test("secret-scan: a firing while the previous scan still reads is skipped and kept with its schedule id", async () => {
     setUp();
     let release!: () => void;
     const sc = new Scheduler(db, tasks, () => now, undefined, () => new Promise((r) => (release = () => r({ lines: [], summary: { repos: 0, hits: 0, failed: 0 } }))));
@@ -866,7 +866,7 @@ test("UI_LAYERS_PROMPT names scripts that exist, with flags they read", () => {
   expect(readFileSync(join(root, "scripts/ui-layers-report.ts"), "utf8")).toContain('"--history"');
 });
 
-describe("scheduler log in the database (#3770)", () => {
+describe("scheduler log in the database", () => {
   const setup = async () => {
     const sc = new Scheduler(db, tasks, () => now);
     const s = sc.create({ title: "nightly", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });

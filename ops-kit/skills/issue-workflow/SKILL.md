@@ -14,8 +14,9 @@ Product Backlog を Priority 順に上から取るだけ）。
 このスキル群はいくつものリポジトリで共有する。リポジトリごとの値はスキルに書かず、各リポジトリが持つ。
 スキルに「CLAUDE.md の〜」とあれば、作業しているリポジトリの root の `CLAUDE.md`（Codex は `AGENTS.md`。中身は CLAUDE.md を指す）を読む。
 スキルと CLAUDE.md が食い違えば CLAUDE.md に従う。
+ただし、エージェント管理アプリが名前で読む印（`type:request` / `type:pbi` / `type:task`・`needs-decision`・`on-hold` などのラベル、Project の Status の選択肢の名前）は CLAUDE.md の文では変わらない（`ops.config.json` が持つ値は除く。必須の節はそこで変える）。無いものを足すだけで、元のラベル・選択肢は消さない（既存のフィールドの選択肢は API で渡さず、Project の画面で足す。API で選択肢を渡すと差し替えになり、全部の項目のその値が消える）。
 
-- `ops.config.json`（root）: Project の URL（`projectUrl`）、フィールドの選択肢（Area / Kind / Priority）、
+- `ops.config.json`（root）: Project の URL（`projectUrl`）、フィールドの選択肢（Priority）、
   種類ごとの必須の節（PBI / Task / 要望）、元要望の節の名前と形、環境変数の接頭辞（`envPrefix`）。バックログの道具はここを読む
 - `scripts/setup/` の入口: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `bootstrap_project.sh` / `request_issue.sh`。
   中身は共有のキットで、入口はそのリポジトリの `ops.config.json` を渡して呼ぶだけの薄いもの。バックログの読み書きと検査は入口ではなく `ops-kit backlog` / `ops-kit lint --fresh`（「操作」）

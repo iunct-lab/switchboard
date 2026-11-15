@@ -2,51 +2,13 @@
  * 既知の失敗の登録（root の known-failures.json）を読み、テストの失敗の行から差し引く。
  * 登録の行: {"test":"<ファイルのパス> > <テストの題>","issue":<番号>,"until":"YYYY-MM-DD"}
  * 照合は `<ファイル> > <題>` の完全一致（ファイルは bun の出力の見出しの行から、題は `(fail)` 行から。failedTests）。
- * zod は scripts/ から解決できない（root に依存が無い）ので、書式は手で検べる。
+ * 登録の形式と読み取り（parseKnownFailures）は共通キットの ops-kit/src/known-failures.ts（lint と同じ読み取り）。
  */
 import type { Deps } from "./local-ci";
+import { KNOWN_FAILURES_FILE, parseKnownFailures, type KnownFailure } from "../ops-kit/src/known-failures.ts";
 
-export interface KnownFailure { test: string; issue: number; until: string }
+export { KNOWN_FAILURES_FILE, parseKnownFailures, type KnownFailure };
 export interface Subtracted { /** `<ファイル> > <題>` */ test: string; issue: number; until: string }
-
-export const KNOWN_FAILURES_FILE = "known-failures.json";
-
-function isRealDate(s: unknown): s is string {
-  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  const d = new Date(`${s}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
-}
-
-/** 配列の k 番目（0 始まり）の要素が始まる行（1 始まり）。見つからなければ 1。 */
-function lineOfElement(text: string, k: number): number {
-  let line = 1, depth = 0, seen = -1, inStr = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (c === "\n") line++;
-    if (inStr) { if (c === "\\") i++; else if (c === '"') inStr = false; continue; }
-    if (c === '"') inStr = true;
-    else if (c === "[" || c === "{") { if (depth === 1 && ++seen === k) return line; depth++; }
-    else if (c === "]" || c === "}") depth--;
-    else if (depth === 1 && !/[\s,]/.test(c) && ++seen === k) return line;
-  }
-  return 1;
-}
-
-export function parseKnownFailures(json: string): KnownFailure[] {
-  if (json.trim() === "") return [];
-  let v: unknown;
-  try { v = JSON.parse(json); } catch (e) { throw new Error(`${KNOWN_FAILURES_FILE}: not valid JSON (${(e as Error).message})`); }
-  if (!Array.isArray(v)) throw new Error(`${KNOWN_FAILURES_FILE}: must be an array`);
-  return v.map((row, k) => {
-    const at = `${KNOWN_FAILURES_FILE}: line ${lineOfElement(json, k)}`;
-    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error(`${at}: each entry must be an object`);
-    const r = row as Record<string, unknown>;
-    if (typeof r.test !== "string" || r.test === "") throw new Error(`${at}: test must be a non-empty string`);
-    if (typeof r.issue !== "number" || !Number.isInteger(r.issue) || r.issue <= 0) throw new Error(`${at}: issue must be a positive integer`);
-    if (!isRealDate(r.until)) throw new Error(`${at}: until must be a real date as YYYY-MM-DD`);
-    return { test: r.test, issue: r.issue, until: r.until };
-  });
-}
 
 /** `ref` のコミットの known-failures.json を読む（作業ツリーは読まない）。ref にファイルが無ければ []、ほかの失敗（ref が無いなど）は投げる。有無は git の文言でなく ls-tree で見る。 */
 export async function readKnownFailures(sh: Deps["sh"], repoRoot: string, ref: string): Promise<KnownFailure[]> {

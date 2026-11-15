@@ -21,7 +21,7 @@ Commands (same as `--help`; each accepts `--config <ops.config.json>`, and if om
 | Command | What it does | Configuration |
 |---|---|---|
 | `set <issue> <field> <value>` | Sets one Project field of one Issue | Required |
-| `triage <issue> <area> <kind> <priority> [<phase>] [<parent>] [<status>]` | Adds an Issue to the Project and sets Area / Kind / Priority / (Phase) / Status and the parent | Required |
+| `triage <issue> <priority> [<phase>] [<parent>] [<status>]` | Adds an Issue to the Project and sets Priority / (Phase) / Status and the parent | Required |
 | `reconcile-project [--dry-run]` | Adds only the open Issues / PRs that are not yet in the Project (sets no fields; replaces the Actions autoadd). Stops (exit 1) when `BACKLOG_URL` is set (inside an app Task). Instead: for one imported request, PBI, or Task use `backlog triage`; otherwise run it outside a Task | Required |
 | `lint [--no-project] [--fresh]` | Checks, with a single query (paginated), that open PBIs / Tasks / requests have the required sections from the configuration and meet the kit's Story Points scale. If `BACKLOG_URL` is set it reads the app's stored values (`--fresh` imports first; if GitHub is unreachable it keeps the stored values) | Required |
 | `bootstrap <title> [--dry-run]` | Creates the Project and the fields that are in the configuration but not in the Project. Stops (exit 1) when `BACKLOG_URL` is set (inside an app Task). Instead: run it outside a Task (for a new repository, follow the `new-repo` skill) | Required |
@@ -44,8 +44,6 @@ Placed at the repository root. The type is in `src/config.ts` (an invalid key or
   "owner": "example-org",
   "envPrefix": "EXAMPLE",
   "fields": {
-    "area": ["api", "web"],
-    "kind": ["bug", "feature", "chore"],
     "priority": ["P0", "P1", "P2", "P3"],
     "phase": ["Phase 0", "Phase 1"]
   },
@@ -64,7 +62,7 @@ Placed at the repository root. The type is in `src/config.ts` (an invalid key or
 | `projectUrl` | Optional. The Project URL (`https://github.com/(users\|orgs)/<owner>/projects/<n>`). If you do not want it in a tracked file, omit it and put it in a repository variable (below) |
 | `owner` | Optional. The owner of the Project (defaults to the owner of `projectUrl`; `@me` is the logged-in user) |
 | `envPrefix` | The prefix of the environment variables. If `<envPrefix>_PROJECT_URL` is set it takes precedence over `projectUrl`, and `<envPrefix>_PROJECT_OWNER` changes only the owner |
-| `fields.area` / `kind` / `priority` | The options of the Project's single-select fields |
+| `fields.priority` | The options of the Project's Priority field |
 | `fields.phase` | Optional. Only when the Project uses Phase. If present, `triage` takes `<phase>` |
 | `milestone.pattern` | Optional. The regular expression that the title of a Phase Milestone must satisfy |
 | `sections.pbi` / `task` / `request` | The `##` headings each Issue needs. With `{ "name", "hint" }`, the violation line gets the `hint` |
@@ -118,7 +116,7 @@ Put procedures specific to a repository, tracked in Git, at that repository's `.
 
 ## Candidate definitions (processes/)
 
-Candidate development processes are placed as data, one file per candidate (K4 of `docs/design/process-kernel.md` in the kit's parent repository). `processes/<id>.md` has frontmatter (`id` (the same as the file name), an integer `version`, `title`, and `fits` (the kinds of work it suits, one per line)) and, in `## entry <name>` sections, the entry text passed to a Task (placeholders such as `{{n}}` are filled in by the kit's parent app). What exists now is `p0-pipeline` (the flow above itself; the kit's parent app renders the first prompt of a stage's Task from this file) and `p1-direct` (the direct type; definition only, with no path that starts it yet). Fixing a candidate's text means fixing this file, and the app's code does not change (the app-side rendering lands in the same series of changes as this definition).
+Candidate development processes are placed as data, one file per candidate (K4 of `docs/design/process-kernel.md` in the kit's parent repository). `processes/<id>.md` has frontmatter (`id` (the same as the file name), an integer `version`, `title`, and `fits` (the kinds of work it suits, one per line)) and, in `## entry <name>` sections, the entry text passed to a Task (placeholders such as `{{n}}` are filled in by the kit's parent app). What exists now is `p0-pipeline` (the flow above itself; the kit's parent app renders the first prompt of a stage's Task from this file), `p1-direct` (the direct type; definition only, with no path that starts it yet) and `p2-baseline` (the baseline type: from a concept to a new repository's first baseline, without request, PBI or Task Issues; only the owner starts it). Fixing a candidate's text means fixing this file, and the app's code does not change (the app-side rendering lands in the same series of changes as this definition).
 
 The line that no candidate may cross is in one place, `invariants.md` (only the owner changes it; the "manners" of candidates and skills do not go in there).
 
@@ -128,11 +126,11 @@ The line that no candidate may cross is in one place, `invariants.md` (only the 
 
 | Location | Contents |
 |---|---|
-| `ops.config.json` | The configuration (`envPrefix`, Area, required sections. The Project URL is not placed here but in the repository variable `<PREFIX>_PROJECT_URL`: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>` (for a user's Project, change `orgs` to `users`)) |
+| `ops.config.json` | The configuration (`envPrefix`, required sections. The Project URL is not placed here but in the repository variable `<PREFIX>_PROJECT_URL`: `gh variable set <PREFIX>_PROJECT_URL --body https://github.com/orgs/<owner>/projects/<n>` (for a user's Project, change `orgs` to `users`)) |
 | `scripts/setup/` | 4 entry points: `lint_backlog.sh` / `set_project_field.sh` / `triage_issue.sh` / `request_issue.sh` (with the execute bit) |
 | `.github/ISSUE_TEMPLATE/` | `bug_report.yml` / `config.yml` / `feature_request.yml` / `pbi.yml` / `task.yml` |
 | `.github/PULL_REQUEST_TEMPLATE.md` | The form of a PR body |
-| `.github/labels.yml` | The label scheme (one Area is placed; add as many as there are values) |
+| `.github/labels.yml` | The label scheme |
 | `.github/workflows/` | `labels.yml` (label sync) / `ci.yml` (minimal for Bun / TypeScript; for other languages rewrite the run lines) / an optional `project-autoadd.yml` (settings are in the fork steps below) |
 | `.gitignore` | Generic lines only |
 | `CLAUDE.md.tmpl` / `AGENTS.md.tmpl` | The place for values specific to the repository (the section layout follows the items of "what the consuming repository holds" in `issue-workflow`). They are `.tmpl` so that a runner that reads under the kit does not load them as nested instructions. Remove the suffix when placing them |
@@ -143,7 +141,6 @@ The line that no candidate may cross is in one place, `invariants.md` (only the 
 | `__OWNER__` | The GitHub owner | `.github/ISSUE_TEMPLATE/config.yml`, `CLAUDE.md.tmpl` |
 | `__REPO__` | The repository name | `.github/ISSUE_TEMPLATE/config.yml`, `CLAUDE.md.tmpl`, `AGENTS.md.tmpl` |
 | `__PREFIX__` | `envPrefix` (the Project URL variable is `<PREFIX>_PROJECT_URL`, and the variable that runs workflows is `<PREFIX>_ACTIONS`) | `ops.config.json`, `.github/workflows/project-autoadd.yml`, `.github/workflows/ci.yml`, `.github/workflows/labels.yml` |
-| `__AREA__` | The Area values. In the array, options, labels, and PR template only one is placed; increase it to the number of values | `ops.config.json`, `.github/ISSUE_TEMPLATE/*.yml`, `.github/labels.yml`, `.github/PULL_REQUEST_TEMPLATE.md` |
 | `__TEST_ALL__` | The command for the whole test suite | `.github/workflows/ci.yml`, `.github/ISSUE_TEMPLATE/task.yml`, `.github/PULL_REQUEST_TEMPLATE.md`, `CLAUDE.md.tmpl` |
 | `__KIT_HOME_VAR__` | The name of the environment variable that points at the root of the repository holding the kit | `scripts/setup/*.sh` |
 | `__TEST_TYPECHECK__` / `__TEST_ONE__` | The type-check command / the command for a single test | `CLAUDE.md.tmpl` |

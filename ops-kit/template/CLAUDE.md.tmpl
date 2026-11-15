@@ -5,7 +5,7 @@
 ## リポジトリと Project
 
 - リポジトリ: `__OWNER__/__REPO__`。`gh` の PR の書き込み（作成・コメント・編集・マージ・クローズ）には `-R __OWNER__/__REPO__` を付ける。Issue・コメント・ラベル・Project・Milestone は `ops-kit backlog`
-- Project・選択肢（Area / Kind / Priority）・必須の節: root の `ops.config.json`。Issue を Project に入れるのは `ops-kit backlog create --field Status=Backlog` か `triage`（Actions の自動追加は無い）
+- Project・選択肢（Priority）・必須の節: root の `ops.config.json`。Issue を Project に入れるのは `ops-kit backlog create --field Status=Backlog` か `triage`（Actions の自動追加は無い）
 - 共通キットを持つリポジトリ: `__KIT_REPO__`（共通の仕組みの要望の起票先。`request-to-backlog` の「どのリポジトリにも要る仕組み」）
 - バックログの道具: `ops-kit backlog`（Task の中でも外でも同じ。`--help`）と `ops-kit lint --fresh`。要望の起票の入口は `scripts/setup/request_issue.sh`。中身は共通キット（`ops-kit`）。PATH に無ければ `OPS_KIT`、無ければ `__KIT_HOME_VAR__/ops-kit` の `bin/ops-kit` を呼ぶ
 - Story Points の基準（閉じた PBI）: まだ無い。最初の PBI を閉じたら、ここに「2 = #N / 3 = #N / 5 = #N / 8 = #N / 13 = #N」で足す

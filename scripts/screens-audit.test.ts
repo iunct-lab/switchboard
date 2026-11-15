@@ -64,7 +64,7 @@ describe("screens-audit (#4030)", () => {
   });
 
   test("screens: every header tab and the Backlog's three layouts; the Task only when there is one", () => {
-    expect(screens("task_1").map((s) => s.name)).toEqual(["home", "task", "knowledge", "ledger", "insights", "backlog-list", "backlog-board", "backlog-queue", "resources", "schedules", "approvals", "settings"]);
+    expect(screens("task_1").map((s) => s.name)).toEqual(["home", "task", "ledger", "insights", "backlog-list", "backlog-board", "backlog-queue", "resources", "schedules", "approvals", "settings"]);
     expect(screens(null).map((s) => s.name)).not.toContain("task");
     expect(screens(null).find((s) => s.name === "backlog-queue")).toEqual({ name: "backlog-queue", path: "/backlog", layout: "queue" });
   });

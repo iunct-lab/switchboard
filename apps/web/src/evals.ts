@@ -1,4 +1,4 @@
-import type { EvalsListRow, EvalsSummary, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
+import type { EvalContext, EvalsListRow, EvalsSummary, HumanAnswers, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
 import { effortLabel } from "./effortOptions.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
@@ -88,6 +88,21 @@ export function humanLabel(e: TaskEvals): string | null {
   return e.human.comment ? `${e.human.rating} / 5 · ${e.human.comment}` : `${e.human.rating} / 5`;
 }
 
+/**
+ * The short mark of the three answers for a table cell or beside the Brief's rating: `意図○ 余分なし 価値?`: an answer not given is left
+ * out of the mark, and it is "" when none is given. Words, not lone symbols, so a narrow column wraps between them instead of stacking one character wide.
+ */
+export function humanAnswerMark(h: HumanAnswers | null | undefined): string {
+  if (!h) return "";
+  const intent = { fit: "○", partial: "△", wrong: "×", unknown: "?" } as const;
+  const value = { used: "○", unused: "×", unknown: "?" } as const;
+  return [
+    h.intent ? t(m.markIntent, { mark: intent[h.intent] }) : "",
+    h.extra ? t(h.extra === "none" ? m.markExtraNone : m.markExtraSome) : "",
+    h.value ? t(m.markValue, { mark: value[h.value] }) : "",
+  ].filter(Boolean).join(" ");
+}
+
 /** The human − judge gap as Insights shows it (#1877): the signed mean to one decimal and the count, or that none is rated yet. */
 export function gapLabel(gap: EvalsSummary["gap"]): string {
   if (!gap.count || gap.mean === null) return t(m.noHumanRating);
@@ -150,7 +165,7 @@ export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts"
   const efforts = row.efforts.map((e) => effortLabel(e, runner));
   return {
     judge: row.judge ? row.judge.average.toFixed(1) : "-",
-    human: row.human ? `${row.human.rating} / 5` : "-",
+    human: row.human ? [`${row.human.rating} / 5`, humanAnswerMark(row.human)].filter(Boolean).join(" ") : "-",
     end: endLabel(row.rules?.lastEnd ?? null),
     model: row.models.length ? row.models.join(" → ") : "-",
     mixed: row.models.length >= 2,
@@ -185,3 +200,43 @@ export function evalRowWarn(row: EvalsListRow): boolean {
   const r = row.rules;
   return !!((r && (r.toolFailures > 0 || r.errors > 0 || r.stops > 0)) || (row.judge && row.judge.average <= 2.5) || (row.human && row.human.rating <= 2));
 }
+
+/** One line of an 評価をお願い row's context: a label, its text, and `warn` for the person's own interventions. */
+export interface ContextLine {
+  label: string;
+  text: string;
+  warn?: boolean;
+}
+
+const STATE_LABELS = { open: m.outOpen, merged: m.outMerged, closed: m.outClosed };
+
+/** The request, its interpretation, the outputs with their states and the person's interventions as lines to read without opening the conversation. */
+export function contextLines(ctx: EvalContext): ContextLine[] {
+  const lines: ContextLine[] = [];
+  const r = ctx.request;
+  if (r.kind === "stage") {
+    if (r.source) lines.push({ label: t(m.ctxSource), text: `#${r.source.number} ${r.source.head}`.trim() });
+    lines.push(
+      r.pbi
+        ? { label: t(m.ctxPbi), text: [`#${r.pbi.number} ${r.pbi.title}`, r.pbi.story, r.pbi.outOfScope ? t(m.ctxOutOfScope, { text: r.pbi.outOfScope }) : ""].filter(Boolean).join(" · ") }
+        : { label: t(m.ctxPbi), text: t(m.ctxNoPbi) },
+    );
+  } else {
+    lines.push({ label: t(m.ctxRequest), text: r.text });
+  }
+  const outs = ctx.outputs.map((o) => [t(o.kind === "pr" ? m.outPr : o.kind === "change" ? m.outChange : m.outIssue, { n: o.number }), o.state ? t(STATE_LABELS[o.state]) : ""].filter(Boolean).join(" "));
+  if (ctx.pbiStatus) outs.push(t(m.outPbiStatus, { status: ctx.pbiStatus }));
+  lines.push({ label: t(m.ctxOutputs), text: outs.length ? outs.join(" · ") : t(m.ctxNoOutputs) });
+  const { userInstructions, decisionStops } = ctx.interventions;
+  lines.push({ label: t(m.ctxInterventions), text: `${t(m.ctxInstructions, { n: userInstructions })} · ${t(m.ctxDecisions, { n: decisionStops })}`, warn: userInstructions + decisionStops > 0 });
+  return lines;
+}
+
+type HumanQuestion<K extends keyof HumanAnswers> = { key: K; question: string; options: Array<{ value: NonNullable<HumanAnswers[K]>; label: string }> };
+
+/** The three value questions: the key of `HumanAnswers`, its wording and its choices (the value the daemon stores, the label shown). */
+export const HUMAN_QUESTIONS: Array<HumanQuestion<"intent"> | HumanQuestion<"extra"> | HumanQuestion<"value">> = [
+  { key: "intent", question: t(m.qIntent), options: [{ value: "fit", label: t(m.aIntentFit) }, { value: "partial", label: t(m.aIntentPartial) }, { value: "wrong", label: t(m.aIntentWrong) }, { value: "unknown", label: t(m.aUnknown) }] },
+  { key: "extra", question: t(m.qExtra), options: [{ value: "none", label: t(m.aExtraNone) }, { value: "some", label: t(m.aExtraSome) }] },
+  { key: "value", question: t(m.qValue), options: [{ value: "used", label: t(m.aValueUsed) }, { value: "unused", label: t(m.aValueUnused) }, { value: "unknown", label: t(m.aValueUnknown) }] },
+];

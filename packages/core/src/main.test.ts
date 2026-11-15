@@ -120,8 +120,8 @@ async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: strin
     const deadline = Date.now() + 20_000;
     let pending = reader.read();
     let seenCodexAt = 0;
-    // the banner lists the runners in order (claude, codex, dak); give a dak line a moment to follow the codex one
-    while ((!seenCodexAt || Date.now() - seenCodexAt < 1500) && Date.now() < deadline) {
+    // the banner lists the runners in order (claude, codex, dak) in one synchronous burst; a short grace lets a dak line follow the codex one
+    while ((!seenCodexAt || Date.now() - seenCodexAt < 300) && Date.now() < deadline) {
       const r = await Promise.race([pending, Bun.sleep(300).then(() => null)]);
       if (!r) continue;
       if (r.done) break;
@@ -141,18 +141,11 @@ async function bootAndRead(extraEnv: Record<string, string>, seed?: (home: strin
   }
 }
 
-test("main.ts lists no DAK runner unless SWITCHBOARD_DAK_URL is set", async () => {
-  const { out, runners } = await bootAndRead({});
-  expect(out).toMatch(/runner claude/);
-  expect(out).not.toMatch(/runner dak/);
-  expect(runners).not.toContain("dak");
-  expect(runners.every((r) => r === "claude" || r === "codex")).toBe(true);
-}, 40_000);
-
 // A promotion candidate runs on a throwaway copy in a tmpfs home: the migration runs, the copy before it is not taken.
-test("main.ts as a candidate migrates an older database without taking the snapshot before it", async () => {
+// The same boot shows the DAK rule: with no SWITCHBOARD_DAK_URL, no dak runner is listed.
+test("main.ts lists no DAK runner unless SWITCHBOARD_DAK_URL is set, and as a candidate migrates an older database without taking the snapshot before it", async () => {
   const dbPath = (home: string) => join(home, "switchboard.db");
-  await bootAndRead({}, (home) => {
+  const { out, runners } = await bootAndRead({}, (home) => {
     new Db(dbPath(home)).close();
     const raw = new Database(dbPath(home));
     raw.exec("ALTER TABLE tasks DROP COLUMN background");
@@ -162,6 +155,10 @@ test("main.ts as a candidate migrates an older database without taking the snaps
     expect(existsSync(join(home, "snapshots"))).toBe(false);
     expect(needsMigration(dbPath(home))).toBe(false);
   });
+  expect(out).toMatch(/runner claude/);
+  expect(out).not.toMatch(/runner dak/);
+  expect(runners).not.toContain("dak");
+  expect(runners.every((r) => r === "claude" || r === "codex")).toBe(true);
 }, 40_000);
 
 test("main.ts lists DAK when SWITCHBOARD_DAK_URL is set", async () => {

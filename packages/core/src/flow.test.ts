@@ -1,7 +1,8 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
 import { Db } from "./db.ts";
-import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, requestOf, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { requestOf } from "./backlog.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
@@ -214,7 +215,7 @@ describe("fetchFlow", () => {
 
 describe("switchboard tasks", () => {
   const task = (id: string, title: string, stage: number | null, workspaceId = "w", action = "implement"): Task =>
-    ({ id, workspaceId, title, runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "default", effort: null, origin: "user", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, statusAt: 1000, createdAt: 1000, updatedAt: 9000, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, stage: stage === null ? null : { issue: stage, action }, judgingAt: null }) as unknown as Task;
+    ({ id, workspaceId, title, runner: "claude", cwd: "/x", scope: { read: [], write: [] }, status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "default", effort: null, origin: "user", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, statusAt: 1000, createdAt: 1000, updatedAt: 9000, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, stage: stage === null ? null : { issue: stage, action }, judgingAt: null }) as unknown as Task;
 
   test("counts the PBI's and its Tasks' Switchboard Tasks, with run time and cost", () => {
     const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));

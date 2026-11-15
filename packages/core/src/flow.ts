@@ -6,7 +6,7 @@
 import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
 import type { Database } from "bun:sqlite";
 import { deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
-import { readStoredRecords, type GhRunner } from "./backlog.ts";
+import { readStoredRecords, requestOf, type GhRunner } from "./backlog.ts";
 import { closesOf } from "./backlog-sync.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 
@@ -129,12 +129,6 @@ const weekStarts = (days: number, now: number): number[] => {
 };
 type GqlComments = { comments: { totalCount: number; nodes: RawComment[] } };
 
-/** The Issue a PBI came from: the first `#N` in its `## 元要望` section (null when it says "なし"). */
-export function requestOf(body: string): number | null {
-  const section = /^## 元要望\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(body)?.[1] ?? "";
-  const n = /#(\d+)/.exec(section)?.[1];
-  return n ? Number(n) : null;
-}
 
 /** `o/r` of a GitHub remote URL (https, ssh, scp-like; with or without `.git`), lower-cased; null for another host. */
 export function repoOfRemote(url: string): string | null {
