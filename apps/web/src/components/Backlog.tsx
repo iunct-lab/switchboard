@@ -14,7 +14,7 @@ import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
 import { common } from "../i18n/common.ts";
-import { dropIndex, moveEntry, noteSummary, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
+import { dropIndex, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
 import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -1209,7 +1209,15 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
             <ul>
               {queue.lastNote.split("\n").filter(Boolean).map((l, n) => (
                 <li key={n} className="hint">
-                  {l}
+                  {noteParts(l, (ws) => noteUrlOf(items, ws)).map((p, k) =>
+                    typeof p === "string" ? (
+                      <Fragment key={k}>{p}</Fragment>
+                    ) : (
+                      <IssueLink key={k} url={p.url}>
+                        {p.text}
+                      </IssueLink>
+                    ),
+                  )}
                 </li>
               ))}
             </ul>

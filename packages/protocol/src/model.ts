@@ -10,6 +10,23 @@ export type WorkspaceKind = z.infer<typeof WorkspaceKind>;
  */
 export const WorkspaceSweep = z.object({ implement: z.number().int().min(0).max(3), plan: z.number().int().min(0).max(3) });
 export type WorkspaceSweep = z.infer<typeof WorkspaceSweep>;
+/** `new` / `continuing` do not change how backlog-next picks; `maintenance` only moves bug / deps PBIs and routine-check requests. */
+export const WorkspaceMode = z.enum(["new", "continuing", "maintenance"]);
+export type WorkspaceMode = z.infer<typeof WorkspaceMode>;
+/** The share of the week's usage this workspace is meant to get (0〜1; null = not set, picked as before) and its mode. */
+export const WorkspaceAllocation = z.object({ share: z.number().min(0).max(1).nullable(), mode: WorkspaceMode });
+export type WorkspaceAllocation = z.infer<typeof WorkspaceAllocation>;
+/**
+ * What each workspace got of the week's spend against its share (`GET /api/backlog/allocation`). `actual` is the part of
+ * the spend (metered + billed, all runners) that went to the workspace, 0〜1; `shortfall` = share − actual (null with no share).
+ * `flow` is the same for flow-improvement work against its limit; `windowStart` (ms) is where the week's window begins.
+ */
+export const BacklogAllocation = z.object({
+  windowStart: z.number(),
+  workspaces: z.array(z.object({ workspaceId: z.string(), share: z.number().nullable(), mode: WorkspaceMode, actual: z.number(), shortfall: z.number().nullable() })),
+  flow: z.object({ limit: z.number(), actual: z.number() }),
+});
+export type BacklogAllocation = z.infer<typeof BacklogAllocation>;
 
 export const Workspace = z.object({
   id: z.string(),
@@ -32,6 +49,8 @@ export const Workspace = z.object({
   upstream: z.string().optional(),
   /** backlog-next's slots here; a new workspace starts with one of each. */
   sweep: WorkspaceSweep.default({ implement: 1, plan: 1 }),
+  /** The share of the weekly usage and the mode; a new workspace has no share and continues. */
+  allocation: WorkspaceAllocation.default({ share: null, mode: "continuing" }),
 });
 export type Workspace = z.infer<typeof Workspace>;
 
@@ -863,6 +882,8 @@ const quotaAndResumeFields = {
   thinSample: z.number().int().min(1).max(1000),
   /** At most this many flow-improvement PBIs are in progress at once; backlog-next starts no more (P0 excepted). */
   flowLimit: z.number().int().min(0).max(100),
+  /** The most the `flow-improvement` work may take of the week's usage (0〜1); backlog-next starts no more of it above this (P0 excepted). */
+  flowShareLimit: z.number().min(0).max(1),
   /** The budget (USD) of a Task made without one (a request, a schedule with none). null = no budget. Cost caps live in this group: this, `fableBudgetUsd` and `backlogQuotaLimit`. */
   defaultBudgetUsd: z.number().positive().max(10_000).nullable(),
   /** Fable の Task に、予算が無ければ付ける既定の予算。Fable の Task では `defaultBudgetUsd` より先に使う。null = 付けない */
@@ -898,6 +919,7 @@ export const QuotaAndResumeSettings = z
     maxStopResumes: quotaAndResumeFields.maxStopResumes.default(2),
     thinSample: quotaAndResumeFields.thinSample.default(5),
     flowLimit: quotaAndResumeFields.flowLimit.default(1),
+    flowShareLimit: quotaAndResumeFields.flowShareLimit.default(0.25),
     defaultBudgetUsd: quotaAndResumeFields.defaultBudgetUsd.default(null),
     fableBudgetUsd: quotaAndResumeFields.fableBudgetUsd.default(null),
   })
@@ -2090,6 +2112,10 @@ export const BacklogItem = z.object({
   bodyChars: z.number().int().min(0),
   /** The length of the `## 要望` section's text (fence lines left out), what `auto.maxBodyChars` compares first; null = the Issue has no such section, or it holds no words (the body's length is used). */
   requestChars: z.number().int().min(0).nullable(),
+  /** The Project's Kind field (feature / bug / deps …) by name; null when unset or not in the Project. */
+  kind: z.string().nullable(),
+  /** Who said a request's words: the `- 誰の言葉:` line of its `## 出典` (fences left out); null = no such line, or none of the three values. */
+  requestFrom: z.enum(["利用者", "エージェント", "定期の検査"]).nullable(),
   /** The Issue a PBI's `## 元要望` section names first; null = a request, or a PBI naming none. */
   origin: z.number().int().nullable(),
   /** The Issue's label names: what a process definition's `auto.excludeLabels` and `direct-returned` read. */

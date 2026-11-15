@@ -6,7 +6,7 @@
  * A candidate daemon (SWITCHBOARD_CANDIDATE=1: nothing it holds is sent or resumed; no runner; a gh that answers
  * nothing, so the stored backlog only) runs on a copy of the data: `--home` names a SWITCHBOARD_HOME to use as it is;
  * without it `~/.switchboard/switchboard.db` (sqlite .backup), its artifacts and attachments, and `~/Knowledge` are copied
- * under `~/.cache` (not `/tmp`, which is RAM) and removed at the end (the pictures stay).
+ * under `~/.cache` (not `/tmp`, which is RAM) and removed at the end (the pictures stay; the work directory goes too when nothing is left in it).
  * It refuses a build older than what it reads (`BUILD_INPUTS`: a rebase or an edit not built would show the old screens).
  * Each screen is opened at 390×844 (phone, touch) and 1280×900 (pc), and the widest element that scrolls down is moved
  * one screen at a time, each frame saved as `<width>-<screen>-<n>.png` in `--out`. One line per screen counts what
@@ -14,7 +14,7 @@
  * of one character; and rows a bar (`header`) takes beyond what its items need (`extraRows`), the header measured
  * once more per width with 新しい版 in it (`<width>-header-new-version.png`). The rest is for a person to look at — open the pictures. CHROME_BIN overrides Chrome.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -196,6 +196,17 @@ export function staleBuild(root: string): string[] {
   return files.filter((f) => !/\.test\.tsx?$/.test(f) && statSync(f).mtimeMs > built);
 }
 
+/** Remove `dir` only when it is empty (the work directory once the copy and the profile are gone); false when it is missing or holds something. */
+export function removeIfEmpty(dir: string): boolean {
+  try {
+    if (readdirSync(dir).length > 0) return false;
+    rmdirSync(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** How many frames page through `scrollHeight` with `clientHeight` per frame (60 px shown twice), at most `max`. */
 export const frameCount = (scrollHeight: number, clientHeight: number, max = 8) => Math.max(1, Math.min(max, Math.ceil(scrollHeight / Math.max(1, clientHeight - 60))));
 
@@ -315,6 +326,7 @@ async function main() {
     rmSync(profile, { recursive: true, force: true });
     // the copy of the data made here goes (about 1 GB); the pictures stay
     if (!args.home) rmSync(join(work, "home"), { recursive: true, force: true });
+    removeIfEmpty(work);
   }
   process.exit(0);
 }

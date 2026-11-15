@@ -780,6 +780,24 @@ describe("public-sync", () => {
     expect(() => sync({ ...opts({ exclude: ex }), dryRun: true }, run)).toThrow(words);
   });
 
+  test("check and the sync stop on code that imports a file the sync leaves out, with the importer, the line and the file", () => {
+    const ex = ["scripts/secret.ts", "private/"];
+    const checked = () => check({ ...opts({ exclude: ex }), source: "HEAD" }, run);
+    write("scripts/secret.ts", "export const s = 1;\n");
+    write("private/lib.ts", "export const p = 1;\n");
+    write("src/b.ts", "export const b = 1;\n");
+    write("src/a.ts", 'import { b } from "./b";\nimport "./nothing";\nimport { x } from "pkg";\n');
+    commit("code: not left out");
+    expect(checked()).toMatch(/^public check: ok/);
+    write("src/a.ts", 'import { s } from "../scripts/secret";\nimport { s as t } from "../scripts/secret.ts";\nconst m = await import("../private/lib.ts");\nexport * from \'../scripts/secret.js\';\nconst r = require("../private/lib");\n');
+    commit("code: imports");
+    const words = "a file the sync publishes imports a file the sync leaves out (publish the imported file, or leave out the importer too):\nsrc/a.ts:1 scripts/secret.ts\nsrc/a.ts:2 scripts/secret.ts\nsrc/a.ts:3 private/lib.ts\nsrc/a.ts:4 scripts/secret.ts\nsrc/a.ts:5 private/lib.ts";
+    expect(() => checked()).toThrow(words);
+    expect(() => sync({ ...opts({ exclude: ex }), dryRun: true }, run)).toThrow(words);
+    // the importer is left out too
+    expect(check({ ...opts({ exclude: [...ex, "src/a.ts"] }), source: "HEAD" }, run)).toMatch(/^public check: ok/);
+  });
+
   test("check and the sync stop on a commit hash in a document's text, with the file and the line", () => {
     const ex = ["docs/design/secret.md"];
     const checked = () => check({ ...opts({ exclude: ex }), source: "HEAD" }, run);

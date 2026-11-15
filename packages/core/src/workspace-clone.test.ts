@@ -32,9 +32,10 @@ const ending: RunnerAdapter = {
 /**
  * `git: "full"` clones a real repository with branches main and dev and tag v1 from `<root>/gh/<owner>/<name>.git`;
  * the clone reads https://github.com/ as `<root>/gh/`, so the fetch and push of an own copy stay on disk.
- * `mine` is what `gh api repos/me/<name>` answers (absent = 404).
+ * `mine` is what `gh api repos/me/<name>` answers (absent = 404). `org` is how `my-org` answers (membership and whether members
+ * may create private repositories — GitHub shows that to owners only, so a plain member reads null: `member-unknown`; absent = the same as missing); `orgRepo: "exists"` is `my-org/<name>` being there already.
  */
-async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; createFails?: string; createMakesNothing?: boolean } = {}) {
+async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; org?: "admin" | "member" | "member-no-create" | "member-unknown" | "missing" | "pending" | "error"; orgRepo?: "exists"; createFails?: string; createMakesNothing?: boolean } = {}) {
   root = mkdtempSync(join(tmpdir(), "switchboard.clone."));
   const home = join(root, "home");
   const repoRoot = join(root, "switchboard");
@@ -44,6 +45,15 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
   const gh: GhRunner = async (args, cwd) => {
     calls.push(args);
     if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "me\n", stderr: "" };
+    if (args[0] === "api" && args[1] === "user/memberships/orgs/my-org") {
+      if (!fake.org || fake.org === "missing") return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      if (fake.org === "error") return { code: 1, stdout: "", stderr: "gh: Server Error (HTTP 500)" };
+      return { code: 0, stdout: `${fake.org === "pending" ? "pending" : "active"} ${fake.org === "admin" ? "admin" : "member"}\n`, stderr: "" };
+    }
+    if (args[0] === "api" && args[1] === "orgs/my-org") return { code: 0, stdout: `${fake.org === "member-no-create" ? "false" : fake.org === "member-unknown" ? "null" : "true"}\n`, stderr: "" };
+    if (args[0] === "api" && args[1] === "repos/my-org/lib" && args[3] === ".full_name") {
+      return fake.orgRepo === "exists" ? { code: 0, stdout: "my-org/lib\n", stderr: "" } : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+    }
     if (args[0] === "api" && args[1]!.startsWith("repos/me/") && args[3] === ".full_name") {
       if (fake.mine === "exists") return { code: 0, stdout: `${args[1]!.slice(6)}\n`, stderr: "" };
       return { code: 1, stdout: "", stderr: fake.mine === "error" ? "HTTP 502: Bad Gateway" : "gh: Not Found (HTTP 404)" };
@@ -155,6 +165,8 @@ test("workspace clone: ownCopy creates a private repository, pushes every branch
   const order = t.calls.map((a) => a.slice(0, 2).join(" "));
   expect(order).toEqual(["api repos/other/lib", "api user", "api repos/me/lib", "repo clone", "repo create", "repo set-default"]);
   expect(t.calls.find((a) => a[1] === "create")).toEqual(["repo", "create", "me/lib", "--private"]);
+  // an empty destination is the same as none: no org is asked about
+  expect(t.calls.some((a) => a[1]!.includes("orgs/"))).toBe(false);
   expect(t.calls.find((a) => a[1] === "set-default")).toEqual(["repo", "set-default", "me/lib"]);
   // as configured (git remote -v would show the test's insteadOf)
   expect(gitOut(path, "config", "--get-regexp", "^remote\\..*\\.url$").split("\n")).toEqual([
@@ -185,6 +197,64 @@ test("workspace clone: ownCopy with an existing repository of yours is 409 and c
   const u = await boot({ push: false, git: "full", mine: "error" });
   expect((await u.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true })).status).toBe(502);
   expect(u.calls.filter((a) => a[0] === "repo")).toEqual([]);
+}, 30_000);
+
+test("workspace clone: ownCopy into an org creates there, and an empty or own login destination is your account", async () => {
+  for (const org of ["admin", "member", "member-unknown"] as const) {
+    const t = await boot({ push: false, git: "full", org });
+    expect((await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true, ownCopyOwner: "my-org" })).status).toBe(202);
+    await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+    expect(t.calls.find((a) => a[1] === "create")).toEqual(["repo", "create", "my-org/lib", "--private"]);
+    expect(t.calls.find((a) => a[1] === "set-default")).toEqual(["repo", "set-default", "my-org/lib"]);
+    expect(gitOut(join(root!, "lib"), "config", "remote.origin.url")).toBe("https://github.com/my-org/lib.git");
+    expect(refsOf(join(root!, "gh", "my-org/lib.git"))).toEqual(["refs/heads/dev", "refs/heads/main", "refs/tags/v1"]);
+    // an admin is not asked whether members may create
+    expect(t.calls.some((a) => a[1] === "orgs/my-org")).toBe(org !== "admin");
+    await core!.stop();
+    rmSync(root!, { recursive: true, force: true });
+    core = root = undefined;
+  }
+  for (const ownCopyOwner of ["ME", ""]) {
+    const own = await boot({ push: false, git: "full" });
+    expect((await own.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true, ownCopyOwner })).status).toBe(202);
+    await own.until(async () => ((await own.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.name === "lib"));
+    expect([ownCopyOwner, own.calls.find((a) => a[1] === "create")]).toEqual([ownCopyOwner, ["repo", "create", "me/lib", "--private"]]);
+    expect(own.calls.some((a) => a[1]!.includes("orgs/"))).toBe(false);
+    await core!.stop();
+    rmSync(root!, { recursive: true, force: true });
+    core = root = undefined;
+  }
+}, 90_000);
+
+test("workspace clone: ownCopy into an org that cannot be used is refused before anything is cloned or created", async () => {
+  const cases: Array<[Parameters<typeof boot>[0], number, string]> = [
+    [{ org: "missing" }, 400, "自分が入っている org ではありません"],
+    [{ org: "pending" }, 400, "参加が済んでいません"],
+    [{ org: "member-no-create" }, 403, "非公開のリポジトリを作れません"],
+    [{ org: "error" }, 502, "所属を確かめられません"],
+    [{ org: "admin", orgRepo: "exists" }, 409, "my-org/lib が既にあります"],
+  ];
+  for (const [fake, status, reason] of cases) {
+    const t = await boot({ push: false, git: "full", ...fake });
+    const r = await t.send("POST", "/api/workspaces", { repo: "other/lib", ownCopy: true, ownCopyOwner: "my-org" });
+    expect([fake, r.status]).toEqual([fake, status]);
+    expect((r.body as { error: string }).error).toContain(reason);
+    expect(t.calls.filter((a) => a[0] === "repo")).toEqual([]);
+    expect(existsSync(join(root!, "lib"))).toBe(false);
+    expect(((await t.send("GET", "/api/workspaces")).body as Workspace[]).filter((w) => w.name === "lib")).toEqual([]);
+    expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
+    await core!.stop();
+    rmSync(root!, { recursive: true, force: true });
+    core = root = undefined;
+  }
+}, 60_000);
+
+test("workspace clone: ownCopyOwner of a wrong shape, or without ownCopy, is 400", async () => {
+  const t = await boot({ push: false, git: "full", org: "admin" });
+  for (const body of [{ repo: "other/lib", ownCopy: true, ownCopyOwner: "a/b" }, { repo: "other/lib", ownCopy: true, ownCopyOwner: "-x" }, { repo: "other/lib", ownCopy: true, ownCopyOwner: 5 }, { repo: "other/lib", ownCopyOwner: "my-org" }, { repo: "other/lib", ownCopy: false, ownCopyOwner: "my-org" }]) {
+    expect([body, (await t.send("POST", "/api/workspaces", body)).status]).toEqual([body, 400]);
+  }
+  expect(t.calls).toEqual([]);
 }, 30_000);
 
 test("workspace clone: ownCopy on a repository you can push to is 400", async () => {

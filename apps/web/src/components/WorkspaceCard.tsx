@@ -102,12 +102,40 @@ function OwnRow(props: { workspace: Workspace; open: boolean; onOpen: (open: boo
   );
 }
 
+/** The name the server will give the copy, for display only: after the last separator, without `.git` and a trailing `/`. */
+function repoName(input: string): string {
+  const trimmed = input.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+  return trimmed.slice(Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf(":")) + 1);
+}
+
+/** Where the private copy will be made, `<owner>/<name>`; an empty owner reads as the owner's own account. */
+export function ownCopyTarget(owner: string, repoInput: string): string {
+  return `${owner.trim() || t(m.ownCopyMyAccount)}/${repoName(repoInput) || t(m.ownCopyNamePlaceholder)}`;
+}
+
+/** The mark to make a private copy of your own, and (only while it is on) the destination field with where it will land. */
+export function OwnCopyFields(props: { ownCopy: boolean; owner: string; repo: string; onOwnCopy: (v: boolean) => void; onOwner: (v: string) => void }) {
+  return (
+    <>
+      <label className="hint" style={{ display: "block" }}>
+        <input type="checkbox" checked={props.ownCopy} onChange={(e) => props.onOwnCopy(e.target.checked)} /> {t(m.ownCopy)}
+      </label>
+      {props.ownCopy ? (
+        <div className="row" style={{ paddingLeft: 22, justifyContent: "flex-start", flexWrap: "wrap" }}>
+          <input value={props.owner} onChange={(e) => props.onOwner(e.target.value)} aria-label={t(m.ownCopyOwnerLabel)} placeholder={t(m.ownCopyOwnerPlaceholder)} style={{ width: "12em" }} />
+          <span className="hint">→ {ownCopyTarget(props.owner, props.repo)}</span>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 /**
  * Workspace (#1447): the registered repositories and the ways to add one, in one place. 新しく作る asks a Task to create
  * and register a repository (the steps are the skill's, not the daemon's); GitHub から clones one of the owner's own next
  * to the checkout (#2575); ホストのディレクトリ registers a directory that already exists.
  */
-export function WorkspaceCard(props: { workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
+export function WorkspaceCard(props: { workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean, ownCopyOwner: string) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
   const [method, setMethod] = useState<"github" | "new" | "path">("github");
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
@@ -118,6 +146,8 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
   const [localBacklog, setLocalBacklog] = useState(false);
   // 他者のリポジトリを自分の GitHub の非公開のコピーにもする印: always offered (whether it is yours is not known before adding); off by default and put back after an add
   const [ownCopy, setOwnCopy] = useState(false);
+  // where that copy goes: empty means the owner's own account
+  const [copyOwner, setCopyOwner] = useState("");
   // the row whose 登録を外す is open (#2600): what removing it would do, the typed name, and whether the copy goes too
   const [removing, setRemoving] = useState<{ id: string; info: WorkspaceRemoval; typed: string; deleteCopy: boolean } | null>(null);
   // the row whose 立ち上げ is open: one at a time, like 登録を外す
@@ -180,10 +210,11 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
               disabled={!repo.trim()}
               onClick={() =>
                 props
-                  .onAddWorkspaceFromGithub(repo.trim(), localBacklog ? "switchboard" : "github", ownCopy)
+                  .onAddWorkspaceFromGithub(repo.trim(), localBacklog ? "switchboard" : "github", ownCopy, copyOwner)
                   .then(() => {
                     setRepo((now) => (now === repo ? "" : now));
                     setOwnCopy(false);
+                    setCopyOwner("");
                   })
                   .catch(fail)
               }
@@ -191,9 +222,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
               {t(m.add)}
             </button>
           </div>
-          <label className="hint" style={{ display: "block" }}>
-            <input type="checkbox" checked={ownCopy} onChange={(e) => setOwnCopy(e.target.checked)} /> {t(m.ownCopy)}
-          </label>
+          <OwnCopyFields ownCopy={ownCopy} owner={copyOwner} repo={repo} onOwnCopy={setOwnCopy} onOwner={setCopyOwner} />
           {props.clones.map((c) => (
             <div key={c.path} className="hint">{cloneRowText(c)}</div>
           ))}

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogAllocation, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -40,6 +40,7 @@ import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
 import { AFTER_CHECK_MS, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
+import { startWorktreeSweep } from "./worktree-sweep.ts";
 import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
 import { collectProvenance } from "./provenance.ts";
@@ -57,7 +58,8 @@ import { RUNNER_CONFIG_PATHS, runnerConfigOf } from "./runner-config.ts";
 import { CloneError, parseGithubRepo, registerWorkspace, unusableWorkspaces, WorkspaceClones } from "./workspace-clone.ts";
 import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
-import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, dueSoonOf, replyWaitingIn, readStoredIssue, readStoredRecords, storedIssueHeads, storedIssueReader, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
+import { allocationOf, sweepOrder, weekWindowStart } from "./allocation.ts";
+import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, dueSoonOf, replyWaitingIn, readStoredIssue, readStoredRecords, storedFlowIssues, storedIssueHeads, storedIssueReader, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, allocationHeldLines, type AllocationHold, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -698,7 +700,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     backlog.request(ws);
     return { fetchedAt, ...backlog.state(ws) };
   };
-  /** Whether the backlog reads the workspace: the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it. */
+  /** Whether the backlog reads the workspace: the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it, and so do the request Task's entry and the stage start. */
   function backlogReads(ws: Pick<Workspace, "kind">): boolean {
     return ws.kind !== "meta" || settings().developSelf;
   }
@@ -791,16 +793,29 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       return { error: String((e as Error).message ?? e), status: 409 };
     }
   };
+  /** The upstream request for a text: the repo is the workspace directory's origin. A moved or removed directory makes the spawn throw: the text to copy is still answered. */
+  const upstreamFor = (ws: Workspace, text: string) => {
+    let remote = "";
+    try {
+      const p = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: ws.path, stdout: "pipe", stderr: "ignore", timeout: 3000 });
+      if (p.exitCode === 0) remote = p.stdout.toString().trim();
+    } catch {
+      remote = "";
+    }
+    return upstreamRequest({ repo: remote ? githubRepoOfRemote(remote) : null, text });
+  };
   /**
    * A request Task (request-to-backlog): the feedback button's 要望 and a throwaway app used on enough days.
    * `workspaceId` files it in that workspace's repository, as its backlog stage buttons act there; omitted = the meta.
    * An artifact source must name a known artifact; its 出典 gets the Task it came from and where its copy is.
    */
-  const startRequestTask = async (input: { text: string; screen?: string; attachmentIds?: string[]; workspaceId?: string; source?: FeedbackInput["source"]; auto?: boolean }): Promise<{ task: Task } | { error: string; status: number }> => {
+  const startRequestTask = async (input: { text: string; screen?: string; attachmentIds?: string[]; workspaceId?: string; source?: FeedbackInput["source"]; auto?: boolean }): Promise<{ task: Task } | { upstream: { url: string | null; text: string } } | { error: string; status: number }> => {
     const meta = metaWorkspace();
     if (!meta) return { error: "meta workspace がありません", status: 409 };
     const ws = input.workspaceId ? db.getWorkspace(input.workspaceId) : meta;
     if (!ws) return { error: "workspace not found", status: 404 };
+    // a request for Switchboard itself, on an instance that does not develop it, goes upstream: no Task is made
+    if (!backlogReads(ws)) return { upstream: upstreamFor(ws, input.text) };
     let source: FeedbackSource | undefined;
     if (input.source?.kind === "artifact") {
       const a = artifacts.get(input.source.artifactId);
@@ -1587,7 +1602,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * Why the slot's items are left, one line each in backlog-next's words (`<what>: #N …`; the firing puts the workspace
    * and the slot before each). The backlog queue says it the same way for its own items.
    */
-  const leftLines = (items: BacklogItem[], slot: Slot, flow?: FlowLimit): string[] => {
+  const leftLines = (items: BacklogItem[], slot: Slot, flow?: FlowLimit, hold?: AllocationHold): string[] => {
     const out: string[] = [];
     // on hold: named on this line only, whatever else would also leave it
     const onHold = onHoldIn(items, slot);
@@ -1610,12 +1625,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       if (rows.length) out.push(`${label}: ${rows.join(" ")}`);
     }
     // PBIs whose Tasks' files other work touches: left before a session starts only to find that out
-    const overlapped = overlapIn(unheld, slot, undefined, flow);
+    const overlapped = overlapIn(unheld, slot, undefined, flow, hold);
     out.push(...overlapLine(overlapped));
+    out.push(...allocationHeldLines(unheld, slot, hold));
     // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now
     const spinning = spinningIn(unheld, slot);
     if (spinning.length) out.push(`前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
     return out;
+  };
+  /** Each workspace's share, mode, actual part of the week's spend and shortfall, and flow-improvement's part against its limit, with where the window begins. */
+  const readAllocation = (): BacklogAllocation => {
+    const now = Date.now();
+    const quota = (["claude", "codex"] as const).flatMap((r) => db.quotaFor(r).map((q) => ({ runner: r, window: q.window, resetsAt: q.resetsAt })));
+    const windowStart = weekWindowStart(quota, now);
+    return { windowStart, ...allocationOf(db.listWorkspaces(), db.spendSince(windowStart), (id) => storedFlowIssues(db, { id }), settings().quotaAndResume.flowShareLimit) };
   };
   /**
    * One backlog-next firing: for every registered workspace and each of its two slots (implement / plan),
@@ -1712,119 +1735,129 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const unsynced = only ? null : await backlog.settle(ws).then(() => null, (e) => notSettled(e));
       return { ws, ...(await load(ws)), unsynced, ghLoginHeld: unsynced && ghLoginRefused(ws) ? unsynced : null };
     }));
-    for (const r of read) {
-      const { ws } = r;
-      if ("error" in r) {
-        skipped.push(`${ws.name}: ${r.error}`);
+    // the week's spend against the shares, read once per firing
+    const alloc = readAllocation();
+    // one workspace's turn: its slots, each filled while an item can start
+    const sweepWorkspace = async (r: (typeof read)[number]) => {
+    const { ws } = r;
+    if ("error" in r) {
+      skipped.push(`${ws.name}: ${r.error}`);
+      return;
+    }
+    if (r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${r.unsynced}`);
+    if (r.syncHeld.length) skipped.push(`${ws.name}: 競合があるので自動では始めない: ${r.syncHeld.join(" ")}`);
+    const picked = new Set<number>();
+    // flow PBIs started from Ready in this firing: still ready in `r.items`, so counted as in progress here
+    const flowStarted = new Set<number>();
+    const flow = (): FlowLimit => ({ limit: settings().quotaAndResume.flowLimit, running: r.flowRunning + flowStarted.size, stopped: r.flowStopped });
+    const hold: AllocationHold = { flowShare: alloc.flow, mode: alloc.workspaces.find((w) => w.workspaceId === ws.id)?.mode };
+    for (const slot of SLOTS) {
+      if (slot === "implement" && queued()) {
+        if (ws.sweep[slot] > 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
         continue;
       }
-      if (r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${r.unsynced}`);
-      if (r.syncHeld.length) skipped.push(`${ws.name}: 競合があるので自動では始めない: ${r.syncHeld.join(" ")}`);
-      const picked = new Set<number>();
-      // flow PBIs started from Ready in this firing: still ready in `r.items`, so counted as in progress here
-      const flowStarted = new Set<number>();
-      const flow = (): FlowLimit => ({ limit: settings().quotaAndResume.flowLimit, running: r.flowRunning + flowStarted.size, stopped: r.flowStopped });
-      for (const slot of SLOTS) {
-        if (slot === "implement" && queued()) {
-          if (ws.sweep[slot] > 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
+      // checked again after GitHub was read: a button may have started a stage meanwhile
+      let reported = false;
+      let reread = false;
+      for (let n = 0; ; n++) {
+        // the import was refused the login: the 実装 slot starts nothing until it is back (the 計画 slot and the buttons go on)
+        const authHeld = slot === "implement" ? (r.ghLoginHeld ?? authStopHeld(ws)) : null;
+        if (authHeld) {
+          if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${authHeld}）`);
+          break;
+        }
+        const running = busy(ws.id, slot);
+        if (running.length >= ws.sweep[slot]) {
+          if (ws.sweep[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
+          break;
+        }
+        const slotHeld = sweepActions.filter((a) => SLOT_OF_ACTION[a] === slot).map(stageHeld);
+        if (slotHeld.every(Boolean)) {
+          if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${lines(slotHeld).join(" / ")}`);
+          break;
+        }
+        const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws), dueSoon(ws), hold);
+        if (n === 0) skipped.push(...leftLines(r.items, slot, flow(), hold).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
+        if (n === 0) reported = true;
+        if (!next) {
+          if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 進められる項目が無い`);
+          break;
+        }
+        picked.add(next.item.number);
+        if (defsError && next.item.stage === "request") {
+          skipped.push(`${ws.name}: #${next.item.number} を始めない: 候補の定義を読めません: ${defsError}`);
           continue;
         }
-        // checked again after GitHub was read: a button may have started a stage meanwhile
-        let reported = false;
-        let reread = false;
-        for (let n = 0; ; n++) {
-          // the import was refused the login: the 実装 slot starts nothing until it is back (the 計画 slot and the buttons go on)
-          const authHeld = slot === "implement" ? (r.ghLoginHeld ?? authStopHeld(ws)) : null;
-          if (authHeld) {
-            if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${authHeld}）`);
-            break;
-          }
-          const running = busy(ws.id, slot);
-          if (running.length >= ws.sweep[slot]) {
-            if (ws.sweep[slot] > 0 && n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}が埋まっている: ${running.join(" / ")}`);
-            break;
-          }
-          const slotHeld = sweepActions.filter((a) => SLOT_OF_ACTION[a] === slot).map(stageHeld);
-          if (slotHeld.every(Boolean)) {
-            if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${lines(slotHeld).join(" / ")}`);
-            break;
-          }
-          const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws), dueSoon(ws));
-          if (n === 0) skipped.push(...leftLines(r.items, slot, flow()).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
-          if (n === 0) reported = true;
-          if (!next) {
-            if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 進められる項目が無い`);
-            break;
-          }
-          picked.add(next.item.number);
-          if (defsError && next.item.stage === "request") {
-            skipped.push(`${ws.name}: #${next.item.number} を始めない: 候補の定義を読めません: ${defsError}`);
-            continue;
-          }
-          // read again right before the start: the sweep may have taken long since this workspace was read, and an
-          // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way
-          const late = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
-          if (late && slot === "implement" && ghLoginRefused(ws)) {
-            skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${late}）`);
-            break;
-          }
-          if (late && !r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${late}`);
-          const fresh = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === next.item.number);
-          const can = fresh ? canStartStoredBacklog(fresh) : { ok: false as const, why: "バックログから無くなった" };
-          // its stage Task started meanwhile (a button, an answer's resume): the slot's next item instead
-          if (fresh?.activeTaskId) {
-            skipped.push(`${ws.name}: #${next.item.number} は工程 Task が動いている`);
-            continue;
-          }
-          // what to do is picked again on the item as it is now (a Task reopened meanwhile makes a 閉じる a 実装, or nothing)
-          const again = can.ok ? pickNext([fresh!], slot, undefined, undefined, defsFor(ws)) : null;
-          if (!can.ok || !again || again.action !== next.action || !again.resume !== !next.resume) {
-            skipped.push(`${ws.name}: #${next.item.number} を始めない: ${can.ok ? "照合の間に変わった（次の発火で選び直す）" : can.why}`);
-            continue;
-          }
-          // the usage of the runner this action starts on: another item of the slot may start on another runner
-          const why = stageHeld(again.action);
-          if (why) {
-            skipped.push(`${ws.name}: #${next.item.number} を始めない: ${why}`);
-            continue;
-          }
-          // the queue enabled since this workspace was read: the 実装 slot is the queue's now
-          if (slot === "implement" && queued()) {
-            skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
-            break;
-          }
-          // Unattended: no shadow (like prompt schedules) and the schedule's budget applies to the stage Task.
-          const t = await startStage({
-            ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason,
-            extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
-          });
-          // its stage Task started after GitHub was read (a button, an answer's resume): the slot's next item instead
-          if ("active" in t || "starting" in t) {
-            skipped.push(`${ws.name}: #${next.item.number} は工程 Task が${"active" in t ? "動いている" : "開始中"}`);
-            continue;
-          }
-          if ("error" in t) {
-            skipped.push(`${ws.name}: #${next.item.number} を始められない: ${t.error}`);
-            break;
-          }
-          if (again.item.flow && again.item.stage === "ready") flowStarted.add(again.item.number);
-          started.push({ task: t.task, label: `${ws.name} #${next.item.number} を ${next.action}` });
-          // the next candidate is judged against what this start took (its stage Task now runs): the stored data only; the sync lines stay those of the first read
-          r.items = (await load(ws)).items;
-          reread = true;
+        // read again right before the start: the sweep may have taken long since this workspace was read, and an
+        // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way
+        const late = await backlog.settle(ws).then(() => null, (e) => notSettled(e));
+        if (late && slot === "implement" && ghLoginRefused(ws)) {
+          skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: GitHub の認証切れ: 始めない（${late}）`);
+          break;
         }
-        // an overlap that only the starts made is said too: the line is the first read's with them counted
-        if (reread) {
-          const head = `${ws.name}: ${SLOT_NAME[slot]}: 重なり`;
-          const now = leftLines(r.items, slot, flow()).filter((l) => l.startsWith("重なり")).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`);
-          for (let k = skipped.length - 1; k >= 0; k--) if (skipped[k]!.startsWith(head)) skipped.splice(k, 1);
-          skipped.push(...now);
+        if (late && !r.unsynced) skipped.push(`${ws.name}: GitHub と照合できない（保存データで進める）: ${late}`);
+        const fresh = withActive({ fetchedAt: 0, items: (await storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === next.item.number);
+        const can = fresh ? canStartStoredBacklog(fresh) : { ok: false as const, why: "バックログから無くなった" };
+        // its stage Task started meanwhile (a button, an answer's resume): the slot's next item instead
+        if (fresh?.activeTaskId) {
+          skipped.push(`${ws.name}: #${next.item.number} は工程 Task が動いている`);
+          continue;
         }
-        // the flow PBIs left, said after the starts: one started in this firing may be what holds the next
-        const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)), slot, flow()), flow());
-        if (flowLine) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${flowLine}`);
+        // what to do is picked again on the item as it is now (a Task reopened meanwhile makes a 閉じる a 実装, or nothing)
+        const again = can.ok ? pickNext([fresh!], slot, undefined, undefined, defsFor(ws)) : null;
+        if (!can.ok || !again || again.action !== next.action || !again.resume !== !next.resume) {
+          skipped.push(`${ws.name}: #${next.item.number} を始めない: ${can.ok ? "照合の間に変わった（次の発火で選び直す）" : can.why}`);
+          continue;
+        }
+        // the usage of the runner this action starts on: another item of the slot may start on another runner
+        const why = stageHeld(again.action);
+        if (why) {
+          skipped.push(`${ws.name}: #${next.item.number} を始めない: ${why}`);
+          continue;
+        }
+        // the queue enabled since this workspace was read: the 実装 slot is the queue's now
+        if (slot === "implement" && queued()) {
+          skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: キューに任せる`);
+          break;
+        }
+        // Unattended: no shadow (like prompt schedules) and the schedule's budget applies to the stage Task.
+        const t = await startStage({
+          ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason,
+          extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
+        });
+        // its stage Task started after GitHub was read (a button, an answer's resume): the slot's next item instead
+        if ("active" in t || "starting" in t) {
+          skipped.push(`${ws.name}: #${next.item.number} は工程 Task が${"active" in t ? "動いている" : "開始中"}`);
+          continue;
+        }
+        if ("error" in t) {
+          skipped.push(`${ws.name}: #${next.item.number} を始められない: ${t.error}`);
+          break;
+        }
+        if (again.item.flow && again.item.stage === "ready") flowStarted.add(again.item.number);
+        started.push({ task: t.task, label: `${ws.name} #${next.item.number} を ${next.action}` });
+        // the next candidate is judged against what this start took (its stage Task now runs): the stored data only; the sync lines stay those of the first read
+        r.items = (await load(ws)).items;
+        reread = true;
       }
+      // an overlap that only the starts made is said too: the line is the first read's with them counted
+      if (reread) {
+        const head = `${ws.name}: ${SLOT_NAME[slot]}: 重なり`;
+        const now = leftLines(r.items, slot, flow(), hold).filter((l) => l.startsWith("重なり")).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`);
+        for (let k = skipped.length - 1; k >= 0; k--) if (skipped[k]!.startsWith(head)) skipped.splice(k, 1);
+        skipped.push(...now);
+      }
+      // the flow PBIs left, said after the starts: one started in this firing may be what holds the next
+      const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)), slot, flow()), flow());
+      if (flowLine) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${flowLine}`);
     }
+    };
+    // the workspaces with the largest shortfall first; those over their share only when nothing else started in this firing
+    const order = sweepOrder(alloc, read.map((r) => r.ws.id));
+    const byId = new Map(read.map((r) => [r.ws.id, r]));
+    for (const id of order.first) await sweepWorkspace(byId.get(id)!);
+    if (!started.length) for (const o of order.over) await sweepWorkspace(byId.get(o.workspaceId)!);
+    else for (const o of order.over) skipped.push(`飛ばした: ${byId.get(o.workspaceId)!.ws.name}: 取り分 ${Math.round(o.share * 100)}% に対し実績 ${Math.round(o.actual * 100)}%`);
     return { started, skipped };
   };
   // secret-scan: every registered repository through the kit's scan-issues; its result is on the schedule, 判断待ち's notice is read from it
@@ -2158,6 +2191,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     void resumeDueAfters({ db, tasks, now: Date.now() }).catch((e) => console.error(`[stops] depends resume after a date: ${String((e as Error)?.message ?? e)}`));
   }, opts.afterCheckMs ?? AFTER_CHECK_MS);
   afterTimer?.unref();
+  // the worktrees Tasks leave beside a repository go once nothing in them can be lost (all in the default branch, no change, a day old, unused), in every workspace's repository
+  const stopWorktreeSweep = startWorktreeSweep({ candidate: !!cfg.candidate, read: () => ({ workspaces: db.listWorkspaces(), tasks: db.listTasks() }) });
   const isMeta = (t: { workspaceId: string | null }) => !!t.workspaceId && db.getWorkspace(t.workspaceId)?.kind === "meta";
   let restarting = false;
   tasks.onTurnEnd((taskId, t, turn) => {
@@ -3177,23 +3212,27 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
          * `backlog`: `switchboard` keeps the workspace's backlog in Switchboard only: its source is set now and
          * stored as an empty import, so it reads as current and nothing asks GitHub. Absent = `github` (a path already
          * registered keeps its own). A path already registered with the other one is 409 (switching is turning the GitHub sync on or off).
-         * `ownCopy` (with `repo`): someone else's repository is also copied to a new private `<you>/<name>`, the
-         * clone's origin; 400 on a repository you can push to, 409 when `<you>/<name>` is already there.
+         * `ownCopy` (with `repo`): someone else's repository is also copied to a new private `<owner>/<name>`, the
+         * clone's origin; 400 on a repository you can push to, 409 when `<owner>/<name>` is already there. `ownCopyOwner`
+         * (with `ownCopy`) is where: empty or absent = your account, else an org you are in and may create private
+         * repositories in (400 / 403 before anything is made).
          */
         POST: strong(async (req, srv) => {
-          const body = await readJson(req, (x) => x as { path?: string; name?: string; repo?: string; backlog?: unknown; ownCopy?: unknown });
+          const body = await readJson(req, (x) => x as { path?: string; name?: string; repo?: string; backlog?: unknown; ownCopy?: unknown; ownCopyOwner?: unknown });
           // absent = github; any other value (null too) is refused
           const backlogAt = body.backlog === undefined ? "github" : body.backlog;
           if (backlogAt !== "github" && backlogAt !== "switchboard") return bad('backlog must be "github" or "switchboard"');
           if (body.ownCopy !== undefined && typeof body.ownCopy !== "boolean") return bad("ownCopy must be a boolean");
           if (body.ownCopy && body.repo === undefined) return bad("ownCopy は repo と一緒に指定してください");
+          if (body.ownCopyOwner !== undefined && (typeof body.ownCopyOwner !== "string" || (body.ownCopyOwner !== "" && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(body.ownCopyOwner)))) return bad("ownCopyOwner は GitHub のアカウント名か org 名の形で指定してください");
+          if (body.ownCopyOwner && body.ownCopy !== true) return bad("ownCopyOwner は ownCopy と一緒に指定してください");
           if (body.repo !== undefined) {
             if (body.path !== undefined) return bad("path と repo はどちらか一方です");
             const repo = typeof body.repo === "string" ? parseGithubRepo(body.repo) : null;
             if (!repo) return bad("repo は owner/name か https://github.com/owner/name の形で指定してください");
             try {
-              const row = await clones.start(repo, { backlog: body.backlog === undefined ? undefined : backlogAt, ownCopy: body.ownCopy === true });
-              logOp(req, srv, "workspace.clone", { detail: { repo: row.repo, path: row.path, ...(body.ownCopy ? { ownCopy: true } : {}) } });
+              const row = await clones.start(repo, { backlog: body.backlog === undefined ? undefined : backlogAt, ownCopy: body.ownCopy === true, owner: typeof body.ownCopyOwner === "string" ? body.ownCopyOwner : "" });
+              logOp(req, srv, "workspace.clone", { detail: { repo: row.repo, path: row.path, ...(body.ownCopy ? { ownCopy: true } : {}), ...(body.ownCopyOwner ? { owner: body.ownCopyOwner } : {}) } });
               return json({ repo: row.repo, path: row.path, state: row.state }, 202);
             } catch (e) {
               if (e instanceof CloneError) return bad(e.message, e.status);
@@ -3257,13 +3296,26 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         PATCH: async (req) => {
           const id = String(req.params.id);
           if (!db.getWorkspace(id)) return bad("not found", 404);
-          const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown; sweep?: unknown });
+          const body = await readJson(req, (x) => x as { projectVar?: unknown; backlog?: unknown; sweep?: unknown; allocation?: unknown });
           // backlog-next's slots: on their own, read from the next firing
           if (body.sweep !== undefined) {
-            if (body.projectVar !== undefined || body.backlog !== undefined) return bad("sweep is changed on its own");
+            if (body.projectVar !== undefined || body.backlog !== undefined || body.allocation !== undefined) return bad("sweep is changed on its own");
             const sweep = WorkspaceSweep.partial().strict().safeParse(body.sweep);
             if (!sweep.success) return bad("sweep: implement / plan must be integers 0〜3");
             const ws = db.setWorkspaceSweep(id, sweep.data);
+            if (!ws) return bad("not found", 404); // removed while the body was read
+            broadcast({ type: "workspaces.updated" });
+            return json(ws);
+          }
+          // the share of the week and the mode: on their own too, read from the next firing
+          if (body.allocation !== undefined) {
+            if (body.projectVar !== undefined || body.backlog !== undefined) return bad("allocation is changed on its own");
+            const allocation = WorkspaceAllocation.partial().strict().safeParse(body.allocation);
+            if (!allocation.success) return bad("allocation: share must be a number 0〜1 or null, mode new / continuing / maintenance");
+            const shareOf = (w: Workspace) => (w.id === id && allocation.data.share !== undefined ? allocation.data.share : w.allocation.share);
+            const total = db.listWorkspaces().reduce((sum, w) => sum + (shareOf(w) ?? 0), 0);
+            if (total > 1 + 1e-9) return bad(`取り分の和が 1 を超える: ${Math.round(total * 1e6) / 1e6}`);
+            const ws = db.setWorkspaceAllocation(id, allocation.data);
             if (!ws) return bad("not found", 404); // removed while the body was read
             broadcast({ type: "workspaces.updated" });
             return json(ws);
@@ -3575,6 +3627,16 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
+       * Each workspace's share, mode, actual part of the week's spend and shortfall, and the flow-improvement part
+       * against its limit, with where the window begins. A route of its own: `GET /api/workspaces` is read at every change.
+       */
+      "/api/backlog/allocation": {
+        GET: () => {
+          return json(readAllocation());
+        },
+      },
+
+      /**
        * One stored Issue: body, comments and the Project's fields as shown (with the edits not sent yet),
        * without asking GitHub. `:number` is its number, or the local id of an Issue made here. 404 = not stored.
        */
@@ -3703,7 +3765,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const ws = db.getWorkspace(parsed.data.workspaceId);
           if (!ws) return bad("workspace not found", 404);
           if (!existsSync(ws.path)) return bad("workspace directory does not exist", 409);
-          if (ws.kind === "meta" && !settings().developSelf) return bad(DEVELOP_SELF_OFF, 409);
+          if (!backlogReads(ws)) return bad(DEVELOP_SELF_OFF, 409);
           const meta = metaWorkspace();
           if (ws.kind !== "meta" && !meta) return bad("meta workspace がありません（工程のスキルはそこから読みます）", 409);
           const n = Number(req.params.number);
@@ -3742,20 +3804,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const parsed = FeedbackInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
           if (parsed.data.mode === "request") {
-            // a request for Switchboard itself, on an instance that does not develop it, goes upstream: no Task is made
-            const target = parsed.data.workspaceId ? db.getWorkspace(parsed.data.workspaceId) : metaWorkspace();
-            if (target?.kind === "meta" && !settings().developSelf) {
-              // a moved or removed meta directory makes the spawn throw: the text to copy is still answered
-              let remote = "";
-              try {
-                const p = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: target.path, stdout: "pipe", stderr: "ignore", timeout: 3000 });
-                if (p.exitCode === 0) remote = p.stdout.toString().trim();
-              } catch {
-                remote = "";
-              }
-              return json({ upstream: upstreamRequest({ repo: remote ? githubRepoOfRemote(remote) : null, text: parsed.data.text }) });
-            }
             const r = await startRequestTask(parsed.data);
+            if ("upstream" in r) return json({ upstream: r.upstream }, 200);
             return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
           }
           if (!settings().developSelf) return bad(DEVELOP_SELF_OFF, 409);
@@ -4050,6 +4100,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!use.due) return json({ appDays: use.appDays, appRequestTaskId: use.appRequestTaskId });
           // the same draft as 要望にする (the PBI's 「同じ下書き」); the 出典 says Switchboard filed it and why
           const r = await startRequestTask({ text: `使い捨てアプリ「${a.title}」を一般機能にしたい。`, source: { kind: "artifact", artifactId: a.id }, auto: true });
+          if ("upstream" in r) return json({ appDays: use.appDays, appRequestTaskId: null });
           if (!("task" in r)) {
             // the next day that counts tries again; the page still reads as before
             console.warn(`artifacts: the request for the throwaway app ${a.id} did not start: ${r.error}`);
@@ -4826,6 +4877,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     clearInterval(recheckTimer);
     if (promotionTimer) clearInterval(promotionTimer);
     if (afterTimer) clearInterval(afterTimer);
+    stopWorktreeSweep?.();
     history.stop();
     knowledge.close();
     scheduler.stop();

@@ -31,7 +31,7 @@ export async function runTypecheck(d: TypecheckDeps): Promise<number> {
   const steps = [{ name: "typecheck", run: RUN }];
   // the type check reads no recordings: the build gets none (hostOffload adds them where the host has them)
   const { fixtures: _, ...offload } = d.offload;
-  const { code, output } = await runBuild(offload, steps, ROOT, { ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
+  const { code, output } = await runBuild(offload, steps, ROOT, { caller: "typecheck", ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
   let failed = 0;
   for (const r of parseBuild(output, steps, code)) {
     if (r.code === 0) continue;

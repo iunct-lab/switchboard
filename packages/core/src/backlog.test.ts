@@ -18,7 +18,7 @@ import { fakeGh as fakeKitGh } from "../../../ops-kit/src/gh.ts";
 import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { fmtTime, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
-import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, dueSoonIssues, dueSoonOf, promotionStep, reportPromoteFailure, stageOf, toItem, requestTextChars, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, buildDirectPrompt, buildStartPrompt, subagentModelAlias, localBacklogSource, canStartStoredBacklog, screenAnswer, confirmationsOf, confirmAfterOf, confirmDecisionsOf, mockupTaskOf, prereqsOf, prereqState, type WaitTarget, GithubBudgetCache, holdStoredDecision, otherRepoRules, pickNext, dueSoonIssues, dueSoonOf, promotionStep, reportPromoteFailure, stageOf, toItem, requestTextChars, requestFromOf, allocationHeldLines, flowShareHeldIn, spinningIn, tasksDoneMark, TASKS_DONE_MARK, unchangedIn, heldIn, onHoldIn, chooseProcess, flowHeldIn, flowHeldLine, flowRunning, flowStopped, type GhRunner, type RawBacklogIssue, type ReleaseState, awaitingReply, failedIn, failedSince, isReplyWaiting, replyWaitingIn, stopHeld, storedIssueHeads, readStoredIssue, editStoredIssue, waitsOf, isUnblocked, withOverlap } from "./backlog.ts";
 
 // the writer of the waits, read at run time: scripts/ is not type-checked under core's settings
 const guard = "../../../scripts/parallel-guard.ts";
@@ -2084,7 +2084,7 @@ test("start: the prompt says to read the newest ## 回答 first", async () => {
 });
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 test("pickNext: Priority (none last), then Ready before 分解待ち before 要望, then the oldest; skips decisions and running items", () => {
@@ -4332,6 +4332,87 @@ async function threeWorkspaces(adapter: RunnerAdapter, broken?: "lib", inner: Gh
   return { base, ids, dirs };
 }
 
+test("allocation: a share and a mode are saved per workspace and read back; the sum over 1, a range outside 0〜1 and an unknown mode are 400; null unsets", async () => {
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter);
+  const patch = (id: string, allocation: unknown) => fetch(`${base}/api/workspaces/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ allocation }) });
+  const list = async () => (await (await fetch(`${base}/api/workspaces`)).json()) as Array<{ id: string; allocation: { share: number | null; mode: string } }>;
+  // a new workspace has no share and continues
+  expect((await list()).every((w) => w.allocation.share === null && w.allocation.mode === "continuing")).toBe(true);
+  expect((await patch(ids.lib!, { share: 0.5, mode: "maintenance" })).status).toBe(200);
+  expect((await list()).find((w) => w.id === ids.lib!)!.allocation).toEqual({ share: 0.5, mode: "maintenance" });
+  // a side not given stays
+  expect((await patch(ids.lib!, { mode: "new" })).status).toBe(200);
+  expect((await list()).find((w) => w.id === ids.lib!)!.allocation).toEqual({ share: 0.5, mode: "new" });
+  // 0.5 + 0.6 is over 1, and nothing is saved
+  const over = await patch(ids.app!, { share: 0.6 });
+  expect(over.status).toBe(400);
+  expect(((await over.json()) as { error: string }).error).toContain("取り分の和が 1 を超える: 1.1");
+  expect((await list()).find((w) => w.id === ids.app!)!.allocation.share).toBeNull();
+  expect((await patch(ids.app!, { share: 0.5 })).status).toBe(200);
+  // changing the same workspace's share counts its new value, not the old one
+  expect((await patch(ids.lib!, { share: 0.3 })).status).toBe(200);
+  for (const bad of [{ share: 1.2 }, { share: -0.1 }, { mode: "sleeping" }, { share: "half" }, { extra: 1 }]) expect((await patch(ids.app!, bad)).status).toBe(400);
+  expect((await list()).find((w) => w.id === ids.app!)!.allocation).toEqual({ share: 0.5, mode: "continuing" });
+  // null returns it to unset
+  expect((await patch(ids.app!, { share: null })).status).toBe(200);
+  expect((await list()).find((w) => w.id === ids.app!)!.allocation.share).toBeNull();
+  // on its own, like sweep
+  expect((await fetch(`${base}/api/workspaces/${ids.app!}`, { method: "PATCH", body: JSON.stringify({ allocation: { share: 0.1 }, sweep: { plan: 1 } }) })).status).toBe(400);
+  expect((await list()).find((w) => w.id === ids.app!)!.allocation.share).toBeNull();
+});
+
+test("allocation API: GET /api/backlog/allocation returns each workspace's actual part of the window's spend (billed included) and the flow-improvement part", async () => {
+  // Issue 304 carries flow-improvement in every workspace's copy of the fake repository
+  const inner = fakeGh().gh;
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 304) node.labels.nodes.push({ name: "flow-improvement" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, gh);
+  const get = async () => (await (await fetch(`${base}/api/backlog/allocation`)).json()) as { windowStart: number; workspaces: Array<{ workspaceId: string; share: number | null; mode: string; actual: number; shortfall: number | null }>; flow: { limit: number; actual: number } };
+  // nothing spent: every actual is 0
+  const idle = await get();
+  expect(idle.workspaces.map((w) => w.actual)).toEqual(idle.workspaces.map(() => 0));
+  expect(idle.flow).toEqual({ limit: 0.25, actual: 0 });
+  const patch = (id: string, allocation: unknown) => fetch(`${base}/api/workspaces/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ allocation }) });
+  expect((await patch(ids.lib!, { share: 0.5 })).status).toBe(200);
+  expect((await patch(ids.app!, { share: 0.2 })).status).toBe(200);
+  for (const ws of Object.values(ids)) await fetch(`${base}/api/backlog/sync`, { method: "POST", body: JSON.stringify({ workspaceId: ws }) });
+  const now = Date.now();
+  const spend = (id: string, workspaceId: string, issue: number | null, costUsd: number, billedUsd: number, ts = now) => {
+    core!.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: issue === null ? null : { issue, action: "complete" }, statusAt: now, createdAt: now, updatedAt: now });
+    core!.db.insertLedger({ taskId: id, runner: "claude", model: null, inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd, source: "reported", ts });
+  };
+  spend("tsk_alloc_lib", ids.lib!, 304, 20, 0); // a flow Issue of lib
+  spend("tsk_alloc_app", ids.app!, 305, 0, 60); // billed only
+  spend("tsk_alloc_meta", ids.switchboard!, null, 20, 0);
+  spend("tsk_alloc_old", ids.lib!, 304, 500, 0, now - 30 * 86400_000); // outside the window
+  const r = await get();
+  const by = Object.fromEntries(r.workspaces.map((w) => [w.workspaceId, w]));
+  expect(by[ids.lib!]!.actual).toBeCloseTo(0.2);
+  expect(by[ids.lib!]!.shortfall).toBeCloseTo(0.3);
+  expect(by[ids.app!]!.actual).toBeCloseTo(0.6);
+  expect(by[ids.app!]!.shortfall).toBeCloseTo(-0.4);
+  expect(by[ids.switchboard!]).toMatchObject({ share: null, shortfall: null });
+  expect(by[ids.switchboard!]!.actual).toBeCloseTo(0.2);
+  expect(r.flow.actual).toBeCloseTo(0.2);
+  expect(now - r.windowStart).toBeGreaterThanOrEqual(0);
+  expect(now - r.windowStart).toBeLessThanOrEqual(7 * 86400_000 + 1000);
+});
+
+test("flowShareLimit: the default is 0.25 and PATCH /api/settings changes it", async () => {
+  const base = await boot(fakeGh().gh);
+  const get = async () => ((await (await fetch(`${base}/api/settings`)).json()) as { quotaAndResume: { flowShareLimit: number } }).quotaAndResume.flowShareLimit;
+  expect(await get()).toBe(0.25);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ quotaAndResume: { flowShareLimit: 0.4 } }) })).status).toBe(200);
+  expect(await get()).toBe(0.4);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ quotaAndResume: { flowShareLimit: 1.5 } }) })).status).toBe(400);
+  expect(await get()).toBe(0.4);
+});
+
 test("backlog-next: a decomposed PBI in 分解待ち starts with the make-Ready prompt", async () => {
   const claude = holdingClaude();
   const base = await boot(decomposedGh().gh, claude.adapter);
@@ -5793,6 +5874,17 @@ describe("chooseProcess: the candidate a request starts in", () => {
     expect(chooseProcess(long, defs(600)).process).toBe("p1-direct");
   });
 
+  test("pickNext allocation: toItem carries the 出典's speaker (null when none)", () => {
+    expect(asItem(req("x", "\n## 出典\n- 誰の言葉: 定期の検査\n")).requestFrom).toBe("定期の検査");
+    expect(asItem(req("x")).requestFrom).toBeNull();
+  });
+
+  test("pickNext allocation: toItem carries the Project's Kind (null when none)", () => {
+    const withKind: RawBacklogIssue = { ...raw(["type:pbi"], ""), projectItems: { nodes: [{ project: { number: 11 }, fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }, { name: "deps", field: { name: "Kind" } }] } }] } };
+    expect(toItem(withKind, 11, ws)!.kind).toBe("deps");
+    expect(toItem(raw(["type:pbi"], "", "Ready"), 11, ws)!.kind).toBeNull();
+  });
+
   test("a request's own words are counted without the fence lines; a body with no 要望 section is counted whole", () => {
     expect(requestTextChars("## 要望\n\n```text\nabc\n```\n")).toBe(3);
     expect(requestTextChars("## 原文\nabc")).toBeNull();
@@ -6023,4 +6115,112 @@ test("developSelf off: a stage on the meta workspace is refused", async () => {
   expect(r.status).toBe(409);
   expect(await r.text()).toContain("Switchboard 自体を開発しない設定です");
   expect(core!.db.listTasks()).toHaveLength(0);
+});
+
+describe("pickNext allocation", () => {
+  const over = { flowShare: { actual: 0.4, limit: 0.25 } };
+  const flowItem = (over: Partial<BacklogItem>) => item({ flow: true, ...over });
+
+  test("pickNext allocation: over the flow-share limit, a flow Ready (not P0) is left, P0 and plain PBIs are taken, and the lines say why", () => {
+    const held = flowItem({ number: 1, priority: "P1" });
+    const urgent = flowItem({ number: 2, priority: "P0", createdAt: "2026-09-02T00:00:00Z" });
+    const plain = item({ number: 3, priority: "P3" });
+    expect(pickNext([held, plain], "implement", undefined, undefined, [], new Set(), over)).toMatchObject({ item: { number: 3 } });
+    expect(pickNext([held, urgent, plain], "implement", undefined, undefined, [], new Set(), over)).toMatchObject({ item: { number: 2 } });
+    expect(pickNext([held], "implement", undefined, undefined, [], new Set(), over)).toBeNull();
+    expect(allocationHeldLines([held, urgent, plain], "implement", over)).toEqual(["飛ばした: #1: 自己改善の上限（実績 40% / 上限 25%）"]);
+    // under the limit, or with no hold, nothing is left
+    expect(pickNext([held], "implement", undefined, undefined, [], new Set(), { flowShare: { actual: 0.1, limit: 0.25 } })).toMatchObject({ item: { number: 1 } });
+    expect(pickNext([held], "implement")).toMatchObject({ item: { number: 1 } });
+    // an in-progress flow PBI goes on (its resume is not a new start)
+    const going = flowItem({ number: 4, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: "2026-09-05T00:00:00Z" });
+    expect(flowShareHeldIn([going], "implement", over)).toEqual([]);
+  });
+
+  test("pickNext allocation: in maintenance mode a feature PBI is left, bug / deps PBIs and a routine-check request are taken, and the lines say why", () => {
+    const hold = { mode: "maintenance" as const };
+    const feature = item({ number: 1, kind: "feature", priority: "P0" });
+    const unset = item({ number: 5, kind: null });
+    const bug = item({ number: 2, kind: "bug", priority: "P2" });
+    const deps = item({ number: 3, kind: "deps", priority: "P3" });
+    const routine = item({ number: 4, type: "request", stage: "request", requestFrom: "定期の検査" });
+    const person = item({ number: 6, type: "request", stage: "request", requestFrom: "利用者" });
+    expect(pickNext([feature, unset, bug, deps], "implement", undefined, undefined, [], new Set(), hold)).toMatchObject({ item: { number: 2 } });
+    expect(pickNext([feature, deps], "implement", undefined, undefined, [], new Set(), hold)).toMatchObject({ item: { number: 3 } });
+    expect(pickNext([feature, person, routine], "plan", undefined, undefined, [], new Set(), hold)).toMatchObject({ item: { number: 4 } });
+    expect(pickNext([person], "plan", undefined, undefined, [], new Set(), hold)).toBeNull();
+    expect(allocationHeldLines([feature, unset, bug], "implement", hold)).toEqual(["飛ばした: #1: メンテのモード（Kind feature）", "飛ばした: #5: メンテのモード（Kind 未設定）"]);
+    // the other modes pick as before
+    for (const mode of ["new", "continuing"] as const) expect(pickNext([feature, bug], "implement", undefined, undefined, [], new Set(), { mode })).toMatchObject({ item: { number: 1 } });
+  });
+
+  test("pickNext allocation: requestFromOf reads the 出典 line outside fences", () => {
+    expect(requestFromOf("## 要望\nx\n\n## 出典\n- 誰の言葉: 定期の検査（使い捨てアプリから）\n自動")).toBe("定期の検査");
+    expect(requestFromOf("## 出典\n- 誰の言葉: 利用者\n")).toBe("利用者");
+    expect(requestFromOf("## 出典\n```\n- 誰の言葉: 利用者\n```\n")).toBeNull();
+    expect(requestFromOf("## 要望\n```\n## 出典\n- 誰の言葉: 利用者\n```\n")).toBeNull();
+    expect(requestFromOf("## 出典\n- 誰の言葉: 誰か\n")).toBeNull();
+  });
+});
+
+/** A done Task of a workspace that spent `costUsd` in the current window. */
+const spendIn = (id: string, workspaceId: string, costUsd: number) => {
+  core!.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
+  core!.db.insertLedger({ taskId: id, runner: "claude", model: null, inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd: 0, source: "reported", ts: Date.now() });
+};
+/** The Tasks a firing started: not the ones that only carry spend. */
+const firedTasks = () => startedTasks().filter((t) => !t.id.startsWith("tsk_alloc"));
+const shareOf = (base: string, id: string, share: number | null) => fetch(`${base}/api/workspaces/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ allocation: { share } }) });
+
+test("backlog-next allocation: a workspace over its share is skipped (and logged) while another can start, and starts when nothing else can", async () => {
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter);
+  closeTried(...Object.values(ids));
+  expect((await shareOf(base, ids.app!, 0.2)).status).toBe(200);
+  expect((await shareOf(base, ids.lib!, 0.5)).status).toBe(200);
+  spendIn("tsk_alloc_app", ids.app!, 60);
+  spendIn("tsk_alloc_lib", ids.lib!, 20);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  // lib (under its share) and switchboard (no share) start; app is over its share and other work started
+  expect([...new Set(firedTasks().map((t) => t.workspaceId))].sort()).toEqual([ids.lib!, ids.switchboard!].sort());
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("飛ばした: app: 取り分 20% に対し実績 75%"));
+  await shutdown();
+  // the same, with nothing else to start: the workspace over its share is swept
+  const again = await threeWorkspaces(holdingClaude().adapter);
+  closeTried(...Object.values(again.ids));
+  expect((await shareOf(again.base, again.ids.app!, 0.2)).status).toBe(200);
+  spendIn("tsk_alloc_app2", again.ids.app!, 60);
+  for (const w of ["lib", "switchboard"]) await fetch(`${again.base}/api/workspaces/${again.ids[w]!}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement: 0, plan: 0 } }) });
+  expect((await runSchedule(again.base, await backlogNextSchedule(again.base))).status).toBe(201);
+  expect([...new Set(firedTasks().map((t) => t.workspaceId))]).toEqual([again.ids.app!]);
+});
+
+test("flow share button: over the flow-share limit a firing skips a flow Ready and says why, while the button still starts it (201)", async () => {
+  const inner = fakeGh().gh;
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 304) node.labels.nodes.push({ name: "flow-improvement" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  const base = await boot(gh, holdingClaude().adapter);
+  closeTried();
+  // a limit of 0 is reached with nothing spent
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ quotaAndResume: { flowShareLimit: 0 } }) })).status).toBe(200);
+  expect((await runSchedule(base, await backlogNextSchedule(base))).status).toBe(201);
+  expect(startedTasks().map((t) => t.title.split(":")[0])).not.toContain("#304 実装");
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("飛ばした: #304: 自己改善の上限（実績 0% / 上限 0%）"));
+  expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+});
+
+test("backlog-next allocation: when every workspace is over its share something still starts (no slot is left idle)", async () => {
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter);
+  closeTried(...Object.values(ids));
+  for (const w of Object.keys(ids)) {
+    expect((await shareOf(base, ids[w]!, 0.1)).status).toBe(200);
+    spendIn(`tsk_alloc_${w}`, ids[w]!, 30);
+  }
+  expect((await runSchedule(base, await backlogNextSchedule(base))).status).toBe(201);
+  expect(new Set(firedTasks().map((t) => t.workspaceId)).size).toBe(3);
 });

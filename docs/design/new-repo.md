@@ -84,18 +84,18 @@ A repository you cannot push to is added as a workspace that creates nothing on 
 - Stopping writes: the clone gets the mark `git config ops-kit.noWrite <owner/name>`. The kit's tools and the front of gh stop Issues, PRs, comments, labels and edits to that target before they are posted. What it does not stop: operations the user does in the host's terminal or on GitHub's screen, and anything running as the same OS user changing git's configuration or the DB directly. `git push upstream` is refused by GitHub
 - Confirming the runner's configuration: the targets are `RUNNER_CONFIG_PATHS`. The `Workspace` row of Settings shows the list and the content, and until `確認した` is pressed, no Task of that workspace starts by any route, whether manual, scheduled or by a stage. If the content changes, it is confirmed again (the confirmation is kept by the content's hash). The target of confirmation is the root of the clone; configuration in subdirectories and other worktrees are out of scope. What the repository's code after confirmation (build and test scripts) does is for the user to read and judge
 - Taking in the original's updates: `元の更新を取り込む`, which appears on the row after confirmation, starts one Task that fetches `upstream` and takes it in. The procedure is only in the Task's instruction text, and the daemon does not touch git. If the take-in changes the configuration, the Task stops there and reports, and it is confirmed again before the next Task
-- Copy under your name: the mark `自分の GitHub に非公開のリポジトリを作る` under the `GitHub から` field (the API is `ownCopy: true` next to `repo`). It is always shown, because whether the repository is yours is not known before it is added; on a repository you can push to, the API refuses it with its reason (400) and the screen shows that reason. The mark is put back after an add
+- Copy under your name: the mark `自分の GitHub に非公開のリポジトリを作る` under the `GitHub から` field (the API is `ownCopy: true` next to `repo`). It is always shown, because whether the repository is yours is not known before it is added; on a repository you can push to, the API refuses it with its reason (400) and the screen shows that reason. The mark is put back after an add. When the mark is on, a destination field appears (the API is `ownCopyOwner`): empty means your own account, and an org name creates the copy there. For an org, the daemon first checks that you are an active member and may create private repositories there (an admin, or the org allows members to; GitHub shows that setting to owners only, so when a member cannot read it the daemon goes on and a create that fails is reported as for your own account), and when you cannot, or `<owner>/<name>` already exists, it refuses with the reason and creates, clones and pushes nothing
 
 Two shapes, chosen by the mark:
 
 | | Without the mark (shape above) | With the mark |
 |---|---|---|
-| Created on GitHub | nothing | a private `<you>/<name>`, with every branch and tag pushed to it |
+| Created on GitHub | nothing | a private `<owner>/<name>` (`<owner>` is you, or the org typed in the destination field), with every branch and tag pushed to it |
 | Backlog | kept in Switchboard | on GitHub, in the copy (as for your own repository); kept in Switchboard when `GitHub と連携しない` is also checked |
 | From pull request to merge | the local `変更` (change); no `origin` | a pull request in the copy, merged there |
 | Writes to the original | none (stopped by `ops-kit.noWrite`) | none (the same mark stays; the original is `upstream`) |
 
-Choose the mark when the work in progress should also be on your own GitHub (Issues, pull requests, a place to push). Without it, nothing leaves the host and nothing is created on GitHub. `bun scripts/foreign-repo-e2e.ts` and `bun scripts/foreign-repo-e2e.ts --own-copy` run both shapes against a fake `gh`; each ends with `upstream writes: 0`.
+Choose the mark when the work in progress should also be on your own GitHub (Issues, pull requests, a place to push); type an org in the destination field when the copy belongs to that org. Without it, nothing leaves the host and nothing is created on GitHub. `bun scripts/foreign-repo-e2e.ts` and `bun scripts/foreign-repo-e2e.ts --own-copy` run both shapes against a fake `gh`; each ends with `upstream writes: 0`.
 
 ## Adopting an existing repository's rules
 

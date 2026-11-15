@@ -141,6 +141,7 @@
       "docs/design/ops-metrics.md",
       "docs/design/presets.md",
       "docs/design/proposal.html",
+      "docs/design/promote-without-restart.md",
       "docs/design/pty-bridge.md",
       "docs/design/public-repo.md",
       "docs/design/rate-limit-resume.md",

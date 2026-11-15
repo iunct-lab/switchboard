@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, BacklogQueue } from "@switchboard/protocol";
-import { dropIndex, moveEntry, noteSummary, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting } from "./backlogQueue.ts";
+import { dropIndex, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting } from "./backlogQueue.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", activeTaskId: null, workspaceId: "w1", workspaceName: "one", ...over }) as BacklogItem;
@@ -220,5 +220,30 @@ describe("queueFacts / noteSummary (#4055)", () => {
     expect(noteSummary("キューが空")).toEqual({ line: "キューが空", rest: 0 });
     expect(noteSummary("app: 前提: #1（PR #2 マージ待ち）\napp: 重なり: #3（PR #4: a.ts・PR #5: b.ts）\napp #6 を complete で開始 task_x")).toEqual({ line: "app #6 を complete で開始 task_x", rest: 2 });
     expect(noteSummary("app: 前提: #1（PR #2 マージ待ち）\napp: 保留: #7\n進められる項目が無い")).toEqual({ line: "進められる項目が無い", rest: 2 });
+  });
+});
+
+describe("noteParts", () => {
+  const urlOf = (w: string) => (w === "one" ? "https://github.com/o/r/issues/12" : null);
+  test("links the holder, the planned resume and the checks-only numbers to the workspace's Issues and PRs", () => {
+    expect(noteParts("one: Task #3007 が 3 件を止めている（作業していない）", urlOf)).toEqual(["one: ", { text: "Task #3007", url: "https://github.com/o/r/issues/3007" }, " が 3 件を止めている（作業していない）"]);
+    expect(noteParts("one: 再開の予約: #2999（11/17 12:41 に再開）", urlOf)).toEqual(["one: 再開の予約: ", { text: "#2999", url: "https://github.com/o/r/issues/2999" }, "（11/17 12:41 に再開）"]);
+    expect(noteParts("one: 利用者確認だけ: #3467 #2799", urlOf)).toEqual(["one: 利用者確認だけ: ", { text: "#3467", url: "https://github.com/o/r/issues/3467" }, " ", { text: "#2799", url: "https://github.com/o/r/issues/2799" }]);
+    expect(noteParts("one: 重なり: PR #5170", urlOf)).toEqual(["one: 重なり: ", { text: "PR #5170", url: "https://github.com/o/r/pull/5170" }]);
+  });
+  test("a workspace that is not known, or a line with no workspace, stays a sentence", () => {
+    expect(noteParts("two: Task #1 が 3 件を止めている", urlOf)).toEqual(["two: Task #1 が 3 件を止めている"]);
+    expect(noteParts("進められる項目が無い", urlOf)).toEqual(["進められる項目が無い"]);
+  });
+  test("a known workspace whose URL is not an Issue / PR URL stays a sentence", () => {
+    expect(noteParts("one: Task #1 が 3 件を止めている", () => "")).toEqual(["one: Task #1 が 3 件を止めている"]);
+    expect(noteParts("one: Task #1 が 3 件を止めている", () => "https://example.com/board")).toEqual(["one: Task #1 が 3 件を止めている"]);
+  });
+  test("noteUrlOf: the workspace's Issue URL, none when two workspaces share the name", () => {
+    const u = (n: number) => `https://github.com/o/r/issues/${n}`;
+    expect(noteUrlOf([item(1, { url: u(1) }), item(2, { workspaceId: "w2", workspaceName: "two" })], "one")).toBe(u(1));
+    expect(noteUrlOf([item(1, { url: u(1) }), item(2, { workspaceId: "w2", url: "https://github.com/x/y/issues/2" })], "one")).toBeNull();
+    expect(noteUrlOf([item(1, { url: u(1) })], "three")).toBeNull();
+    expect(noteUrlOf([item(1, { url: "https://example.com/kept" }), item(2, { url: u(2) })], "one")).toBe(u(2));
   });
 });

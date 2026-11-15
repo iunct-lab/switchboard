@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceSweep } from "@switchboard/protocol";
+import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { RULES_BY, delegatedNote } from "./evals.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
@@ -656,13 +656,13 @@ export class Db {
   }
 
   /** `backlog` is not stored as such: it is read from the workspace's backlog source (setWorkspaceBacklogSource). */
-  upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog" | "sweep"> & { id?: string }): Workspace {
+  upsertWorkspace(ws: Omit<Workspace, "id" | "createdAt" | "backlog" | "sweep" | "allocation"> & { id?: string }): Workspace {
     const existing = this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path);
     if (existing) {
       this.sqlite.query("UPDATE workspaces SET name = ?, kind = ?, upstream = COALESCE(?, upstream) WHERE path = ?").run(ws.name, ws.kind, ws.upstream ?? null, ws.path);
       return rowToWorkspace(this.sqlite.query("SELECT * FROM workspaces WHERE path = ?").get(ws.path));
     }
-    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 }, ...(ws.upstream ? { upstream: ws.upstream } : {}) };
+    const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 }, allocation: { share: null, mode: "continuing" }, ...(ws.upstream ? { upstream: ws.upstream } : {}) };
     this.sqlite.query("INSERT INTO workspaces (id, name, path, kind, created_at, upstream) VALUES (?, ?, ?, ?, ?, ?)").run(row.id, row.name, row.path, row.kind, row.createdAt, ws.upstream ?? null);
     return row;
   }
@@ -693,6 +693,15 @@ export class Db {
     if (!ws) return null;
     const next = { ...ws.sweep, ...patch };
     this.sqlite.query("UPDATE workspaces SET sweep_implement = ?, sweep_plan = ? WHERE id = ?").run(next.implement, next.plan, id);
+    return this.getWorkspace(id);
+  }
+
+  /** The share of the weekly usage and the mode of the workspace; a side not given stays as it is. */
+  setWorkspaceAllocation(id: string, patch: Partial<WorkspaceAllocation>): Workspace | null {
+    const ws = this.getWorkspace(id);
+    if (!ws) return null;
+    const next = { ...ws.allocation, ...patch };
+    this.sqlite.query("UPDATE workspaces SET alloc_share = ?, alloc_mode = ? WHERE id = ?").run(next.share, next.mode, id);
     return this.getWorkspace(id);
   }
 
@@ -2226,6 +2235,19 @@ export class Db {
     return total > 0 ? rows.map((r) => ({ ...r, share: r.costUsd / total })) : [];
   }
 
+  /**
+   * The ledger's spend since `since` (ms) per workspace × stage Issue (null = a Task with no stage Issue), both the
+   * metered cost and what was billed. Rows with no Task are left out.
+   */
+  spendSince(since: number): Array<{ workspaceId: string; issue: number | null; costUsd: number; billedUsd: number }> {
+    return this.sqlite
+      .query(
+        `SELECT t.workspace_id AS workspaceId, t.stage_issue AS issue, SUM(l.cost_usd) AS costUsd, SUM(l.billed_usd) AS billedUsd
+         FROM ledger l JOIN tasks t ON t.id = l.task_id WHERE l.ts >= ? AND t.workspace_id IS NOT NULL GROUP BY t.workspace_id, t.stage_issue`,
+      )
+      .all(since) as Array<{ workspaceId: string; issue: number | null; costUsd: number; billedUsd: number }>;
+  }
+
   /** One minute of the host's load and its groups, dropping both tables' rows older than 7 days, in one transaction. */
   insertOpsLoad(row: OpsLoadRow, groups: OpsLoadGroupRow[], now = Date.now()) {
     const group = this.sqlite.query("INSERT INTO ops_load_groups (ts, task_id, owner, kind, rss, cpu_ms, procs) VALUES (?, ?, ?, ?, ?, ?, ?)");
@@ -2521,6 +2543,10 @@ function migrate(db: Database) {
       db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify(settings));
     })();
   }
+  if (!wsCols.has("alloc_share")) {
+    db.exec("ALTER TABLE workspaces ADD COLUMN alloc_share REAL");
+    db.exec("ALTER TABLE workspaces ADD COLUMN alloc_mode TEXT NOT NULL DEFAULT 'continuing'");
+  }
   // Rows another machine's daemon sent (an uplink): where a Task ran (NULL = this instance) and the id a ledger / routing_log row
   // had there (AUTOINCREMENT ids collide across machines, so a row is the same by its Task and src_id; NULL = our own row).
   if (!cols.has("machine")) db.exec("ALTER TABLE tasks ADD COLUMN machine TEXT");
@@ -2714,7 +2740,7 @@ function rowToWorkspace(r: any): Workspace {
   // (backlog.ts syncsGithub); none, or a GitHub one = github
   const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
-  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}) };
+  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, allocation: { share: r.alloc_share, mode: r.alloc_mode }, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -12,7 +12,7 @@
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { independentSync, type Publication } from "./public-version.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
@@ -324,6 +324,37 @@ export function leftOutRefs(tree: string, exclude: string[], allowRefs: string[]
   return [...new Set(hits)];
 }
 
+/** The relative specifiers of a line of code: `from "…"`, `import "…"`, `import("…")`, `require("…")`. */
+const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(["'])(\.{1,2}\/[^"'\n]*)\1/g;
+
+/**
+ * The lines of the tree's code that import (relative `./` or `../`) a file the sync leaves out, as
+ * `<file>:<line> <path>`: the public copy would not build. A specifier is resolved as a module would be (as written, with an
+ * extension, or as a directory index; a `.js` one also as `.ts` / `.tsx`); one that names nothing in either the source or
+ * the tree was never there and is not looked at. No type check or bundler runs, and package names are not looked at. Lines
+ * are matched as text, so a string or comment that holds such an import (a test's fixture code) counts as one too.
+ */
+export function leftOutImports(tree: string, src: string, { git }: Git): string[] {
+  const list = (rev: string) => new Set(git(["ls-tree", "-r", "-z", "--name-only", rev]).split("\0").filter(Boolean));
+  const published = list(tree);
+  const source = list(src);
+  const hits: string[] = [];
+  for (const path of published) {
+    if (!/\.(?:[mc]?js|tsx?)$/.test(path)) continue;
+    git(["show", `${tree}:${path}`]).split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(SPECIFIER)) {
+        const base = posix.join(posix.dirname(path), m[2]!);
+        const candidates = [base, ...[".ts", ".tsx", ".js", ".mjs", ".json"].map((e) => base + e), ...["ts", "tsx", "js"].map((e) => `${base}/index.${e}`)];
+        if (/\.js$/.test(base)) candidates.push(base.replace(/\.js$/, ".ts"), base.replace(/\.js$/, ".tsx"));
+        if (candidates.some((c) => published.has(c))) continue;
+        const gone = candidates.find((c) => source.has(c));
+        if (gone) hits.push(`${path}:${i + 1} ${gone}`);
+      }
+    });
+  }
+  return [...new Set(hits)];
+}
+
 /** A line break a code span does not cross: the next line starts a new block (blank, heading, quote, list item, a fence). */
 const BLOCK = String.raw`\n(?:[ \t]*(?:\n|\0|$)|[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]))`;
 /** A code span: a run of backticks, then the shortest text up to the same run, not over a {@link BLOCK} break. */
@@ -366,6 +397,11 @@ export function commitHashes(tree: string, { git }: Git): string[] {
 function checkHashes(tree: string, g: Git): void {
   const hashes = commitHashes(tree, g);
   if (hashes.length) throw new Error(`a document names a commit hash in its text (a reader of the public copy cannot use it: write what it means, or put an example in code):\n${hashes.join("\n")}`);
+}
+
+function checkImports(tree: string, src: string, g: Git): void {
+  const imports = leftOutImports(tree, src, g);
+  if (imports.length) throw new Error(`a file the sync publishes imports a file the sync leaves out (publish the imported file, or leave out the importer too):\n${imports.join("\n")}`);
 }
 
 function checkRefs(tree: string, opts: Pick<Options, "exclude" | "allowRefs">, g: Git): void {
@@ -427,6 +463,7 @@ export function check(opts: Pick<Options, "host" | "privateRepo" | "target" | "i
   const { tree } = publicTree(src, opts, g);
   checkTree(tree, opts.privateRepo, g, opts.host);
   checkRefs(tree, opts, g);
+  checkImports(tree, src, g);
   checkHashes(tree, g);
   return `public check: ok (${g.git(["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean).length} files)`;
 }
@@ -502,6 +539,7 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
 
   checkTree(tree, opts.privateRepo, g);
   checkRefs(tree, opts, g);
+  checkImports(tree, src, g);
   checkHashes(tree, g);
   // The same in the message, and no address of a person in the author / committer the commit will carry (env and
   // config, as git itself resolves them).

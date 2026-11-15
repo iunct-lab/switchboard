@@ -81,9 +81,11 @@ Each element below says what it is for, what exists today, and how it is itself 
 
 **For.** Exploration spends tokens and the owner's attention; neither spending it all nor hoarding it is right, and the share is the owner's to set. An experiment pays for itself only if it can change a decision.
 
-**Shape (not yet built).** A share of work or cost reserved for candidates whose record is thin or uncertain; before an experiment, the decision it would change written down ("if X then A, if Y then B" — if both branches are A, do not run it); afterwards, whether the decision changed. Kinds of experiment whose results never change decisions lose budget.
+**Shape.** A share of work or cost reserved for candidates whose record is thin or uncertain (built so far: only the per-workspace share below; the written-down decision and the budget loss are not built); before an experiment, the decision it would change written down ("if X then A, if Y then B" — if both branches are A, do not run it); afterwards, whether the decision changed. Kinds of experiment whose results never change decisions lose budget.
 
 **Revised by.** The share of experiments that changed a decision.
+
+The first form of the share is a per-workspace share of the week's spend, which the owner sets (`PATCH /api/workspaces/:id` with `allocation`) and nothing adjusts automatically. The backlog sweep reads it through `sweepOrder`: workspaces under their share are visited first, the largest shortfall first, and a workspace at or over its share is visited only in a firing where nothing else started, so the share orders the work and never leaves a slot idle. The record to review it against is `GET /api/backlog/allocation` (each workspace's actual part of the window and its shortfall, with the flow-improvement part) and the week's spend in the `ledger` table.
 
 The cost ceilings sit in one settings group, `quotaAndResume`: `backlogQuotaLimit` (the usage at which the backlog holds back) and `defaultBudgetUsd` (the budget of a Task made without one; null = none). Changing the group's value changes the default for every path that makes a local Task (a Cloud Task takes no budget); `autoStart.fallbackAt` switches runner by usage and is not a cost ceiling.
 

@@ -678,8 +678,8 @@ export function App() {
             health={health}
             workspaces={workspaces}
             clones={clones}
-            onAddWorkspaceFromGithub={async (repo, backlog, ownCopy) => {
-              await api.addWorkspaceFromGithub(repo, backlog, ownCopy);
+            onAddWorkspaceFromGithub={async (repo, backlog, ownCopy, ownCopyOwner) => {
+              await api.addWorkspaceFromGithub(repo, backlog, ownCopy, ownCopyOwner);
               await refreshClones();
             }}
             onAddWorkspace={async (path, backlog) => {
