@@ -50,8 +50,8 @@ async function verify() {
     const click = async (expression:string) => until(() => evaluate(`(()=>{const el=${expression};if(!el||el.disabled)return false;el.click();return true;})()`), "click");
     await call("Page.enable");
     await call("Emulation.setDeviceMetricsOverride",{width:1280,height:1400,deviceScaleFactor:1,mobile:false});
-    await call("Page.navigate",{url:base});
-    await click(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Knowledge')`);
+    await call("Page.navigate",{url:`${base}/settings`});
+    await click(`document.querySelector('#knowledge > summary')`);
     await until(() => evaluate(`document.body.textContent.includes('リポジトリ指定のルールは書き出さない')`), "repo warning");
     expect(await evaluate(`document.body.textContent.includes('取り込み')`)).toBe(false);
     expect(await evaluate(`document.querySelectorAll('.kn-mat')[0].querySelector('select') === null`)).toBe(true);
@@ -76,7 +76,8 @@ async function verify() {
     const otherWs = await post("/api/workspaces", { path: other, name: "other-fixture" });
     // Refresh workspace options, then changing the cleanup scope must invalidate its pending confirmation.
     await call("Page.reload");
-    await click(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Knowledge')`);
+    await call("Page.navigate",{url:`${base}/settings`});
+    await click(`document.querySelector('#knowledge > summary')`);
     await until(()=>evaluate(`!!document.querySelector('select[aria-label="管理ブロックを外すリポジトリ"]')`),"reload");
     const select = async (id: string) => {
       await until(() => evaluate(`!!document.querySelector('select[aria-label="管理ブロックを外すリポジトリ"] option[value="${id}"]')`), "workspace option");

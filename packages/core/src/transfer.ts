@@ -149,6 +149,68 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
   }
 }
 
+/** One entry of `writeTarZst`: bytes held in memory, or a file read from `path` as it is written. */
+export type TarEntry = { name: string; bytes: Uint8Array } | { name: string; path: string };
+
+/**
+ * tar → zstd into `out` (never overwritten, 0600), entry by entry: a file is read in chunks straight into the stream,
+ * cut at the size it had when it was opened, so no file is held whole. A file that is gone when its turn comes is left
+ * out (it was removed after the entries were chosen). A partial `out` is removed on failure.
+ */
+export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Promise<void> {
+  const fd = openSync(out, "wx", 0o600);
+  const z = createZstdCompress();
+  try {
+    const done = pipeline(z, createWriteStream("", { fd, autoClose: false }));
+    done.catch(() => undefined); // awaited below; this only keeps an early failure from being reported as unhandled
+    const write = async (b: Uint8Array) => {
+      if (!z.write(b)) await Promise.race([once(z, "drain"), done]);
+    };
+    for (const e of entries) {
+      if ("bytes" in e) {
+        await write(tarHeader(e.name, e.bytes.length));
+        await write(e.bytes);
+        await write(new Uint8Array(tarPad(e.bytes.length)));
+        continue;
+      }
+      let f: number;
+      try {
+        f = openSync(e.path, "r");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw err;
+      }
+      try {
+        const size = fstatSync(f).size;
+        await write(tarHeader(e.name, size));
+        for (let at = 0; at < size; ) {
+          const chunk = Buffer.allocUnsafe(Math.min(CHUNK, size - at));
+          const n = readSync(f, chunk, 0, chunk.length, at);
+          if (n === 0) throw new Error(`${e.path} shrank while it was being packed`);
+          await write(chunk.subarray(0, n));
+          at += n;
+        }
+        await write(new Uint8Array(tarPad(size)));
+      } finally {
+        closeSync(f);
+      }
+    }
+    await write(new Uint8Array(1024)); // the two empty blocks that end a tar
+    z.end();
+    await done;
+  } catch (e) {
+    z.destroy();
+    rmSync(out, { force: true });
+    throw e;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EBADF") throw e;
+    }
+  }
+}
+
 /** How long the snapshot waits for a writer's lock (the Db default, which this read-only connection does not get from Db). */
 const SNAPSHOT_BUSY_TIMEOUT_MS = 5000;
 

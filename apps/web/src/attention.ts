@@ -12,6 +12,17 @@ export function stopCandidates(tasks: TaskSummary[]): TaskSummary[] {
 }
 
 /**
+ * Whether the stop marks are read again for this list of candidates (`stopCandidates`) after `prev`, the candidates
+ * the last time (each `id:statusAt`): only when one came, or moved status. A candidate going away needs no read (its mark
+ * is no longer shown), nor does one that only changed other fields (a title, a judged outcome: `updatedAt`); a new stop
+ * record is read on its own notice.
+ */
+export function stopsToRead(prev: ReadonlySet<string> | null, tasks: TaskSummary[]): { keys: Set<string>; read: boolean } {
+  const keys = new Set(stopCandidates(tasks).map((t) => `${t.id}:${t.statusAt}`));
+  return { keys, read: [...keys].some((k) => !prev?.has(k)) };
+}
+
+/**
  * What a Task that holds or waits for a run slot is called (#1141): 実行中 / 承認待ち, and 実行枠待ち for an idle Task in the
  * daemon's queue (`queuedAt`). A Task running in the background keeps its own word. Home, the Task screen's head and the
  * Schedules queue say it with this one function.

@@ -1,6 +1,7 @@
 /**
  * What else fills the host's disk besides /tmp (#2549): the working directories local CI and hand-run checks leave under ~/.cache when they are killed
- * before its `finally`, and its failure logs, one per PR. Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
+ * before its `finally`, and its failure logs, one per PR; and the review clones the kit leaves under ~/.cache/ops-kit/review (a clone goes only
+ * once `gh` says its PR is closed). Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
  * Only `node:` here: sb-rescue shares no code with Switchboard (#178).
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -23,6 +24,29 @@ export const CACHE_WORK: RegExp[] = [
   /^[\w.-]+\.(?:e2e(?:-\d+)?|duration(?:-\d+)?|tag-ci(?:-[\w.-]+)?)\.(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6}$/, // a check's copy of the database or the tree, tag-ci's log too: <repo>.e2e.XXXXXX, <repo>.duration-<n>.XXXXXX; mktemp's suffix, so not myapp.e2e.report
 ];
 
+/** The review clones cross-runner-review leaves under `<cacheDir>/ops-kit/review`: <repo>.review<PR> / <repo>.recheck<PR>, matched against the whole name. */
+export const REVIEW_CLONE = /^[\w.-]+\.(?:review|recheck)(\d+)$/;
+
+/** The state of a pull request ("open" / "closed", merged included) from GitHub's REST API (not GraphQL: its quota is spent elsewhere), or null when it cannot be told. */
+async function ghPrState(repo: string, n: number, cwd: string): Promise<string | null> {
+  try {
+    // bounded: a connection that hangs would hold this sweep (and the ones after it) forever
+    return (await run(["timeout", "60", "gh", "api", `repos/${repo}/pulls/${n}`, "--jq", ".state"], cwd)) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** `<owner>/<name>` of a clone's origin when that is on GitHub, or null. */
+async function originRepo(dir: string): Promise<string | null> {
+  try {
+    const url = await run(["git", "-C", dir, "remote", "get-url", "origin"], dir);
+    return /^(?:https:\/\/(?:[^@/]+@)?|ssh:\/\/git@|git@)github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The repository's git directory a worktree belongs to (`gitdir: <repo>/.git/worktrees/<name>` in its .git file), or null. */
 function ownerGitDir(dir: string): string | null {
   try {
@@ -38,10 +62,16 @@ function ownerGitDir(dir: string): string | null {
 }
 
 /**
- * Removes every local-CI leftover under `cacheDir` that is removable right now, then lets the repositories they were worktrees
+ * Removes every local-CI leftover under `cacheDir` that is removable right now, and the old review clones under `<cacheDir>/ops-kit/review`
+ * (a local change's worktree by age alone; a clone only when `prState` says its PR is closed), then lets the repositories they were worktrees
  * of forget them (`git worktree prune`). A prune that fails is logged, not counted: the directory is gone either way.
  */
-export async function sweepCacheWork(cacheDir: string, judge: TmpJudge, now = Date.now()): Promise<TmpSweep> {
+export async function sweepCacheWork(
+  cacheDir: string,
+  judge: TmpJudge,
+  now = Date.now(),
+  prState: (repo: string, n: number) => Promise<string | null> = (repo, n) => ghPrState(repo, n, cacheDir),
+): Promise<TmpSweep> {
   const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
   if (!existsSync(cacheDir)) return sweep;
   const busy = inUse(cacheDir, judge.proc);
@@ -66,6 +96,37 @@ export async function sweepCacheWork(cacheDir: string, judge: TmpJudge, now = Da
     sweep.removed++;
     sweep.freedBytes += entry.bytes;
     if (gitDir) gitDirs.add(gitDir);
+  }
+  // the review clones: a worktree of a local change goes by age alone; a clone only once GitHub says its PR is closed (not told: it stays)
+  const reviewRoot = join(cacheDir, "ops-kit", "review");
+  if (existsSync(reviewRoot)) {
+    const reviewBusy = inUse(reviewRoot, judge.proc);
+    for (const name of readdirSync(reviewRoot).filter((n) => REVIEW_CLONE.test(n))) {
+      const path = join(reviewRoot, name);
+      let entry: TmpEntry;
+      try {
+        entry = inspect(reviewRoot, name, now, reviewBusy, [REVIEW_CLONE], CACHE_WORK_STALE_MS);
+        if (!entry.removable) continue;
+        const gitDir = ownerGitDir(path);
+        if (!gitDir) {
+          if (!lstatSync(join(path, ".git"), { throwIfNoEntry: false })?.isDirectory()) continue; // a .git file that names no worktree, or none at all: not a gh clone
+          const repo = await originRepo(path);
+          if (!repo || (await prState(repo, Number(REVIEW_CLONE.exec(name)![1]))) !== "closed") continue;
+          entry = inspect(reviewRoot, name, now, inUse(reviewRoot, judge.proc), [REVIEW_CLONE], CACHE_WORK_STALE_MS); // judged again after the wait
+          if (!entry.removable) continue;
+        }
+        rmSync(path, { recursive: true, force: true });
+        if (gitDir) gitDirs.add(gitDir);
+      } catch (e) {
+        if (existsSync(path)) {
+          sweep.skipped++;
+          console.error(`cache sweep: ${name}:`, e);
+        }
+        continue;
+      }
+      sweep.removed++;
+      sweep.freedBytes += entry.bytes;
+    }
   }
   for (const gitDir of gitDirs) {
     if (!existsSync(gitDir)) continue;

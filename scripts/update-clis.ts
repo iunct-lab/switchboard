@@ -6,9 +6,11 @@
  *   <runner> version: <v>（最新）                      — nothing to do
  *   <runner> updated: <old> → <new>（確認 ok）          — updated, and one read-only turn came back
  *   <runner> rolled back: <new> → <old>（確認 失敗: …） — the update or the turn failed; the symlink is back on <old>
+ *   <runner> rolled back: <new> → <old>（確認 できない: …） — the turn hit the runner's usage limit; back on <old>, retried the next day
  *   <runner> 戻せなかった: …                            — it failed and the old version could not be put back
  *   <runner> version / latest: 分からない（…）          — the CLI is missing or the registry could not be read
- * Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll back, or the update failed / 2 = cannot tell.
+ * Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll back, or the update failed / 2 = cannot tell
+ * (including a turn stopped by the usage limit, which says nothing about the new version).
  *
  * Each CLI's own `update` flips a symlink to the new version and keeps the old files, so rolling back is flipping the
  * symlink to where it pointed before. Running Tasks keep the files they started with; only Tasks that start later use the new CLI.
@@ -22,6 +24,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createClaudeAdapter } from "../packages/adapters/claude/src/index.ts";
 import { createCodexAdapter } from "../packages/adapters/codex/src/index.ts";
+import { isLimitText } from "../packages/core/src/ratelimit.ts";
 import { readOnlyMode, runSuggestionTurn } from "../packages/core/src/suggest-llm.ts";
 import { compareVersions, hostVersions, type Runner, type VersionReaders } from "./check-models";
 import { fileRequest } from "./file-request";
@@ -92,7 +95,8 @@ export async function updateClis(deps: UpdateDeps, links: Record<Runner, string>
       continue;
     }
     let reached = latest; // what the update actually installed, once it can be read (npm's latest is only what was asked for)
-    const fail = async (reason: string) => {
+    /** `untested`: the check could not run (the usage limit) — rolled back, but not a failure of the new version. */
+    const fail = async (reason: string, untested = false) => {
       let restored = false;
       let detail = "";
       try {
@@ -110,6 +114,11 @@ export async function updateClis(deps: UpdateDeps, links: Record<Runner, string>
         if (!restored) detail = `--version が ${now ?? "無し"}`;
       } catch (e) {
         detail = short((e as Error).message);
+      }
+      if (restored && untested) {
+        lines.push(`${runner} rolled back: ${reached} → ${installed}（確認 できない: ${reason}）`);
+        worse(2);
+        return;
       }
       lines.push(
         restored
@@ -139,7 +148,9 @@ export async function updateClis(deps: UpdateDeps, links: Record<Runner, string>
     try {
       await deps.smoke(runner);
     } catch (e) {
-      await fail(`1 ターンが通らない: ${short((e as Error).message)}`);
+      const msg = (e as Error).message;
+      if (isLimitText(runner, msg)) await fail(`使用上限で 1 ターンが通らない: ${short(msg)}`, true);
+      else await fail(`1 ターンが通らない: ${short(msg)}`);
       continue;
     }
     lines.push(`${runner} updated: ${installed} → ${now}（確認 ok）`);

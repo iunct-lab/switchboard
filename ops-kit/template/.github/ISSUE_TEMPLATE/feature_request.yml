@@ -27,15 +27,6 @@ body:
       label: 添付
       description: スクリーンショットなど。API から作るときは feedback-assets ブランチに置いた画像の URL（request-to-backlog の手順）。個人情報が写るものは載せない。
       value: なし
-  - type: dropdown
-    id: area
-    attributes:
-      label: 対象コンポーネント / Component
-      multiple: true
-      options:
-        - __AREA__
-    validations:
-      required: false
   - type: textarea
     id: derived
     attributes:

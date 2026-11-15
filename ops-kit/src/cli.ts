@@ -1,18 +1,19 @@
 #!/usr/bin/env bun
-import { readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import { BACKLOG_USAGE, readRecords, runBacklog, triageUsage } from "./backlog-client.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { BACKLOG_USAGE, readRecords, repoName, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
 import { bootstrap } from "./bootstrap.ts";
 import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, sectionName, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
 import { exportCopy } from "./export-copy.ts";
 import { resolveReviewThread } from "./forge-github.ts";
-import { forgeTargetOf, originOf } from "./forge.ts";
+import { forgeTargetOf, originOf, remoteOf } from "./forge.ts";
 import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
 import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { formatLint, lint } from "./lint.ts";
+import { KNOWN_FAILURES_FILE, parseKnownFailures } from "./known-failures.ts";
 import { findIssueRefs, publicFiles } from "./issue-refs.ts";
 import { pullMain } from "./pull-main.ts";
 import { gitIn, pushRebased } from "./push-rebased.ts";
@@ -545,7 +546,16 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         const records = stored ? await readRecords(env, { fresh: rest.includes("--fresh") }) : undefined;
         if (records) err(`アプリの保存値を検査（${records.repository}、最終取得 ${new Date(records.fetchedAt).toISOString()}${rest.includes("--fresh") && !records.unsynced ? "、取込み済み" : ""}）`);
         if (records?.unsynced) err(records.unsynced);
-        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records });
+        // the registry sits next to ops.config.json; a repository without one is not checked for it. Its numbers are this
+        // checkout's Issues, so it is read only when the linted repository is this checkout's own (not GH_REPO / --workspace elsewhere)
+        const dir = configPath || hasConfig() ? dirname(findConfig(configPath)) : null;
+        const remote = dir && existsSync(join(dir, KNOWN_FAILURES_FILE)) ? originOf(dir) : null;
+        const own = remote ? remoteOf(remote)?.path ?? null : null;
+        const target = !dir ? null : records?.repository ?? (await repoName(env, dir).catch(() => null));
+        const registry = dir && own && target && own.toLowerCase() === target.toLowerCase() ? join(dir, KNOWN_FAILURES_FILE) : null;
+        if (dir && !registry && existsSync(join(dir, KNOWN_FAILURES_FILE))) err(`${KNOWN_FAILURES_FILE} は検査しない（検査する ${target ?? "リポジトリ不明"} がこの checkout の origin ${own ?? "不明"} と違う）`);
+        const knownFailures = registry && existsSync(registry) ? parseKnownFailures(readFileSync(registry, "utf8")) : undefined;
+        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records, knownFailures });
         for (const line of formatLint(violations, warnings)) out(line);
         return violations.length > 0 ? 1 : 0;
       }

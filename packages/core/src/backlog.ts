@@ -17,7 +17,9 @@ import type { SetupScripts } from "./skillsync.ts";
 import { loadProcess, renderEntry, type ProcessDef } from "./process-defs.ts";
 import { afterTime, judge, type Work } from "../../../scripts/parallel-guard.ts";
 import { pathsIn } from "../../../scripts/task-paths.ts";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { KNOWN_FAILURES_FILE, parseKnownFailures, type KnownFailure } from "../../../ops-kit/src/known-failures.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubFailure, type GithubResponse } from "../../../ops-kit/src/gh.ts";
 
@@ -92,6 +94,27 @@ function section(body: string, name: string): string {
     if (inside) out.push(line);
   }
   return out.join("\n");
+}
+
+/** The Issue a PBI came from: the first `#N` in its `## 元要望` section (null when it says "なし"). */
+export function requestOf(body: string): number | null {
+  const origin = /^## 元要望\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(body)?.[1] ?? "";
+  const n = /#(\d+)/.exec(origin)?.[1];
+  return n ? Number(n) : null;
+}
+
+/** An entry of the known-failures registry this close to its last day (or past it) puts its Issue's PBIs before Priority. */
+export const KNOWN_FAILURE_DUE_DAYS = 1;
+
+/** The Issues of the registry's entries whose `until` (the last day in effect, UTC) is at most `KNOWN_FAILURE_DUE_DAYS` days away, an expired one too. */
+export function dueSoonIssues(entries: KnownFailure[], now: number): Set<number> {
+  const today = Math.floor(now / 86_400_000);
+  return new Set(entries.filter((e) => Date.parse(`${e.until}T00:00:00Z`) / 86_400_000 - today <= KNOWN_FAILURE_DUE_DAYS).map((e) => e.issue));
+}
+
+/** `dueSoonIssues` of the registry in a workspace's checkout; an absent or unreadable file is none (picking goes on without the tier). */
+export function dueSoonOf(dir: string, now = Date.now()): Set<number> {
+  try { return dueSoonIssues(parseKnownFailures(readFileSync(join(dir, KNOWN_FAILURES_FILE), "utf8")), now); } catch { return new Set(); }
 }
 
 /**
@@ -287,6 +310,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     flow: raw.labels.nodes.some((l) => l.name === FLOW_LABEL),
     bodyChars: raw.body.length,
     requestChars: requestTextChars(raw.body),
+    origin: pbi ? requestOf(raw.body) : null,
     labels: raw.labels.nodes.map((l) => l.name),
     waits: [],
     waitsAt: null,
@@ -767,9 +791,9 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
  * any stage (`failedIn`, `replyWaitingIn`).
  * An item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
-export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = []): Picked | null {
+export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set()): Picked | null {
   // An 実装 (`complete`) that would touch what other work touches is not started; the next candidate goes instead
-  return candidates(items, slot, order, flow, defs).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
+  return candidates(items, slot, order, flow, defs, dueSoon).find((c) => !(c.action === "complete" && isOverlapped(c.item))) ?? null;
 }
 
 /** The items of the 実装 slot backlog-next leaves for their files overlapping other work, or for that not being judged. */
@@ -782,23 +806,26 @@ export type Picked = { item: BacklogItem; action: BacklogAction; resume?: true; 
  * backlog queue's numbers) the 実装 slot takes only the items in it, in its order; what holds an item is judged as
  * without it.
  */
-function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = []): Picked[] {
+function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set()): Picked[] {
   const resumed = (i: BacklogItem) =>
     isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
   const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
+  // a PBI of (or itself) an Issue a known failure's registry entry names, close to its end, goes before Priority
+  const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
   // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`)
   const flowHeld = new Set(flowHeldIn(items, slot, flow));
   const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
-  // The ones to finish first (`resumed`), then Priority, then not yet worked on, then the stage, then the oldest;
+  // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
   // the queue's order instead when there is one
   const ranked = queued ? open.filter((i) => queued(i) >= 0) : open;
   ranked.sort(
     (a, b) =>
       (queued ? queued(a) - queued(b) : 0) ||
       first(a) - first(b) ||
+      due(a) - due(b) ||
       priorityRank(a.priority) - priorityRank(b.priority) ||
       tried(a) - tried(b) ||
       STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage) ||
@@ -982,9 +1009,13 @@ const issueIds = (records: Iterable<BacklogRecord>) =>
 /** A PBI's own record and its Tasks': an edit kept for one of them is the PBI's too (its stage and completion come from the Tasks). */
 const familyOf = (own: string | undefined, subIssues: number[], ids: Map<number, string>) => new Set([own, ...subIssues.map((n) => ids.get(n))].filter((x): x is string => !!x));
 
+/** Issue `n`'s record among the Issue records: one made here (sb:) with the number of one of GitHub's yields to GitHub's. */
+const issueRecordOf = (issues: BacklogRecord[], n: number): BacklogRecord | undefined =>
+  issues.filter((r) => ((r.local ?? r.remote) as BacklogIssueData | null)?.number === n).sort((a, b) => Number(a.externalId.startsWith("sb:")) - Number(b.externalId.startsWith("sb:")))[0];
+
 function issueRecord(db: Db, source: BacklogSource, ref: number | string): BacklogRecord | null {
   // while the sync is being turned on an Issue made here may still have the number of one of GitHub's: #N is GitHub's
-  if (typeof ref === "number") return (ref > 0 && db.listBacklogRecords(source, "issue").filter((r) => ((r.local ?? r.remote) as BacklogIssueData | null)?.number === ref).sort((a, b) => Number(a.externalId.startsWith("sb:")) - Number(b.externalId.startsWith("sb:")))[0]) || null;
+  if (typeof ref === "number") return (ref > 0 && issueRecordOf(db.listBacklogRecords(source, "issue"), ref)) || null;
   const op = db.getBacklogOperation(ref);
   if (!op || op.kind !== "create" || op.repository !== source.repository || op.host !== source.host) return null;
   return db.getBacklogRecord({ ...source, objectKind: "issue", externalId: op.target });
@@ -1688,6 +1719,40 @@ export function storedIssueHeads(db: Db, ws: Pick<BacklogWorkspace, "id">): Map<
     if (!heads.has(value.number) || (heads.get(value.number)!.own && !own)) heads.set(value.number, { state: value.state, title: value.title, own });
   }
   return new Map([...heads].map(([n, h]) => [n, { state: h.state, title: h.title }]));
+}
+
+/** What `storedIssueReader` reads: an Issue as `readStoredIssue` shows it, and its Project fields as shown. */
+export interface StoredIssueReader {
+  issue(workspaceId: string, number: number): BacklogIssueData | null;
+  /** The Project item's fields of the Issue, as shown (a pending "remove from Project" hides them); null = none. */
+  fields(workspaceId: string, number: number): Record<string, string | number | null> | null;
+}
+
+/**
+ * `readStoredIssue`'s Issue and Project fields for many Issues of a request: a workspace's records are read the first
+ * time they are asked and kept for the reader's life, so a list of rows that look up a few Issues each reads them once.
+ * Make one per request.
+ */
+export function storedIssueReader(db: Db): StoredIssueReader {
+  const issues = new Map<string, BacklogRecord[]>();
+  const shownAll = new Map<string, BacklogRecord[]>();
+  return {
+    issue(workspaceId, number) {
+      const source = db.getWorkspaceBacklogSource(workspaceId);
+      if (!source || number <= 0) return null;
+      if (!issues.has(workspaceId)) issues.set(workspaceId, db.listBacklogRecords(source, "issue"));
+      const rec = issueRecordOf(issues.get(workspaceId)!, number);
+      const value = rec && ((shown(rec) ?? rec.local ?? rec.remote) as BacklogIssueData | null);
+      return value ? { ...value, body: withoutMarker(value.body) } : null;
+    },
+    fields(workspaceId, number) {
+      const source = db.getWorkspaceBacklogSource(workspaceId);
+      if (!source || number <= 0) return null;
+      if (!shownAll.has(workspaceId)) shownAll.set(workspaceId, shownRecords(db, source));
+      const item = projectItemOf(shownAll.get(workspaceId)!, source, number);
+      return item ? (item.remote as BacklogProjectItemData).fields : null;
+    },
+  };
 }
 
 /**

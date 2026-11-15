@@ -519,9 +519,9 @@ stageOf(ci, 304);
   await answerCheck(`check:${m13}:`, OPTION);
   await until(() => replies.some((r) => r.prompt === "check13" && r.text === `- PR #13 をマージしてよいか: ${OPTION}`), "#13's answer reaches the Task", () => replies);
   assert(replies.filter((r) => r.prompt === "check13").length === 1, "#13 got more than one reply");
-  // a Task with an old stop (CI failed): its question is answered as any other
+  // a Task with an old stop (CI failed, a waiting depends stop recorded before the question): its question is answered as any other
   const stale = await checkTask("古い停止のある Task", "checkstale");
-  core.db.appendEvent(stale, { t: "stop.record", stop: { id: "s-stale", work: { workspaceId: meta.id, issue: null, taskId: stale }, op: "gh pr merge", target: "#15", reason: "input", evidence: "CI が失敗", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
+  core.db.appendEvent(stale, { t: "stop.record", stop: { id: "s-stale", work: { workspaceId: meta.id, issue: null, taskId: stale }, op: "gh pr merge", target: "#15", reason: "depends", evidence: "CI が失敗", safety: "before-effect", conditions: [{ key: "ci", value: "failure", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
   await open();
   await cardOf(`check:${stale}:`);
   assert(await evaluate(`!${card(`check:${stale}:`)}.querySelector('.ask-blocker')`), "an old stop shows a blocker on a question card");

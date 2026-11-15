@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { TaskSummary, taskSummary, type Task, type TaskStatus } from "@switchboard/protocol";
 import { filterTasks, openTask, upsertSummary } from "./taskList.ts";
 
-const task = (id: string, title: string, cwd: string, status: TaskStatus = "done", archivedAt: number | null = null): Task => ({ id, workspaceId: null, title, runner: "claude", cwd, scope: [cwd], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
+const task = (id: string, title: string, cwd: string, status: TaskStatus = "done", archivedAt: number | null = null): Task => ({ id, workspaceId: null, title, runner: "claude", cwd, scope: [cwd], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt: 0 });
 const ids = (ts: Task[]) => ts.map((t) => t.id);
 const all = { q: "", status: "all" as const, archived: false };
 
@@ -53,7 +53,7 @@ test("upsertSummary keeps a task.updated in the list shape", () => {
   const added = upsertSummary(listed, task("z", "New", "/work/new"));
   expect(added.map((t) => t.id)).toEqual(["z", ...ids(list)]);
   for (const t of [...replaced, ...added]) expect(Object.keys(t).sort()).toEqual(keys);
-  expect(keys.length).toBe(21);
+  expect(keys.length).toBe(22);
 });
 
 test("openTask keeps the Task last shown while its detail is forgotten", () => {

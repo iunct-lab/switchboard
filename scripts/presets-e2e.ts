@@ -245,6 +245,54 @@ try {
   const widthSettings = await evaluate("document.documentElement.scrollWidth");
   await shot("settings-390.png");
   assert(widthHome <= 390 && widthSettings <= 390, `scrolls sideways at 390px: Home ${widthHome}, 設定 ${widthSettings}`);
+  // 7a. 操作数: how many operations the 3-step call takes, 4 ways. One click or one key press is 1; the characters
+  // typed into the target field are not counted. Counting starts when the request / reply box is visible and ends when the
+  // expanded text is in it. A native select is 2 (open the list, choose the entry). The Workspace on Home is chosen before
+  // counting: the request needs one whatever the preset (自動 cannot check a target).
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  const planText = "今の状況を確認して報告してください";
+  const created = await fetch(`${base}/api/presets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "状況の確認", text: planText }) });
+  assert(created.status === 201, `the plain preset: ${created.status}`);
+  const targetPreset = "レビュー対応からマージまで";
+  const targetText = `PR ${REPO}#12 のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）`;
+  const presetRequests = () => evaluate(`performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/presets')).length`) as Promise<number>;
+  const measure = async (where: "home" | "task", withTarget: boolean) => {
+    await call("Page.navigate", { url: where === "home" ? base : `${base}/task/${task.id}` });
+    const box = where === "home" ? ".compose textarea" : ".composer textarea";
+    await until(() => evaluate(`!!document.querySelector(${JSON.stringify(box)}) && !!document.querySelector('.preset-picker button')`), `${where}: the box and the picker`);
+    if (where === "home") {
+      await until(() => evaluate(`[...document.querySelectorAll('.compose select option')].some((o) => o.value === ${JSON.stringify(wsDev.id)})`), "the Workspace in the request box");
+      await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsDev.id)})`);
+      await sleep();
+    }
+    const requestsOnOpen = await presetRequests();
+    let n = 0;
+    const name = withTarget ? targetPreset : "状況の確認";
+    n += 1; // the button 「定型の指示…」
+    await openPicker();
+    n += 2; // the select: open the list, choose the entry
+    await page(`pick(${JSON.stringify(name)})`);
+    const bodyLine = (withTarget ? targetText : planText).split("\n")[0].slice(0, 80);
+    const visible = await evaluate(`document.querySelector('.preset-picker').innerText.includes(${JSON.stringify(bodyLine)})`);
+    if (withTarget) {
+      n += 1; // focus on the target field (the characters are not counted)
+      await page(`set(document.querySelector('.preset-picker input'), '#12')`);
+    }
+    await sleep();
+    n += 1; // 「本文に入れる」
+    await page(`button(picker(), '本文に入れる').click()`);
+    const text = await until(() => evaluate(`document.querySelector(${JSON.stringify(box)}).value`), `${where} ${withTarget ? "target" : "plain"}: the text in the box`).catch(async (e) => { console.error(await evaluate(`document.querySelector('.compose, .composer').innerText + ' | ' + document.querySelector('.compose select')?.value`)); throw e; });
+    assert(text === (withTarget ? targetText : planText), `${where} ${withTarget ? "target" : "plain"}: ${text}`);
+    return { n, visible, requestsOnOpen };
+  };
+  const m = { "home-plain": await measure("home", false), "task-plain": await measure("task", false), "home-target": await measure("home", true), "task-target": await measure("task", true) };
+  const ops = Object.entries(m).map(([k, v]) => `${k}=${v.n}`).join(" ");
+  console.log(`preset-ops ${ops}`);
+  // the before values in docs/design/presets.md 「評価項目」: a change to the call has to update both
+  assert(ops === "home-plain=4 task-plain=4 home-target=5 task-target=5", `preset-ops differs from the 評価項目 table: ${ops}`);
+  console.log(`preset-first-line-visible home=${m["home-plain"].visible} task=${m["task-plain"].visible}`);
+  console.log(`preset-requests-on-open home=${m["home-plain"].requestsOnOpen} task=${m["task-plain"].requestsOnOpen}`);
+
   assert(!errors.length, `page errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ listed, refused: { empty: empty.hint, auto: auto.hint, otherRepo, stale: stale.warn }, sent: { title: box.title, text: box.text, permissionMode: mode, approval: perm.buttons }, reply, left, options, scrollWidth: { home: widthHome, settings: widthSettings } }, null, 1));
 } finally {

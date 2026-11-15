@@ -164,7 +164,7 @@ export const RunnerStats = z.object({
   outcomes: z.object({ done: z.number(), needs_action: z.number(), failed: z.number(), unknown: z.number() }),
   /** Median ledger total in API-equivalent USD; null when there are no tasks. */
   medianCostUsd: z.number().nullable(),
-  /** Median creation → last event, in ms; null when there are no tasks. */
+  /** Median creation → last event (trailing `status` events, such as the cleanup note after `done`, not counted), in ms; null when there are no tasks. */
   medianDurationMs: z.number().nullable(),
 });
 export type RunnerStats = z.infer<typeof RunnerStats>;
@@ -268,10 +268,22 @@ export const Task = z.object({
    * sent to the primary are copied to it. Set at creation, never changed; null = not a shadow.
    */
   shadowOf: z.string().nullable(),
+  /**
+   * Fork: id of the Task this one branched from at a past turn. The child continues the parent's conversation up to
+   * that turn (its first reply starts a forked runner session) and then goes its own way; it shares the parent's
+   * working tree. Set at creation, never changed; null = not a fork.
+   */
+  forkOf: z.string().nullable(),
+  /** Fork: the seq of the parent's `session.end` event the branch was taken at; null = not a fork. */
+  forkSeq: z.number().int().nullable(),
+  /** Fork: that `session.end`'s `turn` (the runner's own pointer to the turn); null = not a fork. */
+  forkTurn: z.string().nullable(),
   /** Shadow run: the user stopped this shadow (中断), so replies to the primary are no longer copied to it. */
   shadowStopped: z.boolean(),
   /** Why the daemon picked this task's Workspace; null = the person picked it. Set at creation, never changed. */
   workspaceReason: z.string().nullable(),
+  /** Which machine the Task ran on, when its record came from another one (an uplink); null or absent = this instance itself. */
+  machine: z.string().nullable().optional(),
   /** The title is provisional: it is set once more after the first turn. A title the person gave or changed is false. */
   titlePending: z.boolean(),
   /** What the task came to; separate from `status`. Set by the rule on a status change, by the person, and by the judge of the last reply. */
@@ -319,6 +331,7 @@ export const TaskSummary = Task.pick({
   queuedAt: true,
   shadowOf: true,
   shadowStopped: true,
+  forkOf: true,
   runner: true,
   executionMode: true,
 });
@@ -345,6 +358,7 @@ export function taskSummary(t: Task): TaskSummary {
     queuedAt: t.queuedAt,
     shadowOf: t.shadowOf,
     shadowStopped: t.shadowStopped,
+    forkOf: t.forkOf,
     runner: t.runner,
     executionMode: t.executionMode,
   };
@@ -453,6 +467,14 @@ export const JudgeEval = z.object({
 });
 export type JudgeEval = z.infer<typeof JudgeEval>;
 
+/** The person's answers to the three value questions, each optional: was the intent met, was there complexity or an alternative nobody asked for, did it lead to value. A row without them reads as before. */
+export const HumanAnswers = z.object({
+  intent: z.enum(["fit", "partial", "wrong", "unknown"]).optional(),
+  extra: z.enum(["none", "some"]).optional(),
+  value: z.enum(["used", "unused", "unknown"]).optional(),
+});
+export type HumanAnswers = z.infer<typeof HumanAnswers>;
+
 /**
  * The person's own evaluation of a task: one rating and a note. Optional — most tasks never get one, and the
  * list and its sums stand without it. Kept next to the judge's row so the two can be compared later.
@@ -462,11 +484,11 @@ export const HumanEval = z.object({
   comment: z.string().max(1000),
   by: z.literal("user"),
   ts: z.number(),
-});
+}).extend(HumanAnswers.shape);
 export type HumanEval = z.infer<typeof HumanEval>;
 
 /** `PUT /api/tasks/:id/evals/human` body. */
-export const HumanEvalInput = z.object({ rating: z.number().int().min(1).max(5), comment: z.string().max(1000).default("") });
+export const HumanEvalInput = z.object({ rating: z.number().int().min(1).max(5), comment: z.string().max(1000).default("") }).extend(HumanAnswers.shape);
 export type HumanEvalInput = z.infer<typeof HumanEvalInput>;
 
 /** `GET /api/tasks/:id/evals`: one slot per source. null = not evaluated (a Cloud task has no rules row; a judge row needs a reply; a human row is the person's choice). */
@@ -502,9 +524,32 @@ export const EvalsListRow = z.object({
   rules: z.object({ toolCalls: z.number(), toolFailures: z.number(), errors: z.number(), userInstructions: z.number(), stops: z.number(), lastEnd: z.enum(["ok", "error", "aborted"]).nullable(), daemonStops: z.number(), lastCutByDaemon: z.boolean() }).nullable(),
   /** `ts`: when the judge row was written (`task_evals.ts`) — the weekly sample picks by it. */
   judge: z.object({ average: z.number(), scores: z.record(z.string(), z.number()), rubric: z.string(), by: z.string(), ts: z.number() }).nullable(),
-  human: z.object({ rating: z.number(), comment: z.string() }).nullable(),
+  human: z.object({ rating: z.number(), comment: z.string() }).extend(HumanAnswers.shape).nullable(),
 });
 export type EvalsListRow = z.infer<typeof EvalsListRow>;
+
+/**
+ * What a person needs to rate a task without opening its conversation. `request`: a stage Task's Issue read as the PBI
+ * (the Issue itself when it is a PBI, its parent when it is a Task; null = not stored) with the first `## 元要望`
+ * Issue's `## 要望` head (null = none); any other Task's first message, cut. `interventions`: the person's follow-up
+ * instructions and the stops whose reason is `decision`. `outputs`: the pull requests, local changes and Issues the Task
+ * opened, with their stored state (null = not in the workspace's copy); `pbiStatus`: a stage Task's PBI's Project Status
+ * (null = not stored, or not a stage Task).
+ */
+export const EvalContext = z.object({
+  request: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("stage"),
+      pbi: z.object({ number: z.number(), title: z.string(), story: z.string(), outOfScope: z.string() }).nullable(),
+      source: z.object({ number: z.number(), head: z.string() }).nullable(),
+    }),
+    z.object({ kind: z.literal("prompt"), text: z.string() }),
+  ]),
+  interventions: z.object({ userInstructions: z.number(), decisionStops: z.number() }),
+  outputs: z.array(z.object({ kind: z.enum(["pr", "change", "issue"]), repo: z.string(), number: z.number(), title: z.string().nullable(), state: z.enum(["open", "merged", "closed"]).nullable() })),
+  pbiStatus: z.string().nullable(),
+});
+export type EvalContext = z.infer<typeof EvalContext>;
 
 /**
  * The Insights summary: the tasks asked to be rated this week (`sample`, picked from those judged in the week
@@ -513,7 +558,7 @@ export type EvalsListRow = z.infer<typeof EvalsListRow>;
  */
 export const EvalsSummary = z.object({
   weekStart: z.number(),
-  sample: z.array(EvalsListRow),
+  sample: z.array(EvalsListRow.extend({ context: EvalContext })),
   gap: z.object({ count: z.number(), mean: z.number().nullable() }),
 });
 export type EvalsSummary = z.infer<typeof EvalsSummary>;
@@ -545,6 +590,10 @@ export const NewRepoInput = z.object({
   purpose: z.string().trim().min(1).max(2_000),
 });
 export type NewRepoInput = z.infer<typeof NewRepoInput>;
+
+/** 立ち上げ: the concept the baseline Task starts from (the p2-baseline candidate). It goes into the Task's first prompt as data, and is kept nowhere else. */
+export const BaselineInput = z.object({ concept: z.string().trim().min(1).max(8_000) });
+export type BaselineInput = z.infer<typeof BaselineInput>;
 
 export const CreateTaskInput = z.object({
   executionMode: ExecutionMode.default("local"),
@@ -623,6 +672,10 @@ export type SetOutcomeInput = z.infer<typeof SetOutcomeInput>;
 /** `POST /api/tasks/:id/archive`: hide a stopped Task from the list, or bring it back. */
 export const SetArchivedInput = z.object({ archived: z.boolean() });
 export type SetArchivedInput = z.infer<typeof SetArchivedInput>;
+
+/** `POST /api/tasks/:id/fork`: the seq of the `session.end` of the turn to branch from. */
+export const ForkTaskInput = z.object({ seq: z.number().int().positive() });
+export type ForkTaskInput = z.infer<typeof ForkTaskInput>;
 
 /**
  * A file the person attached to a turn. Uploaded into the daemon's data directory, then moved under the task
@@ -740,7 +793,7 @@ export type TaskJudgement = z.infer<typeof TaskJudgement>;
  * The kinds of Task that start by themselves: the feedback modes (`FeedbackInput.mode`) and the backlog stages
  * (`BacklogAction`), under their own names.
  */
-export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync"]);
+export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync", "adopt-repo", "baseline"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
 /** One kind's own runner / model / effort; `model` / `effort` empty = that runner's CLI default. */
@@ -769,6 +822,8 @@ export const AutoStartSettings = z
         direct: AutoStartChoice.optional(),
         "new-repo": AutoStartChoice.optional(),
         "upstream-sync": AutoStartChoice.optional(),
+        "adopt-repo": AutoStartChoice.optional(),
+        baseline: AutoStartChoice.optional(),
       })
       .prefault({}),
     /**
@@ -810,7 +865,7 @@ const quotaAndResumeFields = {
   flowLimit: z.number().int().min(0).max(100),
   /** The budget (USD) of a Task made without one (a request, a schedule with none). null = no budget. Cost caps live in this group: this, `fableBudgetUsd` and `backlogQuotaLimit`. */
   defaultBudgetUsd: z.number().positive().max(10_000).nullable(),
-  /** Fable の Task に、予算が無ければ付ける既定の予算（#1989）。Fable の Task では `defaultBudgetUsd` より先に使う。null = 付けない */
+  /** Fable の Task に、予算が無ければ付ける既定の予算。Fable の Task では `defaultBudgetUsd` より先に使う。null = 付けない */
   fableBudgetUsd: z.number().positive().max(10_000).nullable(),
 };
 const judgeAndChoiceFields = {
@@ -1017,6 +1072,8 @@ export const SettingsPatch = z.object({
           direct: autoStartChoicePatch,
           "new-repo": autoStartChoicePatch,
           "upstream-sync": autoStartChoicePatch,
+          "adopt-repo": autoStartChoicePatch,
+          baseline: autoStartChoicePatch,
         })
         .partial(),
       /** Replaces the whole order. */
@@ -1865,6 +1922,8 @@ export const RunnerInfo = z.object({
   bedrockAvailable: z.boolean().default(false),
   /** What to type in a terminal tab to log in again. */
   loginHint: z.string().optional(),
+  /** The runner can start a Task from a past turn of another (the adapter has `forks` and the detected version is at least its `forkMinVersion`). */
+  forks: z.boolean().default(false),
 });
 export type RunnerInfo = z.infer<typeof RunnerInfo>;
 
@@ -2031,6 +2090,8 @@ export const BacklogItem = z.object({
   bodyChars: z.number().int().min(0),
   /** The length of the `## 要望` section's text (fence lines left out), what `auto.maxBodyChars` compares first; null = the Issue has no such section, or it holds no words (the body's length is used). */
   requestChars: z.number().int().min(0).nullable(),
+  /** The Issue a PBI's `## 元要望` section names first; null = a request, or a PBI naming none. */
+  origin: z.number().int().nullable(),
   /** The Issue's label names: what a process definition's `auto.excludeLabels` and `direct-returned` read. */
   labels: z.array(z.string()),
   /**
@@ -2682,3 +2743,23 @@ export const BalanceRow = z.object({
   kinds: BalanceKinds,
 });
 export type BalanceRow = z.infer<typeof BalanceRow>;
+
+/**
+ * What the weekly quota leaves. Per runner: the use of the current window (0 once it has reset or when the current window has no record), when
+ * it resets (epoch s, null when the current window has no record), and `saturated` when the current or the previous window (reset within
+ * the last 7 days) reached 100%. A runner with no window recorded at all has no entry. `interventionsPerDay` is the last 7 days' count
+ * over 7. `medianWeeklyUsd` is the median spend of the workspaces that spent in the last 7 days; `moreRepos` the whole number of such
+ * workspaces the remaining quota would carry at the same use (0 when `limitedBy` is "quota"; null when the use or the median is unknown).
+ */
+export const BalanceCapacity = z.object({
+  runners: z.array(z.object({ runner: RunnerId, utilization: z.number().nullable(), resetsAt: z.number().nullable(), saturated: z.boolean() })),
+  interventionsPerDay: z.number(),
+  medianWeeklyUsd: z.number().nullable(),
+  moreRepos: z.number().nullable(),
+  limitedBy: z.literal("quota").nullable(),
+});
+export type BalanceCapacity = z.infer<typeof BalanceCapacity>;
+
+/** The workspaces' balance over `days` days and the capacity left. */
+export const BalanceView = z.object({ days: z.union([z.literal(7), z.literal(30)]), rows: z.array(BalanceRow), capacity: BalanceCapacity });
+export type BalanceView = z.infer<typeof BalanceView>;

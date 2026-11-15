@@ -22,6 +22,11 @@ export const task = msgs({
   budgetCut: { ja: "新しい Task に切る", en: "Cut a new Task" },
   budgetCutTitle: { ja: "同じ Workspace・同じランナーで、この Task を名指す新しい Task を開きます。この Task はそのまま残ります", en: "Opens a new Task in the same Workspace and runner that names this one. This Task stays as it is" },
 
+  // Fork: a Task branched from a finished turn
+  forkHere: { ja: "ここから分岐", en: "Fork from here" },
+  forkTitle: { ja: "このターンまでの会話を引き継いだ新しい Task を作ります。この Task は変わりません。ファイルは同じ作業ツリーです", en: "Makes a new Task that continues the conversation up to this turn. This Task does not change. The files are the same working tree" },
+  forkedFrom: { ja: "分岐元の Task の、分岐したターンまでの会話を引き継いでいます。ファイルは分岐元と同じ作業ツリーです", en: "Continues the parent Task's conversation up to the turn it was forked at. The files are the parent's working tree" },
+
   // asks.ts: kinds, states and groups of a question
   kindApproval: { ja: "ツール承認", en: "Tool approval" },
   kindDecision: { ja: "実装の判断", en: "Implementation decision" },

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
-import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, Workspace } from "@switchboard/protocol";
+import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { taskModelOptions } from "../modelOptions.ts";
@@ -16,12 +16,13 @@ import { countriesUrl, logoutPath } from "../login.ts";
 import { presetRow } from "../presets.ts";
 import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
+import { Knowledge } from "./Knowledge.tsx";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
 import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
 
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
-const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo]];
+const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo], ["adopt-repo", settings.kindAdoptRepo], ["baseline", settings.kindBaseline]];
 
 const groupTitle = (id: string) => t(settingsGroup(id).title);
 
@@ -30,7 +31,7 @@ const groupTitle = (id: string) => t(settingsGroup(id).title);
  * changes (a partial PATCH /api/settings), so a value takes effect on the next use. The per-Task choices (mode, model,
  * budget, shadow for one Task) stay on the Home form; what is saved here is only what they start from.
  */
-export function Settings(props: { focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard") => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
+export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; knowledgeRev: number; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
   const [s, setS] = useState<SettingsResponse | null>(null);
   const [saving, setSaving] = useState(false);
   // 端末通知 (#1138): the browser's permission is the only switch; asked for only from the button
@@ -336,6 +337,8 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
       <SettingsGroupHeading id="settings-connect" />
       <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
 
+      <McpCard tasks={props.tasks} onError={props.onError} />
+
       <SettingsCard title={t(settings.notifications)}>
         {perm === "default" && (
           <>
@@ -405,6 +408,10 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
         </label>
         <div className="muted">{t(settings.runnerTelemetryHint)}</div>
       </SettingsCard>
+
+      <SettingsCard title={t(settings.knowledge)} id="knowledge" lazy>
+        <Knowledge refreshKey={props.knowledgeRev} workspaces={props.workspaces} onError={props.onError} />
+      </SettingsCard>
     </main>
   );
 }
@@ -412,17 +419,82 @@ export function Settings(props: { focus?: { id: string; n: number } | null; heal
 /** The choices of レビューのランナー (#4025), in the order shown: the default first. */
 const REVIEW_RUNNER_LABELS: Record<ReviewRunnerChoice, Msg> = { other: settings.reviewRunnerOther, same: settings.reviewRunnerSame };
 
+/** The Tasks a Workspace MCP endpoint can be issued for: not ended and not a cloud Task (the cases where `GET /api/tasks/:id/mcp` answers 409 or has no local scope), not archived, newest first. */
+export function mcpTaskChoices(tasks: TaskSummary[]): TaskSummary[] {
+  return tasks
+    .filter((x) => x.status !== "done" && x.status !== "error" && x.status !== "aborted" && x.executionMode !== "cloud" && !x.archivedAt)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+type McpIssued = { id: string; url: string; token: string };
+
+/** The selected Task (the pick while it is a choice, else the newest) and the issued endpoint shown for it: only one issued for that same Task. */
+export function mcpSelection(choices: TaskSummary[], picked: string, issued: McpIssued | null): { id: string; shown: McpIssued | null } {
+  const id = choices.some((x) => x.id === picked) ? picked : (choices[0]?.id ?? "");
+  return { id, shown: issued && issued.id === id ? issued : null };
+}
+
+/** The folded Workspace MCP card of the 接続とアプリ group. */
+export function McpCard(props: { tasks: TaskSummary[]; onError: (msg: string) => void }) {
+  return (
+    <SettingsCard title="Workspace MCP">
+      <McpEndpoint tasks={props.tasks} onError={props.onError} />
+      <div className="hint" style={{ marginTop: 6 }}>{t(settings.mcpHint)}</div>
+    </SettingsCard>
+  );
+}
+
+/** Issues, copies and rotates the Workspace MCP endpoint of one running Task chosen from the list. */
+export function McpEndpoint(props: { tasks: TaskSummary[]; onError: (msg: string) => void }) {
+  const choices = mcpTaskChoices(props.tasks);
+  const [picked, setPicked] = useState("");
+  const [issued, setIssued] = useState<McpIssued | null>(null);
+  const { id, shown: mcp } = mcpSelection(choices, picked, issued);
+  // The call goes to the Task chosen when pressed, and pins the pick so a reorder of the list does not move the selection.
+  const run = (target: string, call: (id: string) => Promise<{ url: string; token: string }>) => {
+    setPicked(target);
+    return call(target).then((r) => setIssued({ id: target, ...r })).catch((e) => props.onError(String(e.message ?? e)));
+  };
+  if (choices.length === 0) return <div className="muted">{t(settings.mcpNoTask)}</div>;
+  return (
+    <>
+      {/* A long Task title must not widen the select past the card on a phone: it shrinks, and the button wraps below it. */}
+      <div className="actions" style={{ flexWrap: "wrap" }}>
+        <select className="model-select" value={id} onChange={(e) => setPicked(e.target.value)}>
+          {choices.map((x) => <option key={x.id} value={x.id}>{x.title}</option>)}
+        </select>
+        {!mcp && <button onClick={() => void run(id, api.mcpEndpoint)} title={t(settings.mcpIssueTitle)}>{t(settings.mcpIssue)}</button>}
+      </div>
+      {mcp && (
+        <div className="kv">
+          <span>URL</span>
+          <span className="mono" style={{ wordBreak: "break-all" }}>{mcp.url}</span>
+          <span>{t(settings.mcpToken)}</span>
+          <span className="mono" style={{ wordBreak: "break-all" }}>{mcp.token}</span>
+          <span />
+          <span>
+            <button className="ghost" onClick={() => void navigator.clipboard?.writeText(`${mcp.url}?token=${mcp.token}`)}>{t(settings.mcpCopy)}</button>{" "}
+            <button className="ghost" onClick={() => void run(mcp.id, api.mcpRotate)} title={t(settings.mcpRotateTitle)}>{t(settings.mcpRotate)}</button>
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
+
 /**
  * A folded card of the Settings screen (#3849): only its title shows until pressed. React is not given `open`, so a save's
- * re-render leaves an opened card open. 承認モードの既定 is not one of these (a safety setting stays unfolded).
+ * re-render leaves an opened card open. A `lazy` card draws its body from the first time it is opened (a closed
+ * <details> body is still rendered by React, and a body that fetches would fetch on every visit to Settings). 承認モードの既定 is not one of these (a safety setting stays unfolded).
  */
-function SettingsCard(props: { title: string; id?: string; className?: string; children: ReactNode }) {
+function SettingsCard(props: { title: string; id?: string; className?: string; lazy?: boolean; children: ReactNode }) {
+  const [opened, setOpened] = useState(false);
   return (
-    <details className={`card ${props.className ?? ""}`.trim()} id={props.id}>
+    <details className={`card ${props.className ?? ""}`.trim()} id={props.id} onToggle={props.lazy ? (e) => e.currentTarget.open && setOpened(true) : undefined}>
       <summary>
         <h5>{props.title}</h5>
       </summary>
-      {props.children}
+      {(!props.lazy || opened) && props.children}
     </details>
   );
 }

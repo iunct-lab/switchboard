@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BalanceView, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HumanAnswers, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -226,7 +226,7 @@ export const api = {
   /** `backlog`: `switchboard` keeps the workspace's Issues and Project in Switchboard only (#2265); PRs stay with the repository. */
   addWorkspace: (path: string, backlog: "github" | "switchboard" = "github") => req<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify({ path, backlog }) }),
   /** A GitHub repository added by name (#2575): answers at once (202); the clone goes on in the daemon, see `workspaceClones`. */
-  addWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard" = "github") => req<{ repo: string; path: string; state: "cloning" }>("/api/workspaces", { method: "POST", body: JSON.stringify({ repo, backlog }) }),
+  addWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard" = "github", ownCopy = false) => req<{ repo: string; path: string; state: "cloning" }>("/api/workspaces", { method: "POST", body: JSON.stringify({ repo, backlog, ownCopy }) }),
   workspaceRemoval: (id: string) => req<WorkspaceRemoval>(`/api/workspaces/${id}/removal`),
   removeWorkspace: (id: string, deleteCopy: boolean) => req<{ ok: true }>(`/api/workspaces/${id}`, { method: "DELETE", body: JSON.stringify({ deleteCopy }) }),
   workspaceClones: () => req<WorkspaceClone[]>("/api/workspaces/clones"),
@@ -234,6 +234,10 @@ export const api = {
   runnerConfig: (id: string) => req<RunnerConfigView>(`/api/workspaces/${id}/runner-config`),
   confirmRunnerConfig: (id: string, hash: string) => req<{ ok: true }>(`/api/workspaces/${id}/runner-config`, { method: "POST", body: JSON.stringify({ hash }) }),
   syncUpstream: (id: string) => req<Task>(`/api/workspaces/${id}/upstream-sync`, { method: "POST" }),
+  /** 取り込み: a meta Task that runs the adopt-repo skill on this workspace (asks before it writes anything). */
+  adoptRepo: (id: string) => req<Task>(`/api/workspaces/${id}/adopt`, { method: "POST" }),
+  /** 立ち上げ: a Task in this workspace under the p2-baseline candidate, the concept as data. */
+  startBaseline: (id: string, concept: string) => req<Task>(`/api/workspaces/${id}/baseline`, { method: "POST", body: JSON.stringify({ concept }) }),
   /**
    * Turns the workspace's GitHub sync off (`switchboard`) or on (`github`, #2266): on answers how far it is (202), or
    * rejects with why GitHub could not be read (424, nothing changed). `projectVar` = the Project of one kept here only.
@@ -260,6 +264,8 @@ export const api = {
   createTask: (input: CreateTaskInput) => req<Task>("/api/tasks", { method: "POST", body: JSON.stringify(input) }),
   suggest: (input: SuggestInput) => req<RoutingSuggestion & { source: string; cloudPreparation?: CloudPreparation }>("/api/tasks/suggest", { method: "POST", body: JSON.stringify(input) }),
   send: (id: string, text: string, attachmentIds?: string[]) => req<Task>(`/api/tasks/${id}/send`, { method: "POST", body: JSON.stringify({ text, attachmentIds }) }),
+  /** Fork a Task from the finished turn whose `session.end` is at `seq`: the new Task, idle until its first reply. */
+  forkTask: (id: string, seq: number) => req<Task>(`/api/tasks/${id}/fork`, { method: "POST", body: JSON.stringify({ seq }) }),
   /** Attachments (#125): upload first, then send the ids with a turn. */
   uploadAttachments: (files: File[]) => {
     const fd = new FormData();
@@ -383,6 +389,8 @@ export const api = {
   perf: (rows: PerfSample[]) => req<{ ok: true; count: number }>("/api/perf", { method: "POST", body: JSON.stringify(rows) }),
   perfSummary: () => req<PerfSummaryRow[]>("/api/perf/summary"),
   opsLatency: (days = 7) => req<OpsLatency>(`/api/ops/latency?days=${days}`),
+  /** リポジトリ横断 (Insights): each workspace's spend, interventions and delivered PBIs over 7 or 30 days, and the capacity left */
+  balance: (days: 7 | 30) => req<BalanceView>(`/api/balance?days=${days}`),
   opsStops: (days = 7) => req<OpsStops>(`/api/ops/stops?days=${days}`),
   opsResources: () => req<OpsResources>("/api/ops/resources"),
   opsLoad: (days = 7, task?: string) => req<OpsLoad>(`/api/ops/load?days=${days}${task ? `&task=${encodeURIComponent(task)}` : ""}`),
@@ -392,7 +400,7 @@ export const api = {
   /** 再評価 (#1219): scores the task now, in the background; the result arrives as evals.updated. */
   judgeEvals: (id: string) => req<{ queued: boolean }>(`/api/tasks/${id}/evals/judge`, { method: "POST" }),
   /** The person's own rating and note (#1220): one per task, replaced; DELETE clears it. Both answer the task's evals. */
-  setHumanEval: (id: string, body: { rating: number; comment: string }) => req<TaskEvals>(`/api/tasks/${id}/evals/human`, { method: "PUT", body: JSON.stringify(body) }),
+  setHumanEval: (id: string, body: { rating: number; comment: string } & HumanAnswers) => req<TaskEvals>(`/api/tasks/${id}/evals/human`, { method: "PUT", body: JSON.stringify(body) }),
   clearHumanEval: (id: string) => req<TaskEvals>(`/api/tasks/${id}/evals/human`, { method: "DELETE" }),
   /** The Evals list (#1221): every task's counts, rubric score and rating, newest first; the daemon filters, the screen sorts. */
   evalsList: (q: { workspaceId?: string; runner?: string; limit?: number } = {}) => {

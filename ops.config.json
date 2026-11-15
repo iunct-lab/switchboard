@@ -2,8 +2,6 @@
   "envPrefix": "SWITCHBOARD",
   "forge": { "service": "github" },
   "fields": {
-    "area": ["protocol", "core", "adapter-claude", "adapter-codex", "adapter-dak", "web", "knowledge", "ledger", "infra"],
-    "kind": ["bug", "feature", "deps", "tech-watch", "eval", "chore"],
     "priority": ["P0", "P1", "P2", "P3"]
   },
   "sections": {
@@ -16,6 +14,7 @@
     "target": "iunct-lab/switchboard",
     "include": [
       ".claude/",
+      ".claude/skills/adopt-repo/SKILL.md",
       ".claude/skills/flow-loop/SKILL.md",
       ".claude/skills/new-repo/SKILL.md",
       ".claude/skills/perf-loop/SKILL.md",
@@ -78,6 +77,7 @@
       "docs/design/self-dev.md",
       "docs/design/shared-tmp-guard.md",
       "docs/design/skill-sync.md",
+      "docs/design/task-fork.md",
       "docs/design/task-work-phase.md",
       "docs/design/ui-language.md",
       "docs/design/ui-layers.md",
@@ -90,6 +90,7 @@
       "ops-kit/invariants.md",
       "ops-kit/processes/p0-pipeline.md",
       "ops-kit/processes/p1-direct.md",
+      "ops-kit/processes/p2-baseline.md",
       "ops-kit/public/README.section.md",
       "ops-kit/public/SECURITY.md",
       "ops-kit/skills/cross-runner-review/SKILL.md",

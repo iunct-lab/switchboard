@@ -87,12 +87,12 @@ const nav = (path: unknown) => ({ type: "switchboard-navigate", path });
 
 describe("parseNavigateRequest", () => {
   test("a Task's path and each header tab's path pass as they are", () => {
-    for (const path of ["/task/task_x", "/task/a_b-1", "/", "/backlog", "/schedules", "/insights", "/settings", "/approvals", "/knowledge", "/ledger", "/resources"])
+    for (const path of ["/task/task_x", "/task/a_b-1", "/", "/backlog", "/schedules", "/insights", "/settings", "/approvals", "/ledger", "/resources"])
       expect(parseNavigateRequest(nav(path))).toBe(path);
   });
 
   test("another site, /api/, a script, an unknown screen, a query, a fragment, an escape or a trailing slash is dropped", () => {
-    for (const path of ["https://example.com/", "//evil", "/api/tasks", "javascript:alert(1)", "/nope", "/task/", "/task/a/b", "/task/x?y=1", "/task/x#y", "/backlog/", "/task/a%2Fb", "/task/a b", "/task/a\\b", "\\\\evil", "/task/x\n", "/task/.", "/task/..", "/task/./x", "/backlog/..", "/./backlog", "backlog", "", "/" + "a".repeat(3000)])
+    for (const path of ["https://example.com/", "//evil", "/api/tasks", "javascript:alert(1)", "/nope", "/knowledge", "/task/", "/task/a/b", "/task/x?y=1", "/task/x#y", "/backlog/", "/task/a%2Fb", "/task/a b", "/task/a\\b", "\\\\evil", "/task/x\n", "/task/.", "/task/..", "/task/./x", "/backlog/..", "/./backlog", "backlog", "", "/" + "a".repeat(3000)])
       expect(parseNavigateRequest(nav(path))).toBeNull();
   });
 

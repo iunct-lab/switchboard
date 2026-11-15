@@ -2,8 +2,10 @@
 // テストの棚卸しの候補を根拠の数字つきで出す。消すかは決めない（PR のレビューで決める）。
 //   bun scripts/test-audit.ts candidates [--json <file>]
 //   bun scripts/test-audit.ts growth [--weeks N] [--json <file>]
+//   bun scripts/test-audit.ts ratio --since <日付> [--until <日付>]
 // 全テストを 1 回回し（赤なら候補を出さない）、遅い・似た・赤にならないテストの上位を表で出す。--json は全件を書く。
 // growth は直近 N 週（既定 5）の週の末の origin/main を数え直し、製品と道具のテスト・本体の増えを表にする。exit は常に 0。
+// ratio は origin/main の期間の `git log --no-merges --numstat` から、テスト（*.test.ts(x)）と本体（それ以外の .ts / .tsx。*-e2e.ts は本体）の追加・削除の行数を数える。日付だけなら UTC の 0 時から。
 // exit 0 = 出した / 1 = 止まった（テストが赤、実行の結果や git log を読めない） / 2 = 引数
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -198,6 +200,41 @@ export function countAt(rev: string, dirs: string[]): GrowthCounts {
   };
 }
 
+export type Ratio = { testAdded: number; testRemoved: number; bodyAdded: number; bodyRemoved: number };
+
+/** `git log --numstat --format=` の出力から、テスト（*.test.ts(x)）と本体（それ以外の .ts / .tsx）の追加・削除の行数を数える。バイナリ（`-` の行）と .ts 以外は数えない。 */
+export function ratio(numstat: string): Ratio {
+  const out: Ratio = { testAdded: 0, testRemoved: 0, bodyAdded: 0, bodyRemoved: 0 };
+  for (const line of numstat.split("\n")) {
+    const [added = "", removed = "", ...rest] = line.split("\t");
+    if (!/^\d+$/.test(added) || !/^\d+$/.test(removed)) continue;
+    const path = rest.join("\t").replace(/^.*=> /, "").replace(/\}/, "");
+    if (!/\.tsx?$/.test(path)) continue;
+    const kind = TEST_FILE.test(path) ? "test" : "body";
+    out[`${kind}Added`] += Number(added);
+    out[`${kind}Removed`] += Number(removed);
+  }
+  return out;
+}
+
+/** 日付だけ（YYYY-MM-DD）なら UTC の 0 時を補う。git は日付だけを実行した時刻で区切るので、補わないと期間の端が回す時刻で動く。 */
+export function dayStart(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value;
+}
+
+function ratioCommand(since: string, until: string | undefined): number {
+  const base = Bun.spawnSync(["git", "rev-parse", "--verify", "-q", "origin/main"], { cwd: ROOT }).exitCode === 0 ? "origin/main" : "HEAD";
+  const log = Bun.spawnSync(["git", "-c", "core.quotePath=false", "log", base, "--no-merges", "--numstat", "--format=", `--since=${dayStart(since)}`, ...(until ? [`--until=${dayStart(until)}`] : [])], { cwd: ROOT });
+  if (log.exitCode !== 0) {
+    console.error(`git log が失敗しました: ${log.stderr.toString().trim()}`);
+    return 1;
+  }
+  const r = ratio(log.stdout.toString());
+  console.log(JSON.stringify(r));
+  console.log(`テストの追加 ÷ 本体の追加 = ${r.bodyAdded === 0 ? "-" : (r.testAdded / r.bodyAdded).toFixed(2)}`);
+  return 0;
+}
+
 function growth(weeks: number, jsonPath: string | undefined): number {
   const base = Bun.spawnSync(["git", "rev-parse", "--verify", "-q", "origin/main"], { cwd: ROOT }).exitCode === 0 ? "origin/main" : "HEAD";
   const today = Math.floor(Date.now() / 1000 / 86_400) * 86_400 + 86_400;
@@ -217,7 +254,7 @@ function growth(weeks: number, jsonPath: string | undefined): number {
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
   const usage = () => {
-    console.error("usage: bun scripts/test-audit.ts candidates [--json <file>] | growth [--weeks N] [--json <file>]");
+    console.error("usage: bun scripts/test-audit.ts candidates [--json <file>] | growth [--weeks N] [--json <file>] | ratio --since <日付> [--until <日付>]");
     process.exit(2);
   };
   const option = (name: string): string | undefined => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
@@ -225,5 +262,6 @@ if (import.meta.main) {
   if (command === "candidates" && known(["--json"])) process.exit(await candidates(option("--json")));
   const weeks = Number(option("--weeks") ?? 5);
   if (command === "growth" && known(["--weeks", "--json"]) && Number.isInteger(weeks) && weeks >= 1) process.exit(growth(weeks, option("--json")));
+  if (command === "ratio" && known(["--since", "--until"]) && option("--since")) process.exit(ratioCommand(option("--since")!, option("--until")));
   usage();
 }

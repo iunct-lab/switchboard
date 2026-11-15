@@ -207,6 +207,8 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .tool-detail .copy { display: block; margin: 2px 6px 2px auto; }
 .end { font: 400 11px/1.6 var(--mono); color: var(--ink3); border-top: 1px dashed var(--line); padding-top: 6px; }
 .end.error { color: var(--red); }
+.end .fork { margin-left: 8px; }
+.fork-first { margin-bottom: 8px; }
 .note { font-size: 12px; color: var(--red); }
 .perm { border: 1px solid var(--amber); background: var(--amber-soft); border-radius: 4px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; max-width: 760px; }
 .perm b { margin-right: 8px; }
@@ -245,7 +247,7 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .suggestion { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .suggestion .warn { color: var(--amber); }
 
-.main.knowledge { display: grid; grid-template-columns: 300px 1fr 340px; gap: 12px; align-items: start; }
+.knowledge { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; align-items: start; }
 .kn-list input { width: 100%; margin: 6px 0 8px; }
 .kn-tree { max-height: calc(100vh - 220px); overflow-y: auto; }
 .kn-tree .grp { margin: 10px 4px 4px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
@@ -656,8 +658,8 @@ label.toggle.off { opacity: .45; cursor: default; }
   .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
   /* Knowledge (#392): the list, the note and its details one under another, with the page as the one scroll (a scroll
      inside a scroll is hard to move with a finger); a long line already scrolls inside the note (`overflow: auto`). */
-  .main.knowledge { grid-template-columns: 1fr; }
-  .main.knowledge > * { min-width: 0; }
+  .knowledge { grid-template-columns: 1fr; }
+  .knowledge > * { min-width: 0; }
   .kn-tree, .kn-doc .kn-body { max-height: none; }
   .kn-tree .it { min-height: 44px; justify-content: center; }
   /* Every screen's rows (#393, found in Ledger and Schedules with real data; Home's form relies on it too): a row wraps,
@@ -836,3 +838,18 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .ask-links { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
 .ask-links .link, .ask .ask-talk { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; background: transparent; border: 0; color: var(--acc); text-decoration: underline; text-align: left; font: inherit; overflow-wrap: anywhere; }
 .ask-talk { margin: 4px 0; }
+
+/* リポジトリ横断: a table of its own width on a desktop, one card per repository (label: value) on a phone */
+.balance-scroll { max-width: 100%; overflow-x: auto; }
+.balance-table .balance-kinds td { font-size: 11px; color: var(--ink3); }
+.balance-capacity { margin-top: 8px; font-size: 12px; }
+@media (max-width: 600px) {
+  .balance-table, .balance-table tbody, .balance-table tr, .balance-table td { display: block; width: 100%; box-sizing: border-box; }
+  .balance-table thead { display: none; }
+  .balance-table tbody { border: 1px solid var(--line2); border-radius: 6px; margin-bottom: 8px; padding: 4px 0; }
+  /* `table.pricing td` sets a border and padding with more weight than one class; name the table the same way so the card rows win */
+  table.pricing.balance-table td { display: flex; justify-content: space-between; gap: 12px; border-bottom: 0; padding: 2px 8px; }
+  .balance-table td::before { content: attr(data-label); color: var(--ink3); }
+  table.pricing.balance-table .balance-kinds td { display: block; }
+  .balance-table .balance-kinds td::before { content: none; }
+}

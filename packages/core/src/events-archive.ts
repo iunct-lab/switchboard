@@ -35,14 +35,18 @@ interface Row {
  * What stays of a task's events once the bodies are gone. Light events (status, usage, quota, session.*, stop.record,
  * permission.*, error, …) stay as they are. A tool call keeps `id` and `name`, a result `id` and `ok`, the person's
  * words stay, and an assistant message is its first row with an empty text: a run of consecutive assistant rows of the
- * same message becomes that one row. The run's last row also stays when it is the task's last event, so the task's
- * last `ts` (its duration, `TASK_DURATION_SQL` and `ruleMetrics`) does not move. Everything that reads the rows
+ * same message becomes that one row. The run's last row also stays when it is the task's last event other than a trailing `status`, so the task's
+ * duration end (`taskDurationSql` and `ruleMetrics`) does not move. Everything that reads the rows
  * (metrics, stops, permissions, the last reply) keeps its value: they use `t`, `ok`, `status`, `ts` and the order only.
  */
 export function skeletonize(rows: Row[]): { update: Map<number, string>; remove: number[] } {
   const update = new Map<number, string>();
   const remove: number[] = [];
-  const last = rows.length ? rows[rows.length - 1]!.seq : -1;
+  // The end of the task's duration: the last row that is not a `status` (the notes after `done` do not count).
+  const isStatus = (r: Row) => r.json.startsWith('{"t":"status",');
+  let end = rows.length - 1;
+  while (end >= 0 && isStatus(rows[end]!)) end--;
+  const last = rows.length ? rows[end >= 0 ? end : rows.length - 1]!.seq : -1;
   let run: { messageId: string | undefined } | null = null;
   for (const r of rows) {
     const ev = JSON.parse(r.json) as { t: string; [k: string]: unknown };

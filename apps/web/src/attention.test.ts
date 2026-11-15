@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type { StopReasonCode, StopState, Task, TaskOutcome, TaskStatus, TaskStopMark } from "@switchboard/protocol";
-import { activeLabel, attentionGroups, isActive, judgementNote, outcomeDotClass, outcomeLabel, stopCandidates, terminalMark } from "./attention.ts";
+import { activeLabel, attentionGroups, isActive, judgementNote, outcomeDotClass, outcomeLabel, stopCandidates, stopsToRead, terminalMark } from "./attention.ts";
 
-const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
+const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
 
 const mark = (reason: StopReasonCode, state: StopState, key = "k", conditions: TaskStopMark["conditions"] = []): TaskStopMark => ({ key, reason, state, conditions, count: 1, answered: false });
 // what 要対応 shows of one Task, and the order of its Tasks: Home and the rail read attentionGroups
@@ -34,6 +34,21 @@ test("stopCandidates: the stopped tasks not reviewed yet, 完了 ones too; not r
     task("idle", "idle", "done"),
   ]).map((t) => t.id);
   expect(ids).toEqual(["done", "ask", "failed"]);
+});
+
+test("stopsToRead: read when a candidate comes or moves status; not when one goes away or only changes other fields", () => {
+  const done = task("done", "done", "unknown");
+  const first = stopsToRead(null, [done, task("running", "running", "unknown")]);
+  expect(first.read).toBe(true);
+  // a title or a judged outcome moves updatedAt, not the mark
+  expect(stopsToRead(first.keys, [{ ...done, updatedAt: 9, title: "renamed", outcome: "done" }, task("running", "running", "unknown", null, 9)]).read).toBe(false);
+  expect(stopsToRead(first.keys, [task("running", "running", "unknown")]).read).toBe(false);
+  expect(stopsToRead(first.keys, [done, task("running", "done", "unknown")]).read).toBe(true);
+  expect(stopsToRead(first.keys, [{ ...done, statusAt: 5 }]).read).toBe(true);
+  // one that went away and came back (確認済み undone) is read again
+  const gone = stopsToRead(first.keys, [task("done", "done", "unknown", 3)]);
+  expect(gone.read).toBe(false);
+  expect(stopsToRead(gone.keys, [done]).read).toBe(true);
 });
 
 test("attentionList: 要対応 → 失敗 → 未判定, newest first within each; 完了, reviewed and running ones left out; a 完了 task stopped on a decision ranks as 要対応", () => {

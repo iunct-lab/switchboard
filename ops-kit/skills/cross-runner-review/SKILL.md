@@ -55,6 +55,7 @@ Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力�
 レビュアーには**この clone とこのファイルだけ**を見せる。自分の会話・Task 実装時の判断・memory は渡さない。
 
 clone の前に、切れたセッションが残した clone のうち終わった PR の分を消し、置き場（`${XDG_CACHE_HOME:-$HOME/.cache}/ops-kit/review`。ディスク上で、RAM の `/tmp` ではない）の空きを見る。消すのは**同じリポジトリ名**の `review<PR番号>` / `recheck<PR番号>` のうち `gh` で MERGED / CLOSED と確かめたものだけ（open の PR、`gh` で確かめられなかった番号、別のリポジトリ名の clone は残す。別のセッションが使っているかもしれない）。
+sb-rescue が動くマシンでは、ほかのリポジトリの分と、レビューが走らないあいだの分も、その定期の片付け（`rescue/src/cache.ts` の `sweepCacheWork`。間隔と期間はそこの定数）が片付ける（長く変わらず使われていない分のうち、clone は PR が closed と確かめられた分だけ。下の「ローカルの変更では」の worktree は PR に聞かず、それだけで消える。作り直しは `git worktree add` で済む）。
 `STOP:` が出たら clone せず、`du` の上位をそのまま利用者に報告して止まる（溜まっている分を消すのは利用者。別のリポジトリの分・動いているセッションの分を自分で消さない）。
 
 ```bash
@@ -74,7 +75,7 @@ AVAIL=$(df -Pk "$REVIEW_ROOT" | awk 'NR==2{print $4}')
 
 ```bash
 N=<PR番号>; KIND=review    # 再チェック（マージ判定の Recheck）で 1〜3 を流すときは KIND=recheck（主レビューの clone は 4 の見直しまで残すので消さない）
-R="${REVIEW_ROOT:?}/${NAME:?}.$KIND$N"; echo "$R"    # 名前はリポジトリ名 + PR 番号で決まる（別リポジトリの同じ番号の PR とはぶつからない）。再開して新しいシェルで R を作り直すときは、上の片付けのブロックの REVIEW_ROOT・NAME とこの行の代入まで（次の行は流さない）
+R="${REVIEW_ROOT:?}/${NAME:?}.${KIND:?}${N:?}"; echo "$R"    # 名前はリポジトリ名 + PR 番号で決まる（別リポジトリの同じ番号の PR とはぶつからない）。再開して新しいシェルで R を作り直すときは、上の片付けのブロックの REVIEW_ROOT・NAME とこの行の代入まで（次の行は流さない）
 rm -rf "$R"    # 初回だけ: 同じ PR のやり直しは前のものを消して 1 つのまま。clone が作るので mkdir しない
 # 置き場は RAM でない所。ホストの作り直しで消えうるので、レビューの材料は再開したら作り直す前提で、作る手順（この節）をそのまま流せる形にしておく
 HEAD_REF=$(gh pr view $N --json headRefName -q .headRefName); BASE_REF=$(gh pr view $N --json baseRefName -q .baseRefName)
@@ -93,7 +94,7 @@ sed -n '/^## Design rules/,/^## License/p' "$R/README.md" > "$M/design-rules.md"
 ls "$R/docs/design" > "$M/design-docs.txt"
 ```
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(git rev-parse --show-toplevel)")`、`REVIEW_ROOT` の行はそのまま、`R` は上の `KIND` と `R=` の行のとおり（再チェックは `KIND=recheck`）。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune` で前のものを外してから。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・置き場の古い clone の片付けのループ（`REVIEW_ROOT` の行は除く）・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
+**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT` の行はそのまま、`R` は上の `KIND` と `R=` の行のとおり（再チェックは `KIND=recheck`）。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸のため。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・置き場の古い clone の片付けのループ（`REVIEW_ROOT` の行は除く）・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`、Task は本文の `Backlog-Task:` の行。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
 

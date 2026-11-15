@@ -462,3 +462,36 @@ describe("bodyLoss", () => {
     expect(bodyLoss("## 目的\nx\n", "## 目的\ny\n", true, ["目的"])).toBeNull();
   });
 });
+
+describe("lint: registry of known failures", () => {
+  const entry = (issue: number) => ({ test: "a.test.ts > flaky", issue, until: "2026-12-01" });
+  // ok.json: request 1, its PBI 10 (whose 元要望 line names it, Priority P2), Task 11
+  const run = async (knownFailures: ReturnType<typeof entry>[], edit: (nodes: any[]) => void = () => undefined) => {
+    const raw = JSON.parse(readFileSync(join(fixtures, "lint", "ok.json"), "utf8"));
+    edit(raw.repository.issues.nodes);
+    const { violations } = await lint(fakeGh([() => raw]), cfg, { sleep: noSleep, knownFailures });
+    return formatLint(violations);
+  };
+  const ok = ["violations: 0  warnings: 0  (api errors: 0)"];
+
+  test("an entry pointing at a request with an open PBI that has a Priority, or at that PBI, is no violation; no registry is not checked", async () => {
+    expect(await run([entry(1)])).toEqual(ok);
+    expect(await run([entry(10)])).toEqual(ok);
+    expect(await run([])).toEqual(ok);
+  });
+
+  test("an entry pointing at an Issue that is not open (closed) is a violation naming the entry and the fix", async () => {
+    const [line] = await run([entry(99)]);
+    expect(line).toContain("#99: known-failures.json の登録（a.test.ts > flaky、期限 2026-12-01）が指す #99 は open の要望・PBI に無い（閉じているか、要望・PBI でない）");
+    expect(line).toContain("登録を消す PR を出すか");
+  });
+
+  test("a request whose PBI is closed (not among the open rows) or has no Priority is a violation", async () => {
+    const closed = await run([entry(1)], (nodes) => nodes.splice(0, 1));
+    expect(closed[0]).toMatch(/^#1: .*Priority の付いた open の PBI が無い（PBI が無いか、閉じている）/);
+    const noPriority = await run([entry(1)], (nodes) => {
+      nodes[0].projectItems.nodes[0].fieldValues.nodes = nodes[0].projectItems.nodes[0].fieldValues.nodes.filter((v: any) => v.field.name !== "Priority");
+    });
+    expect(noPriority.find((l) => l.startsWith("#1: "))).toContain("（Priority が未設定）");
+  });
+});

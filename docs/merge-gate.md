@@ -66,8 +66,21 @@ On a large PR, leave which kind was waived and by whom as marks in PR comments (
 | `[recheck] <kind> pass <head sha>` (`RECHECK_PASS`) | When a recheck has passed (the "Recheck" section above) | That kind was waived by a recheck |
 | `[merge-ask] <kinds> <head sha>` (`MERGE_ASK`) | Just before asking the user "may I merge?" in the Task's conversation | `<kinds>` is merge-gate's output `ask` and the `recheck` that has no mark yet, joined with `,` (in the order of `MERGE_KINDS` above) |
 | `[merge-answer] <yes\|no> <kinds> <head sha>` (`MERGE_ANSWER`) | When you resume after the reply to a PR you asked about with `[merge-ask]` (for `yes`, go on to the merge decision with `--allow-large`. When you asked for a reason other than large, such as CI, post neither mark). If there is no `[merge-ask]`, post `[merge-ask]` first (the time of both is the time they were posted) | `yes` = the user allowed it. `<kinds>` is the same as when asked |
+| `[merge-direct] <head sha>` (`MERGE_DIRECT`) | Just before `--merge` / `--merge-stack` merges a PR without the main review ("Direct PRs without the main review" below); merge-gate posts it, you do not | The merge was made without a main review; `scripts/kernel-report.ts` counts these in its window |
 
 Post with `gh pr comment <PR> -R <owner/name> --body "[merge-ask] <kinds> $(gh pr view <PR> -R <owner/name> --json headRefOid -q .headRefOid)"` (`[merge-answer]` likewise). `--allow-large` does not take effect unless the last `[merge-answer]` with the same sha as the head is `yes` and its `<kinds>` includes all of the `ask` and `recheck` of the verdict's output (a `no` after a `yes` is a cancellation. For a PR you asked about without posting `[merge-ask]`, post `[merge-ask]` and then `[merge-answer]`, in that order). Marks are not added retroactively to earlier merges.
+
+## Direct PRs without the main review
+
+A direct PR skips the main-review reason (`最後のコミットより新しい主レビュー…が無い`) when all of these hold (the rule is `reviewSkipped` in `scripts/merge-gate.ts`; the table is `ops-kit/reversibility.json`, read here by pointer and not copied):
+
+- The branch name starts with `sb/direct-` and the PR is a GitHub PR (a local change and a GitLab MR keep the review, since they have no place for the mark)
+- No large reason is left once the kinds the table answers `reversible` are set aside, or the PR is not large. The table has no gate kind answered `reversible` today, so for now only a PR with no large reason skips the review. A kind answered `reversible` is still large for `impact` and still needs its recheck (only `irreversible` kinds are asked); the other kinds (`compensable`, `irreversible`) keep the review, and the `irreversible` ones are still asked of the owner
+- Local CI is a pass, no review thread is unresolved and `mergeStateStatus` is CLEAN, as for any PR
+
+Run the gate first without `--merge`; ask for a review only when `reasons` names the main review (`ops-kit/processes/p1-direct.md`). When `--merge` / `--merge-stack` merges with the skip, it first posts `[merge-direct] <head sha>` on the PR, so a merge whose comment fails is not made.
+
+Going back, when a merged direct PR turns out to break something: `bun scripts/rollback-pr.ts <tag> --repo <owner/name>` (run in that repository's clone, `<tag>` = the newest tag that passed CI before the merge, `bun scripts/tag-ci.ts --latest-pass --contained-in <the commit before the PR's first commit on main> --repo <owner/name>`; without `--contained-in` a later tag that carries the mistake can be picked). It opens a PR whose one commit puts the tag's tree on top of `main` and merges nothing; that PR goes through merge-gate like any other. Without the main review a mistake is found after the merge, not before; the rework and rollbacks are the cost to read in `scripts/kernel-report.ts`.
 
 ## Post-merge audit
 

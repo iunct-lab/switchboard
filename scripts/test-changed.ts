@@ -4,13 +4,16 @@
 // 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）と、ほかのパッケージが読む共有の型
 // （packages/protocol/）が変わったとき。子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
 // 変更が無い、または選ばれたテストが無ければ何も回さない。SWITCHBOARD_SUPERVISED は抜いて回す。
+// 使い方: bun scripts/test-changed.ts [--local]
 // sb-offload があるホストでは、選んだテスト全部（録画を読むものも）を外の 1 本のビルドで回す（local-ci と同じ runBuild /
 // ciScript / parseBuild。docs/design/local-ci-offload.md）。ホストの重い処理の枠は取らない。外が失敗・時間切れ・中断しても
-// ホストで回し直さない。sb-offload が無いホストでは、重い処理の枠を取って今までどおりホストで回す。
+// ホストで回し直さない。重い処理の枠を取ってホストで回すのは、--local を付けたときと、sb-offload が無いホストだけ
+// （tag-ci.ts の offloadFor。local-ci の --local と同じ選び方。環境変数や設定では切り替えない）。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
-import { type Deps, hostOffload, parseBuild, runBuild, testRun, type Offload } from "./local-ci.ts";
+import { type Deps, parseBuild, runBuild, testRun, type Offload } from "./local-ci.ts";
+import { offloadFor } from "./tag-ci.ts";
 import { currentRepo } from "./repo.ts";
 import { repoFiles, selectFrom } from "./test-select.ts";
 
@@ -96,7 +99,7 @@ if (import.meta.main) {
   }
   console.log("full" in picked ? `test-changed: 一式（${picked.full}）` : `test-changed: ${picked.tests.length} ファイル\n${picked.tests.join("\n")}`);
   const { SWITCHBOARD_SUPERVISED: _, ...env } = process.env;
-  const offload = hostOffload();
+  const offload = offloadFor(process.argv.slice(2).includes("--local"));
   process.exit(
     await runTests(picked, {
       spawnHost: async (cmd) => await Bun.spawn(cmd, { cwd: ROOT, env, stdout: "inherit", stderr: "inherit" }).exited,

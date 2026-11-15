@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TaskSummary, TeleportProgress } from "@switchboard/protocol";
+import { isWorkingStatus, type RunnerInfo, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TaskSummary, TeleportProgress } from "@switchboard/protocol";
 import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
@@ -23,12 +23,17 @@ import { useMdView } from "../mdView.ts";
 import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
 import { diffRows, diffTag } from "../diffView.ts";
 import { abortNote } from "../runners.ts";
+import { canFork } from "../fork.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 
 export function TaskView(props: {
   task: Task;
   onOpenTask?: (id: string) => void;
+  /** The daemon's runners: the 「ここから分岐」 button is offered only on a runner that can start from a past turn. */
+  runners?: RunnerInfo[];
+  /** A fork was made from a finished turn: the new Task, to be put in the list and opened. */
+  onForked?: (task: Task) => void;
   /** "ローカルで続ける" finished and opens the imported Local Task (#1634); falls back to `onOpenTask`. */
   onContinuedLocally?: (localTaskId: string) => void;
   /** This Local Task was just switched to by "ローカルで続ける" (#1634): the head says so. */
@@ -55,6 +60,15 @@ export function TaskView(props: {
   onLoadOlder: () => Promise<EventEnvelope[]>;
 }) {
   const cloud = props.task.executionMode === "cloud";
+  const runnerInfo = props.runners?.find((r) => r.id === props.task.runner);
+  const [forking, setForking] = useState(false);
+  const fork = (seq: number) => {
+    setForking(true);
+    api.forkTask(props.task.id, seq).then(
+      (child) => props.onForked?.(child),
+      (e) => props.onError(String(e.message ?? e)),
+    ).finally(() => setForking(false));
+  };
   const archiveNotice = eventsArchiveNotice(props.detail?.eventsArchive);
   const transcript = useMemo(() => foldTranscript(props.detail?.events ?? []), [props.detail?.events]);
   // The last assistant row of each turn with two or more of them: that row also copies the whole reply (#695).
@@ -405,6 +419,7 @@ export function TaskView(props: {
             {t(m.loadOlder)}
           </button>
         )}
+        {props.task.forkOf && (firstSeq <= 1 || firstSeq === olderEndAt) && <div className="hint fork-first">{t(m.forkedFrom)}</div>}
         {transcript.items.map((it) => (
           <TranscriptItem
             key={it.key}
@@ -416,6 +431,8 @@ export function TaskView(props: {
             onError={props.onError}
             turn={turnEnds.has(it.key) ? () => turnReply(transcript.items, it.key).text : undefined}
             onOpenArtifact={openArtifact}
+            onFork={it.kind === "end" && canFork(props.task, it, runnerInfo) ? () => fork(it.seq) : undefined}
+            forking={forking}
           />
         ))}
         {props.detail === undefined && <div className="muted">{t(m.loading)}</div>}
@@ -510,6 +527,9 @@ function TranscriptItem(props: {
   onError: (msg: string) => void;
   /** Set on the last assistant row of a turn with two or more: the turn's whole reply. */
   turn?: () => string;
+  /** Set on the end row of a turn a fork can start from: makes the fork. */
+  onFork?: () => void;
+  forking: boolean;
 }) {
   const it = props.item;
   const copy = (label: string | undefined, text: () => string) => <CopyButton label={label} text={text} partial={props.partial} onError={props.onError} />;
@@ -579,6 +599,7 @@ function TranscriptItem(props: {
           {it.at !== undefined && t(m.endTime, { time: jstTime(it.at), span: spanText(it.durationMs) })}
           {it.summary && it.status !== "ok" && <span> — {it.summary}</span>}
           {abortNote(props.runner, it.status) && <span> — {abortNote(props.runner, it.status)}</span>}
+          {props.onFork && <button className="ghost fork" disabled={props.forking} title={t(m.forkTitle)} onClick={props.onFork}>{t(m.forkHere)}</button>}
         </div>
       );
     case "note":

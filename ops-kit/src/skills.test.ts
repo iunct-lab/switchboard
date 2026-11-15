@@ -1,7 +1,7 @@
 // test-reads: ops-kit/bin/ ops-kit/skills/ ops-kit/template/ ops-kit/src/cli.ts ops-kit/src/idle-run.ts
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { type Dirent, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type Dirent, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -198,7 +198,7 @@ test("cross-runner-review: running the clone lines twice for one PR leaves one d
   const lines = text.split("\n");
   const at = lines.findIndex((l) => l.startsWith("N=<PR番号>; KIND=review"));
   expect(at).toBeGreaterThan(-1);
-  expect(lines[at + 1]).toStartWith('R="${REVIEW_ROOT:?}/${NAME:?}.$KIND$N";');
+  expect(lines[at + 1]).toStartWith('R="${REVIEW_ROOT:?}/${NAME:?}.${KIND:?}${N:?}";');
   expect(lines[at + 1]).not.toContain("rm -rf"); // rebuilding R on resume only assigns
   expect(lines[at + 2]).toStartWith('rm -rf "$R"');
   const block = lines.slice(at, at + 3).map((l) => l.split("#")[0]).join("\n");
@@ -215,8 +215,90 @@ test("cross-runner-review: running the clone lines twice for one PR leaves one d
     expect(run.status).toBe(0);
     expect(readdirSync(reviewRoot).sort()).toEqual(["app.recheck7", "app.review7"]);
     expect(run.stdout.trim().split("\n")).toContain("0"); // the previous run's file is gone
-    const unset = spawnSync("bash", ["-c", once], { encoding: "utf8" }); // a new shell without REVIEW_ROOT / NAME stops instead of using /
+    const unset = spawnSync("bash", ["-c", `unset REVIEW_ROOT NAME\n${once}`], { encoding: "utf8" }); // a new shell without REVIEW_ROOT / NAME stops instead of using /
     expect(unset.status).not.toBe(0);
+    for (const missing of ["KIND", "N"]) {
+      // a new shell that lost KIND or N stops instead of making `<name>.` / `<name>.review` (unset: the runner's environment may export them)
+      const lost = spawnSync("bash", ["-c", `unset KIND N; REVIEW_ROOT=${reviewRoot}; NAME=app; ${missing === "KIND" ? "N=7" : "KIND=review"}\n${lines[at + 1]!.split("#")[0]}`], { encoding: "utf8" });
+      expect(lost.status).not.toBe(0);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** The code span of the local-change paragraph that starts with `prefix`. */
+function localChangeSpan(prefix: string): string {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const para = text.split("\n").find((l) => l.startsWith("**ローカルの変更では**"))!;
+  const span = para.split("`").find((p) => p.startsWith(prefix));
+  expect(span).toBeDefined();
+  return span!;
+}
+
+test("cross-runner-review: the local-change NAME is the main work tree's directory from any worktree", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-name-"));
+  try {
+    const main = join(root, "mainapp");
+    const other = join(root, "elsewhere-wt");
+    const git = (cwd: string, ...args: string[]) =>
+      spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8" });
+    mkdirSync(main);
+    git(main, "init", "-q", "-b", "main");
+    git(main, "commit", "-q", "--allow-empty", "-m", "init");
+    expect(git(main, "worktree", "add", "-q", "--detach", other).status).toBe(0);
+    const line = localChangeSpan("NAME=");
+    const nameFrom = (cwd: string) => spawnSync("bash", ["-c", `${line}; echo "$NAME"`], { cwd, encoding: "utf8" }).stdout.trim();
+    expect(nameFrom(main)).toBe("mainapp");
+    expect(nameFrom(other)).toBe("mainapp");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cross-runner-review: the local-change remove line clears a leftover directory git does not know, then worktree add works", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-leftover-"));
+  try {
+    const main = join(root, "app");
+    const R = join(root, "review", "app.review7");
+    const git = (cwd: string, ...args: string[]) =>
+      spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8" });
+    mkdirSync(main);
+    git(main, "init", "-q", "-b", "main");
+    git(main, "commit", "-q", "--allow-empty", "-m", "init");
+    mkdirSync(R, { recursive: true });
+    writeFileSync(join(R, "left"), "not registered with git\n");
+    expect(git(main, "worktree", "add", "--detach", R).status).not.toBe(0); // without the cleanup it stops
+    const remove = localChangeSpan("git worktree remove --force");
+    const run = spawnSync("bash", ["-c", `R=${R}; ${remove}\ngit worktree add --detach "$R" main`], { cwd: main, encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(readdirSync(R)).not.toContain("left");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cross-runner-review: the local-change remove line keeps a live worktree another repository with the same name registered", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-other-wt-"));
+  try {
+    const main = join(root, "a", "app");
+    const other = join(root, "b", "app");
+    const R = join(root, "review", "app.review7");
+    const git = (cwd: string, ...args: string[]) =>
+      spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8" });
+    for (const d of [main, other]) {
+      mkdirSync(d, { recursive: true });
+      git(d, "init", "-q", "-b", "main");
+      git(d, "commit", "-q", "--allow-empty", "-m", "init");
+    }
+    mkdirSync(join(root, "real-review"));
+    symlinkSync(join(root, "real-review"), join(root, "review")); // R is reached through a symlink: git answers with the real path
+    expect(git(other, "worktree", "add", "-q", "--detach", R).status).toBe(0); // the other session's review, still in use
+    writeFileSync(join(R, "work"), "the other session's\n");
+    const remove = localChangeSpan("git worktree remove --force");
+    spawnSync("bash", ["-c", `R=${R}; ${remove}`], { cwd: main, encoding: "utf8" });
+    expect(readdirSync(R)).toContain("work");
+    expect(git(other, "worktree", "list", "--porcelain").stdout).toContain(`worktree ${join(root, "real-review", "app.review7")}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -586,7 +668,7 @@ function triageStep3(): string {
   return skill.slice(skill.indexOf("## 3. 直す"), skill.indexOf("## 4. 返信する"));
 }
 
-test("review-triage-and-merge: each fixed finding's Scenario is reproduced before asking for the follow-up review (#3792)", () => {
+test("review-triage-and-merge: each fixed finding's Scenario is reproduced before asking for the follow-up review", () => {
   const step3 = triageStep3();
   const at = step3.indexOf("指摘の `Scenario:`（入力・状態）を再現して直ったことを確かめる");
   expect(at).toBeGreaterThan(-1);
@@ -598,7 +680,7 @@ test("review-triage-and-merge: each fixed finding's Scenario is reproduced befor
   expect(step3.indexOf("見直しを頼む前に、修正した指摘ごとに")).toBeLessThan(step3.indexOf("`cross-runner-review` の 4"));
 });
 
-test("review-triage-and-merge: a fix reply names the commit and how it was checked (#3792)", () => {
+test("review-triage-and-merge: a fix reply names the commit and how it was checked", () => {
   const skill = readFileSync(join(skills, "review-triage-and-merge", "SKILL.md"), "utf8");
   const line = skill.split("\n").find((l) => l.startsWith("修正: <")) ?? "";
   expect(line).toContain("<commit sha 短縮>");
@@ -606,7 +688,7 @@ test("review-triage-and-merge: a fix reply names the commit and how it was check
   expect(line).toContain("Scenario を再現したコマンドと結果");
 });
 
-test("review-triage-and-merge: a deviation in a fix is written in the PR body's 逸脱 and the PBI's decision log before the follow-up review (#3588)", () => {
+test("review-triage-and-merge: a deviation in a fix is written in the PR body's 逸脱 and the PBI's decision log before the follow-up review", () => {
   const step3 = triageStep3();
   const at = step3.indexOf("修正が Task の手順・受け入れ条件から外れたら");
   expect(at).toBeGreaterThan(-1);
@@ -617,7 +699,7 @@ test("review-triage-and-merge: a deviation in a fix is written in the PR body's 
   expect(paragraph).toContain("日付つきで 1 行");
 });
 
-test("cross-runner-review: the follow-up review re-reads the PR body, which the fix wrote first (#3792)", () => {
+test("cross-runner-review: the follow-up review re-reads the PR body, which the fix wrote first", () => {
   expect(triageStep3()).toContain("gh pr edit");
   const review = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const step4 = review.slice(review.indexOf("## 4. 修正後の見直し"), review.indexOf("## 報告"));
@@ -628,4 +710,14 @@ test("cross-runner-review: the follow-up review re-reads the PR body, which the 
   expect(triageStep3()).toContain("ops-kit backlog view <変更> --json | jq -r .issue.body");
   const local = review.slice(review.indexOf("**ローカルの変更では**"), review.indexOf("レビュー指示（"));
   expect(local).toContain('`ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）');
+});
+
+test("task-to-pr / pbi-complete: a failure that also fails on the base goes to a request, a P1 PBI and a registry PR without asking for a merge approval", () => {
+  const toPr = readFileSync(join(skills, "task-to-pr", "SKILL.md"), "utf8");
+  const at = toPr.indexOf("**ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら**");
+  expect(at).toBeGreaterThan(-1);
+  const paragraph = toPr.slice(at, toPr.indexOf("\n", at));
+  for (const word of ["要望", "P1 以上の PBI", "登録に期限つきで足す PR", "承認を利用者に求めない", "base に登録を届かせてから", "ローカル CI を頼み直す"]) expect(paragraph).toContain(word);
+  const complete = readFileSync(join(skills, "pbi-complete", "SKILL.md"), "utf8");
+  expect(complete).toContain("`task-to-pr` の「ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら」の項に従う（承認は求めない）");
 });

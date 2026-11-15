@@ -4,7 +4,6 @@ import { msgs } from "../i18n.ts";
 export const app = msgs({
   home: { ja: "Home", en: "Home" },
   task: { ja: "Task", en: "Task" },
-  knowledge: { ja: "Knowledge", en: "Knowledge" },
   ledger: { ja: "Ledger", en: "Ledger" },
   insights: { ja: "Insights", en: "Insights" },
   backlog: { ja: "Backlog", en: "Backlog" },

@@ -2,9 +2,9 @@ import type { CreatedIssue, SourceRow, SourceView } from "@switchboard/protocol"
 import { speakerOf } from "../../../ops-kit/src/lint.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { revertedShas } from "../../../scripts/merge-audit.ts";
-import { readStoredRecords } from "./backlog.ts";
+import { readStoredRecords, requestOf } from "./backlog.ts";
 import { deferredTasksSince, scheduledIssuesSince, type Db } from "./db.ts";
-import { median, requestOf, type FlowWorkspace } from "./flow.ts";
+import { median, type FlowWorkspace } from "./flow.ts";
 
 const DAY = 86_400_000;
 /** A request still open with no PBI after this many days is "stale" (shown in the table's heading). */

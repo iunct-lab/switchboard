@@ -8,10 +8,11 @@
 2. Older: remembers where the CLI's symlink points (`LINKS`: claude `~/.local/bin/claude` → `versions/<v>`, codex `~/.codex/packages/standalone/current` → `releases/<v>-<triple>`), then runs the CLI's own `update` (5 min limit). Each `update` installs the new version beside the old and flips that symlink; the old files stay.
 3. Re-reads `--version` (it must have moved), then runs one turn through the adapter: `runSuggestionTurn` (the same path as the routing judge), read-only mode, the CLI's default model, an empty temporary directory, 180 s. Any non-empty answer passes; the content is not looked at.
 4. Passes: `<runner> updated: <old> → <new>（確認 ok）`. Fails at any step: the symlink is flipped back to the remembered target (a temporary link in the same directory, then rename — the path never disappears), `--version` is checked to be `<old>` again, and `<runner> rolled back: <new> → <old>（確認 失敗: <reason>）` is printed. If it cannot be put back: `<runner> 戻せなかった: …`.
+5. The turn stopped by the runner's usage limit (`isLimitText` of `packages/core/src/ratelimit.ts`) says nothing about the new version: it is rolled back the same way, printed as `<runner> rolled back: <new> → <old>（確認 できない: 使用上限で …）`, and counts as "cannot tell" (exit 2), so no request is filed. The next day tries again.
 
 CLI missing, registry unreadable, or the symlink unreadable: `<runner> latest / version: 分からない（…）`; nothing is changed.
 
-Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll back, or `update` failed / 2 = cannot tell.
+Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll back, or `update` failed / 2 = cannot tell (including a check stopped by the usage limit).
 
 ## Where the result is read
 

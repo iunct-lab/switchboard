@@ -7,7 +7,6 @@ import type { View } from "./screen.ts";
  */
 const PATHS = {
   home: "/",
-  knowledge: "/knowledge",
   ledger: "/ledger",
   evals: "/insights",
   schedules: "/schedules",

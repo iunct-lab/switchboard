@@ -9,7 +9,7 @@ import { openTask as openTaskShown, upsertSummary } from "./taskList.ts";
 import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
 import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
-import { stopCandidates } from "./attention.ts";
+import { stopsToRead } from "./attention.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
 import { loginRoute, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
 import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
@@ -18,7 +18,6 @@ import { watchHealth } from "./healthWatch.ts";
 import { Backlog } from "./components/Backlog.tsx";
 import { Brief } from "./components/Brief.tsx";
 import { Home } from "./components/Home.tsx";
-import { Knowledge } from "./components/Knowledge.tsx";
 import { Ledger } from "./components/Ledger.tsx";
 import { Evals } from "./components/Evals.tsx";
 import { Resources } from "./components/Resources.tsx";
@@ -414,18 +413,29 @@ export function App() {
   }, [reader]);
   // Archived Tasks (#1142) are read only when the rail asks to show them; Home leaves them out
   const live = useMemo(() => tasks.filter((t) => t.archivedAt === null), [tasks]);
-  // The last stop of each Task (#4480): read again when the stop candidates (the stopped Tasks not 確認済み: their ids and updatedAt) change, and on each
-  // stop record (`stopRev`: a record does not move a Task's row). A failed read keeps the last value; an answer that comes
-  // after a newer read started is dropped, so an older answer does not put back marks already gone.
-  const candidatesSig = useMemo(() => stopCandidates(live).map((t) => `${t.id}:${t.updatedAt}`).join(","), [live]);
+  // The last stop of each Task: read again when a stop candidate (a stopped Task not 確認済み) comes or moves status
+  // (`stopsToRead`; one going away is not read for), and on each stop record (`stopRev`: a record does not move a Task's
+  // row). A failed read keeps the last value; an answer that comes after a newer read started is dropped, so an older
+  // answer does not put back marks already gone.
+  const stopKeysRef = useRef<ReadonlySet<string> | null>(null);
+  const stopRevRead = useRef<number | null>(null);
+  const stopsSeq = useRef(0);
   useEffect(() => {
-    if (!authorized || candidatesSig === "") return;
-    let current = true;
-    api.taskStops().then((marks) => current && setStopMarks(marks)).catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [authorized, candidatesSig, stopRev]);
+    if (!authorized) {
+      // signed out: an answer on its way is dropped, and the next sign-in reads again
+      stopsSeq.current++;
+      stopKeysRef.current = null;
+      stopRevRead.current = null;
+      return;
+    }
+    const next = stopsToRead(stopKeysRef.current, live);
+    stopKeysRef.current = next.keys;
+    const newRecord = stopRevRead.current !== stopRev;
+    stopRevRead.current = stopRev;
+    if (next.keys.size === 0 || (!next.read && !newRecord)) return;
+    const seq = ++stopsSeq.current;
+    api.taskStops().then((marks) => seq === stopsSeq.current && setStopMarks(marks)).catch(() => undefined);
+  }, [authorized, live, stopRev]);
   const showArchived = useCallback(() => {
     archivedShown.current = true;
     api.tasks({ archived: true }).then((list) => setTasks((prev) => list.reduce((acc, s) => {
@@ -473,9 +483,6 @@ export function App() {
           </button>
           <button className={view.name === "task" ? "on" : ""} disabled={view.name !== "task"}>
             {t(app.task)}
-          </button>
-          <button className={view.name === "knowledge" ? "on" : ""} onClick={() => setView({ name: "knowledge" })}>
-            {t(app.knowledge)}
           </button>
           <button className={view.name === "ledger" ? "on" : ""} onClick={() => setView({ name: "ledger" })}>
             {t(app.ledger)}
@@ -629,6 +636,8 @@ export function App() {
               onError={setError}
               onBrief={() => setBriefOpen(true)}
               onOpenTask={openTask}
+              runners={health?.runners}
+              onForked={(child) => { upsertTask(child); openTask(child.id); }}
               onContinuedLocally={(id) => { setSwitchedTo(id); openTask(id); }}
               switchedFromCloud={switchedTo === currentTask.id}
               openArtifact={view.artifact}
@@ -650,7 +659,6 @@ export function App() {
             )}
           </main>
         )}
-        {view.name === "knowledge" && <Knowledge refreshKey={knowledgeRev} workspaces={workspaces} onError={setError} />}
         {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
         {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onRateTask={rateTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
         {view.name === "backlog" && <Backlog onFeedback={openFeedback} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
@@ -665,12 +673,13 @@ export function App() {
         {view.name === "resources" && <Resources onOpenTask={openTask} />}
         {view.name === "schedules" && <Schedules workspaces={workspaces} runners={health?.runners ?? []} runnerOk={runnerOk} onOpenTask={openTask} onOpenSettings={() => setView({ name: "settings" })} onError={setError} />}
         {view.name === "settings" && <Settings
+            tasks={tasks}
             focus={settingsFocus}
             health={health}
             workspaces={workspaces}
             clones={clones}
-            onAddWorkspaceFromGithub={async (repo, backlog) => {
-              await api.addWorkspaceFromGithub(repo, backlog);
+            onAddWorkspaceFromGithub={async (repo, backlog, ownCopy) => {
+              await api.addWorkspaceFromGithub(repo, backlog, ownCopy);
               await refreshClones();
             }}
             onAddWorkspace={async (path, backlog) => {
@@ -680,7 +689,7 @@ export function App() {
             onTaskStarted={(task) => {
               upsertTask(task);
               openTask(task.id);
-            }} runnerOk={runnerOk} onRunners={(runners) => setHealth((h) => (h ? { ...h, runners } : h))} onError={setError} />}
+            }} knowledgeRev={knowledgeRev} runnerOk={runnerOk} onRunners={(runners) => setHealth((h) => (h ? { ...h, runners } : h))} onError={setError} />}
           </>
         )}
       </div>

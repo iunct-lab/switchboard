@@ -1,6 +1,6 @@
 import { AskQuestion, CloudSessionRef, CustomRunner, HumanEval, JudgeEval, RuleEval, SizeClass } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { closeSync, createReadStream, createWriteStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, deferred_prompt TEXT, shadow_of TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, subagent_effort TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, deferred_prompt TEXT, shadow_of TEXT, fork_of TEXT, fork_seq INTEGER, fork_turn TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
@@ -290,10 +290,16 @@ export type OpsLoadGroupRow = { taskId: string | null; owner: "task" | "daemon" 
 
 /**
  * What a routed task cost and how long it took, for a query over `routing_log r JOIN tasks t`. The
- * duration runs to the task's last event rather than `updated_at` (see `routingLog`), clamped at 0.
+ * duration runs to the task's last event that is not a trailing `status` rather than `updated_at` (see `routingLog`).
  */
 const TASK_COST_SQL = "COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = r.task_id), 0)";
-const TASK_DURATION_SQL = "MAX(COALESCE((SELECT MAX(ts) FROM events e WHERE e.task_id = r.task_id), t.updated_at) - t.created_at, 0)";
+/**
+ * The end of a task's duration for the task whose id is `idColumn`: its last event that is not a `status`, so the notes that
+ * follow `done` (the container cleanup, a daemon's stop note) do not count as work. A task with only `status` events runs to its
+ * last event, a task with no events to `updated_at`. Clamped at 0 because an imported record can carry timestamps older than `created_at`.
+ */
+const taskDurationSql = (idColumn: string): string =>
+  `MAX(COALESCE((SELECT ts FROM events e WHERE e.task_id = ${idColumn} AND substr(e.json, 1, 14) <> '{"t":"status",' ORDER BY e.seq DESC LIMIT 1), (SELECT MAX(ts) FROM events e WHERE e.task_id = ${idColumn}), t.updated_at) - t.created_at, 0)`;
 
 /** One evaluation of a task: `json` is a `RuleEval` for `rules`; `rubric` names the rubric and version a judge used, null otherwise. */
 export interface EvalRow {
@@ -308,7 +314,7 @@ export interface EvalRow {
 /**
  * The Switchboard Tasks of these workspaces that worked on these Issues: a stage Task of the Issue (`stage_issue`) or a Task whose
  * title starts `#N `. Issue numbers repeat across repositories, so the workspaces (of the repository read) say whose they are.
- * Reads only, so the caller may open the file read-only. `durationMs` is the same creation → last event as routingLog's.
+ * Reads only, so the caller may open the file read-only. `durationMs` is the same creation → last non-`status` event as routingLog's.
  */
 export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }> {
   if (issues.length === 0 || workspaceIds.length === 0) return [];
@@ -317,7 +323,7 @@ export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: 
   return sqlite
     .query(
       `SELECT t.id AS id, t.created_at AS createdAt, t.stage_issue AS stageIssue, t.stage_action AS stageAction,
-              MAX(COALESCE((SELECT MAX(ts) FROM events e WHERE e.task_id = t.id), t.updated_at) - t.created_at, 0) AS durationMs,
+              ${taskDurationSql("t.id")} AS durationMs,
               COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = t.id), 0) AS costUsd
        FROM tasks t WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) AND (t.stage_issue IN (${marks}) OR ${titles}) ORDER BY t.created_at`,
     )
@@ -339,6 +345,46 @@ export function issuesInText(text: string): CreatedIssue[] {
     out.push(issue);
   }
   return out;
+}
+
+/** Every GitHub pull request URL in this text, once each, in the order they appear (`issuesInText`'s twin). */
+export function pullsInText(text: string): CreatedIssue[] {
+  const seen = new Set<string>();
+  const out: CreatedIssue[] = [];
+  for (const m of text.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)(?!\d)/g)) {
+    const pull = { repo: m[1]!.toLowerCase(), number: Number(m[2]) };
+    const key = `${pull.repo}#${pull.number}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(pull);
+  }
+  return out;
+}
+
+/**
+ * The pull requests a Task opened, once each, in order, from the successful `tool.result` of each `tool.call`: every pull
+ * URL where the input runs `gh pr create`; where it runs `gh stack submit` (this repository's way to open a PR), only the
+ * ones its `✓ Created PR #N (<url>)` lines name — the same output also lists the stack's PRs that already existed
+ * (`PR #N (<url>) for <branch> is up to date`), which that Task did not open. Counted from the events on every read (no column), like createdIssuesOf.
+ */
+export function createdPullsOf(sqlite: Database, taskId: string): CreatedIssue[] {
+  const prefix = '{"t":"tool.';
+  const rows = sqlite.query("SELECT json FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq").all(taskId, prefix, prefix) as Array<{ json: string }>;
+  const opening = new Set<string>();
+  const submitting = new Set<string>();
+  const out: CreatedIssue[] = [];
+  for (const r of rows) {
+    const ev = JSON.parse(r.json) as AgentEvent;
+    if (ev.t === "tool.call") {
+      const input = JSON.stringify(ev.input ?? null);
+      if (/gh pr create/.test(input)) opening.add(ev.id);
+      else if (/gh stack submit/.test(input)) submitting.add(ev.id);
+    }
+    if (ev.t !== "tool.result" || !ev.ok) continue;
+    if (opening.has(ev.id)) out.push(...pullsInText(ev.summary));
+    else if (submitting.has(ev.id)) out.push(...[...ev.summary.matchAll(/Created PR #\d+ \((https:\/\/github\.com\/[^\s)]+)\)/g)].flatMap((m) => pullsInText(m[1]!)));
+  }
+  return out.filter((x, i) => out.findIndex((y) => y.repo === x.repo && y.number === x.number) === i);
 }
 
 /**
@@ -520,6 +566,52 @@ export async function snapshotBeforeMigrate(path: string, home: string, now = ne
 
 export type QuotaWindowRow = { runner: RunnerId; window: string; resetsAt: number; peak: number; firstTs: number; lastTs: number };
 
+let emptyBytes: Uint8Array | null = null;
+
+/** The file of a database that got `SCHEMA` and `migrate` and holds no rows: written as a new database file, it skips running both again. */
+function emptyDatabase(): Uint8Array {
+  if (emptyBytes === null) {
+    const db = new Database(":memory:");
+    try {
+      db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      db.exec(SCHEMA);
+      migrate(db);
+      emptyBytes = db.serialize();
+    } finally {
+      db.close();
+    }
+  }
+  return emptyBytes;
+}
+
+/**
+ * Write `bytes()` as the file at `path` when there is none. True when it was written.
+ * The bytes go to a file of its own first and are synced; only then the name appears (`link`), so no process sees a half-written
+ * file, and a stop midway leaves no file at `path`. A file another process made first is not overwritten (`EEXIST`).
+ * The mode is SQLite's own default for a new file.
+ */
+function createdWith(path: string, bytes: () => Uint8Array): boolean {
+  if (existsSync(path)) return false;
+  const part = `${path}.new-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    const fd = openSync(part, "wx", 0o644);
+    try {
+      const data = bytes();
+      for (let at = 0; at < data.length; ) at += writeSync(fd, data, at);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    linkSync(part, path);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  } finally {
+    rmSync(part, { force: true });
+  }
+}
+
 export class Db {
   readonly sqlite: Database;
   /** The records of a repository as last read, by kind and id, and in the order of the table. Frozen: every caller shares them. */
@@ -527,12 +619,16 @@ export class Db {
 
   /** `busyTimeoutMs`: a batch beside the daemon (the host's archive) waits longer than the daemon's own few seconds. */
   constructor(path: string, opts: { busyTimeoutMs?: number } = {}) {
+    // A new file starts from the copy of an empty, migrated database (the same `SCHEMA` and `migrate`, built once per process)
+    const fresh = path !== ":memory:" && createdWith(path, emptyDatabase);
     this.sqlite = new Database(path, { create: true });
     this.sqlite.exec(`PRAGMA busy_timeout = ${opts.busyTimeoutMs ?? BUSY_TIMEOUT_MS}; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;`);
-    // Only a database with no tables yet takes this; an older file is switched once below.
-    this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL");
-    this.sqlite.exec(SCHEMA);
-    migrate(this.sqlite);
+    if (!fresh) {
+      // Only a database with no tables yet takes this; an older file is switched once below.
+      this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      this.sqlite.exec(SCHEMA);
+      migrate(this.sqlite);
+    }
     // the events archive frees pages with `incremental_vacuum`, which only a file in INCREMENTAL mode gives back.
     // The mode of an existing file changes only with a VACUUM; once, before the daemon answers.
     if ((this.sqlite.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum !== 2) this.sqlite.exec("PRAGMA auto_vacuum = INCREMENTAL; VACUUM");
@@ -1273,19 +1369,19 @@ export class Db {
    * `session.end` and the one before it, in order, with the seq of the last `session.end`; null when it never ended a
    * turn. Read from the events, so they outlive a restart of the daemon.
    */
-  lastTurnQuestions(taskId: string): { questions: AskQuestion[]; seq: number } | null {
+  lastTurnQuestions(taskId: string): { questions: AskQuestion[]; seq: number; askedAt: number | null } | null {
     const end = '{"t":"session.end",';
     const ask = '{"t":"question.ask",';
     const ends = this.sqlite.query("SELECT seq FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 2").all(taskId, end, end) as Array<{ seq: number }>;
     if (!ends.length) return null;
     const rows = this.sqlite
-      .query("SELECT json FROM events WHERE task_id = ? AND seq < ? AND seq > ? AND substr(json, 1, length(?)) = ? ORDER BY seq")
-      .all(taskId, ends[0]!.seq, ends[1]?.seq ?? -1, ask, ask) as Array<{ json: string }>;
+      .query("SELECT json, ts FROM events WHERE task_id = ? AND seq < ? AND seq > ? AND substr(json, 1, length(?)) = ? ORDER BY seq")
+      .all(taskId, ends[0]!.seq, ends[1]?.seq ?? -1, ask, ask) as Array<{ json: string; ts: number }>;
     const questions = rows.flatMap((r) => {
       const qs = AskQuestion.array().safeParse((JSON.parse(r.json) as { questions?: unknown }).questions);
       return qs.success ? qs.data : [];
     });
-    return { questions, seq: ends[0]!.seq };
+    return { questions, seq: ends[0]!.seq, askedAt: rows.length ? rows[rows.length - 1]!.ts : null };
   }
 
   insertTask(t: Task): Task {
@@ -1296,10 +1392,10 @@ export class Db {
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, fork_of, fork_seq, fork_turn, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending, machine)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -1348,7 +1444,7 @@ export class Db {
   /**
    * The decision log joined with how each task ended: status, outcome, what it cost, how long it took.
    *
-   * `durationMs` is creation → the task's last recorded event, not `updated_at`: every patch stamps `updated_at`,
+   * `durationMs` is creation → the task's last recorded event other than a trailing `status` (the cleanup after `done`), not `updated_at`: every patch stamps `updated_at`,
    * so raising a budget days later would otherwise report days of "work" for a decision that took a minute. It
    * keeps growing while the task is still running, and falls back to `updated_at` for a task with no events at all.
    * Clamped at 0 because an imported record can carry timestamps older than its `createdAt`.
@@ -1360,7 +1456,7 @@ export class Db {
     return this.sqlite
       .query(
         `SELECT r.task_id AS taskId, t.title AS title, r.suggested, r.rule_id AS ruleId, r.reason, r.chosen, r.suggested_by AS suggestedBy, t.status, t.outcome,
-                ${TASK_COST_SQL} AS costUsd, ${TASK_DURATION_SQL} AS durationMs, r.ts
+                ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs, r.ts
          FROM routing_log r JOIN tasks t ON t.id = r.task_id ORDER BY r.ts DESC, r.id DESC LIMIT ?`,
       )
       .all(limit) as RoutingLogRow[];
@@ -1398,7 +1494,7 @@ export class Db {
   private runnerStats(since: number): RunnerStats[] {
     const rows = this.sqlite
       .query(
-        `SELECT r.chosen AS runner, t.outcome, ${TASK_COST_SQL} AS costUsd, ${TASK_DURATION_SQL} AS durationMs
+        `SELECT r.chosen AS runner, t.outcome, ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs
          FROM routing_log r JOIN tasks t ON t.id = r.task_id WHERE r.suggested_by = 'rule' AND r.ts >= ?`,
       )
       .all(since) as Array<{ runner: RunnerId; outcome: TaskOutcome; costUsd: number; durationMs: number }>;
@@ -1420,6 +1516,11 @@ export class Db {
   shadowTaskOf(primaryId: string): Task | null {
     const r = this.sqlite.query("SELECT * FROM tasks WHERE shadow_of = ?").get(primaryId);
     return r ? rowToTask(r) : null;
+  }
+
+  /** The Tasks forked from `parentId`, oldest first. */
+  forksOf(parentId: string): Task[] {
+    return this.sqlite.query("SELECT * FROM tasks WHERE fork_of = ? ORDER BY created_at, id").all(parentId).map(rowToTask);
   }
 
   /** Imported Local Tasks associated with the original Cloud Task. */
@@ -1676,6 +1777,20 @@ export class Db {
     );
   }
 
+  /** One event of a task by its seq; null = none. */
+  getEvent(taskId: string, seq: number): EventEnvelope | null {
+    const r = this.sqlite.query("SELECT seq, ts, json FROM events WHERE task_id = ? AND seq = ?").get(taskId, seq) as { seq: number; ts: number; json: string } | null;
+    return r ? { taskId, seq: r.seq, ts: r.ts, ev: JSON.parse(r.json) as AgentEvent } : null;
+  }
+
+  /** The runner session a task's turn ran in: the session id of its last `session.start` before `seq`; null = none recorded. */
+  sessionAt(taskId: string, seq: number): string | null {
+    const r = this.sqlite
+      .query("SELECT json_extract(json, '$.runnerSessionId') AS sid FROM events WHERE task_id = ? AND seq < ? AND json_extract(json, '$.t') = 'session.start' AND json_extract(json, '$.runnerSessionId') IS NOT NULL ORDER BY seq DESC LIMIT 1")
+      .get(taskId, seq) as { sid: string } | null;
+    return r?.sid ?? null;
+  }
+
   /** The last `limit` events of a task, in seq order: what the Task screen draws first. */
   listEventsTail(taskId: string, limit: number): EventEnvelope[] {
     return this.listEventsBefore(taskId, Number.MAX_SAFE_INTEGER, limit);
@@ -1824,7 +1939,7 @@ export class Db {
         models: starts.get(r.taskId)?.models ?? [], efforts: starts.get(r.taskId)?.efforts ?? [], subagentEffort: r.subagentEffort,
         rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd, daemonStops: rules.metrics.daemonStops, lastCutByDaemon: rules.metrics.lastCutByDaemon } : null,
         judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by, ts: r.judgeTs ?? 0 } : null,
-        human: human ? { rating: human.rating, comment: human.comment } : null,
+        human: human ? { rating: human.rating, comment: human.comment, intent: human.intent, extra: human.extra, value: human.value } : null,
       };
     });
   }
@@ -1871,6 +1986,15 @@ export class Db {
   eventsArchiveOf(taskId: string): { key: string; at: number; count: number } | null {
     const r = this.sqlite.query("SELECT events_archive_key AS key, events_archived_at AS at, events_archived_count AS count FROM tasks WHERE id = ?").get(taskId) as { key: string | null; at: number; count: number } | null;
     return r?.key ? { key: r.key, at: r.at, count: r.count } : null;
+  }
+
+  /** The pull requests / Issues a task opened (`createdPullsOf` / `createdIssuesOf`), as methods so evals.ts, which db.ts imports, takes them from the Db it is given. */
+  createdPullsOf(taskId: string): CreatedIssue[] {
+    return createdPullsOf(this.sqlite, taskId);
+  }
+
+  createdIssuesOf(taskId: string): CreatedIssue[] {
+    return createdIssuesOf(this.sqlite, taskId);
   }
 
   taskCost(taskId: string): { costUsd: number; tokens: number } {
@@ -2276,6 +2400,9 @@ function migrate(db: Database) {
   if (!cols.has("deferred_prompt")) db.exec("ALTER TABLE tasks ADD COLUMN deferred_prompt TEXT");
   if (!cols.has("background")) db.exec("ALTER TABLE tasks ADD COLUMN background TEXT");
   if (!cols.has("shadow_of")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_of TEXT");
+  if (!cols.has("fork_of")) db.exec("ALTER TABLE tasks ADD COLUMN fork_of TEXT");
+  if (!cols.has("fork_seq")) db.exec("ALTER TABLE tasks ADD COLUMN fork_seq INTEGER");
+  if (!cols.has("fork_turn")) db.exec("ALTER TABLE tasks ADD COLUMN fork_turn TEXT");
   const opCols = new Set((db.query("PRAGMA table_info(backlog_operations)").all() as Array<{ name: string }>).map((c) => c.name));
   if (!opCols.has("overwritten")) db.exec("ALTER TABLE backlog_operations ADD COLUMN overwritten TEXT");
   // Status conflicts held before the send told GitHub's Project automation from a person: the send looks at each again.
@@ -2394,6 +2521,9 @@ function migrate(db: Database) {
       db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify(settings));
     })();
   }
+  // Rows another machine's daemon sent (an uplink): where a Task ran (NULL = this instance) and the id a ledger / routing_log row
+  // had there (AUTOINCREMENT ids collide across machines, so a row is the same by its Task and src_id; NULL = our own row).
+  if (!cols.has("machine")) db.exec("ALTER TABLE tasks ADD COLUMN machine TEXT");
   const logCols = new Set((db.query("PRAGMA table_info(routing_log)").all() as Array<{ name: string }>).map((c) => c.name));
   // Rows written before the routing log kept who suggested are all rule-table suggestions, which is what the default says.
   if (!logCols.has("suggested_by")) db.exec("ALTER TABLE routing_log ADD COLUMN suggested_by TEXT NOT NULL DEFAULT 'rule'");
@@ -2401,6 +2531,10 @@ function migrate(db: Database) {
   db.exec("DROP INDEX IF EXISTS tasks_shadow_of");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tasks_shadow_of_unique ON tasks (shadow_of)");
   const lcols = new Set((db.query("PRAGMA table_info(ledger)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (!lcols.has("src_id")) db.exec("ALTER TABLE ledger ADD COLUMN src_id INTEGER");
+  if (!logCols.has("src_id")) db.exec("ALTER TABLE routing_log ADD COLUMN src_id INTEGER");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_src ON ledger (task_id, src_id) WHERE src_id IS NOT NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS routing_log_src ON routing_log (task_id, src_id) WHERE src_id IS NOT NULL");
   if (!lcols.has("billed_usd")) db.exec("ALTER TABLE ledger ADD COLUMN billed_usd REAL NOT NULL DEFAULT 0");
   if (!lcols.has("cache_write_1h")) db.exec("ALTER TABLE ledger ADD COLUMN cache_write_1h INTEGER NOT NULL DEFAULT 0");
   // Claude's `total_cost_usd` is the session's running total, and every turn booked it whole. The rows of a
@@ -2660,6 +2794,9 @@ function rowToTask(r: any): Task {
     deferredPrompt: r.deferred_prompt ?? null,
     background: r.background ? JSON.parse(r.background) : null,
     shadowOf: r.shadow_of ?? null,
+    forkOf: r.fork_of ?? null,
+    forkSeq: r.fork_seq ?? null,
+    forkTurn: r.fork_turn ?? null,
     shadowStopped: !!r.shadow_stopped,
     workspaceReason: r.workspace_reason ?? null,
     outcome: (r.outcome ?? "unknown") as TaskOutcome,
@@ -2672,9 +2809,38 @@ function rowToTask(r: any): Task {
     stage: r.stage_issue == null ? null : { issue: r.stage_issue, action: r.stage_action as BacklogAction },
     statusAt: r.status_at,
     titlePending: !!r.title_pending,
+    machine: r.machine ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
+}
+
+/** The number of columns over all tables of a database (virtual tables and SQLite's own left out). */
+function columnCount(sqlite: Database): number {
+  const tables = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql NOT LIKE 'CREATE VIRTUAL%'").all() as Array<{ name: string }>;
+  return tables.reduce((n, t) => n + (sqlite.query(`SELECT count(*) AS n FROM pragma_table_info(?)`).get(t.name) as { n: number }).n, 0);
+}
+
+let codeLevel: number | null = null;
+
+/**
+ * The version of the database shape this code writes: the number of columns over all tables of an empty database that
+ * got `SCHEMA` and `migrate` (the reference `needsMigration` uses). A migration only adds columns (schema.test.ts), so
+ * newer code always has a bigger number, and no constant is raised by hand. It is the code's and not an open file's: a
+ * long-used file keeps columns the code no longer declares, and after a rollback a file is ahead of the code that reads it.
+ */
+export function schemaLevel(): number {
+  if (codeLevel === null) {
+    const want = new Database(":memory:");
+    try {
+      want.exec(SCHEMA);
+      migrate(want);
+      codeLevel = columnCount(want);
+    } finally {
+      want.close();
+    }
+  }
+  return codeLevel;
 }
 
 /** A Task's size class by its event count; null when the sample has none. */

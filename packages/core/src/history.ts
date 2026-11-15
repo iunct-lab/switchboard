@@ -303,7 +303,7 @@ export class HistoryImporter {
           origin: "terminal",
           resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null,
           shadowOf: null,
-          shadowStopped: false,
+          forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false,
           workspaceReason: null,
           titlePending: false,
           outcome: "unknown",

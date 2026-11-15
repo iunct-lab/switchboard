@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, designRulesTouched, judge, loadReversibility, localCiOf, main, MERGE_ANSWER, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, designRulesTouched, judge, loadReversibility, localCiOf, main, mergePr, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
 import { resultComment } from "./local-ci";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -184,6 +184,53 @@ describe("merge-gate judge", () => {
     // nothing large: the flag does nothing and asks for no mark
     expect(judge(base(), allow)).toMatchObject({ verdict: "merge", impact: "small", reasons: [] });
     expect(judge(base({ files: [files[1]!], rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", impact: "large", reasons: [] });
+  });
+});
+
+describe("direct PR (branch sb/direct-)", () => {
+  const noReview = { reviewComments: [] };
+  test("a direct PR with no large reason merges without a main review and says so", () => {
+    expect(judge(base({ direct: true, ...noReview }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], reviewSkipped: true });
+  });
+
+  test("a direct PR still needs CI, resolved threads and CLEAN", () => {
+    const j = judge(base({ direct: true, ...noReview, checks: [], unresolvedThreads: 1, mergeState: "BEHIND" }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons).toHaveLength(3);
+    expect(j.reasons.join("\n")).not.toContain("主レビュー");
+  });
+
+  test("a direct PR touching a gate file is large and asks", () => {
+    const j = judge(base({ direct: true, ...noReview, files: [{ path: "scripts/merge-gate.ts", additions: 1, deletions: 0 }] }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reviewSkipped).toBeUndefined();
+    expect(j.reasons.some((r) => r.includes("security:gates"))).toBe(true);
+    expect(j.reasons.some((r) => r.includes("主レビュー"))).toBe(true);
+  });
+
+  test("a PR that is not direct stops without a main review", () => {
+    const j = judge(base(noReview), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reviewSkipped).toBeUndefined();
+    expect(j.reasons.some((r) => r.includes("主レビュー"))).toBe(true);
+  });
+
+  test("mergePr puts [merge-direct] <head> on the PR before it merges, in both modes", async () => {
+    const HEAD40 = "c".repeat(40);
+    const facts = base({ head: HEAD40, base: "main", direct: true });
+    for (const mode of ["merge", "merge-stack"] as const) {
+      const calls: string[][] = [];
+      await mergePr(7, REPO, mode, facts, async (a) => { calls.push(a); return a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40}\n` : ""; }, () => REPO, true);
+      const at = calls.findIndex((a) => a[0] === "pr" && a[1] === "comment");
+      const merge = calls.findIndex((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack");
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(calls[at]).toEqual(["pr", "comment", "7", "-R", REPO, "--body", `[merge-direct] ${HEAD40}`]);
+      expect(MERGE_DIRECT.exec(calls[at]![6]!)?.[1]).toBe(HEAD40);
+      expect(at).toBeLessThan(merge);
+    }
+    const none: string[][] = [];
+    await mergePr(7, REPO, "merge", facts, async (a) => { none.push(a); return ""; });
+    expect(none.some((a) => a[1] === "comment")).toBe(false);
   });
 });
 
@@ -1081,6 +1128,20 @@ describe("merge command merges only on verdict merge", () => {
     const r = await gate(["7", "--merge", "--repo", "acme/lib"]);
     expect(r.code).toBe(0);
     expect(r.merges).toEqual([["pr", "merge", "7", "-R", "acme/lib", "--rebase", "--delete-branch", "--match-head-commit", SHA]]);
+  });
+
+  test("--merge of a direct branch without a main review marks the head, then merges", async () => {
+    const calls: string[][] = [];
+    const code = await main(["7", "--merge"], async (a) => {
+      calls.push(a);
+      if (a[0] === "pr" && a[1] === "view") return JSON.stringify(view({ headRefName: "sb/direct-x", comments: [] }));
+      if (a[0] === "pr" && a[1] === "list") return "[]";
+      if (a[0] === "pr") return "";
+      return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
+    }, () => {}, () => {}, () => REPO);
+    expect(code).toBe(0);
+    expect(calls.filter((a) => a[0] === "pr" && (a[1] === "comment" || a[1] === "merge")).map((a) => a[1])).toEqual(["comment", "merge"]);
+    expect(calls.find((a) => a[1] === "comment")![6]).toBe(`[merge-direct] ${SHA}`);
   });
 
   test("--merge-stack calls gh stack merge for the bottom PR of the working tree's repository at the judged head", async () => {

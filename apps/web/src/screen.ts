@@ -4,7 +4,7 @@ import type { Task } from "@switchboard/protocol";
  * `task.artifact`: the 成果物 to open first (#1835 links to it from Insights); `evals.report`: the report Insights opens first
  * (Home's line); `evals.artifacts`: Insights' レポート section shows every artifact instead of the HTML ones (#1833).
  */
-export type View = { name: "home" } | { name: "task"; id: string; artifact?: string } | { name: "knowledge" } | { name: "ledger" } | { name: "evals"; report?: string; artifacts?: boolean } | { name: "schedules" } | { name: "backlog" } | { name: "resources" } | { name: "approvals" } | { name: "settings" };
+export type View = { name: "home" } | { name: "task"; id: string; artifact?: string } | { name: "ledger" } | { name: "evals"; report?: string; artifacts?: boolean } | { name: "schedules" } | { name: "backlog" } | { name: "resources" } | { name: "approvals" } | { name: "settings" };
 
 /** Room left for a task's title inside the label; FeedbackInput.screen takes at most 200 characters. */
 const TITLE_MAX = 120;
@@ -18,5 +18,5 @@ export function screenLabel(view: View, task?: Task): string {
     return `Task「${title.length > TITLE_MAX ? `${title.slice(0, TITLE_MAX)}…` : title}」(${task.id})`;
   }
   // ui-strings: value "判断待ち" — sent to the daemon; the dialog shows 判断待ち through `shownScreen`
-  return { home: "Home", knowledge: "Knowledge", ledger: "Ledger", evals: "Insights", schedules: "Schedules", backlog: "Backlog", resources: "Resources", approvals: "判断待ち", settings: "Settings" }[view.name];
+  return { home: "Home", ledger: "Ledger", evals: "Insights", schedules: "Schedules", backlog: "Backlog", resources: "Resources", approvals: "判断待ち", settings: "Settings" }[view.name];
 }

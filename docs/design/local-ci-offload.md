@@ -66,9 +66,13 @@ An earlier design kept some steps on the host: the public-tree check (it reads t
 
 ## test-changed
 
-`bun scripts/test-changed.ts` (the tests a Task runs for its change) uses the same parts. With `sb-offload`, every selected test file (the ones that read recordings too) goes to one build through the same `runBuild`, `ciScript` and `parseBuild`, and the host takes no heavy slot. Without `sb-offload`, the files run on the host inside the slot. A build that fails, times out or is stopped fails the run with its reason line; the host does not rerun it. The type check is not part of it.
+`bun scripts/test-changed.ts` (the tests a Task runs for its change) uses the same parts. With `sb-offload`, every selected test file (the ones that read recordings too) goes to one build through the same `runBuild`, `ciScript` and `parseBuild`, and the host takes no heavy slot. Without `sb-offload`, or with `--local` (the same choice as local-ci's `--local`), the files run on the host inside the slot. A build that fails, times out or is stopped fails the run with its reason line; the host does not rerun it.
 
-Unlike local-ci, which sends a fresh checkout, test-changed sends the Task's work tree as it is: `sb-offload` ships the tracked files and the untracked files that are not ignored. Do not leave a file with a secret in the work tree (keep scratch files in a `mktemp -d` directory outside it). It sends no AWS names: its build runs no public-tree check.
+## typecheck
+
+`bun scripts/typecheck.ts` (the type check a Task runs, the same as the root `bun run typecheck`, `codex:types` included) goes to one build the same way: the CI image has the Codex CLI that `codex:types` needs, so the build's types come from the image's Codex, as in a pull request's CI. When the host's Codex is a different version, `--local` checks against the host's. With `sb-offload` the host takes no heavy slot; without it, or with `--local`, `bun run typecheck` runs on the host inside the slot. It sends no recordings: the type check reads none. A failing, timed-out or stopped build fails the run with its reason line (and the tsc lines, when tsc ran); the host does not rerun it.
+
+Unlike local-ci, which sends a fresh checkout, test-changed and typecheck send the Task's work tree as it is: `sb-offload` ships the tracked files and the untracked files that are not ignored. Do not leave a file with a secret in the work tree (keep scratch files in a `mktemp -d` directory outside it). Neither sends AWS names: their builds run no public-tree check.
 
 ## Lambda builds
 

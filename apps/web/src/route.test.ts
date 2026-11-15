@@ -7,7 +7,6 @@ import type { View } from "./screen.ts";
 const views: View[] = [
   { name: "home" },
   { name: "task", id: "task_abc123" },
-  { name: "knowledge" },
   { name: "ledger" },
   { name: "evals" },
   { name: "schedules" },
@@ -41,7 +40,7 @@ describe("screen URLs (#3355)", () => {
   test("a trailing slash is fine; an unknown path, /task/ without an id and a malformed id are not screens", () => {
     expect(viewFromPath("/backlog/")).toEqual({ name: "backlog" });
     expect(viewFromPath("/task/t1/")).toEqual({ name: "task", id: "t1" });
-    for (const p of ["/nope", "/task/", "/task", "/task/a/b", "/task/%E0%A4%A", "/evals", "//backlog", ""]) expect(viewFromPath(p)).toBeNull();
+    for (const p of ["/nope", "/knowledge", "/task/", "/task", "/task/a/b", "/task/%E0%A4%A", "/evals", "//backlog", ""]) expect(viewFromPath(p)).toBeNull();
   });
 
   test("the daemon's own paths are never read as a screen (the service worker's LIVE set)", () => {
@@ -61,6 +60,7 @@ describe("when the address bar is written (#3427)", () => {
     expect(pathToWrite({ name: "task", id: "t1" }, "/")).toBe("/task/t1");
     expect(pathToWrite({ name: "backlog" }, "/task/t1")).toBe("/backlog");
     expect(pathToWrite({ name: "home" }, "/settings")).toBe("/");
+    expect(pathToWrite({ name: "home" }, "/knowledge")).toBe("/"); // the removed tab's path opens Home and the bar is rewritten
     expect(pathToWrite({ name: "task", id: "t1" }, "/task/t1")).toBeNull(); // popstate brought it: no second entry
   });
 

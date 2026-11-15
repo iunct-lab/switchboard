@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
 import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
 import { runnerConfigSummary } from "../foreignWorkspace.ts";
-import { canRemove, cloneRowText, removalWarning } from "../workspaceAdd.ts";
+import { baselineWarning, canAdopt, canRemove, canStartBaseline, cloneRowText, removalWarning } from "../workspaceAdd.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
@@ -63,11 +63,51 @@ function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) =
 }
 
 /**
+ * A repository of your own: 取り込み (the adopt-repo skill, on a GitHub one) and 立ち上げ (the p2-baseline candidate from a
+ * concept). Each starts one Task and opens it. There is no confirmation here: 取り込み asks in the Task before it writes
+ * anything, and 立ち上げ asks its decisions in the Task before its first pull request merges.
+ */
+function OwnRow(props: { workspace: Workspace; open: boolean; onOpen: (open: boolean) => void; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
+  const { workspace: w, open } = props;
+  const [busy, setBusy] = useState(false);
+  const [concept, setConcept] = useState("");
+  const run = (start: () => Promise<Task>, after?: () => void) => {
+    setBusy(true);
+    start()
+      .then((task) => {
+        after?.();
+        props.onTaskStarted(task);
+      })
+      .catch((e: unknown) => props.onError(String((e as Error).message ?? e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <div className="row" style={{ justifyContent: "flex-start" }}>
+        {canAdopt(w) ? <button className="ghost" disabled={busy} onClick={() => run(() => api.adoptRepo(w.id))}>{t(m.adopt)}</button> : null}
+        <button className={open ? undefined : "ghost"} aria-expanded={open} onClick={() => props.onOpen(!open)}>{t(m.baseline)}</button>
+      </div>
+      {open ? (
+        <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+          <div className="hint">{t(m.baselineHint)}</div>
+          <textarea value={concept} onChange={(e) => setConcept(e.target.value)} aria-label={t(m.baselineLabel)} placeholder={t(m.baselinePlaceholder)} rows={5} />
+          {baselineWarning(concept) ? <div className="hint">{baselineWarning(concept)}</div> : null}
+          <div className="row">
+            <button disabled={busy || !canStartBaseline(concept)} onClick={() => run(() => api.startBaseline(w.id, concept.trim()), () => { setConcept(""); props.onOpen(false); })}>{t(m.baselineStart)}</button>
+            <button className="ghost" onClick={() => props.onOpen(false)}>{t(m.cancel)}</button>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/**
  * Workspace (#1447): the registered repositories and the ways to add one, in one place. 新しく作る asks a Task to create
  * and register a repository (the steps are the skill's, not the daemon's); GitHub から clones one of the owner's own next
  * to the checkout (#2575); ホストのディレクトリ registers a directory that already exists.
  */
-export function WorkspaceCard(props: { workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard") => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
+export function WorkspaceCard(props: { workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
   const [method, setMethod] = useState<"github" | "new" | "path">("github");
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
@@ -76,8 +116,12 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
   const [repo, setRepo] = useState("");
   // a workspace without GitHub (#2265): its backlog kept in Switchboard; off by default
   const [localBacklog, setLocalBacklog] = useState(false);
+  // 他者のリポジトリを自分の GitHub の非公開のコピーにもする印: always offered (whether it is yours is not known before adding); off by default and put back after an add
+  const [ownCopy, setOwnCopy] = useState(false);
   // the row whose 登録を外す is open (#2600): what removing it would do, the typed name, and whether the copy goes too
   const [removing, setRemoving] = useState<{ id: string; info: WorkspaceRemoval; typed: string; deleteCopy: boolean } | null>(null);
+  // the row whose 立ち上げ is open: one at a time, like 登録を外す
+  const [launching, setLaunching] = useState<string | null>(null);
   const fail = (e: unknown) => props.onError(String((e as Error).message ?? e));
   const localBacklogBox = (
     <label className="hint">
@@ -96,7 +140,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
             <span className="mono hint" style={{ flex: 1 }}>{w.path}</span>
             <button className="ghost" onClick={() => api.workspaceRemoval(w.id).then((info) => setRemoving({ id: w.id, info, typed: "", deleteCopy: false })).catch(fail)}>{t(m.unregister)}</button>
           </div>
-          {w.upstream ? <ForeignRow workspace={w} onTaskStarted={props.onTaskStarted} onError={props.onError} /> : null}
+          {w.upstream ? <ForeignRow workspace={w} onTaskStarted={props.onTaskStarted} onError={props.onError} /> : <OwnRow workspace={w} open={launching === w.id} onOpen={(o) => setLaunching(o ? w.id : null)} onTaskStarted={props.onTaskStarted} onError={props.onError} />}
           {removing?.id === w.id ? (
             <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
               {removalWarning(removing.info, removing.deleteCopy) ? <div className="hint">{removalWarning(removing.info, removing.deleteCopy)}</div> : null}
@@ -136,14 +180,20 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
               disabled={!repo.trim()}
               onClick={() =>
                 props
-                  .onAddWorkspaceFromGithub(repo.trim(), localBacklog ? "switchboard" : "github")
-                  .then(() => setRepo((now) => (now === repo ? "" : now)))
+                  .onAddWorkspaceFromGithub(repo.trim(), localBacklog ? "switchboard" : "github", ownCopy)
+                  .then(() => {
+                    setRepo((now) => (now === repo ? "" : now));
+                    setOwnCopy(false);
+                  })
                   .catch(fail)
               }
             >
               {t(m.add)}
             </button>
           </div>
+          <label className="hint" style={{ display: "block" }}>
+            <input type="checkbox" checked={ownCopy} onChange={(e) => setOwnCopy(e.target.checked)} /> {t(m.ownCopy)}
+          </label>
           {props.clones.map((c) => (
             <div key={c.path} className="hint">{cloneRowText(c)}</div>
           ))}

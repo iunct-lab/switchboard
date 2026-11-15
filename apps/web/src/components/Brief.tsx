@@ -12,7 +12,8 @@ import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { AttachmentGallery } from "./Attachments.tsx";
 import { firstInstruction, foldTranscript } from "../transcript.ts";
-import { humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
+import { HumanEvalForm, humanEvalKey } from "./HumanEvalForm.tsx";
+import { humanAnswerMark, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { brief as m } from "../i18n/brief.ts";
@@ -53,6 +54,9 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   // Shadow run (#99): the linked task, whichever side this one is. Derived from the task list so no extra fetch is needed.
   const shadowTask = props.task.shadowOf ? undefined : props.tasks?.find((t) => t.shadowOf === props.task.id);
   const primaryTask = props.task.shadowOf ? props.tasks?.find((t) => t.id === props.task.shadowOf) : undefined;
+  // Fork: the Task this one was split from, and the Tasks split from this one, from the Task list.
+  const forkParent = props.task.forkOf ? props.tasks?.find((t) => t.id === props.task.forkOf) : undefined;
+  const forkChildren = (props.tasks?.filter((t) => t.forkOf === props.task.id) ?? []).sort((a, b) => a.createdAt - b.createdAt); // numbered in the order made, not the list's recency order
   const [fp, setFp] = useState<Footprint | null>(null);
   // Permission mode (#58): the daemon's list for this runner; a change applies live (Claude) or from the next turn (Codex).
   const runnerInfo = props.runners?.find((r) => r.id === props.task.runner);
@@ -116,8 +120,6 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   const loadLine = load ? (load.available ? taskLoadLine(load.groups) : t(m.loadUnavailable)) : null;
 
   const quota = (props.ledger?.quota ?? []).filter((q) => q.runner === props.task.runner);
-  const [mcp, setMcp] = useState<{ url: string; token: string } | null>(null);
-  const [mcpErr, setMcpErr] = useState<string | null>(null);
   const [staged, setStaged] = useState<Array<Omit<StagedChange, "before" | "after">>>([]);
   const [stagedErr, setStagedErr] = useState<string | null>(null);
   const [budgetErr, setBudgetErr] = useState<string | null>(null);
@@ -149,6 +151,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   // Evals (#1218): the rule counts, read again when a turn ends (the daemon counts them then); the previous ones stay up while a turn runs.
   // Another task's counts never show under this one: cleared on a task change, and a response for an earlier request is dropped.
   const [evals, setEvals] = useState<TaskEvals | null>(null);
+  const answerMark = humanAnswerMark(evals?.human);
   const evalsSeq = useRef(0);
   // 再評価 (#1219): asked in the background; this task's evals.updated (→ evalsRev) brings the new row — also after a
   // failed scoring, which the daemon announces the same way. The timer is the way out if that message never comes.
@@ -218,39 +221,9 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     props.onFocused?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- onFocused is a fresh closure on every render; the scroll is for this focus request
   }, [props.focus, props.open, evals]);
-  // 自分の評価 (#1220): a rating and a note the person saves in one go; optional, nothing prompts for it
-  const [rating, setRating] = useState<number | null>(null);
-  const [comment, setComment] = useState("");
-  const [humanBusy, setHumanBusy] = useState(false);
-  const [humanErr, setHumanErr] = useState<string | null>(null);
-  useEffect(() => {
-    setRating(null);
-    setComment("");
-    setHumanErr(null);
-    setHumanBusy(false);
-  }, [props.task.id]);
-  // which task is open, for an answer that arrives later (a save's own evals.updated bumps evalsSeq before the PUT answers, so that counter cannot be the gate here)
+  // which task is open, for an answer that arrives later: a save that lands after a switch is dropped
   const openTaskId = useRef(props.task.id);
   openTaskId.current = props.task.id;
-  const saveHuman = (fn: () => Promise<TaskEvals>) => {
-    // the answer belongs to the task it was sent for; one that lands after a switch is dropped
-    const id = props.task.id;
-    setHumanBusy(true);
-    setHumanErr(null);
-    fn()
-      .then((e) => {
-        if (openTaskId.current !== id) return;
-        setEvals(e);
-        setRating(null);
-        setComment("");
-      })
-      .catch((e) => {
-        if (openTaskId.current === id) setHumanErr(String(e.message ?? e));
-      })
-      .finally(() => {
-        if (openTaskId.current === id) setHumanBusy(false);
-      });
-  };
   useEffect(() => {
     setChecks(null);
     setRestartMsg(null);
@@ -285,8 +258,6 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       })
       .catch((e) => setRestartMsg(String(e.message ?? e)));
   useEffect(() => {
-    setMcp(null);
-    setMcpErr(null);
     setStaged([]);
     setStagedErr(null);
     setOpenDiff(null);
@@ -423,6 +394,29 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
               </div>
             )}
           </span>
+          {props.task.forkOf && (
+            <>
+              <span>{t(m.forkOf)}</span>
+              <span>
+                <button className="ghost" onClick={() => props.onOpenTask?.(props.task.forkOf!)} title={forkParent?.title}>{t(m.openForkParent)}</button>
+                <div className="hint">{t(m.forkOfHint)}</div>
+              </span>
+            </>
+          )}
+          {forkChildren.length > 0 && (
+            <>
+              <span>{t(m.forks)}</span>
+              <span>
+                {forkChildren.map((c, i) => (
+                  <div key={c.id}>
+                    <button className="ghost" onClick={() => props.onOpenTask?.(c.id)} title={c.title}>
+                      {t(m.openForkBefore, { n: i + 1 })}<RunnerPill runner={c.runner} />{t(m.openForkAfter)}
+                    </button>
+                  </div>
+                ))}
+              </span>
+            </>
+          )}
           {(shadowTask || props.task.shadowOf) && (
             <>
               <span>{t(m.shadow)}</span>
@@ -542,26 +536,18 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             <div className="kv" id="brief-human-eval" style={{ marginTop: 8 }}>
               <span>{t(m.humanEval)}</span>
               <span className="num">
-                {humanLabel(evals) ?? t(m.none)}{" "}
-                {evals.human && (
-                  <button className="ghost" disabled={humanBusy} onClick={() => saveHuman(() => api.clearHumanEval(props.task.id))}>
-                    {t(m.clear)}
-                  </button>
-                )}
+                {humanLabel(evals) ?? t(m.none)}
+                {answerMark && <span style={{ display: "inline-block", marginLeft: 8 }}>{answerMark}</span>}
               </span>
             </div>
-            <div className="row" style={{ alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button key={n} className={rating === n ? "pri" : "ghost"} disabled={humanBusy} onClick={() => setRating(n)} title={`${n} / 5`} aria-label={t(m.humanEvalN, { n })}>
-                  {n}
-                </button>
-              ))}
-              <input value={comment} maxLength={1000} placeholder={t(m.commentPlaceholder)} disabled={humanBusy} onChange={(e) => setComment(e.target.value)} style={{ flex: 1, minWidth: 80 }} />
-              <button disabled={humanBusy || rating === null} onClick={() => saveHuman(() => api.setHumanEval(props.task.id, { rating: rating!, comment }))}>
-                {t(m.save)}
-              </button>
-            </div>
-            {humanErr && <div className="hint warn">{humanErr}</div>}
+            <HumanEvalForm
+              key={humanEvalKey(props.task.id, evals.human)}
+              taskId={props.task.id}
+              human={evals.human}
+              onSaved={(e) => {
+                if (openTaskId.current === props.task.id) setEvals(e);
+              }}
+            />
             {props.onImprove && (
               <div className="row" style={{ marginTop: 6 }}>
                 <button className="ghost" onClick={() => props.onImprove?.(props.task.id)} title={t(m.improveTitle)}>
@@ -718,65 +704,15 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
         </div>
       )}
 
-      {!cloud && <div className="blk">
-        <h5>Workspace MCP</h5>
-        {props.task.runner === "claude" && props.detail && (
+      {!cloud && props.task.runner === "claude" && props.detail && (
+        <div className="blk">
+          <h5>Workspace MCP</h5>
           <div className="kv">
             <span>{t(m.mcpServers)}</span>
             <span title={t(m.mcpServersTitle)}>{props.detail.mcpServers?.length ? props.detail.mcpServers.join(t(m.mcpSeparator)) : t(m.mcpNone)}</span>
           </div>
-        )}
-        {!mcp && (
-          <div className="actions">
-            <button
-              disabled={!busy}
-              onClick={() =>
-                api
-                  .mcpEndpoint(props.task.id)
-                  .then(setMcp)
-                  .catch((e) => setMcpErr(String(e.message ?? e)))
-              }
-              title={t(m.issueEndpointTitle)}
-            >
-              {t(m.issueEndpoint)}
-            </button>
-          </div>
-        )}
-        {mcpErr && <div className="hint warn">{mcpErr}</div>}
-        {mcp && (
-          <div className="kv">
-            <span>URL</span>
-            <span className="mono" style={{ wordBreak: "break-all" }}>
-              {mcp.url}
-            </span>
-            <span>{t(m.token)}</span>
-            <span className="mono" style={{ wordBreak: "break-all" }}>
-              {mcp.token}
-            </span>
-            <span />
-            <span>
-              <button className="ghost" onClick={() => void navigator.clipboard?.writeText(`${mcp.url}?token=${mcp.token}`)}>
-                {t(m.copyUrlToken)}
-              </button>{" "}
-              <button
-                className="ghost"
-                onClick={() =>
-                  api
-                    .mcpRotate(props.task.id)
-                    .then(setMcp)
-                    .catch((e) => setMcpErr(String(e.message ?? e)))
-                }
-                title={t(m.rotateTitle)}
-              >
-                {t(m.rotate)}
-              </button>
-            </span>
-          </div>
-        )}
-        <div className="hint" style={{ marginTop: 6 }}>
-          {t(m.mcpHint)}
         </div>
-      </div>}
+      )}
     </aside>
   );
 }

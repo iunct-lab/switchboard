@@ -277,7 +277,7 @@ Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/acme/app.gi
 afterAll(() => rmSync(clone, { recursive: true, force: true }));
 
 const PBI_BODY = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n## スコープ外\nなし\n\n**Story Points**: 3\n";
-/** An app that stores #3 as `stored` (labels `labels`) and takes its PATCH; `edit` runs `backlog edit 3 --body-file -` with `body` on the standard input. */
+/** An app that stores issue 3 as `stored` (labels `labels`) and takes its PATCH; `edit` runs `backlog edit 3 --body-file -` with `body` on the standard input. */
 async function editBody(body: string, opts: { stored?: string; labels?: string[]; sections?: string[]; extra?: string[]; env?: Record<string, string | undefined> } = {}) {
   const fake = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: opts.stored ?? PBI_BODY, labels: opts.labels ?? ["type:pbi"] } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
   const out: string[] = [];

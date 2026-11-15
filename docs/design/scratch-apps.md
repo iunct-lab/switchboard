@@ -52,7 +52,7 @@ A row on the page (a Task in a queue, for example) can move Switchboard's screen
 
 - Request (frame → parent): `{ type: "switchboard-navigate", path }`. There is no answer.
 - `path` is one of Switchboard's own screens, written as the address bar shows it: `/task/<id>`, or a header tab's
-  path (`/`, `/knowledge`, `/ledger`, `/insights`, `/schedules`, `/backlog`, `/resources`, `/approvals`, `/settings`;
+  path (`/`, `/ledger`, `/insights`, `/schedules`, `/backlog`, `/resources`, `/approvals`, `/settings`;
   the table is `PATHS` in `apps/web/src/route.ts`). Anything else is dropped without a word: another site
   (`https://…`, `//…`), `/api/…`, `javascript:`, a path that is no screen, a query, a fragment, a %-escape, a `.` or `..`
   segment, a trailing slash or a backslash. The page cannot take the screen outside Switchboard.

@@ -11,6 +11,7 @@ POST /mcp/<taskId>?token=<token>  or  Authorization: Bearer <token>             
 
 - One endpoint per task, one **disposable token** per task (constant-time compared). Issued on demand while the task is running; revoked (401) once the task is over for good — terminal status *and* its runner process gone (exited, released after the idle window, aborted) — and at daemon shutdown. A follow-up on a "done" task whose process still lingers keeps using it.
 - One `McpServer` + `WebStandardStreamableHTTPServerTransport` **per MCP session** (`mcp-session-id`); the endpoint keeps a `Map<sessionId, {server, transport, lastSeen}>`. A session is only created by an `initialize` request (anything else without a session id is 400), at most `sessions.maxPerTask` (429), and expires after `sessions.idleMs` idle.
+- Issuing, copying, and revoking-and-reissuing the token are done from the collapsed `Workspace MCP` card in Settings (pick a task there: one that has not ended, is not archived, and does not run in the cloud). The Brief only lists the MCP servers handed to the task.
 - `SWITCHBOARD_PUBLIC_URL` sets the base URL handed out (e.g. `http://host.docker.internal:47831` for DAK). The daemon still listens where `SWITCHBOARD_HOST` says; see "Local API token".
 
 ## Tools
@@ -49,7 +50,7 @@ POST /mcp/<taskId>?token=<token>  or  Authorization: Bearer <token>             
 ## Trying it
 
 ```bash
-# claude code as an MCP client of its own task (Brief → Workspace MCP → エンドポイントを発行)
+# claude code as an MCP client of its own task (Settings → Workspace MCP → エンドポイントを発行)
 claude --mcp-config '{"mcpServers":{"switchboard":{"type":"http","url":"http://127.0.0.1:47831/mcp/<taskId>","headers":{"Authorization":"Bearer <token>"}}}}'
 ```
 

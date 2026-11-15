@@ -15,7 +15,7 @@ export type Item = (
   | { kind: "user"; key: string; text: string; attachments?: AttachmentRef[] }
   | { kind: "assistant"; key: string; text: string; messageId?: string; attachments?: AttachmentRef[] }
   | { kind: "tool"; key: string; call?: ToolCall; result?: ToolResult; ask?: PermissionAsk; decision?: "allow" | "deny"; decidedBy?: "user" | "rule" | "timeout"; endAt?: number }
-  | { kind: "end"; key: string; status: "ok" | "error" | "aborted"; summary?: string; durationMs: number }
+  | { kind: "end"; key: string; status: "ok" | "error" | "aborted"; summary?: string; durationMs: number; /** The `session.end` event's seq and the runner's pointer to the turn: where a fork can start. */ seq: number; turn?: string }
   | { kind: "note"; key: string; text: string; tone: "info" | "error" }
   /** An artifact the agent registered with its fence (#1778): the row opens it on the 成果物 tab. */
   | { kind: "artifact"; key: string; id: string; title: string }
@@ -134,7 +134,7 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
         break;
       }
       case "session.end":
-        items.push({ kind: "end", key, at: ts, status: ev.status, summary: ev.summary, durationMs: ts - turnStart });
+        items.push({ kind: "end", key, at: ts, status: ev.status, summary: ev.summary, durationMs: ts - turnStart, seq, turn: ev.turn });
         turnStart = undefined;
         pending.clear();
         assistant = undefined;

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "../packages/core/src/db.ts";
-import { kernelReport, median, NO_PROCESS, NO_PROVENANCE, reasonGroup, reasonKind, renderReport, reworkOf, type GitCommit } from "./kernel-report.ts";
+import { directMerges, kernelReport, median, NO_PROCESS, NO_PROVENANCE, reasonGroup, reasonKind, renderReport, reworkOf, type GitCommit } from "./kernel-report.ts";
 
 const prov = (process: string | null, skills: string, bytes: number | null, reason: string | null = null) => JSON.stringify({ v: 1, process: process ? { id: process, version: 1 } : null, processReason: reason, bundle: { skills, repoSkills: null, claudeMd: null, processes: null }, repo: { head: null }, runner: "claude", model: null, effort: null, permissionMode: null, instructionBytes: bytes, recordedAt: 1 });
 
@@ -316,4 +316,34 @@ test("without git history the rework row reads 記録なし", () => {
   expect(r.outcomes.find((o) => o.key === "rework")).toEqual({ key: "rework", baseline: { n: 0, value: null }, recent: { n: 0, value: null } });
   expect(renderReport(r)).toContain("| 記録なし | 記録なし | 0 / 0 |");
   db.close();
+});
+
+const emptyDb = () => {
+  const db = new Database(":memory:");
+  db.exec("CREATE TABLE tasks (id TEXT, status TEXT, created_at INTEGER, status_at INTEGER, shadow_of TEXT); CREATE TABLE ledger (task_id TEXT, cost_usd REAL); CREATE TABLE task_evals (task_id TEXT, source TEXT, json TEXT)");
+  return db;
+};
+const SHA = "a".repeat(40);
+const prList = (...prs: Array<[number, string, string]>) => JSON.stringify(prs.map(([number, authorAssociation, body]) => ({ number, comments: [{ authorAssociation, body }] })));
+
+test("directMerges counts only the merged PRs with a [merge-direct] mark by a mark author, and renders the count", () => {
+  const calls: string[][] = [];
+  const run = (cmd: string[]) => (calls.push(cmd), prList([7, "MEMBER", `[merge-direct] ${SHA}`], [3, "OWNER", `[merge-direct] ${SHA} 理由`], [9, "MEMBER", "[local-ci] pass"], [11, "NONE", `[merge-direct] ${SHA}`]));
+  expect(directMerges(7, run, Date.parse("2026-11-14T00:00:00Z"), () => "o/r")).toEqual([3, 7]);
+  expect(calls).toEqual([["gh", "pr", "list", "-R", "o/r", "--state", "merged", "--search", "merged:>=2026-11-07", "--limit", "500", "--json", "number,comments"]]);
+  const db = emptyDb();
+  const r = kernelReport(db, { days: 1, now: 1000, directMerges: [3, 7] });
+  expect(renderReport(r)).toContain("レビューなしで出た PR（[merge-direct]）: 2 件");
+});
+
+test("directMerges is null when gh or the repository cannot be read or the window fills the limit, and the report says it could not count", () => {
+  const run = () => {
+    throw new Error("gh: HTTP 403");
+  };
+  expect(directMerges(7, run, 0, () => "o/r")).toBeNull();
+  expect(directMerges(7, () => "[]", 0, () => { throw new Error("Cannot resolve repository"); })).toBeNull();
+  const full = JSON.stringify(Array.from({ length: 500 }, (_, i) => ({ number: i + 1, comments: [{ authorAssociation: "MEMBER", body: `[merge-direct] ${SHA}` }] })));
+  expect(directMerges(7, () => full, 0, () => "o/r")).toBeNull();
+  const db = emptyDb();
+  expect(renderReport(kernelReport(db, { days: 1, now: 1000, directMerges: null }))).toContain("数えられない（gh が読めないか、窓のマージ済み PR が 500 件以上）");
 });

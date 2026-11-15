@@ -14,6 +14,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Provenance } from "../packages/protocol/src/index.ts";
+import { MARK_AUTHORS, MERGE_DIRECT } from "./merge-gate.ts";
+import { currentRepo } from "./repo.ts";
 
 export const NO_PROVENANCE = "記録なし";
 /** Provenance recorded, but no process candidate named (a Task typed on Home): not the same as no record. */
@@ -71,7 +73,9 @@ export type OutcomeSide = { n: number; value: number | null; split?: { p0: Rewor
  */
 export type Outcome = { key: "bytes" | "closeDays" | "rework"; baseline: OutcomeSide; recent: OutcomeSide };
 
-export type Report = { days: number; since: number; tasks: number; byBundle: boolean; strata: Stratum[]; choices: ChoiceScore[]; baselineDate: string; outcomes: Outcome[] };
+export type Report = { days: number; since: number; tasks: number; byBundle: boolean; strata: Stratum[]; choices: ChoiceScore[]; baselineDate: string; outcomes: Outcome[];
+  /** PR numbers merged in the window with a `[merge-direct]` mark (no review); null when gh could not be read. */
+  directMerges: number[] | null };
 
 /**
  * The kind of reason, with the numbers a chooser writes into it left out so equal rules count together:
@@ -343,7 +347,7 @@ function reworkSides(db: Database, windows: Record<"baseline" | "recent", readon
 export const baselineEndMs = (date: string | undefined): number => Date.parse(`${date ?? DEFAULT_BASELINE}T00:00:00Z`) + 86_400_000;
 
 /** `git`: the history the rework row reads (`readGit`); none given or null = that row has no record. */
-export function kernelReport(db: Database, opts: { days: number; now?: number; byBundle?: boolean; baseline?: string; git?: GitHistory | null }): Report {
+export function kernelReport(db: Database, opts: { days: number; now?: number; byBundle?: boolean; baseline?: string; git?: GitHistory | null; directMerges?: number[] | null }): Report {
   const now = opts.now ?? Date.now();
   const byBundle = opts.byBundle ?? false;
   const since = now - opts.days * 86_400_000;
@@ -394,7 +398,7 @@ export function kernelReport(db: Database, opts: { days: number; now?: number; b
   const baselineDate = opts.baseline ?? DEFAULT_BASELINE;
   const baselineMs = baselineEndMs(baselineDate);
   if (!Number.isFinite(baselineMs)) throw new Error(`--baseline must be a date (YYYY-MM-DD): ${baselineDate}`);
-  return { days: opts.days, since, tasks: rows.length, byBundle, strata, choices, baselineDate, outcomes: hasProvenance ? outcomes(db, baselineMs, now, opts.git ?? null) : noOutcomes() };
+  return { days: opts.days, since, tasks: rows.length, byBundle, strata, choices, baselineDate, outcomes: hasProvenance ? outcomes(db, baselineMs, now, opts.git ?? null) : noOutcomes(), directMerges: opts.directMerges ?? null };
 }
 
 const fmtMs = (ms: number | null) => (ms === null ? "-" : `${(ms / 60_000).toFixed(1)} 分`);
@@ -418,6 +422,33 @@ const fmtRework = (x: OutcomeSide): string => {
 };
 const fmtReworkN = (x: OutcomeSide): string => (x.split ? `${x.split.p0.n} + ${x.split.other.n}` : "0");
 
+/** Runs a command and returns its stdout; throws when it fails. */
+export type Run = (cmd: string[]) => string;
+const spawnRun: Run = (cmd) => {
+  const p = spawnSync(cmd[0]!, cmd.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (p.status !== 0) throw new Error(`${cmd.slice(0, 3).join(" ")} failed: ${p.stderr}`);
+  return p.stdout;
+};
+
+/** The most merged PRs one read of directMerges lists; a window that fills it is not counted (gh would cut the rest silently). */
+export const DIRECT_LIMIT = 500;
+/**
+ * The PRs merged in the last `days` days that carry a `[merge-direct] <head sha>` mark — merged without a review. The mark is
+ * a PR comment (not in the database), read through gh the way merge-audit reads marks: by MARK_AUTHORS only. null when the
+ * repository or gh cannot be read, or when the window has DIRECT_LIMIT merged PRs or more (the count would be short).
+ */
+export function directMerges(days: number, run: Run = spawnRun, now = Date.now(), repo: () => string = () => currentRepo()): number[] | null {
+  const since = new Date(now - days * 86_400_000).toISOString().slice(0, 10);
+  let prs: Array<{ number: number; comments: Array<{ authorAssociation: string; body: string }> }>;
+  try {
+    prs = JSON.parse(run(["gh", "pr", "list", "-R", repo(), "--state", "merged", "--search", `merged:>=${since}`, "--limit", String(DIRECT_LIMIT), "--json", "number,comments"]));
+  } catch {
+    return null;
+  }
+  if (prs.length >= DIRECT_LIMIT) return null;
+  return prs.filter((pr) => pr.comments.some((c) => MARK_AUTHORS.includes(c.authorAssociation) && MERGE_DIRECT.test(c.body))).map((pr) => pr.number).sort((a, b) => a - b);
+}
+
 export function renderReport(r: Report): string {
   const lines = [`# カーネルの報告 — 直近 ${r.days} 日の Task ${r.tasks} 件（${new Date(r.since).toISOString().slice(0, 10)} 以降、shadow を除く）`, ""];
   const bundleHead = r.byBundle ? " スキルの束 |" : "";
@@ -434,6 +465,7 @@ export function renderReport(r: Report): string {
     else lines.push(`| ${OUTCOME_LABELS[o.key].label} | ${cell(o.baseline, OUTCOME_LABELS[o.key].fmt)} | ${cell(o.recent, OUTCOME_LABELS[o.key].fmt)} | ${o.baseline.n} / ${o.recent.n} |`);
   }
   lines.push("", "値を並べるだけで、良し悪しは書かない（利用者が決める）。b は窓内に始めた Task（shadow を除く）の由来の記録から、c は窓内に閉じた要望（type:request）のうち、workspace のバックログが指すリポジトリのものから。a は窓内にマージされた PR（PR 記録の mergedAt があるもの）のうち、p0-pipeline の Task が出した仕事とそれ以外の Task が出した仕事（PR が閉じた Issue かその親を、Task が stage_issue に持つもの。由来の記録が無い Task の PR は入れない）に分け、main のコミット（fix / revert で始まる題、PR のマージから 7 日以内、同じファイルを触る。PR 自身のマージコミットは除く）で再作業になった割合。a の n は「p0-pipeline の PR 数 + それ以外の PR 数」。git が読めなければ記録なし。");
+  lines.push("", `レビューなしで出た PR（[merge-direct]）: ${r.directMerges === null ? `数えられない（gh が読めないか、窓のマージ済み PR が ${DIRECT_LIMIT} 件以上）` : `${r.directMerges.length} 件`}`);
   return lines.join("\n");
 }
 
@@ -458,7 +490,7 @@ if (import.meta.main) {
     const baseline = arg("--baseline");
     // the rework row reads main's commits from the oldest window's start on (`--repo-dir`, else the current directory)
     const git = readGit(arg("--repo-dir") ?? process.cwd(), Math.min(baselineEndMs(baseline), Date.now()) - OUTCOME_WINDOW_DAYS * 86_400_000);
-    const report = kernelReport(db, { days, byBundle: process.argv.includes("--by-bundle"), baseline, git });
+    const report = kernelReport(db, { days, byBundle: process.argv.includes("--by-bundle"), baseline, git, directMerges: directMerges(days, spawnRun, Date.now(), () => currentRepo(arg("--repo-dir") ?? process.cwd())) });
     console.log(process.argv.includes("--json") ? JSON.stringify(report, null, 2) : renderReport(report));
   } finally {
     db.close();
