@@ -95,6 +95,8 @@
       "ops-kit/public/README.section.md",
       "ops-kit/public/SECURITY.md",
       "ops-kit/skills/cross-runner-review/SKILL.md",
+      "ops-kit/skills/doc-to-slides/SKILL.md",
+      "ops-kit/skills/doc-to-slides/template.html",
       "ops-kit/skills/issue-workflow/SKILL.md",
       "ops-kit/skills/pbi-complete/SKILL.md",
       "ops-kit/skills/pbi-to-tasks/SKILL.md",

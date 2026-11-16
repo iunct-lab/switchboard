@@ -12,7 +12,7 @@ import { buildPrompt, LlmSuggester, parseSuggestion, runSuggestionTurn } from ".
 const fixture = recordingText("packages/core/fixtures/suggest-claude.jsonl");
 
 const EXAMPLES: RoutingLogRow[] = [
-  { taskId: "task_1", title: "PR のレビューコメントに返信する", suggested: "codex", ruleId: "single-repo-long", reason: "単一リポジトリで完結・長時間", chosen: "codex", suggestedBy: "rule", status: "done", outcome: "done", costUsd: 0.42, durationMs: 900_000, ts: 1 },
+  { taskId: "task_1", title: "PR のレビューコメントに返信する", suggested: "codex", ruleId: "single-repo-long", reason: "単一リポジトリで完結・長時間", chosen: "codex", suggestedBy: "rule", status: "done", outcome: "finished", costUsd: 0.42, durationMs: 900_000, ts: 1 },
   { taskId: "task_2", title: "Switchboard の Ledger 画面にカードを足す", suggested: "claude", ruleId: "self-dev", reason: "自分自身の改善", chosen: "claude", suggestedBy: "rule", status: "waiting", outcome: "needs_action", costUsd: 1.8, durationMs: 2_400_000, ts: 2 },
 ];
 
@@ -129,7 +129,7 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     expect(p).toContain("JSON だけを返してください");
     expect(p).toContain("title: Codex のレビュー指摘に返信する");
     expect(p).toContain("| 提案元 | 提案 | 実際 | 状態 | 結果 | USD | 所要 | title |");
-    expect(p).toContain("| rule | codex | codex | done | done | 0.4200 | 900s | PR のレビューコメントに返信する |");
+    expect(p).toContain("| rule | codex | codex | done | finished | 0.4200 | 900s | PR のレビューコメントに返信する |");
     // the status says only that the runner stopped; the outcome says whether it needs the person
     expect(p).toContain("| rule | claude | claude | waiting | needs_action | 1.8000 | 2400s |");
     expect(buildPrompt(CTX, [])).toContain("（まだ記録がありません）");

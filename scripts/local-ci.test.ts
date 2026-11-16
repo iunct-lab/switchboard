@@ -56,6 +56,7 @@ describe("local-ci", () => {
         calls.push(cmd);
         if (cmd[0] === "env") return o.select ?? "";
         if (cmd.includes("merge-base")) return "f".repeat(40) + "\n";
+        if (cmd.includes("defaultBranchRef")) return "main\n";
         if (cmd[0] === "gh") return JSON.stringify({ headRefOid: (named = next(heads)), baseRefName: "main" });
         if (cmd.includes("fetch")) fetched = cmd.at(-1)!;
         if (cmd.includes("rev-parse")) return `${fetched.startsWith("+refs/heads/") ? next(bases) : (pullHead ?? named)}\n`;
@@ -297,6 +298,21 @@ describe("local-ci", () => {
       expect(await incrementalBase(42, "example/development", "/repo", SHA, BASE, mk({ cherry: `- ${c1}\n` }))).toEqual({ pass: PASS, commits: [], files: [] });
     });
 
+    test("a stacked PR: the commits are counted from the default branch's tip, so a fix added to the PR below is chosen too", async () => {
+      const TIP = "e".repeat(40);
+      const [lower, top] = ["1".repeat(40), "2".repeat(40)];
+      const f = incDeps("selected: 1\na.test.ts  x", { cherry: `+ ${lower}\n+ ${top}\n`, files: { [lower]: "lower.ts\0", [top]: "top.ts\0" } });
+      const inner = f.d.sh;
+      f.d.sh = async (cmd, cwd) => {
+        if (cmd.includes("rev-parse") && cmd.includes("refs/local-ci/42/default")) return `${TIP}\n`;
+        return inner(cmd, cwd);
+      };
+      const r = await localCi(42, "/repo", f.d, "example/development", CACHE);
+      expect(f.calls.filter((c) => c.includes("merge-base") && !c.includes("--is-ancestor"))).toEqual([["git", "-C", "/repo", "merge-base", TIP, SHA]]);
+      expect(f.calls.find((c) => c[0] === "env")!.slice(-2)).toEqual(["lower.ts", "top.ts"]);
+      expect(r.incremental).toEqual({ pass: PASS, commits: 2, files: 2 });
+    });
+
     test("main: no commit added since the pass (a rebase only) exits 0 without a slot, a worktree or a post; --force and --all go on to run", async () => {
       const root = mkdtempSync(join(CACHE, "main-root-"));
       Bun.spawnSync(["git", "init", "-q", root]);
@@ -452,7 +468,7 @@ describe("local-ci", () => {
     expect(r).toMatchObject({ ok: true, sha: SHA });
     expect(ran).toEqual(prSteps.map((s) => s.run.trim()));
     // what Actions' pull_request run tests: the latest head merged here into the base branch's latest tip (#913)
-    expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/base", "-C /repo fetch -q origin +refs/pull/42/head:refs/local-ci/42/head"]);
+    expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/base", "-C /repo fetch -q origin +refs/pull/42/head:refs/local-ci/42/head", "-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/default"]);
     const add = calls.find((c) => c.includes("worktree") && c.includes("add"))!;
     expect(add.at(-1)).toBe(BASE);
     expect(calls.find((c) => c.includes("merge"))!.slice(-4)).toEqual(["-q", "--no-ff", "--no-edit", SHA]);
@@ -979,9 +995,10 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const { d, calls } = deps();
     const r = await localCi(42, "/other", d, "o/r", CACHE);
     expect(r.ok).toBe(true);
+    // `gh repo view <repo>` (the default branch's tip) names the repository as an argument, not with -R
     const gh = calls.filter((c) => c[0] === "gh");
     expect(gh.length).toBeGreaterThan(0);
-    for (const c of gh) expect(c[c.indexOf("-R") + 1]).toBe("o/r");
+    for (const c of gh) expect(c[1] === "repo" ? c[3] : c[c.indexOf("-R") + 1]).toBe("o/r");
     const git = calls.filter((c) => c[0] === "git");
     expect(git.some((c) => c.join(" ") === "git -C /other fetch -q origin +refs/pull/42/head:refs/local-ci/42/head")).toBe(true);
     // the clone, or the worktree local-ci added from it (the merge)

@@ -107,3 +107,88 @@ test("migration moves a done task with a background mark to background once", ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("migration renames the outcome, judged result and rules row outcome done to finished once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-finished-"));
+  try {
+    const path = join(dir, "switchboard.db");
+    const first = new Db(path);
+    const ins = first.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, outcome, judged_result, status_at, created_at, updated_at) VALUES (?, 't', 'claude', '/x', '[]', 'done', ?, ?, 1, 1, 1)");
+    ins.run("judged", "done", "done");
+    ins.run("asked", "needs_action", "needs_action");
+    ins.run("unjudged", "unknown", null);
+    const ev = first.sqlite.query("INSERT INTO task_evals (task_id, source, by, rubric, json, ts) VALUES (?, ?, 'x', NULL, ?, 1)");
+    ev.run("judged", "rules", JSON.stringify({ status: "done", outcome: "done", costUsd: 0 }));
+    ev.run("asked", "rules", JSON.stringify({ status: "done", outcome: "needs_action", costUsd: 0 }));
+    ev.run("judged", "judge", JSON.stringify({ outcome: "done" }));
+    first.close();
+    const read = () => {
+      const db = new Db(path);
+      try {
+        return {
+          tasks: db.sqlite.query("SELECT id, status, outcome, judged_result AS judged FROM tasks ORDER BY id").all(),
+          evals: db.sqlite.query("SELECT task_id AS id, source, json_extract(json, '$.outcome') AS outcome FROM task_evals ORDER BY task_id, source").all(),
+        };
+      } finally {
+        db.close();
+      }
+    };
+    const rows = [
+      { id: "asked", status: "done", outcome: "needs_action", judged: "needs_action" },
+      { id: "judged", status: "done", outcome: "finished", judged: "finished" },
+      { id: "unjudged", status: "done", outcome: "unknown", judged: null },
+    ];
+    // only the rules row carries the task's outcome; another source's JSON is not touched
+    const evals = [
+      { id: "asked", source: "rules", outcome: "needs_action" },
+      { id: "judged", source: "judge", outcome: "done" },
+      { id: "judged", source: "rules", outcome: "finished" },
+    ];
+    expect(read()).toEqual({ tasks: rows, evals });
+    expect(read()).toEqual({ tasks: rows, evals });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration: stored outcome keeps only what the status does not decide, once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-stored-outcome-"));
+  try {
+    const path = join(dir, "switchboard.db");
+    const first = new Db(path);
+    const ins = first.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, outcome, status_at, created_at, updated_at) VALUES (?, 't', 'claude', '/x', '[]', ?, ?, 1, 1, 1)");
+    ins.run("failed_error", "error", "failed");
+    ins.run("failed_done", "done", "failed");
+    ins.run("waiting_asked", "waiting", "needs_action");
+    ins.run("aborted_finished", "aborted", "finished");
+    ins.run("done_asked", "done", "needs_action");
+    ins.run("done_finished", "done", "finished");
+    ins.run("bg_asked", "background", "needs_action");
+    first.close();
+    const read = () => {
+      const db = new Db(path);
+      try {
+        return {
+          stored: db.sqlite.query("SELECT id, outcome FROM tasks ORDER BY id").all(),
+          shown: db.listTasks().map((t) => [t.id, t.outcome]).sort(),
+        };
+      } finally {
+        db.close();
+      }
+    };
+    const stored = [
+      { id: "aborted_finished", outcome: "unknown" },
+      { id: "bg_asked", outcome: "needs_action" },
+      { id: "done_asked", outcome: "needs_action" },
+      { id: "done_finished", outcome: "finished" },
+      { id: "failed_done", outcome: "unknown" },
+      { id: "failed_error", outcome: "unknown" },
+      { id: "waiting_asked", outcome: "unknown" },
+    ];
+    const shown = [["aborted_finished", "failed"], ["bg_asked", "needs_action"], ["done_asked", "needs_action"], ["done_finished", "finished"], ["failed_done", "unknown"], ["failed_error", "failed"], ["waiting_asked", "needs_action"]];
+    expect(read()).toEqual({ stored, shown });
+    expect(read()).toEqual({ stored, shown });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

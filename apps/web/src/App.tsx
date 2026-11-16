@@ -603,7 +603,6 @@ export function App() {
             onCreate={createTask}
             onOpenTask={openTask}
             onError={setError}
-            inboxRev={knowledgeRev}
             stopRev={stopRev}
             stopMarks={stopMarks}
             onOpenSettings={() => setView({ name: "settings" })}

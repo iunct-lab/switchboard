@@ -428,7 +428,7 @@ describe("stopMarks", () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.t4520."));
     const db = new Db(join(dir, "t.db"));
     try {
-      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "done" }), running = mk("rn", { status: "running" }), idle = mk("id", { status: "idle" }), archived = mk("ar", { archivedAt: 5 });
+      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "finished" }), running = mk("rn", { status: "running", outcome: "unknown" }), idle = mk("id", { status: "idle", outcome: "unknown" }), archived = mk("ar", { archivedAt: 5 });
       for (const t of [a, none, reviewed, done, running, idle, archived]) {
         db.insertTask(t);
         if (t.id !== "none") db.appendEvent(t.id, { t: "stop.record", stop: own(t, { reason: "transient", evidence: "HTTP 503" }) });
@@ -458,7 +458,7 @@ describe("stopMarks", () => {
       db.appendEvent("old", { t: "stop.record", stop: stop({ reason: "decision", evidence: "どちらか決めてください", work: { workspaceId: "ws1", issue: 939, taskId: "old" } }) });
       db.appendEvent("new", { t: "stop.record", stop: stop({ reason: "depends", state: "resolved", work: { workspaceId: "ws1", issue: 939, taskId: "new" } }) });
       // more newer Tasks of the schedule than stopRecordsFor reads: the old Task's own stop is still its mark
-      for (let i = 0; i < 40; i++) db.insertTask(mk(`later${i}`, { scheduleId: "sch1", createdAt: 10 + i, status: "running" }));
+      for (let i = 0; i < 40; i++) db.insertTask(mk(`later${i}`, { scheduleId: "sch1", createdAt: 10 + i, status: "running", outcome: "unknown" }));
       const marks = stopMarks(db, db.listTasks());
       expect(marks.old).toMatchObject({ reason: "decision", state: "waiting" });
       expect(marks.new).toMatchObject({ reason: "depends", state: "resolved" });

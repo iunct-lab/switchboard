@@ -1380,12 +1380,16 @@ describe("core daemon", () => {
     expect((await logRows()).find((r) => r.taskId === past.id)!.durationMs).toBe(0);
     // each row carries its task's outcome: the status alone says "done" for a task that stopped to ask
     expect(row.outcome).toBe(core.db.getTask(t.id)!.outcome);
-    for (const outcome of ["done", "needs_action", "failed"] as const) {
+    for (const outcome of ["finished", "needs_action"] as const) {
       const id = `task_outcome_${outcome}`;
       core.db.insertTask({ ...past, id, title: id, createdAt: 6_000, updatedAt: 6_000 });
       core.db.updateTask(id, { outcome });
       expect((await logRows()).find((r) => r.taskId === id)).toMatchObject({ status: "done", outcome });
     }
+    // a failed task's outcome comes from its status, in the same log
+    core.db.insertTask({ ...past, id: "task_outcome_failed", title: "failed", createdAt: 6_000, updatedAt: 6_000 });
+    core.db.updateTask("task_outcome_failed", { status: "error" });
+    expect((await logRows()).find((r) => r.taskId === "task_outcome_failed")).toMatchObject({ status: "error", outcome: "failed" });
 
     const res = await fetch(`${base}/api/routing/log?format=jsonl&limit=5`);
     expect(res.headers.get("content-type")).toContain("application/x-ndjson");
@@ -1533,7 +1537,7 @@ describe("core daemon", () => {
         const busy = await create(b, home, "busy");
         await waitFor(async () => (await statusOf(b, busy.id)) === "waiting");
         await c.tasks.releaseAndWait(done.id);
-        c.db.updateTask(done.id, { outcome: "done", reviewedAt: Date.now(), archivedAt: Date.now() }); // 確認済み and archived before the reply
+        c.db.updateTask(done.id, { outcome: "finished", reviewedAt: Date.now(), archivedAt: Date.now() }); // 確認済み and archived before the reply
         const reply = `again\n${"long ".repeat(40).trim()}`; // longer than a line, with a break: the log keeps it whole
         const r = await post(b, `/api/tasks/${done.id}/send`, { text: reply });
         expect(r.status).toBe(200);
@@ -2229,7 +2233,7 @@ describe("core daemon", () => {
         otherTotal: 0,
         days: 30,
         // the rule rows only: task_c has an LLM row and no rule row, so it is not a task of any runner here
-        byRunner: [{ runner: "claude", total: 2, outcomes: { done: 0, needs_action: 0, failed: 0, unknown: 2 }, medianCostUsd: 0, medianDurationMs: 0 }],
+        byRunner: [{ runner: "claude", total: 2, outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 2 }, medianCostUsd: 0, medianDurationMs: 0 }],
       });
       // a source that never agreed reports 0, not a missing group
       log("task_d", "llm", "codex", "claude", now);
@@ -2263,25 +2267,25 @@ describe("core daemon", () => {
       if (costUsd) c.db.insertLedger({ taskId: id, runner: chosen, model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd: 0, source: "reported", ts });
     };
     try {
-      task("task_x1", "codex", "done", 0.1, 1000);
-      task("task_x2", "codex", "done", 0.5, 3000);
+      task("task_x1", "codex", "finished", 0.1, 1000);
+      task("task_x2", "codex", "finished", 0.5, 3000);
       task("task_x3", "codex", "failed", 0.3, 2000);
       task("task_c1", "claude", "needs_action", 0, 1000, now, true); // (a) rule + llm rows: one task
-      task("task_c2", "claude", "done", 1, 4000);
-      task("task_d1", "dak", "done", 9, 9000, now - 40 * day); // (b) outside the 30-day window
+      task("task_c2", "claude", "finished", 1, 4000);
+      task("task_d1", "dak", "finished", 9, 9000, now - 40 * day); // (b) outside the 30-day window
       task("task_c3", "claude", "judged_later", 0, 0, now - 40 * day); // outside too, and a value this version does not know
       task("task_c4", "claude", "toString", 0, 0, now - 40 * day); // not an own key of the counts either
       const stats = (await fetch(`${b}/api/routing/stats?days=30`).then(j)) as RoutingStats;
       expect(stats.byRunner).toEqual([
         // (c) an odd count takes the middle value
-        { runner: "codex", total: 3, outcomes: { done: 2, needs_action: 0, failed: 1, unknown: 0 }, medianCostUsd: 0.3, medianDurationMs: 2000 },
+        { runner: "codex", total: 3, outcomes: { finished: 2, needs_action: 0, failed: 1, unknown: 0 }, medianCostUsd: 0.3, medianDurationMs: 2000 },
         // an even count the mean of the middle two
-        { runner: "claude", total: 2, outcomes: { done: 1, needs_action: 1, failed: 0, unknown: 0 }, medianCostUsd: 0.5, medianDurationMs: 2500 },
+        { runner: "claude", total: 2, outcomes: { finished: 1, needs_action: 1, failed: 0, unknown: 0 }, medianCostUsd: 0.5, medianDurationMs: 2500 },
       ]); // (d) dak has no record in the window, so no entry; most tasks first
       expect(stats.llm.total).toBe(1); // the LLM row still counts for agreement
       const wide = (await fetch(`${b}/api/routing/stats?days=90`).then(j)) as RoutingStats;
       expect(wide.byRunner.map((r) => [r.runner, r.total])).toEqual([["claude", 4], ["codex", 3], ["dak", 1]]); // ties by name
-      expect(wide.byRunner[0]!.outcomes).toEqual({ done: 1, needs_action: 1, failed: 0, unknown: 2 });
+      expect(wide.byRunner[0]!.outcomes).toEqual({ finished: 1, needs_action: 1, failed: 0, unknown: 2 });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -3719,7 +3723,7 @@ describe("automatic judgement", () => {
   // the real adapters echo the prompt as a user message first; the judge reads the task's first one as the request
   const ok: AgentEvent[] = [{ t: "message.delta", role: "user", text: "依頼文" }, ...SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result")];
   const post = (url: string, body?: unknown, method = "POST") => fetch(url, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  type Call = { input: Parameters<typeof judgeTurn>[0]; opts: Parameters<typeof judgeTurn>[1]; answer: (r: "done" | "needs_action") => void; fail: (e: Error) => void };
+  type Call = { input: Parameters<typeof judgeTurn>[0]; opts: Parameters<typeof judgeTurn>[1]; answer: (r: "finished" | "needs_action") => void; fail: (e: Error) => void };
   /** A judge the test answers by hand: each call waits until the test resolves it. */
   const handJudge = () => {
     const calls: Call[] = [];
@@ -3727,7 +3731,7 @@ describe("automatic judgement", () => {
       new Promise((resolve, reject) => {
         calls.push({ input, opts, fail: reject, answer: (result) => {
           opts.onUsage?.(opts.settings.runner, { t: "usage", source: "reported", model: opts.settings.model, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.0012 });
-          resolve({ result, reason: result === "done" ? "報告して終わっている" : "選択を求めている", runner: opts.settings.runner, model: opts.settings.model });
+          resolve({ result, reason: result === "finished" ? "報告して終わっている" : "選択を求めている", runner: opts.settings.runner, model: opts.settings.model });
         } });
       });
     return { calls, judge };
@@ -3839,8 +3843,8 @@ describe("automatic judgement", () => {
       const sent = await post(`${b}/api/tasks/${a.id}/send`, { text: "again" }).then(j);
       expect(sent).toMatchObject({ status: "running", outcome: "unknown", judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null });
       await turnDone(a.id, 2);
-      calls[1]!.answer("done");
-      await waitFor(async () => (await get(a.id)).judgedResult === "done");
+      calls[1]!.answer("finished");
+      await waitFor(async () => (await get(a.id)).judgedResult === "finished");
 
       // (b) the judge throws → unjudged, and the task is still done
       const x = await create("fails");
@@ -3852,10 +3856,10 @@ describe("automatic judgement", () => {
       // (c) + (f) the person sets the outcome while the judge is still thinking → the judgement is kept, the outcome is theirs
       const m = await create("by hand");
       await turnDone(m.id, 4);
-      expect((await post(`${b}/api/tasks/${m.id}/outcome`, { outcome: "done" })).status).toBe(200);
+      expect((await post(`${b}/api/tasks/${m.id}/outcome`, { outcome: "finished" })).status).toBe(200);
       calls[3]!.answer("needs_action");
       await waitFor(async () => (await get(m.id)).judgedResult === "needs_action");
-      expect(await get(m.id)).toMatchObject({ outcome: "done", judgedResult: "needs_action", judgedBy: "codex:gpt-6-luna" });
+      expect(await get(m.id)).toMatchObject({ outcome: "finished", judgedResult: "needs_action", judgedBy: "codex:gpt-6-luna" });
 
       // a judgement that arrives after the next turn started is of an older reply and is dropped
       const s = await create("stale");
@@ -3865,8 +3869,8 @@ describe("automatic judgement", () => {
       calls[4]!.answer("needs_action");
       await Bun.sleep(50);
       expect(await get(s.id)).toMatchObject({ outcome: "unknown", judgedResult: null });
-      calls[5]!.answer("done");
-      await waitFor(async () => (await get(s.id)).judgedResult === "done");
+      calls[5]!.answer("finished");
+      await waitFor(async () => (await get(s.id)).judgedResult === "finished");
 
       // … and so is one that arrives while the next turn is still running
       const r = await create("running", "codex");
@@ -3877,8 +3881,8 @@ describe("automatic judgement", () => {
       await Bun.sleep(50);
       expect(await get(r.id)).toMatchObject({ status: "running", outcome: "unknown", judgedResult: null });
       await turnDone(r.id, 8);
-      calls[7]!.answer("done");
-      await waitFor(async () => (await get(r.id)).judgedResult === "done");
+      calls[7]!.answer("finished");
+      await waitFor(async () => (await get(r.id)).judgedResult === "finished");
     } finally {
       ws.close();
       await c.stop();
@@ -4599,8 +4603,8 @@ describe("task outcome", () => {
       expect(await get(d.id)).toMatchObject({ outcome: "unknown", reviewedAt: null });
 
       // (e) reviewed, then a reply starts a new turn → not reviewed, unknown again
-      c.db.updateTask(d.id, { reviewedAt: 1234, outcome: "done" });
-      expect(await get(d.id)).toMatchObject({ outcome: "done", reviewedAt: 1234 });
+      c.db.updateTask(d.id, { reviewedAt: 1234, outcome: "finished" });
+      expect(await get(d.id)).toMatchObject({ outcome: "finished", reviewedAt: 1234 });
       const sent = await post(`${b}/api/tasks/${d.id}/send`, { text: "again" });
       expect(sent).toMatchObject({ status: "running", outcome: "unknown", reviewedAt: null });
       await waitFor(async () => (await get(d.id)).status === "done");
@@ -4621,12 +4625,10 @@ describe("task outcome", () => {
       const mk = (id: string, status: Task["status"]) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: h, scope: [h], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       mk("t1", "running");
       expect(db.updateTask("t1", { status: "waiting" })?.outcome).toBe("needs_action");
-      expect(db.updateTask("t1", { status: "running", outcome: "done" })?.outcome).toBe("done");
-      expect(db.updateTask("t1", { status: "done" })?.outcome).toBe("done");
+      expect(db.updateTask("t1", { status: "done", outcome: "finished" })?.outcome).toBe("finished");
       mk("t3", "running");
-      db.updateTask("t3", { outcome: "done" });
-      expect(db.updateTask("t3", { status: "idle" })?.outcome).toBe("done");
-      expect(db.updateTask("t3", { status: "idle", title: "same status" })?.outcome).toBe("done");
+      db.updateTask("t3", { status: "done", outcome: "finished" });
+      expect(db.updateTask("t3", { status: "done", title: "same status" })?.outcome).toBe("finished");
       db.updateTask("t1", { outcome: "needs_action", reviewedAt: 42 });
       mk("t2", "running");
       db.close();
@@ -4668,14 +4670,16 @@ describe("task outcome", () => {
 
       // (b) done keeps 確認済み; needs_action (or failed) on a reviewed task puts it back under 要対応; both at once is taken as given
       await set({ reviewed: true });
-      const done = (await set({ outcome: "done" }).then(j)).task as Task;
-      expect(done.outcome).toBe("done");
+      const done = (await set({ outcome: "finished" }).then(j)).task as Task;
+      expect(done.outcome).toBe("finished");
       expect(done.reviewedAt).not.toBeNull();
       expect((await set({ outcome: "needs_action" }).then(j)).task).toMatchObject({ outcome: "needs_action", reviewedAt: null });
       await set({ reviewed: true });
-      expect((await set({ outcome: "failed" }).then(j)).task).toMatchObject({ outcome: "failed", reviewedAt: null });
-      const both = (await set({ outcome: "failed", reviewed: true }).then(j)).task as Task;
-      expect(both.outcome).toBe("failed");
+      // failed is not set by hand (it comes from the status): 400
+      expect((await set({ outcome: "failed" })).status).toBe(400);
+      await set({ reviewed: false });
+      const both = (await set({ outcome: "needs_action", reviewed: true }).then(j)).task as Task;
+      expect(both.outcome).toBe("needs_action");
       expect(both.reviewedAt).not.toBeNull();
       expect((await get(t.id)).updatedAt).toBe(before.updatedAt);
 
@@ -4767,6 +4771,36 @@ describe("task outcome", () => {
     }
   });
 
+  test("POST /api/tasks/:id/outcome: a failed or waiting Task's outcome comes from its status and an idle one stores none, so setting one is 409 and the Task is unchanged; reviewed alone still works", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-outcome-409-"));
+    const c = await daemon(h);
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const get = async (id: string): Promise<Task> => (await fetch(`${b}/api/tasks/${id}`).then(j)).task;
+      const set = (id: string, body: unknown) => fetch(`${b}/api/tasks/${id}/outcome`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const e = await post(`${b}/api/tasks`, { cwd: h, title: "err", prompt: "p", runner: "codex" });
+      await waitFor(async () => (await get(e.id)).status === "error");
+      const a = await post(`${b}/api/tasks`, { cwd: h, title: "ask", prompt: "p", runner: "claude" });
+      await waitFor(async () => (await get(a.id)).status === "waiting");
+      for (const [id, shown] of [[e.id, "failed"], [a.id, "needs_action"]] as const) {
+        for (const outcome of ["finished", "needs_action", "unknown"]) expect((await set(id, { outcome })).status).toBe(409);
+        expect(await get(id)).toMatchObject({ outcome: shown });
+      }
+      expect((await set(e.id, { reviewed: true })).status).toBe(200);
+      expect(await get(e.id)).toMatchObject({ outcome: "failed" });
+      const d = await post(`${b}/api/tasks`, { cwd: h, title: "ok", prompt: "p", runner: "dak" });
+      await waitFor(async () => (await get(d.id)).status === "done");
+      expect((await set(d.id, { outcome: "finished" })).status).toBe(200);
+      // a status that stores only unknown (idle: a reply waits for a run slot) refuses a person's outcome too
+      c.db.insertTask({ ...c.db.getTask(d.id)!, id: "task_idle_outcome", status: "idle", outcome: "unknown" });
+      expect((await set("task_idle_outcome", { outcome: "finished" })).status).toBe(409);
+      expect(await get("task_idle_outcome")).toMatchObject({ outcome: "unknown" });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("migrate(): tasks that stopped before reviewedAt existed are reviewed (reviewedAt = updatedAt), running / waiting / idle ones are not", () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-outcome-mig-"));
     try {
@@ -4778,7 +4812,7 @@ describe("task outcome", () => {
       raw.close();
       const db = new Db(p);
       expect(db.getTask("t_done")).toMatchObject({ outcome: "unknown", reviewedAt: 100 });
-      expect(db.getTask("t_err")).toMatchObject({ outcome: "unknown", reviewedAt: 200 });
+      expect(db.getTask("t_err")).toMatchObject({ outcome: "failed", reviewedAt: 200 }); // shown from the status; the column stays unknown
       for (const id of ["t_run", "t_wait", "t_idle"]) expect(db.getTask(id)!.reviewedAt).toBeNull();
       db.close();
       const reopened = new Db(p); // the backfill runs once, with the column
@@ -5081,8 +5115,8 @@ describe("task evals", () => {
       expect(recounted.metrics).toMatchObject({ daemonStops: 0, lastCutByDaemon: false });
       expect(c.db.getEval(t.id, "rules")?.by).toBe("rules@5");
       // (c) the task's status / outcome / cost of the moment, not the snapshot the turn's end stored (the person or the judge sets the outcome afterwards)
-      await post(`${b}/api/tasks/${t.id}/outcome`, { outcome: "done" });
-      expect((await evals(t.id)).rules).toMatchObject({ status: "done", outcome: "done" });
+      await post(`${b}/api/tasks/${t.id}/outcome`, { outcome: "finished" });
+      expect((await evals(t.id)).rules).toMatchObject({ status: "done", outcome: "finished" });
       expect((c.db.getEval(t.id, "rules")?.json as { outcome: string }).outcome).toBe("unknown");
       // (d) no such task
       expect((await fetch(`${b}/api/tasks/nope/evals`)).status).toBe(404);
@@ -5290,7 +5324,7 @@ describe("human eval", () => {
       const rows = (id: string) => (c.db.sqlite.query("SELECT count(*) AS n FROM task_evals WHERE task_id = ? AND source = 'human'").get(id) as { n: number }).n;
       const t = await send(`${b}/api/tasks`, "POST", { cwd: h, title: "rate me", prompt: "依頼文", runner: "claude" }).then(j);
       await waitFor(async () => (await get(t.id)).status === "done");
-      c.db.updateTask(t.id, { outcome: "done", reviewedAt: 777 });
+      c.db.updateTask(t.id, { outcome: "finished", reviewedAt: 777 });
       const before = await get(t.id);
       expect((await evals(t.id)).human).toBeNull();
       // (a) put, read back, announced; one row
@@ -5306,20 +5340,20 @@ describe("human eval", () => {
       expect(c.db.getEval(t.id, "human")).toMatchObject({ by: "user", rubric: null });
       // (b) the task row did not move: no activity, no outcome change, still reviewed
       const after = await get(t.id);
-      expect(after).toMatchObject({ updatedAt: before.updatedAt, outcome: "done", reviewedAt: 777 });
+      expect(after).toMatchObject({ updatedAt: before.updatedAt, outcome: "finished", reviewedAt: 777 });
       // (c) refused shapes, unknown task
       for (const body of [{ rating: 6 }, { rating: 2.5 }, { rating: 3, comment: "x".repeat(1001) }, {}]) expect((await send(`${b}/api/tasks/${t.id}/evals/human`, "PUT", body)).status, JSON.stringify(body).slice(0, 30)).toBe(400);
       expect((await send(`${b}/api/tasks/nope/evals/human`, "PUT", { rating: 3 })).status).toBe(404);
       expect((await send(`${b}/api/tasks/nope/evals/human`, "DELETE")).status).toBe(404);
-      // (c2) the three answers: kept, read back, listed and in the summary's sample row; an unknown value is refused; a row without them reads as before
-      const ans = { rating: 3, comment: "ずれた", intent: "partial", extra: "some", value: "unknown" };
+      // (c2) the four answers: kept, read back, listed and in the summary's sample row; an unknown value or key (the old `extra`) is refused; a row without them reads as before
+      const ans = { rating: 3, comment: "ずれた", intent: "partial", complexity: "some", detour: "unknown", value: "unknown" };
       expect((await send(`${b}/api/tasks/${t.id}/evals/human`, "PUT", ans).then(j)).human).toMatchObject(ans);
       expect((await evals(t.id)).human).toMatchObject(ans);
       expect((await fetch(`${b}/api/evals`).then(j)).find((r: any) => r.taskId === t.id).human).toMatchObject(ans);
       const partial = await send(`${b}/api/tasks/${t.id}/evals/human`, "PUT", { rating: 4, value: "used" }).then(j);
       expect(partial.human).toMatchObject({ rating: 4, value: "used" });
       expect(partial.human.intent).toBeUndefined();
-      for (const body of [{ rating: 3, intent: "maybe" }, { rating: 3, extra: "many" }, { rating: 3, value: "fit" }]) expect((await send(`${b}/api/tasks/${t.id}/evals/human`, "PUT", body)).status, JSON.stringify(body)).toBe(400);
+      for (const body of [{ rating: 3, intent: "maybe" }, { rating: 3, complexity: "many" }, { rating: 3, detour: "yes" }, { rating: 3, extra: "none" }, { rating: 3, value: "fit" }]) expect((await send(`${b}/api/tasks/${t.id}/evals/human`, "PUT", body)).status, JSON.stringify(body)).toBe(400);
       expect((await evals(t.id)).human).toMatchObject({ rating: 4, value: "used" });
       c.db.upsertEval({ taskId: t.id, source: "human", by: "user", rubric: null, json: { rating: 2, comment: "古い", by: "user", ts: 1 }, ts: 1 });
       expect((await evals(t.id)).human).toMatchObject({ rating: 2, comment: "古い" });
@@ -5481,10 +5515,10 @@ describe("evals list", () => {
       expect(all.weekStart).toBe(week);
       expect(all.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["last1", "last2", "other"]);
       expect(all.sample[0]).toMatchObject({ judge: { average: 2, ts: week - 1 }, human: { rating: 1, intent: "wrong", value: "unused" } });
-      expect(all.gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 } });
+      expect(all.gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
       const w2 = await sum("?workspaceId=w2");
       expect(w2.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["other"]);
-      expect(w2.gap).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null } });
+      expect(w2.gap).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
       // the gap counts every rated task: 500 newer rated tasks without a judge do not push the judged ones out
       c.db.sqlite.transaction(() => {
         for (let i = 0; i < 500; i++) {
@@ -5494,7 +5528,7 @@ describe("evals list", () => {
           rate(id, 3);
         }
       })();
-      expect((await sum()).gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 } });
+      expect((await sum()).gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -5579,7 +5613,7 @@ describe("task status transitions", () => {
     try {
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "t", prompt: "p", runner: "dak" }).then(j);
       await waitFor(async () => c.db.getTask(t.id)?.status === "done");
-      c.db.updateTask(t.id, { outcome: "done" });
+      c.db.updateTask(t.id, { outcome: "finished" });
       const sent = await post(`${b}/api/tasks/${t.id}/send`, { text: "again" });
       expect(sent.status).toBe(200);
       await waitFor(async () => c.db.listEvents(t.id).filter((e) => e.ev.t === "session.end").length === 2);

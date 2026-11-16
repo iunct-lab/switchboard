@@ -9,9 +9,10 @@
  */
 import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSource, Job, StopRecord } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
+import { ANSWER_HEADING } from "./backlog.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
-import { issueOf, JOB_KEY, openStops, type StopReport } from "./stops.ts";
+import { issueAnsweredAction, issueOf, JOB_KEY, openStops, type StopReport } from "./stops.ts";
 import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
 import { isWorking } from "./task-status.ts";
 
@@ -92,6 +93,43 @@ export function stateFromRecords(records: BacklogRecord[], project: BacklogSourc
   };
 }
 
+/**
+ * Whether an Issue was answered since a time, from the stored records: the Issue is closed, or has a comment that starts
+ * with the answer heading (`## 回答`) created at `since` (ms) or after. Not stored, or not read, is not answered.
+ */
+export function answeredFromRecords(records: BacklogRecord[]): (n: number, since: number) => boolean {
+  const closed = new Set<number>();
+  const answers = new Map<number, number>();
+  for (const r of records) {
+    if (r.fetchState !== "fetched" || !r.remote) continue;
+    if (r.objectKind === "issue" && !r.externalId.startsWith("sb:")) {
+      if ((r.local ?? r.remote).state === "CLOSED") closed.add(r.remote.number);
+    } else if (r.objectKind === "comment") {
+      const c = r.local ?? r.remote;
+      const at = Date.parse(c.createdAt);
+      if (c.body.trimStart().startsWith(ANSWER_HEADING) && !Number.isNaN(at)) answers.set(c.issue, Math.max(answers.get(c.issue) ?? -Infinity, at));
+    }
+  }
+  return (n, since) => closed.has(n) || (answers.get(n) ?? -Infinity) >= since;
+}
+
+/**
+ * The open `decision` stops with a condition on an Issue (`issue#N`, not met): the person's answer is written on that
+ * Issue. `since` is when the stop was first reported (the oldest record of its id after the last time it was resolved:
+ * a Task reporting it again does not move it, one asking again under the same id after it resolved does): an answer older
+ * than that is for an earlier question.
+ */
+export function decisionIssueWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; since: number }[] {
+  return openStops(records).flatMap((stop) => {
+    if (stop.reason !== "decision") return [];
+    const numbers = [...new Set(stop.conditions.filter((c) => !c.met).map((c) => /^issue#(\d+)$/.exec(c.key)).filter((m) => m !== null).map((m) => Number(m![1])))];
+    if (!numbers.length) return [];
+    const own = records.filter((r) => r.id === stop.id).sort((a, b) => a.at - b.at);
+    const asked = own.reduce((at, r, i) => (r.state === "resolved" && own[i + 1] ? own[i + 1]!.at : at), own[0]!.at);
+    return [{ stop, numbers, since: asked }];
+  });
+}
+
 /** The follow-up turn of a Task whose waits closed: it says what closed, and to look at the overlap again before going on. */
 export const dependsResumePrompt = (keys: string[], afters: string[] = []) =>
   `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。並列ガードの overlap をやり直してから、中断した箇所から作業を続けてください。`;
@@ -125,11 +163,31 @@ export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: stri
 export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; workspaceId: string | null; now: number }): Promise<string[]> {
   const { db, tasks, workspaceId, now } = deps;
   const source = workspaceId === null ? null : db.getWorkspaceBacklogSource(workspaceId);
-  const stateOf: (n: number) => WaitState = source ? stateFromRecords(db.listBacklogRecords(source), source.project) : () => "unknown";
+  const stored = source ? db.listBacklogRecords(source) : [];
+  const stateOf: (n: number) => WaitState = source ? stateFromRecords(stored, source.project) : () => "unknown";
+  const answered = answeredFromRecords(stored);
   const jobStateOf = jobWaitState(db);
   const sent: string[] = [];
   for (const task of db.listTasksUpdatedSince(now - STOP_WAITS_MS)) {
     if (task.workspaceId !== workspaceId) continue;
+    // an answered decision stop stays waiting (the person's answer is read by the next stage Task); only its Issue condition is met
+    for (const d of decisionIssueWaits(db.listStopRecords([task.id])).filter((d) => d.stop.work.taskId === task.id)) {
+      const seen = d.numbers.filter((m) => answered(m, d.since));
+      if (!seen.length) continue;
+      const { stop } = d;
+      tasks.recordStop(task.id, {
+        id: stop.id.slice(task.id.length + 1),
+        op: stop.op,
+        target: stop.target,
+        reason: stop.reason,
+        evidence: stop.evidence,
+        safety: stop.safety,
+        conditions: stop.conditions.map((c) => (seen.some((m) => c.key === `issue#${m}`) ? { ...c, met: true } : c)),
+        actions: [...stop.actions, ...seen.map((m, i) => ({ attempt: stop.actions.length + 1 + i, at: now, what: issueAnsweredAction(`issue#${m}`), ok: true }))].slice(-20),
+        state: stop.state,
+        ...(stop.grant !== undefined ? { grant: stop.grant } : {}),
+      });
+    }
     const waits = dependsWaits(db.listStopRecords([task.id])).filter((w) => w.stop.work.taskId === task.id);
     const closed = waits.filter((w) => waitsClosed(w, stateOf, jobStateOf, now));
     if (!closed.length) continue;

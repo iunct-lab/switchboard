@@ -171,6 +171,7 @@ main: <pull 済み（pulled <old>..<new>） / up to date / pull していない�
 ## 途中で止まったとき（再開）
 
 占有を取り直す（並列ガードを使うとき）: `<guard> claim <PBI>`（前のセッションが release していれば通る。止まったセッションの占有が残っていて、利用者が再開を指示したときだけ `--takeover`）。
+PBI の worktree が無ければ（全部既定の枝に入って止まった worktree はアプリの片付けで消える。枝は残る）、3 の `git worktree add --detach <PBI の worktree> origin/main` で作り直し、依存の導入も CLAUDE.md の手順に従って済ませてから続ける。
 スタックは PBI の worktree の中で `gh stack switch` / `git branch --list`（CLAUDE.md の枝の名前）を確認し、各 PR の状態（`gh pr view --json state,mergeStateStatus`）と Task の Status（`ops-kit backlog view <Task> --fresh`）を読む。
 結果コメントの無い Task は「閉じているが未完了」。そこから 4 か 5 を再開する。前の会話の記憶ではなく Issue と PR の記録を正とする。
 PBI が（別のセッションで）既に閉じていても、6 の済んでいない項目（元要望、worktree の片付け、main の更新）は自分で済ませてから報告する。「やっていない」と書いて止めない。

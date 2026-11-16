@@ -2974,7 +2974,7 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([stalled], "implement")).toBeNull();
   // reviewed (the person read it) → resumed; an outcome set by hand to done → resumed; a Task that ended without asking → resumed
   expect(pickNext([{ ...stalled, lastTask: asked({ reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...stalled, updatedAt: "2026-09-28T00:30:00Z", lastTask: asked({ outcome: "done" }) }], "implement")).toMatchObject({ action: "complete", resume: true });
+  expect(pickNext([{ ...stalled, updatedAt: "2026-09-28T00:30:00Z", lastTask: asked({ outcome: "finished" }) }], "implement")).toMatchObject({ action: "complete", resume: true });
   // the Issue updated since (a ## 回答 on it or a Task, any comment) → resumed, an answered one first
   expect(pickNext([{ ...stalled, updatedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(pickNext([{ ...stalled, answeredAt: "2026-09-28T01:00:00Z", updatedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete" });
@@ -3006,9 +3006,9 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([spun], "implement")).toBeNull();
   expect(pickNext([{ ...spun, lastTask: reviewed }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(spinningIn([{ ...spun, lastTask: reviewed }], "implement")).toEqual([]);
-  expect(pickNext([{ ...spun, lastTask: asked({ outcome: "done", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
+  expect(pickNext([{ ...spun, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
   // one that ended done (nothing asked) and was marked reviewed is still 前回から更新が無い
-  expect(pickNext([{ ...ready, lastTask: asked({ outcome: "done", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
+  expect(pickNext([{ ...ready, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
 });
 
 describe("on-hold", () => {
@@ -5365,9 +5365,9 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
     ["(d) (a) with the Issue newer than the Task", { ...asked, updatedAt: later }, false, false],
     ["(e) (a) with a newer ## 回答", { ...asked, answeredAt: later }, false, false],
     ["(f) (b) answered: the answer leaves the stop waiting, with answered (moveOpenStops)", { ...stopped, stopSummary: [stopOf({ next: "resume", answered: true, lastAnswer: { ref: "seq:9", at: 3 }, changes: [{ kind: "answer", detail: "seq:9" }] })] }, false, false],
-    ["(f2) done + a decision stop answered, the Task resumed and ended done: not waiting", { ...asked, lastTask: last({ outcome: "done" }), stopSummary: [stopOf({ answered: true, lastAnswer: { ref: "seq:9", at: 3 } })] }, false, false],
+    ["(f2) done + a decision stop answered, the Task resumed and ended done: not waiting", { ...asked, lastTask: last({ outcome: "finished" }), stopSummary: [stopOf({ answered: true, lastAnswer: { ref: "seq:9", at: 3 } })] }, false, false],
     // personWait: the judgment done with the newest stop waiting for a decision is waiting; needs_action with the newest stop only waiting on a condition (depends) is not, it is stopHeld's side
-    ["(g) done + newest stop decision waiting", { ...asked, lastTask: last({ outcome: "done" }), stopSummary: [stopOf()] }, true, null],
+    ["(g) done + newest stop decision waiting", { ...asked, lastTask: last({ outcome: "finished" }), stopSummary: [stopOf()] }, true, null],
     ["(h) needs_action + newest stop depends waiting", { ...asked, stopSummary: [stopOf({ reason: "depends", next: "wait" })] }, false, null],
   ];
   for (const [name, i, want, skip] of rows) {
@@ -5382,7 +5382,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
 });
 
 test("a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
-  const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "done" as const, reviewedAt: null, resumeAt: null };
+  const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
     count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
@@ -5804,7 +5804,7 @@ describe("flow-improvement limit", () => {
     const next = flowItem({ number: 2, priority: "P1" });
     const reply = flowItem({ number: 10, ...progress, lastTask: asked });
     // a decision stop on a Task that ended done (no reply waited for): only the stop holds it
-    const decided = { ...asked, outcome: "done" as const };
+    const decided = { ...asked, outcome: "finished" as const };
     const ask: BacklogItem["stopSummary"][number] = {
       key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
       count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",

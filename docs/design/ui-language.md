@@ -9,7 +9,7 @@ The web UI mixed the two languages without a rule: the header had English tabs f
 | Header (`App.tsx`'s `<header className="chrome">`): brand, tabs, rescue entry, connection state | English words | `Home` `Task` `Knowledge` `Ledger` `Insights` `Backlog` `Resources` `Schedules` `Settings` `Rescue`, `daemon connected` |
 | A screen's name where a tab opens it (its heading, `screen.ts`'s `screenLabel`) | The tab's word | `Backlog`, `Settings` (not `設定`), `Schedules` (not `定期タスク`) |
 | The rail's group headings | `Running · Waiting` and `Tasks` as they are (English); the rest by the row below | `Running · Waiting`, `Tasks`, `Workspace`, `要対応 · N` |
-| Every other heading, buttons, labels, body text, `placeholder` / `title` / `aria-label` / `alt` | Japanese; proper nouns mixed in as they are | `新しいタスク · Inbox`, `Terminal の履歴（Claude Code）` |
+| Every other heading, buttons, labels, body text, `placeholder` / `title` / `aria-label` / `alt` | Japanese; proper nouns mixed in as they are | `新しいタスク`, `Terminal の履歴（Claude Code）` |
 | Proper nouns: products, runners, external services, protocols | As they are | Switchboard, Claude Code, Codex, DAK, GitHub, MCP, Workspace MCP, URL, JSON |
 | GitHub's names for its parts: `Project`, `Issue`, `PR`, `Milestone`, `Actions`, and git's `head` / `base` of a PR | As they are | `Issue を作る`, `PR #N`, `head 1a2b3c4 · base 5d6e7f8` |
 | Values from data: Issue titles, Project field options, model ids, runner ids, paths, commands | As they are (not listed) | `claude-opus-…`, `~/.claude/projects`, `bun run dev` |
@@ -18,7 +18,7 @@ The rule's data is in `scripts/ui-strings.ts` only: `NAV_EN` (the header's words
 
 ### The app's own words
 
-The owner kept these English words for the app's concepts as proper nouns (2026-10-23), since they already work as names inside Japanese sentences (`Inbox に保存`, `Task の会話`, the `Terminal` tag): Workspace, Inbox, Terminal, Task, SP (the Project's Story Points), PBI, worktree, main, OK, ID / id, and the units ms, KB, MB, GB, JST, UTC and a single letter next to a number (`3 s`, `12 k`). `Local` / `Cloud` (the run location) are translated: `ローカル` / `クラウド`.
+The owner kept these English words for the app's concepts as proper nouns (2026-10-23), since they already work as names inside Japanese sentences (`Task の会話`, the `Terminal` tag): Workspace, Inbox, Terminal, Task, SP (the Project's Story Points), PBI, worktree, main, OK, ID / id, and the units ms, KB, MB, GB, JST, UTC and a single letter next to a number (`3 s`, `12 k`). `Local` / `Cloud` (the run location) are translated: `ローカル` / `クラウド`.
 
 The owner's answer (2026-10-23) keeps two of the rail's group headings in English as they are: `Running · Waiting` and `Tasks` (`RAIL_HEADINGS`). The third, `Workspaces`, follows the confirmed proposal and becomes the proper noun `Workspace`; `要対応 · N` stays Japanese.
 

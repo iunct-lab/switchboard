@@ -163,8 +163,7 @@ export const task = msgs({
   outcomeNeedsAction: { ja: "要対応", en: "Needs action" },
   outcomeUnknown: { ja: "未判定", en: "Not judged" },
   cliDefaultBy: { ja: "{runner}CLI 既定", en: "{runner} CLI default" },
-  judgedText: { ja: "自動判定: {judged} — {reason}", en: "Auto-judged: {judged} — {reason}" },
-  judgedTitle: { ja: "自動判定（{by}）: {judged}", en: "Auto-judged ({by}): {judged}" },
+  judgedTitle: { ja: "自動判定（{by}）", en: "Auto-judged ({by})" },
   termWorking: { ja: "端末: 作業中", en: "Terminal: working" },
   termWaiting: { ja: "端末: 返事待ち", en: "Terminal: waiting for a reply" },
 
@@ -269,6 +268,8 @@ export const task = msgs({
   titleLabel: { ja: "タイトル", en: "Title" },
   clickToEdit: { ja: "クリックで変更", en: "Click to change" },
   outcomeTitle: { ja: "結果（要対応のまとまりの並びに使う）", en: "Outcome (orders the Needs action group)" },
+  outcomeDerivedTitle: { ja: "結果は状態から決まります（手では直せません）", en: "The outcome follows from the status and cannot be set by hand" },
+  outcomeLaterTitle: { ja: "結果はターンが終わると付けられます", en: "The outcome can be set once the turn ends" },
   markReviewed: { ja: "確認済みにする", en: "Mark reviewed" },
   unmarkReviewed: { ja: "確認済みを取り消す", en: "Unmark reviewed" },
   archive: { ja: "アーカイブ", en: "Archive" },

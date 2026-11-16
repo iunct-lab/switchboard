@@ -64,12 +64,16 @@ export function isWorkingStatus(status: TaskStatus): boolean {
 
 /**
  * What a stopped task came to, for the person, apart from whether its runner is running (`status`):
- * `done` = finished, nothing to do; `needs_action` = waits on the person (an approval, a question); `failed` = error /
+ * `finished` = finished, nothing to do (not the status `done`: the two sets share no value); `needs_action` = waits on the person (an approval, a question); `failed` = error /
  * aborted; `unknown` = not judged yet. Set by the rule in `Db.updateTask` when the status changes, by the person, and
  * by reading the last reply.
  */
-export const TaskOutcome = z.enum(["done", "needs_action", "failed", "unknown"]);
+export const TaskOutcome = z.enum(["finished", "needs_action", "failed", "unknown"]);
 export type TaskOutcome = z.infer<typeof TaskOutcome>;
+
+/** The outcomes written to the `outcome` column. `needs_action` for a waiting Task and `failed` for an error / aborted one come from the status, so they are not stored there. */
+export const StoredOutcome = z.enum(["finished", "needs_action", "unknown"]);
+export type StoredOutcome = z.infer<typeof StoredOutcome>;
 
 /**
  * The user journeys the Web UI times: each starts with the person's action and ends once the result is drawn.
@@ -180,7 +184,7 @@ export type SuggestInput = z.infer<typeof SuggestInput>;
 export const RunnerStats = z.object({
   runner: RunnerId,
   total: z.number(),
-  outcomes: z.object({ done: z.number(), needs_action: z.number(), failed: z.number(), unknown: z.number() }),
+  outcomes: z.object({ finished: z.number(), needs_action: z.number(), failed: z.number(), unknown: z.number() }),
   /** Median ledger total in API-equivalent USD; null when there are no tasks. */
   medianCostUsd: z.number().nullable(),
   /** Median creation → last event (trailing `status` events, such as the cleanup note after `done`, not counted), in ms; null when there are no tasks. */
@@ -305,7 +309,7 @@ export const Task = z.object({
   machine: z.string().nullable().optional(),
   /** The title is provisional: it is set once more after the first turn. A title the person gave or changed is false. */
   titlePending: z.boolean(),
-  /** What the task came to; separate from `status`. Set by the rule on a status change, by the person, and by the judge of the last reply. */
+  /** What the task came to; separate from `status`. Derived from the stored outcome and the status (`outcomeOf` in core): waiting → needs_action and error / aborted → failed come from the status; the rest is what the rule on a status change, the person or the judge of the last reply stored. */
   outcome: TaskOutcome,
   /** When the person marked the task 確認済み (ms); null = not reviewed. A new turn clears it. */
   reviewedAt: z.number().nullable(),
@@ -315,7 +319,7 @@ export const Task = z.object({
    * The judge's reading of the last reply, kept next to `outcome` so a hand-set outcome and the judgement can
    * be compared later. null = not judged (a new turn clears it). `judgedBy` is `<runner>:<model>`.
    */
-  judgedResult: z.enum(["done", "needs_action"]).nullable(),
+  judgedResult: z.enum(["finished", "needs_action"]).nullable(),
   judgedReason: z.string().nullable(),
   judgedBy: z.string().nullable(),
   /** When the judgement of the last reply began (ms); null = not judging, or done. A new turn clears it; a restart that cut it short has it judged again once at start. */
@@ -486,10 +490,15 @@ export const JudgeEval = z.object({
 });
 export type JudgeEval = z.infer<typeof JudgeEval>;
 
-/** The person's answers to the three value questions, each optional: was the intent met, was there complexity or an alternative nobody asked for, did it lead to value. A row without them reads as before. */
+/**
+ * The person's answers to the four value questions, one matter each and each optional: was the intent of the request met,
+ * did it add features, settings or layers nobody asked for (`complexity`), did it propose or build an alternative that leads
+ * to no value (`detour`), were its outputs used (merged, adopted, used by the next stage). A row without them reads as before.
+ */
 export const HumanAnswers = z.object({
   intent: z.enum(["fit", "partial", "wrong", "unknown"]).optional(),
-  extra: z.enum(["none", "some"]).optional(),
+  complexity: z.enum(["none", "some", "unknown"]).optional(),
+  detour: z.enum(["none", "some", "unknown"]).optional(),
   value: z.enum(["used", "unused", "unknown"]).optional(),
 });
 export type HumanAnswers = z.infer<typeof HumanAnswers>;
@@ -506,8 +515,8 @@ export const HumanEval = z.object({
 }).extend(HumanAnswers.shape);
 export type HumanEval = z.infer<typeof HumanEval>;
 
-/** `PUT /api/tasks/:id/evals/human` body. */
-export const HumanEvalInput = z.object({ rating: z.number().int().min(1).max(5), comment: z.string().max(1000).default("") }).extend(HumanAnswers.shape);
+/** `PUT /api/tasks/:id/evals/human` body. Strict: a key it does not know (the old `extra`) is a 400, not dropped. */
+export const HumanEvalInput = z.object({ rating: z.number().int().min(1).max(5), comment: z.string().max(1000).default("") }).extend(HumanAnswers.shape).strict();
 export type HumanEvalInput = z.infer<typeof HumanEvalInput>;
 
 /** `GET /api/tasks/:id/evals`: one slot per source. null = not evaluated (a Cloud task has no rules row; a judge row needs a reply; a human row is the person's choice). */
@@ -532,6 +541,8 @@ export const EvalsListRow = z.object({
   workspaceId: z.string().nullable(),
   status: TaskStatus,
   outcome: TaskOutcome,
+  /** The auto-judge's result (`tasks.judged_result`), kept to be compared with `outcome` on the Evals list; null = not judged. */
+  judgedResult: z.enum(["finished", "needs_action"]).nullable(),
   updatedAt: z.number(),
   costUsd: z.number(),
   /** As `TaskEvals.models`: the distinct `session.start` models in the order first used. Two or more = the model was changed mid-task. */
@@ -583,6 +594,10 @@ export const EvalsSummary = z.object({
     mean: z.number().nullable(),
     /** The judge's `intent` score averaged over the tasks the person answered "partial" or "wrong" to the intent question (a row without an `intent` score is not counted). */
     intent: z.object({ count: z.number(), mean: z.number().nullable() }),
+    /** The judge's `minimal` score averaged over the tasks the person answered "some" to the complexity or the detour question. */
+    minimal: z.object({ count: z.number(), mean: z.number().nullable() }),
+    /** The judge's `value` score averaged over the tasks the person answered "unused" to the value question. */
+    value: z.object({ count: z.number(), mean: z.number().nullable() }),
   }),
 });
 export type EvalsSummary = z.infer<typeof EvalsSummary>;
@@ -687,9 +702,9 @@ export const SendTaskInput = z.object({
 });
 export type SendTaskInput = z.infer<typeof SendTaskInput>;
 
-/** `POST /api/tasks/:id/outcome`: mark reviewed / not reviewed, set the outcome by hand, or both. */
+/** `POST /api/tasks/:id/outcome`: mark reviewed / not reviewed, set the outcome by hand, or both. Only a stored outcome can be set by hand (`failed` comes from the status). */
 export const SetOutcomeInput = z
-  .object({ outcome: TaskOutcome.optional(), reviewed: z.boolean().optional() })
+  .object({ outcome: StoredOutcome.optional(), reviewed: z.boolean().optional() })
   .refine((x) => x.outcome !== undefined || x.reviewed !== undefined, { message: "outcome or reviewed is required" });
 export type SetOutcomeInput = z.infer<typeof SetOutcomeInput>;
 
@@ -812,8 +827,8 @@ export type EvalsSettings = z.infer<typeof EvalsSettings>;
 export const TitlesSettings = z.object({ auto: z.boolean().default(true) }).prefault({});
 export type TitlesSettings = z.infer<typeof TitlesSettings>;
 
-/** One answer of the judge: `done` = the work asked for is finished and reported, `needs_action` = it stopped for the person. */
-export const TaskJudgement = z.object({ result: z.enum(["done", "needs_action"]), reason: z.string() });
+/** One answer of the judge: `finished` = the work asked for is finished and reported, `needs_action` = it stopped for the person. */
+export const TaskJudgement = z.object({ result: z.enum(["finished", "needs_action"]), reason: z.string() });
 export type TaskJudgement = z.infer<typeof TaskJudgement>;
 
 /**

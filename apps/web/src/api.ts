@@ -1,11 +1,10 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BalanceView, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HumanAnswers, HistoryScanResult, HistorySession, HistoryStatus, InboxNote, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAllocation, BalanceView, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HumanAnswers, HistoryScanResult, HistorySession, HistoryStatus, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceAllocation, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
 import type { EventsArchive } from "./events-archive.ts";
 import { RECENT_MESSAGE, askRecentCheck, isRecentRefusal } from "./recent.ts";
 import { loginPath } from "./loginRow.ts";
-export type { InboxNote };
 
 /** The daemon's view of a runner login started from the screen (#354; mirrors packages/core/src/runnerlogin.ts). */
 export interface RunnerLoginView {
@@ -258,6 +257,8 @@ export const api = {
   setWorkspaceBacklog: (id: string, backlog: "github" | "switchboard", projectVar?: string | null) =>
     req<Workspace & { enabling?: { total: number; done: number } }>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ backlog, ...(projectVar === undefined ? {} : { projectVar }) }) }),
   setWorkspaceSweep: (id: string, sweep: Partial<WorkspaceSweep>) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ sweep }) }),
+  setWorkspaceAllocation: (id: string, allocation: Partial<WorkspaceAllocation>) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ allocation }) }),
+  backlogAllocation: () => req<BacklogAllocation>("/api/backlog/allocation"),
   setWorkspaceProjectVar: (id: string, projectVar: string | null) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ projectVar }) }),
   workspaceBrief: (id: string) => req<{ workspaceId: string; text: string }>(`/api/workspaces/${id}/brief`),
   taskStops: () => req<Record<string, TaskStopMark>>("/api/tasks/stops"),
@@ -429,11 +430,6 @@ export const api = {
   setArchived: (id: string, archived: boolean) => req<Task>(`/api/tasks/${id}/archive`, { method: "POST", body: JSON.stringify({ archived }) }),
   setOutcome: (id: string, body: { outcome?: TaskOutcome; reviewed?: boolean }) => req<{ task: Task }>(`/api/tasks/${id}/outcome`, { method: "POST", body: JSON.stringify(body) }),
   setBudget: (id: string, budgetUsd: number | null) => req<{ task: Task; overBudget: boolean }>(`/api/tasks/${id}/budget`, { method: "POST", body: JSON.stringify({ budgetUsd }) }),
-  inbox: () => req<InboxNote[]>("/api/inbox"),
-  inboxAdd: (text: string, opts: { title?: string; workspaceHint?: string } = {}) => req<InboxNote>("/api/inbox", { method: "POST", body: JSON.stringify({ text, ...opts }) }),
-  inboxClose: (path: string) => req<InboxNote>("/api/inbox/close", { method: "POST", body: JSON.stringify({ path }) }),
-  inboxEdit: (path: string, title: string, text: string) => req<InboxNote>("/api/inbox/edit", { method: "POST", body: JSON.stringify({ path, title, text }) }),
-  inboxPromote: (path: string, workspaceId: string, runner?: RunnerId) => req<{ task: Task; note: InboxNote }>("/api/inbox/promote", { method: "POST", body: JSON.stringify({ path, workspaceId, runner }) }),
   knowledge: () => req<KnowledgeIndex>("/api/knowledge"),
   knowledgeSearch: (q: string) => req<KnowledgeSearchHit[]>(`/api/knowledge/search?q=${encodeURIComponent(q)}`),
   knowledgeDoc: (path: string) => req<KnowledgeDocDetail>(`/api/knowledge/doc?path=${encodeURIComponent(path)}`),

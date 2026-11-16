@@ -39,7 +39,7 @@ export interface JudgeOptions {
 }
 
 /**
- * Judges a finished turn as done / needs action: one read-only turn of the configured runner, and when that
+ * Judges a finished turn as finished / needs action: one read-only turn of the configured runner, and when that
  * fails for any reason, one turn of the fallback (`JUDGE_FALLBACK` unless set). Throws the last error when neither answers; the caller then
  * leaves the task unjudged.
  */
@@ -72,8 +72,8 @@ export async function judgeTurn(input: JudgeInput, opts: JudgeOptions): Promise<
 export function buildJudgePrompt(input: JudgeInput): string {
   return [
     "あなたはエージェントのタスクが「完了」か「要対応」かを、最後の返答から判定します。JSON だけを返してください。",
-    'ほかの文章・コードブロック・前置きは書かないこと。形式: {"result": "done|needs_action", "reason": "<日本語で 60 字以内の理由>"}',
-    "- done（完了）: 依頼された作業を終えて、その結果を報告している",
+    'ほかの文章・コードブロック・前置きは書かないこと。形式: {"result": "finished|needs_action", "reason": "<日本語で 60 字以内の理由>"}',
+    "- finished（完了）: 依頼された作業を終えて、その結果を報告している",
     "- needs_action（要対応）: 利用者に質問・選択・確認・作業を求めて止まっている",
     "",
     "## 依頼",
@@ -85,7 +85,7 @@ export function buildJudgePrompt(input: JudgeInput): string {
   ].join("\n");
 }
 
-/** The first JSON object whose `result` is done / needs_action (same scan as `parseSuggestion`, which also skips the echoed format line). */
+/** The first JSON object whose `result` is finished / needs_action (same scan as `parseSuggestion`, which also skips the echoed format line). */
 export function parseJudgement(text: string): TaskJudgement {
   for (const candidate of jsonCandidates(text)) {
     let parsed: unknown;
@@ -95,7 +95,7 @@ export function parseJudgement(text: string): TaskJudgement {
       continue;
     }
     const obj = parsed as { result?: unknown; reason?: unknown };
-    if (obj?.result !== "done" && obj?.result !== "needs_action") continue;
+    if (obj?.result !== "finished" && obj?.result !== "needs_action") continue;
     const reason = typeof obj.reason === "string" ? oneLine(obj.reason).slice(0, REASON_CHARS) : "";
     return { result: obj.result, reason: reason || "（理由なし）" };
   }

@@ -16,7 +16,7 @@ export const HUMAN_STOP_REASONS: ReadonlySet<StopReasonCode> = new Set(["decisio
  * (approval, stop record) come before the judge's guess (outcome); who set the outcome does not change the order.
  * `stop` is the Task's own last stop (null when it has none). A stop the person answered says nothing more (they acted;
  * what the Task did after decides), and a resolved one only keeps a `needs_action` outcome from asking — the Task said
- * its stop is over, so a judged `done` / `unknown` stands.
+ * its stop is over, so a judged `finished` / `unknown` stands.
  */
 export function personWait(t: Pick<Task, "status" | "reviewedAt" | "outcome">, stop: Pick<TaskStopMark, "reason" | "state" | "answered"> | null): PersonWait {
   if (t.reviewedAt !== null || AT_WORK.has(t.status)) return "none";

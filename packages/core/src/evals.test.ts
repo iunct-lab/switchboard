@@ -210,7 +210,7 @@ describe("ruleMetrics", () => {
 
 describe("evalRequestDraft", () => {
   const task = { id: "task_1", title: "README を\n直す", runner: "claude" as const };
-  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null, delegatedModel: null }, status: "done" as const, outcome: "done" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
+  const rules = { metrics: { turns: 2, toolCalls: 7, toolFailures: 2, errors: 1, asks: 0, denials: 0, stops: 1, stopReasons: { "usage-limit": 1 }, userInstructions: 3, lastEnd: "ok" as const, daemonStops: 0, lastCutByDaemon: false, durationMs: 1000, classifier: null, delegatedModel: null }, status: "done" as const, outcome: "finished" as const, costUsd: 0.1, by: RULES_BY, ts: 1 };
   test("the task, the counts, the criteria at 3 or below with their reasons, the summary, the rating, then the line to fill", () => {
     const text = evalRequestDraft(task, {
       rules,
@@ -237,10 +237,10 @@ describe("evalRequestDraft", () => {
 });
 
 /** A list row with a judge average (null = not judged) and a human rating (null = none). */
-const listRow = (taskId: string, average: number | null, o: { runner?: EvalsListRow["runner"]; workspaceId?: string | null; rating?: number; intent?: "fit" | "partial" | "wrong" | "unknown"; judgeIntent?: number } = {}): EvalsListRow => ({
-  taskId, title: taskId, runner: o.runner ?? "claude", workspaceId: o.workspaceId === undefined ? "w1" : o.workspaceId, status: "done", outcome: "unknown", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null, rules: null,
-  judge: average === null ? null : { average, scores: o.judgeIntent === undefined ? {} : { intent: o.judgeIntent }, rubric: "r@1", by: "x", ts: 1 },
-  human: o.rating === undefined ? null : { rating: o.rating, comment: "", ...(o.intent ? { intent: o.intent } : {}) },
+const listRow = (taskId: string, average: number | null, o: { runner?: EvalsListRow["runner"]; workspaceId?: string | null; rating?: number; intent?: "fit" | "partial" | "wrong" | "unknown"; judgeIntent?: number; answers?: Omit<NonNullable<EvalsListRow["human"]>, "rating" | "comment" | "intent">; judge?: Record<string, number> } = {}): EvalsListRow => ({
+  taskId, title: taskId, runner: o.runner ?? "claude", workspaceId: o.workspaceId === undefined ? "w1" : o.workspaceId, status: "done", outcome: "unknown", judgedResult: null, updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null, rules: null,
+  judge: average === null ? null : { average, scores: { ...(o.judgeIntent === undefined ? {} : { intent: o.judgeIntent }), ...o.judge }, rubric: "r@1", by: "x", ts: 1 },
+  human: o.rating === undefined ? null : { rating: o.rating, comment: "", ...(o.intent ? { intent: o.intent } : {}), ...o.answers },
 });
 
 describe("weekly human sample", () => {
@@ -285,11 +285,11 @@ describe("weekly human sample", () => {
 describe("judge vs human gap", () => {
   test("only the tasks with both, the mean of human − judge to one decimal, and the count", () => {
     const rows = [listRow("a", 2.6, { rating: 1 }), listRow("b", 3.6, { rating: 1 }), listRow("c", 4, {}), listRow("d", null, { rating: 5 })];
-    expect(judgeHumanGap(rows)).toEqual({ count: 2, mean: -2.1, intent: { count: 0, mean: null } });
-    expect(judgeHumanGap([listRow("a", 3, { rating: 4 }), listRow("b", 3.5, { rating: 4 })])).toEqual({ count: 2, mean: 0.8, intent: { count: 0, mean: null } });
+    expect(judgeHumanGap(rows)).toEqual({ count: 2, mean: -2.1, intent: { count: 0, mean: null }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
+    expect(judgeHumanGap([listRow("a", 3, { rating: 4 }), listRow("b", 3.5, { rating: 4 })])).toEqual({ count: 2, mean: 0.8, intent: { count: 0, mean: null }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
   });
   test("none with both → mean null", () => {
-    expect(judgeHumanGap([listRow("a", 3), listRow("b", null, { rating: 2 })])).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null } });
+    expect(judgeHumanGap([listRow("a", 3), listRow("b", null, { rating: 2 })])).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null }, minimal: { count: 0, mean: null }, value: { count: 0, mean: null } });
   });
   test("intent: the judge's intent score only where the person answered partial or wrong; fit, no answer and no intent score are left out", () => {
     const rows = [
@@ -302,6 +302,17 @@ describe("judge vs human gap", () => {
     ];
     expect(judgeHumanGap(rows).intent).toEqual({ count: 2, mean: 3.5 });
     expect(judgeHumanGap([listRow("a", 3, { rating: 5, intent: "fit", judgeIntent: 5 })]).intent).toEqual({ count: 0, mean: null });
+  });
+  test("minimal: the judge's minimal score where the person answered some to complexity or detour; value: the judge's value score where it went unused", () => {
+    const rows = [
+      listRow("a", 3, { rating: 2, answers: { complexity: "some", detour: "none" }, judge: { minimal: 5, value: 4 } }),
+      listRow("b", 3, { rating: 2, answers: { complexity: "none", detour: "some", value: "unused" }, judge: { minimal: 4, value: 3 } }),
+      listRow("c", 3, { rating: 4, answers: { complexity: "none", detour: "none", value: "used" }, judge: { minimal: 2, value: 1 } }),
+      listRow("d", 3, { rating: 3, answers: { complexity: "unknown", detour: "unknown", value: "unknown" }, judge: { minimal: 2, value: 1 } }),
+      listRow("e", 3, { rating: 2, answers: { complexity: "some", value: "unused" } }), // no minimal / value score: left out
+    ];
+    expect(judgeHumanGap(rows).minimal).toEqual({ count: 2, mean: 4.5 });
+    expect(judgeHumanGap(rows).value).toEqual({ count: 1, mean: 3 });
   });
 });
 

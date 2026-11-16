@@ -1,4 +1,4 @@
-import { personWait, type PersonWait, type StopCondition, type StopReasonCode, type StopState, type Task, type TaskOutcome, type TaskStopMark, type TaskSummary, type TerminalStatus } from "@switchboard/protocol";
+import { personWait, type PersonWait, type StopCondition, type StopReasonCode, type StopState, type Task, type TaskOutcome, type TaskStopMark, type TaskStatus, type TaskSummary, type TerminalStatus } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
@@ -38,7 +38,17 @@ export function isActive(x: TaskSummary): boolean {
   return activeLabel(x) !== null;
 }
 
-const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, done: 2, unknown: 2 };
+/** Whether the Task's outcome follows from its status (an open approval, a failure, an abort) and so cannot be set by hand: the same statuses the daemon refuses an outcome write for. */
+export function outcomeIsDerived(status: TaskStatus): boolean {
+  return status === "waiting" || status === "error" || status === "aborted";
+}
+
+/** Whether a person can set the outcome by hand: only once the turn has ended (done / background). A derived one cannot, and idle / running store none yet (the server refuses with 409). */
+export function outcomeIsSettable(status: TaskStatus): boolean {
+  return !outcomeIsDerived(status) && status !== "idle" && status !== "running";
+}
+
+const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, finished: 2, unknown: 2 };
 
 /** One row of 要対応 (#4480): the Tasks stopped by the same series (`TaskStopMark.key`), newest first; `tasks[0]` is the one the row opens. */
 export type AttentionGroup = { key: string; tasks: TaskSummary[]; count: number; reason: StopReasonCode | null; state: StopState | null };
@@ -80,7 +90,7 @@ export function attentionGroups(tasks: TaskSummary[], marks: Record<string, Task
   return { needs: [...byKey.values()], waiting };
 }
 
-const LABEL: Record<TaskOutcome, string> = { needs_action: t(m.outcomeNeedsAction), failed: t(m.statusFailed), done: t(m.statusDone), unknown: t(m.outcomeUnknown) };
+const LABEL: Record<TaskOutcome, string> = { needs_action: t(m.outcomeNeedsAction), failed: t(m.statusFailed), finished: t(m.statusDone), unknown: t(m.outcomeUnknown) };
 
 export function outcomeLabel(o: TaskOutcome): string {
   return LABEL[o];
@@ -88,19 +98,18 @@ export function outcomeLabel(o: TaskOutcome): string {
 
 /**
  * What the Task screen shows next to the outcome (#493): the judge's one-line reason, and in the tooltip who judged.
- * When the person set a different outcome by hand, the judged result is named in the text so the two can be told apart.
+ * The result itself is not read here: the outcome is the one result the screen shows, and a judgement that differs from it is marked on the Evals list.
  */
 export function judgementNote(x: Task): { text: string; title: string } | null {
-  if (!x.judgedResult || !x.judgedReason) return null;
-  const judged = outcomeLabel(x.judgedResult);
+  if (!x.judgedReason) return null;
   // `<runner>:` = judged on that runner's CLI default model (the setting's model is "")
   const by = x.judgedBy?.endsWith(":") ? t(m.cliDefaultBy, { runner: x.judgedBy }) : (x.judgedBy ?? "?");
-  return { text: x.outcome === x.judgedResult ? x.judgedReason : t(m.judgedText, { judged, reason: x.judgedReason }), title: t(m.judgedTitle, { by, judged }) };
+  return { text: x.judgedReason, title: t(m.judgedTitle, { by }) };
 }
 
 /** The dot of a row under 要対応: coloured by the outcome, not the runner's status. */
 export function outcomeDotClass(o: TaskOutcome): string {
-  return o === "needs_action" ? "wait" : o === "failed" ? "err" : o === "done" ? "ok" : "idle";
+  return o === "needs_action" ? "wait" : o === "failed" ? "err" : o === "finished" ? "ok" : "idle";
 }
 
 /** The rail's mark for Claude Code in a Task's terminal tab (#1574). Done shows nothing: it needs nothing from the person. */

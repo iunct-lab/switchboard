@@ -10,7 +10,7 @@ The kit never contains values specific to any one repository (repository names, 
 | Location | Contents |
 |---|---|
 | `src/cli.ts` | The commands. `bun ops-kit/src/cli.ts --help` prints the usage of every command and a configuration example |
-| `skills/` | 10 skills that are the same in every repository: `issue-workflow` / `request-to-backlog` / `pbi-to-tasks` / `task-to-pr` / `cross-runner-review` / `review-with-subagent` / `review-triage-and-merge` / `stacked-pr-delivery` / `pbi-complete` / `public-release-gate` |
+| `skills/` | 11 skills that are the same in every repository: `issue-workflow` / `request-to-backlog` / `pbi-to-tasks` / `task-to-pr` / `cross-runner-review` / `review-with-subagent` / `review-triage-and-merge` / `stacked-pr-delivery` / `pbi-complete` / `public-release-gate` / `doc-to-slides` |
 | `bin/` | 4 programs to put on `PATH`: `ops-kit` (same as `src/cli.ts`; runs `scan-text` / `scan-issues`, which need no configuration, from anywhere) / `gh` (a front for `gh`; stops writes that contain a value usable for authentication) / `deny-shared-tmp` (a Claude Code PreToolUse hook; stops commands that write to a fixed name directly under `/tmp`) / `device-auth` (runs a command that asks for approval elsewhere and keeps the URL and code out of the output the agent reads) |
 | `template/` | The template for a new repository (configuration, entry points, `.github/`). See "Templates (new repositories)" below |
 | `public/` | The set placed in a public repository: the policy section to put in the README (`README.section.md`), the request-only Issue template (`.github/ISSUE_TEMPLATE/request.yml` and `config.yml`), a `SECURITY.md` template, and a workflow that closes pull requests from non-members (`.github/workflows/close-pull-requests.yml`). The only value is `__PUBLIC_REPO__`, which takes the public `owner/name`. `public-sync` adds it to the tree it publishes (see "Syncing to the public repository" below). It is also part of the published tree because it is part of the kit: someone who forks uses it when running `public-sync` to their own public repository. It is not used to operate the upstream public repository |
@@ -110,7 +110,7 @@ Start heavy processes (local CI, the full test suite and type checks, a fake-run
 
 The skills have a single source, `skills/`, and no copy is kept by hand. The app that holds the kit, just before starting a Task's runner, places a copy of `skills/` at `.claude/skills/<name>` (Claude Code) and `.agents/skills/<name>` (Codex) in each repository, and excludes it from Git tracking (`docs/design/skill-sync.md` in the kit's parent repository). Claude Code and Codex read the same content, and if you fix `skills/` it is put back at the next start. There is no install command.
 
-How to check: after starting a Task from that app, `ls .claude/skills .agents/skills` in the working folder shows the 10 skills above.
+How to check: after starting a Task from that app, `ls .claude/skills .agents/skills` in the working folder shows the 11 skills above.
 
 Put procedures specific to a repository, tracked in Git, at that repository's `.claude/skills/<another name>` (it is left alone as long as the name does not overlap with a kit copy). Write the values that the shared skills call "what the consuming repository holds" in that repository's `CLAUDE.md` (`AGENTS.md` for Codex).
 

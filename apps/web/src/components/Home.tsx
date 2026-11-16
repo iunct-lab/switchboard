@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, TaskStopMark, TaskSummary, Workspace } from "@switchboard/protocol";
-import { api, type Health, type InboxNote } from "../api.ts";
+import { api, type Health } from "../api.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
@@ -9,7 +9,6 @@ import { activeLabel, attentionGroups, isActive, type AttentionGroup, outcomeDot
 import { reportMeta } from "../reports.ts";
 import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
-import { editChanged, toggleDraft, type DraftEdit } from "../inbox.ts";
 import { isAdkRunner, listedRunners, runnerLabel } from "../runners.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
@@ -38,8 +37,6 @@ export function Home(props: {
   onCreate: (input: CreateTaskInput) => Promise<void>;
   onOpenTask: (id: string) => void;
   onError: (msg: string) => void;
-  /** Bumped when the knowledge folder changes (inbox notes live there). */
-  inboxRev: number;
   /** Moves on each stop record (#4501): the stuck schedules are read again. */
   stopRev: number;
   /** The last stop of each Task (#4520); null until read. Drawn from #4522 on. */
@@ -55,7 +52,7 @@ export function Home(props: {
   const [wsId, setWsId] = useState<string>("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  // Attachments (#125): uploaded as they are added, sent as ids with 開始. Not kept in the Inbox (a note is text).
+  // Attachments (#125): uploaded as they are added, sent as ids with 開始.
   const attach = useAttachments(props.onError);
   const drop = useDropZone((files) => void attach.add(files), props.onError);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
@@ -78,16 +75,6 @@ export function Home(props: {
   const [detailsOpen, setDetailsOpen] = useState(() => loadDetailsOpen(localStorage));
   const [busy, setBusy] = useState(false);
   const [suggestion, setSuggestion] = useState<RoutingSuggestion | null>(null);
-  const [inbox, setInbox] = useState<InboxNote[]>([]);
-  const [promoteWs, setPromoteWs] = useState<Record<string, string>>({});
-  const [promoting, setPromoting] = useState<string | null>(null);
-  /** The draft opened under its row to read and fix (#3032). */
-  const [editing, setEditing] = useState<DraftEdit | null>(null);
-  const [savingEdit, setSavingEdit] = useState(false);
-  const [saved, setSaved] = useState<string | null>(null);
-  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Only a workspace the user picked by hand is worth recording as a hint on the note. */
-  const [wsTouched, setWsTouched] = useState(false);
   const [brief, setBrief] = useState<Brief | null>(null);
   /** The text a 定型の指示 put in (#940) and the workspace it was expanded for: sent only while that workspace is chosen. */
   const [draft, setDraft] = useState<{ workspaceId: string | null; text: string } | null>(null);
@@ -100,10 +87,6 @@ export function Home(props: {
   wsIdRef.current = wsId;
   const meta = props.workspaces.find((w) => w.kind === "meta");
 
-  const loadInbox = () => api.inbox().then(setInbox).catch(() => undefined);
-  useEffect(() => {
-    void loadInbox();
-  }, [props.inboxRev]);
   const [runnerTouched, setRunnerTouched] = useState(false);
   /** The model select was changed by hand: the rule table's model proposal no longer fills it. */
   const [modelTouched, setModelTouched] = useState(false);
@@ -325,73 +308,6 @@ export function Home(props: {
     }
   };
 
-  /** ⌘↵: keep the thought without deciding the repository yet. */
-  const saveToInbox = async () => {
-    if (!prompt.trim() || busy || attach.items.length || attach.busy || stale) return; // a note is text; attachments go with 開始
-    setBusy(true);
-    try {
-      const n = await api.inboxAdd(prompt.trim(), { title: title.trim() || undefined, workspaceHint: wsTouched ? ws?.name : undefined });
-      setSaved(n.path);
-      setModelTouched(false);
-      setTitle("");
-      setPrompt("");
-      setBrief(null);
-      setDraft(null);
-      await loadInbox();
-      if (savedTimer.current) clearTimeout(savedTimer.current);
-      savedTimer.current = setTimeout(() => setSaved(null), 4000);
-    } catch (e) {
-      props.onError(String((e as Error).message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Inbox promotion stays manual (#135 スコープ外): with the main select on 自動 it falls back to what used to be the default.
-  const promoteDefault = wsId || (props.workspaces.find((w) => w.kind === "repo") ?? props.workspaces[0])?.id || "";
-  const promote = async (n: InboxNote) => {
-    const targetId = promoteWs[n.path] ?? props.workspaces.find((w) => w.name === n.workspaceHint)?.id ?? promoteDefault;
-    const target = props.workspaces.find((w) => w.id === targetId);
-    if (!target || promoting) return;
-    setPromoting(n.path);
-    try {
-      const s = await api.suggest({ executionMode: "local", workspaceId: target.id, cwd: target.path, title: n.title, prompt: n.body }).catch(() => null);
-      const installed = [...props.runnerOk];
-      const runner = s && props.runnerOk.has(s.runner) ? s.runner : installed[0];
-      if (!runner) throw new Error(t(home.noRunner));
-      const r = await api.inboxPromote(n.path, target.id, runner);
-      await loadInbox();
-      props.onOpenTask(r.task.id);
-    } catch (e) {
-      props.onError(String((e as Error).message ?? e));
-    } finally {
-      setPromoting(null);
-    }
-  };
-
-  const closeNote = async (n: InboxNote) => {
-    try {
-      await api.inboxClose(n.path);
-      await loadInbox();
-    } catch (e) {
-      props.onError(String((e as Error).message ?? e));
-    }
-  };
-  const saveEdit = async (e: DraftEdit) => {
-    setSavingEdit(true);
-    try {
-      const n = await api.inboxEdit(e.path, e.title, e.text);
-      // only while the editor still holds what was sent: typing more, やめる or another draft meanwhile wins
-      setEditing((cur) => (cur === e ? { path: n.path, title: n.title, text: n.body } : cur));
-      await loadInbox();
-    } catch (err) {
-      props.onError(String((err as Error).message ?? err));
-    } finally {
-      setSavingEdit(false);
-    }
-  };
-  const drafts = inbox;
-
   /**
    * "改善 →": put a workspace's brief (from the daemon) in front of the request. What the user already typed is kept:
    * a prompt that starts with a previous brief has that prefix replaced, anything else gets the brief prepended.
@@ -399,7 +315,6 @@ export function Home(props: {
   const improve = async (target: Workspace) => {
     if (target.id !== wsId) {
       setWsId(target.id);
-      setWsTouched(true);
     }
     const seq = ++briefSeq.current;
     try {
@@ -441,7 +356,6 @@ export function Home(props: {
               value={wsId}
               onChange={(e) => {
                 setWsId(e.target.value);
-                setWsTouched(true);
               }}
             >
               <option value="" disabled={cloud}>{cloud ? t(home.chooseWorkspace) : t(home.autoWorkspace)}</option>
@@ -475,7 +389,6 @@ export function Home(props: {
                 e.preventDefault();
                 if (busy) return;
                 if (e.shiftKey) void submit();
-                else void saveToInbox();
               }
             }}
             rows={6}
@@ -535,9 +448,6 @@ export function Home(props: {
             )}
           </div>
           <AttachButton onFiles={(files) => void attach.add(files)} disabled={busy || cloud} />
-          <button disabled={busy || stale || !prompt.trim() || attach.items.length > 0} onClick={() => void saveToInbox()} title={attach.items.length ? t(home.inboxNoAttachments) : t(home.inboxSaveTitle)}>
-            {t(home.saveToInbox)}
-          </button>
           <button className="pri" disabled={busy || stale || (!cloud && attach.busy) || !prompt.trim() || !props.runnerOk.has(runner) || (cloud && !ws)} onClick={() => void submit()} title={!cloud && attach.busy ? t(home.waitUpload) : ""}>
             {choosing ? t(home.choosingWorkspace) : busy ? t(home.starting) : !cloud && attach.busy ? t(home.uploading) : t(home.start)}
           </button>
@@ -633,37 +543,6 @@ export function Home(props: {
           </span>
         </div>
       </section>
-
-      {saved && <div className="banner ok">{t(home.savedToInbox, { path: saved })}</div>}
-
-      {drafts.length > 0 && (
-        <section className="card">
-          <h5>{t(home.inboxHeading)}</h5>
-          {drafts.map((n) => {
-            const open = editing?.path === n.path ? editing : null;
-            return (
-              <Fragment key={n.path}>
-                <div className="row inbox-row" title={n.path}>
-                  <DraftTitle note={n} open={!!open} onToggle={() => setEditing((cur) => toggleDraft(cur, n))} />
-                  <select value={promoteWs[n.path] ?? props.workspaces.find((w) => w.name === n.workspaceHint)?.id ?? promoteDefault} onChange={(e) => setPromoteWs((m) => ({ ...m, [n.path]: e.target.value }))}>
-                    {props.workspaces.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                        {n.workspaceHint === w.name ? " ?" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <button disabled={promoting !== null} onClick={() => void promote(n)}>
-                    {promoting === n.path ? t(home.starting) : t(home.promote)}
-                  </button>
-                  <button onClick={() => void closeNote(n)}>{t(home.close)}</button>
-                </div>
-                {open && <DraftEditor edit={open} note={n} saving={savingEdit} onChange={setEditing} onCancel={() => setEditing(null)} onSave={() => void saveEdit(open)} />}
-              </Fragment>
-            );
-          })}
-        </section>
-      )}
 
       {stuck.length > 0 && (
         <section className="card stuck-schedules">
@@ -818,33 +697,6 @@ function QuotaRow(props: { label: string; utilization: number; resetsAt: number;
         </span>
       </span>
     </>
-  );
-}
-
-/** An Inbox draft's title on its row (#3032): pressing it opens or closes the draft; … marks a longer body while closed. */
-export function DraftTitle(props: { note: InboxNote; open: boolean; onToggle: () => void }) {
-  return (
-    <button className="t" aria-expanded={props.open} onClick={props.onToggle}>
-      {props.note.title}
-      {!props.open && props.note.body.includes("\n") && <span className="hint"> …</span>}
-    </button>
-  );
-}
-
-/** The draft opened under its row (#3032): its title and whole body to fix, saved only by 保存 and only when changed. */
-export function DraftEditor(props: { edit: DraftEdit; note: InboxNote; saving: boolean; onChange: (e: DraftEdit) => void; onCancel: () => void; onSave: () => void }) {
-  const { edit } = props;
-  return (
-    <div className="inbox-edit">
-      <input value={edit.title} onChange={(e) => props.onChange({ ...edit, title: e.target.value })} />
-      <textarea value={edit.text} onChange={(e) => props.onChange({ ...edit, text: e.target.value })} />
-      <div className="acts">
-        <button onClick={props.onCancel}>{t(home.cancel)}</button>
-        <button className="pri" disabled={props.saving || !editChanged(edit, props.note)} onClick={props.onSave}>
-          {t(home.save)}
-        </button>
-      </div>
-    </div>
   );
 }
 

@@ -244,7 +244,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
                       <RunnerPill runner={r.runner} />
                     </td>
                     <td className="num">{countLabel(r)}</td>
-                    <td className="num">{r.outcomes.done}</td>
+                    <td className="num">{r.outcomes.finished}</td>
                     <td className="num">{r.outcomes.needs_action}</td>
                     <td className="num">{r.outcomes.failed}</td>
                     <td className="num">{r.outcomes.unknown}</td>

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { StopReasonCode, StopState, Task, TaskOutcome, TaskStatus, TaskStopMark } from "@switchboard/protocol";
-import { activeLabel, attentionGroups, isActive, judgementNote, outcomeDotClass, outcomeLabel, stopCandidates, stopsToRead, terminalMark } from "./attention.ts";
+import { activeLabel, attentionGroups, isActive, judgementNote, outcomeDotClass, outcomeIsDerived, outcomeIsSettable, outcomeLabel, stopCandidates, stopsToRead, terminalMark } from "./attention.ts";
 
 const task = (id: string, status: TaskStatus, outcome: TaskOutcome, reviewedAt: number | null = null, updatedAt = 1): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome, reviewedAt, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 0, createdAt: 0, updatedAt, queuedAt: null });
 
@@ -10,28 +10,28 @@ const needsAttention = (x: Task, m?: TaskStopMark) => attentionGroups([x], m ? {
 const attentionList = (xs: Task[], marks: Record<string, TaskStopMark> | null) => attentionGroups(xs, marks).needs.flatMap((g) => g.tasks);
 test("needsAttention: by personWait — a stopped task not reviewed yet whose outcome is not 完了; an open approval always; never a running or idle one", () => {
   for (const status of ["done", "error", "aborted"] as const) {
-    expect(needsAttention(task("t", status, "done")), `${status} done`).toBe(false);
+    expect(needsAttention(task("t", status, "finished")), `${status} finished`).toBe(false);
     for (const outcome of ["needs_action", "failed", "unknown"] as const) {
       expect(needsAttention(task("t", status, outcome)), `${status} ${outcome}`).toBe(true);
       expect(needsAttention(task("t", status, outcome, 5)), `${status} ${outcome} reviewed`).toBe(false);
     }
   }
   // an open approval needs the person whatever the judge guessed
-  expect(needsAttention(task("t", "waiting", "done"))).toBe(true);
+  expect(needsAttention(task("t", "waiting", "finished"))).toBe(true);
   // a stop that waits on the person decides before the outcome; one that waits on something else does not need them
-  expect(needsAttention(task("t", "done", "done"), mark("decision", "waiting"))).toBe(true);
+  expect(needsAttention(task("t", "done", "finished"), mark("decision", "waiting"))).toBe(true);
   expect(needsAttention(task("t", "done", "needs_action"), mark("depends", "waiting"))).toBe(false);
-  for (const status of ["running", "background", "idle"] as const) for (const outcome of ["done", "needs_action", "failed", "unknown"] as const) expect(needsAttention(task("t", status, outcome))).toBe(false);
+  for (const status of ["running", "background", "idle"] as const) for (const outcome of ["finished", "needs_action", "failed", "unknown"] as const) expect(needsAttention(task("t", status, outcome))).toBe(false);
 });
 
 test("stopCandidates: the stopped tasks not reviewed yet, 完了 ones too; not running, idle or reviewed ones", () => {
   const ids = stopCandidates([
-    task("done", "done", "done"),
-    task("ask", "waiting", "done"),
+    task("done", "done", "finished"),
+    task("ask", "waiting", "finished"),
     task("failed", "error", "failed"),
-    task("reviewed", "done", "done", 5),
+    task("reviewed", "done", "finished", 5),
     task("running", "running", "unknown"),
-    task("idle", "idle", "done"),
+    task("idle", "idle", "finished"),
   ]).map((t) => t.id);
   expect(ids).toEqual(["done", "ask", "failed"]);
 });
@@ -41,7 +41,7 @@ test("stopsToRead: read when a candidate comes or moves status; not when one goe
   const first = stopsToRead(null, [done, task("running", "running", "unknown")]);
   expect(first.read).toBe(true);
   // a title or a judged outcome moves updatedAt, not the mark
-  expect(stopsToRead(first.keys, [{ ...done, updatedAt: 9, title: "renamed", outcome: "done" }, task("running", "running", "unknown", null, 9)]).read).toBe(false);
+  expect(stopsToRead(first.keys, [{ ...done, updatedAt: 9, title: "renamed", outcome: "finished" }, task("running", "running", "unknown", null, 9)]).read).toBe(false);
   expect(stopsToRead(first.keys, [task("running", "running", "unknown")]).read).toBe(false);
   expect(stopsToRead(first.keys, [done, task("running", "done", "unknown")]).read).toBe(true);
   expect(stopsToRead(first.keys, [{ ...done, statusAt: 5 }]).read).toBe(true);
@@ -53,12 +53,12 @@ test("stopsToRead: read when a candidate comes or moves status; not when one goe
 
 test("attentionList: 要対応 → 失敗 → 未判定, newest first within each; 完了, reviewed and running ones left out; a 完了 task stopped on a decision ranks as 要対応", () => {
   const list = attentionList([
-    task("done-old", "done", "done", null, 1),
+    task("done-old", "done", "finished", null, 1),
     task("unknown-new", "done", "unknown", null, 9),
     task("failed", "error", "failed", null, 2),
     task("ask-old", "waiting", "needs_action", null, 3),
     task("ask-new", "done", "needs_action", null, 8),
-    task("stopped-done", "done", "done", null, 4),
+    task("stopped-done", "done", "finished", null, 4),
     task("reviewed", "done", "needs_action", 7, 10),
     task("running", "running", "unknown", null, 11),
   ], { "stopped-done": mark("decision", "waiting") });
@@ -66,17 +66,19 @@ test("attentionList: 要対応 → 失敗 → 未判定, newest first within eac
 });
 
 test("labels and dots per outcome", () => {
-  expect((["needs_action", "failed", "done", "unknown"] as const).map(outcomeLabel)).toEqual(["要対応", "失敗", "完了", "未判定"]);
-  expect((["needs_action", "failed", "done", "unknown"] as const).map(outcomeDotClass)).toEqual(["wait", "err", "ok", "idle"]);
+  expect((["needs_action", "failed", "finished", "unknown"] as const).map(outcomeLabel)).toEqual(["要対応", "失敗", "完了", "未判定"]);
+  expect((["needs_action", "failed", "finished", "unknown"] as const).map(outcomeDotClass)).toEqual(["wait", "err", "ok", "idle"]);
 });
 
-test("judgementNote (#493): the judge's reason with who judged; the judged result is named only when the outcome differs (set by hand)", () => {
-  const judged = (outcome: TaskOutcome, result: "done" | "needs_action"): Task => ({ ...task("t", "done", outcome), judgedResult: result, judgedReason: "A か B を聞いている", judgedBy: "codex:gpt-6-luna" });
+test("judgementNote: the judge's reason with who judged, never the judged result (the outcome is the one result shown)", () => {
+  const judged = (outcome: TaskOutcome, result: "finished" | "needs_action"): Task => ({ ...task("t", "done", outcome), judgedResult: result, judgedReason: "A か B を聞いている", judgedBy: "codex:gpt-6-luna" });
   expect(judgementNote(task("t", "done", "unknown"))).toBeNull();
-  expect(judgementNote(judged("needs_action", "needs_action"))).toEqual({ text: "A か B を聞いている", title: "自動判定（codex:gpt-6-luna）: 要対応" });
-  expect(judgementNote(judged("done", "needs_action"))).toEqual({ text: "自動判定: 要対応 — A か B を聞いている", title: "自動判定（codex:gpt-6-luna）: 要対応" });
+  const same = judgementNote(judged("needs_action", "needs_action"));
+  expect(same).toEqual({ text: "A か B を聞いている", title: "自動判定（codex:gpt-6-luna）" });
+  // set by hand to a different outcome: the same note, no result word
+  expect(judgementNote(judged("finished", "needs_action"))).toEqual(same);
   // judged on the runner's CLI default model (model "", saved when the runner is changed): no dangling colon
-  expect(judgementNote({ ...judged("done", "done"), judgedBy: "codex:" })?.title).toBe("自動判定（codex:CLI 既定）: 完了");
+  expect(judgementNote({ ...judged("finished", "finished"), judgedBy: "codex:" })?.title).toBe("自動判定（codex:CLI 既定）");
 });
 
 test("terminalMark: working / waiting show a mark, done and none do not", () => {
@@ -112,7 +114,7 @@ test("attentionGroups: waiting / exhausted on a reason that needs the person sta
 test("attentionGroups: a 完了 task stopped on a decision is under needs, a needs_action one stopped on depends under waiting; 完了 with no mark is in neither", () => {
   expect(split(mark("decision", "waiting"), "done")).toBe("needs");
   expect(split(mark("depends", "waiting"), "needs_action")).toBe("waiting");
-  const r = attentionGroups([task("t", "done", "done")], null);
+  const r = attentionGroups([task("t", "done", "finished")], null);
   expect([r.needs, r.waiting]).toEqual([[], []]);
 });
 
@@ -141,4 +143,14 @@ test("attentionGroups: Tasks of the same key are one group with the count, place
   const marks = { a: mark("decision", "waiting", "same"), b: mark("decision", "waiting", "same"), c: mark("decision", "waiting", "same"), n: mark("input", "waiting", "other") };
   const { needs } = attentionGroups(ts, marks);
   expect(needs.map((g) => [g.key, g.count, g.tasks.map((x) => x.id)])).toEqual([["other", 1, ["n"]], ["same", 3, ["b", "c", "a"]], ["task:f", 1, ["f"]]]);
+});
+
+test("outcomeIsDerived: derived outcome — only the statuses the outcome follows from cannot be set by hand", () => {
+  for (const status of ["waiting", "error", "aborted"] as const) expect(outcomeIsDerived(status), status).toBe(true);
+  for (const status of ["idle", "running", "background", "done"] as const) expect(outcomeIsDerived(status), status).toBe(false);
+});
+
+test("outcomeIsSettable: derived outcome aside, idle and running store none either — only an ended turn takes one by hand", () => {
+  for (const status of ["done", "background"] as const) expect(outcomeIsSettable(status), status).toBe(true);
+  for (const status of ["idle", "running", "waiting", "error", "aborted"] as const) expect(outcomeIsSettable(status), status).toBe(false);
 });
