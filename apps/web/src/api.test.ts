@@ -93,3 +93,23 @@ test("renewLogin: only a passkey login's changing request asks the Starter, at m
   expect(() => renewLogin("passkey", "POST", 9e9, () => Promise.reject(new Error("offline")))).not.toThrow();
   resetRenewal();
 });
+
+test("resumeNow: a note goes as the trimmed text of the body; empty or blank sends no body", async () => {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { fetch: g.fetch, localStorage: g.localStorage };
+  g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  const sent: { url: string; method?: string; body?: unknown }[] = [];
+  g.fetch = async (url: string, init?: RequestInit) => (sent.push({ url, method: init?.method, body: init?.body }), Response.json({ id: "t1" }));
+  try {
+    await api.resumeNow("t1", "  Codex を待たずに進める\n");
+    await api.resumeNow("t1", "   ");
+    await api.resumeNow("t1");
+    expect(sent).toEqual([
+      { url: "/api/tasks/t1/resume", method: "POST", body: JSON.stringify({ text: "Codex を待たずに進める" }) },
+      { url: "/api/tasks/t1/resume", method: "POST", body: undefined },
+      { url: "/api/tasks/t1/resume", method: "POST", body: undefined },
+    ]);
+  } finally {
+    Object.assign(g, saved);
+  }
+});

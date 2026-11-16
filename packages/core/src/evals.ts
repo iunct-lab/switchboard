@@ -1,4 +1,4 @@
-import type { AgentEvent, BacklogPullRequestData, EvalContext, EvalsListRow, EventEnvelope, RuleEval, RuleMetrics, Task, TaskEvals } from "@switchboard/protocol";
+import type { AgentEvent, BacklogPullRequestData, EvalContext, EvalsListRow, EvalsSummary, EventEnvelope, RuleEval, RuleMetrics, Task, TaskEvals } from "@switchboard/protocol";
 import { DEFAULT_RUBRIC } from "./rubric.ts";
 import type { StoredIssueReader } from "./backlog.ts";
 import type { Db } from "./db.ts";
@@ -199,9 +199,12 @@ export function weeklyHumanSample(rows: EvalsListRow[]): EvalsListRow[] {
 }
 
 /** How far the person's rating sits from the judge: human − the judge's average over the tasks with both, mean to one decimal. Not used to correct anything. */
-export function judgeHumanGap(rows: EvalsListRow[]): { count: number; mean: number | null } {
+export function judgeHumanGap(rows: EvalsListRow[]): EvalsSummary["gap"] {
+  const mean = (xs: number[]) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : null);
   const diffs = rows.flatMap((r) => (r.judge && r.human ? [r.human.rating - r.judge.average] : []));
-  return { count: diffs.length, mean: diffs.length ? Math.round((diffs.reduce((a, b) => a + b, 0) / diffs.length) * 10) / 10 : null };
+  // where the person said the intent was missed, what the judge's `intent` score said; a judge row without that score is left out
+  const intents = rows.flatMap((r) => (r.human && (r.human.intent === "partial" || r.human.intent === "wrong") && r.judge?.scores.intent !== undefined ? [r.judge.scores.intent] : []));
+  return { count: diffs.length, mean: mean(diffs), intent: { count: intents.length, mean: mean(intents) } };
 }
 
 /** How many characters of a PBI's story / out-of-scope and of a first message the Evals context shows: what a row can read at a glance. */
@@ -221,6 +224,29 @@ function sectionOf(body: string, heading: string): string {
   return (next < 0 ? rest : rest.slice(0, next)).join("\n").trim();
 }
 
+/** The PBI and source request a stage Task works from, each part capped (`caps`): shown in Insights and read by the rubric judge. */
+export type StageRequest = { pbi: { number: number; title: string; story: string; outOfScope: string } | null; source: { number: number; head: string } | null };
+
+/**
+ * A stage Task's PBI (`## ユーザーストーリー` / `## スコープ外`) and the source request's `## 要望`, read from the stored copy (no
+ * GitHub call). A type:task Issue goes up to its parent PBI (none when the parent is not stored), a PBI is read as it is, and the first
+ * `#N` of the PBI's `## 元要望` that is not part of `owner/repo#N` is the source. A request Issue's own stage (to-pbi, direct) has no PBI:
+ * its `## 要望` is the source. null when the Task is not a stage Task.
+ */
+export function stageRequestOf(task: Task, issues: StoredIssueReader, caps: { pbiChars: number; requestChars: number }): StageRequest | null {
+  if (!task.stage) return null;
+  const read = (n: number) => (task.workspaceId ? issues.issue(task.workspaceId, n) : null);
+  const requestHead = (n: number, body: string) => ({ number: n, head: cut(sectionOf(body, "要望"), caps.requestChars) });
+  const issue = read(task.stage.issue);
+  if (!issue) return { pbi: null, source: null };
+  if (issue.labels.includes("type:request")) return { pbi: null, source: requestHead(issue.number, issue.body) };
+  const pbiIssue = issue.labels.includes("type:task") ? (issue.parent ? read(issue.parent) : null) : issue;
+  if (!pbiIssue) return { pbi: null, source: null };
+  const pbi = { number: pbiIssue.number, title: pbiIssue.title, story: cut(sectionOf(pbiIssue.body, "ユーザーストーリー"), caps.pbiChars), outOfScope: cut(sectionOf(pbiIssue.body, "スコープ外"), caps.pbiChars) };
+  const sourceNumber = /(?<![\w/])#(\d+)/.exec(sectionOf(pbiIssue.body, "元要望"))?.[1];
+  return { pbi, source: sourceNumber ? requestHead(Number(sourceNumber), read(Number(sourceNumber))?.body ?? "") : null };
+}
+
 /**
  * What the Insights sample shows beside a task so it can be rated without its conversation (`EvalContext`). A stage
  * Task reads its Issue from the stored copy (no GitHub call): a type:task Issue goes up to its parent PBI (none when the parent is not
@@ -233,7 +259,6 @@ export function evalContext(db: Db, task: Task, issues: StoredIssueReader): Eval
   const interventions = { userInstructions: rules.metrics.userInstructions, decisionStops: rules.metrics.stopReasons.decision ?? 0 };
   const source = task.workspaceId ? db.getWorkspaceBacklogSource(task.workspaceId) : null;
   const read = (n: number) => (task.workspaceId ? issues.issue(task.workspaceId, n) : null);
-  const requestHead = (n: number, body: string) => ({ number: n, head: cut(sectionOf(body, "要望"), EVAL_REQUEST_CHARS) });
   const ours = (repo: string) => !!source && source.repository.toLowerCase() === repo;
   const created = db.createdPullsOf(task.id);
   // the stored pull-request records are read only when the Task opened a pull request
@@ -251,17 +276,7 @@ export function evalContext(db: Db, task: Task, issues: StoredIssueReader): Eval
     }),
   ];
   if (!task.stage) return { request: { kind: "prompt", text: cut(db.firstUserText(task.id) ?? "", EVAL_CONTEXT_CHARS) }, interventions, outputs, pbiStatus: null };
-  const issue = read(task.stage.issue);
-  if (!issue) return { request: { kind: "stage", pbi: null, source: null }, interventions, outputs, pbiStatus: null };
-  // a request's own stage (to-pbi, direct): no PBI yet, its `## 要望` is the source
-  if (issue.labels.includes("type:request")) return { request: { kind: "stage", pbi: null, source: requestHead(issue.number, issue.body) }, interventions, outputs, pbiStatus: null };
-  // a type:task Issue goes up to its parent; one whose parent is not stored shows no PBI
-  const pbiIssue = issue.labels.includes("type:task") ? (issue.parent ? read(issue.parent) : null) : issue;
-  if (!pbiIssue) return { request: { kind: "stage", pbi: null, source: null }, interventions, outputs, pbiStatus: null };
-  const pbi = { number: pbiIssue.number, title: pbiIssue.title, story: cut(sectionOf(pbiIssue.body, "ユーザーストーリー"), EVAL_CONTEXT_CHARS), outOfScope: cut(sectionOf(pbiIssue.body, "スコープ外"), EVAL_CONTEXT_CHARS) };
-  // the first `#N` of `## 元要望` that is not part of `owner/repo#N` (another repository's number reads another Issue here)
-  const sourceNumber = /(?<![\w/])#(\d+)/.exec(sectionOf(pbiIssue.body, "元要望"))?.[1];
-  const request = sourceNumber ? requestHead(Number(sourceNumber), read(Number(sourceNumber))?.body ?? "") : null;
-  const status = task.workspaceId ? issues.fields(task.workspaceId, pbi.number)?.["Status"] : undefined;
-  return { request: { kind: "stage", pbi, source: request }, interventions, outputs, pbiStatus: typeof status === "string" ? status : null };
+  const stage = stageRequestOf(task, issues, { pbiChars: EVAL_CONTEXT_CHARS, requestChars: EVAL_REQUEST_CHARS })!;
+  const status = stage.pbi && task.workspaceId ? issues.fields(task.workspaceId, stage.pbi.number)?.["Status"] : undefined;
+  return { request: { kind: "stage", pbi: stage.pbi, source: stage.source }, interventions, outputs, pbiStatus: typeof status === "string" ? status : null };
 }

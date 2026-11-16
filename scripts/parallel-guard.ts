@@ -56,6 +56,17 @@ export const lastClaim = (comments: Comment[]) => {
     .reduce<number | undefined>((a, c) => (a === undefined || c.id > a ? c.id : a), undefined);
 };
 
+/**
+ * Whether a Task only waits for a check: work is done and nothing is left that changes the files its body names. Of the PRs
+ * linked to the Task (`linkedIssues`; `state` is OPEN / CLOSED / MERGED) at least one is merged and none is open (a Draft
+ * is open). A merged PR that was never read (not in `pulls`) is not seen, so such a Task is not taken for waiting.
+ * The app's overlap check and this guard both use it.
+ */
+export function waitsOnlyForCheck(task: number, pulls: { state: string; linked: number[] }[]): boolean {
+  const mine = pulls.filter((p) => p.linked.includes(task));
+  return mine.some((p) => p.state === "MERGED") && !mine.some((p) => p.state === "OPEN");
+}
+
 export interface Work { ref: string; task?: number; paths: string[]; updatedAt: string; claimId?: number }
 export interface Hit { ref: string; path: string; updatedAt: string }
 export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[] }
@@ -268,6 +279,27 @@ export interface Material {
   target: (n: number) => Promise<WaitTarget | undefined>;
 }
 
+/**
+ * Of the Tasks (none with an open PR) the ones that only wait for a check: the PRs that refer to each Task's Issue, read
+ * by one GraphQL call for all of them (last 20 references each), those linked to it by `linkedIssues` judged by `waitsOnlyForCheck`.
+ * No call when there is no Task.
+ */
+async function waitingForCheck(owner: string, name: string, tasks: number[], run: Run): Promise<number[]> {
+  if (tasks.length === 0) return [];
+  const fields = "timelineItems(itemTypes:[CROSS_REFERENCED_EVENT], last:20){ nodes{ ... on CrossReferencedEvent{ source{ ... on PullRequest{ number state body headRefName repository{ nameWithOwner } } } } } }";
+  const query = `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${tasks.map((n) => `t${n}: issue(number:${n}){ ${fields} }`).join(" ")} } }`;
+  const repository = JSON.parse(await run(["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`])).data.repository as Record<string, { timelineItems: { nodes: ({ source?: { number?: number; state?: string; body?: string; headRefName?: string; repository?: { nameWithOwner?: string } } } | null)[] } } | null>;
+  const here = `${owner}/${name}`.toLowerCase();
+  return tasks.filter((n) => {
+    // a PR of another repository that mentions this Issue is not linked to it (its `sb/<n>-` branch is that repository's Task)
+    const pulls = (repository[`t${n}`]?.timelineItems.nodes ?? []).flatMap((e) => {
+      const s = e?.source;
+      return s?.number !== undefined && s.state && s.repository?.nameWithOwner?.toLowerCase() === here ? [{ state: s.state, linked: linkedIssues({ body: s.body ?? null, headRefName: s.headRefName ?? null }) }] : [];
+    });
+    return waitsOnlyForCheck(n, pulls);
+  });
+}
+
 export async function ghMaterial(repo: string, task: number, run: Run = gh, now = Date.now()): Promise<Material> {
   const [owner, name] = repo.split("/");
   const top = lines(await run(["api", `repos/${repo}/contents`, "-q", '.[] | {name, dir: (.type == "dir")}'])) as { name: string; dir: boolean }[];
@@ -302,11 +334,13 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
   for (const n of new Set(inProgress.flatMap((t) => (t.parent ? [t.parent.number] : [])))) {
     if (waitsForDate((await comments(repo, n, run)).map((c) => ({ body: c.body, createdAt: "" })), now)) dateWaiting.add(n);
   }
+  const unlinked = inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !prs.some((pr) => linkedIssues(pr).includes(t.number)));
+  const checking = new Set<number>(await waitingForCheck(owner!, name!, unlinked.map((t) => t.number), run));
   return {
     top,
     issue: { body: issue.body, parent: issue.parent && { number: issue.parent.number, body: issue.parent.body, subIssues: issue.parent.subIssues.nodes.map((n: { number: number }) => n.number) } },
     prs: prs.map((pr) => ({ number: pr.number, linked: linkedIssues(pr), updatedAt: pr.updatedAt, files: pr.files.map((f) => f.path), isDraft: pr.isDraft, labels: pr.labels.map((l) => l.name) })),
-    working: inProgress.filter((t) => !t.parent || !dateWaiting.has(t.parent.number)),
+    working: inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !checking.has(t.number)),
     target: async (n) => {
       try {
         const r = JSON.parse(await run(["api", `repos/${repo}/issues/${n}`, "-q", "{state, state_reason, merged: (.pull_request.merged_at != null), pr: (.pull_request != null)}"])) as { state: string; state_reason: string | null; merged: boolean; pr: boolean };
@@ -332,12 +366,13 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
   if (mine.parent !== null && (!parent || r.unread.includes(mine.parent))) throw new Error(`Task #${task} の親 #${mine.parent} がアプリに保存されていない（または最後の取込みで読めなかった）`);
   const prs = r.pulls.filter((p) => p.state === "OPEN").map((p) => ({ number: p.number, linked: p.closes, updatedAt: p.updatedAt, files: p.files, isDraft: p.isDraft, labels: p.labels }));
   const pulls = new Map(r.pulls.map((p) => [p.number, p]));
+  const linked = r.pulls.map((p) => ({ state: p.state, linked: p.closes }));
   return {
     top: r.top.map((t) => ({ ...t })),
     issue: { body: mine.body, parent: parent ? { number: parent.number, body: parent.body, subIssues: parent.subIssues } : null },
     prs,
     // a Task whose PBI waits for a date still ahead (#4616) holds no file until then
-    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now))),
+    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && !waitsOnlyForCheck(t.number, linked)),
     target: async (n) => {
       const p = pulls.get(n);
       if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null };

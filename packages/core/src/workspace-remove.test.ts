@@ -34,6 +34,17 @@ test("a Git checkout directly under the parent is deletable; a missing path too"
   expect(copyDeletable({ kind: "repo", path: join(root, "gone") }, repoRoot)).toEqual({ ok: true });
 });
 
+test("with a repositories' place of its own (the container's ~/repos) only a checkout directly under it is deletable", () => {
+  const repoRoot = setup();
+  const repos = join(root, "repos");
+  mkdirSync(repos);
+  checkout(join(repos, "b"));
+  checkout(join(root, "a"));
+  expect(copyDeletable({ kind: "repo", path: join(repos, "b") }, repoRoot, repos)).toEqual({ ok: true });
+  // next to the checkout is no longer the place
+  expect(copyDeletable({ kind: "repo", path: join(root, "a") }, repoRoot, repos)).toMatchObject({ ok: false, code: 400 });
+});
+
 test("meta, the checkout itself, a symlink out, a nested path and a non-Git directory are refused", () => {
   const repoRoot = setup();
   checkout(join(root, "a"));

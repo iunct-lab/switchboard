@@ -2745,7 +2745,7 @@ describe("core daemon", () => {
       expect(saved.defaultPermissionMode).toEqual({ claude: "plan" });
       expect(saved.runners[0].defaultPermissionMode).toBe("plan");
       expect((await fetch(`${b8}/api/health`).then(j)).runners[0].defaultPermissionMode).toBe("plan");
-      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, flowShareLimit: 0.25, defaultBudgetUsd: null, fableBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
+      expect(c8.db.getSetting("settings", {})).toEqual({ developSelf: true, defaultPermissionMode: { claude: "plan" }, subagentEffort: {}, autoResume: {}, bedrock: {}, shadowRunner: null, routing: { llm: { enabled: false, runner: "claude", model: "", timeoutMs: 5000 } }, judge: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 }, autoStart: { runner: "claude", model: "", effort: "", byKind: {}, fallback: [], fallbackAt: 0.9, completeTaskModel: "" }, reviewRunner: "other", maxRunners: 3, evals: { judge: { enabled: true } }, titles: { auto: true }, quotaAndResume: { backlogQuotaLimit: 0.8, retryDelayMs: 900_000, retryMaxDelayMs: 14_400_000, maxLimitStops: 8, resumePrompt: "使用上限がリセットされました。中断した箇所から作業を続けてください。", maxStopResumes: 2, thinSample: 5, flowLimit: 1, flowShareLimit: 0.25, defaultBudgetUsd: null, fableBudgetUsd: null }, judgeAndChoice: { judgeFallbackRunner: "claude", judgeFallbackModel: "claude-haiku-4-5", judgeTimeoutMs: 60_000, workspaceChoiceTimeoutMs: 60_000 }, newDefaults: { taskRunner: "claude", scheduleCron: "0 3 * * *" }, prices: {}, models: {}, hiddenModels: {}, outbound: { classifierLog: false, runnerTelemetry: false } });
       const t4 = await post("/api/tasks", { cwd: h8, title: "t4", prompt: "p", runner: "claude" }).then(j);
       expect(t4.permissionMode).toBe("plan");
       expect(starts[2]?.permissionMode).toBe("plan");
@@ -2874,15 +2874,20 @@ describe("core daemon", () => {
       expect(cancelled.resumeAt).toBeNull();
       expect((await call(`/api/tasks/${t.id}/resume`, "DELETE")).status).toBe(200);
       expect((await call("/api/tasks/nope/resume", "DELETE")).status).toBe(404);
+      // a body that is not { text: string } is refused before anything is sent
+      expect((await call(`/api/tasks/${t.id}/resume`, "POST", { text: 5 })).status).toBe(400);
       // resume now: a follow-up turn on the same session, at once
-      const resumed = await call(`/api/tasks/${t.id}/resume`, "POST").then(j);
+      expect(c12.db.hasMergeGrant(t.id, "merge", 12)).toBe(false);
+      const resumed = await call(`/api/tasks/${t.id}/resume`, "POST", { text: "PR #12 を判定の外でマージしてよい" }).then(j);
       expect(resumed.status).toBe("running");
+      expect(c12.db.hasMergeGrant(t.id, "merge", 12)).toBe(true); // a grant in the note is recorded, as in a reply
       await waitFor(async () => (await task(t.id)).task.status === "error"); // the fake hits the limit again
       const again = await task(t.id);
       // the fake does not echo the first prompt (the real adapters do); the resume turn is the one user message, in the daemon's words
       const userTurns = again.events.map((e: { ev: AgentEvent }) => e.ev).filter((e: AgentEvent) => e.t === "message.delta" && e.role === "user");
       expect(userTurns.length).toBe(1);
       expect(userTurns[0].text).toContain("Switchboard 自動再開");
+      expect(userTurns[0].text.endsWith("\n\nPR #12 を判定の外でマージしてよい")).toBe(true); // the note follows the follow-up
       expect(again.task.resumeAt).not.toBeNull(); // planned once more
       // switching the setting off keeps the plan (shown, not acted on) and is reflected in health
       const off = await call("/api/settings", "PATCH", { autoResume: { claude: false } }).then(j);
@@ -3819,7 +3824,7 @@ describe("automatic judgement", () => {
       const a = await create("judged");
       await turnDone(a.id, 1);
       expect(calls[0]!.input).toEqual({ title: "judged", prompt: "依頼文", lastReply: "done" });
-      expect(calls[0]!.opts).toMatchObject({ settings: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, cwd: join(h, "suggest") });
+      expect(calls[0]!.opts).toMatchObject({ settings: { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 }, cwd: join(h, "suggest") });
       calls[0]!.answer("needs_action");
       await waitFor(async () => updates.some((t) => t.id === a.id && t.outcome === "needs_action" && t.judgedResult === "needs_action"));
       expect(await get(a.id)).toMatchObject({ outcome: "needs_action", judgedResult: "needs_action", judgedReason: "選択を求めている", judgedBy: "codex:gpt-6-luna", status: "done" });
@@ -3895,23 +3900,23 @@ describe("automatic judgement", () => {
         return t;
       };
       const off = await post(`${b}/api/settings`, { judge: { enabled: false } }, "PATCH").then(j);
-      expect(off.judge).toEqual({ enabled: false, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
+      expect(off.judge).toEqual({ enabled: false, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 });
       await run("off");
       expect(calls).toHaveLength(0);
 
       const on = await post(`${b}/api/settings`, { judge: { enabled: true, runner: "claude", model: "claude-haiku-4-5" } }, "PATCH").then(j);
-      expect(on.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
+      expect(on.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 });
       await run("on");
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.opts.settings).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 });
+      expect(calls[0]!.opts.settings).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 });
 
       const missing = await post(`${b}/api/settings`, { judge: { runner: "dak" } }, "PATCH");
       expect(missing.status).toBe(400);
       expect((await fetch(`${b}/api/settings`).then(j)).judge.runner).toBe("claude");
 
       // the input caps: a partial patch keeps the runner / model; not a positive integer → 400
-      const caps = await post(`${b}/api/settings`, { judge: { recapChars: 30_000 } }, "PATCH").then(j);
-      expect(caps.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 30_000, laterChars: 4_000, laterEachChars: 600 });
+      const caps = await post(`${b}/api/settings`, { judge: { recapChars: 30_000, pbiChars: 1_200, requestChars: 500 } }, "PATCH").then(j);
+      expect(caps.judge).toEqual({ enabled: true, runner: "claude", model: "claude-haiku-4-5", recapChars: 30_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 1_200, requestChars: 500 });
       expect((await post(`${b}/api/settings`, { judge: { laterChars: 0 } }, "PATCH")).status).toBe(400);
       expect((await fetch(`${b}/api/settings`).then(j)).judge.laterChars).toBe(4_000);
     } finally {
@@ -5152,7 +5157,7 @@ describe("rubric judge", () => {
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "rubric", prompt: "依頼文", runner: "claude" }).then(j);
       await waitFor(async () => (await get(t.id)).status === "done");
       await waitFor(async () => calls.length === 1);
-      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 3 } });
+      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 4 } });
       expect(calls[0]!.input.metrics.toolCalls).toBe(1);
       expect(calls[0]!.opts.settings).toMatchObject({ runner: "codex", model: "gpt-6-luna" });
       expect((await evals(t.id)).judge).toBeNull();
@@ -5160,9 +5165,9 @@ describe("rubric judge", () => {
       calls[0]!.answer(4);
       await waitFor(async () => rows(t.id) === 1);
       const e = await evals(t.id);
-      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@3", by: "codex:gpt-6-luna" });
-      expect(Object.keys(e.judge.scores)).toHaveLength(5);
-      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@3" });
+      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@4", by: "codex:gpt-6-luna" });
+      expect(Object.keys(e.judge.scores)).toHaveLength(8);
+      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@4" });
       await waitFor(async () => updated.includes(t.id));
       expect(ledgerRows(t.id)).toBe(before + 1);
       // (b) a second turn: judged again, the row is replaced, still one
@@ -5462,7 +5467,7 @@ describe("evals list", () => {
       const task = (id: string, workspaceId: string | null = null) => c.db.insertTask({ id, workspaceId, title: id, runner: "claude", cwd: h, scope: [h], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
       const judge = (id: string, score: number, ts: number) => c.db.upsertEval({ taskId: id, source: "judge", by: "x", rubric: "r@1", json: { scores: { goal: { score, reason: "" } }, summary: "", rubric: "r@1", by: "x", ts }, ts });
       const rate = (id: string, rating: number) => c.db.upsertEval({ taskId: id, source: "human", by: "user", rubric: null, json: { rating, comment: "", by: "user", ts: now }, ts: now });
-      task("last1"); judge("last1", 2, week - 1);
+      task("last1"); c.db.upsertEval({ taskId: "last1", source: "judge", by: "x", rubric: "r@1", json: { scores: { goal: { score: 2, reason: "" }, intent: { score: 2, reason: "" } }, summary: "", rubric: "r@1", by: "x", ts: week - 1 }, ts: week - 1 }); // the human said "wrong": counted in gap.intent
       task("last2"); judge("last2", 4, week - 6 * 86_400_000);
       task("thisweek"); judge("thisweek", 3, week); // judged this week: next week's candidate
       task("older"); judge("older", 3, week - 7 * 86_400_000 - 1); // two weeks ago
@@ -5476,10 +5481,10 @@ describe("evals list", () => {
       expect(all.weekStart).toBe(week);
       expect(all.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["last1", "last2", "other"]);
       expect(all.sample[0]).toMatchObject({ judge: { average: 2, ts: week - 1 }, human: { rating: 1, intent: "wrong", value: "unused" } });
-      expect(all.gap).toEqual({ count: 2, mean: 0.5 });
+      expect(all.gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 } });
       const w2 = await sum("?workspaceId=w2");
       expect(w2.sample.map((r: Record<string, any>) => r.taskId)).toEqual(["other"]);
-      expect(w2.gap).toEqual({ count: 0, mean: null });
+      expect(w2.gap).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null } });
       // the gap counts every rated task: 500 newer rated tasks without a judge do not push the judged ones out
       c.db.sqlite.transaction(() => {
         for (let i = 0; i < 500; i++) {
@@ -5489,7 +5494,7 @@ describe("evals list", () => {
           rate(id, 3);
         }
       })();
-      expect((await sum()).gap).toEqual({ count: 2, mean: 0.5 });
+      expect((await sum()).gap).toEqual({ count: 2, mean: 0.5, intent: { count: 1, mean: 2 } });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });

@@ -15,7 +15,7 @@ import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts"
 import type { ReleaseReview } from "./release-review.ts";
 import type { SetupScripts } from "./skillsync.ts";
 import { loadProcess, renderEntry, type ProcessDef } from "./process-defs.ts";
-import { afterTime, judge, type Work } from "../../../scripts/parallel-guard.ts";
+import { afterTime, judge, waitsOnlyForCheck, type Work } from "../../../scripts/parallel-guard.ts";
 import { pathsIn } from "../../../scripts/task-paths.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1582,7 +1582,9 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
  * `needs-decision` and not the PBI's own (it closes neither the PBI nor one of its Tasks), and an In progress Task of
  * another PBI that is not `needs-decision`. A PR whose files are not all stored cannot be judged (`unknown`). `root` =
  * the checkout, whose top level the paths in a Task's body are read against (what `readOthers` asks GitHub for).
- * Judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
+ * Not counted as other work: a Task of a PBI that waits for a date, a Task that only waits for a check (its linked PRs are
+ * merged and none is open: `waitsOnlyForCheck`), and the unstarted Tasks of a PBI whose stage Task only has a resume planned
+ * (`active` is false for it). Judged per Task that can start (`startable`), so one free Task lets the PBI go; with none, all its open Tasks as one.
  */
 export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: Array<{ number: number; isDraft: boolean; labels: string[]; closes: number[]; updatedAt: string; files: string[] | null; state: string }>, statuses: Map<number, string | number | null>, root: string, active: (pbi: number) => boolean = () => false): void {
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
@@ -1609,7 +1611,8 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   const otherPaths = (n: number) => (inPr.has(n) ? [] : taskPaths(n));
   // a Task of a PBI that waits for a date is not at work: nothing of it changes before the date
   const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
-  const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)));
+  const checkOnly = (n: number) => waitsOnlyForCheck(n, pulls.map((p) => ({ state: p.state, linked: p.closes })));
+  const working = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)) && !checkOnly(t.number));
   const now = new Date();
   for (const i of mine) {
     const own = new Set<number>([i.number, ...(issues.get(i.number)?.subIssues ?? [])]);
@@ -1633,7 +1636,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
       if (m.number === i.number || m.state !== "OPEN" || !m.labels.includes("type:pbi") || !active(m.number)) continue;
       for (const n of m.subIssues) {
         const t = issues.get(n);
-        if (!t || t.state !== "OPEN" || !t.labels.includes("type:task") || t.labels.includes("needs-decision") || working.includes(t) || own.has(n)) continue;
+        if (!t || t.state !== "OPEN" || !t.labels.includes("type:task") || t.labels.includes("needs-decision") || working.includes(t) || checkOnly(n) || own.has(n)) continue;
         others.push({ ref: `Task #${n}`, task: n, paths: otherPaths(n), updatedAt: now.toISOString() });
       }
     }
@@ -1983,6 +1986,8 @@ export function canStartStoredBacklog(item: Pick<BacklogItem, "sync">): { ok: tr
 export interface ReleaseState {
   managed: boolean;
   current: string | null;
+  /** `owner/name` releases are built from (no git); null or absent = built from the checkout. */
+  source?: string | null;
   /** What sb-rescue is doing right now (`/api/status`'s `busy`), e.g. a promotion; null = idle. */
   busy?: string | null;
   history: Array<{ action: string; from: string | null; to: string | null; ok: boolean; reason: string }>;

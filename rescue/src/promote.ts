@@ -5,17 +5,20 @@
  * taken before each promotion is for the case where going back is not enough.
  */
 import { Database } from "bun:sqlite";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip, constants } from "node:zlib";
-import { appendHistory, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
+import { extractTarball, fetchTarball, shaOfTag } from "./github-release.ts";
+import { appendHistory, buildFromTree, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
 import type { Supervisor } from "./supervisor.ts";
 
 export interface Ctx {
   home: string;
   repo: string;
+  /** `owner/name` of the repository releases come from (`<home>/update-source.json`); null = build from the checkout `repo`. */
+  source: string | null;
   port: number;
   sup: Supervisor;
 }
@@ -56,22 +59,47 @@ async function compressSnapshots(home: string): Promise<void> {
 }
 
 /**
+ * Room to ask for per byte of live data: the copy VACUUM INTO writes is that much (free pages are left out), and the gzip
+ * written next to it while the copy is still there is about a quarter of it. There is no margin beyond that: a database
+ * that compresses worse can still run out of disk in the gzip, which removes the copy and fails the snapshot.
+ */
+const SNAPSHOT_ROOM = 1.25;
+/** What a snapshot needs on disk, from what the database holds now, not from the size of the host. */
+export function snapshotNeeds(db: Database): number {
+  const n = (pragma: string) => (db.query(`PRAGMA ${pragma}`).get() as Record<string, number>)[pragma]!;
+  return Math.ceil((n("page_count") - n("freelist_count")) * n("page_size") * SNAPSHOT_ROOM);
+}
+const freeOn = (dir: string) => {
+  const s = statfsSync(dir);
+  return s.bavail * s.bsize;
+};
+const mb = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
+
+/**
  * A consistent copy of the live database (VACUUM INTO reads through the WAL), gzipped: a database compresses to about a
  * quarter, and three of them were most of what grew on the disk. Null when there is no database yet.
  */
-export async function snapshotDb(home: string, label: string, protect?: string): Promise<string | null> {
+export async function snapshotDb(home: string, label: string, protect?: string, freeBytes: (dir: string) => number = freeOn): Promise<string | null> {
   if (!existsSync(dbPath(home))) return null;
   mkdirSync(snapshotsDir(home), { recursive: true });
   // what a run killed halfway left: never finished, nothing reads it
-  for (const f of readdirSync(snapshotsDir(home)).filter((n) => n.endsWith(".tmp") || n.endsWith(".part"))) rmSync(join(snapshotsDir(home), f), { force: true });
+  for (const f of readdirSync(snapshotsDir(home)).filter((n) => n.endsWith(".tmp") || n.endsWith(".part") || n.endsWith("-journal"))) rmSync(join(snapshotsDir(home), f), { force: true });
   const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label.replace(/[^\w-]/g, "")}.db`;
   const copy = join(snapshotsDir(home), `${name}.tmp`); // not `.db` until it is whole
   const db = new Database(dbPath(home));
   try {
+    const need = snapshotNeeds(db);
+    if (freeBytes(snapshotsDir(home)) < need) {
+      // what a success would delete anyway goes first, so the newest ones are not touched
+      for (const old of listSnapshots(home).slice(KEEP_SNAPSHOTS - 1)) if (old !== protect) rmSync(join(snapshotsDir(home), old), { force: true });
+      const free = freeBytes(snapshotsDir(home));
+      if (free < need) throw new Error(`not enough disk for the database snapshot: needs ${mb(need)}, ${mb(free)} free`);
+    }
     db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
     renameSync(copy, join(snapshotsDir(home), name));
   } catch (e) {
     rmSync(copy, { force: true });
+    rmSync(`${copy}-journal`, { force: true });
     throw e;
   } finally {
     db.close();
@@ -199,16 +227,23 @@ async function freePort(): Promise<number> {
 /** Boot the release on a spare port, a throwaway home and a copy of the snapshot. Null = it works. */
 async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, candidateMs: number): Promise<string | null> {
   const home = mkdtempSync(join(tmpdir(), "sb-candidate-"));
-  if (snapshot) await transform(join(snapshotsDir(ctx.home), snapshot), dbPath(home), createGunzip());
-  const port = await freePort();
   const dir = join(releasesDir(ctx.home), sha);
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-  Object.assign(env, { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_REPO_ROOT: ctx.repo, SWITCHBOARD_CANDIDATE: "1" });
-  delete env.SWITCHBOARD_DB;
-  // sb-rescue's own secret for 作り直す (#181): the candidate has no use for it, as supervisor.ts does for the daemon (#2077)
-  delete env.SWITCHBOARD_STARTER_TOKEN;
-  const proc = Bun.spawn([process.execPath, join(dir, "packages", "core", "src", "main.ts")], { cwd: dir, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  let port: number;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    if (snapshot) await transform(join(snapshotsDir(ctx.home), snapshot), dbPath(home), createGunzip());
+    port = await freePort();
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    Object.assign(env, { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_REPO_ROOT: ctx.source ? dir : ctx.repo, SWITCHBOARD_CANDIDATE: "1" });
+    delete env.SWITCHBOARD_DB;
+    // sb-rescue's own secret for 作り直す (#181): the candidate has no use for it, as supervisor.ts does for the daemon (#2077)
+    delete env.SWITCHBOARD_STARTER_TOKEN;
+    proc = Bun.spawn([process.execPath, join(dir, "packages", "core", "src", "main.ts")], { cwd: dir, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  } catch (e) {
+    rmSync(home, { recursive: true, force: true }); // until the candidate runs, nothing else removes its home: a full temp folder must not keep one more each promotion
+    throw e;
+  }
   const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]).then(([o, e]) => (o + e).trim().slice(-1500));
   let exited: number | null = null;
   void proc.exited.then((code) => (exited = code));
@@ -250,19 +285,53 @@ async function confirm(ctx: Ctx, confirmMs: number, settleMs: number): Promise<s
   return `not confirmed within ${Math.round(confirmMs / 1000)} s: ${reason}`;
 }
 
-export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}): Promise<HistoryEntry> {
+/** Build the release `tag` of `source` from its tarball (no git). The tag must be a version tag; the tree is checked on the way in. */
+
+async function buildFromSource(source: string, tag: string, home: string, expectSha?: string): Promise<string> {
+  if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`a release is promoted by its version tag (v1.2.3), not ${tag}`);
+  const sha = await shaOfTag(source, tag);
+  if (expectSha && sha !== expectSha) throw new Error(`${tag} now points at ${sha}, not the checked version ${expectSha}: the checked version is not the one that would run`);
+  if (existsSync(join(releasesDir(home), sha))) return sha;
+  const work = join(releasesDir(home), `.tmp-${sha}-${process.pid}`);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
+  try {
+    const tarball = await fetchTarball(source, tag, work);
+    const tree = join(work, "tree");
+    await extractTarball(tarball, tree, { tag, sha });
+    return await buildFromTree(tree, sha, home, { tag, sha });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/** `expectSha`: from a source repository, the commit the caller checked; a tag that now points elsewhere is rejected before any build. */
+export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string): Promise<HistoryEntry> {
   const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000 } = times;
   const from = currentOf(ctx.home);
   const before = previousOf(ctx.home);
   let sha: string;
   try {
-    sha = await buildRelease(ctx.repo, rev, ctx.home);
+    sha = ctx.source ? await buildFromSource(ctx.source, rev, ctx.home, expectSha) : await buildRelease(ctx.repo, rev, ctx.home);
   } catch (e) {
-    return appendHistory(ctx.home, { action: "rejected", from, to: rev, ok: false, reason: `could not build the release: ${String((e as Error).message ?? e)}` });
+    // asked by tag with the commit that was checked: the history names that commit, as the daemon looks failures up by
+    // commit. Any failure holds that version, as a failed build does on the checkout path (the daemon reports it, and
+    // `この版に更新` asks again): telling a passing outage from a lasting refusal is not attempted
+    return appendHistory(ctx.home, { action: "rejected", from, to: expectSha ?? rev, ok: false, reason: `could not build the release: ${String((e as Error).message ?? e)}` });
   }
   if (sha === from) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: "this release is already current" });
-  const snapshot = await snapshotDb(ctx.home, `before-${sha.slice(0, 7)}`);
-  const refused = await tryCandidate(ctx, sha, snapshot, candidateMs);
+  let snapshot: string | null;
+  try {
+    snapshot = await snapshotDb(ctx.home, `before-${sha.slice(0, 7)}`);
+  } catch (e) {
+    return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: `could not take the database snapshot: ${String((e as Error).message ?? e)}` });
+  }
+  let refused: string | null;
+  try {
+    refused = await tryCandidate(ctx, sha, snapshot, candidateMs);
+  } catch (e) {
+    return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: `could not start the candidate: ${String((e as Error).message ?? e)}` });
+  }
   if (refused) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: refused });
   switchTo(ctx.home, sha);
   await ctx.sup.restart();

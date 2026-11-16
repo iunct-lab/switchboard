@@ -4,6 +4,7 @@ import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, typ
 import type { ReleaseStatus } from "./release.ts";
 import type { EventsArchive } from "./events-archive.ts";
 import { RECENT_MESSAGE, askRecentCheck, isRecentRefusal } from "./recent.ts";
+import { loginPath } from "./loginRow.ts";
 export type { InboxNote };
 
 /** The daemon's view of a runner login started from the screen (#354; mirrors packages/core/src/runnerlogin.ts). */
@@ -14,6 +15,13 @@ export interface RunnerLoginView {
   code?: string;
   needsCode: boolean;
   error?: string;
+}
+
+/** The daemon's `gh auth status` (mirrors packages/core/src/github-login.ts). */
+export interface GithubStatus {
+  /** `missing`: no gh on the daemon's machine, so no login to offer. */
+  login: "ok" | "none" | "missing";
+  account?: string;
 }
 
 export interface Health {
@@ -214,12 +222,14 @@ export const api = {
   /** 改善要望にする (#1221): the draft the feedback dialog opens with for a task's evaluations. */
   evalsDraft: (id: string) => req<{ text: string }>(`/api/tasks/${id}/evals/draft`),
   /** A runner's own login from the screen (#354): the URL / device code it prints, or a box for its page's code. */
-  runnerLogin: (runner: string, kind?: "console") => req<RunnerLoginView>(`/api/runners/${runner}/login${kind ? "?billing=api" : ""}`, { method: "POST" }),
+  runnerLogin: (runner: string, kind?: "console") => req<RunnerLoginView>(`${loginPath(runner)}${kind ? "?billing=api" : ""}`, { method: "POST" }),
   /** The runner's own logout (#2528); the login is read again, so the next health says it is logged out. */
   runnerLogout: (runner: string) => req<{ ok: boolean }>(`/api/runners/${runner}/logout`, { method: "POST" }),
-  runnerLoginState: (runner: string) => req<RunnerLoginView>(`/api/runners/${runner}/login`),
+  runnerLoginState: (runner: string) => req<RunnerLoginView>(loginPath(runner)),
   runnerLoginCode: (runner: string, code: string) => req<RunnerLoginView>(`/api/runners/${runner}/login/code`, { method: "POST", body: JSON.stringify({ code }) }),
-  runnerLoginCancel: (runner: string) => req<RunnerLoginView>(`/api/runners/${runner}/login`, { method: "DELETE" }),
+  runnerLoginCancel: (runner: string) => req<RunnerLoginView>(loginPath(runner), { method: "DELETE" }),
+  /** gh's login on this machine: `none` until someone logs in (a machine without the cloud host's stored token). */
+  githubStatus: () => req<GithubStatus>("/api/github/status"),
   /** `recheck` = ask the runners' login status commands again now instead of within the minute (#180). */
   health: (opts: { recheck?: boolean } = {}) => req<Health>(opts.recheck ? "/api/health?recheck=1" : "/api/health").then((h) => ((loginMode = h.login), h)),
   workspaces: () => req<Workspace[]>("/api/workspaces"),
@@ -317,7 +327,7 @@ export const api = {
   /** Change the thinking effort of an existing task (#1802): used from the next turn. null = the CLI's default. */
   setTaskEffort: (id: string, effort: string | null) => req<Task>(`/api/tasks/${id}/effort`, { method: "POST", body: JSON.stringify({ effort }) }),
   /** Usage-limit resume (#102): send the follow-up now, or forget the planned resume. */
-  resumeNow: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "POST" }),
+  resumeNow: (id: string, text?: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "POST", ...(text?.trim() ? { body: JSON.stringify({ text: text.trim() }) } : {}) }),
   cancelResume: (id: string) => req<Task>(`/api/tasks/${id}/resume`, { method: "DELETE" }),
   settings: () => req<SettingsResponse>("/api/settings"),
   /** The ADK servers added in Settings (#3388); read by the daemon at its next start. */

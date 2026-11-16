@@ -70,7 +70,19 @@ describe("reduceStops", () => {
     // even with a condition met at the same time, the URL is not shown as the person's answer
     const open = stop({ reason: "decision", conditions: [{ key: "pr#12", value: "open", met: false }] });
     const c = stop({ reason: "decision", conditions: [{ key: "pr#12", value: "merged", met: true }], answer: b.answer });
-    expect(reduceStops([open, c])[0]).toMatchObject({ lastAnswer: null, next: "resume" });
+    expect(reduceStops([open, c])[0]).toMatchObject({ lastAnswer: null, next: "decide" });
+  });
+
+  test("a stop waiting for the person's decision is not let go by a condition met alone", () => {
+    // a job waited on, then the Task asks at the same place: the job met against the earlier stop is not an answer
+    const job = stop({ conditions: [{ key: "job#5", value: "running", met: false }] });
+    const ask = stop({ reason: "decision", conditions: [{ key: "job#5", value: "done", met: true }] });
+    const [s] = reduceStops([job, ask]);
+    expect(s!.changes.map((c) => c.kind)).toEqual(["cause", "condition-met"]);
+    expect(s).toMatchObject({ lastAnswer: null, next: "decide" });
+    // the person's answer still lets it go
+    const answered = stop({ reason: "decision", conditions: [{ key: "job#5", value: "done", met: true }], answer: { ref: "seq:3", at: ask.at + 1 } });
+    expect(reduceStops([job, ask, answered]).find((x) => x.reason === "decision")!.next).toBe("resume");
   });
 
   test("the same conditions again: counted, unchanged, waiting — no new question", () => {

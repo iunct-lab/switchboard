@@ -1,51 +1,70 @@
 # The image of the stand-alone mode (#4042): the tools, versions and paths of the EC2 host (aws/host/devtools.sh,
-# node.sh) in one arm64 image. HOME is /home/switchboard and the repositories live in /home/switchboard/repos, as on
-# the host, so a task's cwd and ~/.claude/projects read the same in both. Build from the repository root:
+# node.sh) in one image, built natively for arm64 or x86-64. HOME is /home/switchboard and the repositories live in
+# /home/switchboard/repos, as on the host, so a task's cwd and ~/.claude/projects read the same in both. Build from the repository root:
 #   docker build -t sb-local -f container/Dockerfile .
 # The versions and sha256 below that the host pins too are checked against those scripts by container/versions.test.ts.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS base
 
 RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq && dnf clean all
 
-# pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256)
+# pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256). The unsuffixed sha256 are the arm64 ones the
+# host pins; <NAME>_SHA256_X86_64 is the same version's x86-64 file from the same upstream release
 ARG DOCKER_VERSION=29.9.3
 ARG DOCKER_SHA256=1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2
+ARG DOCKER_SHA256_X86_64=3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2e6922c973
 ARG COMPOSE_VERSION=5.7.1
 ARG COMPOSE_SHA256=f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5
+ARG COMPOSE_SHA256_X86_64=af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf
 ARG UV_VERSION=0.13.7
 ARG UV_SHA256=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
+ARG UV_SHA256_X86_64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+ARG GITLEAKS_SHA256_X86_64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 ARG NODE_VERSION=24.22.3
 ARG NODE_SHA256=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c
+ARG NODE_SHA256_X86_64=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
 # pinned here only (the host installs gh from the distribution's repository, and the others at the latest)
 ARG GH_VERSION=2.103.3
 ARG GH_SHA256=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+ARG GH_SHA256_X86_64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 ARG GH_STACK_VERSION=v0.3.0
 ARG GH_STACK_SHA256=803ec91eeba9b2ac38827e299a79830fe75ca7284f0c28d60e6a2704bb34ed13
+ARG GH_STACK_SHA256_X86_64=957e822cfa7e435cd84a297cd96c419b58e51e3ac58be249762c24bd9e45099b
 ARG BUN_VERSION=1.4.4
 ARG CLAUDE_VERSION=2.1.322
 ARG CODEX_VERSION=0.167.0
 
-# fetch <url> <sha256> <file>: download and refuse anything whose checksum differs
+# fetch <url> <sha256> <file>: download and refuse anything whose checksum differs. The CPU is chosen by uname -m (not buildkit's
+# TARGETARCH, so the classic builder works too); each upstream names its files differently, hence the names below
 RUN set -eu; \
+  M="$(uname -m)"; \
+  case "$M" in \
+    x86_64) CPU=x86_64; GL=x64; GH_CPU=amd64; NODE_CPU=x64; \
+      DOCKER_SHA="$DOCKER_SHA256_X86_64"; COMPOSE_SHA="$COMPOSE_SHA256_X86_64"; UV_SHA="$UV_SHA256_X86_64"; GITLEAKS_SHA="$GITLEAKS_SHA256_X86_64"; \
+      GH_SHA="$GH_SHA256_X86_64"; NODE_SHA="$NODE_SHA256_X86_64"; GH_STACK_SHA="$GH_STACK_SHA256_X86_64" ;; \
+    aarch64) CPU=aarch64; GL=arm64; GH_CPU=arm64; NODE_CPU=arm64; \
+      DOCKER_SHA="$DOCKER_SHA256"; COMPOSE_SHA="$COMPOSE_SHA256"; UV_SHA="$UV_SHA256"; GITLEAKS_SHA="$GITLEAKS_SHA256"; \
+      GH_SHA="$GH_SHA256"; NODE_SHA="$NODE_SHA256"; GH_STACK_SHA="$GH_STACK_SHA256" ;; \
+    *) echo "unsupported CPU: $M" >&2; exit 1 ;; \
+  esac; \
   fetch() { curl -fsSL -o "$3" "$1" && echo "$2  $3" | sha256sum -c --quiet -; }; \
   DL="$(mktemp -d)"; \
-  fetch "https://download.docker.com/linux/static/stable/aarch64/docker-$DOCKER_VERSION.tgz" "$DOCKER_SHA256" "$DL/docker.tgz"; \
+  fetch "https://download.docker.com/linux/static/stable/$CPU/docker-$DOCKER_VERSION.tgz" "$DOCKER_SHA" "$DL/docker.tgz"; \
   tar --no-same-owner -xzf "$DL/docker.tgz" -C /usr/local/bin --strip-components=1 docker/docker; \
-  fetch "https://github.com/docker/compose/releases/download/v$COMPOSE_VERSION/docker-compose-linux-aarch64" "$COMPOSE_SHA256" "$DL/compose"; \
+  fetch "https://github.com/docker/compose/releases/download/v$COMPOSE_VERSION/docker-compose-linux-$CPU" "$COMPOSE_SHA" "$DL/compose"; \
   install -D -m 755 "$DL/compose" /usr/local/lib/docker/cli-plugins/docker-compose; \
-  fetch "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz" "$UV_SHA256" "$DL/uv.tar.gz"; \
-  tar --no-same-owner -xzf "$DL/uv.tar.gz" -C /usr/local/bin --strip-components=1 uv-aarch64-unknown-linux-gnu/uv uv-aarch64-unknown-linux-gnu/uvx; \
-  fetch "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz" "$GITLEAKS_SHA256" "$DL/gitleaks.tar.gz"; \
+  fetch "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$CPU-unknown-linux-gnu.tar.gz" "$UV_SHA" "$DL/uv.tar.gz"; \
+  tar --no-same-owner -xzf "$DL/uv.tar.gz" -C /usr/local/bin --strip-components=1 uv-$CPU-unknown-linux-gnu/uv uv-$CPU-unknown-linux-gnu/uvx; \
+  fetch "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_$GL.tar.gz" "$GITLEAKS_SHA" "$DL/gitleaks.tar.gz"; \
   tar --no-same-owner -xzf "$DL/gitleaks.tar.gz" -C /usr/local/bin gitleaks; \
-  fetch "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_arm64.tar.gz" "$GH_SHA256" "$DL/gh.tar.gz"; \
-  tar --no-same-owner -xzf "$DL/gh.tar.gz" -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_arm64/bin/gh"; \
-  fetch "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-arm64.tar.xz" "$NODE_SHA256" "$DL/node.tar.xz"; \
+  fetch "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$GH_CPU.tar.gz" "$GH_SHA" "$DL/gh.tar.gz"; \
+  tar --no-same-owner -xzf "$DL/gh.tar.gz" -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_$GH_CPU/bin/gh"; \
+  fetch "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NODE_CPU.tar.xz" "$NODE_SHA" "$DL/node.tar.xz"; \
   mkdir -p /usr/local/lib/nodejs; \
   tar --no-same-owner -xJf "$DL/node.tar.xz" -C /usr/local/lib/nodejs --strip-components=1; \
   for b in node npm npx; do ln -sf "/usr/local/lib/nodejs/bin/$b" "/usr/local/bin/$b"; done; \
-  fetch "https://github.com/github/gh-stack/releases/download/$GH_STACK_VERSION/linux-arm64" "$GH_STACK_SHA256" "$DL/gh-stack"; \
+  fetch "https://github.com/github/gh-stack/releases/download/$GH_STACK_VERSION/linux-$GH_CPU" "$GH_STACK_SHA" "$DL/gh-stack"; \
   D=/home/switchboard/.local/share/gh/extensions/gh-stack; \
   install -D -m 755 "$DL/gh-stack" "$D/gh-stack"; \
   printf 'owner: github\nname: gh-stack\nhost: github.com\ntag: %s\nispinned: true\npath: %s/gh-stack\n' "$GH_STACK_VERSION" "$D" > "$D/manifest.yml"; \

@@ -13,7 +13,7 @@ import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { recapOf } from "./recap.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "./task-status.ts";
 import { setupScripts, syncSkills } from "./skillsync.ts";
-import { answerableStops, FenceReader, lastAttempt, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
+import { answerableStops, FenceReader, lastAttempt, meetEndedJobs, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
 import { foreignWorkspaceOf, RunnerConfigUnconfirmed, runnerConfigOf } from "./runner-config.ts";
 import { originMismatch } from "./workspace-clone.ts";
@@ -45,6 +45,12 @@ interface LiveSession {
   idleTimer?: ReturnType<typeof setTimeout>;
   /** Background jobs the runner still has (the last `background` event). While any is left the process is not released. */
   background?: number;
+  /**
+   * Replies sent under the admission hold while the Task sat on background jobs, oldest first. The queue holds only idle
+   * rows and the process must keep running its jobs, so the text waits here (memory: it goes with the process) until the
+   * Task leaves its jobs and turns, or the hold ends; then it is dispatched like a reply sent at that moment (flushHeldReplies).
+   */
+  heldReplies?: string[];
   /**
    * The next turn must restart the runner (--resume) instead of reusing this process: its mode changed and it could
    * not switch live, or its scope grew (an attachment directory) and roots are only read at start.
@@ -237,6 +243,12 @@ export interface TaskManagerOptions {
   /** The machine's free memory (MemAvailable), the floor of `ops-kit heavy` and the safety valve `taskMinFreeMb`: free < safety holds a new start back; safety <= free < floor only warns. null / absent = judged by the count alone. */
   memoryHeadroom?: () => { free: number; floor: number; safety: number } | null;
   /**
+   * A reason not to start anything new while the daemon waits to be replaced (null = no hold). While it returns a value, a new
+   * Task and a new turn (a reply to a Task with no process, or to one whose turn has ended) wait in the queue instead of
+   * starting; a turn already running is not touched. The caller tells the queue when the hold ends (`resumeAdmission`).
+   */
+  admissionHold?: () => { wait: string; detail: string } | null;
+  /**
    * true = never start the waiting Tasks: a candidate daemon (`SWITCHBOARD_CANDIDATE`) runs on a copy of the database,
    * whose queue is the live daemon's; starting it there would run those Tasks twice, with their real runner sessions.
    */
@@ -333,6 +345,7 @@ export class TaskManager {
   private bedrock: TaskManagerOptions["bedrock"];
   private maxRunners: () => number;
   private memoryHeadroom: TaskManagerOptions["memoryHeadroom"];
+  private admissionHold: TaskManagerOptions["admissionHold"];
   private holdQueue: boolean;
   private draining = false;
   private stopped = false;
@@ -376,6 +389,7 @@ export class TaskManager {
     this.bedrock = opts.bedrock;
     this.maxRunners = opts.maxRunners ?? (() => Infinity);
     this.memoryHeadroom = opts.memoryHeadroom;
+    this.admissionHold = opts.admissionHold;
     this.holdQueue = opts.holdQueue ?? false;
     if (!this.holdQueue) {
       // a throw here would be uncaught and stop the daemon (main.ts); a failed look is retried at the next tick
@@ -399,7 +413,9 @@ export class TaskManager {
    * Why a new start has to wait (null = it may start). The count is the limit; the memory is read only while something
    * runs — with nothing running no event would ever call drain() again, so a first Task is never held for memory.
    */
-  private slotBlock(): { wait: string; detail: string; memory?: true } | null {
+  private slotBlock(): { wait: string; detail: string; memory?: true; promotion?: true } | null {
+    const hold = this.holdBlock();
+    if (hold) return hold;
     const occupied = this.occupied();
     const max = this.maxRunners();
     if (occupied >= max) return { wait: "実行枠が埋まっているため待機", detail: `実行中 ${occupied} / 上限 ${max}` };
@@ -413,6 +429,17 @@ export class TaskManager {
     return null;
   }
 
+  /** The hold on every new start (local and Cloud alike), or null. */
+  private holdBlock(): { wait: string; detail: string; promotion: true } | null {
+    const hold = this.admissionHold?.();
+    return hold ? { ...hold, promotion: true } : null;
+  }
+
+  /** What a new start of this Task waits for: the hold on every Task, then the run count and memory for a local one. */
+  private startBlock(task: Task): ReturnType<TaskManager["slotBlock"]> {
+    return task.executionMode === "local" ? this.slotBlock() : this.holdBlock();
+  }
+
   /** A start that goes ahead with less free memory than the `ops-kit heavy` floor (still above the safety valve): the line to write, else null. */
   private memoryWarning(task: Task): string | null {
     if (task.executionMode !== "local" || this.occupied() === 0) return null;
@@ -421,11 +448,17 @@ export class TaskManager {
     return `空きメモリが少ない（空き ${Math.floor(mem.free / 1048576)} MB / 下限 ${Math.ceil(mem.floor / 1048576)} MB）が、安全弁（${Math.ceil(mem.safety / 1048576)} MB）以上なので続けます`;
   }
 
-  /** Why the queue waits: null = nothing queued or no block (the memory is not read for an empty queue), "memory" = free memory below the safety valve, "slot" = the run count. */
-  queueWait(): "slot" | "memory" | null {
+  /** Why the queue waits: null = nothing queued or no block (the memory is not read for an empty queue), "promotion" = the admission hold, "memory" = free memory below the safety valve, "slot" = the run count. */
+  queueWait(): "slot" | "memory" | "promotion" | null {
     if (!this.db.listQueuedTasks()[0]) return null;
     const block = this.slotBlock();
-    return block === null ? null : block.memory ? "memory" : "slot";
+    return block === null ? null : block.promotion ? "promotion" : block.memory ? "memory" : "slot";
+  }
+
+  /** The admission hold has ended: start what waited for it (the same as drain()). */
+  resumeAdmission(): void {
+    for (const [id, live] of [...this.live]) this.flushHeldReplies(id, live);
+    this.drain();
   }
 
   /** How many more Tasks may start now (0 while the memory is short too). */
@@ -438,7 +471,7 @@ export class TaskManager {
    * prompt, so a restart keeps the wait. Cloud Tasks start no local process and are not counted.
    */
   private admit(task: Task, prompt: string, atts: Attachment[]): "started" | "queued" {
-    const block = task.executionMode === "local" ? this.slotBlock() : null;
+    const block = this.startBlock(task);
     if (block === null) {
       const warning = this.memoryWarning(task);
       if (warning) this.record(task.id, { t: "status", text: warning });
@@ -752,6 +785,10 @@ export class TaskManager {
   recordStop(taskId: string, report: StopReport): { ok: true; stop: StopRecord } | { ok: false; why: string } {
     const task = this.mustGet(taskId);
     const now = Date.now();
+    report = meetEndedJobs(report, (jobId) => {
+      const j = this.db.getJob(jobId);
+      return !!j && j.status !== "running";
+    });
     const id = `${taskId}/${report.id}`;
     const known = stopRecordsFor(this.db, task);
     const prev = known.filter((r) => r.id === id).at(-1);
@@ -1319,8 +1356,29 @@ export class TaskManager {
     let widened = false;
     if (dirs.length) ({ task, widened } = this.widenScope(task, dirs));
     // a Task still in the queue starts from drain() with its first prompt: the reply goes after it
-    if (task.queuedAt !== null) return this.queueReply(task, text, task.executionMode === "local" ? this.slotBlock() : null);
+    if (task.queuedAt !== null) return this.queueReply(task, text, this.startBlock(task));
     const live = this.live.get(taskId);
+    // a new turn is a new start: under the hold a process left open after its turn is closed and the reply waits (a turn
+    // in flight is sent to as before). A process still running background jobs keeps them: the reply waits on it
+    // (heldReplies) and is dispatched when the jobs and turns are over or the hold ends.
+    if (live && task.status === "background") {
+      const hold = this.holdBlock();
+      if (hold) {
+        (live.heldReplies ??= []).push(text);
+        // the input box is cleared: this line is where the text stays in the log until the Task is queued
+        this.record(taskId, { t: "status", text: `${REPLY_QUEUED}（${hold.wait}、裏の処理の終わりを待って待ち列に入れます、${hold.detail}）: 「${text.trim()}」` });
+        this.broadcast({ type: "task.updated", task: this.mustGet(taskId) });
+        return this.mustGet(taskId);
+      }
+    }
+    if (live && !IN_FLIGHT.has(task.status)) {
+      const hold = this.holdBlock();
+      if (hold && (await this.release(taskId))) {
+        this.queueReply(this.mustGet(taskId), text, hold);
+        this.drain(); // the hold may have lifted while the process closed
+        return this.mustGet(taskId);
+      }
+    }
     // A process flagged for restart is released first; release() refuses while a turn is in flight, and then the
     // live process takes the text as before (the mode change waits for the next turn) — never two processes.
     if (live && (!live.restartNext || !(await this.release(taskId)))) {
@@ -1337,7 +1395,7 @@ export class TaskManager {
     if (widened && live) this.record(taskId, { t: "status", text: "添付ディレクトリを scope に加えたので、プロセスを再開します（--resume）" });
     task = this.mustGet(taskId); // the release above was awaited: a model or mode chosen meanwhile is the one to start with
     // no process, and no slot for a new one (preflight saw a live process that a release above may have closed): wait in the queue
-    const block = task.executionMode === "local" ? this.slotBlock() : null;
+    const block = this.startBlock(task);
     if (block !== null) return this.queueReply(task, text, block);
     const { resume, preamble } = this.resumeArgs(task);
     const warning = this.memoryWarning(task);
@@ -1385,6 +1443,27 @@ export class TaskManager {
     return done;
   }
 
+  /**
+   * Replies held under the admission hold on a process with background jobs: while the Task is still on its jobs or in a
+   * turn and the hold stands, they keep waiting. Otherwise they go through dispatch as one reply sent now: under the hold
+   * the process is closed and the reply queued, without it the process (or a resume) takes it. A planned automatic
+   * resume is dropped, the same as for a person's reply (this reply is the next turn). An aborted Task drops them (中断
+   * means it does not come back on its own; abort() drops them first), and so does a daemon that is stopping.
+   */
+  private flushHeldReplies(taskId: string, live: LiveSession): void {
+    const texts = live.heldReplies;
+    const task = this.db.getTask(taskId);
+    if (!texts?.length || !task) return;
+    if ((task.status === "background" || IN_FLIGHT.has(task.status)) && this.holdBlock()) return;
+    live.heldReplies = undefined;
+    if (task.status === "aborted" || this.stopped) {
+      this.record(taskId, { t: "status", text: task.status === "aborted" ? "中断したので、保留した返信は渡しません" : "デーモンが止まるので、保留した返信は渡しません" });
+      return;
+    }
+    if (task.resumeAt !== null) this.setResumeAt(taskId, null);
+    this.dispatch(taskId, texts.join("\n\n"), []).catch((e) => this.record(taskId, { t: "error", message: `保留した返信を渡せませんでした: ${String((e as Error).message ?? e)}` }));
+  }
+
   /** Fire onTaskEnd listeners once the task is terminal and no process is attached. */
   private maybeEnded(taskId: string) {
     if (this.live.has(taskId)) return;
@@ -1418,6 +1497,10 @@ export class TaskManager {
 
   async abort(taskId: string): Promise<Task> {
     const live = this.live.get(taskId);
+    if (live?.heldReplies?.length) {
+      live.heldReplies = undefined; // the process leaves `live` before the status moves: drop what was held here
+      this.record(taskId, { t: "status", text: "中断したので、保留した返信は渡しません" });
+    }
     let task = this.mustGet(taskId);
     if (task.executionMode === "cloud") {
       if (live) { await live.session.close(); this.live.delete(taskId); }
@@ -1648,6 +1731,8 @@ export class TaskManager {
           if (cur && IN_FLIGHT.has(cur.status)) {
             this.fromRunner(task.id, live, { t: "session.end", status: code === 0 ? "ok" : "error", summary: `runner exited (${code})` });
           } else this.takeHeld(task.id, live);
+          // the process is gone (out of `live`, so no move above reached it): what was held goes on now
+          this.flushHeldReplies(task.id, live);
         };
         if (live.held.length) live.afterHeld = afterExit;
         else afterExit();
@@ -2044,7 +2129,11 @@ export class TaskManager {
   private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "outcome" | "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
     const cur = this.db.getTask(taskId);
     if (!cur || !canTransition(cur.status, status)) return null;
-    return this.db.updateTask(taskId, { status, ...extra });
+    const t = this.db.updateTask(taskId, { status, ...extra });
+    // off its jobs and turns: replies held under the admission hold go on, once the caller has written the rest of this move
+    const live = this.live.get(taskId);
+    if (t && live?.heldReplies && status !== "background" && !IN_FLIGHT.has(status)) queueMicrotask(() => this.flushHeldReplies(taskId, live));
+    return t;
   }
 
   private mustGet(taskId: string): Task {

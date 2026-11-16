@@ -204,15 +204,64 @@ export function readGit(dir: string, sinceMs: number): GitHistory | null {
   return { repository, commits };
 }
 
+/** The text under `## <name>` up to the next `## ` heading; headings and `#N` inside a ``` / ~~~ fence do not count (as `section` in the backlog code). */
+function sectionOf(body: string, name: string): string {
+  const out: string[] = [];
+  let fence: string | null = null;
+  let inside = false;
+  for (const line of body.split("\n")) {
+    const before = fence;
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) fence = marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker ? null : fence;
+    else fence = marker ?? null;
+    if (!before && !fence && /^## /.test(line)) {
+      if (inside) break;
+      inside = line.trim() === `## ${name}`;
+      continue;
+    }
+    if (inside) out.push(line);
+  }
+  return out.join("\n");
+}
+
 /**
- * Per kind of reason (`reasonGroup`), over the window's Tasks that name an issue (`stage_issue`, shadows left out): how many
- * were chosen; how many of the direct ones were later sent back (a Task with the reason `direct returned` on the same
- * workspace and issue, started after it); how many have a merged pull request closing that issue in the workspace's repository
- * (the stored PR record's `state = MERGED` and `closes`), or closing one of its sub-issues (the issue record's `parent`), so a
- * PBI whose Tasks merged counts as merged.
+ * Per repository, the request each PBI came from, read from the stored issue bodies both ways: a PBI's `## 元要望` (its first
+ * `#N`, none when it says `なし`) and a request's `## 派生 PBI` (every `#N`). Only what the bodies say; the first reading of a PBI is kept.
+ */
+function issueLinks(db: Database): Map<string, Map<number, number>> {
+  const links = new Map<string, Map<number, number>>();
+  const link = (repository: string, pbi: number, request: number) => {
+    if (pbi === request) return;
+    const m = links.get(repository) ?? new Map<number, number>();
+    if (!m.has(pbi)) m.set(pbi, request);
+    links.set(repository, m);
+  };
+  for (const r of db.query("SELECT repository, remote FROM backlog_records WHERE object_kind = 'issue' AND remote IS NOT NULL").all() as Array<{ repository: string; remote: string }>) {
+    try {
+      const issue = JSON.parse(r.remote) as { number?: unknown; body?: unknown };
+      if (typeof issue.number !== "number" || typeof issue.body !== "string") continue;
+      // `なし（…）` names no request, whatever issue or PR its reason cites
+      const originText = sectionOf(issue.body, "元要望").trim();
+      const origin = originText.startsWith("なし") ? undefined : /#(\d+)/.exec(originText)?.[1];
+      if (origin) link(r.repository, issue.number, Number(origin));
+      for (const m of sectionOf(issue.body, "派生 PBI").matchAll(/^\s*[-*]\s*#(\d+)/gm)) link(r.repository, Number(m[1]), issue.number);
+    } catch {
+      /* an unreadable record links nothing */
+    }
+  }
+  return links;
+}
+
+/**
+ * Per request (a Task's `stage_issue` lifted to the request it came from through `issueLinks`, per workspace; an issue with no
+ * link is its own request), over the window's Tasks that name an issue (shadows left out): how many requests were chosen, by the
+ * kind of reason (`reasonGroup`) of the request's first Task in the window; how many of the direct ones were later sent back (a
+ * Task with the reason `direct returned` on the same request, started after the first); how many have a merged pull request in
+ * the workspace's repository closing the request, a PBI of it, or a Task of that PBI (the closed issue and its `parent` up two
+ * levels, each lifted to its request), so a request whose derived PBI's Task merged counts as merged.
  */
 function choiceScores(db: Database, since: number): ChoiceScore[] {
-  const rows = db.query("SELECT workspace_id, stage_issue, stage_action, created_at, provenance FROM tasks WHERE created_at >= ? AND shadow_of IS NULL AND stage_issue IS NOT NULL").all(since) as Array<{ workspace_id: string | null; stage_issue: number; stage_action: string | null; created_at: number; provenance: string | null }>;
+  const rows = db.query("SELECT workspace_id, stage_issue, stage_action, created_at, provenance FROM tasks WHERE created_at >= ? AND shadow_of IS NULL AND stage_issue IS NOT NULL ORDER BY created_at, rowid").all(since) as Array<{ workspace_id: string | null; stage_issue: number; stage_action: string | null; created_at: number; provenance: string | null }>;
   const reasonOf = (raw: string | null): string | null => {
     try {
       return raw ? ((JSON.parse(raw) as Provenance).processReason ?? null) : null;
@@ -220,37 +269,42 @@ function choiceScores(db: Database, since: number): ChoiceScore[] {
       return null;
     }
   };
-  // the returns of the window (a return is started after the direct Task it sends back, so one before the window cannot matter)
-  const returnedAt = new Map<string, number[]>();
-  for (const r of db.query("SELECT workspace_id, stage_issue, created_at, provenance FROM tasks WHERE stage_issue IS NOT NULL AND shadow_of IS NULL AND created_at >= ?").all(since) as Array<{ workspace_id: string | null; stage_issue: number; created_at: number; provenance: string | null }>) {
-    if (reasonOf(r.provenance) !== "direct returned") continue;
-    const k = `${r.workspace_id}#${r.stage_issue}`;
-    returnedAt.set(k, [...(returnedAt.get(k) ?? []), r.created_at]);
-  }
   const repoOf = workspaceRepos(db);
-  // per repository, the issues a merged PR closes, then their parents (one level: a PBI whose Task merged)
+  const links = issueLinks(db);
+  const rootOf = (repo: string | undefined, issue: number): number => (repo ? links.get(repo)?.get(issue) : undefined) ?? issue;
+  // per repository, the issues a merged PR closes and their parents up two levels (a Task's PBI, then its request), lifted to requests
+  const parents = issueParents(db);
   const merged = new Map<string, Set<number>>();
   for (const pr of mergedPullRequests(db)) {
+    const up = parents.get(pr.repository);
     const set = merged.get(pr.repository) ?? new Set<number>();
-    for (const n of pr.closes) set.add(n);
+    for (const n of pr.closes) {
+      let at: number | undefined = n;
+      for (let level = 0; at !== undefined && level <= 2; level++) {
+        set.add(rootOf(pr.repository, at));
+        at = up?.get(at);
+      }
+    }
     merged.set(pr.repository, set);
   }
-  // the parents are read against the closed issues alone (not the set being added to), so one level only, whatever the order
-  for (const [repository, parents] of issueParents(db)) {
-    const set = merged.get(repository);
-    if (!set) continue;
-    const up = [...parents].filter(([number]) => set.has(number)).map(([, parent]) => parent);
-    for (const p of up) set.add(p);
+  // one entry per workspace and request: its first Task decides the kind of reason; a later `direct returned` Task sends a direct first one back
+  const requests = new Map<string, { group: string; direct: boolean; first: number; returned: boolean; merged: boolean }>();
+  for (const t of rows) {
+    const repo = t.workspace_id ? repoOf.get(t.workspace_id) : undefined;
+    const root = rootOf(repo, t.stage_issue);
+    const key = `${t.workspace_id}#${root}`;
+    const found = requests.get(key);
+    if (!found) {
+      requests.set(key, { group: reasonGroup(reasonOf(t.provenance)), direct: t.stage_action === "direct", first: t.created_at, returned: false, merged: !!repo && !!merged.get(repo)?.has(root) });
+    } else if (found.direct && reasonOf(t.provenance) === "direct returned" && t.created_at > found.first) found.returned = true;
   }
   const groups = new Map<string, ChoiceScore>();
-  for (const t of rows) {
-    const group = reasonGroup(reasonOf(t.provenance));
-    const g = groups.get(group) ?? { group, chosen: 0, returned: 0, merged: 0 };
+  for (const q of requests.values()) {
+    const g = groups.get(q.group) ?? { group: q.group, chosen: 0, returned: 0, merged: 0 };
     g.chosen++;
-    if (t.stage_action === "direct" && (returnedAt.get(`${t.workspace_id}#${t.stage_issue}`) ?? []).some((at) => at > t.created_at)) g.returned++;
-    const repo = t.workspace_id ? repoOf.get(t.workspace_id) : undefined;
-    if (repo && merged.get(repo)?.has(t.stage_issue)) g.merged++;
-    groups.set(group, g);
+    if (q.returned) g.returned++;
+    if (q.merged) g.merged++;
+    groups.set(q.group, g);
   }
   return [...groups.values()].sort((a, b) => b.chosen - a.chosen || a.group.localeCompare(b.group));
 }
@@ -457,7 +511,7 @@ export function renderReport(r: Report): string {
   lines.push("", `層別は観察で、決着ではない（候補（プロセス）だけで分ける。スキルの束でも分けるには --by-bundle。n と幅を見る。費用は API 相当の見積、介入は rules の評価がある Task だけ。${NO_PROVENANCE} = 由来の記録が無い Task、${NO_PROCESS} = 記録はあるが候補を名指ししていない Task。選んだ理由は processReason の語で分け、理由が無い Task は ボタン・自動・戻した のどれにも入らない）。`);
   lines.push("", "## 選び方の成績", "", "| 選んだ理由 | 選ばれた数 | 直行から戻された数 | マージまで行った数 |", "|---|---:|---:|---:|");
   for (const c of r.choices) lines.push(`| ${c.group} | ${c.chosen} | ${c.returned} | ${c.merged} |`);
-  lines.push("", "Issue に結びついた Task（stage_issue あり）だけを数える。戻された数は直行（direct）の Task のうち、同じ Issue に後から「戻した」Task があるもの。マージまでは、その workspace のリポジトリの PR 記録に、その Issue かその sub-issue（1 段下。PBI の Task）を閉じるマージ済みの PR があるもの（Task が出した PR とは限らない。要望から PBI へのつながりは追わない）。基準は仮の出発点。見直す材料であって決着ではない。");
+  lines.push("", "Issue に結びついた Task（stage_issue あり）だけを、要望ごとに 1 件として数える（Issue の本文の「元要望」と「派生 PBI」で、PBI・Task の Issue を要望に引き上げる。同じ要望の to-pbi・to-tasks・complete の Task は 1 件で、選んだ理由は窓内で最初の Task のもの）。戻された数は、最初の Task が直行（direct）の要望のうち、後から「戻した」Task があるもの。マージまでは、その workspace のリポジトリの PR 記録に、その要望・派生 PBI・PBI の Task（sub-issue）のどれかを閉じるマージ済みの PR があるもの（Task が出した PR とは限らない。つながりは要望 → 派生 PBI → Task の 2 段まで）。基準は仮の出発点。見直す材料であって決着ではない。");
   lines.push("", `## 成果の条件（基準日 ${r.baselineDate} までの ${OUTCOME_WINDOW_DAYS} 日と、直近 ${OUTCOME_WINDOW_DAYS} 日）`, "", `| 行 | ${r.baselineDate} まで | 直近 | n（基準日まで / 直近） |`, "|---|---:|---:|---:|");
   const cell = (x: OutcomeSide, fmt: (v: number) => string) => (x.n === 0 || x.value === null ? NO_PROVENANCE : fmt(x.value));
   for (const o of r.outcomes) {

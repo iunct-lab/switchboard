@@ -3,7 +3,7 @@ import { stopEndedTasksProcesses, stopTaskProcesses } from "./detached.ts";
 import { githubRepoOfRemote, readCloudPreparation, cloudTransferNotice, prepareTeleportWorktree } from "./claude-cloud.ts";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
@@ -28,7 +28,7 @@ import { ApprovalRules, subjectsOf } from "./approval.ts";
 import { workspaceBrief } from "./brief.ts";
 import { judgeTurn } from "./judge.ts";
 import { skillCommandTitle, suggestTitle } from "./suggest-title.ts";
-import { delegatedNote, evalContext, evalRequestDraft, judgeHumanGap, personMessages, RULES_BY, rulesEvalOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { delegatedNote, evalContext, evalRequestDraft, judgeHumanGap, personMessages, RULES_BY, rulesEvalOf, stageRequestOf, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { judgeRubric } from "./rubric-judge.ts";
 import { loadRubric } from "./rubric.ts";
 import { claudeCatalog, codexCatalog, hostReaders, modelCandidates, SHIPPED_HIDDEN_MODELS, type CatalogRunner } from "./model-catalog.ts";
@@ -38,7 +38,7 @@ import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.t
 import { deferNote, fallbackNote, fallbackRunner, fmtTime, RateLimitResumer, RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
-import { AFTER_CHECK_MS, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
+import { AFTER_CHECK_MS, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { startWorktreeSweep } from "./worktree-sweep.ts";
 import { setupScripts } from "./skillsync.ts";
@@ -79,6 +79,7 @@ import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { createDockerdIdle } from "./dockerd-idle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
+import { afterGithubLogin, GITHUB_LOGIN_ARGS, GITHUB_LOGIN_HOSTS, githubStatus, type GitConfigRunner } from "./github-login.ts";
 import { DeviceAuths, type DeviceAuthInput } from "./deviceauth.ts";
 import { archiveProblem } from "./archive-status.ts";
 
@@ -177,6 +178,10 @@ export interface StartServerOptions {
   peerAddress?: (req: Request) => string | undefined;
   /** How long a runner login from the screen may stay open; tests shorten it. */
   loginTimeoutMs?: number;
+  /** The `gh` executable GitHub's login from the screen runs; tests point it at a fake. Unset = `gh` from PATH. */
+  ghBin?: string | null;
+  /** How GitHub's login reads and fills git's commit name and email; tests answer by hand. Unset = `git config --global`. */
+  gitConfig?: GitConfigRunner;
   /** Overrides the judge asked at the end of a turn; tests answer by hand. Unset = `judgeTurn`, the configured runner's own adapter. */
   judge?: typeof judgeTurn;
   /** Overrides the one that names a task after its first turn; tests answer by hand. Unset = `suggestTitle`. */
@@ -276,6 +281,18 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     },
     opts.loginTimeoutMs,
   );
+  // GitHub's own login from the screen (github-login.ts): the same relay, keyed "gh". Done → git is pointed at gh's
+  // credentials; the screen reads /api/github/status again on its own.
+  const githubLogins = new RunnerLogins<"gh">(
+    (argv) => Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: runnerCliEnv() }),
+    () => {
+      void afterGithubLogin(opts.gh ?? runGh, cfg.repoRoot, opts.gitConfig).then((ok) => {
+        if (!ok) console.error("github login: gh auth setup-git failed; git over https may not use the login");
+      });
+    },
+    opts.loginTimeoutMs,
+  );
+  const ghBin = () => (opts.ghBin === undefined ? Bun.which("gh") : opts.ghBin);
   const loginTarget = (id: string, api = false) => {
     const d = detected.find((x) => x.adapter.id === id);
     const args = api ? d?.adapter.loginApiArgs : d?.adapter.loginArgs;
@@ -671,7 +688,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // the backlog is read from what was imported; GitHub is asked by the sync only, and for its budget (below)
   // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again
   const backlog = new BacklogSync(db, opts.gh ?? runGh, undefined, undefined, !cfg.candidate, (ws) => { const w = db.getWorkspace(ws.id); return !w || backlogReads(w); });
-  const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.repoRoot, () => broadcast({ type: "workspaces.updated" }));
+  const clones = new WorkspaceClones(db, opts.gh ?? runGh, cfg.reposDir, () => broadcast({ type: "workspaces.updated" }));
   // GitHub's GraphQL budget: read at most once a minute, for backlog-next, the stage buttons and the ledger
   const githubBudget = new GithubBudgetCache(opts.gh ?? runGh, undefined, undefined, undefined, () => backlog.hostWait());
   // the flow of the closed PBIs: the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
@@ -685,8 +702,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * for, once: a failed one is asked again by 再読込, the daemon's boot or the scheduled sweep, not by every look.
    */
   const storedBacklog = (ws: Workspace, released?: (oid: string) => boolean | null): StoredBacklog => {
-    // a PBI whose stage Task runs counts as other work in the overlap judgement, before its Tasks are In progress
-    const active = (n: number) => !!activeStageTask(ws.id, n);
+    // a PBI whose stage Task runs now counts as other work in the overlap judgement, before its Tasks are In progress (a planned resume alone does not)
+    const active = (n: number) => !!db.workingStageTask(ws.id, n);
     const stored = backlog.read(ws, { released, active });
     if (stored.fetchedAt !== null || stored.error || stored.syncing) return stored;
     backlog.request(ws);
@@ -838,13 +855,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
   /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
   const activeStageTask = (workspaceId: string, n: number) => db.activeStageTask(workspaceId, n);
-  // Issues whose stage Task is being created right now (`<workspaceId>:<n>` → n): nothing awaits in startMetaTask since the routing turn moved
-  // after creation, but the running/waiting check must not depend on that staying so.
-  const startingStage = new Map<string, { n: number; action: BacklogAction }>();
   /**
    * Starts one stage Task of an Issue: the button, backlog-next and the resume after an answer all come here, so
-   * the same Issue never has two. A running / waiting one, or one being created, is answered instead of a second; nothing
-   * awaits between that check and the mark, and the mark is taken off however the start ends.
+   * the same Issue never has two. A running / waiting one is answered instead of a second; nothing awaits between that
+   * check and the Task's creation in startMetaTask, so a second start of the same Issue always finds the first one.
    */
   const startStage = async (input: {
     ws: Workspace;
@@ -855,46 +869,39 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     /** Why this candidate (backlog-next: `chooseProcess`'s); the buttons leave it out and are recorded as the button / the stage. */
     processReason?: string;
     extra?: Pick<Parameters<typeof startMetaTask>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd">;
-  }): Promise<{ task: Task } | { active: Task } | { starting: true } | { error: string; status: number }> => {
+  }): Promise<{ task: Task } | { active: Task } | { error: string; status: number }> => {
     const { ws, item, action } = input;
     const active = activeStageTask(ws.id, item.number);
     if (active) return { active };
-    const key = `${ws.id}:${item.number}`;
-    if (startingStage.has(key)) return { starting: true };
-    startingStage.set(key, { n: item.number, action });
+    const other = otherRepo(input.meta, ws);
+    // the person's newest answer on the screen goes in as their words
+    const source = action === "check" ? null : db.getWorkspaceBacklogSource(ws.id);
+    const answer = source ? screenAnswer(db, source, item.number) : null;
+    // the stage runs under the pipeline candidate (docs/design/process-kernel.md, K4); its definition is the meta checkout's, like the skills, not the running release's.
+    // A checkout without it (behind, or mid-edit) answers like any other reason a stage cannot start, so a button gets its 409 and a sweep skips the item
+    // 直行で直す runs under the direct candidate, the stages under the pipeline
+    let def;
     try {
-      const other = otherRepo(input.meta, ws);
-      // the person's newest answer on the screen goes in as their words
-      const source = action === "check" ? null : db.getWorkspaceBacklogSource(ws.id);
-      const answer = source ? screenAnswer(db, source, item.number) : null;
-      // the stage runs under the pipeline candidate (docs/design/process-kernel.md, K4); its definition is the meta checkout's, like the skills, not the running release's.
-      // A checkout without it (behind, or mid-edit) answers like any other reason a stage cannot start, so a button gets its 409 and a sweep skips the item
-      // 直行で直す runs under the direct candidate, the stages under the pipeline
-      let def;
-      try {
-        def = loadProcess(action === "direct" ? "p1-direct" : "p0-pipeline", input.meta.path);
-      } catch (e) {
-        return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
-      }
-      // a grant sentence in the person's screen answer is theirs for the first stage Task started after it (the Issue's Task that
-      // asked has ended); a later stage Task, while that answer is still the newest, does not get it again. The answer is known by
-      // its comment operation's id, which sending it to the service does not change
-      const granting = (r: Awaited<ReturnType<typeof startMetaTask>>) => {
-        if (answer && "task" in r) {
-          const used = db.getSetting<string[]>(MERGE_GRANT_ANSWERS_KEY, []);
-          if (!used.includes(answer.id)) {
-            noteMergeGrant(r.task.id, answer.text);
-            db.setSetting(MERGE_GRANT_ANSWERS_KEY, [...used, answer.id].slice(-200));
-          }
-        }
-        return r;
-      };
-      if (action === "direct") return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra }));
-      const taskModel = action === "complete" ? completeTaskModelFor(input.extra?.runner) : "";
-      return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer, taskModel }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra }));
-    } finally {
-      startingStage.delete(key);
+      def = loadProcess(action === "direct" ? "p1-direct" : "p0-pipeline", input.meta.path);
+    } catch (e) {
+      return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
     }
+    // a grant sentence in the person's screen answer is theirs for the first stage Task started after it (the Issue's Task that
+    // asked has ended); a later stage Task, while that answer is still the newest, does not get it again. The answer is known by
+    // its comment operation's id, which sending it to the service does not change
+    const granting = (r: Awaited<ReturnType<typeof startMetaTask>>) => {
+      if (answer && "task" in r) {
+        const used = db.getSetting<string[]>(MERGE_GRANT_ANSWERS_KEY, []);
+        if (!used.includes(answer.id)) {
+          noteMergeGrant(r.task.id, answer.text);
+          db.setSetting(MERGE_GRANT_ANSWERS_KEY, [...used, answer.id].slice(-200));
+        }
+      }
+      return r;
+    };
+    if (action === "direct") return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra }));
+    const taskModel = action === "complete" ? completeTaskModelFor(input.extra?.runner) : "";
+    return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer, taskModel }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra }));
   };
   // the login GitHub refused (the import's failure kind): a stage is not started on it, a stored edit could not be sent either
   const ghLoginRefused = (ws: Workspace) => syncsGithub(db.getWorkspaceBacklogSource(ws.id)) && backlog.state(ws).errorKind === "gh-login";
@@ -1209,7 +1216,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if ("task" in r) return started(r.task.id);
     // an active one is from before the answer (even an idle one awaiting judging), not started by it: the card stays 再開待ち
     if ("active" in r) return done({ state: "running", reason: null, taskId: r.active.id, at });
-    if ("starting" in r) return done({ state: "running", reason: "工程 Task を開始しているところ", taskId: null, at });
     // kept for the question and for the answered one it became (its id names the answer's time)
     const failure = { at, reason: r.error };
     db.rememberAskAnswer(id, { at, failure });
@@ -1411,8 +1417,9 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   };
   /** sb-rescue builds, checks on a spare port, switches and rolls back by itself; this only asks (202 = started). */
-  const requestPromote = async (commit: string): Promise<{ status: number; body: object }> => {
-    const r = await askRescue("/api/promote", { method: "POST", body: JSON.stringify({ commit }) });
+  const requestPromote = async (commit: string, expectSha?: string): Promise<{ status: number; body: object }> => {
+    // `expectSha`: from an update source the release is asked for by its tag, with the commit that was checked; a tag moved since is not built
+    const r = await askRescue("/api/promote", { method: "POST", body: JSON.stringify(expectSha ? { commit, expectSha } : { commit }) });
     return { status: r.status, body: (await r.json()) as object };
   };
   /** Running and waiting Tasks, and those whose turn ended with background jobs still going: a restart cuts all of them. */
@@ -1437,7 +1444,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * `.claude/settings.json` hooks, Codex's `.codex/`) from its cwd, and the tag's own must not run. No shadow runner (a
    * second runner would start with its own permission mode). Null = started; else why it could not start.
    */
-  const startReleaseReview = async (tag: string, sha: string, current: string): Promise<string | null> => {
+  const startReleaseReview = async (tag: string, sha: string, current: string, source?: string | null): Promise<string | null> => {
     const meta = metaWorkspace();
     if (!meta) return `${tag} の差分を確認できない: meta workspace がありません`;
     const dir = join(cfg.home, "release-review", tag);
@@ -1450,22 +1457,49 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const { runner, note } = autoRunner(configured);
       const permissionMode = runner === "claude" ? "plan" : runner === "codex" ? "read-only" : null;
       if (!permissionMode) return `${tag} の差分を確認できない: ${runner} は読み取りだけの権限で動かせない`;
+      // a new check starts from nothing: from a source this also drops a folder sb-rescue made for a commit the tag no longer names
       await removeReviewTree(tag);
-      mkdirSync(dir, { recursive: true });
-      await git(["worktree", "add", "--detach", tree, sha]);
-      await Bun.write(diffFile, await git(["diff", `${current}..${sha}`]));
-      const stat = await git(["diff", "--stat", `${current}..${sha}`]);
+      let review = { tree, diffFile, stat: "" };
+      if (source) {
+        // an update source (no git): sb-rescue unpacks the tag's tarball and makes the diff against what runs. How long that may
+        // take depends on the line and the tarball's size: SWITCHBOARD_RELEASE_TREE_TIMEOUT_MS (default 3 minutes)
+        const r = await askRescue("/api/release-tree", { method: "POST", body: JSON.stringify({ tag }), signal: AbortSignal.timeout(Number(process.env.SWITCHBOARD_RELEASE_TREE_TIMEOUT_MS) || 180_000) });
+        const out = (await r.json().catch(() => ({}))) as { sha?: string; tree?: string; diffFile?: string; stat?: string[]; error?: string };
+        if (!r.ok || !out.tree || !out.diffFile || !Array.isArray(out.stat)) throw new Error(`sb-rescue の release-tree が ${r.status}: ${out.error ?? "答えが読めない"}`);
+        if (out.sha !== sha) throw new Error(`${tag} は ${sha} ではなく ${out.sha} を指している`);
+        review = { tree: out.tree, diffFile: out.diffFile, stat: out.stat.join("\n") };
+      } else {
+        mkdirSync(dir, { recursive: true });
+        await git(["worktree", "add", "--detach", tree, sha]);
+        await Bun.write(diffFile, await git(["diff", `${current}..${sha}`]));
+        review.stat = await git(["diff", "--stat", `${current}..${sha}`]);
+      }
       const model = note ? "" : runner === auto.runner ? auto.model : "";
       const effort = !note && runner === auto.runner && auto.effort && !tasks.checkEffort(runner, auto.effort) ? auto.effort : "";
       tasks.create({
         workspaceId: meta.id, cwd: dir, scope: [dir], runner, shadowRunner: null, title: `${RELEASE_REVIEW_TITLE} ${tag}`, origin: RELEASE_REVIEW_ORIGIN, permissionMode,
-        prompt: releaseReviewPrompt({ from: current, to: sha, tag, diffFile, tree, stat }),
+        prompt: releaseReviewPrompt({ from: current, to: sha, tag, ...review }),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       }, undefined, (t) => { if (note) tasks.record(t.id, { t: "status", text: note }); });
+      // from a source, the commit this check is for, kept after the check's folder goes: its result counts only for that
+      // commit. Written once the check exists, so a start that failed leaves the previous check's commit in place
+      if (source) {
+        mkdirSync(join(cfg.home, "release-review"), { recursive: true });
+        writeFileSync(reviewedShaFile(tag), sha + "\n");
+      }
       return null;
     } catch (e) {
       await removeReviewTree(tag);
       return `${tag} の差分の確認を始められなかった: ${String((e as Error).message ?? e)}`;
+    }
+  };
+  /** From an update source: the commit the check of `tag` was made for (beside the folder, which goes when the check ends). */
+  const reviewedShaFile = (tag: string) => join(cfg.home, "release-review", `${tag}.sha`);
+  const reviewedSha = (tag: string): string | null => {
+    try {
+      return readFileSync(reviewedShaFile(tag), "utf8").trim() || null;
+    } catch {
+      return null;
     }
   };
   const removeReviewTree = async (tag: string) => {
@@ -1494,37 +1528,79 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
    * nothing is managed). Reads the tags already fetched (the interval check fetches), so it makes no network call. Null for a
    * development origin or a clone with no tag.
    */
-  const latestRelease = async (current: string | null): Promise<{ tag: string; sha: string; ahead: number | null } | null> => {
+  const latestRelease = async (current: string | null, source?: string | null): Promise<{ tag: string; sha: string; ahead: number | null } | null> => {
+    if (source) {
+      const l = await latestOfSource(source);
+      // no git: the commits cannot be counted; 1 = newer than what runs (the screen offers it), 0 = not
+      // the answer is kept 10 minutes: the release just promoted to is not offered again
+      return l ? { tag: l.tag, sha: l.sha, ahead: l.newer && l.sha !== current ? 1 : 0 } : null;
+    }
     if (!(await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false))) return null;
     const tag = (await git(["tag", "-l", "v*", "--sort=-v:refname"]).catch(() => "")).split("\n")[0]?.trim();
     if (!tag) return null;
     const sha = await git(["rev-list", "-n", "1", tag]);
     return { tag, sha, ahead: await git(["rev-list", "--count", `${current ?? "HEAD"}..${sha}`]).then(Number, () => null) };
   };
+  /**
+   * The newest release of an update source, from sb-rescue (`GET /api/latest-release`: one or two calls to GitHub's
+   * unauthenticated API, 60 an hour). Kept 10 minutes (a failure 5 minutes) so the interval check, the firings and the
+   * screen's polling together stay well under that. Null = could not be told.
+   */
+  /** From an update source: when a start of the check of `<tag>@<sha>` last failed, and how long until it is tried again. */
+  const reviewStartFailed = new Map<string, number>();
+  const REVIEW_RETRY_MS = 10 * 60_000;
+  let sourceLatest: { source: string; at: number; value: { tag: string; sha: string; newer: boolean } | null } | null = null;
+  const latestOfSource = async (source: string): Promise<{ tag: string; sha: string; newer: boolean } | null> => {
+    if (sourceLatest?.source === source && Date.now() - sourceLatest.at < (sourceLatest.value ? 10 * 60_000 : 5 * 60_000)) return sourceLatest.value;
+    const value = await askRescue("/api/latest-release").then(async (r) => (r.ok ? ((await r.json()) as { tag: string; sha: string; newer: boolean }) : null), () => null);
+    sourceLatest = { source, at: Date.now(), value };
+    return value;
+  };
   const releaseReviewFor = (r: { tag: string; sha: string }): ReleaseReview | null => {
     const t = db.findTaskByOrigin(RELEASE_REVIEW_ORIGIN, `${RELEASE_REVIEW_TITLE} ${r.tag}`);
-    return t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, r) : null;
+    const review = t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, r) : null;
+    // from an update source a tag can be moved: a check counts only for the commit it was made for (the file only that path
+    // writes), so for the promotion, the screen and the re-check alike a moved tag reads as not checked
+    const checked = reviewedSha(r.tag);
+    if (review && review.state !== "running" && checked !== null && checked !== r.sha) {
+      return { ...review, state: "failed", findings: [], reason: `${r.tag} は確認した commit（${checked.slice(0, 7)}）ではなく ${r.sha.slice(0, 7)} を指している。確かめ直すまで上げない` };
+    }
+    return review;
   };
   let rechecking = false;
   /** Before picking: bring the app up to the newest tag, or hold everything while that tag failed to start. */
   const promotionFirst = async (meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
     const status = await releaseStatus();
     if (!status.managed) return null;
-    const latest = await latestTag(git).catch(() => null);
+    // an update source (sb-rescue builds from tarballs, no git): the newest release comes from it, and it is a public copy by being the source
+    const source = (status as ReleaseState).source ?? null;
+    const latest = source ? await latestOfSource(source) : await latestTag(git).catch(() => null);
     const current = (status as ReleaseState).current;
-    // exit 0 = the tag's commit is an ancestor of what runs (git throws on any other exit)
-    const latestInCurrent = !!latest && !!current && latest.sha !== current && (await git(["merge-base", "--is-ancestor", latest.sha, current]).then(() => true, () => false));
+    // exit 0 = the tag's commit is an ancestor of what runs (git throws on any other exit). From a source (no history) sb-rescue
+    // compares the tags: one that is not above what runs counts as in it, so nothing goes down a version by itself
+    const latestInCurrent = !!latest && !!current && latest.sha !== current && (source ? !(latest as { newer?: boolean }).newer : await git(["merge-base", "--is-ancestor", latest.sha, current]).then(() => true, () => false));
     // a public copy's clone checks the tag's diff first: the check is the Task of origin release-review titled with the tag
-    const publicCopy = !!latest && (await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false));
+    const publicCopy = !!latest && (!!source || (await git(["remote", "get-url", "origin"]).then((u) => isPublicCopy(u, cfg.repoRoot), () => false)));
     let review: ReleaseReview | "start" | undefined;
     if (publicCopy) {
-      const t = db.findTaskByOrigin(RELEASE_REVIEW_ORIGIN, `${RELEASE_REVIEW_TITLE} ${latest!.tag}`);
-      review = t ? releaseReviewOf(t, db.lastReply(t.id)?.text ?? null, latest!) : "start";
+      review = releaseReviewFor(latest!) ?? "start";
     }
     // counted after the last await: a Task that ends while git runs either counts as ended here or finds the hold set
     const step = promotionStep({ status: status as ReleaseState, latest, busyTasks: busyTasks(), latestInCurrent, review });
     let reviewNote: string | null = null;
-    if (step.action === "review") reviewNote = await startReleaseReview(latest!.tag, latest!.sha, current!);
+    if (step.action === "review") {
+      // from a source a start that failed (GitHub not answering, a moved tag) is tried again only after a while, as each
+      // try spends GitHub's unauthenticated calls; the re-check on the screen is not held back
+      const key = `${latest!.tag}@${latest!.sha}`;
+      const failedAt = source ? reviewStartFailed.get(key) : undefined;
+      if (failedAt !== undefined && Date.now() - failedAt < REVIEW_RETRY_MS) {
+        reviewNote = `${latest!.tag} の差分の確認を始められなかった。${new Date(failedAt + REVIEW_RETRY_MS).toLocaleTimeString("ja-JP")} ごろにまた試す`;
+      } else {
+        reviewNote = await startReleaseReview(latest!.tag, latest!.sha, current!, source);
+        if (source && reviewNote) reviewStartFailed.set(key, Date.now());
+        else reviewStartFailed.delete(key);
+      }
+    }
     const heldTag = step.action === "wait" ? (step.failed?.tag ?? latest!.tag) : step.action === "review" ? latest!.tag : null;
     if (heldTag === null) heldSince = null;
     else if (heldSince?.tag !== heldTag) heldSince = { tag: heldTag, at: Date.now() };
@@ -1535,7 +1611,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (step.action === "promote") {
       const asked = { tag: step.tag, sha: step.sha, at: Date.now(), by };
       try {
-        const r = await requestPromote(step.sha);
+        const r = await (source ? requestPromote(step.tag, step.sha) : requestPromote(step.sha));
         if (r.status === 202) { promotionAsked = asked; return `${step.tag} の昇格を依頼`; }
         const error = JSON.stringify(r.body);
         promotionAsked = { ...asked, error };
@@ -1672,12 +1748,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // a narrow firing logs no skips, but a promotion it asked for (no hold left: it was asked) is an action, logged as a full firing's is
     if (held && only && !promotionHold) scheduler.note(`${db.getSchedule(scheduleId)?.title ?? "バックログを進める"}: ${held} (待ちが解けた)`, scheduleId);
     if (held) return { started, skipped: [], promotion: held };
-    // Stage Tasks at work (Db's activeStage), and ones a button (or this firing) is creating right now (startingStage), per workspace and slot.
+    // Stage Tasks at work (Db's activeStage), per workspace and slot.
     const stageTasks = () => db.listActiveStageTasks();
     const busy = (wsId: string, slot: Slot) => {
       const tasks = stageTasks().filter((t) => t.workspaceId === wsId && SLOT_OF_ACTION[t.stage!.action] === slot).map((t) => `工程 Task ${t.id}（${t.title}）が ${activeAs(t)}`);
-      const starting = [...startingStage].filter(([k, v]) => k.startsWith(`${wsId}:`) && SLOT_OF_ACTION[v.action] === slot).map(([, v]) => `#${v.n} の工程 Task を開始しているところ`);
-      return [...tasks, ...starting];
+      return tasks;
     };
     // The usage that counts is the one of the runner each stage Task starts on: its kind's as startMetaTask decides
     // it (the kind's own, else the schedule's), after 上限のときの代わり; read once per firing.
@@ -1709,7 +1784,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // Why an action's stage Task is not started now: its runner at the limit, or its runner's usage high and a stage Task
     // already running anywhere or started by this firing (one start per firing, asked again before each start: one a
     // button started while GitHub was read counts too). "" = it may start.
-    const quotaHeld = (a: BacklogAction) => fullOf(targetOf[a]) || (usageOf(targetOf[a]) && (started.length > 0 || stageTasks().length + startingStage.size > 0) ? usageOf(targetOf[a]) : "");
+    const quotaHeld = (a: BacklogAction) => fullOf(targetOf[a]) || (usageOf(targetOf[a]) && (started.length > 0 || stageTasks().length > 0) ? usageOf(targetOf[a]) : "");
     // The login of the runner an action starts on: a lapsed login holds every slot (the stage Task would end at once on
     // "not logged in"), a Claude login that lapses within LOGIN_SOON_MS holds the implement slot only (a long run would
     // be cut off on the way). The button (startStage) is not held. Memory only: runnerInfo() starts no runner. "" = it may start.
@@ -1842,8 +1917,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
         });
         // its stage Task started after GitHub was read (a button, an answer's resume): the slot's next item instead
-        if ("active" in t || "starting" in t) {
-          skipped.push(`${ws.name}: #${next.item.number} は工程 Task が${"active" in t ? "動いている" : "開始中"}`);
+        if ("active" in t) {
+          skipped.push(`${ws.name}: #${next.item.number} は工程 Task が動いている`);
           continue;
         }
         if ("error" in t) {
@@ -1949,12 +2024,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return queueRun;
   };
   const queueKey = (workspaceId: string, n: number) => `${workspaceId}:${n}`;
-  /** The queue's PBIs' 実装 Tasks running / waiting, and the ones being created right now (a button's too). */
+  /** The queue's PBIs' 実装 Tasks running / waiting (a button's too). */
   const queueRunning = (queue: BacklogQueue) => {
     const queued = new Set(queue.items.map((e) => queueKey(e.workspaceId, e.number)));
     return (
-      db.listActiveStageTasks().filter((t) => t.workspaceId && SLOT_OF_ACTION[t.stage!.action] === "implement" && queued.has(queueKey(t.workspaceId, t.stage!.issue))).length +
-      [...startingStage].filter(([k, v]) => queued.has(k) && SLOT_OF_ACTION[v.action] === "implement").length
+      db.listActiveStageTasks().filter((t) => t.workspaceId && SLOT_OF_ACTION[t.stage!.action] === "implement" && queued.has(queueKey(t.workspaceId, t.stage!.issue))).length
     );
   };
   /** Why an action of the 実装 slot does not start now: its runner's usage at the limit, as backlog-next's; "" = it may. */
@@ -2039,8 +2113,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         continue;
       }
       const t = await startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done } });
-      if ("active" in t || "starting" in t) {
-        lines.push(`${ws.name}: #${p.item.number} は工程 Task が${"active" in t ? "動いている" : "開始中"}`);
+      if ("active" in t) {
+        lines.push(`${ws.name}: #${p.item.number} は工程 Task が動いている`);
         continue;
       }
       if ("error" in t) {
@@ -2144,6 +2218,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     // a Task that stopped on `job#<id>` goes on with the job's result, without waiting for the next import
     onFinish: (job) => {
       const workspaceId = db.getTask(job.taskId)?.workspaceId ?? null;
+      // a stop that is not depends is not resumed, but its job#<id> is met
+      try {
+        meetJobConditions({ db, tasks, taskId: job.taskId, jobId: job.id });
+      } catch (e) {
+        console.error(`[jobs] job#${job.id} conditions after the end: ${String((e as Error)?.message ?? e)}`);
+      }
       void resumeDepends({ db, tasks, workspaceId, now: Date.now() })
         .catch((e) => console.error(`[jobs] depends resume after job#${job.id}: ${String((e as Error)?.message ?? e)}`))
         // after the resume: a Task it resumed is running again and keeps its place
@@ -2371,7 +2451,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const events = db.listEvents(taskId);
     const lastSeq = events[events.length - 1]?.seq ?? 0;
     const jc = settings().judgeAndChoice;
-    void (opts.rubricJudge ?? judgeRubric)({ title: t.title, prompt: db.firstUserText(taskId) ?? "", later: personMessages(events.map((e) => e.ev)).slice(1), events: events.map((e) => e.ev), metrics, rubric }, { adapters: adapterMap, settings: settings().judge, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal, fallback: { runner: jc.judgeFallbackRunner, model: jc.judgeFallbackModel } })
+    void (opts.rubricJudge ?? judgeRubric)({ title: t.title, prompt: db.firstUserText(taskId) ?? "", later: personMessages(events.map((e) => e.ev)).slice(1), events: events.map((e) => e.ev), metrics, rubric, stage: stageRequestOf(t, storedIssueReader(db), settings().judge) }, { adapters: adapterMap, settings: settings().judge, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal, fallback: { runner: jc.judgeFallbackRunner, model: jc.judgeFallbackModel } })
       .then((j) => {
         if (judgeStop.signal.aborted) return;
         const cur = db.getTask(taskId);
@@ -2405,7 +2485,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const shadow = db.shadowTaskOf(taskId);
     if (shadow) history.catchUp(shadow.id);
   };
-  const askRescue = (path: string, init: RequestInit = {}) => fetch(`${cfg.rescueUrl}${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) });
+  const askRescue = (path: string, init: RequestInit = {}) => fetch(`${cfg.rescueUrl}${path}`, { signal: AbortSignal.timeout(5000), ...init, headers: { "content-type": "application/json", authorization: `Bearer ${token}` } });
   const git = async (args: string[]) => {
     // Never a prompt for credentials (a fetch of tags from an SSH remote would hang the firing), and a time limit.
     const p = Bun.spawn(["git", "-C", cfg.repoRoot, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes" } });
@@ -2677,6 +2757,24 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
         DELETE: (req) => {
           const v = runnerLogins.cancel(req.params.id as RunnerId);
+          return v ? json(v) : bad("no login in progress", 404);
+        },
+      },
+      "/api/github/status": {
+        GET: async () => json(await githubStatus(opts.gh ?? runGh, cfg.repoRoot)),
+      },
+      "/api/github/login": {
+        GET: () => {
+          const v = githubLogins.get("gh");
+          return v ? json(v) : bad("no login in progress", 404);
+        },
+        POST: async () => {
+          const bin = ghBin();
+          if (!bin) return bad("gh is not installed here", 404);
+          return json(await githubLogins.start("gh", [bin, ...GITHUB_LOGIN_ARGS], GITHUB_LOGIN_HOSTS));
+        },
+        DELETE: () => {
+          const v = githubLogins.cancel("gh");
           return v ? json(v) : bad("no login in progress", 404);
         },
       },
@@ -3295,7 +3393,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const schedule = db.listSchedules().find((x) => x.workspaceId === id);
           if (schedule) return bad(`スケジュール「${schedule.title}」がこの workspace を使っています。先にスケジュールを変えるか消してください`, 409);
           if (deleteCopy) {
-            const copy = copyDeletable(ws, cfg.repoRoot);
+            const copy = copyDeletable(ws, cfg.repoRoot, cfg.reposDir);
             if (!copy.ok) return bad(copy.reason, copy.code);
           }
           const source = db.getWorkspaceBacklogSource(id);
@@ -3399,7 +3497,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         GET: async (req) => {
           const ws = db.getWorkspace(String(req.params.id));
           if (!ws) return bad("not found", 404);
-          const copy = copyDeletable(ws, cfg.repoRoot);
+          const copy = copyDeletable(ws, cfg.repoRoot, cfg.reposDir);
           const lost = copy.ok && existsSync(ws.path) ? await inspectRemoval(ws.path) : { dirty: false, unpushed: false };
           const running = runningTasksIn(ws);
           return json({ name: ws.name, path: ws.path, copy: copy.ok ? { deletable: true } : { deletable: false, reason: copy.reason }, ...lost, running } satisfies WorkspaceRemoval);
@@ -3814,7 +3912,6 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (action === "complete" && !activeStageTask(ws.id, n) && isOverlapped(item)) return json({ error: overlapLine([item]).join("・") }, 409);
           const r = await startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined, ...(wantRunner ? { extra: { runner: wantRunner, model: wantModel, effort: wantEffort } } : {}) });
           if ("active" in r) return json({ error: `#${n} の工程 Task が実行中です`, taskId: r.active.id }, 409);
-          if ("starting" in r) return json({ error: `#${n} の工程 Task を開始しているところです`, taskId: null }, 409);
           return "task" in r ? json(r.task, 201) : bad(r.error, r.status);
         },
       },
@@ -4240,8 +4337,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       "/api/tasks/:id/resume": {
         POST: async (req) => {
           if (!db.getTask(String(req.params.id))) return bad("not found", 404);
+          const parsed = SendTaskInput.pick({ text: true }).safeParse(await req.json().catch(() => ({})));
+          if (!parsed.success) return bad(parsed.error.message);
           try {
-            return json(await resumer.resumeNow(String(req.params.id)));
+            const resumed = await resumer.resumeNow(String(req.params.id), parsed.data.text);
+            noteMergeGrant(resumed.id, parsed.data.text); // a note is the person's words to the task, as a reply is
+            return json(resumed);
           } catch (e) {
             return bad(String((e as Error).message ?? e), 409);
           }
@@ -4374,13 +4475,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // null when it cannot be counted (the running version is not in this checkout, git failed).
           // `behind` is its pair: commits in the running version that HEAD lacks. > 0 with `ahead` 0 = HEAD is an ancestor of what
           // runs (the checkout does not follow the tag), so "up to date" and promoting HEAD would be wrong.
-          const [head, dirty, headSubject, ahead, behind] = await Promise.all([
+          // from an update source the running version is an unpacked tarball (no .git, maybe no git): there is no checkout, so
+          // the running version stands for HEAD (nothing ahead or behind) and the panel shows no HEAD line beside a newer release
+          const [head, dirty, headSubject, ahead, behind] = s.source ? [s.current, "", null, 0, 0] : await Promise.all([
             git(["rev-parse", "HEAD"]), git(["status", "--porcelain"]), git(["log", "-1", "--format=%s", "HEAD"]),
             s.current ? git(["rev-list", "--count", `${s.current}..HEAD`]).then(Number, () => null) : Promise.resolve(null),
             s.current ? git(["rev-list", "--count", `HEAD..${s.current}`]).then(Number, () => null) : Promise.resolve(null),
           ]);
           // a public copy's clone: the newest release and the check of its diff (null on a development origin)
-          const latest = await latestRelease(s.current).catch(() => null);
+          const latest = await latestRelease(s.current, s.source).catch(() => null);
           const review = latest ? releaseReviewFor(latest) : null;
           return json({ managed: true, latestRelease: latest, review, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
         } catch (e) {
@@ -4393,7 +4496,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         POST: strong(async () => {
           const s = await releaseStatus();
           if (!s.managed) return bad("this daemon does not run from a release (start it with sb-rescue)", 409);
-          const latest = await latestRelease(s.current).catch(() => null);
+          const latest = await latestRelease(s.current, s.source).catch(() => null);
           if (!latest) return bad("this clone has no public release to check", 409);
           const review = releaseReviewFor(latest);
           if (review?.state === "running" || rechecking) return bad(`${latest.tag} の差分を確認中です`, 409);
@@ -4402,7 +4505,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           try {
             // the old check waiting to resume (a usage limit) is superseded: it shares the folder, and its end would remove the new one's
             if (review.state === "failed") { const old = db.getTask(review.taskId); if (old?.resumeAt != null) tasks.setResumeAt(old.id, null); }
-            const why = await startReleaseReview(latest.tag, latest.sha, s.current!);
+            const why = await startReleaseReview(latest.tag, latest.sha, s.current!, s.source);
             if (why) return bad(why, 500);
             promotionHold = null;
             await askPromotion("idle").catch(() => undefined); // the hold now says the check is running
@@ -4419,9 +4522,14 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const busy = db.listWorkingTasks("gate");
           if (busy.length && !body.force) return bad(`${busy.length} task(s) still running; a promotion restarts the daemon — wait or force`, 409);
           try {
-            const commit = body.commit ?? (await git(["rev-parse", "HEAD"]));
+            // an update source builds by tag: the newest release (named by its tag or its commit) is asked for with the commit that was seen
+            const source = await releaseStatus().then((s) => (s.managed ? (s as ReleaseState).source ?? null : null));
+            const newest = source ? await latestOfSource(source) : null;
+            if (source && !newest) return bad(`${source} の最新のリリースを確かめられない`, UPSTREAM_FAILED);
+            if (source && body.commit !== undefined && body.commit !== newest!.tag && body.commit !== newest!.sha) return bad(`更新元から昇格できるのは最新のリリース ${newest!.tag} だけです`, 409);
+            const commit = source ? newest!.sha : body.commit ?? (await git(["rev-parse", "HEAD"]));
             const from = clientOf(req, srv);
-            const r = await requestPromote(commit);
+            const r = await (source ? requestPromote(newest!.tag, newest!.sha) : requestPromote(commit));
             if (r.status >= 200 && r.status < 300) logOp(req, srv, "daemon.promote", { detail: { commit } }, from); // sb-rescue took it
             return json({ ...r.body, commit }, r.status);
           } catch (e) {
@@ -4943,6 +5051,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     dockerdIdle?.stop();
     opsLoadSampler?.stop();
     runnerLogins.stop();
+    githubLogins.stop();
     deviceAuths.stop();
     selfdev.cancelAll();
     pty?.closeAll();

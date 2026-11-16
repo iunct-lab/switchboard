@@ -646,12 +646,19 @@ export class RateLimitResumer {
     return w !== undefined && w.ts > t.resumeSince && w.utilization < SATURATED;
   }
 
-  /** The person's "今すぐ再開": same follow-up, regardless of the time and the setting. */
-  async resumeNow(taskId: string): Promise<Task> {
+  /**
+   * The person's "今すぐ再開": same follow-up, regardless of the time and the setting. A non-blank `note` is appended
+   * to it after a blank line; a Task not started yet (`start`) takes none, its first prompt was fixed when it was made.
+   */
+  async resumeNow(taskId: string, note?: string): Promise<Task> {
     const t = this.db.getTask(taskId);
     if (!t) throw new Error(`task ${taskId} not found`);
     if (isWorking(t, "slot")) throw new Error("the task is still running");
-    if (t.resumeReason === "start") return this.startNow(t, "待たずに今すぐ開始します");
+    const extra = note?.trim() ?? "";
+    if (t.resumeReason === "start") {
+      if (extra) throw new Error("a Task not started yet takes no note");
+      return this.startNow(t, "待たずに今すぐ開始します");
+    }
     if (!t.runnerSessionId) throw new Error("the task has no runner session to resume");
     if (this.sending.has(taskId)) throw new Error("a resume is already in flight");
     this.sending.add(taskId);
@@ -660,7 +667,8 @@ export class RateLimitResumer {
       const github = t.resumeReason === "github";
       const disk = t.resumeReason === "disk";
       this.tasks.record(taskId, { t: "status", text: stopped ? "中断されたターンを今すぐ再開します" : github ? "GitHub の上限の待ちを打ち切って今すぐ再開します" : disk ? "空き待ちを打ち切って今すぐ再開します" : "使用上限の待ちを打ち切って今すぐ再開します" });
-      return await this.tasks.send(taskId, stopped ? STOP_RESUME_PROMPT : this.followUp(t), { mirror: false }); // the shadow's runner hit no limit
+      const base = stopped ? STOP_RESUME_PROMPT : this.followUp(t);
+      return await this.tasks.send(taskId, extra ? `${base}\n\n${extra}` : base, { mirror: false }); // the shadow's runner hit no limit
     } finally {
       this.sending.delete(taskId);
     }

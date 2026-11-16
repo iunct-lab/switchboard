@@ -84,6 +84,14 @@ describe("task status transitions", () => {
     expect(workPhase({ status: "idle", resumeAt: null })).toBe("stopped");
   });
 
+  test("drain counts a turn and a background process, not an open approval, a planned resume or a stopped Task", () => {
+    expect(isWorking({ status: "running", resumeAt: null }, "drain")).toBe(true);
+    expect(isWorking({ status: "background", resumeAt: null }, "drain")).toBe(true);
+    expect(isWorking({ status: "waiting", resumeAt: null }, "drain")).toBe(false);
+    expect(isWorking({ status: "idle", resumeAt: 1 }, "drain")).toBe(false);
+    expect(isWorking({ status: "idle", resumeAt: null }, "drain")).toBe(false);
+  });
+
   test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it)", () => {
     for (const st of ALL) expect(isWorkingStatus(st), st).toBe(isWorking({ status: st, resumeAt: null }, "display"));
   });

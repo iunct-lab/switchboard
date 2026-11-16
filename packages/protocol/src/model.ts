@@ -578,7 +578,12 @@ export type EvalContext = z.infer<typeof EvalContext>;
 export const EvalsSummary = z.object({
   weekStart: z.number(),
   sample: z.array(EvalsListRow.extend({ context: EvalContext })),
-  gap: z.object({ count: z.number(), mean: z.number().nullable() }),
+  gap: z.object({
+    count: z.number(),
+    mean: z.number().nullable(),
+    /** The judge's `intent` score averaged over the tasks the person answered "partial" or "wrong" to the intent question (a row without an `intent` score is not counted). */
+    intent: z.object({ count: z.number(), mean: z.number().nullable() }),
+  }),
 });
 export type EvalsSummary = z.infer<typeof EvalsSummary>;
 
@@ -789,6 +794,9 @@ export const JudgeSettings = z
     recapChars: z.number().int().positive().default(12_000),
     laterChars: z.number().int().positive().default(4_000),
     laterEachChars: z.number().int().positive().default(600),
+    /** For a stage Task: the PBI's story and out-of-scope (each), and the source request's `## 要望`, in characters. */
+    pbiChars: z.number().int().positive().default(800),
+    requestChars: z.number().int().positive().default(800),
   })
   .prefault({});
 export type JudgeSettings = z.infer<typeof JudgeSettings>;
@@ -1072,7 +1080,7 @@ export const SettingsPatch = z.object({
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
   routing: z.object({ llm: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), timeoutMs: z.number().int().min(1000).max(60_000) }).partial().optional() }).partial().optional(),
   /** Partial: `{ judge: { enabled: false } }` leaves the saved runner / model alone. */
-  judge: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), recapChars: z.number().int().positive(), laterChars: z.number().int().positive(), laterEachChars: z.number().int().positive() }).partial().optional(),
+  judge: z.object({ enabled: z.boolean(), runner: RunnerId, model: z.string(), recapChars: z.number().int().positive(), laterChars: z.number().int().positive(), laterEachChars: z.number().int().positive(), pbiChars: z.number().int().positive(), requestChars: z.number().int().positive() }).partial().optional(),
   /**
    * Partial: `{ autoStart: { model: "x" } }` leaves the saved runner alone. `byKind`: a partial choice per kind
    * over that kind's saved one (else the common values); `null` = back to the common values.

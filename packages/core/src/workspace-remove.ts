@@ -4,19 +4,20 @@ import type { Workspace } from "@switchboard/protocol";
 
 export type CopyDeletable = { ok: true } | { ok: false; code: 400 | 409; reason: string };
 
-/** Whether a workspace's directory may be deleted with its registration: only a Git checkout directly under the checkout's parent directory. */
-export function copyDeletable(ws: Pick<Workspace, "kind" | "path">, repoRoot: string): CopyDeletable {
+/** Whether a workspace's directory may be deleted with its registration: only a Git checkout directly under `reposDir` (config.ts; next to the checkout unless set). */
+export function copyDeletable(ws: Pick<Workspace, "kind" | "path">, repoRoot: string, reposDir = dirname(repoRoot)): CopyDeletable {
   if (ws.kind === "meta") return { ok: false, code: 400, reason: "meta workspace のディレクトリは消せません" };
   if (!existsSync(ws.path)) return { ok: true };
-  let path: string, self: string;
+  let path: string, self: string, repos: string;
   try {
     path = realpathSync(ws.path);
     self = realpathSync(repoRoot);
+    repos = realpathSync(reposDir);
   } catch (e) {
     return { ok: false, code: 409, reason: `パスを確かめられないので消せません（${(e as Error).message}）` };
   }
   if (path === self) return { ok: false, code: 400, reason: "Switchboard 自身のディレクトリは消せません" };
-  if (dirname(path) !== dirname(self)) return { ok: false, code: 400, reason: "Switchboard のチェックアウトの親ディレクトリの直下にないので消せません" };
+  if (dirname(path) !== repos) return { ok: false, code: 400, reason: `リポジトリの置き場（${reposDir}）の直下にないので消せません` };
   if (!existsSync(join(path, ".git"))) return { ok: false, code: 409, reason: "Git のチェックアウトではないので消せません" };
   return { ok: true };
 }

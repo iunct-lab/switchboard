@@ -6,11 +6,11 @@ import { Rubric } from "@switchboard/protocol";
 import { DEFAULT_RUBRIC, loadRubric, rubricKey, rubricPath } from "./rubric.ts";
 
 describe("rubric", () => {
-  test("the default parses and names the five criteria, each with 1 / 3 / 5 anchors", () => {
+  test("the default parses and names the eight criteria, each with 1 / 3 / 5 anchors", () => {
     expect(Rubric.safeParse(DEFAULT_RUBRIC).success).toBe(true);
-    expect(DEFAULT_RUBRIC.criteria.map((c) => c.id)).toEqual(["goal", "instructions", "efficiency", "communication", "safety"]);
+    expect(DEFAULT_RUBRIC.criteria.map((c) => c.id)).toEqual(["goal", "instructions", "efficiency", "communication", "safety", "intent", "minimal", "value"]);
     for (const c of DEFAULT_RUBRIC.criteria) expect(Object.keys(c.anchors).sort()).toEqual(["1", "3", "5"]);
-    expect(rubricKey(DEFAULT_RUBRIC)).toBe("switchboard-default@3");
+    expect(rubricKey(DEFAULT_RUBRIC)).toBe("switchboard-default@4");
   });
 
   test("the person's evals/rubric.json replaces the default; a broken or invalid one falls back with one warning; none → default, no warning", () => {

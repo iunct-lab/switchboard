@@ -166,20 +166,64 @@ test("the choice scores count chosen, returned and merged per kind of reason, th
   issue("o/one", 14, 13);
   issue("o/one", 16, 15);
   issue("o/two", 12, 99); // the parent of a merge in another repository: not counted in o/one
-  // one level only, in either row order: #21 merged, #21's parent #20 counts, #20's parent #19 does not
+  // two levels up, in either row order: issue 21 merged, its parent 20 and that one's parent 19 count, 19's parent 18 does not
   pr("o/one", "MERGED", [21]);
   issue("o/one", 21, 20);
   issue("o/one", 20, 19);
+  issue("o/one", 19, 18);
   task("g", 100, "w1", 19, "complete", "backlog stage complete");
+  task("h", 100, "w1", 18, "complete", "backlog stage complete");
   const r = kernelReport(db, { days: 1, now: 1000 });
+  // the two Tasks on issue 10 are one request (the first one's reason, "auto direct", decides), so "戻した" is not a row of its own
   expect(r.choices).toEqual([
-    { group: "ボタン", chosen: 4, returned: 0, merged: 1 },
+    { group: "ボタン", chosen: 5, returned: 0, merged: 2 },
     { group: "自動 direct: 本文 ≤ 600", chosen: 2, returned: 1, merged: 1 },
-    { group: "戻した", chosen: 1, returned: 0, merged: 0 },
   ]);
   const text = renderReport(r);
   expect(text).toContain("| 自動 direct: 本文 ≤ 600 | 2 | 1 | 1 |");
   expect(text).toContain("見直す材料であって決着ではない");
+  db.close();
+});
+
+const requestDb = () => {
+  const db = new Database(":memory:");
+  db.exec(`CREATE TABLE tasks (id TEXT, status TEXT, created_at INTEGER, status_at INTEGER, shadow_of TEXT, provenance TEXT, workspace_id TEXT, stage_issue INTEGER, stage_action TEXT);
+    CREATE TABLE ledger (task_id TEXT, cost_usd REAL); CREATE TABLE task_evals (task_id TEXT, source TEXT, json TEXT);
+    CREATE TABLE workspaces (id TEXT, backlog_source TEXT);
+    CREATE TABLE backlog_records (repository TEXT, object_kind TEXT, remote TEXT)`);
+  db.query("INSERT INTO workspaces VALUES ('w1', ?), ('w2', ?)").run(JSON.stringify({ repository: "o/one" }), JSON.stringify({ repository: "o/two" }));
+  return db;
+};
+const addStage = (db: Database, id: string, created: number, ws: string, issue: number, action: string, reason: string) =>
+  db.query("INSERT INTO tasks VALUES (?, 'done', ?, ?, NULL, ?, ?, ?, ?)").run(id, created, created, prov("p0-pipeline", "s".repeat(64), 1, reason), ws, issue, action);
+const addIssue = (db: Database, repo: string, number: number, parent: number | null, body: string) =>
+  db.query("INSERT INTO backlog_records VALUES (?, 'issue', ?)").run(repo, JSON.stringify({ number, parent, body }));
+const addMerged = (db: Database, repo: string, closes: number[]) => db.query("INSERT INTO backlog_records VALUES (?, 'pull-request', ?)").run(repo, JSON.stringify({ state: "MERGED", closes }));
+
+test("the choice scores count a request once however many of its stages ran, the PBI read from the request's body or its own", () => {
+  const db = requestDb();
+  addIssue(db, "o/one", 50, null, "## 要望\n\n```text\n## 派生 PBI\n- #99\n```\n\n## 派生 PBI\n\n- #51 一つ目\n");
+  addIssue(db, "o/one", 52, null, "## 元要望\n\n#50\n\n## Tasks\n"); // linked from its own side too
+  addStage(db, "p", 100, "w1", 50, "to-pbi", "backlog stage to-pbi");
+  addStage(db, "t", 200, "w1", 51, "to-tasks", "backlog stage to-tasks");
+  addStage(db, "c", 300, "w1", 52, "complete", "backlog stage complete");
+  // a PBI with no request whose reason cites one is its own request
+  addIssue(db, "o/one", 53, null, "## 元要望\n\nなし（#50 のレビューの残り）\n");
+  addStage(db, "n", 400, "w1", 53, "complete", "backlog stage complete");
+  expect(kernelReport(db, { days: 1, now: 1000 }).choices).toEqual([{ group: "ボタン", chosen: 2, returned: 0, merged: 0 }]);
+  db.close();
+});
+
+test("the choice scores count a request merged when a Task of its derived PBI merged, and keep another repository's numbers apart", () => {
+  const db = requestDb();
+  addIssue(db, "o/one", 60, null, "## 派生 PBI\n\n- #61\n");
+  addIssue(db, "o/one", 62, 61, "Task"); // 62 is a Task of PBI 61, the PBI of request 60
+  addMerged(db, "o/one", [62]);
+  addStage(db, "r", 100, "w1", 60, "to-pbi", "backlog stage to-pbi");
+  // the same numbers in another repository link to nothing there and merged nothing there
+  addStage(db, "q", 100, "w2", 60, "to-pbi", "direct button");
+  addStage(db, "s", 200, "w2", 61, "complete", "direct button");
+  expect(kernelReport(db, { days: 1, now: 1000 }).choices).toEqual([{ group: "ボタン", chosen: 3, returned: 0, merged: 1 }]);
   db.close();
 });
 

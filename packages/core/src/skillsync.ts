@@ -61,8 +61,12 @@ export function setupScripts({ metaPath, cwd }: { metaPath: string; cwd: string 
 }
 
 function git(cwd: string, ...args: string[]): string | null {
-  const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-  return p.exitCode === 0 ? p.stdout.toString().trim() : null;
+  try {
+    const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    return p.exitCode === 0 ? p.stdout.toString().trim() : null;
+  } catch {
+    return null; // no git on this host
+  }
 }
 
 /** A hash of every file under `dir` (relative path and content), without the marker. */

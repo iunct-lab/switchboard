@@ -63,6 +63,13 @@ test("two start requests at once start one agent; a command that cannot start le
   expect(missing.status().error).toBeTruthy();
 });
 
+test("from an update source (no repository) the agent says it is not available, before it touches git", async () => {
+  const agent = new RescueAgent({ home: f.home, repo: join(f.home, "no-repo"), source: "o/n", sup }, ["/bin/sh", "-c", "sleep 30"]);
+  await expect(agent.start()).rejects.toThrow("使えません");
+  expect(agent.status()).toMatchObject({ running: false, worktree: null });
+  expect(agent.status().error).toContain("使えません");
+});
+
 test("the agent runs in a fresh worktree with the log, history and diff in its prompt; its output streams; nothing is promoted", async () => {
   const agent = new RescueAgent({ home: f.home, repo: f.repo, sup }, FAKE);
   const before = { current: currentOf(f.home), history: readHistory(f.home).length };
@@ -88,7 +95,7 @@ test("the agent runs in a fresh worktree with the log, history and diff in its p
 
 test("the page starts and stops it over HTTP and shows the output in /api/status", async () => {
   const flag = join(f.root, "started");
-  const rescue = startRescue({ home: f.home, repo: f.repo, port: 1, sup }, { port: 0, agentArgv: ["/bin/sh", "-c", `touch ${flag}; echo hello from the agent; sleep 30`] });
+  const rescue = startRescue({ home: f.home, repo: f.repo, source: null, port: 1, sup }, { port: 0, agentArgv: ["/bin/sh", "-c", `touch ${flag}; echo hello from the agent; sleep 30`] });
   const base = `http://127.0.0.1:${rescue.server.port}`;
   try {
     expect((await fetch(`${base}/api/agent/start`, { method: "POST" })).status).toBe(202);

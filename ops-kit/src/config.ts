@@ -222,7 +222,7 @@ export function mergeGateOf(cwd = process.cwd()): string | null {
 }
 
 /** `owner/name` of a repository given as `owner/name`, `host/owner/name`, or a URL (with or without `.git`). */
-const ownerName = (repo: string) => repo.trim().replace(/^[a-z]+:\/\/[^/]+\//i, "").replace(/^git@[^:]+:/, "").replace(/\/+$/, "").replace(/\.git$/, "").split("/").slice(-2).join("/").toLowerCase();
+export const ownerName = (repo: string) => repo.trim().replace(/^[a-z]+:\/\/[^/]+\//i, "").replace(/^git@[^:]+:/, "").replace(/\/+$/, "").replace(/\.git$/, "").split("/").slice(-2).join("/").toLowerCase();
 
 /**
  * Why a write to `repo` is refused: it is this clone's public copy (`publicSync.target`), so the clone was taken from

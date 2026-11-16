@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
+import { type AgentEvent, REPLY_QUEUED, type RunnerAdapter, type RunnerSession, type StartOptions, type Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd, versionAtLeast } from "./tasks.ts";
@@ -14,24 +14,24 @@ import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd, versi
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
  * starts the next turn on the runner's own (what a background job's notification does) through `emit`.
  */
-type Fake = { emit: (ev: AgentEvent) => void; closes: number; exit: (code: number | null) => void };
+type Fake = { emit: (ev: AgentEvent) => void; closes: number; exit: (code: number | null) => void; sent: string[]; prompt?: string };
 function fakeAdapter(fakes: Fake[]): RunnerAdapter {
   return {
     id: "claude",
     async detect() {
       return { available: true };
     },
-    start(_opts, emit) {
+    start(opts, emit) {
       let resolveExit!: (c: number | null) => void;
       const exited = new Promise<number | null>((r) => (resolveExit = r));
-      const fake: Fake = { emit, closes: 0, exit: (c) => resolveExit(c) };
+      const fake: Fake = { emit, closes: 0, exit: (c) => resolveExit(c), sent: [], prompt: opts.prompt };
       fakes.push(fake);
       queueMicrotask(() => {
         emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
         emit({ t: "session.end", status: "ok", summary: "待ちます" });
       });
       const session: RunnerSession = {
-        send: () => undefined,
+        send: (text) => void fake.sent.push(text),
         respondPermission: () => undefined,
         abort: async () => resolveExit(null),
         close: async () => {
@@ -178,6 +178,191 @@ describe("background work", () => {
     // the notification: the count drops, and the runner goes on in a turn of its own
     fakes[0]!.emit({ t: "background", count: 1 });
     fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    expect(db.getTask(t.id)!.status).toBe("running");
+  });
+});
+
+describe("admission hold", () => {
+  let hold: { wait: string; detail: string } | null;
+  let held: TaskManager;
+  let wsId: string;
+  beforeEach(() => {
+    hold = null;
+    held = new TaskManager(db, new Map([["claude", fakeAdapter(fakes)]]), () => undefined, { idleMs: 10_000, admissionHold: () => hold, drainTickMs: 3_600_000 });
+    wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
+  });
+  afterEach(async () => void (await held.shutdown()));
+  const statusLines = (id: string) => db.listEvents(id).map((e) => e.ev).flatMap((ev) => (ev.t === "status" ? [ev.text] : []));
+
+  test("a new Task waits in the queue while the hold stands and starts when it ends and resumeAdmission is called", async () => {
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    expect(db.getTask(t.id)).toMatchObject({ status: "idle" });
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    expect(fakes.length).toBe(0);
+    expect(held.queueWait()).toBe("promotion");
+    held.drain();
+    expect(fakes.length).toBe(0);
+    hold = null;
+    expect(held.queueWait()).toBeNull();
+    held.resumeAdmission();
+    await sleep(0);
+    expect(fakes.length).toBe(1);
+    expect(db.getTask(t.id)!.queuedAt).toBeNull();
+    expect(db.getTask(t.id)!.status).toBe("done");
+  });
+
+  test("a reply to a Task whose turn ended is queued with its text in the log, and its process is closed", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    expect(db.getTask(t.id)!.status).toBe("done");
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    const r = await held.send(t.id, "次の指示");
+    expect(r.queuedAt).not.toBeNull();
+    expect(fakes[0]!.sent).toEqual([]);
+    expect(fakes[0]!.closes).toBe(1);
+    expect(statusLines(t.id).some((l) => l.startsWith(REPLY_QUEUED) && l.includes("次の指示") && l.includes("昇格待ち"))).toBe(true);
+    hold = null;
+    held.resumeAdmission();
+    await sleep(0);
+    expect(db.getTask(t.id)!.queuedAt).toBeNull();
+  });
+
+  test("a new Cloud Task waits in the queue while the hold stands", async () => {
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude", executionMode: "cloud" });
+    await sleep(0);
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    expect(fakes.length).toBe(0);
+  });
+
+  test("a reply to a turn in progress still reaches it", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    expect(db.getTask(t.id)!.status).toBe("running");
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    const r = await held.send(t.id, "追い打ち");
+    expect(r.queuedAt).toBeNull();
+    expect(fakes[0]!.sent).toEqual(["追い打ち"]);
+  });
+
+  test("a reply to a Task left on background jobs is held, keeps the process, and is queued when the jobs end", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    expect(db.getTask(t.id)!.status).toBe("background");
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    const r = await held.send(t.id, "次の指示");
+    expect(r.status).toBe("background");
+    expect(r.queuedAt).toBeNull();
+    expect(fakes[0]!.sent).toEqual([]);
+    expect(fakes[0]!.closes).toBe(0);
+    expect(statusLines(t.id).some((l) => l.startsWith(REPLY_QUEUED) && l.includes("次の指示") && l.includes("裏の処理"))).toBe(true);
+    fakes[0]!.emit({ t: "background", count: 0 });
+    await sleep(0);
+    expect(db.getTask(t.id)).toMatchObject({ status: "idle" });
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    expect(fakes.length).toBe(1);
+    expect(fakes[0]!.closes).toBe(1);
+    hold = null;
+    held.resumeAdmission();
+    await sleep(0);
+    expect(db.getTask(t.id)!.queuedAt).toBeNull();
+    expect(fakes.length).toBe(2);
+    expect(fakes[1]!.prompt).toContain("次の指示");
+  });
+
+  test("a reply held on background jobs waits through a turn the runner starts itself, and is queued when that turn ends", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    expect(db.getTask(t.id)!.status).toBe("running");
+    fakes[0]!.emit({ t: "background", count: 0 });
+    await sleep(0);
+    expect(db.getTask(t.id)!.queuedAt).toBeNull();
+    fakes[0]!.emit({ t: "session.end", status: "ok", summary: "済み" });
+    await sleep(0);
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    expect(fakes[0]!.sent).toEqual([]);
+    expect(fakes[0]!.closes).toBe(1);
+  });
+
+  test("a reply held on background jobs is dropped when the Task is aborted", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    await held.abort(t.id);
+    await sleep(0);
+    hold = null;
+    held.resumeAdmission();
+    await sleep(0);
+    expect(db.getTask(t.id)).toMatchObject({ status: "aborted", queuedAt: null });
+    expect(fakes.length).toBe(1);
+    expect(fakes[0]!.sent).toEqual([]);
+  });
+
+  test("a reply held on background jobs is dropped when the daemon stops", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    await held.shutdown();
+    await sleep(5);
+    expect(db.getTask(t.id)!.queuedAt).toBeNull();
+    expect(fakes.length).toBe(1);
+    expect(statusLines(t.id).some((l) => l.includes("デーモンが止まるので"))).toBe(true);
+  });
+
+  test("a reply held through a turn the runner started itself is dropped when that turn is aborted", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    await held.abort(t.id);
+    await sleep(5);
+    expect(db.getTask(t.id)).toMatchObject({ status: "aborted", queuedAt: null });
+    expect(statusLines(t.id).some((l) => l.includes("中断したので"))).toBe(true);
+  });
+
+  test("a reply held through a turn the runner started itself is queued when the runner dies in that turn", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    fakes[0]!.emit({ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/" });
+    fakes[0]!.emit({ t: "background", count: 0 });
+    fakes[0]!.exit(137);
+    await sleep(5);
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    hold = null;
+    held.resumeAdmission();
+    await sleep(0);
+    expect(fakes.length).toBe(2);
+    expect(fakes[1]!.prompt).toContain("次の指示");
+  });
+
+  test("a reply held on background jobs goes to the process when the hold ends before the jobs do", async () => {
+    const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    fakes[0]!.emit({ t: "background", count: 1 });
+    hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+    await held.send(t.id, "次の指示");
+    hold = null;
+    held.resumeAdmission();
+    await sleep(0);
+    expect(fakes[0]!.sent).toEqual(["次の指示"]);
+    expect(fakes.length).toBe(1);
     expect(db.getTask(t.id)!.status).toBe("running");
   });
 });

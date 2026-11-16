@@ -1,9 +1,9 @@
 // test-reads: .gitattributes
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { commitFile, daemonSource, makeRepo } from "./fixture.ts";
-import { appendHistory, buildRelease, currentOf, listReleases, previousOf, pruneReleases, readHistory, releasesDir, switchTo } from "./releases.ts";
+import { appendHistory, buildFromTree, buildRelease, currentOf, listReleases, previousOf, pruneReleases, readHistory, releasesDir, run, switchTo } from "./releases.ts";
 
 let f: Awaited<ReturnType<typeof makeRepo>>;
 beforeAll(async () => {
@@ -73,4 +73,32 @@ test("the repository's .gitattributes leaves the root .github out of a release, 
   expect(existsSync(join(dir, "ops-kit/public/.github/workflows/y.yml"))).toBe(true); // ops-kit/ runs from the release: public-sync reads it
   expect(existsSync(join(dir, "packages/core/src/main.ts"))).toBe(true);
   expect(existsSync(join(dir, ".gitattributes"))).toBe(true);
+});
+
+test("buildFromTree builds an exported tree under the given id and records where it came from", async () => {
+  const id = "e".repeat(40);
+  const tree = join(releasesDir(f.home), ".tmp-tree");
+  mkdirSync(tree, { recursive: true });
+  const archive = Bun.spawnSync(["sh", "-c", `git -C ${f.repo} archive --format=tar ${f.v1} | tar -x -C ${tree}`]);
+  expect(archive.exitCode).toBe(0);
+  expect(await buildFromTree(tree, id, f.home, { tag: "v0.0.1", sha: id })).toBe(id);
+  const dir = join(releasesDir(f.home), id);
+  expect(JSON.parse(readFileSync(join(dir, ".release.json"), "utf8"))).toEqual({ tag: "v0.0.1", sha: id });
+  expect(existsSync(tree)).toBe(false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("run passes the environment as it is now: a PATH set after start is where the command is looked up", async () => {
+  const bin = join(f.root, "bin-only-hello");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "sb-hello"), "#!/bin/sh\necho \"$PATH\"\n");
+  chmodSync(join(bin, "sb-hello"), 0o755);
+  const was = process.env.PATH;
+  process.env.PATH = bin;
+  try {
+    expect(await run(["sb-hello"], f.root)).toBe(bin); // found on the new PATH, and the child sees it
+    await expect(run(["git", "--version"], f.root)).rejects.toThrow(); // not on it
+  } finally {
+    process.env.PATH = was;
+  }
 });

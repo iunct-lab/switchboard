@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { BACKLOG_USAGE, readRecords, repoName, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
+import { runTask, TASK_USAGE } from "./task-client.ts";
 import { bootstrap } from "./bootstrap.ts";
 import { defaultConfig, findConfig, loadConfig, loadPublicSync, projectOf, publicCopyRefusal, resolveProject, sectionName, type OpsConfig } from "./config.ts";
 import { realGh, repoOf, type GhClient } from "./gh.ts";
@@ -77,6 +78,7 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
 
 ${BACKLOG_USAGE}
 ${JOB_USAGE}
+${TASK_USAGE}
 
   pull-main
       main の作業ツリー（git worktree list の最初）を upstream に fast-forward する。fast-forward できない・未コミットの変更が取り込むファイルと重なる・detached・upstream 無しは何も変えず理由を出して exit 1、fetch できない・Git でないは exit 2。設定ファイルは要らない
@@ -244,6 +246,13 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       return 0;
     }
     return runJob(rest, env, { out, err });
+  }
+  if (command === "task") {
+    if (rest[0] === "--help" || rest[0] === "-h") {
+      out(TASK_USAGE);
+      return 0;
+    }
+    return runTask(rest, env, { out, err });
   }
   if (command === "pull-main") {
     if (rest.length) return usage(err, "pull-main", 2);

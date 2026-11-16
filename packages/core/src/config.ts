@@ -20,6 +20,12 @@ export interface CoreConfig {
    * sets it when the daemon runs from an immutable release; otherwise it is the tree this code lives in.
    */
   repoRoot: string;
+  /**
+   * Where「GitHub から追加」clones and the only place a workspace's directory may be deleted with it: next to the
+   * development checkout (`dirname(repoRoot)`) unless SWITCHBOARD_REPOS_DIR names another — the container, whose code
+   * sits in /opt, points it at the repositories' volume.
+   */
+  reposDir: string;
   /** The tree this running code lives in (a release directory under sb-rescue): built web UI and shipped config defaults. */
   codeRoot: string;
   /**
@@ -103,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     port: Number(env.SWITCHBOARD_PORT ?? 47831),
     host: env.SWITCHBOARD_HOST ?? "127.0.0.1",
     repoRoot,
+    reposDir: env.SWITCHBOARD_REPOS_DIR ? resolve(env.SWITCHBOARD_REPOS_DIR) : dirname(repoRoot),
     codeRoot,
     candidate: env.SWITCHBOARD_CANDIDATE === "1",
     rescueUrl: env.SWITCHBOARD_RESCUE_URL || undefined,

@@ -9,7 +9,7 @@ import { settings } from "../i18n/settings.ts";
  * what it prints: codex a device URL and a one-time code (approve on the page, this goes away by itself), claude a URL
  * and a box for the code its page shows. No terminal.
  */
-export function RunnerLogin(props: { runner: RunnerId; onDone: () => void; onError: (m: string) => void }) {
+export function RunnerLogin(props: { runner: RunnerId | "gh"; onDone: () => void; onError: (m: string) => void }) {
   const [view, setView] = useState<RunnerLoginView | null>(null);
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState("");
@@ -45,7 +45,7 @@ export function RunnerLogin(props: { runner: RunnerId; onDone: () => void; onErr
       <span className="runner-login">
         {view?.error && <span className="hint">{view.error}</span>}
         <button className="pri" disabled={busy} onClick={() => start()}>
-          {busy ? t(settings.preparing) : props.runner === "claude" ? t(settings.claudeLogin) : t(settings.logIn)}
+          {busy ? t(settings.preparing) : props.runner === "claude" ? t(settings.claudeLogin) : props.runner === "gh" ? t(settings.githubLogin) : t(settings.logIn)}
         </button>
         {props.runner === "claude" && (
           <button className="ghost" disabled={busy} onClick={() => start("console")}>

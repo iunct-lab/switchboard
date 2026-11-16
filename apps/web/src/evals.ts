@@ -4,7 +4,7 @@ import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
 /** The default rubric's criteria as the screen names them (#1219); an id the screen does not know is shown as is. */
-const CRITERION_TITLES: Record<string, string> = { goal: t(m.critGoal), instructions: t(m.critInstructions), efficiency: t(m.critEfficiency), communication: t(m.critCommunication), safety: t(m.critSafety) };
+const CRITERION_TITLES: Record<string, string> = { goal: t(m.critGoal), instructions: t(m.critInstructions), efficiency: t(m.critEfficiency), communication: t(m.critCommunication), safety: t(m.critSafety), intent: t(m.critIntent), minimal: t(m.critMinimal), value: t(m.critValue) };
 
 /** One line of the 評価 section of the Brief (#1218). `warn` = a count that points at trouble (a failure, an error, a denial, a stop, a bad end). */
 export interface MetricRow {
@@ -107,7 +107,8 @@ export function humanAnswerMark(h: HumanAnswers | null | undefined): string {
 export function gapLabel(gap: EvalsSummary["gap"]): string {
   if (!gap.count || gap.mean === null) return t(m.noHumanRating);
   const sign = gap.mean > 0 ? "+" : gap.mean < 0 ? "−" : "";
-  return t(m.gap, { gap: `${sign}${Math.abs(gap.mean).toFixed(1)}`, count: gap.count });
+  const line = t(m.gap, { gap: `${sign}${Math.abs(gap.mean).toFixed(1)}`, count: gap.count });
+  return gap.intent.count && gap.intent.mean !== null ? `${line} ／ ${t(m.gapIntent, { count: gap.intent.count, mean: gap.intent.mean.toFixed(1) })}` : line;
 }
 
 /** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */

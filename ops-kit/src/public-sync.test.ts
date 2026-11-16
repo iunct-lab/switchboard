@@ -129,15 +129,22 @@ describe("public-sync", () => {
   });
 
   test("the next sync is a PR that the script merges itself (Rebase and merge): its commit lands on public main, titled only, with no private subject in it", () => {
-    sync(opts(), run);
+    // a target with capitals (the schema takes owner/name only): -R is the target as configured, the mark is owner/name lowercased
+    const mixed = TARGET.replace("app", "App");
+    sync(opts({ target: mixed }), run);
     const before = pubGit("rev-parse", "main");
     write("README.md", "v2\n");
     commit("feat: two (#3)");
     write("README.md", "v3\n");
     commit("fix: three (#4)");
-    const out = sync(opts(), run);
+    let mark: string | undefined;
+    const out = sync(opts({ target: mixed }), (cmd, o) => ((cmd[2] === "merge" ? (mark = o?.env?.OPS_PUBLIC_SYNC_PR) : undefined), run(cmd, o)));
     expect(out).toContain("opened https://github.com/example-org/app-public/pull/1");
-    expect(out).toContain(`merged sync PR ${opened()} on ${TARGET}`);
+    expect(out).toContain(`merged sync PR 1 on ${mixed}`);
+    // merged by the number read from gh pr create, with the mark that names the public copy and the PR (the gh front lets it through)
+    expect(ghCalls.find((c) => c[2] === "merge")!.slice(3, 6)).toEqual(["1", "-R", mixed]);
+    expect(mark).toBe(`${TARGET}#1`);
+    expect(opened()).toStartWith("sync/");
     expect(pubGit("rev-parse", "main^")).toBe(before);
     expect(pubGit("show", "main:README.md")).toStartWith("v3\n");
     expect(pubGit("log", "-1", "--format=%B", "main")).toBe("sync");
@@ -156,8 +163,10 @@ describe("public-sync", () => {
     expect(pubGit("show", "main:README.md")).toStartWith("hello\n"); // the PR stays open, main as it was
     const branch = opened();
     const open: Run = (cmd, o) => (cmd[0] === "gh" && cmd[2] === "list" ? { code: 0, out: `7 ${branch}` } : run(cmd, o));
-    const out = sync(opts(), open);
+    let mark: string | undefined;
+    const out = sync(opts(), (cmd, o) => ((cmd[2] === "merge" ? (mark = o?.env?.OPS_PUBLIC_SYNC_PR) : undefined), open(cmd, o)));
     expect(out).toContain(`merged sync PR 7 on ${TARGET}`);
+    expect(mark).toBe(`${TARGET}#7`); // the left-open PR is merged by its number with the same mark
     expect(out).toContain("nothing to sync");
     expect(pubGit("show", "main:README.md")).toStartWith("v2\n");
     // a commit made only on the public main: the open PR is left alone
@@ -313,7 +322,7 @@ describe("public-sync", () => {
     expect(() => sync(opts({ source: "v1.1.0" }), failing)).toThrow("could not merge sync PR");
     // the PR was closed by hand (no open PR in the list); a new commit, not the same sha, goes to the same branch
     const later: Run = (cmd, o) => run(cmd, { ...o, env: { ...o?.env, GIT_COMMITTER_DATE: "2030-01-01T00:00:00Z" } });
-    expect(sync(opts({ source: "v1.1.0" }), later)).toContain("merged sync PR sync/v1.1.0");
+    expect(sync(opts({ source: "v1.1.0" }), later)).toContain("merged sync PR 1 ");
     expect(pubGit("show", "main:README.md")).toStartWith("v2\n");
     expect(sync(opts({ source: "v1.1.0" }), run)).toContain("nothing to sync");
   });

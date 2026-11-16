@@ -56,11 +56,49 @@ describe("container/Dockerfile pins", () => {
     expect(dockerfile.indexOf("PLAYWRIGHT_VERSION")).toBeLessThan(stages[2].index!);
   });
 
-  test("HOME, user and repositories are the host's; arm64 only", () => {
+  test("HOME, user and repositories are the host's", () => {
     expect(dockerfile).toContain("ENV HOME=/home/switchboard");
     expect(dockerfile).toContain("useradd -u 1000 -m -d /home/switchboard switchboard");
     expect(dockerfile).toContain("/home/switchboard/repos");
-    expect(dockerfile).not.toMatch(/x86_64|amd64/);
+  });
+
+  const tools = ["DOCKER", "COMPOSE", "UV", "GITLEAKS", "NODE", "GH", "GH_STACK"];
+  // the RUN that downloads the tools: from `RUN set -eu` to the blank line after it
+  const fetchRun = /^RUN set -eu; \\\n[\s\S]*?\n\n/m.exec(dockerfile)?.[0] ?? "";
+
+  // the unsuffixed sha256 are the arm64 files the host pins; the x86-64 file of the same version is another file, so its sha256 differs
+  test("every downloaded tool has an x86-64 sha256 that is not its arm64 one", () => {
+    for (const tool of tools) {
+      const x86 = arg(dockerfile, `${tool}_SHA256_X86_64`);
+      expect({ tool, x86 }).toEqual({ tool, x86: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      expect({ tool, same: x86 === arg(dockerfile, `${tool}_SHA256`) }).toEqual({ tool, same: false });
+    }
+  });
+
+  // one version per tool for both CPUs: the version is only an ARG and the RUN names it by variable, so one CPU cannot lag behind
+  test("the fetching RUN names each version by its ARG and holds no version number", () => {
+    expect(fetchRun).toContain("fetch()");
+    for (const tool of tools) {
+      const version = arg(dockerfile, `${tool}_VERSION`)!.replace(/^v/, "");
+      expect({ tool, written: fetchRun.includes(version) }).toEqual({ tool, written: false });
+      expect({ tool, named: fetchRun.includes(`$${tool}_VERSION`) || fetchRun.includes(`\${${tool}_VERSION}`) }).toEqual({ tool, named: true });
+    }
+  });
+
+  test("the fetching RUN chooses by uname -m between x86_64 and aarch64 and refuses any other CPU", () => {
+    expect(fetchRun).toContain('M="$(uname -m)"');
+    expect(fetchRun).toMatch(/^\s+x86_64\) /m);
+    expect(fetchRun).toMatch(/^\s+aarch64\) /m);
+    expect(fetchRun).toContain('*) echo "unsupported CPU: $M" >&2; exit 1 ;;');
+  });
+
+  // each branch takes its own CPU's sha256: a swapped or copied assignment would pass the arm64 build and fail only on x86-64
+  test("the x86_64 branch takes the _X86_64 sha256 and the aarch64 branch the unsuffixed one", () => {
+    const branch = (cpu: string) => new RegExp(`^\\s+${cpu}\\) [\\s\\S]*?;;`, "m").exec(fetchRun)?.[0] ?? "";
+    for (const tool of tools) {
+      expect({ tool, x86: branch("x86_64").includes(`${tool}_SHA="$${tool}_SHA256_X86_64"`) }).toEqual({ tool, x86: true });
+      expect({ tool, arm: branch("aarch64").includes(`${tool}_SHA="$${tool}_SHA256"`) }).toEqual({ tool, arm: true });
+    }
   });
 });
 

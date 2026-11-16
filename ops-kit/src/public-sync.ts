@@ -13,6 +13,8 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join, posix } from "node:path";
+import { ownerName } from "./config.ts";
+import { PUBLIC_SYNC_MARK } from "./gh-guard.ts";
 import { independentSync, type Publication } from "./public-version.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
@@ -587,8 +589,11 @@ export function sync(opts: Options, run: Run, publication?: Publication): string
     git(["push", "-q", url, `+${commit}:refs/heads/${branch}`]);
     const pr = ok(retryOnRateLimit(run, ["gh", "pr", "create", "-R", opts.target, "--base", "main", "--head", branch, "--title", title, "--body-file", "-"], { input: "" }), ["gh", "pr", "create"]);
     log.push(`opened ${pr}`);
-    // a failed merge leaves the PR open with the reason; the next run merges it
-    merge(branch, opts, run, log);
+    // a failed merge leaves the PR open with the reason; the next run merges it. By number: the gh front lets this merge
+    // through only with the PR named (PUBLIC_SYNC_MARK)
+    const opened = /\/pull\/(\d+)\s*$/.exec(pr)?.[1];
+    if (opened === undefined) throw new Error(`could not read the number of the sync PR on ${opts.target} from gh pr create (it stays open; the next run merges it): ${pr}`);
+    merge(opened, opts, run, log);
   }
   releaseLast(publicMain(), opts, run, git, log);
   return log.join("\n");
@@ -611,9 +616,14 @@ export function releaseBaseline(opts: Options, run: Run, commit: string, version
   return log.join("\n");
 }
 
-/** Rebase and merge (the public main takes PRs only, rebased): the head commit keeps its title, the version. */
+/**
+ * Rebase and merge (the public main takes PRs only, rebased): the head commit keeps its title, the version. `pr` is the number;
+ * PUBLIC_SYNC_MARK names the public copy (as owner/name) and the PR, so the gh front in an app's Task lets this merge through
+ * (`gh-guard.ts`). `-R` is the target as configured: the schema takes `owner/name` only, and the front compares both as
+ * `owner/name`, so a target that differs only in case still matches.
+ */
 function merge(pr: string, opts: Options, run: Run, log: string[]): void {
-  const r = retryOnRateLimit(run, ["gh", "pr", "merge", pr, "-R", opts.target, "--rebase", "--delete-branch"]);
+  const r = retryOnRateLimit(run, ["gh", "pr", "merge", pr, "-R", opts.target, "--rebase", "--delete-branch"], { env: { [PUBLIC_SYNC_MARK]: `${ownerName(opts.target)}#${pr}` } });
   if (r.code !== 0) throw new Error(`could not merge sync PR ${pr} on ${opts.target} (it stays open; the next run merges it): ${r.err?.trim() ? stderrLine(r) : `gh pr merge exited ${r.code}`}`);
   log.push(`merged sync PR ${pr} on ${opts.target}`);
 }

@@ -30,6 +30,7 @@ describe("parseBridgeRequest", () => {
     const refused = [
       "/api/runners/claude/login",
       "/api/runners/x/login/code",
+      "/api/github/login",
       "/api/tasks/t1/device-auth",
       "/api/tasks/t1/permission",
       "/api/tasks/t1/permission-mode",

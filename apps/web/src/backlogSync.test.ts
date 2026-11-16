@@ -171,10 +171,12 @@ test("heldIssueText: number, title, the counts that are not zero, Closed", () =>
 
 describe("workspaceErrorGuide (#2362)", () => {
   const err = (kind: "gh-login" | "project-var" | "other") => ({ workspaceId: "w", workspaceName: "app", message: "gh variable get: variable SWITCHBOARD_PROJECT_URL was not found", kind });
-  test("gh-login: log in with gh, then 再読込", () => {
+  test("gh-login: the login button on the screen, then 再読込; no step sends the owner to a terminal", () => {
     const g = workspaceErrorGuide(err("gh-login"), undefined);
     expect(g.lead).toBe("app を読むには gh のログインが要ります");
-    expect(g.steps.map((s) => s.text)).toEqual(["ターミナルで gh auth login を実行する", "終わったら「再読込」を押す"]);
+    expect(g.steps.map((s) => s.text)).toEqual(["「GitHub にログイン」を押し、開いたページでコードを入れて承認する", "終わったら「再読込」を押す"]);
+    expect(g.steps.map((s) => !!s.githubLogin)).toEqual([true, false]);
+    expect(g.steps.some((s) => /ターミナル|terminal/i.test(s.text))).toBe(false);
   });
   test("project-var: the two ways, the variable's name, and the setup document", () => {
     const g = workspaceErrorGuide(err("project-var"), undefined);

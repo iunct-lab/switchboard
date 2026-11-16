@@ -128,7 +128,7 @@ function typicalFromHistory(home: string): Map<string, Typical> {
   return typical;
 }
 
-export function opsResources(db: Db, opts: { home: string; procRoot?: string; now?: number; queueWait?: () => "slot" | "memory" | null }): OpsResources {
+export function opsResources(db: Db, opts: { home: string; procRoot?: string; now?: number; queueWait?: () => "slot" | "memory" | "promotion" | null }): OpsResources {
   const heavy = readHeavyState(opts.home);
   const typical = typicalFromHistory(opts.home);
   const now = opts.now ?? Date.now();

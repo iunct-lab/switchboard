@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { BacklogSource, Workspace } from "@switchboard/protocol";
 import { localBacklogSource, type GhRunner } from "./backlog.ts";
 import type { Db } from "./db.ts";
@@ -129,7 +129,7 @@ async function pushToOwnCopy(path: string, mine: string, gh: GhRunner): Promise<
 export class WorkspaceClones {
   private readonly rows = new Map<string, WorkspaceClone>();
 
-  constructor(private readonly db: Db, private readonly gh: GhRunner, private readonly repoRoot: string, private readonly onChange: () => void) {}
+  constructor(private readonly db: Db, private readonly gh: GhRunner, private readonly reposDir: string, private readonly onChange: () => void) {}
 
   list(): WorkspaceClone[] {
     return [...this.rows.values()];
@@ -146,7 +146,7 @@ export class WorkspaceClones {
    */
   async start(repo: { owner: string; name: string }, opts: { backlog?: "github" | "switchboard"; ownCopy?: boolean; owner?: string }): Promise<WorkspaceClone> {
     const full = `${repo.owner}/${repo.name}`;
-    const cwd = dirname(this.repoRoot);
+    const cwd = this.reposDir;
     const path = join(cwd, repo.name);
     if (existsSync(path) || this.rows.get(path)?.state === "cloning") throw new CloneError(`${path} は既にあります。上書きしません`, 409);
     // a workspace still registered at this path (its directory was deleted) keeps its backlog, as the path form says

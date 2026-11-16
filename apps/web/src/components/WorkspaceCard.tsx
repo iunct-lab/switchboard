@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
 import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
 import { runnerConfigSummary } from "../foreignWorkspace.ts";
+import { GithubLoginRow } from "./GithubLoginRow.tsx";
 import { baselineWarning, canAdopt, canRemove, canStartBaseline, cloneRowText, removalWarning } from "../workspaceAdd.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
@@ -197,6 +198,7 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
         </div>
       ))}
       <h5>{t(m.addHeading)}</h5>
+      <GithubLoginRow onError={props.onError} />
       <div className="row">
         <button className={method === "github" ? undefined : "ghost"} onClick={() => setMethod("github")}>{t(m.fromGithub)}</button>
         <button className={method === "new" ? undefined : "ghost"} onClick={() => setMethod("new")}>{t(m.createNew)}</button>

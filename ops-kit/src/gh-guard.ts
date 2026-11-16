@@ -1,5 +1,6 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { ownerName } from "./config.ts";
 
 /**
  * The check in front of `gh` (docs/design/secret-guard.md): what a `gh` command is about to write to GitHub,
@@ -329,6 +330,29 @@ export function mergeWrite(argv: string[], texts: string[] = []): { pr: number |
   if (!((group === "pr" || group === "stack") && sub === "merge")) return null;
   const n = ref === undefined ? undefined : /^\d+$/.test(ref) ? ref : /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/(\d+)/.exec(ref)?.[1];
   return { pr: n === undefined ? null : Number(n) };
+}
+
+/**
+ * The environment variable `public-sync` sets on the one `gh` that merges its own sync PR: `<owner/name>#<n>` of the public copy
+ * and the PR. The public copy takes no PR but the sync's, and the merge gate judges this repository's PRs only, so that merge
+ * does not go through the gate.
+ */
+export const PUBLIC_SYNC_MARK = "OPS_PUBLIC_SYNC_PR";
+
+/**
+ * Whether a merge of PR `pr` is `public-sync`'s own: a merge whose write goes to `publicCopy` (`publicSync.target` of the working
+ * tree; `writeTargetOf` names none for `gh stack`, and a graphql merge has no PR number, so neither is it), with no PR URL of
+ * another repository (gh merges the URL's repository whatever `-R` says), and the mark names that repository and that PR.
+ * Repositories are compared as `owner/name`, so a target written as a URL or with `.git` is the same. A merge of this
+ * repository's PR, or of another repository's, is not it.
+ */
+export function publicSyncMerge(argv: string[], env: Record<string, string | undefined>, publicCopy: string | null, pr: number | null): boolean {
+  if (publicCopy === null || pr === null) return false;
+  const copy = ownerName(publicCopy);
+  const repo = writeTargetOf(argv, env)?.repo;
+  if (typeof repo !== "string" || ownerName(repo) !== copy) return false;
+  if (argv.some((a) => { const u = /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/\d+/.exec(a)?.[1]; return u !== undefined && ownerName(u) !== copy; })) return false;
+  return env[PUBLIC_SYNC_MARK]?.trim().toLowerCase() === `${copy}#${pr}`;
 }
 
 /** The mark of the person's answer that lets a merge go past the gate's large reason: a line that begins `[merge-answer] yes`. */

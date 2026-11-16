@@ -22,22 +22,25 @@ A Task made without starting is started by the automatic resume at its runner's 
 
 `COUNTS` says which phases count for each purpose. The purposes are fixed; they are not a setting.
 
-| Phase | dedupe | slot | gate | display |
-|---|---|---|---|---|
-| `turn` | yes | yes | yes | yes |
-| `approval` | yes | yes | yes | yes |
-| `background` | yes | yes | yes | yes |
-| `resume` | yes | no | no | no |
-| `stopped` | no | no | no | no |
+| Phase | dedupe | slot | gate | display | drain |
+|---|---|---|---|---|---|
+| `turn` | yes | yes | yes | yes | yes |
+| `approval` | yes | yes | yes | yes | no |
+| `background` | yes | yes | yes | yes | yes |
+| `resume` | yes | no | no | no | no |
+| `stopped` | no | no | no | no | no |
 
 - dedupe: do not start a second Task for the same item.
 - slot: the queue and the backlog sweep's capacity.
 - gate: promotion and restart wait for no one.
 - display: lists and badges that show what is moving.
+- drain: what a held-back start waits for before the daemon is replaced: a turn in progress and a background process, not an open approval (a person decides that) and not a queued row.
 
 ## The `background` status
 
 A turn that ends on background jobs moves to `background` instead of `done`. It is not terminal: it can go back to `running` (a new turn), and moves to `done` when the jobs are all over, or to `error` / `aborted`. `running` and `waiting` can move to it, and so can a `done` Task whose background mark arrives after its turn ended. A turn that ended in `error` or `aborted` stays so even if jobs remain. The outcome is left as it is on this status.
+
+Under the admission hold (a promotion waiting), a reply to a `background` Task is not sent: the process keeps its jobs, and the text waits in memory with its status line in the log. When the Task is off its jobs and turns (including a turn the runner starts itself on a job notification), the text is handled as a reply sent at that moment: under the hold the process is closed and the reply goes to the queue (`idle` with `queued_at`) to start after the hold, and a planned automatic resume is dropped. If the hold ends first, the process takes the reply as before. An aborted Task drops the held text (an abort means it does not come back on its own), and so does a daemon stop; a runner that exits by itself passes it on the same way; the daemon is not replaced while the jobs run, because drain waits for them.
 
 ## Migration
 

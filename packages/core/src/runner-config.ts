@@ -46,9 +46,14 @@ function placedSkills(base: string): Set<string> {
     const dir = realOf(join(base, target));
     if (dir === null || !within(base, dir) || !statSync(dir).isDirectory()) continue;
     const rel = relative(base, dir);
-    const ls = Bun.spawnSync(["git", "-C", base, "ls-files", "-z", "--", rel], { stdout: "pipe", stderr: "pipe" });
-    if (ls.exitCode !== 0) continue;
-    const tracked = ls.stdout.toString().split("\0");
+    let tracked: string[];
+    try {
+      const ls = Bun.spawnSync(["git", "-C", base, "ls-files", "-z", "--", rel], { stdout: "pipe", stderr: "pipe" });
+      if (ls.exitCode !== 0) continue;
+      tracked = ls.stdout.toString().split("\0");
+    } catch {
+      continue; // no git on this host: what is tracked cannot be told, so nothing here is counted as placed
+    }
     for (const name of readdirSync(dir)) {
       const folder = join(dir, name);
       if (statOf(folder)?.isDirectory() && statOf(join(folder, SKILL_MARKER))?.isFile() && !tracked.some((t) => t === `${rel}/${name}` || t.startsWith(`${rel}/${name}/`))) placed.add(folder);

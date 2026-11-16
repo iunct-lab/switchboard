@@ -19,3 +19,15 @@ export function loginRowView(r: Pick<RunnerInfo, "id" | "login" | "loginKind">):
   if (r.login === "expired") return { text: t(common.loggedOut), logout: false };
   return null;
 }
+
+/** `gh` (GitHub's CLI) logs in through the same relay as a runner, at its own path. */
+export function loginPath(runner: string): string {
+  return runner === "gh" ? "/api/github/login" : `/api/runners/${runner}/login`;
+}
+
+/** What gh's status row above the workspace's add form says, and whether it offers the login button. */
+export function githubRowView(s: { login: "ok" | "none" | "missing"; account?: string }): { text: string; login: boolean } {
+  if (s.login === "missing") return { text: t(common.githubMissing), login: false };
+  if (s.login === "none") return { text: t(common.githubNone), login: true };
+  return { text: s.account ? t(common.githubAs, { account: s.account }) : t(common.githubOk), login: false };
+}

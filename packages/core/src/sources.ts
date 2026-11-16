@@ -31,8 +31,13 @@ export type MainCommit = { sha: string; message: string; at: number };
  */
 export async function mainCommits(path: string, since: number): Promise<MainCommit[] | null> {
   for (const ref of ["refs/remotes/origin/HEAD", "origin/main"]) {
-    const p = Bun.spawn(["git", "-C", path, "log", ref, `--since=${new Date(since).toISOString()}`, "--format=%H%x00%cI%x00%B%x1e"], { stdout: "pipe", stderr: "ignore" });
-    const out = await new Response(p.stdout).text();
+    let p: ReturnType<typeof Bun.spawn>;
+    try {
+      p = Bun.spawn(["git", "-C", path, "log", ref, `--since=${new Date(since).toISOString()}`, "--format=%H%x00%cI%x00%B%x1e"], { stdout: "pipe", stderr: "ignore" });
+    } catch {
+      return null; // no git on this host
+    }
+    const out = await new Response(p.stdout as ReadableStream).text();
     if ((await p.exited) !== 0) continue;
     return out.split("\x1e").map((x) => x.replace(/^\n/, "")).filter(Boolean).map((x) => {
       const [sha, at, ...message] = x.split("\0");

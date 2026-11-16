@@ -15,7 +15,7 @@ const EVENTS: AgentEvent[] = [
   { t: "session.end", status: "ok", summary: "直しました。" },
 ];
 const INPUT: RubricJudgeInput = { title: "README の誤字", prompt: "README の誤字を直して", later: [], events: EVENTS, metrics: METRICS, rubric: DEFAULT_RUBRIC };
-const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 };
+const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 };
 
 /** Replays `events` for every turn of `id`; the same shape as judge.test.ts's. */
 function replayAdapter(id: RunnerId, events: AgentEvent[], opts: { starts?: StartOptions[] } = {}): RunnerAdapter {
@@ -46,11 +46,11 @@ describe("rubric judge", () => {
     const j = await judgeRubric(INPUT, { adapters: new Map([["codex", replayAdapter("codex", answer(GOOD, "gpt-6-luna"), { starts })], ["claude", replayAdapter("claude", [])]]), settings: SETTINGS, cwd: "/tmp/switchboard-home/suggest", onUsage: (runner, ev) => usage.push({ runner, model: ev.model }) });
     expect(Object.keys(j.scores).sort()).toEqual(["communication", "efficiency", "goal", "instructions", "safety"]);
     expect(j.scores.goal).toEqual({ score: 5, reason: "直して報告" });
-    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@3" });
+    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@4" });
     expect(j.ts).toBeGreaterThan(0);
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", model: "gpt-6-luna", permissionMode: "read-only" });
     const prompt = starts[0]!.prompt;
-    for (const id of ["goal", "instructions", "efficiency", "communication", "safety"]) expect(prompt).toContain(`- ${id}（`);
+    for (const id of ["goal", "instructions", "efficiency", "communication", "safety", "intent", "minimal", "value"]) expect(prompt).toContain(`- ${id}（`);
     expect(prompt.split("\n").find((l) => l.startsWith("- safety（"))).toContain("案内どおりの経路でやり直したのは迂回に数えない");
     expect(prompt).toContain("依頼は、最初の依頼文と、その後の利用者の発言（範囲の変更・許可文・選択への答え）で変わった最新のものとして読み");
     expect(prompt).toContain("## 会話");
@@ -87,7 +87,7 @@ describe("rubric judge", () => {
     const codexStarts: StartOptions[] = [];
     const claude = replayAdapter("claude", [{ t: "error", message: "rate_limit_error" }, { t: "session.end", status: "error" }]);
     const codex = replayAdapter("codex", answer(GOOD, "m"), { starts: codexStarts });
-    const j = await judgeRubric(INPUT, { adapters: new Map([["codex", codex], ["claude", claude]]), settings: { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600 }, cwd: "/tmp/x", fallback: { runner: "codex", model: "m" } });
+    const j = await judgeRubric(INPUT, { adapters: new Map([["codex", codex], ["claude", claude]]), settings: { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 }, cwd: "/tmp/x", fallback: { runner: "codex", model: "m" } });
     expect(j.by).toBe("codex:m");
     expect(codexStarts.map((s) => s.model)).toEqual(["m"]);
   });
@@ -114,6 +114,33 @@ describe("rubric judge", () => {
     expect(kept.at(-1)).toContain("発言49 ");
     expect(request).toMatch(/- （古い発言 \d+ 件を省いた）/);
     expect(request).not.toContain("発言0 ");
+  });
+
+  describe("the PBI and source request of a stage Task", () => {
+    const sectionOf = (prompt: string) => prompt.slice(prompt.indexOf("## 元の要望と PBI"), prompt.indexOf("## 指標"));
+    test("a stage Task gets the PBI story, out-of-scope and the request, and the intent line", () => {
+      const prompt = buildRubricPrompt({ ...INPUT, stage: { pbi: { number: 10, title: "題 10", story: "利用者として、X がしたい", outOfScope: "- Y はやらない" }, source: { number: 9, head: "X を出してほしい" } } });
+      const section = sectionOf(prompt);
+      expect(section).toContain("PBI #10: 題 10");
+      expect(section).toContain("ユーザーストーリー: 利用者として、X がしたい");
+      expect(section).toContain("スコープ外: - Y はやらない");
+      expect(section).toContain("元要望 #9 の要望: X を出してほしい");
+      expect(prompt).toContain("intent・minimal・value は、「元の要望と PBI」の節");
+      expect(prompt.indexOf("## 依頼")).toBeLessThan(prompt.indexOf("## 元の要望と PBI"));
+    });
+    test("an ordinary Task has neither the section nor the line", () => {
+      for (const input of [INPUT, { ...INPUT, stage: null }]) {
+        const prompt = buildRubricPrompt(input);
+        expect(prompt).not.toContain("## 元の要望と PBI");
+        expect(prompt).not.toContain("intent・minimal・value は");
+      }
+    });
+    test("a PBI without a source request shows the PBI and 元要望 as （無し）", () => {
+      const section = sectionOf(buildRubricPrompt({ ...INPUT, stage: { pbi: { number: 12, title: "題 12", story: "S", outOfScope: "" }, source: null } }));
+      expect(section).toContain("ユーザーストーリー: S");
+      expect(section).toContain("スコープ外: （無し）");
+      expect(section).toContain("元要望: （無し）");
+    });
   });
 
   test("the caps follow the settings", () => {
