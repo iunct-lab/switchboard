@@ -135,6 +135,11 @@ describe("scheduler", () => {
     expect(started).toHaveLength(0);
     expect(db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text === held.deferNote)).toBe(true);
     expect(sc.recentLog().some((l) => l.includes(`nightly: ${held.deferNote}`))).toBe(true);
+    // the held run is still to come: the next firing does not make a second one beside it
+    now = Date.parse("2026-09-06T03:30:00");
+    expect(await sc.runNow(s.id)).toBeNull();
+    expect(db.recentScheduleTaskIds(s.id, 10)).toEqual([t.id]);
+    expect(sc.recentLog().at(-1)).toContain(`previous run ${t.id} is still held to its runner's reset`);
   });
 
   test("a schedule without a budget takes the settings' default budget; its own budget is kept", async () => {

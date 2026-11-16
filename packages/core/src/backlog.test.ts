@@ -535,6 +535,11 @@ test("defers an automatic start at the limit: a stage button at the limit with n
   expect(core!.db.listEvents(task.id).some((e) => e.ev.t === "status" && e.ev.text.startsWith("claude が上限（0.99、") && e.ev.text.endsWith("のため戻る時刻に開始"))).toBe(true);
   await Bun.sleep(50);
   expect(claude.starts).toHaveLength(0);
+  // the held Task holds the Issue: a second start (a button, or backlog-next at its next firing) makes no second Task beside it
+  const again = await start(base, 304, { action: "complete" });
+  expect(again.status).toBe(409);
+  expect(await again.json()).toMatchObject({ taskId: task.id });
+  expect(core!.db.stageTaskIds(metaId(), 304)).toEqual([task.id]);
 });
 
 test("start: complete on a Ready PBI creates a meta Task with the fixed /pbi-complete prompt", async () => {
@@ -1330,7 +1335,7 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   // answered on the screen (POST /api/backlog/:n/answer): its text, as written, on the Task it was asked on
   expect((await fetch(`${base}/api/backlog/305/answer`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: GRANT, issue: 321 }) })).status).toBe(202);
   const answer = screenAnswer(db, source, 305);
-  expect(answer).toEqual({ issue: 321, text: GRANT });
+  expect(answer).toEqual({ issue: 321, text: GRANT, id: expect.any(String) });
   const prompt = buildStartPrompt({ number: 305 }, "complete", { answer });
   expect(prompt).toContain(`利用者が画面で答えた Issue #321 の最新の回答（利用者の言葉）:\n\n\`\`\`\`text\n${GRANT}\n\`\`\`\``);
   expect(buildStartPrompt({ number: 305 }, "check", { answer })).not.toContain(GRANT);
@@ -1343,7 +1348,7 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   expect(screenAnswer(db, source, 305)).toBeNull();
   db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: `## 回答\n\n${GRANT}\n\n<!-- switchboard-op:${sent.id} -->` }), sent.target]);
   // as sent (with its marker): still the screen's answer
-  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT });
+  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT, id: expect.any(String) });
   // a saved policy's answer (no screen mark) after it is the newest: nothing goes in
   answerStoredDecision(db, source, 321, "A: 登録しない\n\n方針で回答", Date.now() + 1000);
   expect(screenAnswer(db, source, 305)).toBeNull();

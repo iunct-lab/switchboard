@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db, abortOrphanedTasks } from "./db.ts";
 import { readFileSync } from "node:fs";
-import { canTransition, COUNTS, InvalidTaskTransitionError, isWorking, outcomeOnStatus, workingSql, type WorkPhase, type WorkPurpose } from "./task-status.ts";
+import { canTransition, COUNTS, InvalidTaskTransitionError, isWorking, outcomeOnStatus, workingSql, workPhase, type WorkPhase, type WorkPurpose } from "./task-status.ts";
 
 const ALL: TaskStatus[] = ["idle", "running", "waiting", "background", "done", "error", "aborted"];
 const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
@@ -75,6 +75,13 @@ describe("task status transitions", () => {
     expect(db.getTask("loc")).toMatchObject({ status: "aborted", outcome: "failed" });
     expect(db.getTask("cs")).toMatchObject({ status: "idle", outcome: "unknown" });
     expect(db.getTask("cn")).toMatchObject({ status: "error", outcome: "unknown" });
+  });
+
+  test("a Task made without starting (idle, its start planned at the runner's reset) is a planned resume: dedupe counts it, a slot does not", () => {
+    expect(workPhase({ status: "idle", resumeAt: 1 })).toBe("resume");
+    expect(isWorking({ status: "idle", resumeAt: 1 }, "dedupe")).toBe(true);
+    expect(isWorking({ status: "idle", resumeAt: 1 }, "slot")).toBe(false);
+    expect(workPhase({ status: "idle", resumeAt: null })).toBe("stopped");
   });
 
   test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it)", () => {

@@ -4,6 +4,7 @@
  * edited in 設定, kept over a reload, put into the request box with a target and started with one 開始, refused when
  * the target is empty / 自動 / another repository / the Workspace changed, put into a reply, and deleted. The Task it
  * starts still stops on the runner's write approval with 許可 / 拒否 (a preset is not a standing permission).
+ * Also measures the 評価項目 (preset-height, preset-shift, preset-reply-ops) and checks them against the values measured before the call changes.
  * SCREENSHOT_DIR=<dir> saves Home and 設定 at 1280 and 390 wide.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -288,10 +289,99 @@ try {
   const m = { "home-plain": await measure("home", false), "task-plain": await measure("task", false), "home-target": await measure("home", true), "task-target": await measure("task", true) };
   const ops = Object.entries(m).map(([k, v]) => `${k}=${v.n}`).join(" ");
   console.log(`preset-ops ${ops}`);
-  // the before values in docs/design/presets.md 「評価項目」: a change to the call has to update both
+  // the before values of the 評価項目 table: a change to the call has to update both
   assert(ops === "home-plain=4 task-plain=4 home-target=5 task-target=5", `preset-ops differs from the 評価項目 table: ${ops}`);
   console.log(`preset-first-line-visible home=${m["home-plain"].visible} task=${m["task-plain"].visible}`);
   console.log(`preset-requests-on-open home=${m["home-plain"].requestsOnOpen} task=${m["task-plain"].requestsOnOpen}`);
+
+  // 7b. 評価項目 (added 2026-11-15): the height the picker takes outside the box when unused, how far the box moves when the list is
+  // shown, and the operations from seeing a question to sending a preset reply. The values below are the table's 前 column.
+  const sized = (w: number) => call("Emulation.setDeviceMetricsOverride", w === 390 ? { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } : { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  const gotoBox = async (where: "home" | "task") => {
+    await call("Page.navigate", { url: where === "home" ? base : `${base}/task/${task.id}` });
+    await until(() => evaluate(`!!document.querySelector(${JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea")}) && !!document.querySelector('.preset-picker button')`), `${where}: the box and the picker`);
+    // the screen is still filling in (banners, lists): wait until the box has not moved for 300 ms
+    const box = JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea");
+    let last = NaN, since = Date.now();
+    await until(async () => {
+      const y = (await evaluate(`document.querySelector(${box}).getBoundingClientRect().top + scrollY`)) as number;
+      if (y !== last) { last = y; since = Date.now(); }
+      return Date.now() - since >= 300;
+    }, `${where}: the box stops moving`);
+  };
+  /** The unused picker's height plus its vertical margins: what it takes outside the box. 0 when there is no picker. */
+  const taken = (where: "home" | "task") => gotoBox(where).then(() => evaluate(`(() => { const p = document.querySelector('.preset-picker'); if (!p) return 0; const c = getComputedStyle(p); return Math.round((p.getBoundingClientRect().height + parseFloat(c.marginTop) + parseFloat(c.marginBottom)) * 10) / 10; })()`)) as Promise<number>;
+  const heights = async (n: number) => {
+    const out: Record<string, number> = {};
+    for (const w of [390, 1280]) {
+      await sized(w);
+      out[`w${w}-n${n}`] = Math.max(await taken("home"), await taken("task"));
+    }
+    return out;
+  };
+  const fill = async (to: number) => {
+    const have = ((await (await fetch(`${base}/api/presets`)).json()) as { presets: unknown[] }).presets.length;
+    for (let i = have; i < to; i++) {
+      const r = await fetch(`${base}/api/presets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: `定型 ${i + 1}`, text: `返事 ${i + 1}` }) });
+      assert(r.status === 201, `preset ${i + 1}: ${r.status}`);
+    }
+  };
+  await fill(4);
+  const h4 = await heights(4);
+  // how far the box's top moves when the list is shown, the larger of the two widths
+  const shift: Record<string, number> = {};
+  const byWidth: string[] = [];
+  for (const w of [390, 1280]) {
+    await sized(w);
+    for (const where of ["home", "task"] as const) {
+      await gotoBox(where);
+      const top = () => evaluate(`(() => { const r = document.querySelector(${JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea")}).getBoundingClientRect(); return r.top + scrollY; })()`) as Promise<number>;
+      const was = await top();
+      await openPicker();
+      await sleep();
+      const d = Math.round(Math.abs((await top()) - was) * 10) / 10; byWidth.push(`w${w}-${where}=${d}`); shift[where] = Math.max(shift[where] ?? 0, d);
+    }
+  }
+  // a reply to a Task that waits for one: from the row on Home (the click on it is 1) and from the open Task (0), then the
+  // plain preset (the button 1 + the select 2 + 「本文に入れる」 1) and 「送信」 1
+  await sized(1280);
+  const replyOps = async (where: "home" | "task") => {
+    await gotoBox(where);
+    let n = 0;
+    if (where === "home") {
+      await until(() => evaluate(`[...document.querySelectorAll('button.row.link')].some((b) => b.textContent.includes(${JSON.stringify(task.title)}))`), "the Task's row on Home");
+      await page(`[...document.querySelectorAll('button.row.link')].find((b) => b.textContent.includes(${JSON.stringify(task.title)})).click()`);
+      n += 1;
+      await until(() => evaluate(`!!document.querySelector('.composer textarea') && !!document.querySelector('.preset-picker button')`), "the Task's reply box");
+    }
+    n += 1; // 「定型の指示…」
+    await openPicker();
+    n += 2; // the select
+    await page(`pick('状況の確認')`);
+    n += 1; // 「本文に入れる」
+    await page(`button(picker(), '本文に入れる').click()`);
+    await until(async () => (await evaluate(`document.querySelector('.composer textarea').value`)) === planText, "the preset in the reply box");
+    const sent = received.length;
+    n += 1; // 「送信」
+    await page(`button(document.querySelector('.composer'), '送信').click()`);
+    await until(() => received.length > sent && received[received.length - 1] === planText, "the runner got the preset reply");
+    return n;
+  };
+  const replyHome = await replyOps("home");
+  const replyTask = await replyOps("task");
+  await fill(30);
+  const h30 = await heights(30);
+  const heightLine = [h4["w390-n4"], h30["w390-n30"], h4["w1280-n4"], h30["w1280-n30"]].map((v, i) => `${["w390-n4", "w390-n30", "w1280-n4", "w1280-n30"][i]}=${v}`).join(" ");
+  const shiftLine = `home=${shift.home} task=${shift.task}`;
+  console.log(`preset-height ${heightLine}`);
+  console.log(`preset-shift ${shiftLine}`);
+  console.log(`preset-shift-by-width ${byWidth.join(" ")}`);
+  console.log(`preset-reply-ops home=${replyHome} task=${replyTask}`);
+  // heights depend on the fonts and the Chrome build, so they are compared within 1 px; the operation counts are exact
+  const near = (got: Record<string, number>, want: Record<string, number>) => Object.entries(want).every(([k, v]) => Math.abs((got[k] ?? NaN) - v) <= 1);
+  assert(near({ ...h4, ...h30 }, { "w390-n4": 44, "w390-n30": 44, "w1280-n4": 32.1, "w1280-n30": 32.1 }), `preset-height differs from the 評価項目 table: ${heightLine}`);
+  assert(near(shift, { home: 42, task: 42 }), `preset-shift differs from the 評価項目 table: ${shiftLine}`);
+  assert(`home=${replyHome} task=${replyTask}` === "home=6 task=5", `preset-reply-ops differs from the 評価項目 table: ${replyHome} ${replyTask}`);
 
   assert(!errors.length, `page errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ listed, refused: { empty: empty.hint, auto: auto.hint, otherRepo, stale: stale.warn }, sent: { title: box.title, text: box.text, permissionMode: mode, approval: perm.buttons }, reply, left, options, scrollWidth: { home: widthHome, settings: widthSettings } }, null, 1));

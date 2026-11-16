@@ -592,3 +592,73 @@ test("outside the app: a choice in another case is written as the choice; one no
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("merge-answer: backlog comment posts a [merge-answer] yes only when the grant of the PR stands, in a repository with a merge gate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "backlog-client-gate-"));
+  const bare = mkdtempSync(join(tmpdir(), "backlog-client-nogate-"));
+  const grants = (path: string) => (path.startsWith("http://app/api/merge-grants") ? { body: { granted: new URL(path).searchParams.get("target") === "12" && new URL(path).searchParams.get("kind") === "answer" } } : null);
+  const fake = () => app((m, p, b) => grants(p) ?? routes()(m, p, b));
+  const comment = async (text: string, issue: string, cwd: string, f = fake(), env: Record<string, string | undefined> = {}) => {
+    const err: string[] = [];
+    const code = await runBacklog(["comment", issue, "--body-file", "-"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app", OPS_KIT_TASK_ID: "t1", ...env }, { out: () => {}, err: (s) => err.push(s), stdin: async () => text }, { fetch: f.fetch, cwd });
+    return { code, err: err.join("\n"), calls: f.calls.map((c) => `${c.method} ${c.path}`) };
+  };
+  try {
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
+    writeFileSync(join(bare, "ops.config.json"), "{}");
+    const stopped = await comment("[merge-answer] yes large abc", "13", dir);
+    expect([stopped.code, stopped.err, stopped.calls]).toEqual([1, expect.stringContaining("許可文の記録がありません"), ["GET http://app/api/merge-grants?taskId=t1&kind=answer&target=13"]]);
+    const allowed = await comment("[merge-answer] yes large abc", "12", dir);
+    expect([allowed.code, allowed.calls.some((c) => c.startsWith("POST /12/comment"))]).toEqual([0, true]);
+    // a no, a text without the mark, no gate in the config and outside the app's Task never ask the app for the grant
+    for (const r of [await comment("[merge-answer] no large abc", "13", dir), await comment("メモ [merge-answer] yes", "13", dir), await comment("[merge-answer] yes large abc", "13", bare)]) {
+      expect([r.code, r.calls.some((c) => c.includes("merge-grants"))]).toEqual([0, false]);
+    }
+    // the app cannot be reached: the mark is not posted
+    const down = await comment("[merge-answer] yes large abc", "12", dir, app((m, p, b) => (p.includes("merge-grants") ? "down" : routes()(m, p, b))));
+    expect([down.code, down.err]).toEqual([1, expect.stringContaining("アプリに届かず")]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test("scope: a Task body that names more paths is saved only when the gate's stop has no scope grant missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "backlog-client-scope-"));
+  const bare = mkdtempSync(join(tmpdir(), "backlog-client-scope-nogate-"));
+  const STORED = "## やること\n`a/b.ts` を直す\n";
+  const edit = async (body: string, o: { scope?: unknown; labels?: string[]; cwd?: string; ref?: string; number?: number | null } = {}) => {
+    const fake = app((m, p) => {
+      if (p.startsWith("http://app/api/merge-grants/scope-stop")) return o.scope === "down" ? "down" : { body: o.scope ?? { stopped: false, granted: false } };
+      return m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: o.number === undefined ? 3 : o.number, body: STORED, labels: o.labels ?? ["type:task"] } } } : { status: 202, body: { localId: null, operations: ["o"] } };
+    });
+    const err: string[] = [];
+    const code = await runBacklog(["edit", o.ref ?? "3", "--body-file", "-"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, OPS_KIT_TASK_ID: "t1" }, { out: () => {}, err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: o.cwd ?? dir });
+    return { code, err: err.join("\n"), patched: fake.calls.some((c) => c.method === "PATCH"), asked: fake.calls.map((c) => c.path).filter((p) => p.includes("scope-stop")) };
+  };
+  try {
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
+    writeFileSync(join(bare, "ops.config.json"), "{}");
+    for (const d of [dir, bare]) {
+      Bun.spawnSync(["git", "init", "-q"], { cwd: d });
+      Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], { cwd: d });
+    }
+    const more = `${STORED}\`c/d.ts\` も直す\n`;
+    // the gate stopped and no scope sentence stands: refused, and nothing is sent
+    const stopped = await edit(more, { scope: { stopped: true, granted: false } });
+    expect([stopped.code, stopped.patched, stopped.asked, stopped.err]).toEqual([1, false, ["http://app/api/merge-grants/scope-stop?taskId=t1&issue=3"], expect.stringContaining("Task #3 の本文に名指しのパスを足してよい")]);
+    // the sentence stands: saved
+    expect((await edit(more, { scope: { stopped: true, granted: true } })).patched).toBe(true);
+    // the gate has not stopped, or the app cannot be reached: the edit is not held up
+    expect([(await edit(more)).patched, (await edit(more, { scope: "down" })).patched]).toEqual([true, true]);
+    // no more paths named (a line number on a named path is the same path), an Issue that is not a Task, no gate in the config,
+    // an Issue with no number yet (no PR can have stopped on it): the app is not asked
+    const stop = { scope: { stopped: true, granted: false } };
+    for (const r of [await edit(`${STORED}説明を足す\n`, stop), await edit(`${STORED}\`a/b.ts:273\` の行\n`, stop), await edit(`${STORED}\`a/b.ts:273-280\` の範囲\n`, stop), await edit(more, { ...stop, labels: ["type:pbi"] }), await edit(more, { ...stop, cwd: bare }), await edit(more, { ...stop, ref: "loc_abc", number: null })]) {
+      expect([r.patched, r.asked]).toEqual([true, []]);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(bare, { recursive: true, force: true });
+  }
+});

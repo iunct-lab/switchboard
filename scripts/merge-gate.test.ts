@@ -215,6 +215,18 @@ describe("direct PR (branch sb/direct-)", () => {
     expect(j.reasons.some((r) => r.includes("主レビュー"))).toBe(true);
   });
 
+  test("mergePr gives the gh that merges OPS_MERGE_GATE_PR=<n>, in both modes, and no other call", async () => {
+    const HEAD40 = "c".repeat(40);
+    const facts = base({ head: HEAD40, base: "main" });
+    for (const mode of ["merge", "merge-stack"] as const) {
+      const calls: Array<[string[], Record<string, string> | undefined]> = [];
+      await mergePr(7, REPO, mode, facts, async (a, env) => { calls.push([a, env]); return a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40}\n` : ""; }, () => REPO);
+      const merging = calls.filter(([a]) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack");
+      expect(merging.map(([, env]) => env)).toEqual([{ OPS_MERGE_GATE_PR: "7" }]);
+      expect(calls.filter(([a]) => !merging.some(([m]) => m === a)).every(([, env]) => env === undefined)).toBe(true);
+    }
+  });
+
   test("mergePr puts [merge-direct] <head> on the PR before it merges, in both modes", async () => {
     const HEAD40 = "c".repeat(40);
     const facts = base({ head: HEAD40, base: "main", direct: true });
@@ -680,6 +692,30 @@ describe("merge-gate readPr", () => {
       const seen: string[][] = [];
       expect(await readPr(1, gate({ body: "Backlog-Task: 5\n", headRefName: "sb/5-a" }, seen))).not.toHaveProperty("task");
       expect(seen.some((a) => a.some((x) => x.includes("issue(number")))).toBe(false);
+    });
+
+    test("a stop for a file no Task names records it in the app for each Task, and does not change the output; another stop records nothing", async () => {
+      const posts: Array<{ url: string; body: unknown }> = [];
+      const fetchApp = async (url: string, init?: RequestInit) => { posts.push({ url, body: JSON.parse(String(init?.body)) }); return Response.json({ recorded: true }); };
+      const env = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", OPS_KIT_TASK_ID: "t1" };
+      const stop = async (path: string, e: Record<string, string | undefined>, f: typeof fetchApp | (() => never) = fetchApp) => {
+        const g = gate({ body: "Closes #5", headRefName: "sb/5-a" });
+        const out: string[] = [];
+        const code = await main(["12", "--repo", REPO], async (a) => (a[0] === "pr" && a[1] === "view" ? JSON.stringify({ ...JSON.parse(await g(a)), files: [{ path, additions: 1, deletions: 0 }] }) : g(a)), (l) => out.push(l), () => {}, () => REPO, undefined, process.cwd(), { env: e, fetch: f as typeof fetchApp });
+        return { code, out: out.join("\n") };
+      };
+      const outside = await stop("zzz/other.ts", env);
+      expect(outside.code).toBe(1);
+      expect(outside.out).toContain("の本文に名指しの無いファイル: zzz/other.ts");
+      expect(posts).toEqual([{ url: "http://127.0.0.1:1/api/merge-grants/scope-stop", body: { taskId: "t1", issue: 5, pr: 12 } }]);
+      // the app failing or absent leaves the output as it is
+      const failing = await stop("zzz/other.ts", env, () => { throw new Error("down"); });
+      expect(failing).toEqual(outside);
+      expect(await stop("zzz/other.ts", {})).toEqual(outside);
+      // a file a Task names is not a scope stop
+      posts.length = 0;
+      await stop("scripts/a.ts", env);
+      expect(posts).toEqual([]);
     });
 
     test("an Issue that cannot be read throws (not judged)", async () => {

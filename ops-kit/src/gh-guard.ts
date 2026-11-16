@@ -290,6 +290,75 @@ function apiBacklogWrite(argv: string[], at: number, texts: string[]): BacklogWr
   return instead === null ? null : { instead, repo };
 }
 
+/** The flags of `gh pr merge` / `gh stack merge` that take a value (the argument that is the PR is not one of them). */
+const MERGE_VALUE_FLAGS = new Set(["--body", "-b", "--body-file", "-F", "--subject", "-t", "--author-email", "-A", "--match-head-commit"]);
+
+/** The arguments of a `gh` command that are not flags or the values of the flags in MERGE_VALUE_FLAGS (`-R` / `--repo` too); after `--` all are arguments. */
+function wordsOf(argv: string[]): string[] {
+  const words: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--") {
+      words.push(...argv.slice(i + 1));
+      break;
+    }
+    if (a === "-R" || a === "--repo") i++;
+    else if (MERGE_VALUE_FLAGS.has(a)) i++;
+    else if (!a.startsWith("-")) words.push(a);
+  }
+  return words;
+}
+
+/**
+ * A write that merges a pull request: `gh pr merge <n|url|branch>`, `gh stack merge <n>`, `gh api` with a method other than GET /
+ * HEAD on `repos/<o>/<r>/pulls/<n>/merge`, and a graphql mutation that names `mergePullRequest` in `texts`. `pr` is the PR
+ * it names (a number, or the number in its URL); null when it names none (a branch, the current branch, graphql). `-R` before the
+ * group, `--` and a URL are read as backlogWrite reads them. Null for anything else.
+ */
+export function mergeWrite(argv: string[], texts: string[] = []): { pr: number | null } | null {
+  const words = wordsOf(argv);
+  const [group, sub, ref] = words;
+  if (group === "api") {
+    const at = argv.indexOf("api");
+    const call = apiCallOf(argv, at);
+    if (call === null) return null;
+    if (call.path === "graphql") return call.mutation && texts.some((t) => /\bmutation\b/.test(t) && /\bmergePullRequest\b/.test(t)) ? { pr: null } : null;
+    const m = /^repos\/[^/?]+\/[^/?]+\/pulls\/(\d+)\/merge(?:\?|$)/.exec(call.path);
+    return call.writes && m ? { pr: Number(m[1]) } : null;
+  }
+  if (!((group === "pr" || group === "stack") && sub === "merge")) return null;
+  const n = ref === undefined ? undefined : /^\d+$/.test(ref) ? ref : /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/(\d+)/.exec(ref)?.[1];
+  return { pr: n === undefined ? null : Number(n) };
+}
+
+/** The mark of the person's answer that lets a merge go past the gate's large reason: a line that begins `[merge-answer] yes`. */
+export const MERGE_ANSWER_YES = /^\[merge-answer\] yes\b/m;
+
+/**
+ * A write that posts the person's `[merge-answer] yes` mark (a line of a text in `texts` that begins with it): `gh pr comment <n|url>`,
+ * `gh issue comment <n|url>`, `gh api` with a method other than GET / HEAD on `repos/<o>/<r>/issues/<n>/comments` or on an existing
+ * comment (`repos/<o>/<r>/issues/comments/<id>`, which names no PR), and a graphql mutation that names `addComment` or
+ * `updateIssueComment`. `pr` is the PR it names (null when none: an edit, graphql, the current branch). Null for anything else, a `no`
+ * answer and a text without the mark included.
+ */
+export function mergeAnswerPost(argv: string[], texts: string[]): { pr: number | null } | null {
+  if (!texts.some((t) => MERGE_ANSWER_YES.test(t))) return null;
+  const words = wordsOf(argv);
+  const [group, sub, ref] = words;
+  if (group === "api") {
+    const call = apiCallOf(argv, argv.indexOf("api"));
+    if (call === null) return null;
+    if (call.path === "graphql") return call.mutation && texts.some((t) => /\bmutation\b/.test(t) && /\b(?:addComment|updateIssueComment)\b/.test(t)) ? { pr: null } : null;
+    if (!call.writes) return null;
+    if (/^repos\/[^/?]+\/[^/?]+\/issues\/comments\/\d+(?:\?|$)/.test(call.path)) return { pr: null };
+    const m = /^repos\/[^/?]+\/[^/?]+\/issues\/(\d+)\/comments(?:\?|$)/.exec(call.path);
+    return m ? { pr: Number(m[1]) } : null;
+  }
+  if ((group !== "pr" && group !== "issue") || sub !== "comment") return null;
+  const n = ref === undefined ? undefined : /^\d+$/.test(ref) ? ref : /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/(?:pull|issues)\/(\d+)/.exec(ref)?.[1];
+  return { pr: n === undefined ? null : Number(n) };
+}
+
 /** The subcommands of each group that only read; any other subcommand of these groups writes. */
 const READS: Record<string, Set<string>> = {
   issue: new Set(["list", "view", "status"]),

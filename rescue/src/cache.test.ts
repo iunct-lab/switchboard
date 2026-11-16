@@ -64,6 +64,35 @@ test("sweepCacheWork: a check's old working directories go; a new one, an unlike
   }
 });
 
+test("sweepCacheWork: an old screens-audit work directory goes on any machine; a new or in-use one stays", async () => {
+  for (const name of ["switchboard.screens-audit.Ab12Cd", "capsule-host.screens-audit.x0QgO6"]) dir(name);
+  dir("switchboard.screens-audit.Fresh1", { fresh: true });
+  dir("switchboard.screens-audit.Busy01");
+  dir("switchboard.screens-audit.toolong1");
+  dir("switchboard.screens-audit.report");
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(cache, "switchboard.screens-audit.Busy01") });
+  try {
+    const r = await sweepCacheWork(cache, { owned: false });
+    expect(readdirSync(cache).sort()).toEqual(["switchboard.screens-audit.Busy01", "switchboard.screens-audit.Fresh1", "switchboard.screens-audit.report", "switchboard.screens-audit.toolong1"]);
+    expect(r.removed).toBe(2);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("sweepCacheWork: on a machine of Switchboard's own, an old mktemp-named directory goes; elsewhere and the caches' names stay", async () => {
+  const mine = ["switchboard.t5066shot.Ab12Cd", "switchboard.pbi2587-ci.1XMbla"];
+  const others = ["uv", "claude-cli-nodejs", "ms-playwright", "fontconfig", "switchboard.local-ci-pending", "ops-kit", "gh"];
+  for (const name of [...mine, ...others]) dir(name);
+  const elsewhere = await sweepCacheWork(cache, { owned: false });
+  expect(elsewhere.removed).toBe(0);
+  expect(readdirSync(cache).sort()).toEqual([...mine, ...others].sort());
+  const r = await sweepCacheWork(cache, { owned: true });
+  expect(r.removed).toBe(2);
+  expect(readdirSync(cache).sort()).toEqual([...others].sort());
+});
+
 test("sweepCacheWork: old local-CI worktrees, base worktrees and any PR's old logs go, and the repository forgets the worktrees; new, in-use and other names stay (#2549)", async () => {
   for (const name of ["switchboard.local-ci-2518.Ab12Cd", "switchboard.local-ci-2518-base.Zz98Yy"]) {
     await run(["git", "-C", repo, "worktree", "add", "-q", "--detach", join(cache, name)], repo);

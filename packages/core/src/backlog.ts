@@ -1279,7 +1279,7 @@ export function answerStoredDecision(db: Db, source: BacklogSource, n: number, t
  * was made here with the `screen` mark. null = there is none, or the newest came from GitHub (written there, or imported
  * only), from a saved policy, or was edited after it was given — only the screen's answer is the person's words to the next stage Task.
  */
-export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string } | null {
+export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string; id: string } | null {
   const records = shownRecords(db, source);
   const item = records.find((r) => r.objectKind === "issue" && (r.remote as BacklogIssueData | null)?.number === n)?.remote as BacklogIssueData | undefined;
   const want = new Set([n, ...(item?.subIssues ?? [])]);
@@ -1294,7 +1294,7 @@ export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue:
   // and only as it was given: a comment edited on GitHub after it was sent is not the screen's words any more
   const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && o.target === last.id && (o.payload as { screen?: unknown } | null)?.screen === true);
   const given = (sent?.payload as { body?: unknown } | undefined)?.body;
-  return typeof given === "string" && given.trim() === last.body.trim() ? { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim() } : null;
+  return typeof given === "string" && given.trim() === last.body.trim() ? { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id } : null;
 }
 
 /** `## 保留` + text on Issue n, kept here and sent later: the needs-decision label stays (an answer would take it off). */

@@ -5,7 +5,7 @@ import { LOCAL_CI_RESULT, sh } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { linkedIssues, overlaps, scopeIn } from "./task-paths.ts";
-import { runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
+import { recordScopeStop, runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
 
 export const LARGE_LINES = 300;
 
@@ -234,6 +234,9 @@ function countsTowardSize(path: string): boolean {
   return !matches(DOCS, path);
 }
 
+/** The reason's words for a file no Task names (main reads the reasons for them). */
+const SCOPE_STOP = "の本文に名指しの無いファイル";
+
 /** The Task-scope reason, or the note that it could not be checked (#2498). The files of the PR no path of its Tasks covers, in the PR's order. */
 function taskScope(f: PrFacts): { reason?: string; note?: string } {
   if (!f.task) return {};
@@ -247,7 +250,7 @@ function taskScope(f: PrFacts): { reason?: string; note?: string } {
     const by = owners(p);
     return by.length > 0 ? `${p}（${by.map((n) => `Task #${n}`).join("、")} が名指し）` : p;
   });
-  return { reason: `Task ${tasks} の本文に名指しの無いファイル: ${listed.join(", ")}` };
+  return { reason: `Task ${tasks} ${SCOPE_STOP}: ${listed.join(", ")}` };
 }
 
 /** --allow-large lifts the large reasons only with a `[merge-answer] yes` of the head that names every kind left. */
@@ -317,8 +320,11 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.note ? { notes: [scope.note] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}) };
 }
 
-async function gh(args: string[]): Promise<string> {
-  const p = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
+/** Runs `gh`; `env` is added to the environment (mergePr marks the PR it merges: the check in front of `gh` lets that merge through). */
+type Run = (args: string[], env?: Record<string, string>) => Promise<string>;
+
+async function gh(args: string[], env?: Record<string, string>): Promise<string> {
+  const p = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe", ...(env && { env: { ...process.env, ...env } }) });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   if (code !== 0) throw new Error(`gh ${args[0]} ${args[1] ?? ""} failed: ${err.trim()}`);
   return out;
@@ -685,12 +691,13 @@ export type MergeMode = "merge" | "merge-stack";
  * no head to match: it runs in the stack's worktree, whose origin must be the judged repository, and the head is read again
  * just before it (a push in between stops it; one in the last moment is not caught).
  */
-export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: (args: string[]) => Promise<string>, stackRepo: () => string | undefined = originRepo, reviewSkipped = false): Promise<void> {
+export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: Run, stackRepo: () => string | undefined = originRepo, reviewSkipped = false): Promise<void> {
   if (!facts.head) throw new Error("head の sha が読めていない");
+  const marked = { OPS_MERGE_GATE_PR: String(n) };
   const mark = () => reviewSkipped ? run(["pr", "comment", String(n), "-R", repo, "--body", `[merge-direct] ${facts.head}`]) : undefined;
   if (mode === "merge") {
     await mark();
-    await run(["pr", "merge", String(n), "-R", repo, "--rebase", "--delete-branch", "--match-head-commit", facts.head]);
+    await run(["pr", "merge", String(n), "-R", repo, "--rebase", "--delete-branch", "--match-head-commit", facts.head], marked);
     return;
   }
   const local = stackRepo();
@@ -700,13 +707,13 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   const now = (await run(["pr", "view", String(n), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"])).trim();
   if (now !== facts.head) throw new Error(`判定の後に head が変わった（${facts.head} → ${now}）。判定し直す`);
   await mark();
-  await run(["stack", "merge", String(n), "--rebase", "-y"]);
+  await run(["stack", "merge", String(n), "--rebase", "-y"], marked);
 }
 
 const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]";
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
-export async function main(args: string[], run: (args: string[]) => Promise<string> = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
+export async function main(args: string[], run: Run = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
   const changeAt = args.indexOf("--change");
   if (changeAt >= 0) return changeMain(args, changeAt, log, err, cwd, backlog);
   const n = Number(args.find((a) => /^\d+$/.test(a)));
@@ -738,7 +745,11 @@ export async function main(args: string[], run: (args: string[]) => Promise<stri
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") return 1;
+  if (j.verdict !== "merge") {
+    // a stop for a file no Task names: the app keeps it, so that the person's scope grant after it is told from one before
+    if (facts.task && j.reasons.some((r) => r.includes(SCOPE_STOP))) await Promise.all(facts.task.numbers.map((issue) => recordScopeStop(backlog.env, issue, n, backlog.fetch)));
+    return 1;
+  }
   const mode = modes[0];
   if (!mode) return 0;
   try {

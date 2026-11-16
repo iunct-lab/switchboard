@@ -103,6 +103,8 @@ export const OpsConfig = z
     forge: ForgeConfig.optional(),
     /** The local CI's steps; omitted = `.github/workflows/ci.yml`'s. */
     ci: CiConfig.optional(),
+    /** The script that judges a merge (path from the repository root). Set: a Task's `gh` merge stops in front of it unless the script made it or the person allowed it (`ops-kit/bin/gh`). */
+    mergeGate: z.string().min(1).optional(),
     /** `ops-kit deps-check`: what this repository adds to the tool's own `## 更新の条件`, a line each. */
     depsCheck: z.object({ extraConditions: z.array(z.string().min(1)) }).strict().optional(),
   })
@@ -204,6 +206,16 @@ export function publicCopyOf(cwd = process.cwd()): string | null {
     const json = JSON.parse(readFileSync(findConfig(undefined, cwd), "utf8")) as { publicSync?: { target?: unknown } } | null;
     const target = json?.publicSync?.target;
     return typeof target === "string" && target !== "" ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `mergeGate` of the nearest `ops.config.json` (only that string is read, as publicCopyOf does); null when there is none. */
+export function mergeGateOf(cwd = process.cwd()): string | null {
+  try {
+    const json = JSON.parse(readFileSync(findConfig(undefined, cwd), "utf8")) as { mergeGate?: unknown } | null;
+    return typeof json?.mergeGate === "string" && json.mergeGate !== "" ? json.mergeGate : null;
   } catch {
     return null;
   }

@@ -1,7 +1,8 @@
 /**
  * What else fills the host's disk besides /tmp (#2549): the working directories local CI and hand-run checks leave under ~/.cache when they are killed
  * before its `finally`, and its failure logs, one per PR; and the review clones the kit leaves under ~/.cache/ops-kit/review (a clone goes only
- * once `gh` says its PR is closed). Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
+ * once `gh` says its PR is closed); and the screens audit's work directory, and on a machine of Switchboard's own any `mktemp`-named directory
+ * a Task named by hand (`CACHE_WORK_OWNED`). Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
  * Only `node:` here: sb-rescue shares no code with Switchboard (#178).
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -14,7 +15,7 @@ import { inspect, inUse, type TmpEntry, type TmpJudge, type TmpSweep } from "./t
 export const CACHE_WORK_STALE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The names under ~/.cache that can go, matched against the whole name: what scripts/local-ci.ts and the kit's local CI make, and a check run by hand or by tag-ci,
+ * The names under ~/.cache that can go, matched against the whole name: what scripts/local-ci.ts and the kit's local CI make, a check run by hand or by tag-ci, and scripts/screens-audit.ts,
  * for any repository (`<repo>.` is switchboard, capsule-host, …). On any machine: only Switchboard and its kit make these.
  */
 export const CACHE_WORK: RegExp[] = [
@@ -22,7 +23,14 @@ export const CACHE_WORK: RegExp[] = [
   /^[\w.-]+\.local-ci-\d+-base\.[A-Za-z0-9]{6}$/, // main's worktree a perf failure measures: <repo>.local-ci-<PR>-base.XXXXXX
   /^[\w.-]+\.local-ci-[\w.-]+-\d+-log\.[A-Za-z0-9]{6}$/, // a failure's log: <repo>.local-ci-<owner_repo>-<PR>-log.XXXXXX
   /^[\w.-]+\.(?:e2e(?:-\d+)?|duration(?:-\d+)?|tag-ci(?:-[\w.-]+)?)\.(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6}$/, // a check's copy of the database or the tree, tag-ci's log too: <repo>.e2e.XXXXXX, <repo>.duration-<n>.XXXXXX; mktemp's suffix, so not myapp.e2e.report
+  /^[\w.-]+\.screens-audit\.(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6}$/, // the screens audit's work directory: <repo>.screens-audit.XXXXXX
 ];
+
+/**
+ * A name made by hand with `mktemp` (`<name>.XXXXXX`, a capital or a digit in the suffix). Nothing in the name says what made it, so these go only
+ * where the machine is Switchboard's alone (`judge.owned`), like `/tmp`'s shared kind; elsewhere another application's directory could look the same.
+ */
+export const CACHE_WORK_OWNED: RegExp[] = [/^[\w-]+(?:\.[\w-]+)*\.(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6}$/];
 
 /** The review clones cross-runner-review leaves under `<cacheDir>/ops-kit/review`: <repo>.review<PR> / <repo>.recheck<PR>, matched against the whole name. */
 export const REVIEW_CLONE = /^[\w.-]+\.(?:review|recheck)(\d+)$/;
@@ -76,11 +84,12 @@ export async function sweepCacheWork(
   if (!existsSync(cacheDir)) return sweep;
   const busy = inUse(cacheDir, judge.proc);
   const gitDirs = new Set<string>();
+  const kinds = judge.owned ? [...CACHE_WORK, ...CACHE_WORK_OWNED] : CACHE_WORK;
   // only the names that can go are measured: walking ~/.cache/uv and the like every sweep would hold the page up
-  for (const name of readdirSync(cacheDir).filter((n) => CACHE_WORK.some((re) => re.test(n)))) {
+  for (const name of readdirSync(cacheDir).filter((n) => kinds.some((re) => re.test(n)))) {
     let entry: TmpEntry;
     try {
-      entry = inspect(cacheDir, name, now, busy, CACHE_WORK, CACHE_WORK_STALE_MS);
+      entry = inspect(cacheDir, name, now, busy, kinds, CACHE_WORK_STALE_MS);
     } catch {
       continue; // gone since readdir
     }

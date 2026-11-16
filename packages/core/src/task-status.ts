@@ -32,14 +32,17 @@ export const TASK_TRANSITIONS: Readonly<Record<TaskStatus, ReadonlySet<TaskStatu
   aborted: new Set<TaskStatus>(["running", "error", "idle"]),
 };
 
-/** Where a Task is in its work, from its status and `resumeAt` (docs/design/task-work-phase.md). `resume` is not a status: a stopped Task with a planned resume. */
+/** A status a planned start or resume waits in: an ended Task, or one made without starting (`idle`, held to its runner's reset). */
+const RESUMABLE: ReadonlySet<TaskStatus> = new Set<TaskStatus>([...TERMINAL, "idle"]);
+
+/** Where a Task is in its work, from its status and `resumeAt` (docs/design/task-work-phase.md). `resume` is not a status: a stopped Task with a planned resume, or one made without starting whose start is planned. */
 export type WorkPhase = "turn" | "approval" | "background" | "resume" | "stopped";
 
 export function workPhase(t: Pick<Task, "status" | "resumeAt">): WorkPhase {
   if (t.status === "running") return "turn";
   if (t.status === "waiting") return "approval";
   if (t.status === "background") return "background";
-  if (TERMINAL.has(t.status) && t.resumeAt !== null) return "resume";
+  if (RESUMABLE.has(t.status) && t.resumeAt !== null) return "resume";
   return "stopped";
 }
 
@@ -66,7 +69,7 @@ export function workingSql(purpose: WorkPurpose, alias?: string): string {
   const statuses = (Object.keys(STATUS_OF_PHASE) as Array<keyof typeof STATUS_OF_PHASE>).filter((p) => COUNTS[purpose].has(p)).map((p) => `'${STATUS_OF_PHASE[p]}'`);
   const parts: string[] = [];
   if (statuses.length) parts.push(`${col("status")} IN (${statuses.join(", ")})`);
-  if (COUNTS[purpose].has("resume")) parts.push(`(${col("resume_at")} IS NOT NULL AND ${col("status")} IN (${[...TERMINAL].map((s) => `'${s}'`).join(", ")}))`);
+  if (COUNTS[purpose].has("resume")) parts.push(`(${col("resume_at")} IS NOT NULL AND ${col("status")} IN (${[...RESUMABLE].map((s) => `'${s}'`).join(", ")}))`);
   return parts.length ? `(${parts.join(" OR ")})` : "0";
 }
 
