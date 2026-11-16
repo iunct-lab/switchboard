@@ -202,9 +202,18 @@ export function weeklyHumanSample(rows: EvalsListRow[]): EvalsListRow[] {
 export function judgeHumanGap(rows: EvalsListRow[]): EvalsSummary["gap"] {
   const mean = (xs: number[]) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : null);
   const diffs = rows.flatMap((r) => (r.judge && r.human ? [r.human.rating - r.judge.average] : []));
-  // where the person said the intent was missed, what the judge's `intent` score said; a judge row without that score is left out
-  const intents = rows.flatMap((r) => (r.human && (r.human.intent === "partial" || r.human.intent === "wrong") && r.judge?.scores.intent !== undefined ? [r.judge.scores.intent] : []));
-  return { count: diffs.length, mean: mean(diffs), intent: { count: intents.length, mean: mean(intents) } };
+  // where the person's answer says the judge's criterion should be low, what the judge scored it; a judge row without that score is left out
+  const scored = (criterion: string, missed: (h: NonNullable<EvalsListRow["human"]>) => boolean) => {
+    const xs = rows.flatMap((r) => (r.human && missed(r.human) && r.judge?.scores[criterion] !== undefined ? [r.judge.scores[criterion]!] : []));
+    return { count: xs.length, mean: mean(xs) };
+  };
+  return {
+    count: diffs.length,
+    mean: mean(diffs),
+    intent: scored("intent", (h) => h.intent === "partial" || h.intent === "wrong"),
+    minimal: scored("minimal", (h) => h.complexity === "some" || h.detour === "some"),
+    value: scored("value", (h) => h.value === "unused"),
+  };
 }
 
 /** How many characters of a PBI's story / out-of-scope and of a first message the Evals context shows: what a row can read at a glance. */

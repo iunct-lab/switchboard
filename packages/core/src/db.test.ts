@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey, Task } from "@switchboard/protocol";
+import { InvalidTaskOutcomeError } from "./task-status.ts";
 import { abortOrphanedTasks, createdIssuesOf, createdPullsOf, Db, deferredOf, schemaLevel, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { delegatedNote, ruleMetrics } from "./evals.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
@@ -509,7 +510,7 @@ test("resumeReason: a database made before the column gets it on open, and its r
 
 test("archivedAt: listTasks() leaves archived Tasks out, listTasks(true) lists only them, and null brings one back", () => {
   const db = new Db(join(dir, "archive.db"));
-  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  const mk = (id: string, updatedAt: number) => db.insertTask({ id, workspaceId: null, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "finished", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_a", 1);
   mk("t_b", 2);
   expect(db.updateTask("t_a", { archivedAt: 5, updatedAt: 1 })).toMatchObject({ archivedAt: 5, updatedAt: 1 });
@@ -524,7 +525,7 @@ test("archivedAt: listTasks() leaves archived Tasks out, listTasks(true) lists o
 
 test("listEventsTail / listEventsBefore: the last `limit` events, and the page before a seq, both in seq order", () => {
   const db = new Db(join(dir, "events.db"));
-  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_ev', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run();
+  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_ev', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'finished', 1, 1, 1)").run();
   for (let i = 0; i < 500; i++) db.appendEvent("t_ev", { t: "message.delta", role: "assistant", text: `${i}` });
   const seqs = (es: Array<{ seq: number }>) => es.map((e) => e.seq);
   const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
@@ -538,14 +539,14 @@ test("listEventsTail / listEventsBefore: the last `limit` events, and the page b
 
 /** A done task row for the events of the weekly request-count readers. */
 const eventsTask = (db: Db, id: string) =>
-  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run(id);
+  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'finished', 1, 1, 1)").run(id);
 
 test("scheduledIssuesSince: the Issues that a schedule's Tasks in any workspace opened since a time, under the schedule's title less a trailing parenthesis, oldest Task first", () => {
   const db = new Db(join(dir, "scheduled.db"));
   const schedule = (id: string, title: string, ws: string) =>
     db.sqlite.query("INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, created_at) VALUES (?, ?, '0 * * * *', ?, 'claude', 'p', 1)").run(id, title, ws);
   const task = (id: string, scheduleId: string | null, ws: string, createdAt: number, endAt: number, url: string) => {
-    db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, schedule_id, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', ?, ?, 1, 1)").run(id, ws, scheduleId, createdAt);
+    db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, schedule_id, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'finished', ?, ?, 1, 1)").run(id, ws, scheduleId, createdAt);
     db.appendEventAt(id, { t: "tool.call", id: "a", name: "Bash", input: { command: "gh issue create --title x" }, summary: "create" }, endAt - 2);
     db.appendEventAt(id, { t: "tool.result", id: "a", ok: true, summary: url }, endAt - 1);
     db.appendEventAt(id, { t: "session.end", status: "ok" }, endAt);
@@ -663,7 +664,7 @@ test("deferred from final summary: the last session.end's summary has a word tha
 
 test("listEventsBefore: a page that starts inside a streamed message reaches back to the message's first delta", () => {
   const db = new Db(join(dir, "events-msg.db"));
-  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_msg', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'done', 1, 1, 1)").run();
+  db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t_msg', 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'finished', 1, 1, 1)").run();
   db.appendEvent("t_msg", { t: "tool.call", id: "c1", name: "Read", summary: "Read a" }); // 1
   for (let i = 0; i < 10; i++) db.appendEvent("t_msg", { t: "message.delta", role: "assistant", text: `a${i}`, messageId: "m1" }); // 2..11
   db.appendEvent("t_msg", { t: "status", text: "thinking" }); // 12
@@ -804,7 +805,7 @@ test("startup: a migrated `background` task whose jobs died with the daemon goes
 
 test("stage: a stage Task in `background` status, with a daemon job or a reply being judged is still active, until that ends", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const mk = (id: string, status: "done" | "error" | "running" | "background", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  const mk = (id: string, status: "done" | "error" | "running" | "background", issue: number, updatedAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: status === "done" || status === "background" ? "needs_action" : "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
   mk("t_bg", "background", 3621, 1);
   mk("t_err", "error", 7, 2);
   mk("t_plain", "done", 8, 3);
@@ -846,7 +847,7 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
 
 test("stage: lastEndedStageTask picks the stage Task that left its slot last, not the one created last", () => {
   const db = new Db(join(dir, "switchboard.db"));
-  const mk = (id: string, status: "done" | "running", action: "complete" | "to-tasks", createdAt: number, statusAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: Number(id.slice(2)), action }, statusAt, createdAt, updatedAt: statusAt });
+  const mk = (id: string, status: "done" | "running", action: "complete" | "to-tasks", createdAt: number, statusAt: number) => db.insertTask({ id, workspaceId: "ws", title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: status === "done" ? "needs_action" : "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: Number(id.slice(2)), action }, statusAt, createdAt, updatedAt: statusAt });
   mk("t_1", "done", "complete", 1, 30); // created first, ended last
   mk("t_2", "done", "complete", 2, 20); // created later, ended earlier
   mk("t_3", "running", "complete", 3, 40); // still in its slot
@@ -932,9 +933,9 @@ test("statusAt moves only on a status change: title, outcome, 確認済み and a
   expect(db.getTask("t1")!).toMatchObject({ statusAt: 1_000, updatedAt: 2_500 });
   db.updateTask("t1", { status: "done", updatedAt: 3_000 });
   expect(db.getTask("t1")!.statusAt).toBe(3_000);
-  db.updateTask("t1", { outcome: "done", updatedAt: 4_000 });
+  db.updateTask("t1", { outcome: "finished", updatedAt: 4_000 });
   db.updateTask("t1", { reviewedAt: 5_000, updatedAt: 5_000 });
-  db.updateTask("t1", { judgedResult: "done", judgedReason: "ok", judgedBy: "claude:x", updatedAt: 6_000 });
+  db.updateTask("t1", { judgedResult: "finished", judgedReason: "ok", judgedBy: "claude:x", updatedAt: 6_000 });
   expect(db.getTask("t1")!).toMatchObject({ status: "done", statusAt: 3_000, updatedAt: 6_000 });
   // a reply runs it again: running from that turn on
   db.updateTask("t1", { status: "running", updatedAt: 7_000 });
@@ -1153,7 +1154,7 @@ test("outbound: an existing DB keeps both on, a new DB has both off", () => {
   const path = join(dir, "db.sqlite");
   const fresh = new Db(path);
   expect(fresh.getSetting<unknown>("settings", null)).toBeNull();
-  fresh.insertTask({ id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
+  fresh.insertTask({ id: "t1", workspaceId: null, title: "t1", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "finished", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
   fresh.setSetting("settings", { titles: { auto: false } });
   fresh.close();
   // from before this migration: it has Tasks
@@ -1192,7 +1193,25 @@ test("delegated model note migration: the （試験） tail of the status note i
   expect(ruleMetrics(evs).delegatedModel).toBe("claude-sonnet-5-5");
   expect(JSON.stringify(evs[1]!.ev)).toContain(oldNote);
   expect(evs[2]!.ev).toEqual({ t: "status", text: "Task ごとの実装は  に任せます（試験）" });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
+  again.close();
+});
+
+test("human answer migration: extra none becomes complexity and detour none, extra some is dropped, other rows stay", () => {
+  const path = join(dir, "db.sqlite");
+  const d = new Db(path);
+  d.upsertEval({ taskId: "a", source: "human", by: "user", rubric: null, json: { rating: 1, comment: "c", intent: "wrong", extra: "none", value: "unused", by: "user", ts: 1 }, ts: 1 });
+  d.upsertEval({ taskId: "b", source: "human", by: "user", rubric: null, json: { rating: 3, comment: "", extra: "some", by: "user", ts: 2 }, ts: 2 });
+  d.upsertEval({ taskId: "c", source: "human", by: "user", rubric: null, json: { rating: 4, comment: "", by: "user", ts: 3 }, ts: 3 });
+  d.close();
+  const old = new Database(path);
+  old.exec("PRAGMA user_version = 5");
+  old.close();
+  const again = new Db(path);
+  expect(again.getEval("a", "human")!.json).toEqual({ rating: 1, comment: "c", intent: "wrong", complexity: "none", detour: "none", value: "unused", by: "user", ts: 1 });
+  expect(again.getEval("b", "human")!.json).toEqual({ rating: 3, comment: "", by: "user", ts: 2 });
+  expect(again.getEval("c", "human")!.json).toEqual({ rating: 4, comment: "", by: "user", ts: 3 });
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
   again.close();
 });
 
@@ -1218,7 +1237,7 @@ test("repeated thinking status is folded once at open", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();
@@ -1354,7 +1373,7 @@ test("a new database has machine on tasks and src_id on ledger and routing_log, 
   db.close();
 });
 
-const machineTask = (id: string, machine: string | null) => ({ id, workspaceId: null, title: id, runner: "claude" as const, cwd: "/work/app", scope: ["/work/app"], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "done" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, machine });
+const machineTask = (id: string, machine: string | null) => ({ id, workspaceId: null, title: id, runner: "claude" as const, cwd: "/work/app", scope: ["/work/app"], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "finished" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, machine });
 
 test("a Task keeps the machine it ran on through insertTask and getTask; none is this instance's", () => {
   const db = new Db(join(dir, "switchboard.db"));
@@ -1401,7 +1420,7 @@ test("schemaLevel is the column count of the shape this code writes, not of an o
 test("cleanup status after the end does not count in the task's duration", () => {
   const db = new Db(join(dir, "switchboard.db"));
   const T0 = 1_000_000;
-  const mk = (id: string): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude", ruleId: "r", reason: "x", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "done", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: T0, createdAt: T0, updatedAt: T0 + 60_000 });
+  const mk = (id: string): Task => ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude", ruleId: "r", reason: "x", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "finished", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: T0, createdAt: T0, updatedAt: T0 + 60_000 });
   const durations = () => Object.fromEntries(db.routingLog().map((r) => [r.taskId, r.durationMs]));
   const medians = () => db.routingStats(30, T0 + 1000).byRunner[0]!.medianDurationMs;
 
@@ -1418,5 +1437,46 @@ test("cleanup status after the end does not count in the task's duration", () =>
   db.appendEventAt("work", { t: "status", text: "stop note" }, T0 + 20_000);
   expect({ durations: durations(), median: medians() }).toEqual(before);
   expect(db.listEvents("work").at(-1)!.ev).toEqual({ t: "status", text: "stop note" });
+  db.close();
+});
+
+test("evalsList carries the judge's result beside the outcome, to be compared on the list", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const base = { workspaceId: null, runner: "claude" as const, cwd: "/work/app", scope: ["/work/app"], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, reviewedAt: null, archivedAt: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+  db.insertTask({ ...base, id: "n", title: "n", status: "done", outcome: "finished", judgedResult: null, judgedReason: null, judgedBy: null });
+  db.insertTask({ ...base, id: "j", title: "j", status: "done", outcome: "finished", judgedResult: "needs_action", judgedReason: "r", judgedBy: "codex:m" });
+  const rows = db.evalsList({ limit: 10 });
+  expect(rows.find((r) => r.taskId === "n")).toMatchObject({ outcome: "finished", judgedResult: null });
+  expect(rows.find((r) => r.taskId === "j")).toMatchObject({ outcome: "finished", judgedResult: "needs_action" });
+  db.close();
+});
+
+test("stored outcome: a waiting or failed Task is never written needs_action / failed, and an impossible pair is refused", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const base = { workspaceId: null, runner: "claude" as const, cwd: "/work/app", scope: ["/work/app"], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
+  const stored = (id: string) => (db.sqlite.query("SELECT outcome FROM tasks WHERE id = ?").get(id) as { outcome: string }).outcome;
+  db.insertTask({ ...base, id: "t", title: "t", status: "running", outcome: "unknown" });
+  for (const [status, shown] of [["waiting", "needs_action"], ["done", "needs_action"], ["error", "failed"]] as const) {
+    expect(db.updateTask("t", { status })?.outcome).toBe(shown);
+    // what is read is derived; what is written is not
+    expect(db.getTask("t")?.outcome).toBe(shown);
+    expect(stored("t")).toBe(status === "done" ? "needs_action" : "unknown");
+    if (status === "done") db.updateTask("t", { outcome: "unknown" });
+    if (status === "error") expect(() => db.updateTask("t", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
+  }
+  db.updateTask("t", { status: "running" });
+  expect(() => db.updateTask("t", { outcome: "needs_action" })).toThrow(InvalidTaskOutcomeError);
+  expect(() => db.updateTask("t", { status: "waiting", outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
+  expect(db.getTask("t")).toMatchObject({ status: "running", outcome: "unknown" });
+  expect(stored("t")).toBe("unknown");
+  // a row written with the outcome it shows is stored without it
+  db.insertTask({ ...base, id: "w", title: "w", status: "waiting", outcome: "needs_action" });
+  expect(stored("w")).toBe("unknown");
+  expect(db.getTask("w")?.outcome).toBe("needs_action");
+  expect(() => db.insertTask({ ...base, id: "x", title: "x", status: "error", outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
+  // the reads in SQL agree with the derived value
+  db.insertTask({ ...base, id: "e", title: "e", status: "error", outcome: "failed" });
+  expect(db.evalsList({ limit: 10 }).find((r) => r.taskId === "e")?.outcome).toBe("failed");
+  expect(db.evalsList({ limit: 10 }).find((r) => r.taskId === "w")?.outcome).toBe("needs_action");
   db.close();
 });

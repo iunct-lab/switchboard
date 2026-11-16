@@ -554,11 +554,11 @@ export function narrowTestStep(steps: Step[], files: string[]): Step[] {
 
 /**
  * What the PR gained since its newest pass (an incremental run): the pass's head `pass`, the commits `git cherry` marks
- * `+` between the PR's merge-base with the base's tip and `head` (a rebase that kept a diff adds none), and the files
+ * `+` between the PR's fork from `tip` (the caller gives the default branch's tip) and `head` (a rebase that kept a diff adds none), and the files
  * they touch, deleted ones too. None when the newest result (of MARK_AUTHORS) is no pass, is of this head, a merge
  * commit of the PR is not in the pass's history (a conflict resolved: `inPass`'s rule), or anything cannot be read.
  */
-export async function incrementalBase(pr: number, repo: string, repoRoot: string, head: string, baseTip: string, d: Pick<Deps, "sh">): Promise<{ pass: string; commits: string[]; files: string[] } | undefined> {
+export async function incrementalBase(pr: number, repo: string, repoRoot: string, head: string, tip: string, d: Pick<Deps, "sh">): Promise<{ pass: string; commits: string[]; files: string[] } | undefined> {
   try {
     const view = JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "comments"])) as { comments?: Array<{ body: string; createdAt: string; authorAssociation?: string }> };
     const newest = newestLocalCi((view.comments ?? []).filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? "")));
@@ -566,7 +566,7 @@ export async function incrementalBase(pr: number, repo: string, repoRoot: string
     const pass = newest.m[2]!;
     const at = ["git", "-C", repoRoot];
     await d.sh([...at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", pass]);
-    const mergeBase = (await d.sh([...at, "merge-base", baseTip, head])).trim();
+    const mergeBase = (await d.sh([...at, "merge-base", tip, head])).trim();
     const commits = (await d.sh([...at, "cherry", pass, head, mergeBase])).split("\n").filter((l) => l.startsWith("+ ")).map((l) => l.slice(2).trim());
     for (const m of (await d.sh([...at, "rev-list", "--merges", `${mergeBase}..${head}`])).split("\n").filter(Boolean)) {
       if (!await d.sh([...at, "merge-base", "--is-ancestor", m, pass]).then(() => true, () => false)) return undefined;
@@ -820,7 +820,9 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       }
       const env = stepEnv(tmp);
       // the commits since the PR's newest pass, when there is one to build on (never for --all or a local change)
-      const since = opts.all || opts.force || change ? undefined : await incrementalBase(pr, repo, repoRoot, sha, base, d);
+      // a stack's base is the PR below, so the commits are counted from the default branch's tip (a fix added below is one the top's pass must hold)
+      const tip = opts.all || opts.force || change ? undefined : await defaultTip(pr, repoRoot, repo, d).catch(() => undefined);
+      const since = tip ? await incrementalBase(pr, repo, repoRoot, sha, tip, d) : undefined;
       // no commit added (a rebase only) has no files to choose tests from: every step, as without a pass
       const inc = since && since.commits.length > 0 ? since : undefined;
       const picked = opts.all ? undefined : await selectTests(dir, () => (change ? Promise.resolve(base) : mainFork(dir, repo, d.sh)), env, d, inc?.files);

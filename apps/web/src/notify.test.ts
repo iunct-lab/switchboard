@@ -56,10 +56,10 @@ test("(b) task.updated notifies when the outcome turns needs_action, not reviewe
   expect(noticeFor(updated(task("t1", "done", "needs_action", null, 5)), before, seen)).toBeNull();
   expect(noticeFor(updated(task("t2", "done", "needs_action", 3, 5)), [task("t2", "done", "unknown")], seen)).toBeNull();
   expect(noticeFor(updated(task("t3", "waiting", "needs_action", null, 5)), [task("t3", "running", "unknown")], seen)).toBeNull();
-  expect(noticeFor(updated(task("t4", "done", "done", null, 5)), [task("t4", "running", "unknown")], seen)).toBeNull();
+  expect(noticeFor(updated(task("t4", "done", "finished", null, 5)), [task("t4", "running", "unknown")], seen)).toBeNull();
   // a hand-set outcome keeps updatedAt: done → needs_action → done → needs_action notifies twice
-  expect(noticeFor(updated(task("t1", "done", "done", null, 5)), [task("t1", "done", "needs_action")], seen)).toBeNull();
-  expect(noticeFor(updated(task("t1", "done", "needs_action", null, 5)), [task("t1", "done", "done")], seen)?.taskId).toBe("t1");
+  expect(noticeFor(updated(task("t1", "done", "finished", null, 5)), [task("t1", "done", "needs_action")], seen)).toBeNull();
+  expect(noticeFor(updated(task("t1", "done", "needs_action", null, 5)), [task("t1", "done", "finished")], seen)?.taskId).toBe("t1");
 });
 
 test("(c) the notice carries neither the ask's detail / input nor the judged reason", () => {
@@ -111,7 +111,7 @@ test("(f) a constructor that throws (Android Chrome) returns false", () => {
 
 test("task.terminal waiting notifies once per wait, the first status too; task.terminals after hello notifies only a wait that came while away", () => {
   const seen = new Set<string>();
-  const tasks = [task("t1", "idle", "done"), task("t2", "idle", "done")];
+  const tasks = [task("t1", "idle", "finished"), task("t2", "idle", "finished")];
   const term = (status: "working" | "waiting" | "done" | null, taskId = "t1"): ServerMessage => ({ type: "task.terminal", taskId, status });
   const now = (terminals: Record<string, "working" | "waiting" | "done">): ServerMessage => ({ type: "task.terminals", terminals });
   const notice = (id: string) => ({ key: `${id}\u0000terminal`, taskId: id, title: `title of ${id}`, body: "ターミナルの Claude Code が返事を待っています" });

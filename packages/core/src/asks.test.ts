@@ -533,7 +533,7 @@ describe("asksFromTasks", () => {
     // a depends stop from before the question is an old one: the question is newer, so the check stays
     expect(asked([depends(NOW - 1_000)])).toBe(true);
     // a decision stop the person already answered asks nothing again once the Task ended done
-    const doneAsked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "done", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
+    const doneAsked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "finished", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
     expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000 })])).toBe(true);
     expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000, answered: true, lastAnswer: { ref: "seq:9", at: NOW } })])).toBe(false);
   });

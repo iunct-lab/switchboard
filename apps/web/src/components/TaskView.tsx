@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus, type RunnerInfo, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, TaskDiffFile, TaskOutcome, TaskSummary, TeleportProgress } from "@switchboard/protocol";
+import { isWorkingStatus, type RunnerInfo, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, StoredOutcome, TaskDiffFile, TaskSummary, TeleportProgress } from "@switchboard/protocol";
 import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
@@ -8,7 +8,7 @@ import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, BackgroundTa
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { Stops } from "./Stops.tsx";
-import { activeLabel, judgementNote, outcomeLabel } from "../attention.ts";
+import { activeLabel, judgementNote, outcomeIsDerived, outcomeIsSettable, outcomeLabel } from "../attention.ts";
 import { SINCE, taskTimes } from "../inProgress.ts";
 import { Artifacts } from "./Artifacts.tsx";
 import { artifactsLabel } from "../artifacts.ts";
@@ -193,7 +193,7 @@ export function TaskView(props: {
   };
   // 結果 / 確認済み (#492): the answer comes back as task.updated too, which is what the lists redraw from
   const [outcomeErr, setOutcomeErr] = useState<string | null>(null);
-  const setOutcome = (body: { outcome?: TaskOutcome; reviewed?: boolean }) => {
+  const setOutcome = (body: { outcome?: StoredOutcome; reviewed?: boolean }) => {
     setOutcomeErr(null);
     api.setOutcome(props.task.id, body).catch((e) => setOutcomeErr(String((e as Error).message ?? e)));
   };
@@ -330,12 +330,18 @@ export function TaskView(props: {
         <BackgroundTag background={props.task.background} />
         <ShadowTag task={props.task} />
         {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
-        <select className="outcome" value={props.task.outcome} disabled={busy} onChange={(e) => setOutcome({ outcome: e.target.value as TaskOutcome })} title={t(m.outcomeTitle)}>
-          {(["needs_action", "failed", "done", "unknown"] as const).map((o) => (
+        <select className="outcome" value={props.task.outcome} disabled={busy || !outcomeIsSettable(props.task.status)} onChange={(e) => setOutcome({ outcome: e.target.value as StoredOutcome })} title={outcomeIsSettable(props.task.status) ? t(m.outcomeTitle) : outcomeIsDerived(props.task.status) ? t(m.outcomeDerivedTitle) : t(m.outcomeLaterTitle)}>
+          {(["needs_action", "finished", "unknown"] as const).map((o) => (
             <option key={o} value={o}>
               {outcomeLabel(o)}
             </option>
           ))}
+          {/* a Task whose outcome follows from its status shows that value, which is not one of the three that can be set */}
+          {!StoredOutcome.safeParse(props.task.outcome).success && (
+            <option value={props.task.outcome} disabled>
+              {outcomeLabel(props.task.outcome)}
+            </option>
+          )}
         </select>
         <button className="ghost review-toggle" disabled={busy} onClick={() => setOutcome({ reviewed: props.task.reviewedAt === null })}>
           {props.task.reviewedAt === null ? t(m.markReviewed) : t(m.unmarkReviewed)}

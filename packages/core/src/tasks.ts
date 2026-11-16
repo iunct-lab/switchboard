@@ -2,7 +2,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, utime
 import { basename, delimiter, dirname, join } from "node:path";
 import { diskFullHit, diskFullText } from "./diskfull.ts";
 import { githubLimitHit, usesGraphql } from "./ratelimit.ts";
-import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, LlmSuggestion, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, Task } from "@switchboard/protocol";
+import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, LlmSuggestion, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, StoredOutcome, Task } from "@switchboard/protocol";
 import { CloudSessionRef, REPLY_QUEUED } from "@switchboard/protocol"; // REPLY_QUEUED: the queued reply's status line, which also answers the Task's open stops
 import { readCloudPreparation } from "./claude-cloud.ts";
 import { ledgerRowFor, usageSince } from "./pricing.ts";
@@ -11,7 +11,7 @@ import { artifactPrompt, parseArtifactFence, type ArtifactFence, type ArtifactSt
 import { Db, newId } from "./db.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { recapOf } from "./recap.ts";
-import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, TERMINAL } from "./task-status.ts";
+import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, OutcomeNotSettableError, outcomeOf, STORED_OUTCOMES, TERMINAL } from "./task-status.ts";
 import { setupScripts, syncSkills } from "./skillsync.ts";
 import { answerableStops, FenceReader, lastAttempt, meetEndedJobs, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
@@ -863,7 +863,9 @@ export class TaskManager {
   setOutcome(taskId: string, input: SetOutcomeInput): Task {
     const cur = this.db.getTask(taskId);
     if (!cur) throw new Error(`task ${taskId} not found`);
-    const reopen = input.reviewed === undefined && (input.outcome === "needs_action" || input.outcome === "failed");
+    // waiting / error / aborted show an outcome their status decides; the other statuses take only what STORED_OUTCOMES lists for them
+    if (input.outcome !== undefined && (outcomeOf(cur.status, "unknown") !== "unknown" || !STORED_OUTCOMES[cur.status].has(input.outcome))) throw new OutcomeNotSettableError(cur.status);
+    const reopen = input.reviewed === undefined && input.outcome === "needs_action";
     const reviewedAt = input.reviewed === true ? Date.now() : input.reviewed === false || reopen ? null : cur.reviewedAt;
     const t = this.db.updateTask(taskId, { ...(input.outcome ? { outcome: input.outcome } : {}), reviewedAt, updatedAt: cur.updatedAt })!;
     this.broadcast({ type: "task.updated", task: t });
@@ -2126,7 +2128,7 @@ export class TaskManager {
    * The one place a task's status is written: checked against the table (task-status.ts) first, and `null`
    * when the move is not allowed, with the row untouched. The outcome follows by rule in `Db.updateTask`.
    */
-  private transition(taskId: string, status: Task["status"], extra: Partial<Pick<Task, "outcome" | "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
+  private transition(taskId: string, status: Task["status"], extra: { outcome?: StoredOutcome } & Partial<Pick<Task, "runnerSessionId" | "model" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt">> = {}): Task | null {
     const cur = this.db.getTask(taskId);
     if (!cur || !canTransition(cur.status, status)) return null;
     const t = this.db.updateTask(taskId, { status, ...extra });

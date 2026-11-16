@@ -73,7 +73,7 @@ import { CompositeSuggester, loadRoutingTable, RuleSuggester, suggestRunner, typ
 import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm.ts";
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
-import { IN_FLIGHT, isWorking, TURN_DONE, workPhase } from "./task-status.ts";
+import { IN_FLIGHT, InvalidTaskOutcomeError, isWorking, OutcomeNotSettableError, TURN_DONE, workPhase } from "./task-status.ts";
 import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager, versionAtLeast } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
@@ -4709,10 +4709,16 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           if (!t) return bad("not found", 404);
           const parsed = SetOutcomeInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
-          const task = tasks.setOutcome(t.id, parsed.data);
-          // an outcome of 要対応 is what makes a Task's check a question
-          void applyPolicies();
-          return json({ task });
+          try {
+            const task = tasks.setOutcome(t.id, parsed.data);
+            // an outcome of 要対応 is what makes a Task's check a question
+            void applyPolicies();
+            return json({ task });
+          } catch (e) {
+            // only a refusal of the outcome is a conflict; anything else (the database, a bug) stays a server error
+            if (e instanceof OutcomeNotSettableError || e instanceof InvalidTaskOutcomeError) return bad(e.message, 409);
+            throw e;
+          }
         },
       },
 

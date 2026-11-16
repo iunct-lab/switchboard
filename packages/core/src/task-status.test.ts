@@ -1,12 +1,12 @@
 // test-reads: docs/design/task-work-phase.md
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { isWorkingStatus, type Task, type TaskStatus } from "@switchboard/protocol";
+import { isWorkingStatus, TaskOutcome, TaskStatus as TaskStatusSchema, type Task, type TaskStatus } from "@switchboard/protocol";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db, abortOrphanedTasks } from "./db.ts";
 import { readFileSync } from "node:fs";
-import { canTransition, COUNTS, InvalidTaskTransitionError, isWorking, outcomeOnStatus, workingSql, workPhase, type WorkPhase, type WorkPurpose } from "./task-status.ts";
+import { canTransition, COUNTS, InvalidTaskTransitionError, isWorking, outcomeOf, outcomeOnStatus, STORED_OUTCOMES, InvalidTaskOutcomeError, outcomeSql, workingSql, workPhase, type WorkPhase, type WorkPurpose } from "./task-status.ts";
 
 const ALL: TaskStatus[] = ["idle", "running", "waiting", "background", "done", "error", "aborted"];
 const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
@@ -43,38 +43,45 @@ describe("task status transitions", () => {
     for (const [id, from, to] of [["a", "done", "waiting"], ["b", "error", "aborted"], ["c", "idle", "done"]] as const) {
       mk(id, from, { updatedAt: 1 });
       expect(() => db.updateTask(id, { status: to })).toThrow(InvalidTaskTransitionError);
-      expect(db.getTask(id)).toMatchObject({ status: from, outcome: "unknown", updatedAt: 1 });
+      expect(db.getTask(id)).toMatchObject({ status: from, outcome: outcomeOf(from, "unknown"), updatedAt: 1 });
     }
   });
 
   test("a status change sets the outcome by rule; a Cloud Task stays unknown", () => {
-    const judged = { reviewedAt: 5, archivedAt: null, judgedResult: "done", judgedReason: "r", judgedBy: "codex:m" } as const;
+    const judged = { reviewedAt: 5, archivedAt: null, judgedResult: "finished", judgedReason: "r", judgedBy: "codex:m" } as const;
     mk("l", "running");
     expect(db.updateTask("l", { status: "waiting" })?.outcome).toBe("needs_action");
     db.updateTask("l", judged);
     expect(db.updateTask("l", { status: "running" })).toMatchObject({ outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null });
     expect(db.updateTask("l", { status: "error" })?.outcome).toBe("failed");
-    mk("d", "running");
-    db.updateTask("d", { outcome: "done" });
-    expect(db.updateTask("d", { status: "done" })?.outcome).toBe("done");
-    mk("c0", "idle", { executionMode: "cloud", outcome: "needs_action", ...judged });
+    mk("d", "done", { outcome: "finished" });
+    expect(db.updateTask("d", { status: "background" })?.outcome).toBe("finished");
+    expect(db.updateTask("d", { status: "done" })?.outcome).toBe("finished");
+    // the turn that ended with an approval open keeps asking; a failure and a queued reply store unknown, not the old outcome
+    mk("w", "waiting");
+    expect(db.updateTask("w", { status: "done" })?.outcome).toBe("needs_action");
+    expect(db.updateTask("w", { status: "idle" })?.outcome).toBe("unknown");
+    mk("f", "done", { outcome: "finished" });
+    expect(db.updateTask("f", { status: "error" })?.outcome).toBe("failed");
+    expect(db.sqlite.query("SELECT outcome FROM tasks WHERE id = 'f'").get()).toEqual({ outcome: "unknown" });
+    mk("c0", "idle", { executionMode: "cloud", ...judged });
     expect(db.updateTask("c0", { status: "running" })).toMatchObject({ outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null });
     mk("c1", "running", { executionMode: "cloud" });
     expect(db.updateTask("c1", { status: "idle" })?.outcome).toBe("unknown");
     mk("c2", "running", { executionMode: "cloud" });
-    expect(db.updateTask("c2", { status: "error" })?.outcome).toBe("unknown");
-    expect(outcomeOnStatus("aborted", "local")).toEqual({ outcome: "failed" });
+    expect(db.updateTask("c2", { status: "error" })?.outcome).toBe("failed");
+    expect(outcomeOnStatus("aborted", "local")).toEqual({ outcome: "unknown" });
     expect(outcomeOnStatus("waiting", "cloud")).toEqual({ outcome: "unknown" });
   });
 
   test("orphan recovery: local running → aborted / failed, cloud with a session → idle / unknown, without → error / unknown", () => {
     mk("loc", "running");
-    mk("cs", "running", { executionMode: "cloud", cloudSession: { id: "session_s1", url: "https://claude.ai/code/session_s1" }, outcome: "needs_action" });
-    mk("cn", "waiting", { executionMode: "cloud", outcome: "needs_action" });
+    mk("cs", "running", { executionMode: "cloud", cloudSession: { id: "session_s1", url: "https://claude.ai/code/session_s1" } });
+    mk("cn", "waiting", { executionMode: "cloud" });
     expect(abortOrphanedTasks(db).sort()).toEqual(["cn", "cs", "loc"]);
     expect(db.getTask("loc")).toMatchObject({ status: "aborted", outcome: "failed" });
     expect(db.getTask("cs")).toMatchObject({ status: "idle", outcome: "unknown" });
-    expect(db.getTask("cn")).toMatchObject({ status: "error", outcome: "unknown" });
+    expect(db.getTask("cn")).toMatchObject({ status: "error", outcome: "failed" });
   });
 
   test("a Task made without starting (idle, its start planned at the runner's reset) is a planned resume: dedupe counts it, a slot does not", () => {
@@ -105,6 +112,37 @@ describe("task status transitions", () => {
       const fn = rows.filter(([, status, resumeAt]) => isWorking({ status, resumeAt }, purpose)).map(([id]) => id).sort();
       expect(sql, purpose).toEqual(fn);
       expect(aliased, purpose).toEqual(fn);
+    }
+  });
+
+  test("outcomeOf: the outcome of a waiting or failed Task is read from its status; every pair of the table is stored or refused", () => {
+    expect(outcomeOf("waiting", "unknown")).toBe("needs_action");
+    expect(outcomeOf("error", "unknown")).toBe("failed");
+    expect(outcomeOf("aborted", "finished")).toBe("failed");
+    // a row is not inserted with an outcome its status cannot have; the derived one (what a Task shows) is stored as unknown
+    expect(() => mk("bad_e", "error", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
+    expect(() => mk("bad_w", "waiting", { outcome: "failed" })).toThrow(InvalidTaskOutcomeError);
+    expect(() => mk("bad_r", "running", { outcome: "needs_action" })).toThrow(InvalidTaskOutcomeError);
+    mk("shown", "error", { outcome: "failed" });
+    expect(db.sqlite.query("SELECT outcome FROM tasks WHERE id = 'shown'").get()).toEqual({ outcome: "unknown" });
+    expect(db.getTask("shown")?.outcome).toBe("failed");
+    for (const status of ALL) for (const stored of ["finished", "needs_action", "unknown"] as const) {
+      const id = `${status}_${stored}`;
+      const allowed = STORED_OUTCOMES[status].has(stored);
+      const derived = status === "waiting" || status === "error" || status === "aborted";
+      // the table is written out here as well: only done / background take a stored outcome, the rest store unknown
+      expect(allowed).toBe(stored === "unknown" || status === "done" || status === "background");
+      if (allowed) {
+        mk(id, status, { outcome: stored });
+        expect(db.getTask(id)?.outcome).toBe(derived ? outcomeOf(status, stored) : stored);
+        expect(db.sqlite.query("SELECT outcome FROM tasks WHERE id = ?").get(id)).toEqual({ outcome: stored });
+        expect(db.sqlite.query(`SELECT ${outcomeSql("t")} AS outcome FROM tasks t WHERE t.id = ?`).get(id)).toEqual({ outcome: db.getTask(id)!.outcome });
+        db.updateTask(id, { outcome: stored });
+      } else {
+        mk(id, status);
+        expect(() => db.updateTask(id, { outcome: stored })).toThrow(InvalidTaskOutcomeError);
+        expect(db.sqlite.query("SELECT outcome FROM tasks WHERE id = ?").get(id)).toEqual({ outcome: "unknown" });
+      }
     }
   });
 });
@@ -156,5 +194,13 @@ describe("no side-by-side status comparison", () => {
     const hits = r.stdout.toString().split("\n").filter(Boolean);
     // a copy of an allowed line (another helper written the same way) counts twice, and a removed one zero times
     for (const a of ALLOWED) expect(hits.filter((h) => h.startsWith(`${a.file}:`) && h.includes(a.has)).length, a.file + " " + a.why).toBe(1);
+  });
+});
+
+describe("status and outcome values", () => {
+  test("the two sets are disjoint: no value names both a runner state and a result", () => {
+    const status: string[] = [...TaskStatusSchema.options];
+    expect(status).toContain("done");
+    expect(TaskOutcome.options.filter((o) => status.includes(o))).toEqual([]);
   });
 });

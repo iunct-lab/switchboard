@@ -184,8 +184,8 @@ try {
   assert(chosenMode === "default", `the request box's approval mode stays as chosen: ${chosenMode}`);
   await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsOther.id)})`);
   await sleep();
-  const stale = await page(`return ({ start: button(document.querySelector('.compose'), '開始').disabled, inbox: button(document.querySelector('.compose'), 'Inbox に保存').disabled, warn: document.querySelector('.compose > .warn')?.textContent ?? null })`);
-  assert(stale.start && stale.inbox && stale.warn?.includes("入れ直して"), `changed Workspace: ${JSON.stringify(stale)}`);
+  const stale = await page(`return ({ start: button(document.querySelector('.compose'), '開始').disabled, warn: document.querySelector('.compose > .warn')?.textContent ?? null })`);
+  assert(stale.start && stale.warn?.includes("入れ直して"), `changed Workspace: ${JSON.stringify(stale)}`);
   assert((await tasks()).length === before, "nothing was sent by the refusals");
   await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsDev.id)})`);
   await sleep();

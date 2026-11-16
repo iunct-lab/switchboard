@@ -39,10 +39,10 @@ test("creation and launcher exit, including nonzero, never complete a Cloud task
   }
 });
 
-test("no reference or invalid reference remains error/unknown without Local fallback", async () => {
+test("no reference or invalid reference remains error (failed) without Local fallback", async () => {
   for (const events of [[], [{ t: "cloud.session.created", id: ref.id, url: "https://example.com" }]] as AgentEvent[][]) {
     const s = setup(events); const t = s.tasks.create(s.input); await Bun.sleep(1);
-    expect(s.db.getTask(t.id)).toMatchObject({ status: "error", outcome: "unknown", cloudSession: null, resumeAt: null });
+    expect(s.db.getTask(t.id)).toMatchObject({ status: "error", outcome: "failed", cloudSession: null, resumeAt: null });
     await s.tasks.shutdown(); s.db.close();
   }
 });

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { EvalsListRow, EvalsSummary, RunnerId, RunnerInfo, Workspace } from "@switchboard/protocol";
 import { api } from "../api.ts";
-import { contextLines, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
+import { contextLines, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, judgedDiffers, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
 import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
 import { HumanEvalForm, humanEvalKey } from "./HumanEvalForm.tsx";
@@ -260,6 +260,14 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                     <td>{cells.subagentEffort}</td>
                     <td>
                       {r.status} · {outcomeLabel(r.outcome)}
+                      {judgedDiffers(r) && r.judgedResult && (
+                        <>
+                          {" "}
+                          <span className="tag" title={t(m.judgedDiffersTitle, { judged: outcomeLabel(r.judgedResult) })}>
+                            {t(m.judgedDiffers)}
+                          </span>
+                        </>
+                      )}
                     </td>
                     <td className="num">{r.rules ? r.rules.toolCalls : "-"}</td>
                     <td className={`num${r.rules && r.rules.toolFailures > 0 ? " warn" : ""}`}>{r.rules ? r.rules.toolFailures : "-"}</td>

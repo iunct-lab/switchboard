@@ -13,7 +13,7 @@ export type RunnerRow = RunnerStats & { thin: boolean };
  * the setting's count (#835).
  */
 export function runnerRows(stats: RoutingStats, runners: RunnerId[], thin = THIN_SAMPLE): RunnerRow[] {
-  const empty = (runner: RunnerId): RunnerStats => ({ runner, total: 0, outcomes: { done: 0, needs_action: 0, failed: 0, unknown: 0 }, medianCostUsd: null, medianDurationMs: null });
+  const empty = (runner: RunnerId): RunnerStats => ({ runner, total: 0, outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 0 }, medianCostUsd: null, medianDurationMs: null });
   const known = runners.map((r) => stats.byRunner.find((s) => s.runner === r) ?? empty(r));
   const extra = stats.byRunner.filter((s) => !runners.includes(s.runner));
   return [...known, ...extra].map((s) => ({ ...s, thin: s.total < thin }));

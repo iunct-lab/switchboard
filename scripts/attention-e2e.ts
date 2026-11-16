@@ -138,16 +138,16 @@ try {
   // (e) set task-ok's outcome to 完了 → out of 要対応 (still not 確認済み), into Home's 最近
   await openFromRail("task-ok");
   await until(() => evaluate(`(() => { const s = document.querySelector('.task-head select.outcome'); if (!s || s.disabled) return false;
-    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'done'); s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`), "outcome select");
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'finished'); s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`), "outcome select");
   const eRail = await until(async () => { const s = await state(); return s.rail.length === 2 && s; }, "rail drops task-ok (完了)");
   await goHome();
   const e = await until(async () => { const s = await state(); return s.onHome && s.home.length === 2 && s; }, "Home drops task-ok (完了)");
   assert(same(e.home, ["task-ask", "task-err"]) && same(eRail.rail, e.home) && e.recent.includes("task-ok"), `(e) ${JSON.stringify({ rail: eRail.rail, ...e })}`);
   const ok = (await tasks()).find((t) => t.title === "task-ok")!;
-  assert(ok.outcome === "done" && ok.reviewedAt === null, `(e) stored ${ok.outcome} ${ok.reviewedAt}`);
+  assert(ok.outcome === "finished" && ok.reviewedAt === null, `(e) stored ${ok.outcome} ${ok.reviewedAt}`);
 
   // (f) the stop record decides before the outcome (personWait): 完了 + a decision stop → 要対応; 要対応 + a depends stop → 待ち
-  for (const [p, outcome] of [["stop-decision", "done"], ["stop-depends", "needs_action"]] as const) {
+  for (const [p, outcome] of [["stop-decision", "finished"], ["stop-depends", "needs_action"]] as const) {
     await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: cfg.repoRoot, title: `task-${p}`, prompt: p, runner: "claude" }) });
     const t = await until(async () => (await tasks()).find((x) => x.title === `task-${p}` && x.status !== "running" && x.status !== "idle"), `task-${p} stopped`);
     await until(async () => ((await (await fetch(`${base}/api/tasks/stops`)).json()) as Record<string, unknown>)[t.id], `task-${p} stop recorded`);

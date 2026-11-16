@@ -143,7 +143,7 @@ describe("judgement across a restart", () => {
     expect((await post(base, `/api/tasks/${t.id}/send`, { text: "もう一度" })).status).toBe(200);
     expect(core!.db.getTask(t.id)).toMatchObject({ status: "running", judgingAt: null });
     const calls: string[] = [];
-    judge = async (input) => (calls.push(input.lastReply), { result: "done", reason: "x", runner: "codex", model: "m" });
+    judge = async (input) => (calls.push(input.lastReply), { result: "finished", reason: "x", runner: "codex", model: "m" });
     await restart();
     await Bun.sleep(100);
     expect(calls).toEqual([]);

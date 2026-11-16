@@ -39,8 +39,8 @@ describe("judgeTurn", () => {
   test("the configured runner answers: its judgement, asked read-only with the configured model in the daemon's directory", async () => {
     const starts: StartOptions[] = [];
     const claudeStarts: StartOptions[] = [];
-    const { out, usage } = run([replayAdapter("codex", answer('{"result": "done", "reason": "誤字を直して報告している"}', "gpt-6-luna"), { starts }), replayAdapter("claude", [], { starts: claudeStarts })]);
-    expect(await out).toEqual({ result: "done", reason: "誤字を直して報告している", runner: "codex", model: "gpt-6-luna" });
+    const { out, usage } = run([replayAdapter("codex", answer('{"result": "finished", "reason": "誤字を直して報告している"}', "gpt-6-luna"), { starts }), replayAdapter("claude", [], { starts: claudeStarts })]);
+    expect(await out).toEqual({ result: "finished", reason: "誤字を直して報告している", runner: "codex", model: "gpt-6-luna" });
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", scope: ["/tmp/switchboard-home/suggest"], model: "gpt-6-luna", permissionMode: "read-only" });
     expect(claudeStarts).toHaveLength(0);
     expect(usage).toEqual([{ runner: "codex", model: "gpt-6-luna" }]);
@@ -62,9 +62,9 @@ describe("judgeTurn", () => {
 
   test("the configured runner answers something that is not a judgement: Claude Haiku judges once", async () => {
     const codex = replayAdapter("codex", answer("完了です", "gpt-6-luna"));
-    const claude = replayAdapter("claude", answer('{"result": "done", "reason": "報告している"}', "claude-haiku-4-5-20251001"));
+    const claude = replayAdapter("claude", answer('{"result": "finished", "reason": "報告している"}', "claude-haiku-4-5-20251001"));
     const { out, usage, logs } = run([codex, claude]);
-    expect(await out).toMatchObject({ result: "done", runner: "claude", model: "claude-haiku-4-5" });
+    expect(await out).toMatchObject({ result: "finished", runner: "claude", model: "claude-haiku-4-5" });
     expect(usage.map((u) => u.runner)).toEqual(["codex", "claude"]);
     expect(logs.join("\n")).toMatch(/no judgement/);
   });
@@ -75,8 +75,8 @@ describe("judgeTurn", () => {
   });
 
   test("the configured runner is not installed, or has no read-only mode: straight to the fallback", async () => {
-    const haiku = () => replayAdapter("claude", answer('{"result": "done", "reason": "終わっている"}', "claude-haiku-4-5-20251001"));
-    expect(await run([haiku()]).out).toMatchObject({ result: "done", runner: "claude", model: "claude-haiku-4-5" });
+    const haiku = () => replayAdapter("claude", answer('{"result": "finished", "reason": "終わっている"}', "claude-haiku-4-5-20251001"));
+    expect(await run([haiku()]).out).toMatchObject({ result: "finished", runner: "claude", model: "claude-haiku-4-5" });
     const codexStarts: StartOptions[] = [];
     const writable = replayAdapter("codex", answer('{"result": "needs_action", "reason": "x"}', "gpt-6-luna"), { starts: codexStarts, modes: ["workspace-write"] });
     expect(await run([writable, haiku()]).out).toMatchObject({ runner: "claude" });
@@ -87,7 +87,7 @@ describe("judgeTurn", () => {
     const claudeStarts: StartOptions[] = [];
     const stop = new AbortController();
     const hung: RunnerAdapter = { ...replayAdapter("codex", []), start: (_o, _emit) => (setTimeout(() => stop.abort(), 10), { send: () => undefined, respondPermission: () => undefined, abort: async () => undefined, close: async () => undefined, exited: new Promise<number | null>(() => undefined) }) };
-    const out = judgeTurn(INPUT, { adapters: new Map([["codex", hung], ["claude", replayAdapter("claude", answer('{"result": "done", "reason": "x"}', "h"), { starts: claudeStarts })]]), settings: SETTINGS, cwd: "/tmp/h", signal: stop.signal });
+    const out = judgeTurn(INPUT, { adapters: new Map([["codex", hung], ["claude", replayAdapter("claude", answer('{"result": "finished", "reason": "x"}', "h"), { starts: claudeStarts })]]), settings: SETTINGS, cwd: "/tmp/h", signal: stop.signal });
     await expect(out).rejects.toThrow();
     expect(claudeStarts).toHaveLength(0);
   });
@@ -104,15 +104,15 @@ describe("judgeTurn settings tunables", () => {
   const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 };
   test("the fallback from the settings: the configured runner fails, the given runner and model judge once", async () => {
     const codexStarts: StartOptions[] = [];
-    const adapters = new Map<RunnerId, RunnerAdapter>([["claude", replayAdapter("claude", limited("claude"))], ["codex", replayAdapter("codex", answer('{"result": "done", "reason": "終わっている"}', "m"), { starts: codexStarts })]]);
+    const adapters = new Map<RunnerId, RunnerAdapter>([["claude", replayAdapter("claude", limited("claude"))], ["codex", replayAdapter("codex", answer('{"result": "finished", "reason": "終わっている"}', "m"), { starts: codexStarts })]]);
     const out = await judgeTurn(INPUT, { adapters, settings: CLAUDE_JUDGE, cwd: "/tmp/h", fallback: { runner: "codex", model: "m" } });
-    expect(out).toMatchObject({ result: "done", runner: "codex", model: "m" });
+    expect(out).toMatchObject({ result: "finished", runner: "codex", model: "m" });
     expect(codexStarts.map((s) => s.model)).toEqual(["m"]);
   });
 
   test("the timeout from the settings: a runner that does not answer is given up after timeoutMs, then the fallback judges", async () => {
     const hung: RunnerAdapter = { ...replayAdapter("codex", []), start: () => ({ send: () => undefined, respondPermission: () => undefined, abort: async () => undefined, close: async () => undefined, exited: new Promise<number | null>(() => undefined) }) };
-    const adapters = new Map<RunnerId, RunnerAdapter>([["codex", hung], ["claude", replayAdapter("claude", answer('{"result": "done", "reason": "x"}', "h"))]]);
+    const adapters = new Map<RunnerId, RunnerAdapter>([["codex", hung], ["claude", replayAdapter("claude", answer('{"result": "finished", "reason": "x"}', "h"))]]);
     const t0 = Date.now();
     const out = await judgeTurn(INPUT, { adapters, settings: SETTINGS, cwd: "/tmp/h", timeoutMs: 50 });
     expect(out).toMatchObject({ runner: "claude", model: JUDGE_FALLBACK.model });
@@ -122,13 +122,13 @@ describe("judgeTurn settings tunables", () => {
 
 describe("parseJudgement", () => {
   test("reads the answer after prose, inside a fence, and past the echoed format line", () => {
-    expect(parseJudgement('判定します。\n{"result": "done", "reason": "報告している"}')).toEqual({ result: "done", reason: "報告している" });
+    expect(parseJudgement('判定します。\n{"result": "finished", "reason": "報告している"}')).toEqual({ result: "finished", reason: "報告している" });
     expect(parseJudgement('```json\n{"result": "needs_action", "reason": "  確認を\\n求めている "}\n```')).toEqual({ result: "needs_action", reason: "確認を 求めている" });
-    expect(parseJudgement('形式: {"result": "done|needs_action", "reason": "…"}\n{"result": "done", "reason": ""}')).toEqual({ result: "done", reason: "（理由なし）" });
+    expect(parseJudgement('形式: {"result": "finished|needs_action", "reason": "…"}\n{"result": "finished", "reason": ""}')).toEqual({ result: "finished", reason: "（理由なし）" });
   });
 
   test("a reason longer than asked is cut at 200 characters", () => {
-    expect(parseJudgement(`{"result": "done", "reason": "${"ゑ".repeat(500)}"}`).reason).toHaveLength(200);
+    expect(parseJudgement(`{"result": "finished", "reason": "${"ゑ".repeat(500)}"}`).reason).toHaveLength(200);
   });
 
   test("a result outside done / needs_action, or no JSON at all, throws", () => {
@@ -142,6 +142,6 @@ describe("buildJudgePrompt", () => {
     const p = buildJudgePrompt({ title: "t", prompt: "ゑ".repeat(5000), lastReply: "ゐ".repeat(5000) });
     expect(p.match(/ゑ+/)![0].length).toBe(1200);
     expect(p.match(/ゐ+/)![0].length).toBe(2000);
-    expect(p).toContain('{"result": "done|needs_action"');
+    expect(p).toContain('{"result": "finished|needs_action"');
   });
 });

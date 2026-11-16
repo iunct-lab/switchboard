@@ -16,7 +16,7 @@ const REPOSITORY_SPECIFIC = /bun test|bun run|packages\/|apps\/|\bsb\/|feedback-
 
 test("skills: the shared skills carry no command or path of one repository", () => {
   const names = readdirSync(skills);
-  expect(names.length).toBe(10);
+  expect(names.length).toBe(11);
   const hits: string[] = [];
   for (const name of names) {
     readFileSync(join(skills, name, "SKILL.md"), "utf8")
@@ -720,4 +720,24 @@ test("task-to-pr / pbi-complete: a failure that also fails on the base goes to a
   for (const word of ["要望", "P1 以上の PBI", "登録に期限つきで足す PR", "承認を利用者に求めない", "base に登録を届かせてから", "ローカル CI を頼み直す"]) expect(paragraph).toContain(word);
   const complete = readFileSync(join(skills, "pbi-complete", "SKILL.md"), "utf8");
   expect(complete).toContain("`task-to-pr` の「ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら」の項に従う（承認は求めない）");
+});
+
+test("skills: doc-to-slides keeps the user's rules and its template keeps the phone reading mode, notes and print", () => {
+  const text = readFileSync(join(skills, "doc-to-slides", "SKILL.md"), "utf8");
+  for (const word of ["**構成**", "**余計なことを書かない**", "**文章量**", "**決めていないことを決めない**", "**スマホで見られる**", "**資料側の決まりを当てる**", "template.html", "?read=1", "1280x720"]) expect({ word, says: text.includes(word) }).toEqual({ word, says: true });
+  const html = readFileSync(join(skills, "doc-to-slides", "template.html"), "utf8");
+  for (const part of ["#deck{width:1280px;height:720px;position:relative;transform-origin:center center;flex:none}", "body.read .slide{", "q.has('read')", "data-notes=", "requestFullscreen", "touchend", "@media print", "break-after:page", "beforeprint"]) expect({ part, has: html.includes(part) }).toEqual({ part, has: true });
+  expect(html).toContain("#hud,#bar,#notes,#help,#mode{display:none!important}"); // the mode button does not print
+  expect(html).not.toContain("localStorage"); // the mode follows the screen or ?read=, not a value saved by an earlier deck
+  expect(html).not.toMatch(/base64,[A-Za-z0-9+/=]{100,}/); // no image of the talk the template was taken from
+});
+
+test("pbi-complete: resuming recreates the PBI worktree with step 3's worktree add when the cleanup removed it", () => {
+  const text = readFileSync(join(skills, "pbi-complete", "SKILL.md"), "utf8");
+  const heading = "## 途中で止まったとき（再開）";
+  const start = text.indexOf(heading);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const next = text.indexOf("\n## ", start + heading.length);
+  const section = text.slice(start, next < 0 ? undefined : next);
+  expect(section).toContain("git worktree add --detach <PBI の worktree> origin/main");
 });

@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
-import { dependsResumePrompt, dependsWaits, jobResumePrompt, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { answeredFromRecords, decisionIssueWaits, dependsResumePrompt, dependsWaits, jobResumePrompt, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { blockersOf } from "./asks.ts";
-import { reduceStops, type StopReport } from "./stops.ts";
+import { lastStopMark, reduceStops, type StopReport } from "./stops.ts";
 import { TaskManager } from "./tasks.ts";
 
 // A Task that stopped on another session's work is resumed when that work closes: which stops wait on what.
@@ -198,6 +198,53 @@ describe("resumeDepends", () => {
     expect(s).toMatchObject({ state: "resolved", reason: "depends", conditions: [{ key: "pr#12", met: true }, { key: "issue#34", met: true }] });
     expect(s.actions.at(-1)).toMatchObject({ what: "待ちが片づいた: pr#12, issue#34", ok: true });
     expect(s.answer).toBeNull(); // the daemon's turn is no answer of the person's
+  });
+
+  test("an issue answered meets the condition of a decision stop", async () => {
+    const ASK = { ...WAIT, id: "ask", op: "ask", target: "", reason: "decision" as const, conditions: [{ key: "issue#34", value: "## 回答", met: false }] };
+    const comment = (id: string, body: string, ms: number) => rec({ objectKind: "comment", externalId: id, remote: { issue: 34, body, createdAt: new Date(ms).toISOString() } });
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app" });
+    await settle();
+    expect(tasks.recordStop(t.id, ASK).ok).toBe(true);
+    const asked = stopOf(t.id, "ask").at;
+    const open = () => stopOf(t.id, "ask");
+    // no answer, or one written before the stop: still not met
+    store([issue(34, "OPEN", [])]);
+    expect(await resume()).toEqual([]);
+    store([issue(34, "OPEN", []), comment("C_1", "## 回答\n\nA", asked - 60_000), comment("C_2", "進めます", asked + 60_000)]);
+    expect(await resume()).toEqual([]);
+    expect(open().conditions[0]!.met).toBe(false);
+    // an answer after the stop: met, still waiting, nothing sent
+    store([issue(34, "OPEN", []), comment("C_3", "## 回答\n\nB", asked + 60_000)]);
+    expect(await resume()).toEqual([]);
+    expect(open()).toMatchObject({ state: "waiting", reason: "decision", conditions: [{ key: "issue#34", met: true }] });
+    expect(open().actions.at(-1)).toMatchObject({ what: "回答か Issue の終わりを見た: issue#34", ok: true });
+    await settle();
+    expect(sends).toEqual([]);
+    // the Task reports the same stop again, not met: the next import meets it again, with the first report's time
+    expect(tasks.recordStop(t.id, ASK).ok).toBe(true);
+    expect(open().conditions[0]!.met).toBe(false);
+    expect(decisionIssueWaits(db.listStopRecords([t.id]))[0]!.since).toBe(asked);
+    expect(await resume()).toEqual([]);
+    expect(open().conditions[0]!.met).toBe(true);
+    // read as answered: the person is not asked again (not decide), and the Task's mark carries the answer
+    expect(reduceStops(db.listStopRecords([t.id]))[0]).toMatchObject({ next: "wait", answered: true });
+    expect(lastStopMark(db.listStopRecords([t.id]))!.answered).toBe(true);
+    // the runner writing met itself is not an answer the daemon saw: still the person's to decide
+    const self = { ...open(), conditions: [{ key: "issue#34", value: "## 回答", met: true }], actions: [] };
+    expect(reduceStops([self])[0]).toMatchObject({ next: "decide", answered: false });
+    // the same id asked again after it resolved: counted from the new question, not the first one
+    const own = open();
+    const asks = [{ ...own, at: 1, conditions: ASK.conditions }, { ...own, at: 2, state: "resolved" as const }, { ...own, at: 3, conditions: ASK.conditions }];
+    expect(decisionIssueWaits(asks)[0]!.since).toBe(3);
+    // closing the Issue is enough
+    expect(tasks.recordStop(t.id, ASK).ok).toBe(true);
+    store([issue(34, "CLOSED", [])]);
+    expect(await resume()).toEqual([]);
+    expect(open()).toMatchObject({ state: "waiting", conditions: [{ key: "issue#34", met: true }] });
+    expect(sends).toEqual([]);
+    // an Issue not read gives no answer
+    expect(answeredFromRecords([{ ...issue(34, "CLOSED", []), fetchState: "unavailable" } as BacklogRecord])(34, 0)).toBe(false);
   });
 
   describe("after", () => {

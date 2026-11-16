@@ -1,4 +1,5 @@
 import type { EvalContext, EvalsListRow, EvalsSummary, HumanAnswers, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
+import { outcomeIsDerived } from "./attention.ts";
 import { effortLabel } from "./effortOptions.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
@@ -89,7 +90,7 @@ export function humanLabel(e: TaskEvals): string | null {
 }
 
 /**
- * The short mark of the three answers for a table cell or beside the Brief's rating: `意図○ 余分なし 価値?`: an answer not given is left
+ * The short mark of the four answers for a table cell or beside the Brief's rating: `意図○ 作り込みなし 代案あり 使用?`: an answer not given is left
  * out of the mark, and it is "" when none is given. Words, not lone symbols, so a narrow column wraps between them instead of stacking one character wide.
  */
 export function humanAnswerMark(h: HumanAnswers | null | undefined): string {
@@ -98,7 +99,8 @@ export function humanAnswerMark(h: HumanAnswers | null | undefined): string {
   const value = { used: "○", unused: "×", unknown: "?" } as const;
   return [
     h.intent ? t(m.markIntent, { mark: intent[h.intent] }) : "",
-    h.extra ? t(h.extra === "none" ? m.markExtraNone : m.markExtraSome) : "",
+    h.complexity ? t({ none: m.markComplexityNone, some: m.markComplexitySome, unknown: m.markComplexityUnknown }[h.complexity]) : "",
+    h.detour ? t({ none: m.markDetourNone, some: m.markDetourSome, unknown: m.markDetourUnknown }[h.detour]) : "",
     h.value ? t(m.markValue, { mark: value[h.value] }) : "",
   ].filter(Boolean).join(" ");
 }
@@ -108,7 +110,8 @@ export function gapLabel(gap: EvalsSummary["gap"]): string {
   if (!gap.count || gap.mean === null) return t(m.noHumanRating);
   const sign = gap.mean > 0 ? "+" : gap.mean < 0 ? "−" : "";
   const line = t(m.gap, { gap: `${sign}${Math.abs(gap.mean).toFixed(1)}`, count: gap.count });
-  return gap.intent.count && gap.intent.mean !== null ? `${line} ／ ${t(m.gapIntent, { count: gap.intent.count, mean: gap.intent.mean.toFixed(1) })}` : line;
+  const parts = ([[gap.intent, m.gapIntent], [gap.minimal, m.gapMinimal], [gap.value, m.gapValue]] as const).flatMap(([g, msg]) => (g.count && g.mean !== null ? [t(msg, { count: g.count, mean: g.mean.toFixed(1) })] : []));
+  return [line, ...parts].join(" ／ ");
 }
 
 /** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */
@@ -196,6 +199,14 @@ export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; eff
   };
 }
 
+/**
+ * Whether the row's judge result differs from the outcome a person can set: the Evals list's only comparison of the two.
+ * A Task whose outcome its status decides (waiting / error / aborted) is not compared — the judge read an earlier reply, and nobody set that outcome by hand.
+ */
+export function judgedDiffers(row: EvalsListRow): boolean {
+  return row.judgedResult !== null && !outcomeIsDerived(row.status) && row.judgedResult !== row.outcome;
+}
+
 /** Whether a row points at trouble: a failure, an error or a stop, a low rubric average, or a low rating. A daemon stop is not the task's weakness and does not count (#2089). */
 export function evalRowWarn(row: EvalsListRow): boolean {
   const r = row.rules;
@@ -235,9 +246,10 @@ export function contextLines(ctx: EvalContext): ContextLine[] {
 
 type HumanQuestion<K extends keyof HumanAnswers> = { key: K; question: string; options: Array<{ value: NonNullable<HumanAnswers[K]>; label: string }> };
 
-/** The three value questions: the key of `HumanAnswers`, its wording and its choices (the value the daemon stores, the label shown). */
-export const HUMAN_QUESTIONS: Array<HumanQuestion<"intent"> | HumanQuestion<"extra"> | HumanQuestion<"value">> = [
+/** The four value questions, one matter each: the key of `HumanAnswers`, its wording and its choices (the value the daemon stores, the label shown). */
+export const HUMAN_QUESTIONS: Array<HumanQuestion<"intent"> | HumanQuestion<"complexity"> | HumanQuestion<"detour"> | HumanQuestion<"value">> = [
   { key: "intent", question: t(m.qIntent), options: [{ value: "fit", label: t(m.aIntentFit) }, { value: "partial", label: t(m.aIntentPartial) }, { value: "wrong", label: t(m.aIntentWrong) }, { value: "unknown", label: t(m.aUnknown) }] },
-  { key: "extra", question: t(m.qExtra), options: [{ value: "none", label: t(m.aExtraNone) }, { value: "some", label: t(m.aExtraSome) }] },
+  { key: "complexity", question: t(m.qComplexity), options: [{ value: "none", label: t(m.aComplexityNone) }, { value: "some", label: t(m.aComplexitySome) }, { value: "unknown", label: t(m.aUnknown) }] },
+  { key: "detour", question: t(m.qDetour), options: [{ value: "none", label: t(m.aDetourNone) }, { value: "some", label: t(m.aDetourSome) }, { value: "unknown", label: t(m.aUnknown) }] },
   { key: "value", question: t(m.qValue), options: [{ value: "used", label: t(m.aValueUsed) }, { value: "unused", label: t(m.aValueUnused) }, { value: "unknown", label: t(m.aValueUnknown) }] },
 ];

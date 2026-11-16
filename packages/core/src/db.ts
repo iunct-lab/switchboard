@@ -5,11 +5,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
-import type { AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
+import type { StoredOutcome, AgentEvent, AskAnswerResult, Artifact, Attachment, BacklogAction, Provenance, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource, CheckRun, CreatedIssue, EvalSource, EvalsListRow, EventEnvelope, HistorySession, Job, JobKind, JobStatus, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerRow, LedgerSummary, LedgerTaskRow, LlmSuggestion, LoadKind, Journey, PerfSample, PerfSummaryRow, ReportRow, RoutingLogRow, RoutingStats, RunnerId, RunnerStats, Schedule, StagedChange, StopRecord, Task, TaskDiffFile, TaskDiffSnapshot, TaskEvals, TaskOrigin, TaskOutcome, TaskStatus, Workspace, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
 import { teleportWorktreePath } from "./config.ts";
 import { RULES_BY, delegatedNote } from "./evals.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
-import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, outcomeOnStatus, type WorkPurpose, workingSql } from "./task-status.ts";
+import { canTransition, IN_FLIGHT, InvalidTaskOutcomeError, InvalidTaskTransitionError, OUTCOME_SQL, outcomeOf, outcomeOnStatus, STORED_OUTCOMES, type WorkPurpose, workingSql } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 import type { ReportedTotal } from "./pricing.ts";
 
@@ -1432,6 +1432,9 @@ export class Db {
   insertTask(t: Task): Task {
     // A row is never inserted waiting for a run slot: the wait is written only by setQueued / takeQueued, with its prompt
     t = { ...t, queuedAt: null };
+    // the column keeps only what the status does not decide: the outcome a Task shows is derived from it, so a derived one is not written
+    const storedOutcome = STORED_OUTCOMES[t.status].has(t.outcome as StoredOutcome) ? (t.outcome as StoredOutcome) : "unknown";
+    if (storedOutcome === "unknown" && t.outcome !== "unknown" && t.outcome !== outcomeOf(t.status, "unknown")) throw new InvalidTaskOutcomeError(t.id, t.status, t.outcome);
     if (t.cloudSession) CloudSessionRef.parse(t.cloudSession);
     this.validateCloudSource(t);
     this.sqlite.transaction(() => {
@@ -1440,7 +1443,7 @@ export class Db {
           `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, fork_of, fork_seq, fork_turn, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending, machine)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, t.outcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, storedOutcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -1500,7 +1503,7 @@ export class Db {
   routingLog(limit = 200): RoutingLogRow[] {
     return this.sqlite
       .query(
-        `SELECT r.task_id AS taskId, t.title AS title, r.suggested, r.rule_id AS ruleId, r.reason, r.chosen, r.suggested_by AS suggestedBy, t.status, t.outcome,
+        `SELECT r.task_id AS taskId, t.title AS title, r.suggested, r.rule_id AS ruleId, r.reason, r.chosen, r.suggested_by AS suggestedBy, t.status, ${OUTCOME_SQL} AS outcome,
                 ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs, r.ts
          FROM routing_log r JOIN tasks t ON t.id = r.task_id ORDER BY r.ts DESC, r.id DESC LIMIT ?`,
       )
@@ -1539,14 +1542,14 @@ export class Db {
   private runnerStats(since: number): RunnerStats[] {
     const rows = this.sqlite
       .query(
-        `SELECT r.chosen AS runner, t.outcome, ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs
+        `SELECT r.chosen AS runner, ${OUTCOME_SQL} AS outcome, ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs
          FROM routing_log r JOIN tasks t ON t.id = r.task_id WHERE r.suggested_by = 'rule' AND r.ts >= ?`,
       )
       .all(since) as Array<{ runner: RunnerId; outcome: TaskOutcome; costUsd: number; durationMs: number }>;
     const by = new Map<RunnerId, { outcomes: RunnerStats["outcomes"]; costs: number[]; durations: number[] }>();
     for (const r of rows) {
       let acc = by.get(r.runner);
-      if (!acc) by.set(r.runner, (acc = { outcomes: { done: 0, needs_action: 0, failed: 0, unknown: 0 }, costs: [], durations: [] }));
+      if (!acc) by.set(r.runner, (acc = { outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 0 }, costs: [], durations: [] }));
       // a value this version does not know (a newer daemon's) still counts, as not yet judged
       acc.outcomes[Object.hasOwn(acc.outcomes, r.outcome) ? r.outcome : "unknown"] += 1;
       acc.costs.push(r.costUsd);
@@ -1604,13 +1607,15 @@ export class Db {
    * an `outcome` in the patch sets the outcome by rule (`outcomeOnStatus` in task-status.ts) — the one place the rule lives. A status the table (`TASK_TRANSITIONS`) does
    * does not allow is not stored: it throws `InvalidTaskTransitionError`.
    */
-  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "deferredPrompt" | "shadowStopped" | "scope" | "outcome" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">>): Task | null {
+  updateTask(id: string, patch: Partial<Pick<Task, "sourceCloudTaskId" | "cloudSession" | "status" | "runnerSessionId" | "model" | "title" | "titlePending" | "budgetUsd" | "permissionMode" | "effort" | "resumeAt" | "resumeReason" | "resumeWindow" | "resumeSince" | "resumePlannedAt" | "deferredPrompt" | "shadowStopped" | "scope" | "reviewedAt" | "archivedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt" | "updatedAt">> & { outcome?: StoredOutcome }): Task | null {
     if (patch.cloudSession) CloudSessionRef.parse(patch.cloudSession);
     const cur = this.getTask(id);
     if (!cur) return null;
+    // the column holds what is stored; `cur.outcome` is the derived one
+    const storedBefore = (this.sqlite.query("SELECT outcome FROM tasks WHERE id = ?").get(id) as { outcome: StoredOutcome }).outcome;
     const moves = patch.status !== undefined && patch.status !== cur.status;
     if (moves && !canTransition(cur.status, patch.status!)) throw new InvalidTaskTransitionError(id, cur.status, patch.status!);
-    const rule = moves && patch.outcome === undefined ? outcomeOnStatus(patch.status!, cur.executionMode) : {};
+    const rule = moves && patch.outcome === undefined ? outcomeOnStatus(patch.status!, cur.executionMode, cur.status) : {};
     const updatedAt = patch.updatedAt ?? Date.now();
     // statusAt moves only when the status does: a title, outcome or 確認済み change keeps when the task came to it
     // a new turn shows the Task again: only a stopped one stays archived
@@ -1618,11 +1623,15 @@ export class Db {
     // The wait for a run slot is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt too),
     // so a Task started some other way does not come back into the queue when it is idle again
     const queuedAt = moves && patch.status !== "idle" ? null : cur.queuedAt;
-    const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt };
+    const status = patch.status ?? cur.status;
+    const stored: StoredOutcome = patch.outcome ?? rule.outcome ?? storedBefore;
+    // only a pair of the table (STORED_OUTCOMES) is stored; a row the patch leaves alone is not judged here
+    if ((patch.status !== undefined || patch.outcome !== undefined) && !STORED_OUTCOMES[status].has(stored)) throw new InvalidTaskOutcomeError(id, status, stored);
+    const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt, outcome: outcomeOf(status, stored) };
     this.validateCloudSource(next, cur);
     this.sqlite
       .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, deferred_prompt = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.deferredPrompt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), next.outcome, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.deferredPrompt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), stored, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 
@@ -1951,7 +1960,7 @@ export class Db {
   evalsList(q: { workspaceId?: string; runner?: RunnerId; judgedFrom?: number; judgedTo?: number; rated?: boolean; limit: number }): EvalsListRow[] {
     const rows = this.sqlite
       .query(
-        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, t.outcome AS outcome, t.updated_at AS updatedAt, t.subagent_effort AS subagentEffort,
+        `SELECT t.id AS taskId, t.title AS title, t.runner AS runner, t.workspace_id AS workspaceId, t.status AS status, ${OUTCOME_SQL} AS outcome, t.judged_result AS judgedResult, t.updated_at AS updatedAt, t.subagent_effort AS subagentEffort,
                 (SELECT COALESCE(SUM(cost_usd), 0) FROM ledger WHERE task_id = t.id) AS costUsd,
                 r.json AS rulesJson, r.by AS rulesBy, j.json AS judgeJson, j.ts AS judgeTs, h.json AS humanJson
          FROM tasks t
@@ -1962,7 +1971,7 @@ export class Db {
            AND (? IS NULL OR j.ts >= ?) AND (? IS NULL OR j.ts < ?) AND (? = 0 OR h.task_id IS NOT NULL)
          ORDER BY t.updated_at DESC LIMIT ?`,
       )
-      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; updatedAt: number; subagentEffort: string | null; costUsd: number; rulesJson: string | null; rulesBy: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
+      .all(q.workspaceId ?? null, q.workspaceId ?? null, q.runner ?? null, q.runner ?? null, q.judgedFrom ?? null, q.judgedFrom ?? null, q.judgedTo ?? null, q.judgedTo ?? null, q.rated ? 1 : 0, q.limit) as Array<{ taskId: string; title: string; runner: RunnerId; workspaceId: string | null; status: TaskStatus; outcome: TaskOutcome; judgedResult: Task["judgedResult"]; updatedAt: number; subagentEffort: string | null; costUsd: number; rulesJson: string | null; rulesBy: string | null; judgeJson: string | null; judgeTs: number | null; humanJson: string | null }>;
     const parse = <T>(json: string | null, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): T | null => {
       if (!json) return null;
       try {
@@ -1980,11 +1989,11 @@ export class Db {
       const scores = judge ? Object.fromEntries(Object.entries(judge.scores).map(([k, v]) => [k, v.score])) : {};
       const values = Object.values(scores);
       return {
-        taskId: r.taskId, title: r.title, runner: r.runner, workspaceId: r.workspaceId, status: r.status, outcome: r.outcome, updatedAt: r.updatedAt, costUsd: r.costUsd,
+        taskId: r.taskId, title: r.title, runner: r.runner, workspaceId: r.workspaceId, status: r.status, outcome: r.outcome, judgedResult: r.judgedResult, updatedAt: r.updatedAt, costUsd: r.costUsd,
         models: starts.get(r.taskId)?.models ?? [], efforts: starts.get(r.taskId)?.efforts ?? [], subagentEffort: r.subagentEffort,
         rules: rules ? { toolCalls: rules.metrics.toolCalls, toolFailures: rules.metrics.toolFailures, errors: rules.metrics.errors, userInstructions: rules.metrics.userInstructions, stops: rules.metrics.stops, lastEnd: rules.metrics.lastEnd, daemonStops: rules.metrics.daemonStops, lastCutByDaemon: rules.metrics.lastCutByDaemon } : null,
         judge: judge && values.length ? { average: Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10, scores, rubric: judge.rubric, by: judge.by, ts: r.judgeTs ?? 0 } : null,
-        human: human ? { rating: human.rating, comment: human.comment, intent: human.intent, extra: human.extra, value: human.value } : null,
+        human: human ? { rating: human.rating, comment: human.comment, intent: human.intent, complexity: human.complexity, detour: human.detour, value: human.value } : null,
       };
     });
   }
@@ -2517,6 +2526,19 @@ function migrate(db: Database) {
       db.exec("PRAGMA user_version = 5");
     })();
   }
+  // The person's answer `extra` ("unasked complexity or an alternative?") asked two things at once and split into
+  // `complexity` and `detour`: "none" said neither happened, so it becomes both "none"; "some" cannot tell which, so it goes.
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 6) {
+    db.transaction(() => {
+      const rows = db.query("SELECT task_id AS taskId, json FROM task_evals WHERE source = 'human' AND json_extract(json, '$.extra') IS NOT NULL").all() as Array<{ taskId: string; json: string }>;
+      const set = db.query("UPDATE task_evals SET json = ? WHERE task_id = ? AND source = 'human'");
+      for (const r of rows) {
+        const { extra, ...rest } = safeJson<Record<string, unknown>>(r.json, {});
+        set.run(JSON.stringify(extra === "none" ? { ...rest, complexity: "none", detour: "none" } : rest), r.taskId);
+      }
+      db.exec("PRAGMA user_version = 6");
+    })();
+  }
   if (!cols.has("shadow_stopped")) db.exec("ALTER TABLE tasks ADD COLUMN shadow_stopped INTEGER NOT NULL DEFAULT 0");
   if (!cols.has("workspace_reason")) db.exec("ALTER TABLE tasks ADD COLUMN workspace_reason TEXT");
   if (!cols.has("outcome")) db.exec("ALTER TABLE tasks ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown'");
@@ -2546,6 +2568,12 @@ function migrate(db: Database) {
   if (!cols.has("judged_reason")) db.exec("ALTER TABLE tasks ADD COLUMN judged_reason TEXT");
   if (!cols.has("judged_by")) db.exec("ALTER TABLE tasks ADD COLUMN judged_by TEXT");
   if (!cols.has("judging_at")) db.exec("ALTER TABLE tasks ADD COLUMN judging_at INTEGER");
+  // the outcome `done` was renamed `finished` so no outcome shares a name with the status `done`; rows from before are rewritten (a no-op once none is left)
+  db.exec("UPDATE tasks SET outcome = 'finished' WHERE outcome = 'done'");
+  db.exec("UPDATE tasks SET judged_result = 'finished' WHERE judged_result = 'done'");
+  db.exec("UPDATE task_evals SET json = json_set(json, '$.outcome', 'finished') WHERE source = 'rules' AND json_extract(json, '$.outcome') = 'done'"); // the rules row keeps the task's outcome of its moment
+  // a waiting, error or aborted Task shows its outcome from its status, so the column keeps only what the status does not decide (docs/design/task-outcome.md); idempotent
+  db.exec("UPDATE tasks SET outcome = 'unknown' WHERE outcome = 'failed' OR (status IN ('waiting', 'error', 'aborted', 'running', 'idle') AND outcome <> 'unknown')");
   if (!cols.has("title_pending")) db.exec("ALTER TABLE tasks ADD COLUMN title_pending INTEGER NOT NULL DEFAULT 0"); // rows from before keep their title
   if (!cols.has("provenance")) db.exec("ALTER TABLE tasks ADD COLUMN provenance TEXT"); // docs/design/process-kernel.md K1: what the task was started with, JSON, written once
   // where a finished task's event bodies went (S3 key, when, how many rows); the rows stay, as skeletons.
@@ -2861,7 +2889,7 @@ function rowToTask(r: any): Task {
     forkTurn: r.fork_turn ?? null,
     shadowStopped: !!r.shadow_stopped,
     workspaceReason: r.workspace_reason ?? null,
-    outcome: (r.outcome ?? "unknown") as TaskOutcome,
+    outcome: outcomeOf(r.status, (r.outcome ?? "unknown") as StoredOutcome),
     reviewedAt: r.reviewed_at ?? null,
     archivedAt: r.archived_at ?? null,
     judgedResult: (r.judged_result ?? null) as Task["judgedResult"],

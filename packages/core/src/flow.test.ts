@@ -432,7 +432,7 @@ describe("flow view", () => {
       const ended = NOW - 2 * DAY;
       const { localId } = createStoredIssue(s.db, source, { title: "残した", body: "", labels: ["type:request"], milestone: null, parent: null, fields: null } as never, ended - 5);
       s.db.sqlite.run("UPDATE backlog_records SET local = json_set(local, '$.number', 7) WHERE external_id = ?", [`local:${localId}`]);
-      s.db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t', ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'done', 1, 1, 1)").run(w!.id);
+      s.db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES ('t', ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'finished', 1, 1, 1)").run(w!.id);
       s.db.appendEventAt("t", { t: "tool.call", id: "c", name: "Bash", input: { command: "ops-kit backlog create --title 残した" }, summary: "ops-kit" }, ended - 10);
       s.db.appendEventAt("t", { t: "tool.result", id: "c", ok: true, summary: `#7 を作りました（localId ${localId}）` }, ended - 1);
       s.db.appendEventAt("t", { t: "session.end", status: "ok", summary: "完了。別 Issue に残した: #7" }, ended);
@@ -657,7 +657,7 @@ describe("backlog net growth", () => {
     db.setWorkspaceBacklogSource(w.id, src);
     db.putBacklogSnapshot(src, { records: [], cursor: null, syncedAt: NOW });
     const task = (id: string, workspace: string, summary: string, endedAt: number) => {
-      db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'done', 1, 1, 1)").run(id, workspace);
+      db.sqlite.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/x', '[]', 'done', 'user', 0, 'finished', 1, 1, 1)").run(id, workspace);
       db.appendEventAt(id, { t: "tool.call", id: "c", name: "Bash", input: { command: "gh issue create --title x" }, summary: "gh" }, endedAt - 2);
       db.appendEventAt(id, { t: "tool.result", id: "c", ok: true, summary: "https://github.com/o/r/issues/9" }, endedAt - 1);
       db.appendEventAt(id, { t: "session.end", status: "ok", summary }, endedAt);

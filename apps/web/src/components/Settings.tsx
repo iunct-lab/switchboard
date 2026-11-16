@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
-import type { CustomRunner, AutoStartKind, Backlog, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace } from "@switchboard/protocol";
+import type { CustomRunner, AutoStartKind, Backlog, BacklogAllocation, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace, WorkspaceMode } from "@switchboard/protocol";
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { taskModelOptions } from "../modelOptions.ts";
@@ -20,6 +20,7 @@ import { Knowledge } from "./Knowledge.tsx";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
 import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
+import { allocationCells, parseShare, saveOrder, shareText } from "../allocation.ts";
 
 /** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
 const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo], ["adopt-repo", settings.kindAdoptRepo], ["baseline", settings.kindBaseline]];
@@ -611,14 +612,20 @@ async function logout(path: string, onError: (msg: string) => void) {
 /** backlog-next's slots of each workspace (#561, #2656): what each firing reads, so a save applies from the next one. */
 export function SweepSlots(props: { onError: (msg: string) => void }) {
   const [saved, setSaved] = useState<Workspace[] | null>(null);
-  const [draft, setDraft] = useState<Record<string, { implement: string; plan: string }>>({});
+  const [alloc, setAlloc] = useState<BacklogAllocation | null>(null);
+  const [draft, setDraft] = useState<Record<string, { implement: string; plan: string; share: string; mode: WorkspaceMode }>>({});
+  const [flowDraft, setFlowDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const show = (list: Workspace[]) => {
+  const show = (list: Workspace[], a: BacklogAllocation | null) => {
     setSaved(list);
-    setDraft(Object.fromEntries(list.map((w) => [w.id, { implement: String(w.sweep.implement), plan: String(w.sweep.plan) }])));
+    setAlloc(a);
+    setDraft(Object.fromEntries(list.map((w) => [w.id, { implement: String(w.sweep.implement), plan: String(w.sweep.plan), share: shareText(w.allocation.share), mode: w.allocation.mode }])));
+    if (a) setFlowDraft(shareText(a.flow.limit));
   };
+  // the actuals are read when the card opens and after each save, not on a timer
+  const load = () => Promise.all([api.workspaces(), api.backlogAllocation().catch(() => null)]).then(([list, a]) => show(list, a));
   useEffect(() => {
-    api.workspaces().then(show).catch((e) => props.onError(String(e.message ?? e)));
+    load().catch((e) => props.onError(String(e.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const save = async () => {
@@ -629,17 +636,33 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
       props.onError(t(settings.slotsInvalid, { name: bad.name, implement: draft[bad.id]!.implement, plan: draft[bad.id]!.plan }));
       return;
     }
+    const badShare = saved.find((w) => parseShare(draft[w.id]!.share) === "invalid");
+    if (badShare) {
+      props.onError(t(settings.allocShareInvalid, { name: badShare.name, value: draft[badShare.id]!.share }));
+      return;
+    }
+    const flow = parseShare(flowDraft);
+    if (alloc && (flow === "invalid" || flow === null)) {
+      props.onError(t(settings.allocFlowInvalid, { value: flowDraft }));
+      return;
+    }
     setBusy(true);
     try {
       for (const w of saved) {
-        const v = { implement: Number(draft[w.id]!.implement), plan: Number(draft[w.id]!.plan) };
+        const d = draft[w.id]!;
+        const v = { implement: Number(d.implement), plan: Number(d.plan) };
         if (v.implement !== w.sweep.implement || v.plan !== w.sweep.plan) await api.setWorkspaceSweep(w.id, v);
       }
+      const changed = saved
+        .map((w) => ({ w, from: w.allocation.share, to: parseShare(draft[w.id]!.share) as number | null, mode: draft[w.id]!.mode }))
+        .filter((c) => c.to !== c.from || c.mode !== c.w.allocation.mode);
+      for (const c of saveOrder(changed)) await api.setWorkspaceAllocation(c.w.id, { share: c.to, mode: c.mode });
+      if (alloc && typeof flow === "number" && flow !== alloc.flow.limit) await api.updateSettings({ quotaAndResume: { flowShareLimit: flow } });
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
     } finally {
       // what was saved, also when one of them failed
-      await api.workspaces().then(show).catch(() => undefined);
+      await load().catch(() => undefined);
       setBusy(false);
     }
   };
@@ -658,22 +681,60 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
       />
     </>
   );
+  const modeName: Record<WorkspaceMode, string> = { new: t(settings.allocModeNew), continuing: t(settings.allocModeContinuing), maintenance: t(settings.allocModeMaintenance) };
   return (
     <div className="backlog-sweep" style={{ gridColumn: "1 / -1" }}>
       {/* ui-strings: value "implement" "plan" — the slot's key */}
-      {saved?.map((w) => (
-        <div key={w.id} className="row" data-workspace={w.id} style={{ alignItems: "center", gap: 6 }}>
-          <span className="t">{w.name}</span>
-          {box(w, "implement", t(settings.slotImplement))}
-          {box(w, "plan", t(settings.slotPlan))}
+      {saved?.map((w) => {
+        const a = alloc?.workspaces.find((x) => x.workspaceId === w.id);
+        return (
+          <div key={w.id} className="row" data-workspace={w.id} style={{ alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span className="t">{w.name}</span>
+            {box(w, "implement", t(settings.slotImplement))}
+            {box(w, "plan", t(settings.slotPlan))}
+            <select aria-label={t(settings.allocModeLabel, { name: w.name })} value={draft[w.id]?.mode ?? "continuing"} onChange={(e) => setDraft((d) => ({ ...d, [w.id]: { ...d[w.id]!, mode: e.target.value as WorkspaceMode } }))}>
+              {(["new", "continuing", "maintenance"] as const).map((m) => (
+                <option key={m} value={m}>
+                  {modeName[m]}
+                </option>
+              ))}
+            </select>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span className="hint">{t(settings.allocShare)}</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                aria-label={t(settings.allocShareLabel, { name: w.name })}
+                value={draft[w.id]?.share ?? ""}
+                onChange={(e) => setDraft((d) => ({ ...d, [w.id]: { ...d[w.id]!, share: e.target.value } }))}
+                style={{ width: 56 }}
+              />
+            </span>
+            {a && (
+              <span className="hint">
+                {t(settings.allocActual)} {allocationCells(a).actual}
+              </span>
+            )}
+          </div>
+        );
+      })}
+      {alloc && (
+        <div className="row" data-flow-limit style={{ alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span className="t">{t(settings.allocFlow)}</span>
+          <input type="text" inputMode="decimal" aria-label={t(settings.allocFlowLabel)} value={flowDraft} onChange={(e) => setFlowDraft(e.target.value)} style={{ width: 56 }} />
+          <span className="hint">
+            {t(settings.allocActual)} {Math.round(alloc.flow.actual * 100)}%
+          </span>
+          <span className="hint">{t(settings.allocFlowHint)}</span>
         </div>
-      ))}
+      )}
       <div className="row" style={{ alignItems: "center", gap: 6 }}>
         <button className="ghost" disabled={busy || !saved} onClick={() => void save()}>
           {t(settings.save)}
         </button>
         <span className="hint">{t(settings.slotsHint)}</span>
       </div>
+      <div className="hint">{t(settings.allocHint)}</div>
     </div>
   );
 }

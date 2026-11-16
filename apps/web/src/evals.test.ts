@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { EvalContext, EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
-import { contextLines, endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, HUMAN_QUESTIONS, humanAnswerMark, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
+import { contextLines, endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, HUMAN_QUESTIONS, humanAnswerMark, humanLabel, judgeAverage, judgedDiffers, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
   metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, delegatedModel: null, ...over },
@@ -103,16 +103,17 @@ describe("humanAnswerMark", () => {
   test("empty without answers; each answer given as a short word; one left out is skipped", () => {
     expect(humanAnswerMark(null)).toBe("");
     expect(humanAnswerMark({})).toBe("");
-    expect(humanAnswerMark({ intent: "fit", extra: "none", value: "unknown" })).toBe("意図○ 余分なし 価値?");
-    expect(humanAnswerMark({ intent: "partial", extra: "some", value: "unused" })).toBe("意図△ 余分あり 価値×");
-    expect(humanAnswerMark({ intent: "wrong", value: "used" })).toBe("意図× 価値○");
-    expect(humanAnswerMark({ extra: "some" })).toBe("余分あり");
+    expect(humanAnswerMark({ intent: "fit", complexity: "none", detour: "some", value: "unknown" })).toBe("意図○ 作り込みなし 代案あり 使用?");
+    expect(humanAnswerMark({ intent: "partial", complexity: "some", detour: "none", value: "unused" })).toBe("意図△ 作り込みあり 代案なし 使用×");
+    expect(humanAnswerMark({ intent: "wrong", value: "used" })).toBe("意図× 使用○");
+    expect(humanAnswerMark({ complexity: "unknown", detour: "unknown" })).toBe("作り込み? 代案?");
+    expect(humanAnswerMark({ detour: "some" })).toBe("代案あり");
   });
 });
 
 describe("evals list rows (#1221)", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
-    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null,
+    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "finished", judgedResult: null, updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null,
     rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false }, judge: null, human: null, ...over,
   });
   const rows = [row("a", { updatedAt: 3, judge: { average: 4.2, scores: {}, rubric: "r@1", by: "x" } }), row("b", { updatedAt: 2, rules: null }), row("c", { updatedAt: 1, judge: { average: 2.0, scores: {}, rubric: "r@1", by: "x" }, rules: { toolCalls: 1, toolFailures: 2, errors: 0, userInstructions: 1, stops: 0, lastEnd: "error", daemonStops: 0, lastCutByDaemon: false } })];
@@ -123,6 +124,14 @@ describe("evals list rows (#1221)", () => {
     expect(sortEvalRows(rows, "toolFailures", "desc").map((r) => r.taskId)).toEqual(["c", "a", "b"]);
     expect(sortEvalRows(rows, "updatedAt", "desc").map((r) => r.taskId)).toEqual(["a", "b", "c"]);
     expect(sortEvalRows(rows, "human", "asc").map((r) => r.taskId)).toEqual(["a", "b", "c"]); // nobody rated: the order stays
+  });
+
+  test("judgedDiffers: marks a judge result that differs from the outcome, not one equal, missing, or beside an outcome the status decides", () => {
+    expect(judgedDiffers(row("x", { outcome: "needs_action", judgedResult: "finished" }))).toBe(true);
+    expect(judgedDiffers(row("x", { outcome: "finished", judgedResult: "finished" }))).toBe(false);
+    expect(judgedDiffers(row("x", { outcome: "finished", judgedResult: null }))).toBe(false);
+    expect(judgedDiffers(row("x", { status: "error", outcome: "failed", judgedResult: "finished" }))).toBe(false);
+    expect(judgedDiffers(row("x", { status: "waiting", outcome: "needs_action", judgedResult: "finished" }))).toBe(false);
   });
 
   test("evalRowWarn: daemon stops alone do not mark the row (#2089); they sort like the other counts", () => {
@@ -139,8 +148,8 @@ describe("evals list rows (#1221)", () => {
 
   test("evalCells human: the rating alone without answers, the rating with the mark after it with some", () => {
     expect(evalCells(row("p", { human: { rating: 4, comment: "" } })).human).toBe("4 / 5");
-    expect(evalCells(row("q", { human: { rating: 4, comment: "", intent: "fit", extra: "none", value: "unknown" } })).human).toBe("4 / 5 意図○ 余分なし 価値?");
-    expect(evalCells(row("r", { human: { rating: 2, comment: "", value: "unused" } })).human).toBe("2 / 5 価値×");
+    expect(evalCells(row("q", { human: { rating: 4, comment: "", intent: "fit", complexity: "none", detour: "none", value: "unknown" } })).human).toBe("4 / 5 意図○ 作り込みなし 代案なし 使用?");
+    expect(evalCells(row("r", { human: { rating: 2, comment: "", value: "unused" } })).human).toBe("2 / 5 使用×");
     expect(evalCells(row("s")).human).toBe("-");
   });
   test("evalCells and evalRowWarn", () => {
@@ -189,7 +198,7 @@ describe("evals list rows (#1221)", () => {
 
 describe("subagentEffort on the Evals list (#3866)", () => {
   const sub = (taskId: string, subagentEffort: string | null): EvalsListRow => ({
-    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "done", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort,
+    taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "finished", judgedResult: null, updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort,
     rules: null, judge: null, human: null,
   });
   test("subagentEffort: the cell, the filter (- = not set) and the options", () => {
@@ -205,13 +214,17 @@ describe("subagentEffort on the Evals list (#3866)", () => {
 });
 
 describe("gapLabel (#1877)", () => {
+  const none = { count: 0, mean: null };
   test("none rated → the line says so; otherwise the signed mean to one decimal and the count", () => {
-    expect(gapLabel({ count: 0, mean: null, intent: { count: 0, mean: null } })).toBe("人の評価がまだありません");
-    expect(gapLabel({ count: 12, mean: 0.4, intent: { count: 0, mean: null } })).toBe("人 − 判定: +0.4（12 件）");
-    expect(gapLabel({ count: 2, mean: -2.1, intent: { count: 0, mean: null } })).toBe("人 − 判定: −2.1（2 件）");
-    expect(gapLabel({ count: 1, mean: 0, intent: { count: 0, mean: null } })).toBe("人 − 判定: 0.0（1 件）");
-    expect(gapLabel({ count: 3, mean: 1, intent: { count: 0, mean: null } })).toBe("人 − 判定: +1.0（3 件）");
-    expect(gapLabel({ count: 3, mean: 1, intent: { count: 2, mean: 3.5 } })).toBe("人 − 判定: +1.0（3 件） ／ 意図がずれた 2 件の判定の意図: 3.5");
+    expect(gapLabel({ count: 0, mean: null, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人の評価がまだありません");
+    expect(gapLabel({ count: 12, mean: 0.4, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人 − 判定: +0.4（12 件）");
+    expect(gapLabel({ count: 2, mean: -2.1, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人 − 判定: −2.1（2 件）");
+    expect(gapLabel({ count: 1, mean: 0, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人 − 判定: 0.0（1 件）");
+    expect(gapLabel({ count: 3, mean: 1, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人 − 判定: +1.0（3 件）");
+    expect(gapLabel({ count: 3, mean: 1, intent: { count: 2, mean: 3.5 }, minimal: none, value: none })).toBe("人 − 判定: +1.0（3 件） ／ 意図がずれた 2 件の判定の意図: 3.5");
+  });
+  test("the judge's minimal and value where the person said it added, detoured or went unused follow the intent part", () => {
+    expect(gapLabel({ count: 3, mean: -1, intent: none, minimal: { count: 2, mean: 4.5 }, value: { count: 1, mean: 4 } })).toBe("人 − 判定: −1.0（3 件） ／ 作り込み・代案ありの 2 件の判定の最小性: 4.5 ／ 使われていない 1 件の判定の価値: 4.0");
   });
 });
 
@@ -220,7 +233,7 @@ describe("in English (#2449)", () => {
   test("the Brief's eval rows, the ledger's and Insights' helpers read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
     const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
-const { metricRows, fmtDuration, gapLabel, modelsLabel, endLabel } = await import(${at("./evals.ts")});
+const { metricRows, fmtDuration, gapLabel, modelsLabel, endLabel, HUMAN_QUESTIONS } = await import(${at("./evals.ts")});
 const { reasonLabel, stopsTable, taskLoadLine, topGroups } = await import(${at("./ops.ts")});
 const { windowLabel, quotaAsOf } = await import(${at("./quota.ts")});
 const { countLabel, fmtMedianDuration } = await import(${at("./runnerStats.ts")});
@@ -230,7 +243,7 @@ console.log(JSON.stringify([
   rows.find((r) => r.label === "Stops")?.value,
   rows.map((r) => r.label).slice(0, 3),
   fmtDuration(3_725_000),
-  gapLabel({ count: 1, mean: 0.5, intent: { count: 2, mean: 3.5 } }),
+  gapLabel({ count: 1, mean: 0.5, intent: { count: 2, mean: 3.5 }, minimal: { count: 0, mean: null }, value: { count: 1, mean: 4 } }),
   modelsLabel({ models: ["a", "b"] }),
   endLabel("aborted"),
   reasonLabel.promote,
@@ -242,6 +255,7 @@ console.log(JSON.stringify([
   countLabel({ thin: true, total: 1 }),
   fmtMedianDuration(120_000),
   kindLabel({ kind: "dir", mime: "" }),
+  HUMAN_QUESTIONS.map((q) => q.question),
 ]));`;
     const r = Bun.spawnSync([process.execPath, "-e", code]);
     expect(r.stderr.toString()).toBe("");
@@ -249,7 +263,7 @@ console.log(JSON.stringify([
       "2 (limit 2)",
       ["Tool calls", "Failures", "Errors"],
       "1 h 2 min",
-      "Person − judge: +0.5 (count: 1) ／ Judge intent where it was missed (2): 3.5",
+      "Person − judge: +0.5 (count: 1) ／ Judge intent where it was missed (2): 3.5 ／ Judge value where outputs were not used (1): 4.0",
       "a → b (mixed)",
       "Aborted",
       "Promotion",
@@ -261,6 +275,7 @@ console.log(JSON.stringify([
       "Too few records to compare (count: 1)",
       "2 min",
       "Folder",
+      ["Did it fit the intent of the request?", "Did it add features, settings or layers you did not ask for?", "Did it propose or build an alternative that leads to no value?", "Were its outputs used? (merged, adopted, next stage)"],
     ]);
   });
 });
@@ -292,7 +307,15 @@ describe("contextLines", () => {
     const lines = contextLines({ ...base, request: { kind: "stage", pbi: null, source: null }, outputs: [{ kind: "pr", repo: "r", number: 4, title: null, state: "closed" }] });
     expect(lines.map((l) => [l.label, l.text])).toEqual([["解釈（PBI）", "PBI なし"], ["成果", "PR #4 閉じた"], ["利用者の介入", "追加指示 0 · 判断待ち 0"]]);
   });
-  test("the three questions keep the values the daemon accepts", () => {
-    expect(HUMAN_QUESTIONS.map((q) => [q.key, q.options.map((o) => o.value)])).toEqual([["intent", ["fit", "partial", "wrong", "unknown"]], ["extra", ["none", "some"]], ["value", ["used", "unused", "unknown"]]]);
+  test("each question asks one matter and its choices answer it", () => {
+    expect(HUMAN_QUESTIONS.map((q) => [q.question, q.options.map((o) => o.label).join("/")])).toEqual([
+      ["元の要望・依頼の意図に合っていた？", "合っていた/一部ずれた/取り違えた/分からない"],
+      ["頼んでいない機能・設定・作り込みを足した？", "足していない/足した/分からない"],
+      ["価値に紐づかない代わりの案を勧めた・作った？", "していない/した/分からない"],
+      ["成果は使われた？（マージ・採用・次の工程）", "使われた/使われていない/まだ分からない"],
+    ]);
+  });
+  test("the four questions keep the values the daemon accepts", () => {
+    expect(HUMAN_QUESTIONS.map((q) => [q.key, q.options.map((o) => o.value)])).toEqual([["intent", ["fit", "partial", "wrong", "unknown"]], ["complexity", ["none", "some", "unknown"]], ["detour", ["none", "some", "unknown"]], ["value", ["used", "unused", "unknown"]]]);
   });
 });

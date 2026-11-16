@@ -50,6 +50,21 @@ export function compareStopConditions(prev: StopRecord | undefined, cur: StopRec
 /** Reasons a retry cannot fix: the person has to act (or has already answered, and nothing changed since). */
 export const NEEDS_PERSON = new Set<StopRecord["reason"]>(["auth", "permission", "input", "decision", "unknown"]);
 
+/** The action `resumeDepends` adds when it meets `key` (`issue#N`) of a decision stop from the stored records. */
+export const issueAnsweredAction = (key: string) => `回答か Issue の終わりを見た: ${key}`;
+
+/**
+ * A decision stop answered on the Issue it named: all its conditions are met and one is an Issue (`issue#N`) that
+ * `resumeDepends` met (its action says so) once that Issue had an answer (`## 回答`) after the stop or was closed. A runner
+ * writing `met: true` itself is not proof, as with an answer it names (`answerIsOwn`): only what the daemon saw counts. The
+ * next stage Task reads the answer from the Issue, so the stop no longer waits for the person — unlike a met `job#N`,
+ * which is not their answer.
+ */
+export const answeredOnIssue = (s: Pick<StopRecord, "reason" | "conditions" | "actions">): boolean =>
+  s.reason === "decision" &&
+  s.conditions.every((c) => c.met) &&
+  s.conditions.some((c) => /^issue#\d+$/.test(c.key) && s.actions.some((a) => a.what === issueAnsweredAction(c.key)));
+
 function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answered: boolean): StopNext {
   if (s.state === "resolved") return "none";
   if (s.state === "exhausted") return "decide";
@@ -57,6 +72,8 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
   // A condition still unmet holds the work back, whatever else changed.
   if (s.conditions.some((c) => !c.met)) return "wait";
   if (changes.some((c) => c.kind === "answer")) return "resume";
+  // answered on the Issue: nothing is sent to the Task (the next stage Task reads it), and the person is not asked again
+  if (answeredOnIssue(s)) return "wait";
   // A stop waiting for the person is not let go by a condition met alone: only their answer is.
   if (!NEEDS_PERSON.has(s.reason)) return changes.some((c) => c.kind === "condition-met") ? "resume" : "wait";
   // This series stopped before and was answered, and no new answer came: asking again gets the same answer — even
@@ -125,7 +142,7 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
       firstAt: first.get(list[0]!.id)!,
       lastAt: last.at,
       lastAnswer,
-      answered: answeredAfter(stops, first, last),
+      answered: answeredAfter(stops, first, last) || answeredOnIssue(last),
       grant: last.grant ?? null,
       conditions: last.conditions,
       actions: last.actions,
@@ -165,7 +182,7 @@ export function lastStopMark(records: StopRecord[]): TaskStopMark | null {
   if (!best) return null;
   const { key, last, count } = best;
   // the answer is checked for the newest series only: the others are not shown
-  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, last) };
+  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, last) || answeredOnIssue(last) };
 }
 
 /**

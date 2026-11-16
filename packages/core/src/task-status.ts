@@ -3,7 +3,7 @@
  * TaskManager checks `canTransition` before it writes, and `Db.updateTask` throws
  * `InvalidTaskTransitionError` for a move the table does not have, so a row never takes a status it may not have.
  */
-import type { Task, TaskStatus } from "@switchboard/protocol";
+import type { StoredOutcome, Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
 
 /** A Task that has ended. A person's action (a reply, a resume, a retry) moves it on, or a turn its attached runner starts on its own. */
 export const TERMINAL: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["done", "error", "aborted"]);
@@ -86,16 +86,67 @@ export class InvalidTaskTransitionError extends Error {
 }
 
 /**
- * The outcome a status change implies: waiting on the person → needs_action, error / aborted → failed, a new
- * turn → unknown, no longer reviewed and no longer judged (the judgement was of the previous reply). done / idle
- * keep what the task has (the turn's start made it unknown; the last reply is judged afterwards by `judge.ts`). A Cloud Task is never
- * judged here, so its outcome stays unknown.
+ * The outcome stored with a status: the ones the status does not decide. A Task waiting on the person (`waiting`) or
+ * stopped by a failure (`error` / `aborted`) has its outcome from the status (`outcomeOf`), so only `unknown` is
+ * stored there; a turn in progress (`running`) or one not started (`idle`) has no outcome yet. `done` and `background` (the turn has ended) keep what the judge, the
+ * person or a question the turn ended on said. Both the write rule and the DB's check read this table (docs/design/task-outcome.md).
  */
-export function outcomeOnStatus(status: TaskStatus, executionMode: Task["executionMode"]): Partial<Pick<Task, "outcome" | "reviewedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt">> {
+export const STORED_OUTCOMES: Readonly<Record<TaskStatus, ReadonlySet<StoredOutcome>>> = {
+  idle: new Set<StoredOutcome>(["unknown"]),
+  running: new Set<StoredOutcome>(["unknown"]),
+  waiting: new Set<StoredOutcome>(["unknown"]),
+  background: new Set<StoredOutcome>(["finished", "needs_action", "unknown"]),
+  done: new Set<StoredOutcome>(["finished", "needs_action", "unknown"]),
+  error: new Set<StoredOutcome>(["unknown"]),
+  aborted: new Set<StoredOutcome>(["unknown"]),
+};
+
+/** The statuses whose outcome is the status's, not a stored one. */
+const DERIVED_OUTCOME: Readonly<Partial<Record<TaskStatus, TaskOutcome>>> = { waiting: "needs_action", error: "failed", aborted: "failed" };
+
+/** The outcome a Task shows: from its status when the status decides it (waiting → needs_action, error / aborted → failed), otherwise what is stored. */
+export function outcomeOf(status: TaskStatus, stored: StoredOutcome): TaskOutcome {
+  return DERIVED_OUTCOME[status] ?? stored;
+}
+
+/** The SQL expression that equals `outcomeOf(status, outcome)` for a `tasks` row (columns `status`, `outcome`). */
+export function outcomeSql(alias?: string): string {
+  const col = (c: string) => (alias ? `${alias}.${c}` : c);
+  const whens = Object.entries(DERIVED_OUTCOME).map(([s, o]) => `WHEN '${s}' THEN '${o}'`).join(" ");
+  return `(CASE ${col("status")} ${whens} ELSE ${col("outcome")} END)`;
+}
+
+/** `outcomeSql` for a `tasks` row joined as `t`. */
+export const OUTCOME_SQL = outcomeSql("t");
+
+/** A person's outcome the Task's status does not take: its status decides it, or the status stores only unknown. */
+export class OutcomeNotSettableError extends Error {
+  constructor(readonly status: TaskStatus) {
+    super(`この Task（${status}）の結果は手では付けられません`);
+    this.name = "OutcomeNotSettableError";
+  }
+}
+
+export class InvalidTaskOutcomeError extends Error {
+  constructor(readonly taskId: string, readonly status: TaskStatus, readonly outcome: string) {
+    super(`task ${taskId}: outcome ${outcome} cannot be stored with status ${status}`);
+    this.name = "InvalidTaskOutcomeError";
+  }
+}
+
+/**
+ * The stored outcome a status change implies: a new turn → unknown, no longer reviewed and no longer judged (the
+ * judgement was of the previous reply). waiting / error / aborted / idle → unknown: the first three show their
+ * outcome from the status (`outcomeOf`), and none of the four has a stored one. A turn that ends from `waiting`
+ * (done / background) leaves the approval open, so it stores needs_action. done / background otherwise keep what
+ * the task has (the last reply is judged afterwards by `judge.ts`). A Cloud Task is never judged here, so its stored outcome stays
+ * unknown (the outcome it shows still comes from its status through `outcomeOf`: a failed Cloud Task shows failed).
+ */
+export function outcomeOnStatus(status: TaskStatus, executionMode: Task["executionMode"], from?: TaskStatus): Partial<Pick<Task, "reviewedAt" | "judgedResult" | "judgedReason" | "judgedBy" | "judgingAt">> & { outcome?: StoredOutcome } {
   const cleared = { reviewedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null };
   if (executionMode === "cloud") return status === "running" ? { outcome: "unknown", ...cleared } : { outcome: "unknown" };
-  if (status === "waiting") return { outcome: "needs_action" };
-  if (status === "error" || status === "aborted") return { outcome: "failed" };
   if (status === "running") return { outcome: "unknown", ...cleared };
+  if (status === "waiting" || status === "error" || status === "aborted" || status === "idle") return { outcome: "unknown" };
+  if (from === "waiting" && (status === "done" || status === "background")) return { outcome: "needs_action" };
   return {};
 }
