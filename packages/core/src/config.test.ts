@@ -14,6 +14,15 @@ afterAll(() => {
   for (const d of made) rmSync(d, { recursive: true, force: true });
 });
 
+describe("reposDir", () => {
+  test("next to the development checkout by default; SWITCHBOARD_REPOS_DIR names another place", () => {
+    const home = dir(tmpdir(), "sb-config-");
+    const c = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: "/srv/code/switchboard" });
+    expect(c.reposDir).toBe("/srv/code");
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: "/srv/code/switchboard", SWITCHBOARD_REPOS_DIR: "/home/switchboard/repos/" }).reposDir).toBe("/home/switchboard/repos");
+  });
+});
+
 describe("knowledgeDir", () => {
   test("a temporary data folder keeps Knowledge inside it, not in the user's ~/Knowledge", () => {
     const home = dir(tmpdir(), "sb-config-");

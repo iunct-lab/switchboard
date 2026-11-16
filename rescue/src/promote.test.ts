@@ -1,11 +1,12 @@
 // test-reads: none
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
-import { appendHistory, buildRelease, currentOf, previousOf, readHistory, switchTo } from "./releases.ts";
+import { appendHistory, buildRelease, currentOf, previousOf, readHistory, run, switchTo } from "./releases.ts";
+import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
 const FAST = { candidateMs: 8000, confirmMs: 6000, settleMs: 800 };
@@ -27,7 +28,7 @@ beforeAll(async () => {
   db.exec("PRAGMA journal_mode = WAL; create table notes (name text); insert into notes values ('before')");
   db.close();
   const port = await freePort();
-  ctx = { home: f.home, repo: f.repo, port, sup: new Supervisor({ home: f.home, repo: f.repo, port, backoffMs: 50 }) };
+  ctx = { home: f.home, repo: f.repo, source: null, port, sup: new Supervisor({ home: f.home, repo: f.repo, port, backoffMs: 50 }) };
   ctx.sup.start();
   await until(() => health(port), "v1 up");
 });
@@ -160,9 +161,26 @@ test("a failed compression stops the snapshot and leaves no half-written file", 
 test("what a killed run left is gone with the next snapshot", async () => {
   const dir = join(f.home, "snapshots");
   mkdirSync(dir, { recursive: true });
-  for (const n of ["2026-01-01T00-00-00-000Z-a.db.tmp", "2026-01-01T00-00-00-000Z-b.db.gz.part"]) writeFileSync(join(dir, n), "x");
+  for (const n of ["2026-01-01T00-00-00-000Z-a.db.tmp", "2026-01-01T00-00-00-000Z-b.db.gz.part", "2026-01-01T00-00-00-000Z-c.db.tmp-journal"]) writeFileSync(join(dir, n), "x");
   await snapshotDb(f.home, "after-kill");
-  expect(readdirSync(dir).filter((n) => n.endsWith(".part") || n.endsWith(".tmp"))).toEqual([]);
+  expect(readdirSync(dir).filter((n) => n.endsWith(".part") || n.endsWith(".tmp") || n.endsWith("-journal"))).toEqual([]);
+});
+
+test("a snapshot that does not fit first drops the snapshots beyond the kept ones, then stops before writing and says how much it needs", async () => {
+  const dir = join(f.home, "snapshots");
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const old = ["01", "02", "03", "04", "05"].map((d) => `2026-01-${d}T00-00-00-000Z-old.db.gz`);
+  for (const n of old) writeFileSync(join(dir, n), "x");
+  const gz = () => readdirSync(dir).filter((n) => n.endsWith(".db.gz"));
+  // room only once every snapshot beyond the newest KEEP_SNAPSHOTS - 1 is gone (old[2] is the newest of them); the one being restored stays
+  const name = (await snapshotDb(f.home, "fits-after-drop", old[0], () => (existsSync(join(dir, old[2]!)) ? 0 : Number.MAX_SAFE_INTEGER)))!;
+  expect(gz().sort()).toEqual([old[0]!, old[3]!, old[4]!, name].sort());
+  // no room even then: nothing new is written, and the error names both amounts
+  const before = readdirSync(dir).sort();
+  await expect(snapshotDb(f.home, "no-room", undefined, () => 0)).rejects.toThrow(/not enough disk for the database snapshot: needs \d+ MB, 0 MB free/);
+  expect(readdirSync(dir).filter((n) => n.includes("no-room"))).toEqual([]);
+  expect(readdirSync(dir).every((n) => before.includes(n))).toBe(true);
 });
 
 test("a snapshot that does not unpack leaves the database alone and the daemon running", async () => {
@@ -280,3 +298,140 @@ test("a release whose task list fails is rejected on the candidate; one that bre
     expect(currentOf(f.home)).toBe(now);
   }
 }, 90_000);
+
+test("a promotion whose database snapshot fails is rejected with the reason in the history and current stays", async () => {
+  const dir = join(f.home, "snapshots");
+  const aside = `${dir}.aside`;
+  renameSync(dir, aside);
+  writeFileSync(dir, "not a folder"); // the snapshot cannot make its folder
+  try {
+    const cur = currentOf(f.home);
+    const good = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v-snap", ""), "good but no snapshot");
+    const r = await promote(ctx, good, FAST);
+    expect(r).toMatchObject({ action: "rejected", ok: false, to: good, from: cur });
+    expect(r.reason).toStartWith("could not take the database snapshot: ");
+    expect(readHistory(f.home).at(-1)).toEqual(r);
+    expect(currentOf(f.home)).toBe(cur);
+  } finally {
+    rmSync(dir, { force: true });
+    renameSync(aside, dir);
+  }
+}, 30_000);
+
+test("a promotion whose candidate cannot be set up is rejected with the reason in the history and current stays", async () => {
+  const was = process.env.TMPDIR;
+  process.env.TMPDIR = join(f.root, "no-such-temp"); // the candidate cannot make its home
+  try {
+    const cur = currentOf(f.home);
+    const good = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v-cand", ""), "good but no candidate home");
+    const r = await promote(ctx, good, FAST);
+    expect(r).toMatchObject({ action: "rejected", ok: false, to: good, from: cur });
+    expect(r.reason).toStartWith("could not start the candidate: ");
+    expect(readHistory(f.home).at(-1)).toEqual(r);
+    expect(currentOf(f.home)).toBe(cur);
+  } finally {
+    if (was === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = was;
+  }
+}, 30_000);
+
+test("from a source repository (no git): promote by tag builds from the tarball, the page lists tags, rollback goes back; a wrong tarball is rejected without a build", async () => {
+  const short = (sha: string) => sha.slice(0, 7);
+  const tarOf = async (tag: string, top: string, daemon: string) => {
+    const sha = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource(daemon), tag);
+    const head = (await run(["git", "rev-parse", "HEAD"], f.repo)) as string;
+    const out = join(f.root, `${tag}-${top}.tgz`);
+    await run(["git", "archive", "--format=tar.gz", `--prefix=${top === "ok" ? `o-n-${short(head)}` : top}/`, "-o", out, head], f.repo);
+    return { sha: head, out, parent: sha };
+  };
+  const t2 = await tarOf("v0.2.0", "ok", "s2");
+  const t3 = await tarOf("v0.3.0", "ok", "s3");
+  const t3other = await tarOf("v0.3.1", "o-n-fffffff", "s31"); // the top directory names another commit
+  const shaOf: Record<string, string> = { "v0.2.0": t2.sha, "v0.3.0": t3.sha, "v0.3.1": t3other.sha };
+  const files: Record<string, string> = { "v0.2.0": t2.out, "v0.3.0": t3.out, "v0.3.1": t3other.out };
+  let cut = false;
+  let down = false;
+  const api = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const parts = new URL(req.url).pathname.split("/");
+      const tag = parts.at(-1) ?? "";
+      if (down) return new Response("unavailable", { status: 503 });
+      if (parts[4] === "commits") return shaOf[tag] ? Response.json({ sha: shaOf[tag] }) : new Response("no", { status: 404 });
+      const body = readFileSync(files[tag]!);
+      return new Response(cut ? body.subarray(0, 30) : body, { headers: { "content-length": String(body.length) } });
+    },
+  });
+  const home = join(f.root, "home-src");
+  mkdirSync(home, { recursive: true });
+  const bin = join(f.root, "bin-no-git"); // tar, gzip and mkdir (the fixture build), nothing else: a git that is called is not found
+  mkdirSync(bin, { recursive: true });
+  for (const tool of ["tar", "gzip", "mkdir"]) symlinkSync(Bun.which(tool)!, join(bin, tool));
+  const oldPath = process.env.PATH;
+  const port = await freePort();
+  const sup = new Supervisor({ home, repo: join(home, "releases", "current"), source: "o/n", port, backoffMs: 50 });
+  const sctx: Ctx = { home, repo: join(home, "releases", "current"), source: "o/n", port, sup };
+  process.env.SWITCHBOARD_GITHUB_API = `http://localhost:${api.port}`;
+  process.env.PATH = bin;
+  try {
+    expect(await promote(sctx, "v0.2.0", FAST)).toMatchObject({ action: "promote", ok: true, from: null, to: t2.sha });
+    expect(await promote(sctx, "v0.3.0", FAST)).toMatchObject({ action: "promote", ok: true, from: t2.sha, to: t3.sha });
+    expect([currentOf(home), previousOf(home)]).toEqual([t3.sha, t2.sha]);
+    const h = await until(() => health(port), "s3 up");
+    expect([h.version, h.repoRoot]).toEqual(["s3", realpathSync(join(home, "releases", "current"))]);
+    expect(JSON.parse(readFileSync(join(home, "releases", t3.sha, ".release.json"), "utf8"))).toEqual({ tag: "v0.3.0", sha: t3.sha });
+
+    const rescue = startRescue(sctx, { port: 0 });
+    const base = `http://127.0.0.1:${rescue.server.port}`;
+    try {
+      const st = (await fetch(`${base}/api/status`).then((r) => r.json())) as { releases: Array<{ sha: string; subject: string; tag: string | null }> };
+      expect(st.releases.map((r) => [r.tag, r.subject]).sort()).toEqual([["v0.2.0", "v0.2.0"], ["v0.3.0", "v0.3.0"]]);
+      expect((await fetch(`${base}/api/rollback`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(202);
+      await until(() => currentOf(home) === t2.sha && health(port).then((x) => x?.version === "s2"), "back to s2");
+    } finally {
+      await rescue.stop();
+    }
+
+    // rejected without building: nothing new under releases/, and the reason is in the history
+    const before = readdirSync(join(home, "releases")).sort();
+    const bad = async (tag: string) => {
+      const r = await promote(sctx, tag, FAST);
+      expect(r).toMatchObject({ action: "rejected", ok: false });
+      expect(readdirSync(join(home, "releases")).sort()).toEqual(before);
+      return r.reason;
+    };
+    expect(await bad("v0.3.1")).toContain("is not the tree of");
+    // the caller checked another commit than the tag now points at: nothing is built
+    const moved = await promote(sctx, "v0.3.0", FAST, "f".repeat(40));
+    expect(moved).toMatchObject({ action: "rejected", ok: false });
+    expect(moved.reason).toContain("checked version");
+    expect(moved.to).toBe("f".repeat(40)); // the commit the daemon asked for: it finds the failure by commit
+    // GitHub not reached (a limit, a server error): the version is held like any failure, named by the checked commit
+    down = true;
+    const unreached = await promote(sctx, "v0.3.0", FAST, "f".repeat(40));
+    down = false;
+    expect([unreached.action, unreached.to]).toEqual(["rejected", "f".repeat(40)]); // held like any failure: the daemon reports it
+    // a download cut short is held the same way (a stub fetch: Bun.serve sets content-length itself)
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) =>
+      String(url).includes("/tarball/") ? new Response("short", { headers: { "content-length": "999" } }) : realFetch(url, init)) as typeof fetch;
+    let cutShort: Awaited<ReturnType<typeof promote>>;
+    try {
+      cutShort = await promote(sctx, "v0.3.1", FAST, t3other.sha);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect([cutShort.action, cutShort.to]).toEqual(["rejected", t3other.sha]);
+    expect(cutShort.reason).toContain("cut short");
+    expect(readdirSync(join(home, "releases")).sort()).toEqual(before);
+    expect(readdirSync(join(home, "releases")).sort()).toEqual(before);
+    expect(await bad("v0.3.0-rc")).toContain("version tag");
+    cut = true;
+    expect(await bad("v0.3.1")).toMatch(/cut short|unexpected end of file/);
+  } finally {
+    process.env.PATH = oldPath;
+    delete process.env.SWITCHBOARD_GITHUB_API;
+    await sup.stop();
+    api.stop(true);
+  }
+}, 120_000);

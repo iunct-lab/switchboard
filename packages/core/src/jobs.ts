@@ -134,8 +134,12 @@ export function jobUsage(runner: RunnerId, jobDir: string): UsageEvent[] {
 const WRAPPER = (tail: string) => `set -o pipefail; "$@"${tail}; echo $? > "$J/exit.tmp" && mv "$J/exit.tmp" "$J/exit"`;
 
 const git = (cwd: string, ...args: string[]): string | null => {
-  const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "ignore" });
-  return r.exitCode === 0 ? r.stdout.toString().trim() : null;
+  try {
+    const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "ignore" });
+    return r.exitCode === 0 ? r.stdout.toString().trim() : null;
+  } catch {
+    return null; // no git on this host
+  }
 };
 const remoteKey = (url: string | null) => url?.replace(/\.git$/, "").replace(/\/+$/, "").replace(/^git@([^:]+):/, "https://$1/").toLowerCase() ?? null;
 const inside = (root: string, p: string) => {

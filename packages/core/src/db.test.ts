@@ -811,6 +811,7 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   db.setTaskBackground("t_bg", { jobs: ["Run Codex review of PR 4048 in background"], since: 1 });
   db.setTaskBackground("t_err", { jobs: ["tests"], since: 2 });
   expect(db.activeStageTask("ws", 3621)!.id).toBe("t_bg");
+  expect(db.workingStageTask("ws", 3621)!.id).toBe("t_bg");
   // a failed turn keeps the mark but is not working: its Issue is free
   expect(db.activeStageTask("ws", 7)).toBeNull();
   expect(db.activeStageTask("ws", 8)).toBeNull();
@@ -826,6 +827,8 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   db.updateTask("t_err", { resumeAt: 100 });
   expect(db.activeStageTask("ws", 7)!.id).toBe("t_err");
   expect(db.listActiveStageTasks()).toEqual([]);
+  // the overlap judgement does not count it: nothing of it changes before the resume
+  expect(db.workingStageTask("ws", 7)).toBeNull();
   db.updateTask("t_err", { resumeAt: null });
   // a job it asked the daemon for keeps it active until the job ends
   const job = db.insertJob({ kind: "local-ci", taskId: "t_plain", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
@@ -835,6 +838,7 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   // so does its last reply being judged: until then a question it ended on does not show
   db.updateTask("t_plain", { judgingAt: 6, updatedAt: 3 });
   expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
+  expect(db.workingStageTask("ws", 8)!.id).toBe("t_plain"); // a reply being judged is work under way, for the overlap check too
   db.updateTask("t_plain", { judgingAt: null, updatedAt: 3 });
   expect(db.activeStageTask("ws", 8)).toBeNull();
   db.close();

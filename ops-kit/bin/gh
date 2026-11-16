@@ -7,8 +7,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeGranted, repoName, syncedRepositories } from "../src/backlog-client.ts";
-import { mergeGateOf, noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets } from "../src/config.ts";
-import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, NO_EQUIVALENT, realCommand, writeTargetOf } from "../src/gh-guard.ts";
+import { mergeGateOf, noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets, publicCopyOf } from "../src/config.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, NO_EQUIVALENT, publicSyncMerge, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
 
 const argv = process.argv.slice(2);
@@ -80,10 +80,11 @@ if (backlog) {
 }
 // In the app's Task of a repository that has a merge gate (`mergeGate` of ops.config.json), a merge goes through the gate: the
 // one the gate itself makes (it marks the PR in OPS_MERGE_GATE_PR), or one of a PR the person allowed in the Task's conversation.
-// Nothing is sent to GitHub either way; the app is asked only for a merge the gate did not make
+// Nothing is sent to GitHub either way; the app is asked only for a merge the gate did not make. public-sync's merge of its own
+// sync PR on the public copy is not this repository's PR and the gate does not judge it: it goes on with public-sync's mark
 const gate = process.env.BACKLOG_URL ? mergeGateOf() : null;
 const merge = gate !== null ? mergeWrite(argv, (reads ?? []).map((r) => r.text)) : null;
-if (merge && !(merge.pr !== null && process.env.OPS_MERGE_GATE_PR === String(merge.pr))) {
+if (merge && !(merge.pr !== null && process.env.OPS_MERGE_GATE_PR === String(merge.pr)) && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   const granted = merge.pr === null || !process.env.OPS_KIT_TASK_ID ? false : await mergeGranted(process.env, "merge", merge.pr);
   if (!granted) {
     const why = merge.pr === null ? "PR の番号が読めない書き方は通りません" : !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `PR #${merge.pr} に利用者の許可文の記録がありません`;

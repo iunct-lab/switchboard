@@ -13,6 +13,8 @@ export type ResumeBlock = {
   parts: ResumePart[];
   /** "Resume now" needs a session to resume, except for a Task made at the limit that has not run a turn (`start`, #2768). */
   canResumeNow: boolean;
+  /** The note field above "Resume now": a Task not started yet (`start`) has no conversation to add a note to, so none there. */
+  canNote: boolean;
   nowTitle: string;
 };
 
@@ -26,6 +28,7 @@ export function resumeBlock(task: Pick<Task, "resumeAt" | "resumeReason" | "resu
       stopped: "",
       parts: [t(m.startNotYet), { b: when }, autoResumeOn === true ? t(m.startAuto) : autoResumeOn === false ? t(m.startAutoOff) : t(m.startAutoUnknown)],
       canResumeNow: true,
+      canNote: false,
       nowTitle: t(m.resumeNowStartTitle),
     };
   if (task.resumeReason === "disk")
@@ -40,6 +43,7 @@ export function resumeBlock(task: Pick<Task, "resumeAt" | "resumeReason" | "resu
             ? [t(m.diskAutoOnBefore), { b: when }, t(m.diskAutoOnAfter)]
             : [t(m.diskAutoUnknown)],
       canResumeNow: hasSession,
+      canNote: hasSession,
       nowTitle: t(m.resumeNowDiskTitle),
     };
   const github = task.resumeReason === "github";
@@ -51,5 +55,5 @@ export function resumeBlock(task: Pick<Task, "resumeAt" | "resumeReason" | "resu
     : autoResumeOn === true && task.resumePlannedAt !== null
       ? [{ b: when }, t(m.limitTryOnce), { b: fmtClock(task.resumePlannedAt) }, t(m.limitTryOnceAfter)]
       : [{ b: when }, autoResumeOn === true ? t(m.limitAutoOn) : autoResumeOn === false ? t(m.limitAutoOff) : t(m.limitAutoUnknown)];
-  return { heading, stopped, parts, canResumeNow: hasSession, nowTitle };
+  return { heading, stopped, parts, canResumeNow: hasSession, canNote: hasSession, nowTitle };
 }

@@ -69,7 +69,7 @@ export class RescueAgent {
   private error: string | null = null;
 
   constructor(
-    private ctx: { home: string; repo: string; sup: Supervisor },
+    private ctx: { home: string; repo: string; source?: string | null; sup: Supervisor },
     private argv: string[] = DEFAULT_AGENT_ARGV,
   ) {}
 
@@ -92,6 +92,8 @@ export class RescueAgent {
   }
 
   private async launch(): Promise<void> {
+    // Releases come from tarballs: there is no repository to branch from or diff in, so the agent is not offered
+    if (this.ctx.source) throw new Error("更新元（update-source.json）から入れた環境には git のリポジトリが無いので、救援エージェントは使えません。ロールバックと再起動は使えます");
     const current = currentOf(this.ctx.home);
     if (!current) throw new Error("there is no current release to start from");
     const previous = previousOf(this.ctx.home);

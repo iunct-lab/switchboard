@@ -1,6 +1,6 @@
 # Running Switchboard as a container on your own machine
 
-One image runs the stand-alone mode: a single Switchboard daemon with the same tools, versions and paths as the cloud host, on any machine where containers run. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
+One image runs the stand-alone mode: a single Switchboard daemon with the same tools, versions and paths as the cloud host, on any machine where containers run. The supported CPUs are arm64 and x86-64: the same Dockerfile and the same procedure on both. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
 
 Files: `container/Dockerfile` (the image), `container/compose.yaml` (the one service and its volumes), `container/entrypoint.sh` and `container/relay.ts` (start-up and the relay below), `container/up.sh` (the start), `container/e2e.sh` (the check with a fake runner).
 
@@ -12,22 +12,18 @@ From a clone of this repository, on a machine where `docker compose` works:
 bash container/up.sh
 ```
 
-This builds the image `sb-local` (arm64 only, see section 7) and starts the container in the background with `restart: unless-stopped`. Open `http://127.0.0.1:47831/`. The first build downloads the tools and builds the web UI, so it takes a while; later starts reuse the layers.
+This builds the image `sb-local` (arm64 or x86-64) and starts the container in the background with `restart: unless-stopped`. Open `http://127.0.0.1:47831/`. The first build downloads the tools and builds the web UI, so it takes a while; later starts reuse the layers.
 
 No AWS setting is needed or read. The daemon starts as a stand-alone instance: no starter, no cloud host, no automatic stop.
 
 ## 2. Log in and bring your repositories
 
-Nothing is logged in inside a new container, and Switchboard holds no credentials of its own. Open the Terminal tab of any Task (or run `docker compose -f container/compose.yaml exec switchboard bash`) and log in once, as you would on any machine:
+Nothing is logged in inside a new container, and Switchboard holds no credentials of its own. Every login is done on the screen; the daemon runs the tool's own login command and shows the page to open and the one-time code:
 
-- `claude auth login` (it prints a URL; open it on the machine's browser and paste the code back)
-- `codex login --device-auth` (a URL and a one-time code; the browser login's callback to localhost cannot reach the container, as only port 47831 is published)
-- `gh auth login` if your Tasks use `gh` (choose the browser login: it shows a one-time code)
-- `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"` for commits
+- Claude and Codex: the login warning on Home and its login button (`claude auth login`, `codex login --device-auth`; the browser login's callback to localhost cannot reach the container, as only port 47831 is published, so Codex uses the device login)
+- GitHub: `Log in to GitHub` above the Workspace's add form on the Settings screen (and on the Backlog screen when a backlog cannot be read for want of it). It runs `gh auth login --web`; approve the code on `github.com/login/device`. Afterwards git's https fetch and push use the same login, and if git has no commit name and email yet, they are set from the GitHub account (its noreply address)
 
-The login warning on Home and its login button run the same `claude` / `codex` commands, so they work here too.
-
-Clone repositories into `~/repos` (that is `/home/switchboard/repos`) and register them as Workspaces on the Settings screen. The development clone of Switchboard itself is yours to put there too; nothing is cloned for you.
+Then add repositories on the Settings screen with `From GitHub`: they are cloned into `~/repos` (that is `/home/switchboard/repos`) and registered as Workspaces. The development clone of Switchboard itself is yours to add too; nothing is cloned for you.
 
 ## 3. What is kept and what is not
 
@@ -42,7 +38,7 @@ Four named volumes are mounted, and they are the only state that survives recrea
 
 Compose prefixes the volume names with the project name, which `container/compose.yaml` fixes as `switchboard` (so `switchboard_sb-home` and so on; `docker volume ls` shows them).
 
-Everything else in the container's HOME is part of the container and is gone after it is recreated (for example after `up.sh` rebuilds the image with a new version, or after `docker compose down` followed by `up`). That includes `~/.config/gh` (your `gh auth login`), `~/.gitconfig`, and `~/.claude.json` (Claude Code's first-run setup and folder trust). After a recreate, log in and set these again (section 2). Only `docker compose stop` / `start` and a restart of the engine keep the container itself.
+Everything else in the container's HOME is part of the container and is gone after it is recreated (for example after `up.sh` rebuilds the image with a new version, or after `docker compose down` followed by `up`). That includes `~/.config/gh` (your GitHub login), `~/.gitconfig`, and `~/.claude.json` (Claude Code's first-run setup and folder trust). After a recreate, log in and set these again (section 2). Only `docker compose stop` / `start` and a restart of the engine keep the container itself.
 
 To remove the data on purpose:
 
@@ -69,12 +65,11 @@ The meaning: a Task can start, stop and delete any container, image and volume o
 
 ## 6. Versions are kept in two places
 
-The cloud host installs its tools with `aws/host/devtools.sh` and `aws/host/node.sh`; the image installs the same ones in `container/Dockerfile`. Pins for node, docker, compose, uv and gitleaks (version and sha256) and for gh-stack (version) are written in both. `container/versions.test.ts` compares them and fails when one side is changed alone, so change both together. `gh`, `bun`, `claude` and `codex` are pinned in the Dockerfile only (the host takes the distribution's `gh` and the latest of the others); bumping them is a change to the `ARG` lines and a rebuild. HOME is `/home/switchboard` and the repositories are in `/home/switchboard/repos`, as on the host, so a Task's `cwd` and the `~/.claude/projects` folder names read the same on both.
+The cloud host installs its tools with `aws/host/devtools.sh` and `aws/host/node.sh`; the image installs the same ones in `container/Dockerfile`. Pins for node, docker, compose, uv and gitleaks (version and sha256) and for gh-stack (version) are written in both. `container/versions.test.ts` compares them and fails when one side is changed alone, so change both together. The host is arm64, so the sha256 compared are the arm64 ones; the x86-64 sha256 (the `_X86_64` lines, same versions) are in the Dockerfile only and have nothing on the host to be compared with. `gh`, `bun`, `claude` and `codex` are pinned in the Dockerfile only (the host takes the distribution's `gh` and the latest of the others); bumping them is a change to the `ARG` lines and a rebuild. HOME is `/home/switchboard` and the repositories are in `/home/switchboard/repos`, as on the host, so a Task's `cwd` and the `~/.claude/projects` folder names read the same on both.
 
 ## 7. What it does not do
 
 - Only the stand-alone mode. The mode where a machine is a work site of another instance (the cloud one keeps the record and the GitHub write path) is not here.
-- arm64 only. There is no x86 image; the Dockerfile downloads arm64 builds of every tool, and the version test refuses an x86 name.
 - No service unit or auto-start of the engine itself. `restart: unless-stopped` brings the container back whenever the engine runs.
 - The tools are not updated inside the container; update by changing a version and running `bash container/up.sh` again (which recreates the container; mind section 3).
 

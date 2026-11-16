@@ -9,7 +9,7 @@ import { sync, type Run } from "./public-sync.ts";
 setDefaultTimeout(30_000);
 
 let dir: string, priv: string, pub: string, origin: string;
-let calls: string[][], releases: Set<string>, fail: string, openPr: boolean;
+let calls: string[][], releases: Set<string>, fail: string, openPr: boolean, prs: string[];
 const git = (cwd: string, ...args: string[]) => {
   const p = Bun.spawnSync(["git", ...args], { cwd, stderr: "pipe" });
   if (p.exitCode) throw new Error(p.stderr.toString());
@@ -29,11 +29,12 @@ const run: Run = (cmd, options) => {
       const branch = git(pub, "for-each-ref", "--format=%(refname:short)", "refs/heads/sync/");
       return { code: 0, out: openPr && branch ? `1 ${branch}` : "" };
     }
-    if (cmd[1] === "pr" && cmd[2] === "create") openPr = true;
+    // gh pr create prints the URL of the PR it opened; the number stands for its branch
+    if (cmd[1] === "pr" && cmd[2] === "create") { openPr = true; prs.push(cmd[cmd.indexOf("--head") + 1]!); return { code: 0, out: `https://github.com/example/app/pull/${prs.length}` }; }
     if (cmd[1] === "pr" && cmd[2] === "merge") {
       openPr = false;
-      // by branch name, or by the number of the open PR (the one sync branch then; a replaced plan's branch is left behind)
-      const branch = cmd[3]!.startsWith("sync/") ? cmd[3]! : git(pub, "for-each-ref", "--format=%(refname:short)", "refs/heads/sync/");
+      // the PR this fake opened last, by its number; else the open PR listed (the one sync branch then; a replaced plan's branch is left behind)
+      const branch = prs.length > 0 && cmd[3] === String(prs.length) ? prs.at(-1)! : git(pub, "for-each-ref", "--format=%(refname:short)", "refs/heads/sync/");
       git(pub, "update-ref", "refs/heads/main", git(pub, "rev-parse", branch));
       git(pub, "update-ref", "-d", `refs/heads/${branch}`);
     }
@@ -66,7 +67,7 @@ beforeEach(() => {
   place(mkdtempSync(join(tmpdir(), "public-version.test.")));
   cpSync(template, dir, { recursive: true });
   git(priv, "remote", "set-url", "origin", origin); // the copy's origin is its own, not the template's
-  calls = []; releases = new Set(); fail = ""; openPr = false;
+  calls = []; releases = new Set(); fail = ""; openPr = false; prs = [];
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

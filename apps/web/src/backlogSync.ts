@@ -24,9 +24,10 @@ export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/
  * What a workspace that could not be read asks of the owner (#2362), by the error's kind: a lead line and the steps.
  * `other` says the reason as it is. The kind is the daemon's (where gh was called); gh's wording is not read here.
  */
-export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: string | undefined): { lead: string; steps: Array<{ text: string; link?: string }> } {
+export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: string | undefined): { lead: string; steps: Array<{ text: string; link?: string; githubLogin?: true }> } {
+  // the step carries the login button (the screen runs gh's own login), so no step sends the owner to a terminal
   if (e.kind === "gh-login")
-    return { lead: t(m.ghLoginLead, { name: e.workspaceName }), steps: [{ text: t(m.ghLoginStep) }, { text: t(m.ghLoginReload) }] };
+    return { lead: t(m.ghLoginLead, { name: e.workspaceName }), steps: [{ text: t(m.ghLoginStep), githubLogin: true }, { text: t(m.ghLoginReload) }] };
   if (e.kind === "project-var")
     return {
       lead: t(m.projectVarLead, { name: e.workspaceName, variable: projectVar ?? "SWITCHBOARD_PROJECT_URL" }),

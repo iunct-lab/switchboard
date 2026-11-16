@@ -9,6 +9,7 @@ import { changeMarks, changeStateLabel, mergedPair, short } from "../changes.ts"
 import { Flow } from "./Flow.tsx";
 import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
+import { RunnerLogin } from "./RunnerLogin.tsx";
 import { Stops } from "./Stops.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
@@ -59,6 +60,12 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
           {guide.steps.map((s) => (
             <li key={s.text}>
               {s.text}
+              {s.githubLogin && (
+                <>
+                  {" "}
+                  <RunnerLogin runner="gh" onDone={props.onSaved} onError={props.onError} />
+                </>
+              )}
               {s.link && (
                 <>
                   {" "}

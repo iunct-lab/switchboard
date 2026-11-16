@@ -1309,6 +1309,15 @@ export class Db {
     return r ? rowToTask(r) : null;
   }
 
+  /**
+   * As activeStageTask, less a Task that only has a resume planned (it takes no slot and changes nothing before the time).
+   * The overlap judgement of the backlog reads this.
+   */
+  workingStageTask(workspaceId: string, issue: number): Task | null {
+    const r = this.sqlite.query(`SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND ${activeStage("slot")} ORDER BY updated_at DESC LIMIT 1`).get(workspaceId, issue);
+    return r ? rowToTask(r) : null;
+  }
+
   /** The newest-created stage Task of a backlog Issue, of `action` only when given. */
   lastStageTask(workspaceId: string, issue: number, action?: BacklogAction): Task | null {
     const r = action

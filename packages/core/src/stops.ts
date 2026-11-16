@@ -56,8 +56,9 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
   if (s.state === "retrying") return "retry";
   // A condition still unmet holds the work back, whatever else changed.
   if (s.conditions.some((c) => !c.met)) return "wait";
-  if (changes.some((c) => c.kind === "answer" || c.kind === "condition-met")) return "resume";
-  if (!NEEDS_PERSON.has(s.reason)) return "wait";
+  if (changes.some((c) => c.kind === "answer")) return "resume";
+  // A stop waiting for the person is not let go by a condition met alone: only their answer is.
+  if (!NEEDS_PERSON.has(s.reason)) return changes.some((c) => c.kind === "condition-met") ? "resume" : "wait";
   // This series stopped before and was answered, and no new answer came: asking again gets the same answer — even
   // when another cause came in between (that cause was its own series, asked on its own).
   return askedBefore && answered ? "wait" : "decide";
@@ -180,6 +181,26 @@ const COMMENT_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d
  */
 export const StopReport = StopRecord.omit({ work: true, at: true, answer: true }).extend({ id: z.string().min(1).max(100), answer: z.string().max(300).regex(COMMENT_URL).optional().catch(undefined) });
 export type StopReport = z.infer<typeof StopReport>;
+
+/** A job the daemon runs for the Task: its id is no number on GitHub, and is read from the jobs table. */
+export const JOB_KEY = /^job#(\d+)$/;
+
+/**
+ * A stop that is not `depends` is no wait the daemon resumes, so nothing else closes its `job#<id>` conditions: the ones
+ * whose job ended (`ended`) are recorded met, even when the Task reports them open again after the job ended. A `depends`
+ * stop is left as reported: `dependsWaits` reads its open conditions to send the Task the job's result.
+ */
+export function meetEndedJobs(report: StopReport, ended: (id: number) => boolean): StopReport {
+  if (report.reason === "depends") return report;
+  let changed = false;
+  const conditions = report.conditions.map((c) => {
+    const m = JOB_KEY.exec(c.key);
+    if (c.met || !m || !ended(Number(m[1]))) return c;
+    changed = true;
+    return { ...c, met: true };
+  });
+  return changed ? { ...report, conditions } : report;
+}
 
 /** The Issue a stage Task is for (its `stage` column); null for any other task. */
 export const issueOf = (task: Pick<Task, "workspaceId" | "stage">): number | null => (task.workspaceId ? task.stage?.issue ?? null : null);

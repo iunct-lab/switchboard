@@ -53,6 +53,7 @@ A stop whose conditions are all `pr#N`, `issue#N` or `job#<id>` is resumed by th
 backlog import. A `job#<id>` closes when the job ends (pass, fail or aborted), and the end of a job runs the same
 resume. The resume message carries each job's kind, runner, PR, status, exit code and a summary, so the Task reads the
 result and continues. A Task whose job has not ended is not resumed.
+A `job#<id>` on a stop whose reason is other than depends (a decision, for one) is met when the job ends too, also when the Task reports it open again afterwards; that stop keeps waiting for the person's answer, and no resume message is sent for it.
 A job's result reaches the Task without waiting for its PR or Issue waits, which are resumed on their own when they close.
 Results are batched only while the same Task still waits on a running job: the last job's end sends one message with every result.
 

@@ -159,6 +159,9 @@ export const insights = msgs({
   critEfficiency: { ja: "効率", en: "Efficiency" },
   critCommunication: { ja: "報告", en: "Reporting" },
   critSafety: { ja: "安全", en: "Safety" },
+  critIntent: { ja: "意図の合致", en: "Intent" },
+  critMinimal: { ja: "最小性", en: "Minimality" },
+  critValue: { ja: "価値", en: "Value" },
   toolCalls: { ja: "ツール呼び出し", en: "Tool calls" },
   failures: { ja: "失敗", en: "Failures" },
   errors: { ja: "エラー", en: "Errors" },
@@ -181,6 +184,7 @@ export const insights = msgs({
   endError: { ja: "エラー", en: "Error" },
   endAborted: { ja: "中断", en: "Aborted" },
   noHumanRating: { ja: "人の評価がまだありません", en: "No ratings by a person yet" },
+  gapIntent: { ja: "意図がずれた {count} 件の判定の意図: {mean}", en: "Judge intent where it was missed ({count}): {mean}" },
   gap: { ja: "人 − 判定: {gap}（{count} 件）", en: "Person − judge: {gap} (count: {count})" },
   mixedModels: { ja: "{models}（混在）", en: "{models} (mixed)" },
 

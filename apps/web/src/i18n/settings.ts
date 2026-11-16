@@ -183,8 +183,8 @@ export const settings = msgs({
   judgeModelTitle: { ja: "判定の 1 ターンだけに使うモデルです", en: "The model used only for the judging turn" },
   rubric: { ja: "ルーブリック判定", en: "Rubric judge" },
   rubricHint: {
-    ja: "done で終わったターンのあと、会話の要約とルール指標をルーブリック（5 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。",
-    en: "After a turn that ended done, scores the conversation's summary and rule metrics on a rubric (5 aspects, 1–5 points). The runner and model are the auto-judge's above, using its quota once per turn (this runs while it is on, even with the auto-judge above off). SWITCHBOARD_HOME/evals/rubric.json overrides the rubric (read once when the daemon starts, so restart after editing it).",
+    ja: "done で終わったターンのあと、会話の要約とルール指標をルーブリック（既定は 8 観点、1〜5 点）で採点します。ランナーとモデルは上の自動判定と同じで、ターンごとにその使用枠を 1 回使います（上の自動判定を切っていても、これが入っていれば動きます）。ルーブリックは SWITCHBOARD_HOME/evals/rubric.json で上書きできます（デーモンの起動時に 1 回読むので、直したら再起動）。",
+    en: "After a turn that ended done, scores the conversation's summary and rule metrics on a rubric (8 aspects by default, 1–5 points). The runner and model are the auto-judge's above, using its quota once per turn (this runs while it is on, even with the auto-judge above off). SWITCHBOARD_HOME/evals/rubric.json overrides the rubric (read once when the daemon starts, so restart after editing it).",
   },
   rubricToggle: { ja: "ターンの終わりにルーブリックで採点する（ランナー・モデルは自動判定と同じ）", en: "Score with the rubric at the end of a turn (same runner and model as the auto-judge)" },
   llm: { ja: "LLM 提案", en: "LLM suggestions" },
@@ -405,6 +405,7 @@ export const settings = msgs({
   preparing: { ja: "準備しています…", en: "Preparing…" },
   claudeLogin: { ja: "Claude アカウントでログイン", en: "Log in with a Claude account" },
   logIn: { ja: "ログインする", en: "Log in" },
+  githubLogin: { ja: "GitHub にログイン", en: "Log in to GitHub" },
   consoleLogin: { ja: "Anthropic Console でログイン", en: "Log in with Anthropic Console" },
   loggedIn: { ja: "ログインしました", en: "Logged in" },
   noLoginUrl: { ja: "ログインの URL が出ませんでした。", en: "No login URL came out." },

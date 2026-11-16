@@ -190,8 +190,13 @@ export function touchedPaths(events: EventEnvelope[], roots: string[]): Set<stri
 }
 
 async function run(cwd: string, args: string[]): Promise<{ code: number; out: string; err: string }> {
-  const p = Bun.spawn(["git", "-c", "core.quotePath=false", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_LITERAL_PATHSPECS: "1", GIT_OPTIONAL_LOCKS: "0" } });
-  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  let p: ReturnType<typeof Bun.spawn>;
+  try {
+    p = Bun.spawn(["git", "-c", "core.quotePath=false", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_LITERAL_PATHSPECS: "1", GIT_OPTIONAL_LOCKS: "0" } });
+  } catch {
+    return { code: 127, out: "", err: "git is not available" };
+  }
+  const [out, err] = await Promise.all([new Response(p.stdout as ReadableStream).text(), new Response(p.stderr as ReadableStream).text()]);
   const code = await p.exited;
   return { code, out, err };
 }

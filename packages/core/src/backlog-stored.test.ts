@@ -350,6 +350,70 @@ describe("pickNext overlap", () => {
     expect(at(read(() => false), 2).overlap).toBeNull();
   });
 
+  describe("what counts as working for the overlap judgement (workingStageTask)", () => {
+    const stage = (id: string, issueNo: number, over: Record<string, unknown> = {}) => {
+      const ws = db.listWorkspaces()[0]!;
+      return db.insertTask({ id, workspaceId: ws.id, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "running", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: issueNo, action: "complete" }, statusAt: 1, createdAt: 1, updatedAt: 1, ...over } as Parameters<Db["insertTask"]>[0]);
+    };
+    const overlapOf = (ws: { id: string; name: string; path: string }, n: number) => readStoredBacklog(db, ws, { active: (m) => !!db.workingStageTask(ws.id, m) }).items.find((i) => i.number === n)!.overlap;
+    const two = () => imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts")]);
+
+    test("a planned resume does not make the PBI's unstarted Tasks overlap", () => {
+      const ws = two();
+      stage("t_resume", 2, { status: "error", resumeAt: Date.now() + 3_600_000, resumeReason: "usage-limit" });
+      expect(db.activeStageTask(ws.id, 2)).not.toBeNull();
+      expect(db.workingStageTask(ws.id, 2)).toBeNull();
+      expect(overlapOf(ws, 1)).toBeNull();
+    });
+
+    test("the Tasks overlap again once the resume runs", () => {
+      const ws = two();
+      stage("t_resume", 2, { status: "error", resumeAt: Date.now() + 3_600_000, resumeReason: "usage-limit" });
+      expect(overlapOf(ws, 1)).toBeNull();
+      db.updateTask("t_resume", { status: "running", resumeAt: null, resumeReason: null });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "Task #20", path: "src/a.ts" }], unknown: null });
+    });
+
+    test("a running stage Task keeps its unstarted Tasks as other work", () => {
+      const hit = { hits: [{ ref: "Task #20", path: "src/a.ts" }], unknown: null };
+      const ws = two();
+      stage("t_run", 2);
+      expect(overlapOf(ws, 1)).toEqual(hit);
+      db.updateTask("t_run", { status: "waiting" });
+      expect(overlapOf(ws, 1)).toEqual(hit);
+      db.updateTask("t_run", { status: "done" });
+      expect(overlapOf(ws, 1)).toBeNull();
+      // waiting for a run slot
+      stage("t_queued", 2, { status: "idle" });
+      db.setQueued("t_queued", "続き", 5);
+      expect(overlapOf(ws, 1)).toEqual(hit);
+      db.updateTask("t_queued", { status: "running" });
+      db.updateTask("t_queued", { status: "done" });
+      expect(overlapOf(ws, 1)).toBeNull();
+      // a job it asked the daemon for, after its turn ended
+      db.insertJob({ kind: "local-ci", taskId: "t_run", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
+      expect(overlapOf(ws, 1)).toEqual(hit);
+    });
+
+    test("a Task whose PRs are merged and that only waits for a check is not other work", () => {
+      const prOf = (n: number, closes: number[], state: "OPEN" | "MERGED", files: string[]): BacklogSnapshotEntry => ({
+        objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched",
+        remote: { number: n, state, isDraft: false, labels: [], closes, mergeCommit: null, updatedAt: new Date().toISOString(), files, closedAt: null, mergedAt: null },
+      });
+      // the child of a PBI whose stage Task runs: In progress or not, a check-only Task is not other work either
+      const ws2 = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts"), prOf(63, [20], "MERGED", ["src/a.ts"])]);
+      stage("t_run", 2);
+      expect(overlapOf(ws2, 1)).toBeNull();
+      db.putBacklogSnapshot(SOURCE, { records: [item(20, { Status: "In progress" })], cursor: null, syncedAt: 7000 });
+      expect(overlapOf(ws2, 1)).toBeNull();
+      const checking = [issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })];
+      const ws = imported([...pbi(1, "P0", "src/a.ts"), ...checking, prOf(61, [60], "MERGED", ["src/a.ts"])]);
+      expect(overlapOf(ws, 1)).toBeNull();
+      db.putBacklogSnapshot(SOURCE, { records: [prOf(62, [60], "OPEN", ["src/a.ts"])], cursor: null, syncedAt: 6000 });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "PR #62", path: "src/a.ts" }], unknown: null });
+    });
+  });
+
   test("a PR whose files are not all stored cannot be judged: it is not started and says why", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, null)]);
     expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #50 の変更ファイルが記録に無い" });

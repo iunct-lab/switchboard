@@ -12,8 +12,9 @@ import type { RunnerId } from "@switchboard/protocol";
  * "Paste code here if prompted >", and reads stdin.
  */
 export type RunnerLoginState = "waiting" | "done" | "failed";
-export interface RunnerLoginView {
-  runner: RunnerId;
+export interface RunnerLoginView<K extends string = RunnerId> {
+  /** What logs in: a runner, or `gh` (GitHub's CLI, the same flow). */
+  runner: K;
   state: RunnerLoginState;
   /** Where the person signs in. */
   url?: string;
@@ -39,17 +40,17 @@ const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 const URL_RE = /https:\/\/[^\s"'<>]+/g;
 const DEVICE_CODE = /\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/;
 
-interface Session { view: RunnerLoginView; child: Child; timer: ReturnType<typeof setTimeout>; seen: Promise<void> }
+interface Session<K extends string> { view: RunnerLoginView<K>; child: Child; timer: ReturnType<typeof setTimeout>; seen: Promise<void> }
 
-export class RunnerLogins {
-  private sessions = new Map<RunnerId, Session>();
+export class RunnerLogins<K extends string = RunnerId> {
+  private sessions = new Map<K, Session<K>>();
   constructor(
     private spawn: SpawnLogin,
-    private onDone: (runner: RunnerId) => void,
+    private onDone: (runner: K) => void,
     private timeoutMs = LOGIN_TIMEOUT_MS,
   ) {}
 
-  get(runner: RunnerId): RunnerLoginView | undefined {
+  get(runner: K): RunnerLoginView<K> | undefined {
     const s = this.sessions.get(runner);
     return s && { ...s.view };
   }
@@ -58,14 +59,14 @@ export class RunnerLogins {
    * Starts the login (or returns the one already running) and resolves once its URL is out, it ended, or 15 s passed.
    * Only a URL on one of `hosts` is relayed (an update notice printed first is skipped).
    */
-  async start(runner: RunnerId, argv: string[], hosts: string[] = []): Promise<RunnerLoginView> {
+  async start(runner: K, argv: string[], hosts: string[] = []): Promise<RunnerLoginView<K>> {
     const running = this.sessions.get(runner);
     if (running && running.view.state === "waiting") {
       await running.seen;
       return { ...running.view };
     }
     const child = this.spawn(argv);
-    const view: RunnerLoginView = { runner, state: "waiting", needsCode: false };
+    const view: RunnerLoginView<K> = { runner, state: "waiting", needsCode: false };
     let text = "";
     // Once the URL and the code (or the prompt for one) are out, nothing more is read from the output: after the paste
     // the CLI may echo it, and no part of it may become a relayed code.
@@ -105,17 +106,17 @@ export class RunnerLogins {
     const timer = setTimeout(() => {
       if (view.state !== "waiting") return;
       view.state = "failed";
-      view.error = "ログインが時間内に終わりませんでした。もう一度「ログインする」を押してください";
+      view.error = "ログインが時間内に終わりませんでした。もう一度ログインのボタンを押してください";
       child.kill();
     }, this.timeoutMs);
-    const session: Session = { view, child, timer, seen };
+    const session: Session<K> = { view, child, timer, seen };
     this.sessions.set(runner, session);
     void child.exited.then((code) => {
       clearTimeout(timer);
       if (view.state === "waiting") {
         view.state = code === 0 ? "done" : "failed";
         // the exit code only: the CLI's output may echo what was typed into it
-        if (code !== 0) view.error = `ログインのコマンドが終了しました（exit ${code}）。もう一度「ログインする」を押してください`;
+        if (code !== 0) view.error = `ログインのコマンドが終了しました（exit ${code}）。もう一度ログインのボタンを押してください`;
       }
       if (view.state === "done") this.onDone(runner);
       markSeen();
@@ -125,7 +126,7 @@ export class RunnerLogins {
   }
 
   /** Hands the code the runner's page showed to the waiting CLI (claude). The code is not kept anywhere. */
-  async submit(runner: RunnerId, code: string): Promise<RunnerLoginView | undefined> {
+  async submit(runner: K, code: string): Promise<RunnerLoginView<K> | undefined> {
     const s = this.sessions.get(runner);
     if (!s || s.view.state !== "waiting") return s && { ...s.view };
     // one line only: a paste must not type further lines into the CLI
@@ -137,7 +138,7 @@ export class RunnerLogins {
   }
 
   /** 取り消す: ends a login that is waiting (e.g. its URL never came). */
-  cancel(runner: RunnerId): RunnerLoginView | undefined {
+  cancel(runner: K): RunnerLoginView<K> | undefined {
     const s = this.sessions.get(runner);
     if (!s) return undefined;
     if (s.view.state === "waiting") {

@@ -1,12 +1,12 @@
 // test-reads: rescue/src/ rescue/install.ts rescue/package.json
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, createHmac, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import type { Ctx } from "./promote.ts";
-import { buildRelease, currentOf, switchTo } from "./releases.ts";
+import { buildRelease, currentOf, readHistory, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { sweepTmp } from "./tmp.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -37,7 +37,7 @@ beforeAll(async () => {
   switchTo(f.home, f.v1);
   switchTo(f.home, v2);
   const port = await freePort();
-  ctx = { home: f.home, repo: f.repo, port, sup: new Supervisor({ home: f.home, repo: f.repo, port, backoffMs: 50 }) };
+  ctx = { home: f.home, repo: f.repo, source: null, port, sup: new Supervisor({ home: f.home, repo: f.repo, port, backoffMs: 50 }) };
   ctx.sup.start();
   await until(() => health(port), "v2 up");
   tmpRoot = mkdtempSync(join(tmpdir(), "sb-rescue-tmp-"));
@@ -59,7 +59,7 @@ test("sb-rescue shares no code with Switchboard: only relative, node: and bun: i
   const transpiler = new Bun.Transpiler({ loader: "ts" });
   const specifiers = files.flatMap((file) => transpiler.scanImports(readFileSync(file, "utf8")).map((i) => `${file.split("/").pop()}: ${i.path}`));
   expect(specifiers.length).toBeGreaterThan(10);
-  expect(specifiers.filter((s) => !/: (\.\/[\w.-]+|node:[\w/]+|bun:[\w]+|bun)$/.test(s))).toEqual([]);
+  expect(specifiers.filter((s) => !/: (\.\/(src\/)?[\w.-]+|node:[\w/]+|bun:[\w]+|bun)$/.test(s))).toEqual([]);
   expect(Object.keys(JSON.parse(readFileSync(join(dir, "..", "package.json"), "utf8")).dependencies ?? {})).toEqual([]);
 });
 
@@ -848,3 +848,117 @@ test("tmp page: the picked age changes the clean button's count and what it send
   expect(none.posts).toEqual([]);
   expect(none.asked[0]).toContain("動いている Task はありません");
 });
+
+test("release-tree: unpacks the tagged tarball without git and diffs it against the current release; no update source is a 404", async () => {
+  const root = mkdtempSync(join(tmpdir(), "switchboard.reltree."));
+  const home = join(root, "home");
+  const cur = "1".repeat(40);
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  mkdirSync(join(home, "releases", cur, "node_modules"), { recursive: true });
+  writeFileSync(join(home, "releases", cur, "package.json"), JSON.stringify({ version: "1.0.0" }));
+  writeFileSync(join(home, "releases", cur, "kept.txt"), "same\n");
+  writeFileSync(join(home, "releases", cur, "changed.txt"), "old line\n");
+  writeFileSync(join(home, "releases", cur, "node_modules", "x.js"), "installed only here\n");
+  switchTo(home, cur);
+  const top = join(root, "src", `o-n-${sha.slice(0, 7)}`);
+  mkdirSync(top, { recursive: true });
+  writeFileSync(join(top, "package.json"), JSON.stringify({ version: "1.1.0" }));
+  writeFileSync(join(top, "kept.txt"), "same\n");
+  writeFileSync(join(top, "changed.txt"), "new line\n");
+  writeFileSync(join(top, "added.txt"), "brand new file\n");
+  const tgz = join(root, "v1.1.0.tgz");
+  Bun.spawnSync(["tar", "-czf", tgz, "-C", join(root, "src"), `o-n-${sha.slice(0, 7)}`]);
+  let tarballCalls = 0;
+  const api = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const p = new URL(req.url).pathname;
+      if (p === "/repos/o/n/commits/v1.1.0") return Response.json({ sha });
+      if (p === "/repos/o/n/releases/latest") return Response.json({ tag_name: "v1.1.0" });
+      if (p === "/repos/o/n/tarball/v1.1.0") {
+        tarballCalls++;
+        return new Response(readFileSync(tgz));
+      }
+      return new Response("no", { status: 404 });
+    },
+  });
+  const bin = join(root, "bin"); // tar, gzip and diff only: a git that is called would not be found
+  mkdirSync(bin);
+  for (const n of ["tar", "gzip", "diff"]) symlinkSync(Bun.which(n)!, join(bin, n));
+  const oldPath = process.env.PATH;
+  process.env.SWITCHBOARD_GITHUB_API = `http://localhost:${api.port}`;
+  process.env.PATH = bin;
+  const sctx: Ctx = { home, repo: join(home, "releases", "current"), source: "o/n", port: 1, sup: new Supervisor({ home, repo: f.repo, port: 1 }) };
+  const noSource: Ctx = { ...sctx, source: null };
+  const r1 = startRescue(sctx, { port: 0, tmpDir: tmpRoot });
+  const r2 = startRescue(noSource, { port: 0, tmpDir: tmpRoot });
+  const ask = (r: typeof r1, body: unknown) => fetch(`http://127.0.0.1:${r.server.port}/api/release-tree`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    // two at once share one run
+    const [res, again] = await Promise.all([ask(r1, { tag: "v1.1.0" }), ask(r1, { tag: "v1.1.0" })]);
+    expect([res.status, again.status]).toEqual([200, 200]);
+    expect(tarballCalls).toBe(1);
+    const out = (await res.json()) as { tag: string; sha: string; tree: string; diffFile: string; stat: string[] };
+    expect(await again.json()).toEqual(out);
+    expect([out.tag, out.sha, out.tree, out.diffFile]).toEqual(["v1.1.0", sha, join(home, "release-review", "v1.1.0", cur, "tree"), join(home, "release-review", "v1.1.0", cur, "diff.patch")]);
+    const patch = readFileSync(out.diffFile, "utf8");
+    expect(patch).toContain("-old line");
+    expect(patch).toContain("+new line");
+    expect(patch).toContain("+brand new file"); // a file only the new version has
+    expect(patch).not.toContain("installed only here"); // node_modules is not a change
+    expect(out.stat.join("\n")).toContain("added.txt");
+    expect(patch).toContain("+++ b/added.txt"); // the trees are a/ and b/: no host path reaches the review
+    expect(`${patch}\n${out.stat.join("\n")}`).not.toContain(root);
+    expect(readFileSync(join(out.tree, "added.txt"), "utf8")).toBe("brand new file\n");
+    // the same tag again answers from what is there, without fetching
+    expect(await ask(r1, { tag: "v1.1.0" }).then((r) => r.json())).toEqual(out);
+    expect(tarballCalls).toBe(1);
+    expect((await ask(r1, { tag: "main" })).status).toBe(400);
+    expect((await ask(r1, { tag: "v9.9.9" })).status).toBe(502);
+    expect(readdirSync(join(home, "release-review"))).toEqual(["v1.1.0"]);
+    expect((await ask(r2, { tag: "v1.1.0" })).status).toBe(404);
+    // the update source and the newest release, for the daemon: no git is asked
+    const get = (r: typeof r1, path: string) => fetch(`http://127.0.0.1:${r.server.port}${path}`);
+    expect(((await get(r1, "/api/status").then((r) => r.json())) as { source: string | null }).source).toBe("o/n");
+    expect(((await get(r2, "/api/status").then((r) => r.json())) as { source: string | null }).source).toBeNull();
+    // newer only when the tag is above the running release's: none to compare with, the same, or a lower tag is not
+    const latestWith = async (runningTag: string | null) => {
+      if (runningTag) writeFileSync(join(home, "releases", cur, ".release.json"), JSON.stringify({ tag: runningTag, sha: cur }));
+      else rmSync(join(home, "releases", cur, ".release.json"), { force: true });
+      return get(r1, "/api/latest-release").then((r) => r.json());
+    };
+    expect(await latestWith(null)).toEqual({ tag: "v1.1.0", sha, newer: false });
+    expect(await latestWith("v1.0.9")).toEqual({ tag: "v1.1.0", sha, newer: true });
+    expect(await latestWith("v1.1.0")).toEqual({ tag: "v1.1.0", sha, newer: false });
+    expect(await latestWith("v1.10.0")).toEqual({ tag: "v1.1.0", sha, newer: false });
+    expect((await get(r2, "/api/latest-release")).status).toBe(404);
+    // /api/promote carries the checked commit to the promotion: a malformed one is refused, and one the tag no longer
+    // names is rejected before anything is fetched or built
+    const promoteAsk = (body: unknown) => fetch(`http://127.0.0.1:${r1.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await promoteAsk({ commit: "v1.1.0", expectSha: "abc" })).status).toBe(400);
+    const calls = tarballCalls;
+    expect((await promoteAsk({ commit: "v1.1.0", expectSha: "e".repeat(40) })).status).toBe(202);
+    const moved = await until(() => readHistory(home).find((h) => h.action === "rejected") ?? null, "promotion rejected");
+    expect([moved.to, moved.reason.includes("checked version"), tarballCalls]).toEqual(["e".repeat(40), true, calls]);
+    // another release runs now (a rollback): the difference is made again against it
+    const other = "2".repeat(40);
+    mkdirSync(join(home, "releases", other), { recursive: true });
+    writeFileSync(join(home, "releases", other, "changed.txt"), "rolled back line\n");
+    switchTo(home, other);
+    const redo = (await ask(r1, { tag: "v1.1.0" }).then((r) => r.json())) as typeof out;
+    expect(tarballCalls).toBe(2);
+    expect(readFileSync(redo.diffFile, "utf8")).toContain("-rolled back line");
+    // beside the first one, which a running check may still read
+    expect(readFileSync(out.diffFile, "utf8")).toContain("-old line");
+    // no current release to compare with
+    rmSync(join(home, "releases", "current"));
+    expect((await ask(r1, { tag: "v1.1.0" })).status).toBe(409);
+  } finally {
+    process.env.PATH = oldPath;
+    delete process.env.SWITCHBOARD_GITHUB_API;
+    await r1.stop();
+    await r2.stop();
+    api.stop(true);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);

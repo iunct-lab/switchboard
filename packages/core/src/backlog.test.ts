@@ -1,6 +1,6 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
 import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Backlog, BacklogIssueData, BacklogAction, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogItem, RunnerAdapter, StartOptions, Task, TaskStatus } from "@switchboard/protocol";
@@ -965,14 +965,15 @@ test("start: a second start while the first is running is 409 with its id; GET /
   expect(core!.db.listTasks()).toHaveLength(1);
 });
 
-test("start: two starts while the routing turn is still thinking make one Task; the other is 409", async () => {
+test("start: two starts of the same Issue in one tick make one Task; the other is 409 with it", async () => {
   const claude = holdingClaude();
-  // an LLM routing suggestion takes a moment: both starts would pass the running/waiting check before either creates
-  const slow: Suggester = { suggest: async () => (await Bun.sleep(50), { runner: "claude", reason: "slow", ruleId: "llm", model: null, available: true, alternatives: [], llm: null }) };
-  const base = await boot(fakeGh().gh, claude.adapter, {}, () => slow);
-  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
+  const base = await boot(fakeGh().gh, claude.adapter);
+  // nothing awaits between the running/waiting check and the Task's creation, so the second start finds the first one's Task
   const [a, b] = await Promise.all([start(base, 304, { action: "complete" }), start(base, 304, { action: "complete" })]);
   expect([a.status, b.status].sort()).toEqual([201, 409]);
+  const task = (await (a.status === 201 ? a : b).json()) as { id: string };
+  const refused = (await (a.status === 409 ? a : b).json()) as { taskId: string };
+  expect(refused.taskId).toBe(task.id);
   expect(core!.db.listTasks()).toHaveLength(1);
 });
 
@@ -4561,11 +4562,13 @@ test("start race: a button start and a backlog-next firing on the same item make
   closeTried();
   await sweepAll(base, { implement: 2, plan: 1 });
   const id = await backlogNextSchedule(base);
-  const button = start(base, 304, { action: "complete" });
-  // implement 2: the slot has room, the firing picks Issue 304 too — and leaves it to the button
-  expect((await runSchedule(base, id)).status).toBe(201);
-  expect((await button).status).toBe(201);
-  expect(startedTasks().filter((t) => t.title.startsWith("#304 ")).length).toBe(1);
+  // implement 2: the slot has room for both; whichever of the two makes Issue 304's stage Task first, the other finds it
+  const [button, firing] = await Promise.all([start(base, 304, { action: "complete" }), runSchedule(base, id)]);
+  expect(firing.status).toBe(201);
+  expect([201, 409]).toContain(button.status);
+  const mine = startedTasks().filter((t) => t.title.startsWith("#304 "));
+  expect(mine.length).toBe(1);
+  if (button.status === 409) expect(((await button.json()) as { taskId: string }).taskId).toBe(mine[0]!.id);
 });
 
 test("start race: a firing skips an item whose stage Task started after GitHub was read, and starts the next one", async () => {
@@ -4663,6 +4666,7 @@ test("promote: promotionStep — only under sb-rescue, only a newer tag, never w
   expect(promotionStep({ status: released({ history: [{ action: "rejected", from: "aaa", to: "ccc", ok: false, reason: "x" }] }), latest: v2, busyTasks: 0 }).action).toBe("promote");
 });
 
+
 /**
  * The failure report's stored backlog: PBI 499, its Task 500 and (when `pr`) PR 501 closing Issue 500, in a Db under `source`.
  * Its gh answers `gh pr view` only (`prView`: the PR's body and branch, else "not a PR") and counts every call.
@@ -4736,7 +4740,7 @@ test("promote: a subject without (#n), or a number that is no stored Issue, repo
 });
 
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
-async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0, origin }: { busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number; origin?: string } = {}) {
+async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0, origin, source, newer = true, treeFails = false }: { busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number; origin?: string; source?: boolean; newer?: boolean; treeFails?: boolean } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
   withProcesses(repo);
   const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
@@ -4755,14 +4759,27 @@ async function releasedDaemon(history: ReleaseState["history"] = [], runningNewe
   let current = runningNewer ? git("rev-parse", "HEAD") : before || "old";
   const promoted: string[] = [];
   const statusAsked = { pending: 0 };
+  // source: a sb-rescue that builds from an update source (no git). Its newest release is not the tag in the checkout, so a
+  // decision made from git would show; release-tree answers with a folder of its own, as the real one does under <home>/release-review.
+  const fromSource = source ? { tag: "v0.3.0", sha: "a".repeat(40), asked: [] as Array<{ commit: string; expectSha?: string }>, trees: [] as string[] } : null;
   const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/api/status" && statusDelayMs) { statusAsked.pending++; await Bun.sleep(statusDelayMs); statusAsked.pending--; }
-    if (url.pathname === "/api/status") return Response.json({ current, previous: null, state: "running", busy, lastError: null, history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
-    if (url.pathname === "/api/promote") { if (refuse) return Response.json({ error: "refused" }, { status: 409 }); if (promoteDelayMs) await Bun.sleep(promoteDelayMs); const commit = ((await req.json()) as { commit: string }).commit; promoted.push(commit); current = commit; return Response.json({ started: "promote" }, { status: 202 }); }
+    if (fromSource && url.pathname === "/api/latest-release") return Response.json({ tag: fromSource.tag, sha: fromSource.sha, newer });
+    if (fromSource && url.pathname === "/api/release-tree") {
+      const { tag } = (await req.json()) as { tag: string };
+      fromSource.trees.push(tag);
+      if (treeFails) return Response.json({ error: "GitHub returned 503" }, { status: 502 });
+      const dir = join(home!, "release-review", tag); // the daemon's own home (a module variable set by boot)
+      mkdirSync(join(dir, "tree"), { recursive: true });
+      writeFileSync(join(dir, "diff.patch"), "diff -ru a/x b/x\n");
+      return Response.json({ tag, sha: fromSource.sha, tree: join(dir, "tree"), diffFile: join(dir, "diff.patch"), stat: ["Files a/x and b/x differ"] });
+    }
+    if (url.pathname === "/api/status") return Response.json({ current, previous: null, ...(fromSource ? { source: "o/n" } : {}), state: "running", busy, lastError: null, history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
+    if (url.pathname === "/api/promote") { if (refuse) return Response.json({ error: "refused" }, { status: 409 }); if (promoteDelayMs) await Bun.sleep(promoteDelayMs); const asked = (await req.json()) as { commit: string; expectSha?: string }; fromSource?.asked.push(asked); const commit = asked.expectSha ?? asked.commit; promoted.push(commit); current = commit; return Response.json({ started: "promote" }, { status: 202 }); }
     return new Response("no", { status: 404 });
   } });
-  return { repo, sha, promoted, statusAsked, rescue, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
+  return { repo, sha, promoted, statusAsked, rescue, fromSource, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };
 }
 
 test("promote: a firing of the items whose waits cleared asks for the newer tag first, logs it, and starts nothing", async () => {
@@ -4851,15 +4868,17 @@ test("promote: while the newest tag is one that failed, nothing is promoted or s
 /** A claude adapter whose turns stay running until the test ends them (`end(i)` = the i-th started Task's turn ends ok). */
 function endableClaude(permissionModes: RunnerAdapter["permissionModes"] = []) {
   const emits: Array<(ev: AgentEvent) => void> = [];
+  const prompts: string[] = [];
   const adapter: RunnerAdapter = {
     id: "claude", detect: async () => ({ available: true }), permissionModes,
-    start(_opts, emit) {
+    start(opts, emit) {
+      prompts.push(opts.prompt);
       emits.push(emit);
       return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise(() => {}) };
     },
   };
   const started = async (n: number) => { for (const t0 = Date.now(); emits.length < n && Date.now() - t0 < 20_000; ) await Bun.sleep(10); expect(emits).toHaveLength(n); };
-  return { adapter, started, count: () => emits.length, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }), emit: (i: number, ev: AgentEvent) => emits[i]!(ev) };
+  return { adapter, started, prompts, count: () => emits.length, end: (i: number) => emits[i]!({ t: "session.end", status: "ok" }), emit: (i: number, ev: AgentEvent) => emits[i]!(ev) };
 }
 const releaseHold = async (base: string) => ((await (await fetch(`${base}/api/daemon/release`)).json()) as { hold: unknown }).hold;
 const settle = async (until: () => boolean) => { for (const t0 = Date.now(); !until() && Date.now() - t0 < 20_000; ) await Bun.sleep(10); };
@@ -6070,6 +6089,143 @@ describe("release review", () => {
       rmSync(ok.repo, { recursive: true, force: true });
     }
   }, 30_000);
+
+  // an update source: the origin is not a public copy and its tags are not the newest; what sb-rescue says decides
+  const treeTask = () => reviews()[0]!;
+  test("an update source: the newest release is sb-rescue's, the check reads release-tree's diff with no git worktree, and an ok result asks for the tag with the checked commit", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await settle(() => reviews().length > 0);
+      const t = treeTask();
+      expect(t).toMatchObject({ origin: "release-review", title: "リリースの差分確認 v0.3.0", permissionMode: "plan" });
+      expect(r.fromSource!.trees).toEqual(["v0.3.0"]);
+      // the prompt carries the paths release-tree returned, and git made no tree
+      await claude.started(1);
+      expect(claude.prompts.find((p) => p.includes("v0.3.0"))).toContain(join(home!, "release-review", "v0.3.0", "diff.patch"));
+      expect(existsSync(join(t.cwd, "tree", ".git"))).toBe(false);
+      expect(await releaseOf(base)).toMatchObject({ latestRelease: { tag: "v0.3.0", sha: "a".repeat(40), ahead: 1 }, hold: { reason: "v0.3.0 の差分を確認中" } });
+      expect(r.promoted).toEqual([]);
+      claude.emit(0, { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      for (let i = 1; i < claude.count(); i++) claude.end(i);
+      await settle(() => r.promoted.length > 0);
+      expect(r.fromSource!.asked).toEqual([{ commit: "v0.3.0", expectSha: "a".repeat(40) }]);
+      // now running (the kept answer still says newer): not offered again
+      expect(await releaseOf(base)).toMatchObject({ latestRelease: { tag: "v0.3.0", ahead: 0 } });
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an update source: an ok check made for another commit than the tag now points at is not promoted (a moved tag)", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await claude.started(1);
+      // the check was made for another commit (the tag moved after it started)
+      writeFileSync(join(home!, "release-review", "v0.3.0.sha"), "c".repeat(40) + "\n");
+      claude.emit(0, { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      for (let i = 1; i < claude.count(); i++) claude.end(i);
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      await Bun.sleep(300);
+      expect(r.promoted).toEqual([]);
+      expect(((await releaseHold(base)) as { reason: string }).reason).toContain("確認した commit");
+      // the screen reads it as not checked too (no checkout is compared from a source), and it can be checked again
+      const shown = (await releaseOf(base)) as unknown as { review: { state: string }; head: string; current: string; ahead: number; behind: number };
+      expect([shown.review.state, shown.head, shown.ahead, shown.behind]).toEqual(["failed", shown.current, 0, 0]);
+      // a check that could not start leaves the commit of the previous one: its ok still does not count for the moved tag
+      const create = core!.tasks.create.bind(core!.tasks);
+      core!.tasks.create = () => {
+        throw new Error("no task");
+      };
+      try {
+        expect((await fetch(`${base}/api/daemon/release/review`, { method: "POST" })).status).toBe(500);
+      } finally {
+        core!.tasks.create = create;
+      }
+      expect(readFileSync(join(home!, "release-review", "v0.3.0.sha"), "utf8").trim()).toBe("c".repeat(40));
+      expect(await releaseOf(base)).toMatchObject({ review: { state: "failed" } });
+      expect(r.promoted).toEqual([]);
+      expect((await fetch(`${base}/api/daemon/release/review`, { method: "POST" })).status).toBe(202);
+      // the new check is for the commit the tag names now, written once the check exists
+      expect(readFileSync(join(home!, "release-review", "v0.3.0.sha"), "utf8").trim()).toBe("a".repeat(40));
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an update source: a check that could not start is not tried again at every check (GitHub's calls are counted)", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true, treeFails: true });
+    try {
+      const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, CHECK);
+      await settle(() => r.fromSource!.trees.length > 0);
+      await Bun.sleep(600); // a dozen interval checks
+      expect(r.fromSource!.trees).toEqual(["v0.3.0"]);
+      expect(reviews()).toEqual([]);
+      expect(((await releaseHold(base)) as { reason: string }).reason).toContain("また試す");
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an update source: a newest release that is not above what runs (a Release deleted) is neither checked nor promoted, nor offered", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true, newer: false });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      await Bun.sleep(500);
+      expect(reviews()).toEqual([]);
+      expect(r.fromSource!.trees).toEqual([]);
+      expect(r.promoted).toEqual([]);
+      expect(await releaseOf(base)).toMatchObject({ latestRelease: { tag: "v0.3.0", ahead: 0 } });
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an update source: promote by hand asks for the newest tag with its commit, whether named by tag or commit, and refuses another", async () => {
+    const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true });
+    try {
+      const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env);
+      const post = (commit: string) => fetch(`${base}/api/daemon/promote`, { method: "POST", body: JSON.stringify({ commit, force: true }) });
+      expect((await post("b".repeat(40))).status).toBe(409);
+      expect(r.fromSource!.asked).toEqual([]);
+      expect((await post("a".repeat(40))).status).toBe(202);
+      expect((await post("v0.3.0")).status).toBe(202);
+      expect(r.fromSource!.asked).toEqual([{ commit: "v0.3.0", expectSha: "a".repeat(40) }, { commit: "v0.3.0", expectSha: "a".repeat(40) }]);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  for (const [name, summary, hold] of [
+    ["concern", fence({ verdict: "concern", findings: [{ path: "a.ts", why: "fetch" }] }), "v0.3.0 の差分の確認で懸念 1 件"],
+    ["unreadable", "問題ありません", "v0.3.0 の差分を確かめられなかった: 最後の返答が結果の書式"],
+  ] as const) {
+    test(`an update source: a ${name} result is not promoted`, async () => {
+      const r = await releasedDaemon([], false, { origin: remote("o/dev"), source: true });
+      const claude = endableClaude(PLAN);
+      try {
+        const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+        await claude.started(1);
+        claude.emit(0, { t: "session.end", status: "ok", summary });
+        await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+        await Bun.sleep(300);
+        expect(r.promoted).toEqual([]);
+        expect(((await releaseHold(base)) as { reason: string }).reason).toContain(hold);
+      } finally {
+        r.rescue.stop(true);
+        rmSync(r.repo, { recursive: true, force: true });
+      }
+    }, 30_000);
+  }
 
   test("a development origin has latestRelease and review null and refuses the re-check", async () => {
     const dev = await releasedDaemon([], false, { origin: remote("o/dev") });

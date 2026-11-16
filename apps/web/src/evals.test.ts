@@ -74,6 +74,16 @@ describe("judge rows (#1219)", () => {
     expect(judgeRows(evals(null))).toEqual([]);
   });
 
+  test("judgeRows: intent, minimal and value carry their titles and follow safety in the default order", () => {
+    const rows = judgeRows(evals(null, judge({ value: { score: 1, reason: "つながらない" }, minimal: { score: 3, reason: "一部足した" }, intent: { score: 5, reason: "合う" }, safety: { score: 5, reason: "ok" } })));
+    expect(rows.map((r) => [r.id, r.title, r.score, r.warn])).toEqual([
+      ["safety", "安全", 5, false],
+      ["intent", "意図の合致", 5, false],
+      ["minimal", "最小性", 3, false],
+      ["value", "価値", 1, true],
+    ]);
+  });
+
   test("judgeAverage: one decimal; null without scores", () => {
     expect(judgeAverage(evals(null, judge({ goal: { score: 4, reason: "" }, safety: { score: 5, reason: "" }, efficiency: { score: 2, reason: "" } })))).toBe(3.7);
     expect(judgeAverage(evals(null, judge({})))).toBeNull();
@@ -196,11 +206,12 @@ describe("subagentEffort on the Evals list (#3866)", () => {
 
 describe("gapLabel (#1877)", () => {
   test("none rated → the line says so; otherwise the signed mean to one decimal and the count", () => {
-    expect(gapLabel({ count: 0, mean: null })).toBe("人の評価がまだありません");
-    expect(gapLabel({ count: 12, mean: 0.4 })).toBe("人 − 判定: +0.4（12 件）");
-    expect(gapLabel({ count: 2, mean: -2.1 })).toBe("人 − 判定: −2.1（2 件）");
-    expect(gapLabel({ count: 1, mean: 0 })).toBe("人 − 判定: 0.0（1 件）");
-    expect(gapLabel({ count: 3, mean: 1 })).toBe("人 − 判定: +1.0（3 件）");
+    expect(gapLabel({ count: 0, mean: null, intent: { count: 0, mean: null } })).toBe("人の評価がまだありません");
+    expect(gapLabel({ count: 12, mean: 0.4, intent: { count: 0, mean: null } })).toBe("人 − 判定: +0.4（12 件）");
+    expect(gapLabel({ count: 2, mean: -2.1, intent: { count: 0, mean: null } })).toBe("人 − 判定: −2.1（2 件）");
+    expect(gapLabel({ count: 1, mean: 0, intent: { count: 0, mean: null } })).toBe("人 − 判定: 0.0（1 件）");
+    expect(gapLabel({ count: 3, mean: 1, intent: { count: 0, mean: null } })).toBe("人 − 判定: +1.0（3 件）");
+    expect(gapLabel({ count: 3, mean: 1, intent: { count: 2, mean: 3.5 } })).toBe("人 − 判定: +1.0（3 件） ／ 意図がずれた 2 件の判定の意図: 3.5");
   });
 });
 
@@ -219,7 +230,7 @@ console.log(JSON.stringify([
   rows.find((r) => r.label === "Stops")?.value,
   rows.map((r) => r.label).slice(0, 3),
   fmtDuration(3_725_000),
-  gapLabel({ count: 1, mean: 0.5 }),
+  gapLabel({ count: 1, mean: 0.5, intent: { count: 2, mean: 3.5 } }),
   modelsLabel({ models: ["a", "b"] }),
   endLabel("aborted"),
   reasonLabel.promote,
@@ -238,7 +249,7 @@ console.log(JSON.stringify([
       "2 (limit 2)",
       ["Tool calls", "Failures", "Errors"],
       "1 h 2 min",
-      "Person − judge: +0.5 (count: 1)",
+      "Person − judge: +0.5 (count: 1) ／ Judge intent where it was missed (2): 3.5",
       "a → b (mixed)",
       "Aborted",
       "Promotion",

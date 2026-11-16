@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
-import { dependsResumePrompt, dependsWaits, jobResumePrompt, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { dependsResumePrompt, dependsWaits, jobResumePrompt, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
+import { blockersOf } from "./asks.ts";
+import { reduceStops, type StopReport } from "./stops.ts";
 import { TaskManager } from "./tasks.ts";
 
 // A Task that stopped on another session's work is resumed when that work closes: which stops wait on what.
@@ -349,8 +351,8 @@ describe("resumeDepends", () => {
     expect(sends).toEqual([dependsResumePrompt(["pr#12", "issue#34", "pr#13"])]);
   });
   describe("job#<id>", () => {
-    const JOB_WAIT = { ...WAIT, id: "overlap", op: "ops-kit job request", target: "PR #12", evidence: "ローカル CI を頼んだ", conditions: [{ key: "job#1", value: "done", met: false }] };
-    const startJob = async (over: { stage?: { issue: number; action: "complete" } } = {}, wait = JOB_WAIT) => {
+    const JOB_WAIT = { ...WAIT, reason: "depends" as StopRecord["reason"], id: "overlap", op: "ops-kit job request", target: "PR #12", evidence: "ローカル CI を頼んだ", conditions: [{ key: "job#1", value: "done", met: false }] };
+    const startJob = async (over: { stage?: { issue: number; action: "complete" } } = {}, wait: StopReport = JOB_WAIT) => {
       const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });
       await settle();
       const job = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now() });
@@ -358,6 +360,44 @@ describe("resumeDepends", () => {
       return { t, job };
     };
     const end = (id: number, code = 1) => db.finishJob(id, { status: code === 0 ? "pass" : "fail", exitCode: code, summary: `fail（終了コード ${code}）\nerror: 2 tests failed\nログ: /jobs/${id}/log`, endedAt: Date.now() })!;
+
+    const DECISION = { ...JOB_WAIT, id: "ask", op: "ask", target: "", reason: "decision" as StopRecord["reason"] };
+
+    test("a job's end meets job# on a stop that is not depends", async () => {
+      const { t, job } = await startJob({}, DECISION);
+      const blockers = () => blockersOf({ waits: [], stops: reduceStops(db.listStopRecords([t.id])), approvalPending: false });
+      expect(blockers().some((b) => b.detail.startsWith(`job#${job.id}`))).toBe(true); // running: it holds the answer back
+      end(job.id);
+      meetJobConditions({ db, tasks, taskId: t.id, jobId: job.id });
+      await settle();
+      expect(stopOf(t.id, "ask")).toMatchObject({ state: "waiting", reason: "decision", conditions: [{ key: `job#${job.id}`, met: true }] });
+      expect(db.getTask(t.id)!.status).toBe("done");
+      expect(sends).toEqual([]);
+      expect(blockers().filter((b) => b.detail.startsWith("job#"))).toEqual([]);
+    });
+
+    test("a retrying stop is not recorded again at a job's end", async () => {
+      const { t, job } = await startJob({}, { ...DECISION, reason: "transient", state: "retrying", actions: [{ attempt: 1, at: 1, what: "fetch", ok: null }] });
+      const before = stopOf(t.id, "ask");
+      end(job.id);
+      meetJobConditions({ db, tasks, taskId: t.id, jobId: job.id });
+      expect(stopOf(t.id, "ask")).toEqual(before); // recording it again would book one more retry
+    });
+
+    test("an ended job's condition stays met when the stop is reported again", async () => {
+      const { t, job } = await startJob({}, DECISION);
+      const again = { ...DECISION, conditions: [{ key: `job#${job.id}`, value: "done", met: false }] };
+      tasks.recordStop(t.id, { ...again, id: "dep", reason: "depends" as const }); // the same condition on a depends stop
+      end(job.id);
+      expect(tasks.recordStop(t.id, again).ok).toBe(true); // the Task reports it open once more after the end
+      expect(stopOf(t.id, "ask")).toMatchObject({ state: "waiting", conditions: [{ key: `job#${job.id}`, met: true }] });
+      expect(stopOf(t.id, "dep")).toMatchObject({ state: "waiting", conditions: [{ key: `job#${job.id}`, met: false }] }); // depends is left to resumeDepends
+      expect(await resume()).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect(stopOf(t.id, "dep")).toMatchObject({ state: "resolved", conditions: [{ key: `job#${job.id}`, met: true }] });
+      expect(await resume()).toEqual([]);
+    });
 
     test("waits while the job runs; once it ends, one turn with its result", async () => {
       const { t, job } = await startJob();

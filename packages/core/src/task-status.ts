@@ -47,7 +47,7 @@ export function workPhase(t: Pick<Task, "status" | "resumeAt">): WorkPhase {
 }
 
 /** What a count of "working" Tasks is for. The set is fixed, not a setting. */
-export type WorkPurpose = "dedupe" | "slot" | "gate" | "display";
+export type WorkPurpose = "dedupe" | "slot" | "gate" | "display" | "drain";
 
 /** Which phases count as working for each purpose: the one table (the same one is in docs/design/task-work-phase.md). */
 export const COUNTS: Record<WorkPurpose, ReadonlySet<WorkPhase>> = {
@@ -55,6 +55,7 @@ export const COUNTS: Record<WorkPurpose, ReadonlySet<WorkPhase>> = {
   slot: new Set<WorkPhase>(["turn", "approval", "background"]),
   gate: new Set<WorkPhase>(["turn", "approval", "background"]),
   display: new Set<WorkPhase>(["turn", "approval", "background"]),
+  drain: new Set<WorkPhase>(["turn", "background"]),
 };
 
 export function isWorking(t: Pick<Task, "status" | "resumeAt">, purpose: WorkPurpose): boolean {

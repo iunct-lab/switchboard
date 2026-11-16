@@ -93,15 +93,22 @@ The daemon registers its own repository as the **meta workspace**, so you can po
 
 **No desktop shell.** The browser UI covers what a desktop shell would be for: it installs as a PWA on a desktop or a phone, the daemon runs from an immutable release promoted only after it boots, and the rescue page (`sb-rescue`) undoes a bad update from any browser (`docs/design/releases-and-rescue.md`); terminal notifications are a separate feature (`設定 → 端末通知`). You send a request about Switchboard from its own browser UI and the change reaches the running daemon.
 
-## Run
+## Use it
+
+Use it without git: install the newest Release, run it under `sb-rescue`, and let it update itself from the Releases (three commands; `bun`, `curl`, `tar`, `gzip` and `diff` are needed, git is not).
 
 ```bash
-./scripts/setup.sh        # installs Bun if needed, then `bun install`
-bun run dev               # core on :47831, web on :5173
-open http://localhost:5173
+# 1. Fetch and unpack the source tarball of any Release (the installer fetches the newest one again)
+mkdir switchboard-src && curl -fsSL https://github.com/iunct-lab/switchboard/archive/refs/tags/<tag>.tar.gz | tar -xz -C switchboard-src --strip-components=1
+# 2. Build the newest Release under ~/.switchboard/releases, record where updates come from, bundle sb-rescue
+cd switchboard-src && bun rescue/install.ts --source iunct-lab/switchboard
+# 3. Start it (the installer prints this line)
+bun ~/.switchboard/rescue/sb-rescue.js
 ```
 
-The built UI the daemon serves (`bun run --cwd apps/web build`, then `http://localhost:47831/`) can be added to a phone's or desktop's home screen as an app (PWA; needs HTTPS or localhost) and opens on `承認` (`/approvals`), the unanswered permission asks of every task. From a phone over Tailscale: `docs/design/mobile-approval.md`. While it is open, tool approvals and `要対応` also show as OS notifications (`設定 → 端末通知`).
+Open `http://localhost:47831/`. The tarball of step 1 is trusted as fetched over HTTPS from github.com; the one the installer downloads is checked (it must come from `codeload.github.com` for that repository, complete, and match the tag's commit) before it builds anything; building runs `bun install --frozen-lockfile` and the web build. Later versions arrive from the Releases: `設定` → `動いている版` shows the newest Release, a model reads its diff first, and a version with no concern goes up by itself while no Task runs, a version with a concern waits for your button (`docs/design/releases-and-rescue.md`). The rescue page (`救援画面`) can roll back or restart; its agent is not available on an install from a Release. To keep sb-rescue running across logouts, see "Keep it running" in that document.
+
+The UI the daemon serves at `http://localhost:47831/` (the install builds it; in a clone, `bun run --cwd apps/web build`) can be added to a phone's or desktop's home screen as an app (PWA; needs HTTPS or localhost) and opens on `承認` (`/approvals`), the unanswered permission asks of every task. From a phone over Tailscale: `docs/design/mobile-approval.md`. While it is open, tool approvals and `要対応` also show as OS notifications (`設定 → 端末通知`).
 
 Releases with a rescue page: run the daemon from an immutable release under `sb-rescue`, promote a commit only after it booted on a spare port, go back automatically or with one button from a phone-sized page that works while Switchboard is down, opened from `救援画面` at the top right of every screen (`docs/design/releases-and-rescue.md`; every green merge on `main` gets a `vX.Y.Z` tag and Release, and under sb-rescue the daemon follows the newest tag by itself, no schedule needed, and holds when it did not start — Tags and unattended updates; to keep sb-rescue running on a local Linux machine, a systemd user unit template is in the same document under "Keep it running").
 
@@ -123,14 +130,12 @@ Runners are detected on `PATH`. Install them with the vendors' official installe
 
 ## Try it on one repository
 
-The shortest path from a clone to a Ready PBI, on one repository of your own, without a GitHub Project:
+The shortest path from an install to a Ready PBI, on one repository of your own, without a GitHub Project:
 
-1. Clone the public repository and `cd` into it.
-2. `./scripts/setup.sh`.
-3. `bun run dev`, then open `http://localhost:5173`.
-4. Open Settings. In the Workspace card under `追加`, choose `ホストにあるディレクトリを追加`, enter the path of your repository, tick `GitHub と連携しない` and press `追加`. Issues and the Project are kept inside Switchboard, so you need no GitHub Project and no repository variables.
-5. Open Backlog and pick your repository's tab, press `要望を登録` (its `登録先` must name your repository; on the `すべて` tab it starts on Switchboard itself), write the request and press `登録`. A Task on your runner files the request, writes the PBI and its Tasks, and the PBI shows up under Ready.
-6. If that Task stops on the way, the row waits in its stage and its button starts the stage again: `PBI にする` on a request under `要望のまま`, `Task に分解` on a PBI under `分解待ち`. Each one also runs on to Ready.
+1. Install it as in "Use it" above and open `http://localhost:47831/`.
+2. Open Settings. In the Workspace card under `追加`, choose `ホストにあるディレクトリを追加`, enter the path of your repository, tick `GitHub と連携しない` and press `追加`. Issues and the Project are kept inside Switchboard, so you need no GitHub Project and no repository variables.
+3. Open Backlog and pick your repository's tab, press `要望を登録` (its `登録先` must name your repository; on the `すべて` tab it starts on Switchboard itself), write the request and press `登録`. A Task on your runner files the request, writes the PBI and its Tasks, and the PBI shows up under Ready.
+4. If that Task stops on the way, the row waits in its stage and its button starts the stage again: `PBI にする` on a request under `要望のまま`, `Task に分解` on a PBI under `分解待ち`. Each one also runs on to Ready.
 
 Your repository needs no `ops.config.json`; without one the choices come from the kit's template `ops-kit/template/ops.config.json`. Install a runner and log in to it first (the list below). A runner that is not logged in gets a banner at the top of every screen with its login button (`Claude アカウントでログイン`, `ログインする`).
 
@@ -142,9 +147,11 @@ Optional, instead of or beside GitHub: a self-managed GitLab Community Edition. 
 
 ## Develop
 
-To change Switchboard, fork it and develop on your fork: [Fork and develop](docs/development.md).
+To change Switchboard, fork it and develop on your fork: [Fork and develop](docs/development.md). A clone runs from the working tree and has no update from the screen:
 
 ```bash
+./scripts/setup.sh        # installs Bun if needed, then `bun install`
+bun run dev               # core on :47831, web on :5173; open http://localhost:5173
 bun test                  # recorded-replay tests for adapters + daemon lifecycle tests
 bun run typecheck
 bun run licenses:check    # every dependency's license against scripts/licenses.allow.json

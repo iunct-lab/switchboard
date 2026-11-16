@@ -99,3 +99,19 @@ test("deferred start: a Task made at the limit reads 開始待ち, the Brief say
   expect(resumeBlock({ ...task, resumeReason: "limit" as const }, true).canResumeNow).toBe(true);
   expect(resumeBlock({ ...task, resumeReason: "github" as const }, true).heading).toBe("GitHub の API 上限");
 });
+
+test("Brief: the resume block has a note field above 今すぐ再開, and none for a Task not started yet", () => {
+  const html = (t: Task) => renderToStaticMarkup(createElement(Brief, { task: t, ledger: null, onAbort: noop, open: true, onClose: noop }));
+  for (const reason of ["limit", "github", "disk"] as const) {
+    const out = html({ ...task, resumeReason: reason });
+    expect(out).toContain("再開に添える指示（任意）");
+    expect(out).toContain("<textarea");
+    expect(out.indexOf("<textarea")).toBeLessThan(out.indexOf("今すぐ再開"));
+    expect(resumeBlock({ ...task, resumeReason: reason }, true).canNote).toBe(true);
+  }
+  for (const t of [{ ...task, resumeReason: "start" as const }, { ...task, resumeReason: "limit" as const, runnerSessionId: null }]) {
+    const out = html(t);
+    expect(out).not.toContain("再開に添える指示（任意）");
+    expect(out).not.toContain("<textarea");
+  }
+});

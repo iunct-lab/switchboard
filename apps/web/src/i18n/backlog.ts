@@ -32,7 +32,7 @@ export const backlog = msgs({
   reasonUnfetched: { ja: "まだ読んでいません", en: "Not read yet" },
   reasonImport: { ja: "GitHub との照合に失敗しているか、待っています", en: "Matching with GitHub failed or is waiting" },
   ghLoginLead: { ja: "{name} を読むには gh のログインが要ります", en: "Reading {name} needs a gh login" },
-  ghLoginStep: { ja: "ターミナルで gh auth login を実行する", en: "Run gh auth login in a terminal" },
+  ghLoginStep: { ja: "「GitHub にログイン」を押し、開いたページでコードを入れて承認する", en: "Press Log in to GitHub, then enter the code on the page that opens and approve" },
   ghLoginReload: { ja: "終わったら「再読込」を押す", en: "When done, press Reload" },
   projectVarLead: { ja: "{name} の Project の URL がリポジトリ変数 {variable} にありません。次のどちらかで始められます", en: "{name} has no Project URL in the repository variable {variable}. Start in one of these ways" },
   projectVarSetup: { ja: "Project を用意する: 手順に従って Project を作り、変数に URL を設定してから「再読込」を押す", en: "Set up a Project: follow the steps to make a Project, set its URL in the variable, then press Reload" },

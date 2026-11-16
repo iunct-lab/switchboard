@@ -245,8 +245,12 @@ export function flowOfStored(records: StoredRecords, prs: StoredFlowPr[], days: 
 export function prRepoOf(records: StoredRecords, path: string): string | null {
   if (records.service === "github") return records.repository;
   if (records.service !== "switchboard") return null;
-  const r = Bun.spawnSync(["git", "-C", path, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "pipe" });
-  return r.exitCode === 0 ? repoOfRemote(r.stdout.toString()) : null;
+  try {
+    const r = Bun.spawnSync(["git", "-C", path, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "pipe" });
+    return r.exitCode === 0 ? repoOfRemote(r.stdout.toString()) : null;
+  } catch {
+    return null; // no git on this host
+  }
 }
 
 /**

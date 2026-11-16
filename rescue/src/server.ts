@@ -11,15 +11,79 @@
  * says how full the root disk is (`disk`) and when each kind was last cleaned (`sweeps`).
  */
 import { createPublicKey, verify } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
+import { diffTrees, extractTarball, fetchTarball, latestRelease, shaOfTag } from "./github-release.ts";
 import { checkDaemon, listSnapshots, promote, restoreDb, rollback, tasksThatStop, type Ctx } from "./promote.ts";
 import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
 import { cleanTmp, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
-import { appendHistory, currentOf, listReleases, previousOf, readHistory, run } from "./releases.ts";
+import { appendHistory, currentOf, listReleases, previousOf, readHistory, releasesDir, run } from "./releases.ts";
+
+/** The tag a release was built from, or null (built from a checkout, or the file is unreadable). */
+function readTag(dir: string): string | null {
+  try {
+    const tag = (JSON.parse(readFileSync(join(dir, ".release.json"), "utf8")) as { tag?: unknown }).tag;
+    return typeof tag === "string" ? tag : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether version tag `a` (v1.2.3) is above `b`. */
+function versionAbove(a: string, b: string): boolean {
+  const n = (t: string) => t.slice(1).split(".").map(Number);
+  const [x, y] = [n(a), n(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return (x[i] ?? 0) > (y[i] ?? 0);
+  return false;
+}
+
+/** Runs of POST /api/release-tree in flight, by tag and the release compared with. */
+const reviewTrees = new Map<string, Promise<{ tag: string; sha: string; tree: string; diffFile: string; stat: string[] }>>();
+
+/**
+ * The new release's tree and its difference from the running release `from`, under
+ * `<home>/release-review/<tag>/<from>/` (`tree`, `diff.patch`, `meta.json`). One folder per release compared with, so a
+ * rollback makes a new one beside it and never removes a folder a running check reads (the daemon removes
+ * `<home>/release-review/<tag>/` when the check of the tag ends). Built beside the final name and renamed, so a folder
+ * that exists is whole and is returned as it is.
+ */
+async function releaseTree(source: string, tag: string, home: string, from: string) {
+  const reviews = join(home, "release-review");
+  const dir = join(reviews, tag, from);
+  const out = (sha: string, stat: string[]) => ({ tag, sha, tree: join(dir, "tree"), diffFile: join(dir, "diff.patch"), stat });
+  try {
+    const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8")) as { sha: string; stat: string[] };
+    return out(meta.sha, meta.stat);
+  } catch {
+    // none yet, or unreadable: made below
+  }
+  // What a sb-rescue that stopped halfway left behind; this process's own runs (other tags) are in flight.
+  for (const name of existsSync(reviews) ? readdirSync(reviews) : []) {
+    if (name.startsWith(".tmp-") && !name.endsWith(`-${process.pid}`)) rmSync(join(reviews, name), { recursive: true, force: true });
+  }
+  const sha = await shaOfTag(source, tag);
+  // named by the release compared with too: the same tag against another release (after a rollback) may run at the same time
+  const work = join(reviews, `.tmp-${tag}-${from.slice(0, 12)}-${process.pid}`);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
+  try {
+    const tarball = await fetchTarball(source, tag, work);
+    await extractTarball(tarball, join(work, "tree"), { tag, sha });
+    rmSync(tarball, { force: true });
+    const stat = await diffTrees(join(releasesDir(home), from), join(work, "tree"), join(work, "diff.patch"));
+    writeFileSync(join(work, "meta.json"), JSON.stringify({ sha, stat, from }) + "\n");
+    rmSync(dir, { recursive: true, force: true }); // only an unreadable one gets here
+    mkdirSync(join(reviews, tag), { recursive: true });
+    renameSync(work, dir);
+    return out(sha, stat);
+  } catch (e) {
+    rmSync(work, { recursive: true, force: true });
+    throw e;
+  }
+}
 
 export interface RescueOptions {
   port: number;
@@ -271,6 +335,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
    * commit after its merge and a tag can be moved by hand, and this stays one process however many releases there are.
    */
   const releaseTags = async (): Promise<Map<string, string>> => {
+    if (ctx.source) return new Map();
     const out = await run(["git", "-C", ctx.repo, "for-each-ref", "refs/tags/v*", "--sort=-v:refname", "--format=%(objectname) %(*objectname) %(refname:short)"], ctx.repo).catch(() => "");
     const bySha = new Map<string, string>();
     for (const line of out.split("\n")) {
@@ -283,6 +348,11 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
   };
   /** A release's commit subject (cached: it never changes) and its release tag. */
   const describe = async (sha: string, tags: Map<string, string>) => {
+    if (ctx.source) {
+      // No git: the tag a release was built from is in its own directory (`.release.json`); the tag is its name on the page.
+      const tag = readTag(join(releasesDir(ctx.home), sha));
+      return { sha, subject: tag ?? "", tag };
+    }
     if (!subjects.has(sha)) subjects.set(sha, await run(["git", "-C", ctx.repo, "log", "-1", "--format=%s", sha], ctx.repo).catch(() => ""));
     return { sha, subject: subjects.get(sha) ?? "", tag: tags.get(sha) ?? null };
   };
@@ -292,6 +362,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
     return {
       current: currentOf(ctx.home),
       previous: previousOf(ctx.home),
+      /** `owner/name` releases come from; null = built from the checkout. */
+      source: ctx.source,
       releases: await releaseTags().then((tags) => Promise.all(listReleases(ctx.home).map((sha) => describe(sha, tags)))),
       state: ctx.sup.state,
       running: ctx.sup.running,
@@ -326,6 +398,19 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       if (!auth) return new Response(o.sessionPublicKey ? "unauthorized: log in with the passkey at /_auth/ and open /rescue/ again" : "unauthorized: open this page with ?token=<the contents of ~/.switchboard/token>", { status: 401 });
       if (req.method === "GET" && path === "/") return new Response(page as unknown as string, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" } });
       if (req.method === "GET" && path === "/api/status") return Response.json(await status());
+      if (req.method === "GET" && path === "/api/latest-release") {
+        if (!ctx.source) return Response.json({ error: "no update source: releases are built from the checkout" }, { status: 404 });
+        try {
+          // newer: above the running release's tag. A release Latest moved back to (a deleted Release) or a running release
+          // with no tag to compare with is not newer, so nothing goes down a version by itself.
+          const latest = await latestRelease(ctx.source);
+          const current = currentOf(ctx.home);
+          const runningTag = current ? readTag(join(releasesDir(ctx.home), current)) : null;
+          return Response.json({ ...latest, newer: latest.sha !== current && runningTag !== null && versionAbove(latest.tag, runningTag) });
+        } catch (e) {
+          return Response.json({ error: String((e as Error).message ?? e) }, { status: 502 });
+        }
+      }
       if (req.method === "GET" && path === "/api/tmp") {
         // what a press of 消す takes: the owner's age (one of STALE_CHOICES_MS; any other value is the default), not the sweep's kinds
         const asked = Number(url.searchParams.get("staleMs"));
@@ -337,7 +422,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       // An empty body means "no arguments"; a body that does not parse is refused — a cut-off {commit} must not
       // turn "go back to this release" into "go back to the previous one".
       const text = await req.text();
-      let body: { commit?: unknown; snapshot?: unknown; names?: unknown; staleMs?: unknown; force?: unknown };
+      let body: { tag?: unknown; commit?: unknown; expectSha?: unknown; snapshot?: unknown; names?: unknown; staleMs?: unknown; force?: unknown };
       try {
         body = text.trim() ? JSON.parse(text) : {};
         if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("not an object");
@@ -346,6 +431,26 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       }
       const commit = typeof body.commit === "string" && /^[\w./-]{1,100}$/.test(body.commit) && !body.commit.startsWith("-") ? body.commit : undefined;
       switch (path) {
+        case "/api/release-tree": {
+          // Read and unpack only, so it is outside `operate`; the same tag asked twice shares one run.
+          if (!ctx.source) return Response.json({ error: "no update source: releases are built from the checkout" }, { status: 404 });
+          const tag = body.tag;
+          if (typeof tag !== "string" || !/^v\d+\.\d+\.\d+$/.test(tag)) return Response.json({ error: "tag must be a version tag (v1.2.3)" }, { status: 400 });
+          const from = currentOf(ctx.home);
+          if (!from) return Response.json({ error: "there is no current release to compare with" }, { status: 409 });
+          // Keyed by the release compared with too: a rollback in the middle must not hand the old difference to a later caller.
+          const key = `${tag}@${from}`;
+          let run1 = reviewTrees.get(key);
+          if (!run1) {
+            run1 = releaseTree(ctx.source, tag, ctx.home, from).finally(() => reviewTrees.delete(key));
+            reviewTrees.set(key, run1);
+          }
+          try {
+            return Response.json(await run1);
+          } catch (e) {
+            return Response.json({ error: String((e as Error).message ?? e) }, { status: 502 });
+          }
+        }
         case "/api/restart":
           if (o.exitToRestart) {
             const exit = o.exitToRestart;
@@ -365,7 +470,9 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
           return operate("rollback", () => rollback(ctx, commit));
         case "/api/promote":
           if (!commit) return Response.json({ error: "commit required" }, { status: 400 });
-          return operate("promote", () => promote(ctx, commit));
+          // The sha the caller checked (the new version's diff): a tag that now points elsewhere is not built.
+          if (body.expectSha !== undefined && !(typeof body.expectSha === "string" && /^[0-9a-f]{40}$/.test(body.expectSha))) return Response.json({ error: "expectSha must be a full commit sha" }, { status: 400 });
+          return operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined));
         case "/api/restore-db":
           if (typeof body.snapshot !== "string" || !listSnapshots(ctx.home).includes(body.snapshot)) return Response.json({ error: "no such snapshot" }, { status: 400 });
           return operate("restore-db", () => restoreDb(ctx, body.snapshot as string));

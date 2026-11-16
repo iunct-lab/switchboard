@@ -365,7 +365,8 @@ ops-kit backlog edit <num> --body-file "$W/body.md" | --add-label needs-decision
 ops-kit backlog edit <num> --state closed --reason not-planned   # 重複・やらないと決めた Issue（--reason completed|not-planned。閉じている Issue の理由の付け替えも同じ）
 ops-kit backlog edit <num> --add-label on-hold | --remove-label on-hold   # 保留の付け外し（「保留」の小節）
 ops-kit backlog edit <num> --parent <PBI> | --no-parent   # sub-issue の付け替え
-ops-kit backlog comment <num> --body-file "$W/comment.md"
+ops-kit backlog comment <num> --body-file <書いたファイルの絶対パス>   # 単独のコマンドで送る（下の箇条。$W は別の呼び出しでは空）
+ops-kit task send <task-id> --body-file <書いたファイルの絶対パス>   # ほかの Task への返信（アプリの Task の中だけ。無い Task と、利用者の許可の文の形の行（PR #n / Task #n … してよい）を含む本文は exit 1、アプリに届かなければ exit 2）
 ops-kit backlog set <num> Status Ready         # フィールドを 1 つだけ（Story Points / Status など）
 ops-kit backlog triage <num> <P0-P3> [<parent>] [<Status>]   # Project のフィールド + 親。親は Task のときだけ（PBI に親を付けない）
 #   注意: triage は毎回 Priority と Status（Phase を使うリポジトリでは Phase も）を上書きする（Status を省くと Backlog）。Status だけ変えたいときは set を使う
@@ -374,7 +375,8 @@ ops-kit backlog retry <num>   # GitHub が断った（failed）編集を、原�
 ops-kit lint --fresh                           # 規約の検査（作った・書き直したら必ず。violations: 0 かつ exit 0 で合格）
 ```
 
-- **backlog に書く連結コマンドは前段の失敗で止める**: 読む → 直す → 送るを 1 回の Bash でつなぐなら `set -euo pipefail` で始め、途中が失敗したら次の書き込みに進まない。本文や番号を作る前段（`python3`・`jq` など）の失敗を `2>/dev/null` で隠さない（隠すと空の本文のまま `edit` まで進む。読み取りが（アプリの再起動などで）空で返っても、空の本文の `edit --body-file` は受け付けられ、そのまま GitHub に送られる）。送る前に `[ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## '` を挟み、通らなければ `|| exit 1` で止める（`&&` の途中の失敗は `set -e` では止まらず、後ろに足した書き込みが走る）。Issue 番号は `create` や `view` の出力を `grep` で切り出さず（送信待ちの Issue や別の `#N` を拾う）、`ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)'` で取る（番号の付く前は `.issue.number` が 0 なので `select(. > 0)` が要る。出力が無く非 0 で終わったら書き込まずに待つか止める）。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す。2026-11-02 の週に、番号の取り違えから無関係の Issue の親・フィールドを書き換えた事故があった
+- **Issue へのコメントとほかの Task への返信は単独のコマンドで送る**: 本文は先にファイルに書き（Write ツールか、その前の別の Bash の呼び出し）、`ops-kit backlog comment` / `ops-kit task send` は `cd`・`cat <<EOF`・`;`・`&&`・`|` でつながない単独のコマンドで送る。`--body-file` には書いたファイルの絶対パスを文字のまま書く（シェルの変数は Bash の呼び出しをまたがないので、前の呼び出しで作った `$W` は送る呼び出しでは空になる。`mktemp -d` が出したパスを控えて使う）。ランナーの許可ルール（エージェント管理アプリの Task なら `Bash(ops-kit backlog:*)`）はコマンド全体が合うときだけ効き、合わない部分を含む複合コマンドは自動承認の判定に回って拒まれることがある。`ops-kit task send` は許可ルールに入っていないので単独でもいつも自動承認の判定に回る（単独にするのは何を送るかを読みやすくするため）。拒まれたら止まりの報告の `grant` に操作を名指しした許可文を書く（「判断待ちの出し方」の許可文）
+- **backlog に書く連結コマンドは前段の失敗で止める**: 読む → 直す → 送るを 1 回の Bash でつなぐなら `set -euo pipefail` で始め、途中が失敗したら次の書き込みに進まない。本文や番号を作る前段（`python3`・`jq` など）の失敗を `2>/dev/null` で隠さない（隠すと空の本文のまま `edit` まで進む。読み取りが（アプリの再起動などで）空で返っても、空の本文の `edit --body-file` は受け付けられ、そのまま GitHub に送られる）。送る前に `[ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## '` を挟み、通らなければ `|| exit 1` で止める（`&&` の途中の失敗は `set -e` では止まらず、後ろに足した書き込みが走る）。Issue 番号は `create` や `view` の出力を `grep` で切り出さず（送信待ちの Issue や別の `#N` を拾う）、`ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)'` で取る（番号の付く前は `.issue.number` が 0 なので `select(. > 0)` が要る。出力が無く非 0 で終わったら書き込まずに待つか止める）。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す。読む・直す・検査を 1 回目の呼び出しにし、送る `edit` / `comment` / `task send` を 2 回目の単独の呼び出しに分けてもよい（上の単独のコマンドの箇条）。2026-11-02 の週に、番号の取り違えから無関係の Issue の親・フィールドを書き換えた事故があった
   ```bash
   set -euo pipefail
   N=$(ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)')

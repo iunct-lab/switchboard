@@ -602,7 +602,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     ["api", "-X", "PUT", "repos/x/y/pulls/12/merge"],
   ];
   // a fake app that answers the grant of PR 12 only, and records what it was asked
-  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false) {
+  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false, config: object = {}) {
     const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.merge."));
     const asked: string[] = [];
     const app = appDown ? null : Bun.serve({ port: 0, fetch: (req) => { const u = new URL(req.url); asked.push(u.pathname + u.search); return Response.json({ granted: u.searchParams.get("target") === "12" && u.searchParams.get("kind") === "merge" && u.searchParams.get("taskId") === "t1" }); } });
@@ -612,8 +612,8 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
       const calls = join(tree, "calls.jsonl");
       writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`);
       chmodSync(join(fake, "gh"), 0o755);
-      writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? {} : { mergeGate }));
-      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? config : { ...config, mergeGate }));
+      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       const [code, err] = [await p.exited, await new Response(p.stderr).text()];
       return { code, err, asked, ran: existsSync(calls) };
     } finally {
@@ -660,6 +660,36 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     // no task id: the app is not asked, and the reason says so
     const noId = await inTree("scripts/merge-gate.ts", { OPS_KIT_TASK_ID: undefined }, ["pr", "merge", "12"]);
     expect([noId.code, noId.ran, noId.asked, noId.err]).toEqual([1, false, [], expect.stringContaining("Task の id（OPS_KIT_TASK_ID）が無く")]);
+  });
+
+  test("public-sync's merge of its own sync PR on the public copy (publicSync.target) goes through with its mark; the mark does not let a merge of this repository's PR, another PR or another repository through", async () => {
+    const pub = { publicSync: { target: "acme/widget-public" } };
+    const mark = { OPS_PUBLIC_SYNC_PR: "acme/widget-public#39" };
+    // what public-sync runs, and the same merge in the other forms the front reads
+    for (const argv of [["pr", "merge", "39", "-R", "acme/widget-public", "--rebase", "--delete-branch"], ["-R", "Acme/Widget-Public", "pr", "merge", "https://github.com/acme/widget-public/pull/39"], ["api", "-X", "PUT", "repos/acme/widget-public/pulls/39/merge"]]) {
+      const r = await inTree("scripts/merge-gate.ts", mark, argv, true, pub);
+      expect([argv, r.code, r.ran, r.asked]).toEqual([argv, 0, true, []]);
+    }
+    // publicSync.target written as a URL with .git is the same repository (public-sync marks it as owner/name)
+    for (const target of ["https://github.com/acme/widget-public.git", "Acme/Widget-Public"]) {
+      const r = await inTree("scripts/merge-gate.ts", mark, ["pr", "merge", "39", "-R", target], true, { publicSync: { target } });
+      expect([target, r.code, r.ran]).toEqual([target, 0, true]);
+    }
+    const stops = [
+      [{}, ["pr", "merge", "39", "-R", "acme/widget-public"], pub], // no mark
+      [mark, ["pr", "merge", "39"], pub], // this repository's PR 39 (no -R: the working tree's repository)
+      [mark, ["pr", "merge", "39", "-R", "acme/widget"], pub], // the same number on another repository
+      [mark, ["pr", "merge", "40", "-R", "acme/widget-public"], pub], // another PR of the public copy
+      [mark, ["pr", "merge", "sync/v1.0.0", "-R", "acme/widget-public"], pub], // no number
+      [mark, ["pr", "merge", "39", "-R", "acme/widget-public"], {}], // a tree that publishes nowhere
+      [mark, ["pr", "merge", "https://github.com/acme/widget/pull/39", "-R", "acme/widget-public"], pub], // gh merges the URL's repository (this one), whatever -R says
+      [mark, ["-R", "acme/widget-public", "pr", "merge", "https://github.com/acme/widget/pull/39"], pub], // the same with -R before the group
+      [mark, ["stack", "merge", "39", "-R", "acme/widget-public"], pub], // public-sync never merges a stack
+    ] as const;
+    for (const [env, argv, config] of stops) {
+      const r = await inTree("scripts/merge-gate.ts", env, [...argv], true, config);
+      expect([argv, r.code, r.ran]).toEqual([argv, 1, false]);
+    }
   });
 
   test("without mergeGate in the config, or outside the app's Task, a merge reaches gh unchanged; reads and other writes never ask", async () => {

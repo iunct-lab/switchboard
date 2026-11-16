@@ -271,6 +271,34 @@ describe("rate limit: RateLimitResumer", () => {
     expect(await resumer.tick()).toEqual([]); // nothing left
   });
 
+  test("resume now with a note", async () => {
+    boot([LIMIT_TURN, OK_TURN, LIMIT_TURN, OK_TURN]);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    const at = db.getTask(t.id)!.resumeAt!;
+    expect(at).not.toBeNull();
+    await resumer.resumeNow(t.id, " Codex を待たずに進める \n");
+    await settle();
+    expect(sends).toEqual([`${RESUME_PROMPT}\n\nCodex を待たずに進める`]);
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    now = at + 1; // the old plan's time: no second resume
+    expect(await resumer.tick()).toEqual([]);
+    expect(sends.length).toBe(1);
+    // blank note: the plain follow-up
+    await tasks.send(t.id, "again"); // -> limit
+    await settle();
+    expect(db.getTask(t.id)!.resumeAt).not.toBeNull();
+    sends.length = 0;
+    await resumer.resumeNow(t.id, "   ");
+    await settle();
+    expect(sends).toEqual([RESUME_PROMPT]);
+    // a Task not started yet takes no note, and keeps its plan
+    const u = tasks.create({ cwd: home, title: "u", prompt: "go", runner: "claude" }, undefined, undefined, { deferUntil: now + 3_600_000 });
+    await expect(resumer.resumeNow(u.id, "extra")).rejects.toThrow("takes no note");
+    expect(db.getTask(u.id)!.resumeReason).toBe("start");
+    expect(db.getTask(u.id)!.deferredPrompt).toBe("go");
+  });
+
   test("no free run slot: a due tick sends nothing and keeps resumeAt (one log line); once another Task ends, the next tick sends, once", async () => {
     const logs: string[] = [];
     tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });

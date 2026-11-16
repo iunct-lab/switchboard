@@ -7,7 +7,7 @@ import { createClaudeParser } from "@switchboard/adapter-claude";
 import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSource, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { storedIssueReader } from "./backlog.ts";
-import { AUTO_RESUME_HEAD, delegatedNote, EVAL_CONTEXT_CHARS, EVAL_REQUEST_CHARS, evalContext, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import { AUTO_RESUME_HEAD, delegatedNote, EVAL_CONTEXT_CHARS, EVAL_REQUEST_CHARS, evalContext, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, stageRequestOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
 import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
@@ -237,10 +237,10 @@ describe("evalRequestDraft", () => {
 });
 
 /** A list row with a judge average (null = not judged) and a human rating (null = none). */
-const listRow = (taskId: string, average: number | null, o: { runner?: EvalsListRow["runner"]; workspaceId?: string | null; rating?: number } = {}): EvalsListRow => ({
+const listRow = (taskId: string, average: number | null, o: { runner?: EvalsListRow["runner"]; workspaceId?: string | null; rating?: number; intent?: "fit" | "partial" | "wrong" | "unknown"; judgeIntent?: number } = {}): EvalsListRow => ({
   taskId, title: taskId, runner: o.runner ?? "claude", workspaceId: o.workspaceId === undefined ? "w1" : o.workspaceId, status: "done", outcome: "unknown", updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null, rules: null,
-  judge: average === null ? null : { average, scores: {}, rubric: "r@1", by: "x", ts: 1 },
-  human: o.rating === undefined ? null : { rating: o.rating, comment: "" },
+  judge: average === null ? null : { average, scores: o.judgeIntent === undefined ? {} : { intent: o.judgeIntent }, rubric: "r@1", by: "x", ts: 1 },
+  human: o.rating === undefined ? null : { rating: o.rating, comment: "", ...(o.intent ? { intent: o.intent } : {}) },
 });
 
 describe("weekly human sample", () => {
@@ -285,11 +285,23 @@ describe("weekly human sample", () => {
 describe("judge vs human gap", () => {
   test("only the tasks with both, the mean of human − judge to one decimal, and the count", () => {
     const rows = [listRow("a", 2.6, { rating: 1 }), listRow("b", 3.6, { rating: 1 }), listRow("c", 4, {}), listRow("d", null, { rating: 5 })];
-    expect(judgeHumanGap(rows)).toEqual({ count: 2, mean: -2.1 });
-    expect(judgeHumanGap([listRow("a", 3, { rating: 4 }), listRow("b", 3.5, { rating: 4 })])).toEqual({ count: 2, mean: 0.8 });
+    expect(judgeHumanGap(rows)).toEqual({ count: 2, mean: -2.1, intent: { count: 0, mean: null } });
+    expect(judgeHumanGap([listRow("a", 3, { rating: 4 }), listRow("b", 3.5, { rating: 4 })])).toEqual({ count: 2, mean: 0.8, intent: { count: 0, mean: null } });
   });
   test("none with both → mean null", () => {
-    expect(judgeHumanGap([listRow("a", 3), listRow("b", null, { rating: 2 })])).toEqual({ count: 0, mean: null });
+    expect(judgeHumanGap([listRow("a", 3), listRow("b", null, { rating: 2 })])).toEqual({ count: 0, mean: null, intent: { count: 0, mean: null } });
+  });
+  test("intent: the judge's intent score only where the person answered partial or wrong; fit, no answer and no intent score are left out", () => {
+    const rows = [
+      listRow("a", 3, { rating: 2, intent: "partial", judgeIntent: 4 }),
+      listRow("b", 3, { rating: 1, intent: "wrong", judgeIntent: 3 }),
+      listRow("c", 3, { rating: 5, intent: "fit", judgeIntent: 5 }),
+      listRow("d", 3, { rating: 3, judgeIntent: 5 }),
+      listRow("e", 3, { rating: 3, intent: "unknown", judgeIntent: 5 }),
+      listRow("f", 3, { rating: 2, intent: "wrong" }), // a judgment of the older rubric has no intent score
+    ];
+    expect(judgeHumanGap(rows).intent).toEqual({ count: 2, mean: 3.5 });
+    expect(judgeHumanGap([listRow("a", 3, { rating: 5, intent: "fit", judgeIntent: 5 })]).intent).toEqual({ count: 0, mean: null });
   });
 });
 
@@ -380,6 +392,20 @@ describe("evalContext", () => {
       const t = taskOf("s6", ws, { issue: 14, action: "complete" });
       db.insertTask(t);
       expect(evalContext(db, t, read(db)).request).toMatchObject({ kind: "stage", pbi: { number: 14 }, source: { number: 9 } });
+    });
+  });
+
+  test("stageRequestOf cuts the PBI and the request by the given caps, and is null for an ordinary Task", () => {
+    withDb((db, ws) => {
+      const t = taskOf("c1", ws, { issue: 11, action: "complete" });
+      db.insertTask(t);
+      const small = stageRequestOf(t, read(db), { pbiChars: 5, requestChars: 3 })!;
+      expect(small.pbi).toMatchObject({ story: "ああああああ".slice(0, 5) + "…", outOfScope: "- やらない".slice(0, 5) + "…" });
+      expect(small.source).toEqual({ number: 9, head: "いいい…" });
+      const large = stageRequestOf(t, read(db), { pbiChars: 10_000, requestChars: 10_000 })!;
+      expect(large.pbi!.story).toBe("あ".repeat(EVAL_CONTEXT_CHARS + 50));
+      expect(large.source!.head).toBe("い".repeat(EVAL_REQUEST_CHARS + 50));
+      expect(stageRequestOf(taskOf("c2", ws, null), read(db), { pbiChars: 5, requestChars: 3 })).toBeNull();
     });
   });
 

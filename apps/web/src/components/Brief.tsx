@@ -127,6 +127,8 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   const autoResumeOn = props.runners?.find((r) => r.id === props.task.runner)?.autoResume;
   const [resumeBusy, setResumeBusy] = useState(false);
   const [resumeErr, setResumeErr] = useState<string | null>(null);
+  const [resumeNote, setResumeNote] = useState("");
+  useEffect(() => setResumeNote(""), [props.task.id]);
   useEffect(() => setResumeErr(null), [props.task.id]);
   const resumeCall = (fn: () => Promise<Task>) => {
     setResumeBusy(true);
@@ -608,8 +610,15 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             {rb.stopped}
             {rb.parts.map((p, i) => (typeof p === "string" ? <Fragment key={i}>{p}</Fragment> : <b key={i}>{p.b}</b>))}
           </div>
+          {rb.canNote && (
+            <>
+              <label htmlFor="resume-note" style={{ display: "block", marginTop: 8 }}>{t(m.resumeNoteLabel)}</label>
+              <textarea id="resume-note" rows={3} value={resumeNote} disabled={resumeBusy} placeholder={t(m.resumeNotePlaceholder)} onChange={(e) => setResumeNote(e.target.value)} />
+              <div className="hint">{t(m.resumeNoteHint)}</div>
+            </>
+          )}
           <div className="actions" style={{ marginTop: 6 }}>
-            <button className="pri" disabled={resumeBusy || busy || !rb.canResumeNow} onClick={() => resumeCall(() => api.resumeNow(props.task.id))} title={rb.nowTitle}>
+            <button className="pri" disabled={resumeBusy || busy || !rb.canResumeNow} onClick={() => resumeCall(async () => { const next = await api.resumeNow(props.task.id, resumeNote); setResumeNote(""); return next; })} title={rb.nowTitle}>
               {t(m.resumeNow)}
             </button>
             <button disabled={resumeBusy} onClick={() => resumeCall(() => api.cancelResume(props.task.id))} title={t(m.cancelResumeTitle)}>

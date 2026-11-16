@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, type Work } from "./parallel-guard";
+import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, waitsOnlyForCheck, type Work } from "./parallel-guard";
 import { linkedIssues, pathsIn, scopeIn } from "./task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
 
@@ -160,6 +160,7 @@ function github(opts: {
   decisionTasks?: number[];
   taskParents?: Record<number, number>; // the PBI of a Task listed by the issues query
   comments?: Record<number, { id: number; body: string }[]>;
+  timeline?: Record<number, { number: number; state: string; body: string; headRefName: string; repository?: { nameWithOwner: string } }[]>; // the PRs that refer to an Issue (the timeline query)
   beforePost?: (issue: number) => void;
 }) {
   const comments: Record<number, { id: number; body: string }[]> = opts.comments ?? {};
@@ -190,6 +191,11 @@ function github(opts: {
     const m = /issues\/(\d+)\/comments/.exec(path);
     if (m) return (comments[Number(m[1])] ?? []).map((c) => JSON.stringify(c)).join("\n");
     if (args[0] === "variable") return "https://github.com/orgs/example/projects/8\n";
+    const asked = args.find((a) => a.includes("CROSS_REFERENCED_EVENT"));
+    if (asked) {
+      const repository = Object.fromEntries([...asked.matchAll(/t(\d+): issue/g)].map((m) => [`t${m[1]}`, { timelineItems: { nodes: (opts.timeline?.[Number(m[1])] ?? []).map((source) => ({ source: { repository: { nameWithOwner: REPO }, ...source } })) } }]));
+      return JSON.stringify({ data: { repository } });
+    }
     if (args[1] === "graphql" && args.some((a) => a.includes("issues("))) {
       return Object.entries(opts.bodies).map(([n, body]) => JSON.stringify({
         number: Number(n), body, updatedAt: fresh, parent: opts.taskParents?.[Number(n)] ? { number: opts.taskParents[Number(n)] } : null, labels: { nodes: opts.decisionTasks?.includes(Number(n)) ? [{ name: "needs-decision" }] : [] },
@@ -435,6 +441,29 @@ describe("parallel-guard overlap", () => {
 
   const db = "`packages/core/src/db.ts`";
 
+  test("a Task that only waits for a check is read from the PRs that refer to it, and not asked when an open PR is known", async () => {
+    const merged = { number: 70, state: "MERGED", body: "Refs #60", headRefName: "sb/60-done" };
+    const timelineCalls = (g: ReturnType<typeof github>) => g.calls.filter((a) => a.some((x) => x.includes("CROSS_REFERENCED_EVENT"))).length;
+    const run = (g: ReturnType<typeof github>) => overlap(ghBoard(REPO, g.run), 40, false, now);
+    const only = github({ bodies: { 40: db, 60: db }, inProgress: [60], timeline: { 60: [merged, { number: 71, state: "MERGED", body: "Closes #99", headRefName: "sb/99-x" }] } });
+    expect((await run(only)).verdict).toBe("go"); // the merged PR is linked by its branch; the other one names another Task
+    expect(timelineCalls(only)).toBe(1);
+    const open = github({ bodies: { 40: db, 60: db }, inProgress: [60], timeline: { 60: [merged, { number: 72, state: "OPEN", body: "Closes #60", headRefName: "sb/60-more" }] } });
+    expect((await run(open)).verdict).toBe("defer");
+    const unmerged = github({ bodies: { 40: db, 60: db }, inProgress: [60], timeline: { 60: [{ ...merged, state: "CLOSED" }] } });
+    expect((await run(unmerged)).verdict).toBe("defer");
+    // a merged PR of another repository on the branch `sb/60-` is that repository's Task, not this one
+    const foreign = github({ bodies: { 40: db, 60: db }, inProgress: [60], timeline: { 60: [{ ...merged, repository: { nameWithOwner: "someone/other" } }] } });
+    expect((await run(foreign)).verdict).toBe("defer");
+    // a Task with an open PR is judged by the list of open PRs: no timeline call; nor when no Task is In progress
+    const listed = github({ bodies: { 40: db, 60: db }, inProgress: [60], timeline: { 60: [merged] }, prs: [{ number: 73, headRefName: "sb/60-open", body: "Closes #60", files: ["packages/core/src/db.ts"] }] });
+    expect((await run(listed)).verdict).toBe("defer");
+    expect(timelineCalls(listed)).toBe(0);
+    const none = github({ bodies: { 40: db } });
+    expect((await run(none)).verdict).toBe("go");
+    expect(timelineCalls(none)).toBe(0);
+  });
+
   // Codex's case on #485: #40 and #60 both pass the check before either is In progress; #60 claims and rechecks first,
   // then #40 claims. #40 must not go on just because its number is smaller.
   test("of two staggered starts on the same file only the first claim goes on", async () => {
@@ -589,6 +618,23 @@ describe("parallel-guard from the app's stored records (#919)", () => {
     const run = (x: StoredRecords) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(x, 40, now.getTime()) }, 40, false, now);
     expect((await run(t("2026-10-01T00:00:00Z"))).verdict).toBe("go"); // the date is ahead
     expect((await run(t("2026-09-28T12:00:00Z"))).blocking.map((h) => h.ref)).toEqual(["Task #60"]); // at the date it holds again
+  });
+
+  test("a Task that only waits for a check does not block", async () => {
+    const run = (pulls: StoredRecords["pulls"]) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(records([issue(40, { body: db }), issue(60, { body: `触る: ${db}`, fields: inProgress })], pulls), 40) }, 40, false, now);
+    expect((await run([pull(71, [60], ["packages/core/src/db.ts"], { state: "MERGED" })])).verdict).toBe("go"); // merged, nothing open: only the check is left
+    expect((await run([pull(71, [60], ["packages/core/src/db.ts"], { state: "MERGED" }), pull(72, [60], ["packages/core/src/db.ts"], { isDraft: true })])).verdict).toBe("defer"); // a Draft is open work
+    expect((await run([pull(71, [60], ["packages/core/src/db.ts"], { state: "MERGED" }), pull(72, [60], ["packages/core/src/db.ts"])])).verdict).toBe("defer");
+    expect((await run([pull(71, [60], ["packages/core/src/db.ts"], { state: "CLOSED" })])).verdict).toBe("defer"); // never merged
+    expect((await run([])).verdict).toBe("defer"); // no merged PR in the records: not taken for waiting
+  });
+
+  test("waitsOnlyForCheck reads only the PRs linked to the Task", () => {
+    expect(waitsOnlyForCheck(5, [{ state: "MERGED", linked: [5] }])).toBe(true);
+    expect(waitsOnlyForCheck(5, [{ state: "MERGED", linked: [5] }, { state: "OPEN", linked: [6] }])).toBe(true);
+    expect(waitsOnlyForCheck(5, [{ state: "MERGED", linked: [5] }, { state: "OPEN", linked: [5, 6] }])).toBe(false);
+    expect(waitsOnlyForCheck(5, [{ state: "CLOSED", linked: [5] }])).toBe(false);
+    expect(waitsOnlyForCheck(5, [])).toBe(false);
   });
 
   test("prerequisites are judged from the stored Issues and PRs; one not stored or not read is missing", async () => {

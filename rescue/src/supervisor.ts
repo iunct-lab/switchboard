@@ -15,6 +15,8 @@ export interface SupervisorOptions {
   home: string;
   /** The checkout agents edit; handed to the daemon as its meta workspace. */
   repo: string;
+  /** Releases come from a repository, not the checkout `repo`: the daemon's repo root is then the release it runs from. */
+  source?: string | null;
   port: number;
   rescueUrl?: string;
   /** Crash retries before giving up, and the first delay (doubles each time). */
@@ -65,7 +67,7 @@ export class Supervisor {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     // sb-rescue's own secret for 作り直す (#181): the daemon and the runners it starts have no use for it
     delete env.SWITCHBOARD_STARTER_TOKEN;
-    Object.assign(env, { SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOME: this.o.home, SWITCHBOARD_PORT: String(this.o.port), SWITCHBOARD_REPO_ROOT: this.o.repo });
+    Object.assign(env, { SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOME: this.o.home, SWITCHBOARD_PORT: String(this.o.port), SWITCHBOARD_REPO_ROOT: this.o.source ? dir : this.o.repo });
     if (this.o.rescueUrl) env.SWITCHBOARD_RESCUE_URL = this.o.rescueUrl;
     const fd = openSync(this.logPath, "a");
     this.note(`starting ${this.running} on port ${this.o.port}`);

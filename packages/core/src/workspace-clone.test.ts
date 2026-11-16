@@ -35,7 +35,7 @@ const ending: RunnerAdapter = {
  * `mine` is what `gh api repos/me/<name>` answers (absent = 404). `org` is how `my-org` answers (membership and whether members
  * may create private repositories — GitHub shows that to owners only, so a plain member reads null: `member-unknown`; absent = the same as missing); `orgRepo: "exists"` is `my-org/<name>` being there already.
  */
-async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; org?: "admin" | "member" | "member-no-create" | "member-unknown" | "missing" | "pending" | "error"; orgRepo?: "exists"; createFails?: string; createMakesNothing?: boolean } = {}) {
+async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hold?: Promise<void>; git?: "clone" | "fork" | "full"; renamedTo?: string; mine?: "exists" | "error"; org?: "admin" | "member" | "member-no-create" | "member-unknown" | "missing" | "pending" | "error"; orgRepo?: "exists"; createFails?: string; createMakesNothing?: boolean; reposDir?: string } = {}) {
   root = mkdtempSync(join(tmpdir(), "switchboard.clone."));
   const home = join(root, "home");
   const repoRoot = join(root, "switchboard");
@@ -81,7 +81,7 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
         return { code: 0, stdout: "", stderr: "" };
       }
       mkdirSync(args[3]!);
-      expect(cwd).toBe(root!);
+      expect(cwd).toBe(fake.reposDir ? join(root!, fake.reposDir) : root!);
       if (fake.git) {
         spawnSync("git", ["-C", args[3]!, "init", "-q"]);
         spawnSync("git", ["-C", args[3]!, "remote", "add", "origin", `https://github.com/${args[2]}.git`]);
@@ -91,7 +91,8 @@ async function boot(fake: { push?: boolean | "missing"; cloneFails?: string; hol
     }
     return { code: 1, stdout: "", stderr: "unexpected" };
   };
-  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: repoRoot, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+  const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: repoRoot, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...(fake.reposDir ? { SWITCHBOARD_REPOS_DIR: join(root, fake.reposDir) } : {}) });
+  if (fake.reposDir) mkdirSync(join(root, fake.reposDir));
   core = await startServer(cfg, [ending], { port: 0, selfdevChecks: false, dryRunRestart: true, gh });
   const base = `http://127.0.0.1:${core.server.port}`;
   const send = async (method: string, path: string, body?: unknown) => {
@@ -117,6 +118,15 @@ test("workspace clone: owner/name clones next to the checkout and registers it",
   expect((await t.send("GET", "/api/workspaces/clones")).body).toEqual([]);
   // the URL form too
   expect((await t.send("POST", "/api/workspaces", { repo: "https://github.com/acme/web.git" })).status).toBe(202);
+}, 30_000);
+
+test("workspace clone: with SWITCHBOARD_REPOS_DIR (the container's ~/repos) the clone goes there, not next to the checkout", async () => {
+  const t = await boot({ reposDir: "repos" });
+  const r = await t.send("POST", "/api/workspaces", { repo: "acme/app" });
+  const path = join(root!, "repos", "app");
+  expect(r.body).toEqual({ repo: "acme/app", path, state: "cloning" });
+  await t.until(async () => ((await t.send("GET", "/api/workspaces")).body as Workspace[]).some((w) => w.path === path));
+  expect(t.calls.find((a) => a[0] === "repo")).toEqual(["repo", "clone", "acme/app", path]);
 }, 30_000);
 
 test("workspace clone: refuses options, other hosts, .. and extra slashes with 400", async () => {

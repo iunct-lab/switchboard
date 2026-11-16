@@ -11,14 +11,12 @@ import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSo
 import type { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
-import { issueOf, openStops, type StopReport } from "./stops.ts";
+import { issueOf, JOB_KEY, openStops, type StopReport } from "./stops.ts";
 import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
 import { isWorking } from "./task-status.ts";
 
 /** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
 export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
-/** A job the daemon runs for the Task: its id is no number on GitHub, and is read from the jobs table. */
-export const JOB_KEY = /^job#(\d+)$/;
 /** A wait for a date: the condition's value is an ISO 8601 time with a time zone, like the `runner#<runner>` value of a usage limit. */
 export const AFTER_KEY = "after";
 
@@ -172,6 +170,22 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
     }
   }
   return sent;
+}
+
+/**
+ * A job of the Task ended: the `job#<id>` conditions of its open stops that are not `depends` are recorded again, and
+ * `recordStop` marks the ended job's condition met. A `retrying` stop is left alone: recording it again would book a retry.
+ * Those stops stay open (a person's answer moves them) and nothing is
+ * sent: only a `depends` stop is resumed (`resumeDepends`).
+ */
+export function meetJobConditions(deps: { db: Db; tasks: Pick<TaskManager, "recordStop">; taskId: string; jobId: number }): void {
+  const { db, tasks, taskId, jobId } = deps;
+  const key = `job#${jobId}`;
+  for (const stop of openStops(db.listStopRecords([taskId]))) {
+    if (stop.reason === "depends" || stop.state === "retrying" || stop.work.taskId !== taskId || !stop.conditions.some((c) => c.key === key && !c.met)) continue;
+    const { id, work: _work, at: _at, answer: _answer, ...rest } = stop;
+    tasks.recordStop(taskId, { ...rest, id: id.slice(taskId.length + 1), actions: [...stop.actions, { attempt: stop.actions.length + 1, at: Date.now(), what: `仕事が終わった: ${key}`, ok: true }].slice(-20) });
+  }
 }
 
 /**

@@ -4,7 +4,7 @@
  * release after it is built, so an agent editing the working tree cannot change the daemon that is running.
  * The history is a JSONL file, not a database row: it must be readable while Switchboard itself is down.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type HistoryAction = "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild";
@@ -19,9 +19,13 @@ export interface HistoryEntry {
 
 export const releasesDir = (home: string) => join(home, "releases");
 
-/** Run a command to completion; a non-zero exit throws with the end of its output (that text is the "reason" users see). */
+/**
+ * Run a command to completion; a non-zero exit throws with the end of its output (that text is the "reason" users see).
+ * The environment is passed as it is now: without it Bun starts the child (and looks the command up) with the one the
+ * process started with, and a PATH set since (a test without git) would not reach it.
+ */
 export async function run(argv: string[], cwd: string): Promise<string> {
-  const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const proc = Bun.spawn(argv, { cwd, env: process.env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`${argv.join(" ")} exited ${code}: ${(err || out).trim().slice(-2000)}`);
   return out.trim();
@@ -29,11 +33,28 @@ export async function run(argv: string[], cwd: string): Promise<string> {
 
 export const resolveCommit = (repo: string, rev: string) => run(["git", "-C", repo, "rev-parse", "--verify", `${rev}^{commit}`], repo);
 
-/** Export `rev` from `repo` and build it. Built aside and renamed into place, so a half-built release never has a final name. */
+/**
+ * Build an exported tree (`treeDir`, a directory under the releases directory) and rename it to `<home>/releases/<sha>`.
+ * The tree is built in place, so a half-built release never has a final name; on failure the tree is removed.
+ * `meta` (the tag and commit a tarball came from) is written to `.release.json` before the rename.
+ */
+export async function buildFromTree(treeDir: string, sha: string, home: string, meta?: { tag: string; sha: string }): Promise<string> {
+  try {
+    await run([process.execPath, "install", "--frozen-lockfile"], treeDir);
+    if (existsSync(join(treeDir, "apps", "web", "package.json"))) await run([process.execPath, "run", "--cwd", "apps/web", "build"], treeDir);
+    if (meta) writeFileSync(join(treeDir, ".release.json"), JSON.stringify(meta) + "\n");
+    renameSync(treeDir, join(releasesDir(home), sha));
+  } catch (e) {
+    rmSync(treeDir, { recursive: true, force: true });
+    throw e;
+  }
+  return sha;
+}
+
+/** Export `rev` from `repo` and build it. */
 export async function buildRelease(repo: string, rev: string, home: string): Promise<string> {
   const sha = await resolveCommit(repo, rev);
-  const dir = join(releasesDir(home), sha);
-  if (existsSync(dir)) return sha;
+  if (existsSync(join(releasesDir(home), sha))) return sha;
   const tmp = join(releasesDir(home), `.tmp-${sha}-${process.pid}`);
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
@@ -42,14 +63,11 @@ export async function buildRelease(repo: string, rev: string, home: string): Pro
     const untar = Bun.spawn(["tar", "-x", "-C", tmp], { stdin: archive.stdout, stdout: "ignore", stderr: "pipe" });
     const [archiveCode, untarCode] = await Promise.all([archive.exited, untar.exited]);
     if (archiveCode !== 0 || untarCode !== 0) throw new Error(`git archive ${sha} failed: ${(await new Response(archive.stderr).text()).trim()}`);
-    await run([process.execPath, "install", "--frozen-lockfile"], tmp);
-    if (existsSync(join(tmp, "apps", "web", "package.json"))) await run([process.execPath, "run", "--cwd", "apps/web", "build"], tmp);
-    renameSync(tmp, dir);
   } catch (e) {
     rmSync(tmp, { recursive: true, force: true });
     throw e;
   }
-  return sha;
+  return buildFromTree(tmp, sha, home);
 }
 
 export function listReleases(home: string): string[] {
