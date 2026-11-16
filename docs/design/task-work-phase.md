@@ -11,10 +11,12 @@ Whether a Task is still at work is decided in one place: `packages/core/src/task
 | `turn` | `running` | A turn is in progress |
 | `approval` | `waiting` | The turn waits for a person's approval |
 | `background` | `background` | The turn ended, but the runner still has background jobs (shells, monitors) |
-| `resume` | `done` / `error` / `aborted` with `resumeAt` set | Stopped, with a resume planned |
-| `stopped` | everything else, including `idle` | Nothing is happening |
+| `resume` | `done` / `error` / `aborted` / `idle` with `resumeAt` set | Stopped with a resume planned, or made without starting (`idle`) with its start planned at the runner's reset |
+| `stopped` | everything else, including `idle` without `resumeAt` | Nothing is happening |
 
-`resume` is derived from `resumeAt` and is not a status: `resumeAt` is only ever set on a stopped Task, and a separate status would add a migration and transitions for no gain.
+`resume` is derived from `resumeAt` and is not a status: `resumeAt` is only ever set on a stopped Task or on one made without starting, and a separate status would add a migration and transitions for no gain.
+
+A Task made without starting is started by the automatic resume at its runner's reset. With the automatic resume of that runner off, it stays held after the reset until a person starts it now or cancels the planned start. Until then its Issue takes no second stage Task, as with any stopped Task whose resume is planned, and its schedule makes no second run (a schedule is held only by a run made without starting, not by a stopped run whose resume is planned).
 
 ## What counts as working
 

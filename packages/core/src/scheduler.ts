@@ -5,7 +5,7 @@ import { type Db, newId } from "./db.ts";
 import type { ScanSummary } from "./secretscan.ts";
 import type { TaskManager } from "./tasks.ts";
 import { collectProvenance } from "./provenance.ts";
-import { isWorking } from "./task-status.ts";
+import { isWorking, workPhase } from "./task-status.ts";
 import { stuckSchedule } from "./stops.ts";
 
 /**
@@ -167,8 +167,10 @@ export class Scheduler {
     // this must move behind a per-schedule lock (or a DB-level compare-and-swap on lastTaskId) instead.
     // backlog-next decides per workspace and slot instead: its last Task running does not hold the others.
     const prev = (s.action === "prompt" || claudeOnly(s.action)) && s.lastTaskId ? this.db.getTask(s.lastTaskId) : null;
-    if (prev && (isWorking(prev, "slot") || prev.queuedAt !== null)) {
-      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${prev.queuedAt !== null ? "queued" : prev.status}`, s.id);
+    // a run made without starting (the runner at its limit, held to the reset) is still to come: a second one would start beside it
+    const held = !!prev && prev.status === "idle" && workPhase(prev) === "resume";
+    if (prev && (isWorking(prev, "slot") || prev.queuedAt !== null || held)) {
+      this.note(`${s.title}: skipped (${reason}); previous run ${prev.id} is still ${held ? "held to its runner's reset" : prev.queuedAt !== null ? "queued" : prev.status}`, s.id);
       return null;
     }
     // A series that keeps stopping on the same thing is not fired by the clock again until it is answered, a condition is met or a Task ends without stopping; a person's "run now" still goes. backlog-next is held per stage by stopHeld instead.

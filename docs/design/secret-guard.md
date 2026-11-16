@@ -29,9 +29,9 @@ The guard against fixed names under `/tmp` works through a hook for Claude Code 
 
 ## Merges
 
-The guard does not judge `gh pr merge` or `gh stack merge`: they reach the real `gh` like any other command, and only their body and subject are checked (below). Running the repository's merge judgement before a merge is the default procedure the skills describe, not a gate in front of `gh`. When the user allows a merge outside that judgement in the Task's conversation, the Task merges with `gh pr merge` / `gh stack merge`.
+In the app's Task, when the `ops.config.json` of the working tree `gh` runs in names a merge gate (`mergeGate`, the script that judges a merge), the front stops a merge the gate did not make: `gh pr merge`, `gh stack merge`, `gh api` with `PUT …/pulls/<n>/merge`, and a GraphQL `mergePullRequest`. The gate marks its own merge with `OPS_MERGE_GATE_PR=<n>` in the environment of the one `gh` it runs after a merge verdict. Any other merge goes through only when the person sent `PR #<n> を判定の外でマージしてよい` in that Task's conversation and the app recorded it (`permission-modes.md`, "Merge grants"); the front asks the app for that record and stops when it cannot ask. The working tree decides, as for the guard's other checks (a Task runs in its repository's checkout); a merge run from another directory with `-R` is outside what it keeps. A working tree without `mergeGate`, and `gh` outside the app's Task, merge as before.
 
-There is no gate in front of `gh` that stops every merge the judgement did not pass: a rule fixed in code would leave no room for a merge the user has allowed.
+This keeps a slip or a shortcut from merging what the judgement did not pass; it is not a fence. A Task runs as the same OS user and can reach the real `gh` by its absolute path, set the gate's mark itself, leave the front with `env`, or run the merge with `-R` from a working tree without `mergeGate`. Promotion and creating a Release are not stopped.
 
 ## Writes it checks
 

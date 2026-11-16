@@ -5004,6 +5004,30 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
       await x.c.stop();
     }
   });
+  test("merge grants: a grant sentence the person picks in a choice or answers a refused stop with is recorded for the guard", async () => {
+    const MERGE = "PR #12 を判定の外でマージしてよい";
+    const question = "PR #12 をマージしてよいか";
+    const x = await boot("確認をお願いします", [{ header: null, question, options: [{ label: "A: 待つ", description: null }, { label: "B: マージする", description: `判定の外 — 許可: ${MERGE}` }], multiSelect: false }]);
+    try {
+      await post(x.b, `/api/tasks/${x.t.id}/outcome`, { outcome: "needs_action" });
+      const [check] = await asksOf(x.b, x.t.id);
+      expect(x.c.db.hasMergeGrant(x.t.id, "merge", 12)).toBe(false);
+      expect((await post(x.b, "/api/asks/answer", { id: check!.id, answer: { kind: "questions", answers: [{ choices: ["B: マージする"] }] } })).status).toBe(200);
+      expect(x.c.db.hasMergeGrant(x.t.id, "merge", 12)).toBe(true);
+    } finally {
+      await x.c.stop();
+    }
+    const fence = "```switchboard-stop\n" + JSON.stringify({ id: "merge", op: "gh pr merge", target: "PR #13", reason: "permission", evidence: "refused", grant: "PR #13 を判定の外でマージしてよい" }) + "\n```";
+    const y = await boot(`マージが止められました。\n${fence}\n`);
+    try {
+      const [stop] = await asksOf(y.b, y.t.id);
+      expect(y.c.db.hasMergeGrant(y.t.id, "merge", 13)).toBe(false);
+      expect((await post(y.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } })).status).toBe(200);
+      expect(y.c.db.hasMergeGrant(y.t.id, "merge", 13)).toBe(true);
+    } finally {
+      await y.c.stop();
+    }
+  });
 });
 
 describe("task evals", () => {
@@ -6662,6 +6686,47 @@ describe("task fork", () => {
         await c.stop();
         rmSync(h, { recursive: true, force: true });
       }
+    }
+  });
+});
+
+describe("merge grants", () => {
+  const post = (b: string, path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const granted = (b: string, taskId: string, kind: string, target: number) => fetch(`${b}/api/merge-grants?taskId=${taskId}&kind=${kind}&target=${target}`).then((r) => r.json()) as Promise<{ granted: boolean }>;
+
+  test("a grant sentence sent to a task is recorded for that PR only; the scope stop is granted only by a later scope grant", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-merge-grants-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter([{ t: "session.start", runner: "claude", runnerSessionId: "s1", cwd: "/tmp" }, { t: "session.end", status: "ok", turn: "t1" }])], { port: 0, selfdevChecks: false, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = (await post(b, "/api/tasks", { cwd: h, title: "t", prompt: "p" }).then(j)) as Task;
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: false });
+      await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 を判定の外でマージしてよい" });
+      expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: true });
+      expect(await granted(b, t.id, "merge", 13)).toEqual({ granted: false });
+      expect(await granted(b, t.id, "answer", 12)).toEqual({ granted: false });
+      expect(await granted(b, "task_other", "merge", 12)).toEqual({ granted: false });
+      await post(b, `/api/tasks/${t.id}/send`, { text: "PR #13 を判定の外でマージしない" });
+      expect(await granted(b, t.id, "merge", 13)).toEqual({ granted: false });
+
+      const stop = () => fetch(`${b}/api/merge-grants/scope-stop?taskId=${t.id}&issue=4372`).then((r) => r.json());
+      expect(await stop()).toEqual({ stopped: false, granted: false });
+      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, issue: 4372, pr: 99 })).status).toBe(200);
+      expect(await stop()).toEqual({ stopped: true, granted: false });
+      await Bun.sleep(5);
+      await post(b, `/api/tasks/${t.id}/send`, { text: "Task #4372 の本文に名指しのパスを足してよい" });
+      expect(await stop()).toEqual({ stopped: true, granted: true });
+      // a scope grant that came before the stop does not count for it
+      await post(b, `/api/tasks/${t.id}/send`, { text: "Task #4400 の本文に名指しのパスを足してよい" });
+      await Bun.sleep(5);
+      await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, issue: 4400, pr: 100 });
+      expect(await fetch(`${b}/api/merge-grants/scope-stop?taskId=${t.id}&issue=4400`).then((r) => r.json())).toEqual({ stopped: true, granted: false });
+      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, issue: "x", pr: 1 })).status).toBe(400);
+      expect((await fetch(`${b}/api/merge-grants?taskId=${t.id}&kind=nope&target=1`)).status).toBe(400);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
     }
   });
 });

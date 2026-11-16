@@ -108,7 +108,7 @@ gh pr comment $N --body-file "$W/summary.md"      # W=$(mktemp -d /tmp/<リポ�
 
 ## 6. マージと記録
 
-スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。利用者が判定の外のマージを認めたときも同じコマンド（`pbi-complete` の 5）。
+スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。利用者が判定の外のマージを認めたときも同じコマンド（`ops.config.json` に `mergeGate` があるリポジトリのアプリの Task では `PR #<n> を判定の外でマージしてよい` の許可文が記録されているときだけ前段を通る。`pbi-complete` の 5）。
 
 ```bash
 <マージ判定> $N --merge-stack                      # スタックの最下段だけ。上は GitHub が retarget + rebase する

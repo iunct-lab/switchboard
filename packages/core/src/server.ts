@@ -61,6 +61,7 @@ import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backl
 import { allocationOf, sweepOrder, weekWindowStart } from "./allocation.ts";
 import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, dueSoonOf, replyWaitingIn, readStoredIssue, readStoredRecords, storedFlowIssues, storedIssueHeads, storedIssueReader, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, allocationHeldLines, type AllocationHold, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
 import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
+import { MERGE_GRANT_ANSWERS_KEY, parseMergeGrants } from "./merge-grants.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
@@ -875,9 +876,22 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       } catch (e) {
         return { error: `候補の定義を読めません: ${(e as Error).message ?? e}`, status: 409 };
       }
-      if (action === "direct") return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra });
+      // a grant sentence in the person's screen answer is theirs for the first stage Task started after it (the Issue's Task that
+      // asked has ended); a later stage Task, while that answer is still the newest, does not get it again. The answer is known by
+      // its comment operation's id, which sending it to the service does not change
+      const granting = (r: Awaited<ReturnType<typeof startMetaTask>>) => {
+        if (answer && "task" in r) {
+          const used = db.getSetting<string[]>(MERGE_GRANT_ANSWERS_KEY, []);
+          if (!used.includes(answer.id)) {
+            noteMergeGrant(r.task.id, answer.text);
+            db.setSetting(MERGE_GRANT_ANSWERS_KEY, [...used, answer.id].slice(-200));
+          }
+        }
+        return r;
+      };
+      if (action === "direct") return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildDirectPrompt(item, { local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra }));
       const taskModel = action === "complete" ? completeTaskModelFor(input.extra?.runner) : "";
-      return await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer, taskModel }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra });
+      return granting(await startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: buildStartPrompt(item, action, { other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path), answer, taskModel }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra }));
     } finally {
       startingStage.delete(key);
     }
@@ -1360,6 +1374,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (answer.kind === "grant") {
       if (!ask.grant) return { status: 409, body: { error: "許可文がありません" } };
       try {
+        noteMergeGrant(taskId, ask.grant);
         const t = await tasks.send(taskId, ask.grant);
         return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
       } catch (e) {
@@ -1372,6 +1387,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const gone = policyGone(by);
     if (gone) return changed(gone, [gone]);
     try {
+      if (!by) noteMergeGrant(taskId, text); // the person chose it; an answer a saved policy made is not the person's grant
       const t = await tasks.send(taskId, by ? `${basisLine(by, ask.subject)}\n\n${text}` : text);
       return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
     } catch (e) {
@@ -2601,6 +2617,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const wrap = (fn: AnyHandler): AnyHandler => (req, srv) => (!viaEdge(req, srv) ? refused(req, srv, notViaEdge()) : !hostOk(req) ? refused(req, srv, notAllowedHost()) : fn(req, srv));
     if (typeof h === "function") return wrap(h);
     return Object.fromEntries(Object.entries(h).map(([k, v]) => [k, wrap(v)]));
+  };
+  /** A merge-grant sentence in what the person sends to a task is recorded for the check in front of `gh` (merge-grants.ts). */
+  const noteMergeGrant = (taskId: string, text: string): void => {
+    for (const g of parseMergeGrants(text)) db.recordMergeGrant(taskId, g.kind, g.target);
   };
   const guard = (h: AnyHandler | Record<string, AnyHandler>): AnyHandler | Record<string, AnyHandler> => {
     const wrap = (fn: AnyHandler): AnyHandler => async (req, srv) => {
@@ -3996,6 +4016,40 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         },
       },
 
+      /**
+       * The person's merge grants (merge-grants.ts), read by the check in front of `gh`. GET ?taskId&kind&target
+       * answers whether the task's conversation carried the sentence.
+       */
+      "/api/merge-grants": {
+        GET: (req) => {
+          const q = new URL(req.url).searchParams;
+          const taskId = q.get("taskId") ?? "";
+          const kind = q.get("kind") ?? "";
+          const target = Number(q.get("target"));
+          if (!taskId || !["merge", "answer", "scope"].includes(kind) || !Number.isInteger(target)) return bad("taskId, kind (merge|answer|scope) and target required");
+          return json({ granted: db.hasMergeGrant(taskId, kind, target) });
+        },
+      },
+
+      /** The merge gate stopped PR `pr` for a file the Task `issue` does not name: POST records it; GET answers whether it stopped and whether a scope grant came after. */
+      "/api/merge-grants/scope-stop": {
+        POST: async (req) => {
+          const b = (await req.json().catch(() => ({}))) as { taskId?: unknown; issue?: unknown; pr?: unknown };
+          if (typeof b.taskId !== "string" || !b.taskId || !Number.isInteger(b.issue) || !Number.isInteger(b.pr)) return bad("taskId, issue and pr required");
+          db.recordScopeStop(b.taskId, b.issue as number, b.pr as number);
+          return json({ recorded: true });
+        },
+        GET: (req) => {
+          const q = new URL(req.url).searchParams;
+          const taskId = q.get("taskId") ?? "";
+          const issue = Number(q.get("issue"));
+          if (!taskId || !Number.isInteger(issue)) return bad("taskId and issue required");
+          const stop = db.scopeStopOf(taskId, issue);
+          const at = db.mergeGrantAt(taskId, "scope", issue);
+          return json({ stopped: stop !== null, granted: stop !== null && at !== null && at > stop.at });
+        },
+      },
+
       "/api/tasks/:id/send": {
         POST: async (req) => {
           const parsed = SendTaskInput.safeParse(await req.json().catch(() => ({})));
@@ -4008,6 +4062,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
           try {
             catchUpWithShadow(String(req.params.id)); // a terminal turn that just finished goes in before this one
+            noteMergeGrant(String(req.params.id), text);
             return json(await tasks.send(String(req.params.id), text, { attachmentIds }));
           } catch (e) {
             return bad(String((e as Error).message ?? e), 409);
@@ -4802,6 +4857,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         try {
           if (m.type === "task.send") {
             catchUpWithShadow(m.taskId);
+            noteMergeGrant(m.taskId, m.text);
             tasks.send(m.taskId, m.text).catch((e) => ws.send(JSON.stringify({ type: "error", message: String((e as Error).message ?? e) } satisfies ServerMessage)));
           } else if (m.type === "permission.respond") tasks.respondPermission(m.taskId, m.id, m.decision);
           else if (m.type === "task.abort") void tasks.abort(m.taskId);

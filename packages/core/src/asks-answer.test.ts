@@ -278,6 +278,29 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(body.ask!.resume!.reason).toContain("ランナー側の拒否");
   });
 
+  test("merge grant on a stage Task's Issue: the grant the person gives there is recorded for the stage Task it starts", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+    const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
+    const r = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    let next: string | null = null;
+    for (let n = 0; n < 200 && !(next = r.ask!.resume?.taskId ?? stageTasks(306).find((x) => x.id !== t.id)?.id ?? null); n++) await Bun.sleep(10);
+    expect(next).not.toBeNull();
+    expect(core!.db.hasMergeGrant(next!, "merge", 12)).toBe(true);
+    expect(core!.db.hasMergeGrant(t.id, "merge", 12)).toBe(false);
+    // a later stage Task on the Issue, while that answer is still the newest, does not get it again (the answer is known by its
+    // operation's id, not by a time that sending it would move)
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [next!]);
+    const again = await fetch(`${base}/api/backlog/306/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: meta().id, action: "complete" }) });
+    expect(again.status).toBe(201);
+    const third = ((await again.json()) as { id: string }).id;
+    expect(third).not.toBe(next);
+    expect(third).toBeDefined();
+    expect(core!.db.hasMergeGrant(third!, "merge", 12)).toBe(false);
+  });
+
   test("permission stop grant reply: a stage Task's refused stop is answered on its Issue by its grant — a ## 回答 the next stage Task gets as the person's words", async () => {
     const GRANT = "git push を origin の sb/x にすることだけ許可します";
     const prompts: string[] = [];

@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
-import { projectOf, type OpsConfig } from "./config.ts";
+import { mergeGateOf, projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
 import { bodyLoss } from "./lint.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
+import { MERGE_ANSWER_YES } from "./gh-guard.ts";
 
 /**
  * `ops-kit backlog …`: the backlog the app running the Task stored, read and edited through its API — the same
@@ -309,6 +310,15 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           const sections = own && opts.pbiSections ? opts.pbiSections() : [];
           const lost = bodyLoss(now.issue.body, body, now.issue.labels.includes("type:pbi"), sections);
           if (lost) throw new Refused(`backlog edit: 保存しません — ${lost}。本文は ops-kit backlog view ${ref.replace(/^#/, "")}${explicit !== undefined ? ` --workspace ${explicit}` : ""} --json | jq -r .issue.body で取る`);
+          // a Task's body that names more paths than it did, after the merge gate stopped on a file it does not name, waits for the person's scope sentence
+          // an Issue that has no number yet (only sent later) cannot have been named by a stopped PR. Its `number` is null then,
+          // although Detail types it as a number, so keep the `n &&` below
+          const n = now.issue.number;
+          if (env.BACKLOG_URL && n && now.issue.labels.includes("type:task") && mergeGateOf(opts.cwd) !== null && addedPaths(now.issue.body ?? "", body).length) {
+            const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", issue: String(n) });
+            const s = (await appRoot(env, opts.fetch ?? fetch)("GET", `/api/merge-grants/scope-stop?${q}`).catch(() => null)) as { stopped?: unknown; granted?: unknown } | null;
+            if (s?.stopped === true && s.granted !== true) throw new Refused(`backlog edit: 保存しません — merge-gate が名指しの外のファイルで止めたあとの、#${n} の本文への名指しのパスの追加には利用者の許可が要ります。利用者が Task の会話に「Task #${n} の本文に名指しのパスを足してよい」と 1 行書いたあとに保存します`);
+          }
         }
         const input: Record<string, unknown> = {
           ...(title !== undefined && { title }),
@@ -332,6 +342,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const body = await text(take("--body-file"));
         if (!ref || !body?.trim() || args.length) throw new Refused("backlog comment <issue> --body-file <f|->");
         noSecrets(body);
+        // `gh` is not in front of this path: the person's `[merge-answer] yes` mark is held to the same grant as in the guard
+        if (env.BACKLOG_URL && mergeGateOf(opts.cwd) !== null && MERGE_ANSWER_YES.test(body)) {
+          const granted = await mergeGranted(env, "answer", number(ref), opts.fetch ?? fetch);
+          if (!granted) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `#${number(ref)} に利用者の許可文の記録がありません`}）。利用者が Task の会話に「PR #${number(ref)} に [merge-answer] yes を投稿してよい」と 1 行書いたあとに投稿します`);
+        }
         if (direct) {
           await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);
           io.out(`#${number(ref)} にコメントを保存しました`);
@@ -588,6 +603,44 @@ export async function syncedRepositories(env: Record<string, string | undefined>
     return list.syncs.flatMap((s) => (s.backlog === "github" && s.repository !== null ? [{ repository: s.repository, workspaceId: s.workspaceId }] : []));
   } catch {
     return null;
+  }
+}
+
+/** The app's API from its origin (BACKLOG_URL ends in `/api/backlog`; the merge-grant routes are beside it), answering within 5 seconds. */
+function appRoot(env: Record<string, string | undefined>, f: Fetch) {
+  const base = env.BACKLOG_URL ? new URL(env.BACKLOG_URL).origin : env.BACKLOG_URL;
+  return client({ ...env, BACKLOG_URL: base }, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(5_000) }));
+}
+
+/**
+ * Whether the person's merge-grant sentence (`kind`: merge / answer / scope) for `target` stands in this Task's conversation
+ * (GET /api/merge-grants). Null when the app cannot be asked (no BACKLOG_URL or task id, not reached, 4xx / 5xx, no answer in 5 seconds).
+ */
+export async function mergeGranted(env: Record<string, string | undefined>, kind: string, target: number, f: Fetch = fetch): Promise<boolean | null> {
+  try {
+    const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", kind, target: String(target) });
+    const a = (await appRoot(env, f)("GET", `/api/merge-grants?${q}`)) as { granted?: unknown } | null;
+    return typeof a?.granted === "boolean" ? a.granted : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The paths in backticks (a `/` or an extension in them; a `:line` after it left out) that `after` has and `before` does not. */
+export function addedPaths(before: string, after: string): string[] {
+  const paths = (t: string) => new Set([...t.matchAll(/`([^`\s]+)`/g)].map((m) => m[1]!.replace(/(?::\d+(?:-\d+)?)+$/, "")).filter((x) => /\/|\.[A-Za-z0-9]+$/.test(x)));
+  const had = paths(before);
+  return [...paths(after)].filter((x) => !had.has(x));
+}
+
+/** Records that the merge gate stopped PR `pr` for a file the Task `issue` does not name (POST /api/merge-grants/scope-stop). Best effort: false when it was not recorded. */
+export async function recordScopeStop(env: Record<string, string | undefined>, issue: number, pr: number, f: Fetch = fetch): Promise<boolean> {
+  if (!env.BACKLOG_URL || !env.OPS_KIT_TASK_ID) return false;
+  try {
+    await appRoot(env, f)("POST", "/api/merge-grants/scope-stop", { taskId: env.OPS_KIT_TASK_ID, issue, pr });
+    return true;
+  } catch {
+    return false;
   }
 }
 

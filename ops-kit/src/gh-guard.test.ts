@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogWrite, bodiesOf, GUARD_MARK, realCommand, writeTargetOf } from "./gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, realCommand, writeTargetOf } from "./gh-guard.ts";
 
 const GUARD = join(import.meta.dir, "../bin/gh");
 const code = ["QWJK", "ZRTP"].join("-");
@@ -594,26 +594,109 @@ describe("public copy: a write from a clone that still writes to its public copy
   });
 });
 
-describe("merge: no judgement in front of gh (2026-11-02, the user allows a merge outside merge-gate)", () => {
-  test("gh pr merge and gh stack merge reach gh unchanged, with or without mergeGate in ops.config.json", () => {
+describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.config.json)", () => {
+  const cases: string[][] = [
+    ["pr", "merge", "12", "--rebase"],
+    ["pr", "merge", "-R", "x/y", "https://github.com/x/y/pull/12", "--rebase"],
+    ["stack", "merge", "12", "--rebase", "-y"],
+    ["api", "-X", "PUT", "repos/x/y/pulls/12/merge"],
+  ];
+  // a fake app that answers the grant of PR 12 only, and records what it was asked
+  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false) {
     const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.merge."));
+    const asked: string[] = [];
+    const app = appDown ? null : Bun.serve({ port: 0, fetch: (req) => { const u = new URL(req.url); asked.push(u.pathname + u.search); return Response.json({ granted: u.searchParams.get("target") === "12" && u.searchParams.get("kind") === "merge" && u.searchParams.get("taskId") === "t1" }); } });
     try {
       const fake = join(tree, "bin");
       mkdirSync(fake);
       const calls = join(tree, "calls.jsonl");
       writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`);
       chmodSync(join(fake, "gh"), 0o755);
-      // the guard no longer reads mergeGate
-      writeFileSync(join(tree, "ops.config.json"), JSON.stringify({ mergeGate: { command: ["false"] } }));
-      const argvs = [["pr", "merge", "12", "--rebase"], ["stack", "merge", "12", "--rebase", "-y"]];
-      for (const argv of argvs) {
-        const p = Bun.spawnSync([GUARD, ...argv], { cwd: tree, env: { ...process.env, BACKLOG_URL: undefined, GH_REPO: undefined, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-        expect(p.exitCode).toBe(0);
-      }
-      expect(readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l))).toEqual(argvs);
+      writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? {} : { mergeGate }));
+      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      const [code, err] = [await p.exited, await new Response(p.stderr).text()];
+      return { code, err, asked, ran: existsSync(calls) };
     } finally {
+      app?.stop(true);
       rmSync(tree, { recursive: true, force: true });
     }
+  }
+
+  test("pr merge, stack merge and a PUT of pulls/<n>/merge stop with exit 1 before gh when no mark and no grant stand", async () => {
+    for (const argv of cases.map((c) => c.map((a) => a.replace("12", "13")))) {
+      const r = await inTree("scripts/merge-gate.ts", {}, argv);
+      expect([argv, r.code, r.ran]).toEqual([argv, 1, false]);
+      expect(r.err).toContain("merge-gate.ts");
+    }
+  });
+
+  test("graphql mergePullRequest stops; a graphql write that is not a merge goes on", async () => {
+    const merge = await inTree("scripts/merge-gate.ts", {}, ["api", "graphql", "-f", "query=mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }"]);
+    expect([merge.code, merge.ran]).toEqual([1, false]);
+    const other = await inTree("scripts/merge-gate.ts", {}, ["api", "graphql", "-f", "query=mutation { addReaction(input: {}) { clientMutationId } }"]);
+    expect([other.code, other.ran]).toEqual([0, true]);
+  });
+
+  test("OPS_MERGE_GATE_PR naming the same PR goes through without asking the app; another PR's mark does not", async () => {
+    for (const argv of cases) {
+      const r = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12" }, argv, true);
+      expect([argv, r.code, r.ran]).toEqual([argv, 0, true]);
+    }
+    const other = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "13" }, ["pr", "merge", "12"], true);
+    expect([other.code, other.ran]).toEqual([1, false]);
+  });
+
+  test("a grant of the PR in the Task's conversation goes through (asked with the task, kind and PR); another PR's does not", async () => {
+    const ok = await inTree("scripts/merge-gate.ts", {}, ["pr", "merge", "12", "--rebase"]);
+    expect([ok.code, ok.ran, ok.asked]).toEqual([0, true, ["/api/merge-grants?taskId=t1&kind=merge&target=12"]]);
+    const no = await inTree("scripts/merge-gate.ts", {}, ["pr", "merge", "14"]);
+    expect([no.code, no.ran]).toEqual([1, false]);
+  });
+
+  test("a merge that names no PR (a branch, the current branch) stops; an app that cannot be reached stops", async () => {
+    for (const argv of [["pr", "merge", "feature-x"], ["pr", "merge"]]) expect((await inTree("scripts/merge-gate.ts", {}, argv)).code).toBe(1);
+    const down = await inTree("scripts/merge-gate.ts", {}, ["pr", "merge", "12"], true);
+    expect([down.code, down.ran, down.err]).toEqual([1, false, expect.stringContaining("アプリに届かず")]);
+    // no task id: the app is not asked, and the reason says so
+    const noId = await inTree("scripts/merge-gate.ts", { OPS_KIT_TASK_ID: undefined }, ["pr", "merge", "12"]);
+    expect([noId.code, noId.ran, noId.asked, noId.err]).toEqual([1, false, [], expect.stringContaining("Task の id（OPS_KIT_TASK_ID）が無く")]);
+  });
+
+  test("without mergeGate in the config, or outside the app's Task, a merge reaches gh unchanged; reads and other writes never ask", async () => {
+    expect((await inTree(undefined, {}, ["pr", "merge", "13"], true)).ran).toBe(true);
+    expect((await inTree("scripts/merge-gate.ts", { BACKLOG_URL: undefined }, ["pr", "merge", "13"])).ran).toBe(true);
+    for (const argv of [["pr", "view", "13"], ["pr", "comment", "13", "--body", "x"], ["api", "repos/x/y/pulls/13/merge"]]) {
+      const r = await inTree("scripts/merge-gate.ts", {}, argv);
+      expect([argv, r.code, r.ran, r.asked]).toEqual([argv, 0, true, []]);
+    }
+  });
+
+  test("mergeAnswerPost reads a yes mark in pr comment, the comments API and graphql addComment; a no, no mark and other writes are not it", () => {
+    const yes = ["[merge-answer] yes large abc"];
+    expect(mergeAnswerPost(["pr", "comment", "12", "--body", yes[0]!], yes)).toEqual({ pr: 12 });
+    expect(mergeAnswerPost(["-R", "x/y", "pr", "comment", "https://github.com/x/y/pull/9", "-b", yes[0]!], yes)).toEqual({ pr: 9 });
+    expect(mergeAnswerPost(["pr", "comment", "-b", yes[0]!], yes)).toEqual({ pr: null });
+    expect(mergeAnswerPost(["api", "-X", "POST", "repos/x/y/issues/12/comments", "-f", `body=${yes[0]}`], yes)).toEqual({ pr: 12 });
+    expect(mergeAnswerPost(["api", "repos/x/y/issues/12/comments"], yes)).toBeNull();
+    expect(mergeAnswerPost(["api", "graphql", "-f", "query=mutation { addComment(input: {}) { clientMutationId } }"], ["mutation { addComment(input: {}) }", ...yes])).toEqual({ pr: null });
+    // the same mark through an Issue comment on the PR, or an edit of a comment that is there already
+    expect(mergeAnswerPost(["issue", "comment", "12", "--body", yes[0]!], yes)).toEqual({ pr: 12 });
+    expect(mergeAnswerPost(["issue", "comment", "https://github.com/x/y/issues/9", "-b", yes[0]!], yes)).toEqual({ pr: 9 });
+    expect(mergeAnswerPost(["api", "-X", "PATCH", "repos/x/y/issues/comments/555", "-f", `body=${yes[0]}`], yes)).toEqual({ pr: null });
+    expect(mergeAnswerPost(["api", "repos/x/y/issues/comments/555"], yes)).toBeNull();
+    expect(mergeAnswerPost(["api", "graphql", "-f", "query=mutation { updateIssueComment(input: {}) { clientMutationId } }"], ["mutation { updateIssueComment(input: {}) }", ...yes])).toEqual({ pr: null });
+    expect(mergeAnswerPost(["pr", "comment", "12", "--body", "[merge-answer] no x"], ["[merge-answer] no x"])).toBeNull();
+    expect(mergeAnswerPost(["pr", "comment", "12", "--body", "x"], ["note [merge-answer] yes"])).toBeNull();
+    expect(mergeAnswerPost(["pr", "review", "12", "--body", yes[0]!], yes)).toBeNull();
+  });
+
+  test("mergeWrite reads the forms: -R before the group, after --, a URL, a branch", () => {
+    expect(mergeWrite(["-R", "x/y", "pr", "merge", "12"])).toEqual({ pr: 12 });
+    expect(mergeWrite(["pr", "merge", "--", "https://github.com/x/y/pull/9"])).toEqual({ pr: 9 });
+    expect(mergeWrite(["pr", "merge", "--subject", "7", "feature"])).toEqual({ pr: null });
+    expect(mergeWrite(["pr", "view", "12"])).toBeNull();
+    expect(mergeWrite(["api", "repos/x/y/pulls/12/merge"])).toBeNull();
+    expect(mergeWrite(["api", "-X", "PUT", "repos/x/y/pulls/12/merge"])).toEqual({ pr: 12 });
   });
 });
 
@@ -734,3 +817,57 @@ describe("bodiesOf / realCommand", () => {
     expect(realCommand("gh", `${dirname(GUARD)}::/nonexistent`, GUARD, GUARD_MARK)).toBeNull();
   });
 });
+
+describe("merge-answer: a yes mark is posted in a Task only with the grant of the PR (kind answer)", () => {
+  async function post(argv: string[], opts: { gate?: boolean; down?: boolean; url?: boolean } = {}) {
+    const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.answer."));
+    const asked: string[] = [];
+    const app = opts.down ? null : Bun.serve({ port: 0, fetch: (req) => { const u = new URL(req.url); asked.push(u.search); return Response.json({ granted: u.searchParams.get("target") === "12" && u.searchParams.get("kind") === "answer" }); } });
+    try {
+      const fake = join(tree, "bin");
+      mkdirSync(fake);
+      const calls = join(tree, "calls.jsonl");
+      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, "x\\n");\n`);
+      chmodSync(join(fake, "gh"), 0o755);
+      writeFileSync(join(tree, "ops.config.json"), JSON.stringify(opts.gate === false ? {} : { mergeGate: "scripts/merge-gate.ts" }));
+      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: opts.url === false ? undefined : `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      const [code, err] = [await p.exited, await new Response(p.stderr).text()];
+      return { code, err, asked, ran: existsSync(calls) };
+    } finally {
+      app?.stop(true);
+      rmSync(tree, { recursive: true, force: true });
+    }
+  }
+  const mark = "[merge-answer] yes large 0123456789012345678901234567890123456789";
+
+  test("without the grant the mark stops before gh; with it, the comment goes on (asked with the task, kind and PR)", async () => {
+    const no = await post(["pr", "comment", "13", "--body", mark]);
+    expect([no.code, no.ran, no.err]).toEqual([1, false, expect.stringContaining("[merge-answer] yes")]);
+    const ok = await post(["pr", "comment", "12", "--body", mark]);
+    expect([ok.code, ok.ran, ok.asked]).toEqual([0, true, ["?taskId=t1&kind=answer&target=12"]]);
+    const api = await post(["api", "-X", "POST", "repos/x/y/issues/13/comments", "-f", `body=${mark}`]);
+    expect([api.code, api.ran]).toEqual([1, false]);
+  });
+
+  test("a mark that names no PR, or an app that cannot be reached, stops", async () => {
+    expect((await post(["pr", "comment", "--body", mark])).code).toBe(1);
+    // an edit of a comment never passes, grant or not: the reason says to post a new comment, not to wait for the grant
+    const edit = await post(["api", "-X", "PATCH", "repos/x/y/issues/comments/555", "-f", `body=${mark}`]);
+    expect([edit.code, edit.ran, edit.asked, edit.err.includes("新しいコメントで投稿します"), edit.err.includes("1 行書いたあとに投稿します")]).toEqual([1, false, [], true, false]);
+    const down = await post(["pr", "comment", "12", "--body", mark], { down: true });
+    expect([down.code, down.ran, down.err]).toEqual([1, false, expect.stringContaining("アプリに届かず")]);
+  });
+
+  test("a no, a comment without the mark, no mergeGate and no BACKLOG_URL go on without asking the app", async () => {
+    for (const [argv, opts] of [
+      [["pr", "comment", "13", "--body", "[merge-answer] no large abc"], {}],
+      [["pr", "comment", "13", "--body", "ordinary"], {}],
+      [["pr", "comment", "13", "--body", mark], { gate: false }],
+      [["pr", "comment", "13", "--body", mark], { url: false }],
+    ] as const) {
+      const r = await post([...argv], opts);
+      expect([r.code, r.ran, r.asked]).toEqual([0, true, []]);
+    }
+  });
+});
+

@@ -236,6 +236,10 @@ CREATE TABLE IF NOT EXISTS task_evals (
 -- the copy of a task's diff: one row per task, so a removed worktree can still be shown; kept out of tasks (listTasks reads that often)
 CREATE TABLE IF NOT EXISTS task_diffs (task_id TEXT PRIMARY KEY, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ask_answers (id TEXT PRIMARY KEY, at INTEGER NOT NULL, result TEXT, failure TEXT);
+-- the person's sentences that let a refused merge step through (merge-grants.ts): one row per task, kind and target, valid for the task's conversation
+CREATE TABLE IF NOT EXISTS merge_grants (task_id TEXT NOT NULL, kind TEXT NOT NULL, target INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, kind, target));
+-- the merge gate stopped a PR for a file the task's body does not name (the grant for adding the path counts only after this)
+CREATE TABLE IF NOT EXISTS merge_scope_stops (task_id TEXT NOT NULL, issue INTEGER NOT NULL, pr INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, issue));
 -- the local passkeys were reverted; the table stays empty and unused because migrations only add (schema.test.ts, releases-and-rescue.md)
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, rp_id TEXT NOT NULL, public_key TEXT NOT NULL, algorithm INTEGER NOT NULL, counter INTEGER NOT NULL, created INTEGER NOT NULL, last_used INTEGER);
 -- one row per daemon start (ops-stops.ts): the stopping daemon writes clean_exit / ended_at, the next start end_reason
@@ -926,6 +930,29 @@ export class Db {
   askAnswer(id: string): { at: number; result: AskAnswerResult | null; failure: { at: number; reason: string } | null } | null {
     const r = this.sqlite.query("SELECT at, result, failure FROM ask_answers WHERE id = ?").get(id) as { at: number; result: string | null; failure: string | null } | null;
     return r ? { at: r.at, result: r.result ? (JSON.parse(r.result) as AskAnswerResult) : null, failure: r.failure ? (JSON.parse(r.failure) as { at: number; reason: string }) : null } : null;
+  }
+
+  /** Records the person's grant sentence; a repeat moves its time. */
+  recordMergeGrant(taskId: string, kind: string, target: number, at = Date.now()): void {
+    this.sqlite.query("INSERT INTO merge_grants (task_id, kind, target, at) VALUES (?, ?, ?, ?) ON CONFLICT(task_id, kind, target) DO UPDATE SET at = excluded.at").run(taskId, kind, target, at);
+  }
+
+  /** When the task's conversation last carried this grant (ms), or null. */
+  mergeGrantAt(taskId: string, kind: string, target: number): number | null {
+    const r = this.sqlite.query("SELECT at FROM merge_grants WHERE task_id = ? AND kind = ? AND target = ?").get(taskId, kind, target) as { at: number } | null;
+    return r ? r.at : null;
+  }
+
+  hasMergeGrant(taskId: string, kind: string, target: number): boolean {
+    return this.mergeGrantAt(taskId, kind, target) !== null;
+  }
+
+  recordScopeStop(taskId: string, issue: number, pr: number, at = Date.now()): void {
+    this.sqlite.query("INSERT INTO merge_scope_stops (task_id, issue, pr, at) VALUES (?, ?, ?, ?) ON CONFLICT(task_id, issue) DO UPDATE SET pr = excluded.pr, at = excluded.at").run(taskId, issue, pr, at);
+  }
+
+  scopeStopOf(taskId: string, issue: number): { pr: number; at: number } | null {
+    return (this.sqlite.query("SELECT pr, at FROM merge_scope_stops WHERE task_id = ? AND issue = ?").get(taskId, issue) as { pr: number; at: number } | null) ?? null;
   }
 
   /** Forgets the answers older than `before` (ms). */
