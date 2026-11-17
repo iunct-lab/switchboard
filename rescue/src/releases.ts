@@ -7,7 +7,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type HistoryAction = "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild";
+export type HistoryAction = "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild" | "promote-web";
 export interface HistoryEntry {
   ts: number;
   action: HistoryAction;
@@ -32,6 +32,27 @@ export async function run(argv: string[], cwd: string): Promise<string> {
 }
 
 export const resolveCommit = (repo: string, rev: string) => run(["git", "-C", repo, "rev-parse", "--verify", `${rev}^{commit}`], repo);
+
+/**
+ * What a daemon reads again on SIGHUP without restarting: the Web UI it serves and the default settings it ships with.
+ * A release whose difference from the one the daemon started from stays inside these needs no restart.
+ */
+export const NO_RESTART_PREFIXES = ["apps/web/", "packages/core/config/"];
+
+/**
+ * Does switching the running daemon (started from `running`) to `sha` need a restart? False only when every file that
+ * differs lies under NO_RESTART_PREFIXES. True when there is nothing to compare with (`running` is null, git fails,
+ * the commit is not in `repo`) or nothing differs: the safe answer is the restart that always worked.
+ */
+export async function restartNeeded(repo: string, running: string | null, sha: string): Promise<boolean> {
+  if (!running) return true;
+  try {
+    const files = (await run(["git", "-C", repo, "diff", "--name-only", running, sha], repo)).split("\n").filter(Boolean);
+    return files.length === 0 || !files.every((f) => NO_RESTART_PREFIXES.some((p) => f.startsWith(p)));
+  } catch {
+    return true;
+  }
+}
 
 /**
  * Build an exported tree (`treeDir`, a directory under the releases directory) and rename it to `<home>/releases/<sha>`.
@@ -80,12 +101,13 @@ export const KEEP_RELEASES = 5;
 
 /**
  * Remove the built releases that nothing points at any more. Kept: `current`, `previous`, and the newest
- * KEEP_RELEASES by the history (`to`, newest first). A release the history does not mention counts as oldest.
+ * KEEP_RELEASES by the history (`to`, newest first), and `alsoKeep` (the release the daemon was started from: switches
+ * without a restart move `current` away from it). A release the history does not mention counts as oldest.
  * Returns the removed ids.
  */
-export function pruneReleases(home: string): string[] {
+export function pruneReleases(home: string, alsoKeep: (string | null)[] = []): string[] {
   const keep = new Set<string>();
-  for (const l of [currentOf(home), previousOf(home)]) if (l) keep.add(l);
+  for (const l of [currentOf(home), previousOf(home), ...alsoKeep]) if (l) keep.add(l);
   const recent: string[] = [];
   for (const e of readHistory(home).reverse()) {
     if (e.to && /^[0-9a-f]{40}$/.test(e.to) && e.ok /* a rejected candidate is not a release to go back to */ && !recent.includes(e.to)) recent.push(e.to);

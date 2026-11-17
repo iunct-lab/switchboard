@@ -105,7 +105,7 @@ stop; no turn-and-tool-name guess is needed. An allow to such an ask has not bee
   Tasks and other runners get none of it.
 - The adapter copies `decision_reason_type: "classifier"` of a `can_use_tool` to the `permission.ask` it emits
   (`reason: "classifier"`).
-- The daemon's receiver `POST /otel/:id/v1/logs` takes the Task's token (401 otherwise; on the cloud host, where the
+- The daemon's receiver `POST /otel/:id/v1/logs` takes the Task's token (401 otherwise; in the EC2 setup, where the
   passkey login is on, only from loopback, as for `/mcp/`) while the Task's runner process is attached or still closing
   (404 for a valid token with no such process), and answers `{}`. Once the Task has closed, its token is revoked and a
   send is 401. Of a body it keeps only the

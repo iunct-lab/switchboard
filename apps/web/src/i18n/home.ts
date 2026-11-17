@@ -146,15 +146,11 @@ export const home = msgs({
 
   // PresetPicker.tsx, presets.ts
   presetsUnreadable: { ja: "定型の指示を読めませんでした: {error}", en: "Could not read the instruction presets: {error}" },
-  presetsButton: { ja: "定型の指示…", en: "Instruction presets…" },
-  noPresets: { ja: "定型の指示: 設定 で定型の指示を作ると、ここで選べます", en: "Instruction presets: create them in Settings to choose them here" },
-  choosePreset: { ja: "定型の指示を選んでください", en: "Choose an instruction preset" },
+  presetHint: { ja: "打つと定型の候補。", en: "Type to see presets. " },
   needTarget: { ja: "対象の Issue / PR を入れてください", en: "Enter the target Issue / PR" },
   needWorkspace: { ja: "Workspace を選んでください（対象のリポジトリを確かめます）", en: "Choose a Workspace (the target's repository is checked)" },
   presetLabel: { ja: "定型の指示", en: "Instruction preset" },
   targetLabel: { ja: "対象の Issue / PR", en: "Target Issue / PR" },
-  putTitle: { ja: "差し込んだ本文を入れます。送るのは「開始」/「送信」", en: "Puts in the filled-in text. Sending is Start / Send" },
-  put: { ja: "本文に入れる", en: "Put in the text" },
   presetTarget: { ja: "対象: Issue / PR を選ぶ", en: "Target: choose an Issue / PR" },
   presetNoTarget: { ja: "対象なし", en: "No target" },
 

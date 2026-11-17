@@ -245,6 +245,8 @@ export const api = {
   /** A foreign repository's runner config (#2576): `confirmed` = Tasks may start; a stale `hash` is refused (409). */
   runnerConfig: (id: string) => req<RunnerConfigView>(`/api/workspaces/${id}/runner-config`),
   confirmRunnerConfig: (id: string, hash: string) => req<{ ok: true }>(`/api/workspaces/${id}/runner-config`, { method: "POST", body: JSON.stringify({ hash }) }),
+  /** The workspace's rules kept on Switchboard's side (empty = none). */
+  setWorkspaceRules: (id: string, rules: string) => req<{ id: string; rules: string }>(`/api/workspaces/${id}/rules`, { method: "PUT", body: JSON.stringify({ rules }) }),
   syncUpstream: (id: string) => req<Task>(`/api/workspaces/${id}/upstream-sync`, { method: "POST" }),
   /** 取り込み: a meta Task that runs the adopt-repo skill on this workspace (asks before it writes anything). */
   adoptRepo: (id: string) => req<Task>(`/api/workspaces/${id}/adopt`, { method: "POST" }),

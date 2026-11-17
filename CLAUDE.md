@@ -8,13 +8,13 @@
 - Project の URL: リポジトリ変数 `SWITCHBOARD_PROJECT_URL`（同名の環境変数を優先）。選択肢（Priority）・必須の節: root の `ops.config.json`。自分の Project URL を登録する。新しい Issue は `ops-kit backlog create` で作ると Task の中ではアプリが Project に入れる。フィールドは `ops-kit backlog triage` / `set`（Status は自分で付ける）
 - バックログの道具: `ops-kit backlog`（`--help`）と `ops-kit lint --fresh`。ほかのリポジトリのバックログは、Task の中では `--workspace <id>`、Task の外では `GH_REPO=<owner/name> SWITCHBOARD_PROJECT_URL=<URL>`。`scripts/setup/` の入口はブートストラップと検査（`bootstrap_project.sh` / `request_issue.sh` / `scan_issues.sh`）の用で、中身は `ops-kit/`（`bun ops-kit/src/cli.ts --help`）
 - 公開リポジトリへの同期: 開発元の手順は `private/CLAUDE.md` に移した。公開の写しを作るなら、公開先・外すファイル・書き換えるファイルは root の `ops.config.json` の `publicSync`（仕組みはキットの README の「Syncing to the public repository」）。文書（`*.md`・`*.html`）を足したら、公開なら `include` に、非公開なら `exclude` にファイルのパスで書く（書かないと `scripts/public-include.test.ts` が落ちる。コードのディレクトリはディレクトリのまま出る）
-- 認証に使える値（ホストの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（`SWITCHBOARD_ACTIONS` が `on` のリポジトリでは週に 1 回 `.github/workflows/secret-scan.yml` も走る）
+- 認証に使える値（このマシンの AWS のプロファイル名・SSO のセッション名も）を Issue・PR に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。Switchboard が起動したランナーでは `gh` の前段（`ops-kit/bin/gh`、`docs/design/secret-guard.md`）が投稿の前に止める。既に書かれたものは `bash scripts/setup/scan_issues.sh`（`SWITCHBOARD_ACTIONS` が `on` のリポジトリでは週に 1 回 `.github/workflows/secret-scan.yml` も走る）
 - Story Points の目安: 尺度と目安は `issue-workflow` の「### Story Points」。このリポジトリで基準にする閉じた PBI は `private/CLAUDE.md`
 - 設計ルール: README の `## Design rules`（`## License` の手前まで）。ライセンスは Apache-2.0（依存を足すなら `bun pm licenses`）
 - 互換層の前提: 利用者は 1 人、外部クライアントは無い。旧形式を読む層は作らず、データは `packages/core/src/db.ts` の migration で 1 回移す
 - 並列ガード: `bun scripts/parallel-guard.ts`（`claim` / `overlap` / `release`。スキルの `<guard>`）。アプリが同期しているリポジトリでは `--repo` を付けなくてよい（付けてもアプリの保存に書く）。Task の外でほかのリポジトリの PBI を扱うときだけ `--repo` で名指しする
 - 言語: 公開に出る文書（README・公開する `docs/design/`・`aws/README.md`・`SECURITY.md`）は英語で、本文に Issue 番号 `#N` を書かない（公開側では開けない。根拠は日付と中身の文で書く）。確かめ方は `bun scripts/public-docs.ts check [file…]`（既定は `publicSync.exclude` を除いた `docs/` 以下・`aws/README.md`・`SECURITY.md`。README は含まないので `check README.md` と渡す）。画面の文言・コマンド・工程の prompt は原文のまま backtick かコードブロックに入れる。開発に入る入力（このファイル・スキル・Issue テンプレート・工程のプロンプト）と画面は日本語。ただしヘッダーのタブの名前（Home・Backlog・Schedules など）は英語で、タブを足すときもほかのタブに合わせる（2026-11-03 の利用者の指摘）。共通キットの `ops-kit/public/`（英語）は変えない。言語や体裁を揃える提案は、見た目でない実益の理由があるときだけ、その理由で Issue にする
-- 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはホスト・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 5）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
+- 決まりの置き場所: 利用者の指摘からできた決まりはメモリではなく記載に書く。どのリポジトリでも同じなら共通キットのスキル、このリポジトリだけならこのファイルか `docs/design/`。ランナーのメモリ（Claude の `~/.claude/projects/*/memory/`）にはマシン・アカウント・経緯の事実だけを置く（`issue-workflow` の「記録の義務」の 5）。`AGENTS.md` はこのファイルを指すので、ここに書けば Codex にも届く
 
 ## 前提（要望を PBI にする前に照らすもの）
 
@@ -24,7 +24,7 @@
 - 別のマシンの作業場は外向きの通信だけで、記録・GitHub への書き込み・自動の判断を自分では持たない
 - Task がここで全部できる。Task が昇格・再起動・マージを叩く（昇格は、自分以外の Task が動いても待ってもいなければ聞かずに叩き、動いていれば待つ。下の「Switchboard の Task と動いているコード」）。Task から操作を取り上げる要望は運用を止める
 - loopback で待ち受けるデーモンは、localhost に届く人を持ち主として信頼する。同じ OS ユーザーの Task は DB もシェルも触れるので、localhost の 1 つの口に認証を足しても Task は回避できる（#31、`docs/design/workspace-mcp.md` の「Local API token」、#1755 の結果）
-- パスキーのログインはインターネット越しの構成（CloudFront 経由）だけ。ホストの中（loopback）では求めない（`docs/design/cloud-hosting.md` の「3. Architecture: start EC2 only when it is used」のログインの流れ、#748）
+- パスキーのログインはインターネット越しの構成（CloudFront 経由）だけ。loopback では求めない（`docs/design/cloud-hosting.md` の「3. Architecture: start EC2 only when it is used」のログインの流れ、#748）
 - 頼まれていない OS や環境（Mac・launchd など）の対応・手順・検証を PBI・Task・文書に足さない（実行環境は 1 つで、OS ごとの対応や分岐を足さない。別のマシンでは同じ実行環境をコンテナで動かす）
 - 画面の見た目・操作を変える PBI は `**置き場所**: 床|天井|壁 — 理由` を書く。毎回は触らない値を床（Home など最初の画面）に並べる案は、天井（Settings・畳んだ節）へ置くか、床に置く理由を書く。安全に関わる確認は畳まず、機能は消さない（原則は `docs/design/ui-layers.md`）
 - 今は動いていない仕組み（Actions・無効にした定期実行など）を理由に、安全の検討を省かない。動かしたときに起きることで判断する。権限は、自動化に使われたときと乗っ取られたときで考える（2026-11-07 の利用者の指摘。共通キットの `pbi-to-tasks` の設計チェックにも同じ趣旨の行がある）
@@ -37,7 +37,7 @@ bun scripts/test-changed.ts     # <関係するテスト>。Task の中はこれ
 env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承すると selfdev の dry-run テストが落ちる
 ```
 
-型検査（`bun scripts/typecheck.ts`）も `test-changed` と同じく、入口が枠を要るときだけ自分で取る（`ops-kit heavy` で包まない。外のビルドが無いホストと `--local` はそのマシンの枠の中。上限・置き場・足し方はキットの README の「Heavy-process slots」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるホストでは選んだテストを（録画を読むものも）全部外のビルドで回し、枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。足したテストは実装を 1 か所壊して赤を見る。壊し方は PR 本文に（`task-to-pr` の「足す前に」）。
+型検査（`bun scripts/typecheck.ts`）も `test-changed` と同じく、入口が枠を要るときだけ自分で取る（`ops-kit heavy` で包まない。外のビルドが無いマシンと `--local` はそのマシンの枠の中。上限・置き場・足し方はキットの README の「Heavy-process slots」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるマシンでは選んだテストを（録画を読むものも）全部外のビルドで回し、枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。足したテストは実装を 1 か所壊して赤を見る。壊し方は PR 本文に（`task-to-pr` の「足す前に」）。
 
 変更ごとのテストの型（軽い順。上の行で足りるなら下の行へ行かない。足す前の検討は `task-to-pr` の「足す前に」）:
 
@@ -60,7 +60,7 @@ env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承�
 
 - main の作業ツリーでは作業しない（利用者の `bun run dev` か release のデーモンがそこを見ている。`packages/core` を触るとセッションごと再起動する）。`git worktree add --detach ../switchboard-<topic> origin/main` → `bun install`。PBI を丸ごとなら `../switchboard-pbi<PBI>`
 - 枝: `sb/<Task番号>-<topic>`。Task を積むときは `gh stack`（`stacked-pr-delivery`）
-- 作業ファイル: `W=$(mktemp -d /tmp/switchboard.<用途>.XXXXXX)`。`/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションとぶつかる）。`ops-kit/bin/deny-shared-tmp`（Claude Code の PreToolUse。Task にはデーモンが `--settings` で渡し（#773）、このリポジトリでは `.claude/settings.json` でも登録。Codex の Task は hook ではなく、`/tmp` を閉じたサンドボックスで止める（#787。Codex の Task は `W=$(mktemp -d)` で `$TMPDIR` の下に作る。`/tmp/…` は失敗する）。`docs/design/shared-tmp-guard.md`）が反するコマンドを止める。`/tmp` は RAM で、ホストの停止・作り直しと満杯の片付け（#1720）で消える。再開してから読むもの（Issue・PR 本文の下書き、レビューの材料）はすぐ投稿するか、消える前提で作り直せる形にする（#1988）
+- 作業ファイル: `W=$(mktemp -d /tmp/switchboard.<用途>.XXXXXX)`。`/tmp` 直下に固定の名前で置かない（別のリポジトリのセッションとぶつかる）。`ops-kit/bin/deny-shared-tmp`（Claude Code の PreToolUse。Task にはデーモンが `--settings` で渡し（#773）、このリポジトリでは `.claude/settings.json` でも登録。Codex の Task は hook ではなく、`/tmp` を閉じたサンドボックスで止める（#787。Codex の Task は `W=$(mktemp -d)` で `$TMPDIR` の下に作る。`/tmp/…` は失敗する）。`docs/design/shared-tmp-guard.md`）が反するコマンドを止める。`/tmp` は RAM で、マシンの停止・作り直しと満杯の片付け（#1720）で消える。再開してから読むもの（Issue・PR 本文の下書き、レビューの材料）はすぐ投稿するか、消える前提で作り直せる形にする（#1988）
 
 ## コードのコメントと Issue 番号
 
@@ -110,7 +110,7 @@ Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で
 ## マージ判定とローカル CI
 
 - マージ判定: `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge|--merge-stack]`（exit 0 = merge / 1 = stop / 2 = 判定不能。`--merge`（単発）/ `--merge-stack`（スタックの最下段）は判定が merge のときだけマージまで進む。Task の許可に入る既定のマージはこれ。利用者が Task の会話で判定の外のマージを認めたときは `gh pr merge` / `gh stack merge`（`pbi-complete` の 5）。規則は `scripts/merge-gate.ts`、手順と印は `docs/merge-gate.md`）。スキルの `<マージ判定>`。large の理由のうち `[再チェック <kind>]` は、`docs/merge-gate.md` の「Recheck」（スキルの `<再チェック>`）を回して付ける印 `[recheck] <kind> pass <head sha>` で外れる。`[聞く]` は利用者が認めたとき（`--allow-large`）だけ
-- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「When to run local CI and how it counts」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「Branch protection and local results」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。クラウドのホストでは重い手順（型検査・`bun test`）を外で回す（`docs/design/local-ci-offload.md`）。詳細は `docs/merge-gate.md`
+- ローカル CI: Actions が始まらない（ジョブのステップ 0 件）か run が無い（全部の run が skip された、も同じ）ときは `bun scripts/local-ci.ts <PR>` で Actions と同じ手順（`scripts/ci.ts`）を、最新の head を最新の base にマージして回す。結果は PR に付き（`[local-ci] pass|fail <head sha> base=<base sha>`）、スタックでは全部の PR の指摘の処理が済んでから一番上で 1 回回し、merge-gate は一番上の最新の結果が pass で、その PR の今のコミットがその pass の head に同じ差分で入っていれば（`git cherry`）CI の成功と数える（いつ回し、どう数えるかは `docs/merge-gate.md` の「When to run local CI and how it counts」。自動 rebase と base の前進では回し直さない）。base の枝の保護が必須チェックを求めると BLOCKED で止まる（ローカルの結果では満たせない。確かめ方は `docs/merge-gate.md` の「Branch protection and local results」）。スキルの `<ローカル CI>`。`bun test` は影響範囲だけを回す（`--all` で全部、全テストの安全網はタグの CI）。同じ head の最新の結果が merge-gate の数える pass なら回さず exit 0（`--force` か `--all` で回す）。EC2 の構成では重い手順（型検査・`bun test`）を外で回す（`docs/design/local-ci-offload.md`）。詳細は `docs/merge-gate.md`
 - Task の中のローカル CI とレビューは、自分のシェルで回して待たず `ops-kit job request local-ci <PR>` / `ops-kit job request review <PR> --runner … --prompt … --out …` でアプリに頼み、`job#<id>` を止まりの理由（reason `depends`）に書いてターンを終える（背景の `sleep` の待ちのループで待たない。仕組みは `docs/design/daemon-jobs.md`）。Task の外は従来どおり直接回す
 - 既知の失敗の登録: root の `known-failures.json`（`{test, issue, until}`。ローカル CI が base から読んで差し引く）。仕組みは `docs/design/local-ci.md` の「Known failures」。`task-to-pr` の「ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら」はここへ足す
 - 性能の上限: `scripts/perf-budget.json`。上げるときの規則は `docs/design/perf.md` の「Ratchet」の **Raising**（上げた PR の書き方は `task-to-pr` のチェックリスト）

@@ -663,9 +663,13 @@ export type FlowLimit = { limit: number; running: number; stopped?: number };
  * The flow PBIs in progress that count against the limit: one with a stage Task running, or one backlog-next would
  * go on with (`candidates` without `flow`: a resume, a close, a lifted reply). One it leaves (a reply or decision waited
  * for, a wait on a dependency, no update since, no progress since the last resume, on hold) is stopped and is not counted.
+ * One whose implementation does not start because it touches what other work touches, or the overlap cannot be judged
+ * (`isOverlapped`; `pickNext` skips it), is stopped too, unless a stage Task is running on it; a close does not look at
+ * the overlap, so it still counts. Once its overlap clears it counts again, so the running ones may then be over the limit
+ * for a while: the limit holds back new starts, not resumes.
  */
 export function flowRunning(items: BacklogItem[]): number {
-  const goes = new Set(candidates(items, "implement").map((c) => c.item));
+  const goes = new Set(candidates(items, "implement").filter((c) => !(c.action === "complete" && isOverlapped(c.item))).map((c) => c.item));
   return items.filter((i) => i.flow && i.stage === "in-progress" && (i.activeTaskId || goes.has(i))).length;
 }
 /** The flow PBIs in progress `flowRunning` does not count. */
@@ -858,9 +862,10 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   // a PBI of (or itself) an Issue a known failure's registry entry names, close to its end, goes before Priority
   const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
   // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
-  // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`)
+  // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
+  // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
-  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
   // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
   // the queue's order instead when there is one

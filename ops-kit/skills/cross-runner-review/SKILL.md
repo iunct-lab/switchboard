@@ -77,7 +77,7 @@ AVAIL=$(df -Pk "$REVIEW_ROOT" | awk 'NR==2{print $4}')
 N=<PR番号>; KIND=review    # 再チェック（マージ判定の Recheck）で 1〜3 を流すときは KIND=recheck（主レビューの clone は 4 の見直しまで残すので消さない）
 R="${REVIEW_ROOT:?}/${NAME:?}.${KIND:?}${N:?}"; echo "$R"    # 名前はリポジトリ名 + PR 番号で決まる（別リポジトリの同じ番号の PR とはぶつからない）。再開して新しいシェルで R を作り直すときは、上の片付けのブロックの REVIEW_ROOT・NAME とこの行の代入まで（次の行は流さない）
 rm -rf "$R"    # 初回だけ: 同じ PR のやり直しは前のものを消して 1 つのまま。clone が作るので mkdir しない
-# 置き場は RAM でない所。ホストの作り直しで消えうるので、レビューの材料は再開したら作り直す前提で、作る手順（この節）をそのまま流せる形にしておく
+# 置き場は RAM でない所。作り直しで消えうるので、レビューの材料は再開したら作り直す前提で、作る手順（この節）をそのまま流せる形にしておく
 HEAD_REF=$(gh pr view $N --json headRefName -q .headRefName); BASE_REF=$(gh pr view $N --json baseRefName -q .baseRefName)
 gh repo clone "$REPO" "$R" -- -q --branch "$HEAD_REF"
 M="$R/_review"; mkdir -p "$M"                                     # untracked。レビュアーはここを読む

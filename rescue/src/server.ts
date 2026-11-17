@@ -17,10 +17,10 @@ import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
 import { diffTrees, extractTarball, fetchTarball, latestRelease, shaOfTag } from "./github-release.ts";
-import { checkDaemon, listSnapshots, promote, restoreDb, rollback, tasksThatStop, type Ctx } from "./promote.ts";
+import { checkDaemon, listSnapshots, promote, restoreDb, rollback, switchesWithoutRestart, tasksThatStop, type Ctx } from "./promote.ts";
 import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
 import { cleanTmp, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
-import { appendHistory, currentOf, listReleases, previousOf, readHistory, releasesDir, run } from "./releases.ts";
+import { appendHistory, currentOf, listReleases, previousOf, readHistory, releasesDir, resolveCommit, run } from "./releases.ts";
 
 /** The tag a release was built from, or null (built from a checkout, or the file is unreadable). */
 function readTag(dir: string): string | null {
@@ -383,6 +383,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       stop: !!o.starter,
       /** 再起動 reads the environment and the host scripts again (#435). */
       restartReloads: !!o.exitToRestart,
+      /** /api/promote understands `ifNoRestart` (a release that needs a restart is refused with 409 before any build). */
+      promoteWithoutRestart: true,
     };
   };
 
@@ -422,7 +424,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       // An empty body means "no arguments"; a body that does not parse is refused — a cut-off {commit} must not
       // turn "go back to this release" into "go back to the previous one".
       const text = await req.text();
-      let body: { tag?: unknown; commit?: unknown; expectSha?: unknown; snapshot?: unknown; names?: unknown; staleMs?: unknown; force?: unknown };
+      let body: { tag?: unknown; commit?: unknown; expectSha?: unknown; snapshot?: unknown; names?: unknown; staleMs?: unknown; force?: unknown; ifNoRestart?: unknown };
       try {
         body = text.trim() ? JSON.parse(text) : {};
         if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("not an object");
@@ -472,7 +474,12 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
           if (!commit) return Response.json({ error: "commit required" }, { status: 400 });
           // The sha the caller checked (the new version's diff): a tag that now points elsewhere is not built.
           if (body.expectSha !== undefined && !(typeof body.expectSha === "string" && /^[0-9a-f]{40}$/.test(body.expectSha))) return Response.json({ error: "expectSha must be a full commit sha" }, { status: 400 });
-          return operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined));
+          if (body.ifNoRestart === true) {
+            // The caller (the daemon's automatic promotion) wants a switch that does not stop its tasks: say no before any build when this one would restart.
+            const sha = typeof body.expectSha === "string" ? body.expectSha : await resolveCommit(ctx.repo, commit).catch(() => null);
+            if (!sha || !(await switchesWithoutRestart(ctx, sha))) return Response.json({ error: "this release needs a restart", restart: true }, { status: 409 });
+          }
+          return operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined, body.ifNoRestart === true));
         case "/api/restore-db":
           if (typeof body.snapshot !== "string" || !listSnapshots(ctx.home).includes(body.snapshot)) return Response.json({ error: "no such snapshot" }, { status: 400 });
           return operate("restore-db", () => restoreDb(ctx, body.snapshot as string));

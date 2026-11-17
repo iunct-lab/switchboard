@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import type { Ctx } from "./promote.ts";
-import { buildRelease, currentOf, readHistory, switchTo } from "./releases.ts";
+import { buildRelease, currentOf, listReleases, readHistory, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { sweepTmp } from "./tmp.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -106,6 +106,15 @@ test("with Switchboard down, rollback brings the previous release up; a second o
   expect((await post("/api/rollback", { commit: v2 })).status).toBe(202); // choose a release
   expect((await until(async () => ((await health(ctx.port))?.version === "v2" ? true : null), "v2 chosen"))).toBe(true);
   await until(async () => (await status()).busy === null, "operation finished");
+});
+
+test("ifNoRestart: a release that needs a restart is refused with 409 before anything is built; status says the question is understood", async () => {
+  expect((await fetch(`${base}/api/status`).then((r) => r.json()) as { promoteWithoutRestart?: boolean }).promoteWithoutRestart).toBe(true);
+  const core = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v3"), "third version (core)");
+  const built = listReleases(f.home).sort();
+  const r = await post("/api/promote", { commit: core, ifNoRestart: true });
+  expect([r.status, await r.json()]).toEqual([409, { error: "this release needs a restart", restart: true }]);
+  expect([listReleases(f.home).sort(), (await status()).busy]).toEqual([built, null]);
 });
 
 test("bad input and foreign origins are refused before anything runs", async () => {

@@ -26,6 +26,7 @@ import { abortNote } from "../runners.ts";
 import { canFork } from "../fork.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
+import { home } from "../i18n/home.ts";
 
 export function TaskView(props: {
   task: Task;
@@ -485,19 +486,20 @@ export function TaskView(props: {
           <button disabled={budgetChoosing} onClick={cutNewTask} title={t(m.budgetCutTitle)}>{t(m.budgetCut)}</button>
         </div>
       )}
-      {!cloud && <PresetPicker workspaceId={props.task.workspaceId} onText={(s) => setText(s)} onError={props.onError} />}
       {!cloud && <div className="composer">
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...drop.handlers}>
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onPaste={drop.onPaste}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
-            }}
-            rows={2}
-            placeholder={busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}
-          />
+          <PresetPicker scene="task" workspaceId={props.task.workspaceId} text={text} onText={(s) => setText(s)} onError={props.onError}>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onPaste={drop.onPaste}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
+              }}
+              rows={2}
+              placeholder={`${t(home.presetHint)}${busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}`}
+            />
+          </PresetPicker>
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </div>
         <AttachButton onFiles={(files) => void attach.add(files)} />

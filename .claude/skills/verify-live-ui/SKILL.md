@@ -19,7 +19,7 @@ description: Switchboard の変更を「動く」と言う前に、実際に動�
    # 400 "cwd must exist" = Origin 判定は通過。403 = 拒否されている
    curl -s -o /dev/null -w '%{http_code}\n' -H 'Origin: http://evil.example' http://localhost:5173/api/tasks   # 403 であること
    ```
-3. Chrome（claude-in-chrome。クラウドホストでは Playwright MCP の `browser_*` が同じ役、`docs/design/cloud-hosting.md` §2.1）: `navigate` → `find` で要素 ref を取り **ref でクリック**（座標クリックは textarea を外す）→ `type`
+3. Chrome（claude-in-chrome。Playwright MCP の `browser_*` が同じ役、`docs/design/cloud-hosting.md` §2.1）: `navigate` → `find` で要素 ref を取り **ref でクリック**（座標クリックは textarea を外す）→ `type`
    → ⌘↵（Inbox 保存。ランナーを起動しない安全な POST）→ `read_network_requests`（`/api/` の status）、
    `read_console_messages`（`error|403|CORS|refused`）、スクリーンショット、デーモン側 `curl /api/inbox` で反映確認。
 4. 後始末: 作ったメモを消す（`~/Knowledge/notes/<date>-<title>.md`）、タブを閉じる、立てたプロセスを止める。

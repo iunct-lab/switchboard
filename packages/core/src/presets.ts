@@ -1,4 +1,4 @@
-import { Preset as PresetSchema, type Preset, type PresetExpansion, type PresetInput } from "@switchboard/protocol";
+import { Preset as PresetSchema, type Preset, type PresetExpansion, type PresetInput, type PresetScene, type PresetUse } from "@switchboard/protocol";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import type { Db } from "./db.ts";
 
@@ -56,4 +56,37 @@ export function checkPreset(input: PresetInput, others: Preset[]): { error: stri
 export function expandPreset(p: Preset, repo: string | null, target: number | null): PresetExpansion {
   const ref = repo && target !== null ? `${repo}#${target}` : null;
   return { title: ref ? `${p.name} ${ref}` : p.name, text: ref ? p.text.replaceAll(PRESET_TARGET, ref) : p.text, repo, target: ref };
+}
+
+const USES_KEY = "presetUses";
+const DAY = 86_400_000;
+/** The record is kept 30 days; the counts and the share only look at the last 14. */
+const PRESET_USE_KEEP_MS = 30 * DAY;
+const PRESET_USE_WINDOW_MS = 14 * DAY;
+
+type Use = { id: string; scene: PresetScene; at: number };
+
+function readUses(db: Db): Use[] {
+  const raw = db.getSetting<unknown>(USES_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((u): u is Use => !!u && typeof u.id === "string" && (u.scene === "home" || u.scene === "task") && typeof u.at === "number");
+}
+
+/** Notes that preset `id` was put in at `scene` at `now`; uses older than 30 days are dropped. No scene = nothing is recorded. */
+export function recordPresetUse(db: Db, id: string, scene: PresetScene | undefined, now: number) {
+  if (!scene) return;
+  db.setSetting(USES_KEY, [...readUses(db).filter((u) => u.at > now - PRESET_USE_KEEP_MS), { id, scene, at: now }]);
+}
+
+/** Per preset in `presets`: uses in the last 14 days per scene and the latest one. Uses of a deleted preset are not counted. */
+export function presetUses(db: Db, presets: Pick<Preset, "id">[], now: number): PresetUse[] {
+  const since = now - PRESET_USE_WINDOW_MS;
+  const rows = new Map<string, PresetUse>(presets.map((p) => [p.id, { id: p.id, home: 0, task: 0, lastAt: null }]));
+  for (const u of readUses(db)) {
+    const r = rows.get(u.id);
+    if (!r || u.at < since) continue;
+    r[u.scene]++;
+    r.lastAt = Math.max(r.lastAt ?? 0, u.at);
+  }
+  return [...rows.values()];
 }

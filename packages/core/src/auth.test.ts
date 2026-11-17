@@ -429,8 +429,12 @@ describe("sb_session cookie", () => {
       const h = { authorization: `Bearer ${core.token}`, "content-type": "application/json" };
       expect((await fetch(`${base}/api/workspaces`, { method: "POST", headers: h, body: JSON.stringify({ path: tmpdir() }) })).status).toBe(201);
       expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: h, body: JSON.stringify({ shadowRunner: null }) })).status).toBe(200);
+      const added = core.db.listWorkspaces().find((w) => w.path === tmpdir())!;
+      expect((await fetch(`${base}/api/workspaces/${added.id}/rules`, { method: "PUT", headers: h, body: JSON.stringify({ rules: "テスト: make test" }) })).status).toBe(200);
       const ops = logLines(spy, "op");
-      expect(ops.map((o) => o.op)).toEqual(["workspace.add", "settings.update"]);
+      expect(ops.map((o) => o.op)).toEqual(["workspace.add", "settings.update", "workspace.rules"]);
+      // the rules' length, never their text
+      expect(ops[2]).toEqual(expect.objectContaining({ detail: { path: tmpdir(), chars: 14 } }));
       expect(ops[0]).toMatchObject({ detail: { path: tmpdir() } });
       expect(ops[1]).toMatchObject({ detail: { keys: ["shadowRunner"] } });
     } finally {

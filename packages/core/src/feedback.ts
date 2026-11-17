@@ -76,7 +76,7 @@ export function newRepoTitle(name: string): string {
  * is not placed in other repositories. The steps (and asking before anything is written) are the skill's; this hands over
  * the workspace as data.
  */
-export function buildAdoptPrompt({ name, path, when }: { name: string; path: string; when: Date }): string {
+export function buildAdoptPrompt({ id, name, path, backlog, when }: { id: string; name: string; path: string; backlog: "github" | "switchboard"; when: Date }): string {
   return `あなたは Switchboard の meta workspace で動いている。
 .claude/skills/adopt-repo/SKILL.md に従って、下の workspace のリポジトリを取り込め。元の決まりは書き換えない。GitHub とアプリに何かを書く前に、スキルの 3 のとおりこの Task の会話で対応表と書くものを見せて利用者の OK を取る。
 終わったら、スキルの 6 の形で報告せよ。
@@ -89,6 +89,13 @@ ${fenced(name)}
 ## ディレクトリ
 
 ${fenced(path)}
+
+## Workspace の id
+
+${fenced(id)}
+
+## バックログ
+${backlog === "switchboard" ? "GitHub と連携しない（Switchboard に置く）。スキルの、GitHub を読む・書く行は飛ばす。" : "GitHub と連携する。"}
 
 ## 出典
 設定タブ「Workspace」の「取り込み」、${when.toISOString()}`;

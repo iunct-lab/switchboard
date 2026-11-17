@@ -5,7 +5,8 @@ import { join } from "node:path";
 import type { Preset, PresetExpansion, PresetList, RunnerAdapter, Task } from "@switchboard/protocol";
 import type { GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
-import { expandPreset, parseTarget } from "./presets.ts";
+import { Db } from "./db.ts";
+import { expandPreset, parseTarget, presetUses, recordPresetUse } from "./presets.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
 /* Saved instructions: the pure parts, then /api/presets on a daemon with a fake runner and a fake gh. */
@@ -46,6 +47,55 @@ describe("presets", () => {
   });
 });
 
+describe("preset uses", () => {
+  const DAY = 86_400_000;
+  const NOW = 100 * DAY;
+  const mk = (id: string): Preset => ({ id, name: id, text: "x", createdAt: 1, updatedAt: 1 });
+  const withDb = (fn: (db: Db) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "presets.uses."));
+    const db = new Db(join(dir, "x.db"));
+    try {
+      fn(db);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("counts the last 14 days per scene, with the latest time", () =>
+    withDb((db) => {
+      recordPresetUse(db, "a", "home", NOW - 20 * DAY);
+      recordPresetUse(db, "a", "home", NOW - 13 * DAY);
+      recordPresetUse(db, "a", "task", NOW - 2 * DAY);
+      recordPresetUse(db, "a", "task", NOW - 1 * DAY);
+      expect(presetUses(db, [mk("a"), mk("b")], NOW)).toEqual([
+        { id: "a", home: 1, task: 2, lastAt: NOW - 1 * DAY },
+        { id: "b", home: 0, task: 0, lastAt: null },
+      ]);
+    }));
+
+  test("without a scene nothing is recorded", () =>
+    withDb((db) => {
+      recordPresetUse(db, "a", undefined, NOW);
+      expect(db.getSetting("presetUses", null)).toBeNull();
+      expect(presetUses(db, [mk("a")], NOW)).toEqual([{ id: "a", home: 0, task: 0, lastAt: null }]);
+    }));
+
+  test("a use older than 30 days is dropped on the next record", () =>
+    withDb((db) => {
+      recordPresetUse(db, "a", "task", NOW - 31 * DAY);
+      recordPresetUse(db, "a", "task", NOW - 29 * DAY);
+      recordPresetUse(db, "a", "task", NOW);
+      expect((db.getSetting<{ at: number }[]>("presetUses", []) ?? []).map((u) => u.at)).toEqual([NOW - 29 * DAY, NOW]);
+    }));
+
+  test("a deleted preset is not counted", () =>
+    withDb((db) => {
+      recordPresetUse(db, "gone", "task", NOW);
+      recordPresetUse(db, "a", "task", NOW);
+      expect(presetUses(db, [mk("a")], NOW).map((u) => u.id)).toEqual(["a"]);
+    }));
+});
+
 const idle: RunnerAdapter = {
   id: "claude",
   detect: async () => ({ available: true, version: "fake" }),
@@ -73,7 +123,8 @@ async function boot(keepHome = false) {
   return `http://127.0.0.1:${core.server.port}`;
 }
 const send = (base: string, method: string, path: string, body?: unknown) => fetch(`${base}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-const list = async (base: string) => ((await (await fetch(`${base}/api/presets`)).json()) as PresetList).presets;
+const listAll = async (base: string) => (await (await fetch(`${base}/api/presets`)).json()) as PresetList;
+const list = async (base: string) => (await listAll(base)).presets;
 
 describe("/api/presets", () => {
   test("crud", async () => {
@@ -139,5 +190,32 @@ describe("/api/presets", () => {
       ghFails = false;
     }
     expect((await (await fetch(`${base}/api/tasks`)).json()) as Task[]).toEqual([]);
+  });
+
+  test("expand with a scene is recorded and listed in uses; without one it is not", async () => {
+    const base = await boot();
+    const ws = core!.db.upsertWorkspace({ path: home, name: "dev", kind: "repo" });
+    const p = (await (await send(base, "POST", "/api/presets", { name: "マージまで", text: "PR {{target}} をマージ" })).json()) as Preset;
+    const plain = (await (await send(base, "POST", "/api/presets", { name: "状況の確認", text: "今の状況を確認して" })).json()) as Preset;
+    const expand = (id: string, body: unknown) => send(base, "POST", `/api/presets/${id}/expand`, body);
+    expect((await expand(p.id, { workspaceId: ws.id, target: "#1" })).status).toBe(200);
+    expect((await listAll(base)).uses.find((u) => u.id === p.id)).toEqual({ id: p.id, home: 0, task: 0, lastAt: null });
+    expect((await expand(p.id, { workspaceId: ws.id, target: "#1", scene: "task" })).status).toBe(200);
+    expect((await expand(plain.id, { scene: "home" })).status).toBe(200);
+    expect((await expand(p.id, { workspaceId: ws.id, target: "abc", scene: "home" })).status).toBe(400);
+    expect((await expand(p.id, { workspaceId: ws.id, target: "#1", scene: "other" })).status).toBe(400);
+    expect((await expand(p.id, { workspaceId: ws.id, target: "other/repo#1", scene: "home" })).status).toBe(409);
+    ghFails = true;
+    try {
+      expect((await expand(p.id, { workspaceId: ws.id, target: "#1", scene: "home" })).status).toBe(424);
+    } finally {
+      ghFails = false;
+    }
+    const uses = (await listAll(base)).uses;
+    expect(uses.find((u) => u.id === p.id)).toEqual({ id: p.id, home: 0, task: 1, lastAt: expect.any(Number) });
+    expect(uses.find((u) => u.id === plain.id)).toEqual({ id: plain.id, home: 1, task: 0, lastAt: expect.any(Number) });
+    await core!.stop();
+    core = null;
+    expect((await listAll(await boot(true))).uses.find((u) => u.id === p.id)?.task).toBe(1);
   });
 });

@@ -104,7 +104,7 @@ Back up:
 docker exec -t <container> gitlab-backup create        # Linux package: sudo gitlab-backup create
 ```
 
-- The archive goes to `/var/opt/gitlab/backups` (on the data volume). Copy it off the host.
+- The archive goes to `/var/opt/gitlab/backups` (on the data volume). Copy it off the machine.
 - It does **not** hold the configuration. Copy these separately and keep them apart from the archive, since the secrets file decrypts the database's encrypted columns: `gitlab-secrets.json`, `gitlab.rb`, `/etc/gitlab/ssl`, `/etc/gitlab/trusted-certs` and the SSH host keys. Also left out: Redis (queued jobs), object storage, server and file hooks.
 
 Restore:
@@ -150,7 +150,7 @@ The kit's side: `docs/design/forge-integration.md` (the GitLab section's table o
 | Issues | Issues, sub-issues, close reasons | Issues; no sub-issues; one close state | Parents come from the body's `## 親 PBI` section. "Not planned" reads as completed |
 | Project fields (Status, Priority, Story Points) | Project v2 | None | Values stay in Switchboard's store; GitLab gets labels only |
 | CI | `.github/workflows/*` (`ci.yml`, `release-tag.yml`, `secret-scan.yml`, `labels.yml`, `project-autoadd.yml`, `host.yml`) | GitLab CI reads none of them | `scripts/local-ci.ts` already runs a merge request and reports in a note. Tags, Releases, the weekly secret scan and the host deploy have no GitLab path yet |
-| AWS host | `aws/host/bootstrap.sh` clones from `github.com` with `/switchboard/github-token` | — | A rebuilt host still needs GitHub |
+| EC2 setup | `aws/host/bootstrap.sh` clones from `github.com` with `/switchboard/github-token` | — | A rebuilt instance still needs GitHub |
 | Public mirror | `ops-kit public-sync` pushes to a GitHub repository | — | Stays on GitHub |
 
 ### What GitHub's importer brings and what it leaves

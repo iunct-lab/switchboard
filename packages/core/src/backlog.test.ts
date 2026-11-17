@@ -1043,7 +1043,7 @@ describe("backlog waiting", () => {
       const base = await boot(fake.gh);
       const ready = await waitsOfItem(base, 304);
       expect(ready).toMatchObject({ waits: [], waitsAt: STOPPED });
-      expect(pickNext([{ ...ready, lastTask: { id: "tsk_old", status: "done", statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.parse(LATER), action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } }], "implement")).toMatchObject({ item: { number: 304 }, action: "complete" });
+      expect(pickNext([{ ...ready, lastTask: { id: "tsk_old", status: "done", statusAt: Date.parse(LATER), createdAt: Date.parse(LATER), updatedAt: Date.parse(LATER), action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } }], "implement")).toMatchObject({ item: { number: 304 }, action: "complete" });
       const building = await waitsOfItem(base, 307);
       expect(building.waits).toEqual([wait(603, "issue", true)]);
       expect(pickNext([building], "implement")).toBeNull();
@@ -2131,7 +2131,7 @@ describe("pickNext: a PBI of a known failure near its end goes before Priority",
     const due = dueSoonIssues([{ test: "a.test.ts > t", issue: 3, until: "2026-11-15" }], NOW);
     expect(pickNext(items, "implement", undefined, undefined, [], due)).toMatchObject({ item: { number: 3 } });
     const t = Date.parse("2026-11-13T00:00:00Z");
-    const answered = item({ number: 9, stage: "in-progress", priority: "P3", answeredAt: "2026-11-14T00:00:00Z", lastTask: { id: "tsk_old", status: "done", statusAt: t, createdAt: t, updatedAt: t, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null } });
+    const answered = item({ number: 9, stage: "in-progress", priority: "P3", answeredAt: "2026-11-14T00:00:00Z", lastTask: { id: "tsk_old", status: "done", statusAt: t, createdAt: t, updatedAt: t, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null, started: true } });
     expect(pickNext([...items, answered], "implement", undefined, undefined, [], new Set([2]))!.item.number).toBe(9);
   });
   test("dueSoonOf reads the checkout's registry; an absent or broken file is no tier", () => {
@@ -2166,7 +2166,7 @@ test("pickNext queue: the queue's order over Priority, only the queued items, a 
 
 test("pickNext: a request goes to 直行で直す or PBI にする by chooseProcess; one a direct Task ran on is left unless it came back", () => {
   const at = "2026-09-28T00:00:00Z";
-  const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+  const direct = (status: TaskStatus) => ({ id: "tsk_direct", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "direct" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true });
   const defs = listProcesses();
   const items = [
     item({ number: 1, stage: "request", type: "request", priority: "P0", lastTask: direct("done"), updatedAt: "2026-09-28T01:00:00Z" }),
@@ -2184,6 +2184,10 @@ test("pickNext: a request goes to 直行で直す or PBI にする by chooseProc
   const back = item({ number: 1, stage: "request", type: "request", bodyChars: 100, labels: ["direct-returned"], lastTask: direct("done") });
   expect(pickNext([back], "plan", undefined, undefined, defs)).toMatchObject({ action: "to-pbi", reason: "direct returned" });
   expect(pickNext([item({ number: 5, stage: "ready" })], "implement", undefined, undefined, defs)?.reason).toBeUndefined();
+  // a direct Task that never started (queued at the limit, its start cancelled) does not hold the request
+  const unstarted = item({ number: 6, stage: "request", type: "request", bodyChars: 100, lastTask: { ...direct("idle"), started: false } });
+  expect(pickNext([unstarted], "plan", undefined, undefined, defs)).toMatchObject({ item: { number: 6 }, action: "direct" });
+  expect(pickNext([{ ...unstarted, lastTask: direct("idle") }], "plan", undefined, undefined, defs)).toBeNull();
 });
 
 test("buildStartPrompt: to-tasks on a PBI that already has Tasks asks to make it Ready without decomposing again", () => {
@@ -2218,7 +2222,7 @@ test("buildStartPrompt: the stage text comes from the p0-pipeline definition —
 });
 
 test("pickNext answered: an in-progress PBI answered after its last stage Task goes on with complete, before Ready", () => {
-  const finished = (at: string) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+  const finished = (at: string) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true });
   const items = [
     item({ number: 1, stage: "ready", priority: "P0" }),
     item({ number: 2, stage: "in-progress", priority: "P3", answeredAt: null, lastTask: finished("2026-09-28T00:00:00Z") }), // no answer
@@ -2233,7 +2237,7 @@ test("pickNext answered: an in-progress PBI answered after its last stage Task g
   expect(pickNext(items.slice(0, 3), "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
   expect(pickNext(items.slice(1), "plan")).toBeNull();
   // a status check that finished after the answer has taken it up; a running stage Task holds it
-  expect(pickNext([items[0]!, { ...items[3]!, lastTask: { id: "tsk_check", status: "done", statusAt: Date.parse("2026-09-28T02:00:00Z"), createdAt: Date.parse("2026-09-28T02:00:00Z"), updatedAt: Date.parse("2026-09-28T02:00:00Z"), action: "check", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } }], "implement")).toMatchObject({ item: { number: 1 } });
+  expect(pickNext([items[0]!, { ...items[3]!, lastTask: { id: "tsk_check", status: "done", statusAt: Date.parse("2026-09-28T02:00:00Z"), createdAt: Date.parse("2026-09-28T02:00:00Z"), updatedAt: Date.parse("2026-09-28T02:00:00Z"), action: "check", outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } }], "implement")).toMatchObject({ item: { number: 1 } });
   expect(pickNext([items[0]!, { ...items[3]!, activeTaskId: "tsk_run" }], "implement")).toMatchObject({ item: { number: 1 } });
 });
 
@@ -2264,7 +2268,7 @@ test("pickNext answered: backlog-next starts 実装 on an in-progress PBI whose 
 });
 
 test("pickNext waiting: an in-progress PBI whose waits all closed goes on with complete, after an answered one and before Ready; an open wait holds Ready and in-progress alike", () => {
-  const finished = { id: "tsk_last", status: "done" as const, statusAt: Date.parse("2026-09-28T00:00:00Z"), createdAt: Date.parse("2026-09-28T00:00:00Z"), updatedAt: Date.parse("2026-09-28T00:00:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const finished = { id: "tsk_last", status: "done" as const, statusAt: Date.parse("2026-09-28T00:00:00Z"), createdAt: Date.parse("2026-09-28T00:00:00Z"), updatedAt: Date.parse("2026-09-28T00:00:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
   const closed = [wait(778, "pr", false), wait(603, "issue", false)];
   const open = [wait(778, "pr", true), wait(603, "issue", false)];
   const ready = item({ number: 1, stage: "ready", priority: "P0" });
@@ -2294,7 +2298,7 @@ test("pickNext waiting: an in-progress PBI whose waits all closed goes on with c
 
 test("pickNext waiting: a Ready PBI whose waits closed goes before untried Ready, reviewed or not", () => {
   const at = Date.parse("2026-09-28T00:00:00Z");
-  const finished = { id: "tsk_last", status: "done" as const, statusAt: at, createdAt: at, updatedAt: at, action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null };
+  const finished = { id: "tsk_last", status: "done" as const, statusAt: at, createdAt: at, updatedAt: at, action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, started: true };
   const closed = [wait(778, "pr", false)];
   const untried = item({ number: 1, stage: "ready", priority: "P0" });
   const lastUpdated = "2026-09-28T01:00:00Z";
@@ -2324,7 +2328,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   expect(pickNext([{ ...closable, activeTaskId: "tsk_run" }, { ...stalled, activeTaskId: "tsk_run" }], "implement")).toBeNull();
   expect(pickNext([{ ...stalled, stage: "needs-decision", decision: { body: "## 判断待ち", at: "2026-09-29T00:00:00Z", issue: 2 } }], "implement")).toBeNull();
   // a 閉じる that finished with no update since is not started again; an update brings it back
-  const triedClose = { ...closable, lastTask: { id: "tsk_close", status: "error" as const, statusAt: Date.parse("2026-09-29T00:00:00Z"), createdAt: Date.parse("2026-09-29T00:00:00Z"), updatedAt: Date.parse("2026-09-29T00:00:00Z"), action: "close" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null } };
+  const triedClose = { ...closable, lastTask: { id: "tsk_close", status: "error" as const, statusAt: Date.parse("2026-09-29T00:00:00Z"), createdAt: Date.parse("2026-09-29T00:00:00Z"), updatedAt: Date.parse("2026-09-29T00:00:00Z"), action: "close" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } };
   expect(pickNext([triedClose], "implement")).toBeNull();
   expect(pickNext([{ ...triedClose, updatedAt: "2026-09-29T01:00:00Z" }], "implement")).toMatchObject({ action: "close" });
   expect(unchangedIn([triedClose, closable], "implement").map((i) => i.number)).toEqual([1]);
@@ -2343,7 +2347,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   // a ## 状況 without the mark (a 状況確認's) does not hold it
   expect(pickNext([{ ...stalled, report: report(null) }], "implement")).toMatchObject({ action: "complete", resume: true });
   // a resume that ended (done: a failed one is held by 前回の Task が失敗したまま更新が無い) before writing its mark is left until the Issue, a Task or an answer moves past its start
-  const died = { ...stalled, lastTask: { id: "tsk_resume", status: "done" as const, statusAt: Date.parse("2026-09-30T00:00:00Z"), createdAt: Date.parse("2026-09-30T00:00:00Z"), updatedAt: Date.parse("2026-09-30T00:10:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null } };
+  const died = { ...stalled, lastTask: { id: "tsk_resume", status: "done" as const, statusAt: Date.parse("2026-09-30T00:00:00Z"), createdAt: Date.parse("2026-09-30T00:00:00Z"), updatedAt: Date.parse("2026-09-30T00:10:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } };
   expect(pickNext([died], "implement")).toBeNull();
   expect(spinningIn([died], "implement").map((i) => i.number)).toEqual([2]);
   expect(pickNext([{ ...died, updatedAt: "2026-09-30T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true }); // a comment (also: a Ready 実装 that logged its start, then stopped)
@@ -2365,7 +2369,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
 });
 
 test("pickNext stalled: the implement slot's order is 回答済みの実装中 → 閉じられる実装中 → 止まった実装中 → Ready", () => {
-  const finished = { id: "tsk_last", status: "done" as const, statusAt: Date.parse("2026-09-28T00:00:00Z"), createdAt: Date.parse("2026-09-28T00:00:00Z"), updatedAt: Date.parse("2026-09-28T00:00:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const finished = { id: "tsk_last", status: "done" as const, statusAt: Date.parse("2026-09-28T00:00:00Z"), createdAt: Date.parse("2026-09-28T00:00:00Z"), updatedAt: Date.parse("2026-09-28T00:00:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
   const ready = item({ number: 1, stage: "ready", priority: "P0" });
   const stalled = item({ number: 2, stage: "in-progress", priority: "P3", tasks: { total: 3, done: 1, doneAt: null } });
   const closable = item({ number: 3, stage: "in-progress", priority: "P3", tasks: { total: 2, done: 2, doneAt: null }, closable: true });
@@ -2874,7 +2878,7 @@ describe("backlog-next prerequisite", () => {
 });
 
 test("pickNext unchanged: an item whose last stage Task of the same stage finished with no update since is left; one updated since goes after the untried of its Priority", () => {
-  const last = (action: BacklogAction, at = "2026-09-28T00:00:00Z", status: TaskStatus = "done") => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+  const last = (action: BacklogAction, at = "2026-09-28T00:00:00Z", status: TaskStatus = "done") => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true });
   const updated = "2026-09-28T01:00:00Z"; // after the last Task finished
   const unchangedReady = item({ number: 1, stage: "ready", priority: "P0", lastTask: last("complete") });
   const freshReady = item({ number: 2, stage: "ready", priority: "P3" });
@@ -2910,7 +2914,7 @@ test("pickNext unchanged: an item whose last stage Task of the same stage finish
 
 test("pickNext priority: a Ready P0 worked on before goes before an untried Ready P3; a resume or a close of an in-progress PBI still goes first", () => {
   const at = "2026-09-28T00:00:00Z";
-  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
   const triedP0 = item({ number: 1, stage: "ready", priority: "P0", lastTask: done, updatedAt: "2026-09-28T01:00:00Z" });
   const freshP3 = item({ number: 2, stage: "ready", priority: "P3" });
   expect(pickNext([freshP3, triedP0], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
@@ -2929,7 +2933,7 @@ test("pickNext priority: a Ready P0 worked on before goes before an untried Read
 
 test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, before a request with none", () => {
   const at = "2026-09-28T00:00:00Z";
-  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "to-tasks" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+  const done = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "to-tasks" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
   const triedP1 = item({ number: 1, stage: "needs-tasks", priority: "P1", lastTask: done, updatedAt: "2026-09-28T01:00:00Z", createdAt: "2026-09-02T00:00:00Z" });
   const freshRequest = item({ number: 2, stage: "request", type: "request", priority: null, createdAt: "2026-09-01T00:00:00Z" });
   expect(pickNext([freshRequest, triedP1], "plan")).toMatchObject({ item: { number: 1 }, action: "to-tasks" });
@@ -2939,7 +2943,7 @@ test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, bef
 
 test("pickNext failed: an item whose last stage Task failed with no update to the Issue since is left in any stage; an update, a reply's resume or a closed wait brings it back", () => {
   const at = "2026-09-28T00:00:00Z";
-  const failed = (status: TaskStatus = "error", resumeAt: number | null = null) => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "failed" as const, reviewedAt: null, resumeAt });
+  const failed = (status: TaskStatus = "error", resumeAt: number | null = null) => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "failed" as const, reviewedAt: null, resumeAt, started: true });
   // an in-progress PBI with Tasks left: resumed unless its last Task failed and the Issue was not updated since — the usage-limit case (resumeAt set) and an aborted one alike
   const stalled = item({ number: 1, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at });
   expect(pickNext([stalled], "implement")).toMatchObject({ action: "complete", resume: true });
@@ -2969,7 +2973,7 @@ test("pickNext failed: an item whose last stage Task failed with no update to th
 
 test("pickNext awaiting reply: an item whose last stage Task ended asking the person (needs_action, not reviewed) is left until the Issue is updated or the Task reviewed", () => {
   const at = "2026-09-28T00:00:00Z";
-  const asked = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, ...over });
+  const asked = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true, ...over });
   const stalled = item({ number: 1, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at, lastTask: asked() });
   expect(pickNext([stalled], "implement")).toBeNull();
   // reviewed (the person read it) → resumed; an outcome set by hand to done → resumed; a Task that ended without asking → resumed
@@ -5350,7 +5354,7 @@ test("prereqState: Issues, pull requests and releases by how they closed; not st
 test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingReply, or the last stage Task's newest stop waiting for a decision", () => {
   const at = "2026-09-28T00:00:00Z";
   const later = "2026-09-28T01:00:00Z";
-  const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, ...over });
+  const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, started: true, ...over });
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
     count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
@@ -5382,7 +5386,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
 });
 
 test("a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
-  const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null };
+  const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, started: true };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
     count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
@@ -5797,7 +5801,7 @@ describe("flow-improvement limit", () => {
 
   // an in-progress flow PBI backlog-next leaves (a reply, decision or wait it is stuck on) does not use the limit
   const at = "2026-09-28T00:00:00Z";
-  const asked = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null };
+  const asked = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true };
   const progress = { stage: "in-progress" as const, projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at };
 
   test("flow: a flow PBI in progress that waits for a reply, a decision or a dependency is not counted, so a Ready flow PBI is taken", () => {
@@ -5836,6 +5840,45 @@ describe("flow-improvement limit", () => {
     expect(flowRunning([flowItem({ number: 14, ...progress, tasks: { total: 3, done: 3, doneAt: null }, closable: true })])).toBe(1);
     // on hold is stopped
     expect(flowStopped([flowItem({ number: 15, ...progress, onHold: true })])).toBe(1);
+  });
+
+  const overlapHit = { hits: [{ ref: "Task #9", path: "src/a.ts" }], unknown: null };
+
+  test("an overlapped in-progress flow PBI does not count against flowLimit", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    for (const overlap of [overlapHit, { hits: [], unknown: "no files named" }]) {
+      const overlapped = flowItem({ number: 20, ...progress, overlap });
+      expect(flowRunning([overlapped])).toBe(0);
+      expect(flowStopped([overlapped])).toBe(1);
+      const all = [overlapped, next];
+      expect(flowRunning(all)).toBe(0);
+    }
+  });
+
+  test("a Ready flow PBI starts while the in-progress one is overlapped", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    const overlapped = flowItem({ number: 20, ...progress, overlap: overlapHit });
+    const all = [overlapped, next];
+    expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 2 } });
+    expect(pickNext(all, "implement", [2, 20], limit(1, all))).toMatchObject({ item: { number: 2 } });
+  });
+
+  test("the flow PBI counts again once its overlap clears", () => {
+    const next = flowItem({ number: 2, priority: "P1" });
+    const cleared = flowItem({ number: 20, ...progress, overlap: null });
+    const all = [cleared, next];
+    expect(flowRunning(all)).toBe(1);
+    expect(flowHeldIn(all, "implement", limit(1, all)).map((i) => i.number)).toEqual([2]);
+    expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 20 } });
+  });
+
+  test("an overlapped flow PBI with a stage Task running still counts as 1", () => {
+    const busy = flowItem({ number: 21, ...progress, activeTaskId: "t9", overlap: overlapHit });
+    expect(flowRunning([busy])).toBe(1);
+    expect(flowStopped([busy])).toBe(0);
+    // a close does not look at the overlap: an overlapped closable one still counts
+    const closing = flowItem({ number: 22, ...progress, tasks: { total: 3, done: 3, doneAt: null }, closable: true, overlap: overlapHit });
+    expect(flowRunning([closing])).toBe(1);
   });
 
   test("flowHeldLine: says how many in-progress flow PBIs were left out of the count", () => {
