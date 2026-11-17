@@ -118,6 +118,18 @@ export class Supervisor {
     this.start();
   }
 
+  /** The process that runs now (null when none): a switch without a restart checks that the same process answers. */
+  get pid(): number | null {
+    return this.proc?.pid ?? null;
+  }
+
+  /** Ask the running daemon to read its Web UI and default settings again (SIGHUP). False when no process runs. */
+  reload(): boolean {
+    if (!this.proc) return false;
+    this.proc.kill("SIGHUP");
+    return true;
+  }
+
   /** The last `lines` lines of the daemon log (reads only the tail of the file). */
   logTail(lines = 200): string[] {
     if (!existsSync(this.logPath)) return [];

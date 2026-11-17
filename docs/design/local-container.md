@@ -1,6 +1,6 @@
 # Running Switchboard as a container on your own machine
 
-One image runs the stand-alone mode: a single Switchboard daemon with the same tools, versions and paths as the cloud host, on any machine where containers run. The supported CPUs are arm64 and x86-64: the same Dockerfile and the same procedure on both. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
+One image runs the stand-alone mode: a single Switchboard daemon with the same tools, versions and paths as the EC2 setup, on any machine where containers run. The supported CPUs are arm64 and x86-64: the same Dockerfile and the same procedure on both. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
 
 Files: `container/Dockerfile` (the image), `container/compose.yaml` (the one service and its volumes), `container/entrypoint.sh` and `container/relay.ts` (start-up and the relay below), `container/up.sh` (the start), `container/e2e.sh` (the check with a fake runner).
 
@@ -14,7 +14,7 @@ bash container/up.sh
 
 This builds the image `sb-local` (arm64 or x86-64) and starts the container in the background with `restart: unless-stopped`. Open `http://127.0.0.1:47831/`. The first build downloads the tools and builds the web UI, so it takes a while; later starts reuse the layers.
 
-No AWS setting is needed or read. The daemon starts as a stand-alone instance: no starter, no cloud host, no automatic stop.
+No AWS setting is needed or read. The daemon starts as a stand-alone instance: no starter, no EC2 instance, no automatic stop.
 
 ## 2. Log in and bring your repositories
 
@@ -65,7 +65,7 @@ The meaning: a Task can start, stop and delete any container, image and volume o
 
 ## 6. Versions are kept in two places
 
-The cloud host installs its tools with `aws/host/devtools.sh` and `aws/host/node.sh`; the image installs the same ones in `container/Dockerfile`. Pins for node, docker, compose, uv and gitleaks (version and sha256) and for gh-stack (version) are written in both. `container/versions.test.ts` compares them and fails when one side is changed alone, so change both together. The host is arm64, so the sha256 compared are the arm64 ones; the x86-64 sha256 (the `_X86_64` lines, same versions) are in the Dockerfile only and have nothing on the host to be compared with. `gh`, `bun`, `claude` and `codex` are pinned in the Dockerfile only (the host takes the distribution's `gh` and the latest of the others); bumping them is a change to the `ARG` lines and a rebuild. HOME is `/home/switchboard` and the repositories are in `/home/switchboard/repos`, as on the host, so a Task's `cwd` and the `~/.claude/projects` folder names read the same on both.
+The EC2 setup installs its tools with `aws/host/devtools.sh` and `aws/host/node.sh`; the image installs the same ones in `container/Dockerfile`. Pins for node, docker, compose, uv and gitleaks (version and sha256) and for gh-stack (version) are written in both. `container/versions.test.ts` compares them and fails when one side is changed alone, so change both together. The EC2 instance is arm64, so the sha256 compared are the arm64 ones; the x86-64 sha256 (the `_X86_64` lines, same versions) are in the Dockerfile only and have nothing in the EC2 setup to be compared with. `gh`, `bun`, `claude` and `codex` are pinned in the Dockerfile only (the EC2 setup takes the distribution's `gh` and the latest of the others); bumping them is a change to the `ARG` lines and a rebuild. HOME is `/home/switchboard` and the repositories are in `/home/switchboard/repos`, as in the EC2 setup, so a Task's `cwd` and the `~/.claude/projects` folder names read the same on both.
 
 ## 7. What it does not do
 
@@ -81,4 +81,4 @@ The cloud host installs its tools with `aws/host/devtools.sh` and `aws/host/node
 bash container/e2e.sh
 ```
 
-It uses compose's project name `sb-e2e`, so its volumes (`sb-e2e_sb-home` and so on) are separate from your own, and its `down -v` at the end cannot touch them. It refuses to start when `127.0.0.1:47831` is already in use, so stop a real start first (`docker compose -f container/compose.yaml stop`). The image build is heavy, so it is not in CI; run it by hand, on an offload host if you have one.
+It uses compose's project name `sb-e2e`, so its volumes (`sb-e2e_sb-home` and so on) are separate from your own, and its `down -v` at the end cannot touch them. It refuses to start when `127.0.0.1:47831` is already in use, so stop a real start first (`docker compose -f container/compose.yaml stop`). The image build is heavy, so it is not in CI; run it by hand, through `sb-offload` if you have it.

@@ -368,32 +368,35 @@ export function Home(props: {
             </select>
           </label>
         </div>
-        <PresetPicker
-          workspaceId={ws?.id ?? null}
-          onText={(text, title) => {
-            setPrompt(text);
-            setTitle(title);
-            setBrief(null);
-            setDraft({ workspaceId: ws?.id ?? null, text });
-          }}
-          onError={props.onError}
-        />
         {stale && <div className="hint warn">{t(home.staleDraft)}</div>}
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(cloud ? {} : drop.handlers)}>
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onPaste={cloud ? undefined : drop.onPaste}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                if (busy) return;
-                if (e.shiftKey) void submit();
-              }
+          <PresetPicker
+            scene="home"
+            workspaceId={ws?.id ?? null}
+            text={prompt}
+            onText={(text, title) => {
+              setPrompt(text);
+              setTitle(title);
+              setBrief(null);
+              setDraft({ workspaceId: ws?.id ?? null, text });
             }}
-            rows={6}
-            placeholder={cloud ? t(home.promptCloud) : t(home.promptLocal)}
-          />
+            onError={props.onError}
+          >
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onPaste={cloud ? undefined : drop.onPaste}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  if (busy) return;
+                  if (e.shiftKey) void submit();
+                }
+              }}
+              rows={6}
+              placeholder={`${t(home.presetHint)}${cloud ? t(home.promptCloud) : t(home.promptLocal)}`}
+            />
+          </PresetPicker>
           {!cloud && <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />}
         </div>
         <div className="row">

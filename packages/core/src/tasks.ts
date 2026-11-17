@@ -106,6 +106,18 @@ export class ResumeSupersededError extends Error {
  */
 export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & { cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"]; origin?: Task["origin"] };
 
+/** A workspace's rules kept on Switchboard's side, as the block added after a Task's first prompt. */
+const RULES_HEADING = "## このリポジトリの決まり（Switchboard の側に置いたもの。リポジトリの git には無い）";
+export function workspaceRulesBlock(rules: string): string {
+  return `${RULES_HEADING}\n\n${rules.trim()}`;
+}
+
+/** A first prompt without the rules block `create()` added after it: what the person asked, for naming the Task. */
+export function withoutWorkspaceRules(prompt: string): string {
+  const at = prompt.lastIndexOf(`\n\n${RULES_HEADING}\n\n`);
+  return at < 0 ? prompt : prompt.slice(0, at);
+}
+
 /** The title a task has until its first turn ends: the head of the prompt, on one line. */
 export function provisionalTitle(prompt: string): string {
   return oneLine(prompt).slice(0, 48);
@@ -1009,7 +1021,10 @@ export class TaskManager {
    * `opts.deferUntil`: the row is made without starting a runner (status idle); `resumeAt` = that time and
    * `resumeReason` = "start", and the prompt waits in `deferredPrompt` for `startDeferred` (the resume tick, or 今すぐ再開).
    */
-  create(input: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void, opts: { deferUntil?: number } = {}): Task {
+  create(given: NewTaskInput, precomputed?: RoutingSuggestion, afterInsert?: (task: Task) => void, opts: { deferUntil?: number } = {}): Task {
+    // the workspace's rules kept on Switchboard's side go after the first prompt, whatever route made the Task
+    const rules = given.workspaceId ? this.db.getWorkspace(given.workspaceId)?.rules : undefined;
+    const input = rules ? { ...given, prompt: `${given.prompt}\n\n${workspaceRulesBlock(rules)}` } : given;
     const why = this.checkCloudInput(input);
     if (why) throw new Error(why);
     const cloud = input.executionMode === "cloud";
@@ -1028,11 +1043,11 @@ export class TaskManager {
     const effort = input.effort || null;
     const whyEffort = effort === null ? undefined : this.checkEffort(input.runner, effort);
     if (whyEffort) throw new Error(whyEffort);
-    const suggestion = cloud ? undefined : precomputed ?? this.suggest?.(input, scope);
+    const suggestion = cloud ? undefined : precomputed ?? this.suggest?.(given, scope); // the routing reads the request alone
     const task: Task = {
       id,
       workspaceId: input.workspaceId ?? null,
-      title: input.title ?? provisionalTitle(input.prompt),
+      title: input.title ?? provisionalTitle(given.prompt), // the request's own words, not the rules added after them
       runner: input.runner,
       cwd: input.cwd,
       scope,

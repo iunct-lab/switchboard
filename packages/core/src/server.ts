@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { basename, join, resolve } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogAllocation, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, WorkspaceRulesInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogAllocation, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetExpansion, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -40,6 +40,7 @@ import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
 import { AFTER_CHECK_MS, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
+import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { startWorktreeSweep } from "./worktree-sweep.ts";
 import { setupScripts } from "./skillsync.ts";
 import { listProcesses, loadProcess } from "./process-defs.ts";
@@ -65,7 +66,7 @@ import { MERGE_GRANT_ANSWERS_KEY, parseMergeGrants } from "./merge-grants.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "./policies.ts";
-import { checkPreset, expandPreset, needsTarget, parseTarget, readPresets, writePresets } from "./presets.ts";
+import { checkPreset, expandPreset, needsTarget, parseTarget, presetUses, readPresets, recordPresetUse, writePresets } from "./presets.ts";
 import { Inbox, localDate } from "./inbox.ts";
 import { KnowledgeStore } from "./knowledge.ts";
 import * as materializer from "./materializer.ts";
@@ -74,7 +75,7 @@ import { DEFAULT_EXAMPLE_COUNT, LlmSuggester, readOnlyMode } from "./suggest-llm
 import { WorkspaceSuggester } from "./suggest-workspace.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { IN_FLIGHT, InvalidTaskOutcomeError, isWorking, OutcomeNotSettableError, TURN_DONE, workPhase } from "./task-status.ts";
-import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager, versionAtLeast } from "./tasks.ts";
+import { isFableModel, kitPath, type NewTaskInput, privateTmpOf, provisionalTitle, sweepPrivateTmps, TaskManager, versionAtLeast, withoutWorkspaceRules } from "./tasks.ts";
 import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { createDockerdIdle } from "./dockerd-idle.ts";
@@ -932,7 +933,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const item: BacklogItem = {
         ...i,
         activeTaskId: activeStageTask(i.workspaceId, i.number)?.id ?? null,
-        lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt } : null,
+        lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt, started: t.runnerSessionId !== null } : null,
         stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number))),
         mockups: i.mockupTask ? mockupsOf(i.mockupTask) : [],
         ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
@@ -2416,7 +2417,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const onUsage = (runner: RunnerId, ev: Extract<AgentEvent, { t: "usage" }>) => {
       if (!judgeStop.signal.aborted) db.insertLedger(ledgerRowFor(pricingTable(), { id: taskId, runner, model: ev.model ?? null }, ev, Date.now()));
     };
-    void (opts.titleSuggester ?? suggestTitle)({ prompt: db.firstUserText(taskId) ?? provisional, reply: turn.end.summary?.trim() ?? "" }, { adapters: adapterMap, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal })
+    void (opts.titleSuggester ?? suggestTitle)({ prompt: withoutWorkspaceRules(db.firstUserText(taskId) ?? provisional), reply: turn.end.summary?.trim() ?? "" }, { adapters: adapterMap, cwd: suggestDir, onUsage, log: (m) => console.warn(m), signal: judgeStop.signal })
       .then((r) => {
         if (judgeStop.signal.aborted) return;
         const cur = db.getTask(taskId);
@@ -3086,11 +3087,15 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
       "/api/schedules/log": () => json(scheduler.recentLog()),
       /**
-       * Saved instructions. Expanding builds the text to put in the request / reply box and
-       * writes nothing: the Task is created or the reply sent by POST /api/tasks / send as before, approval and all.
+       * Saved instructions. Expanding builds the text to put in the request / reply box; with a `scene` it also
+       * records the use (docs/design/presets.md, "Usage record"). It creates no Task and sends nothing: the Task is
+       * created or the reply sent by POST /api/tasks / send as before, approval and all.
        */
       "/api/presets": {
-        GET: () => json({ presets: readPresets(db).sort((a, b) => b.updatedAt - a.updatedAt) } satisfies PresetList),
+        GET: () => {
+          const presets = readPresets(db).sort((a, b) => b.updatedAt - a.updatedAt);
+          return json({ presets, uses: presetUses(db, presets, Date.now()) } satisfies PresetList);
+        },
         POST: async (req) => {
           const parsed = PresetInput.safeParse(await req.json().catch(() => null));
           if (!parsed.success) return bad(parsed.error.message);
@@ -3132,7 +3137,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           const ws = parsed.data.workspaceId ? db.getWorkspace(parsed.data.workspaceId) : null;
           if (parsed.data.workspaceId && !ws) return bad("workspace not found", 404);
           const raw = parsed.data.target?.trim() ?? "";
-          if (!needsTarget(p)) return raw ? bad("この指示は対象を使いません。対象を空にしてください") : json(expandPreset(p, null, null));
+          const done = (x: PresetExpansion) => {
+            recordPresetUse(db, p.id, parsed.data.scene, Date.now());
+            return json(x);
+          };
+          if (!needsTarget(p)) return raw ? bad("この指示は対象を使いません。対象を空にしてください") : done(expandPreset(p, null, null));
           if (!raw) return bad("対象の Issue / PR を入れてください");
           if (!ws) return bad("Workspace を選んでください");
           const target = parseTarget(raw);
@@ -3144,7 +3153,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
             return bad(`Workspace ${ws.name} のリポジトリを読めません: ${String((e as Error).message ?? e).slice(0, 200)}`, 424);
           }
           if (target.repo && target.repo.toLowerCase() !== repo.toLowerCase()) return bad(`対象 ${target.repo}#${target.number} は Workspace ${ws.name} のリポジトリ ${repo} ではありません`, 409);
-          return json(expandPreset(p, repo, target.number));
+          return done(expandPreset(p, repo, target.number));
         },
       },
       "/api/queue": () => json(scheduler.queue()),
@@ -3535,17 +3544,36 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       /**
+       * The workspace's rules kept on Switchboard's side (an adoption that commits nothing to the repository): saved here and
+       * added to the first prompt of the Tasks started there. Empty = none. A value that can authenticate is refused. A repository
+       * of your own only, like 取り込み. The change leaves a line in the operation log where the daemon requires
+       * authentication (loopback is not logged, like every operation): the text becomes an instruction to every later Task there.
+       */
+      "/api/workspaces/:id/rules": {
+        PUT: async (req, srv) => {
+          const ws = db.getWorkspace(String(req.params.id));
+          if (!ws || ws.kind !== "repo" || ws.upstream) return bad("not found", 404);
+          const parsed = WorkspaceRulesInput.safeParse(await req.json().catch(() => null));
+          if (!parsed.success) return bad(parsed.error.message);
+          const rules = parsed.data.rules.trim();
+          if (findSecrets(rules, hostAws()).length) return bad("認証に使える値を含む文は保存できません", 400);
+          const saved = db.setWorkspaceRules(ws.id, rules || null)!;
+          logOp(req, srv, "workspace.rules", { detail: { path: ws.path, chars: rules.length } });
+          broadcast({ type: "workspaces.updated" });
+          return json({ id: saved.id, rules: saved.rules ?? "" });
+        },
+      },
+
+      /**
        * 取り込み: one meta Task that runs the adopt-repo skill on the workspace (the skill is Switchboard's own and stays in the meta
-       * checkout). Only a repository of your own that syncs with GitHub: someone else's has 元の更新を取り込む, and one without
-       * GitHub has nothing of GitHub's to adopt.
+       * checkout). A repository of your own, with or without GitHub (the Task is told which): someone else's has 元の更新を取り込む.
        */
       "/api/workspaces/:id/adopt": {
         POST: async (req) => {
           const ws = db.getWorkspace(String(req.params.id));
           if (!ws || ws.kind !== "repo" || ws.upstream) return bad("not found", 404);
-          if (ws.backlog === "switchboard") return bad("GitHub と連携しない workspace は取り込みの対象外です", 409);
           if (!existsSync(ws.path)) return bad("workspace directory does not exist", 409);
-          const r = await startMetaTask({ kind: "adopt-repo", title: adoptTitle(ws.name), prompt: buildAdoptPrompt({ name: ws.name, path: ws.path, when: new Date() }) });
+          const r = await startMetaTask({ kind: "adopt-repo", title: adoptTitle(ws.name), prompt: buildAdoptPrompt({ id: ws.id, name: ws.name, path: ws.path, backlog: ws.backlog, when: new Date() }) });
           return "error" in r ? bad(r.error, r.status) : json(r.task, 201);
         },
       },

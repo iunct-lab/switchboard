@@ -1,4 +1,4 @@
-import { BaselineInput, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
+import { BaselineInput, WorkspaceRulesInput, type Workspace, type WorkspaceRemoval } from "@switchboard/protocol";
 import type { WorkspaceClone } from "./api.ts";
 import { t } from "./i18n.ts";
 import { common as m } from "./i18n/common.ts";
@@ -18,8 +18,14 @@ export function removalWarning(r: Pick<WorkspaceRemoval, "dirty" | "unpushed" | 
 /** 外す is enabled only when the typed name matches and no Task runs there. */
 export const canRemove = (typed: string, r: Pick<WorkspaceRemoval, "name" | "running">) => typed === r.name && r.running === 0;
 
-/** 取り込み is offered on a repository of your own that syncs with GitHub: someone else's has 元の更新を取り込む, and one without GitHub has nothing of GitHub's to adopt. */
-export const canAdopt = (w: Pick<Workspace, "kind" | "upstream" | "backlog">) => w.kind === "repo" && !w.upstream && w.backlog === "github";
+/** 取り込み is offered on a repository of your own, with or without GitHub (its rules can be kept on Switchboard's side); someone else's has 元の更新を取り込む. */
+export const canAdopt = (w: Pick<Workspace, "kind" | "upstream">) => w.kind === "repo" && !w.upstream;
+
+/** The longest rules text the API takes: read from its schema, so the screen and the API cannot drift apart. */
+export const RULES_MAX = WorkspaceRulesInput.shape.rules.maxLength ?? 0;
+
+/** 保存 is enabled when the text differs from what is kept (the API trims it) and fits. Empty is allowed: it removes the rules. */
+export const canSaveRules = (draft: string, saved: string) => draft.trim() !== saved.trim() && draft.length <= RULES_MAX;
 
 /** The longest concept the API takes, after trimming: read from its schema, so the screen and the API cannot drift apart. */
 export const BASELINE_MAX = BaselineInput.shape.concept.maxLength ?? 0;

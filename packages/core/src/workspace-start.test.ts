@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Provenance, RunnerAdapter, RunnerId, StartOptions, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
+import { withoutWorkspaceRules } from "./tasks.ts";
 import { registerWorkspace } from "./workspace-clone.ts";
 
 // 取り込み and 立ち上げ from a Workspace row: one Task each; the steps are the skill's and the candidate's, not the daemon's.
@@ -57,7 +58,13 @@ async function boot(ids: RunnerId[] = ["claude", "codex"]) {
     for (let i = 0; !started.length && i < 100; i++) await Bun.sleep(10);
     return started.at(-1)!.prompt;
   };
-  return { core, base, repoRoot, own, local, foreign, meta, post, promptOf };
+  /** Stops the daemon and starts it again on the same home; returns the new base URL. */
+  const restart = async () => {
+    await core!.stop();
+    core = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true });
+    return `http://127.0.0.1:${core.server.port}`;
+  };
+  return { core, base, repoRoot, own, local, foreign, meta, post, promptOf, restart };
 }
 
 test("adopt: starts one meta Task that names the adopt-repo skill and hands over the workspace as data", async () => {
@@ -68,20 +75,30 @@ test("adopt: starts one meta Task that names the adopt-repo skill and hands over
   const prompt = await b.promptOf();
   expect(prompt).toContain(".claude/skills/adopt-repo/SKILL.md");
   expect(prompt).toContain(b.own.path);
+  // the id the skill puts the rules under, and whether GitHub's parts apply
+  expect(prompt).toContain(b.own.id);
+  expect(prompt).toContain("GitHub と連携する。");
   // it asks before it writes: the skill's step 3, named in the prompt
   expect(prompt).toContain("書く前に");
   expect(b.core.db.listTasks()).toHaveLength(1);
 });
 
-test("adopt: someone else's repository, the meta workspace, an unknown id are 404; a workspace without GitHub is 409; nothing starts", async () => {
+test("adopt: a workspace without GitHub is adopted too, and its Task is told to skip GitHub's parts", async () => {
+  const b = await boot();
+  const r = await b.post(b.local.id, "adopt");
+  expect(r.status).toBe(201);
+  expect(r.body).toMatchObject({ workspaceId: b.meta.id, title: "取り込み: notes" });
+  const prompt = await b.promptOf();
+  expect(prompt).toContain(b.local.id);
+  expect(prompt).toContain("GitHub と連携しない（Switchboard に置く）");
+});
+
+test("adopt: someone else's repository, the meta workspace, an unknown id are 404; a missing directory is 409; nothing starts", async () => {
   const b = await boot();
   for (const id of [b.foreign.id, b.meta.id, "ws_missing"]) expect((await b.post(id, "adopt")).status).toBe(404);
   // a registered workspace whose directory is gone
   rmSync(b.own.path, { recursive: true });
   expect((await b.post(b.own.id, "adopt")).status).toBe(409);
-  const local = await b.post(b.local.id, "adopt");
-  expect(local.status).toBe(409);
-  expect(local.body.error).toContain("GitHub と連携しない");
   expect(b.core.db.listTasks()).toHaveLength(0);
 });
 
@@ -137,4 +154,53 @@ test("adopt and baseline start on their own kind's runner when one is saved, els
   b.core.db.setSetting("settings", { autoStart: { runner: "codex", byKind: { "adopt-repo": { runner: "claude" }, baseline: { runner: "claude" } } } });
   expect((await b.post(b.own.id, "adopt")).body).toMatchObject({ runner: "claude" });
   expect((await b.post(b.own.id, "baseline", { concept: "x" })).body).toMatchObject({ runner: "claude" });
+});
+
+test("rules: kept in the database on Switchboard's side and added to the first prompt of Tasks in that workspace only", async () => {
+  const b = await boot();
+  const put = async (id: string, body: unknown) => {
+    const r = await fetch(`${b.base}/api/workspaces/${id}/rules`, { method: "PUT", body: JSON.stringify(body) });
+    return { status: r.status, body: (await r.json()) as { id?: string; rules?: string; error?: string } };
+  };
+  const rules = "テスト: make test\n枝: 人は feature/<topic>、Task は sb/<n>-<topic>";
+  expect(await put(b.own.id, { rules: `  ${rules}\n` })).toEqual({ status: 200, body: { id: b.own.id, rules } });
+  expect(b.core.db.getWorkspace(b.own.id)!.rules).toBe(rules);
+  // refused: the meta workspace, someone else's repository, an unknown id, too long, no body, a value that can authenticate
+  for (const id of [b.meta.id, b.foreign.id, "ws_missing"]) expect((await put(id, { rules })).status).toBe(404);
+  for (const body of [{ rules: "x".repeat(8_001) }, {}, null]) expect((await put(b.own.id, body)).status).toBe(400);
+  const secret = await put(b.own.id, { rules: `token: ghp_${"a".repeat(36)}` });
+  expect(secret.status).toBe(400);
+  expect(b.core.db.getWorkspace(b.own.id)!.rules).toBe(rules);
+  // a Task there gets the rules after its prompt; a Task in another workspace does not
+  const start = (workspaceId: string, cwd: string, title: string | null = "t") => fetch(`${b.base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId, cwd, runner: "claude", prompt: "直して", ...(title ? { title } : {}) }) });
+  expect((await start(b.own.id, b.own.path)).status).toBe(201);
+  const withRules = await b.promptOf();
+  expect(withRules.startsWith("直して")).toBe(true);
+  expect(withRules).toContain("このリポジトリの決まり（Switchboard の側に置いたもの。リポジトリの git には無い）");
+  expect(withRules).toContain(rules);
+  // the automatic title reads the request alone
+  expect(withoutWorkspaceRules(withRules)).toBe("直して");
+  expect(withoutWorkspaceRules("直して")).toBe("直して");
+  started.length = 0;
+  expect((await start(b.local.id, b.local.path)).status).toBe(201);
+  expect(await b.promptOf()).not.toContain("このリポジトリの決まり");
+  // the launch Task of that workspace gets them too (one place for every route)
+  started.length = 0;
+  expect((await b.post(b.own.id, "baseline", { concept: "x" })).status).toBe(201);
+  expect(await b.promptOf()).toContain(rules);
+  // a Task made without a title is named from the request's own words, not from the rules added after them
+  expect(((await (await start(b.own.id, b.own.path, null)).json()) as Task).title).toBe("直して");
+  // empty = none
+  expect(await put(b.own.id, { rules: "  " })).toEqual({ status: 200, body: { id: b.own.id, rules: "" } });
+  expect(b.core.db.getWorkspace(b.own.id)!.rules).toBeUndefined();
+});
+
+test("rules: read back through the API after the daemon restarts", async () => {
+  const b = await boot();
+  const rules = "コミット: Conventional Commits";
+  expect((await fetch(`${b.base}/api/workspaces/${b.own.id}/rules`, { method: "PUT", body: JSON.stringify({ rules }) })).status).toBe(200);
+  const base = await b.restart();
+  const list = (await (await fetch(`${base}/api/workspaces`)).json()) as Array<{ id: string; rules?: string }>;
+  expect(list.find((w) => w.id === b.own.id)?.rules).toBe(rules);
+  expect(list.find((w) => w.id === b.local.id)?.rules).toBeUndefined();
 });

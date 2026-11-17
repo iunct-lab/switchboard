@@ -13,7 +13,7 @@ import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
 import { countriesUrl, logoutPath } from "../login.ts";
-import { presetRow } from "../presets.ts";
+import { forgetPresets, presetRow } from "../presets.ts";
 import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
 import { Knowledge } from "./Knowledge.tsx";
@@ -798,6 +798,7 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
     setBusy(true);
     try {
       await fn();
+      forgetPresets(); // the request and reply boxes read the list again
       await load();
     } catch (e) {
       fail(String((e as Error).message ?? e));

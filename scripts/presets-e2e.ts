@@ -4,8 +4,10 @@
  * edited in 設定, kept over a reload, put into the request box with a target and started with one 開始, refused when
  * the target is empty / 自動 / another repository / the Workspace changed, put into a reply, and deleted. The Task it
  * starts still stops on the runner's write approval with 許可 / 拒否 (a preset is not a standing permission).
- * Also measures the 評価項目 (preset-height, preset-shift, preset-reply-ops) and checks them against the values measured before the call changes.
- * SCREENSHOT_DIR=<dir> saves Home and 設定 at 1280 and 390 wide.
+ * The call is the box itself: the cursor in the request / reply box lays the 3 most sent presets over it, typing narrows them,
+ * Tab or a press puts one in. Also measures the 評価項目 (preset-ops, preset-ops-typed, preset-height, preset-shift,
+ * preset-reply-ops) and checks them against the values in the table of docs/design/presets.md.
+ * SCREENSHOT_DIR=<dir> saves Home and 設定 at 1280 and 390 wide, and both boxes with the candidates shown.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -96,8 +98,7 @@ try {
   const page = (body: string) => evaluate(`(() => {
     const set = (el, v) => { const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v); el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })); };
     const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
-    const picker = () => document.querySelector('.preset-picker');
-    const pick = (name) => { const s = picker().querySelector('select'); set(s, [...s.options].find((o) => o.textContent === name).value); };
+    const opt = (name) => [...document.querySelectorAll('.preset-suggest .preset-opt')].find((o) => o.querySelector('.preset-name').textContent === name);
     ${body}
   })()`);
   const shot = async (name: string) => {
@@ -115,17 +116,22 @@ try {
     await call("Page.navigate", { url: base });
     await nav(label, ready);
   };
-  // the picker reads its list only when opened (no request with the screen)
-  const openPicker = async () => {
-    await until(() => evaluate(`!!document.querySelector('.preset-picker button')`), "the picker's button");
-    await page(`button(picker(), '定型の指示…').click()`);
-    await until(() => evaluate(`!!document.querySelector('.preset-picker select')`), "the picker open");
+  // the list is read when the box first takes the cursor (no request with the screen); the cursor in the box shows the candidates
+  const focusBox = async (box: string) => {
+    await page(`const el = document.querySelector(${JSON.stringify(box)}); el.blur(); el.focus({ preventScroll: true });`);
+    await until(() => evaluate(`!!document.querySelector('.preset-suggest .preset-opt')`), "the candidates over the box");
   };
+  const suggestions = () => evaluate(`[...document.querySelectorAll('.preset-suggest .preset-opt .preset-name')].map((e) => e.textContent)`) as Promise<string[]>;
+  const KEYS = { Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 }, Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 }, ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 } } as const;
+  const press = async (k: keyof typeof KEYS) => { await call("Input.dispatchKeyEvent", { type: "rawKeyDown", ...KEYS[k] }); await call("Input.dispatchKeyEvent", { type: "keyUp", ...KEYS[k] }); };
+  const typeChars = async (text: string) => { for (const c of text) await call("Input.insertText", { text: c }); };
+  const targetHint = () => evaluate(`document.querySelector('.preset-target .hint')?.textContent ?? ''`) as Promise<string>;
   const rows = () => evaluate(`[...document.querySelectorAll('.preset-row .t')].map((e) => e.textContent)`) as Promise<string[]>;
   const rowsAre = (names: string[]) => until(async () => { const r = await rows(); return JSON.stringify([...r].sort()) === JSON.stringify([...names].sort()) && r; }, `rows ${names}`);
   const sleep = () => Bun.sleep(60);
   await call("Runtime.enable");
   await call("Page.enable");
+  await call("Emulation.setFocusEmulationEnabled", { enabled: true }); // a headless page takes no cursor otherwise
   await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 
   // 1. 設定: add two, list them, edit a name, keep them over a reload (acceptance 1, 3)
@@ -151,32 +157,33 @@ try {
   const listed = await rowsAre(["レビュー対応からマージまで", "状況の確認"]);
 
   // 2. 誤送信を防ぐ (acceptance 3): an empty target, 自動, another repository, then a Workspace change after putting it in
-  await nav("Home", ".compose .preset-picker");
-  await openPicker();
+  await nav("Home", ".compose .preset-box");
   const before = (await tasks()).length;
-  await page(`pick('レビュー対応からマージまで')`);
+  await focusBox(".compose textarea");
+  await page(`opt('レビュー対応からマージまで').click()`);
+  await until(() => evaluate(`!!document.querySelector('.preset-target input')`), "the target field in place of the candidates");
+  await press("Enter");
+  const empty = { hint: await targetHint(), text: await evaluate(`document.querySelector('.compose textarea').value`) };
+  assert(empty.hint.includes("対象") && empty.text === "", `empty target: ${JSON.stringify(empty)}`);
+  await page(`set(document.querySelector('.preset-target input'), '#12')`);
   await sleep();
-  const disabled = () => page(`return ({ put: button(document.querySelector('.preset-picker'), '本文に入れる').disabled, hint: document.querySelector('.preset-picker .hint')?.textContent ?? null })`);
-  const empty = await disabled();
-  assert(empty.put && empty.hint?.includes("対象"), `empty target: ${JSON.stringify(empty)}`);
-  await page(`set(document.querySelector('.preset-picker input'), '#12')`);
-  await sleep();
-  const auto = await disabled();
-  assert(auto.put && auto.hint?.includes("Workspace"), `自動: ${JSON.stringify(auto)}`);
+  await press("Enter");
+  const auto = { hint: await targetHint() };
+  assert(auto.hint.includes("Workspace"), `自動: ${JSON.stringify(auto)}`);
   await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsDev.id)})`);
   await sleep();
   await page(`set(document.querySelector('.compose select.mode'), 'default')`);
-  await page(`set(document.querySelector('.preset-picker input'), 'other/repo#3')`);
+  await page(`set(document.querySelector('.preset-target input'), 'other/repo#3')`);
   await sleep();
-  await page(`button(picker(), '本文に入れる').click()`);
-  const otherRepo = await until(() => evaluate(`document.querySelector('.preset-picker .warn')?.textContent`), "another repository refused");
+  await press("Enter");
+  const otherRepo = await until(() => evaluate(`document.querySelector('.preset-target .hint.warn')?.textContent`), "another repository refused");
   assert(otherRepo.includes(`other/repo#3 は Workspace dev のリポジトリ ${REPO} ではありません`), `another repository: ${otherRepo}`);
   assert((await evaluate(`document.querySelector('.compose textarea').value`)) === "", "the request box stays empty on a refusal");
 
   // 3. 新規依頼 (acceptance 2): the target swapped into the text, the title named after it, one 開始
-  await page(`set(document.querySelector('.preset-picker input'), '#12')`);
+  await page(`set(document.querySelector('.preset-target input'), '#12')`);
   await sleep();
-  await page(`button(picker(), '本文に入れる').click()`);
+  await press("Enter");
   const box = await until(() => evaluate(`(() => { const v = document.querySelector('.compose textarea').value; return v.includes('#12') && { text: v, title: document.querySelector('.compose-details input:not([type])').value }; })()`), "the text in the request box");
   assert(box.text === `PR ${REPO}#12 のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）`, `text: ${box.text}`);
   assert(box.title === `レビュー対応からマージまで ${REPO}#12`, `title: ${box.title}`);
@@ -209,14 +216,14 @@ try {
   await page(`button(document.querySelector('.perm'), '許可').click()`);
   await until(async () => (await tasks()).find((t) => t.id === task.id)?.status !== "waiting", "answered by the person");
 
-  // 5. 返信 (acceptance 2): the same picker over the reply box, a new target, 送信
-  await until(() => evaluate(`!!document.querySelector('.main .preset-picker') && !document.querySelector('.compose')`), "the reply picker");
-  await openPicker();
-  await page(`pick('レビュー対応からマージまで')`);
+  // 5. 返信 (acceptance 2): the same call over the reply box, a new target, 送信
+  await until(() => evaluate(`!!document.querySelector('.main .preset-box') && !document.querySelector('.compose')`), "the reply box");
+  await focusBox(".composer textarea");
+  await page(`opt('レビュー対応からマージまで').click()`);
+  await until(() => evaluate(`!!document.querySelector('.preset-target input')`), "the target field in the reply box");
+  await page(`set(document.querySelector('.preset-target input'), '#13')`);
   await sleep();
-  await page(`set(document.querySelector('.preset-picker input'), '#13')`);
-  await sleep();
-  await page(`button(picker(), '本文に入れる').click()`);
+  await press("Enter");
   const reply = await until(() => evaluate(`(() => { const v = document.querySelector('.composer textarea').value; return v.includes('#13') && v; })()`), "the text in the reply box");
   await page(`button(document.querySelector('.composer'), '送信').click()`);
   await until(() => received.some((t, i) => i > 0 && t.includes(reply)), "the runner got the reply");
@@ -226,19 +233,23 @@ try {
   await rowsAre(["レビュー対応からマージまで", "状況の確認"]);
   await page(`window.confirm = () => true; button([...document.querySelectorAll('.preset-row')].find((r) => r.querySelector('.t').textContent === '状況の確認'), '削除').click()`);
   await rowsAre(["レビュー対応からマージまで"]);
+  // the box read the list before (the reply box above): Settings dropped the cache, so Home shows what is left
+  await nav("Home", ".compose .preset-box");
+  await focusBox(".compose textarea");
+  const options = await suggestions();
+  assert(JSON.stringify(options) === JSON.stringify(["レビュー対応からマージまで"]), `Home's candidates: ${JSON.stringify(options)}`);
   await call("Page.reload");
   await nav("Settings", ".card.presets .preset-new");
   const left = await rowsAre(["レビュー対応からマージまで"]);
   await shot("settings-1280.png");
-  await nav("Home", ".compose .preset-picker");
-  await openPicker();
-  const options = await evaluate(`[...document.querySelector('.preset-picker select').options].slice(1).map((o) => o.textContent)`);
-  assert(JSON.stringify(options) === JSON.stringify(["レビュー対応からマージまで"]), `Home's select: ${JSON.stringify(options)}`);
 
   // 7. 390 × 844: the Home picker and the 設定 card do not scroll sideways
   await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-  await page(`pick('レビュー対応からマージまで')`);
-  await sleep();
+  await nav("Home", ".compose .preset-box");
+  await focusBox(".compose textarea");
+  await shot("home-suggest-390.png");
+  await page(`opt('レビュー対応からマージまで').click()`);
+  await until(() => evaluate(`!!document.querySelector('.preset-target input')`), "the target field");
   const widthHome = await evaluate("document.documentElement.scrollWidth");
   await shot("home-390.png");
   await nav("Settings", ".card.presets .preset-new");
@@ -246,71 +257,76 @@ try {
   const widthSettings = await evaluate("document.documentElement.scrollWidth");
   await shot("settings-390.png");
   assert(widthHome <= 390 && widthSettings <= 390, `scrolls sideways at 390px: Home ${widthHome}, 設定 ${widthSettings}`);
-  // 7a. 操作数: how many operations the 3-step call takes, 4 ways. One click or one key press is 1; the characters
-  // typed into the target field are not counted. Counting starts when the request / reply box is visible and ends when the
-  // expanded text is in it. A native select is 2 (open the list, choose the entry). The Workspace on Home is chosen before
-  // counting: the request needs one whatever the preset (自動 cannot check a target).
+  // 7a. 操作数: how many operations the call takes, 4 ways. One click or one key press is 1; the characters typed (into the
+  // target field, or to narrow the candidates 1 each) are counted only for narrowing. Counting starts when the request / reply box
+  // is visible and ends when the expanded text is in it. The cursor in the box is 1, a press on a candidate is 1, and a target
+  // is confirmed with Enter 1. The Workspace on Home is chosen before counting: the request needs one whatever the preset (自動
+  // cannot check a target).
   await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   const planText = "今の状況を確認して報告してください";
   const created = await fetch(`${base}/api/presets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "状況の確認", text: planText }) });
   assert(created.status === 201, `the plain preset: ${created.status}`);
   const targetPreset = "レビュー対応からマージまで";
+  const targetTemplate = "PR {{target}} のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）";
   const targetText = `PR ${REPO}#12 のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）`;
   const presetRequests = () => evaluate(`performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/presets')).length`) as Promise<number>;
-  const measure = async (where: "home" | "task", withTarget: boolean) => {
+  const boxOf = (where: "home" | "task") => (where === "home" ? ".compose textarea" : ".composer textarea");
+  const gotoBox = async (where: "home" | "task") => {
     await call("Page.navigate", { url: where === "home" ? base : `${base}/task/${task.id}` });
-    const box = where === "home" ? ".compose textarea" : ".composer textarea";
-    await until(() => evaluate(`!!document.querySelector(${JSON.stringify(box)}) && !!document.querySelector('.preset-picker button')`), `${where}: the box and the picker`);
+    await until(() => evaluate(`!!document.querySelector(${JSON.stringify(boxOf(where))}) && !!document.querySelector('.preset-box')`), `${where}: the box and its wrapper`);
     if (where === "home") {
       await until(() => evaluate(`[...document.querySelectorAll('.compose select option')].some((o) => o.value === ${JSON.stringify(wsDev.id)})`), "the Workspace in the request box");
       await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsDev.id)})`);
       await sleep();
     }
+    // the screen is still filling in (banners, lists): wait until the box has not moved for 300 ms
+    const sel = JSON.stringify(boxOf(where));
+    let last = NaN, since = Date.now();
+    await until(async () => {
+      const y = (await evaluate(`document.querySelector(${sel}).getBoundingClientRect().top + scrollY`)) as number;
+      if (y !== last) { last = y; since = Date.now(); }
+      return Date.now() - since >= 300;
+    }, `${where}: the box stops moving`);
+  };
+  const measure = async (where: "home" | "task", withTarget: boolean) => {
+    await gotoBox(where);
     const requestsOnOpen = await presetRequests();
     let n = 0;
     const name = withTarget ? targetPreset : "状況の確認";
-    n += 1; // the button 「定型の指示…」
-    await openPicker();
-    n += 2; // the select: open the list, choose the entry
-    await page(`pick(${JSON.stringify(name)})`);
-    const bodyLine = (withTarget ? targetText : planText).split("\n")[0].slice(0, 80);
-    const visible = await evaluate(`document.querySelector('.preset-picker').innerText.includes(${JSON.stringify(bodyLine)})`);
+    n += 1; // the cursor in the box
+    await focusBox(boxOf(where));
+    // the first line of both presets is in the candidates (a preset with a target shows its template's first line, not the filled-in one)
+    const shown = await evaluate(`document.querySelector('.preset-suggest').innerText`) as string;
+    const visible = (await suggestions()).length === 2 && shown.includes(planText) && shown.includes(targetTemplate.split("\n")[0].slice(0, 80));
+    n += 1; // a press on the candidate
+    await page(`opt(${JSON.stringify(name)}).click()`);
     if (withTarget) {
-      n += 1; // focus on the target field (the characters are not counted)
-      await page(`set(document.querySelector('.preset-picker input'), '#12')`);
+      await until(() => evaluate(`!!document.querySelector('.preset-target input')`), `${where}: the target field`);
+      await page(`set(document.querySelector('.preset-target input'), '#12')`); // the characters are not counted
+      await sleep();
+      n += 1; // Enter
+      await press("Enter");
     }
-    await sleep();
-    n += 1; // 「本文に入れる」
-    await page(`button(picker(), '本文に入れる').click()`);
-    const text = await until(() => evaluate(`document.querySelector(${JSON.stringify(box)}).value`), `${where} ${withTarget ? "target" : "plain"}: the text in the box`).catch(async (e) => { console.error(await evaluate(`document.querySelector('.compose, .composer').innerText + ' | ' + document.querySelector('.compose select')?.value`)); throw e; });
+    const text = await until(() => evaluate(`document.querySelector(${JSON.stringify(boxOf(where))}).value`), `${where} ${withTarget ? "target" : "plain"}: the text in the box`).catch(async (e) => { console.error(await evaluate(`document.querySelector('.compose, .composer').innerText + ' | ' + document.querySelector('.compose select')?.value`)); throw e; });
     assert(text === (withTarget ? targetText : planText), `${where} ${withTarget ? "target" : "plain"}: ${text}`);
+    assert(!(await evaluate(`!!document.querySelector('.preset-suggest')`)), `${where}: the candidates close once the text is in`);
     return { n, visible, requestsOnOpen };
   };
   const m = { "home-plain": await measure("home", false), "task-plain": await measure("task", false), "home-target": await measure("home", true), "task-target": await measure("task", true) };
   const ops = Object.entries(m).map(([k, v]) => `${k}=${v.n}`).join(" ");
   console.log(`preset-ops ${ops}`);
-  // the before values of the 評価項目 table: a change to the call has to update both
-  assert(ops === "home-plain=4 task-plain=4 home-target=5 task-target=5", `preset-ops differs from the 評価項目 table: ${ops}`);
+  // the after values of the 評価項目 table: a change to the call has to update both
+  assert(ops === "home-plain=2 task-plain=2 home-target=3 task-target=3", `preset-ops differs from the 評価項目 table: ${ops}`);
   console.log(`preset-first-line-visible home=${m["home-plain"].visible} task=${m["task-plain"].visible}`);
+  assert(m["home-plain"].visible && m["task-plain"].visible && m["home-target"].visible && m["task-target"].visible, "the candidates show the first line of both presets");
   console.log(`preset-requests-on-open home=${m["home-plain"].requestsOnOpen} task=${m["task-plain"].requestsOnOpen}`);
+  assert(m["home-plain"].requestsOnOpen === 0 && m["task-plain"].requestsOnOpen === 0, "opening Home or a Task asks for no list");
 
-  // 7b. 評価項目 (added 2026-11-15): the height the picker takes outside the box when unused, how far the box moves when the list is
-  // shown, and the operations from seeing a question to sending a preset reply. The values below are the table's 前 column.
+  // 7b. 評価項目 (added 2026-11-15): the height the call takes outside the box when unused, how far the box moves when the
+  // candidates are shown, and the operations from seeing a question to sending a preset reply.
   const sized = (w: number) => call("Emulation.setDeviceMetricsOverride", w === 390 ? { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } : { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
-  const gotoBox = async (where: "home" | "task") => {
-    await call("Page.navigate", { url: where === "home" ? base : `${base}/task/${task.id}` });
-    await until(() => evaluate(`!!document.querySelector(${JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea")}) && !!document.querySelector('.preset-picker button')`), `${where}: the box and the picker`);
-    // the screen is still filling in (banners, lists): wait until the box has not moved for 300 ms
-    const box = JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea");
-    let last = NaN, since = Date.now();
-    await until(async () => {
-      const y = (await evaluate(`document.querySelector(${box}).getBoundingClientRect().top + scrollY`)) as number;
-      if (y !== last) { last = y; since = Date.now(); }
-      return Date.now() - since >= 300;
-    }, `${where}: the box stops moving`);
-  };
-  /** The unused picker's height plus its vertical margins: what it takes outside the box. 0 when there is no picker. */
-  const taken = (where: "home" | "task") => gotoBox(where).then(() => evaluate(`(() => { const p = document.querySelector('.preset-picker'); if (!p) return 0; const c = getComputedStyle(p); return Math.round((p.getBoundingClientRect().height + parseFloat(c.marginTop) + parseFloat(c.marginBottom)) * 10) / 10; })()`)) as Promise<number>;
+  /** What the wrapper around the box takes besides the box: its own margin, padding and border, and the children in the flow that are not the box. 0 when nothing is added. */
+  const taken = (where: "home" | "task") => gotoBox(where).then(() => evaluate(`(() => { const ta = document.querySelector(${JSON.stringify(boxOf(where))}); const w = ta.closest('.preset-box'); if (!w) return 0; const c = getComputedStyle(w); const px = (k) => parseFloat(c[k]) || 0; let h = px('marginTop') + px('marginBottom') + px('paddingTop') + px('paddingBottom') + px('borderTopWidth') + px('borderBottomWidth'); for (const k of w.children) if (k !== ta && getComputedStyle(k).position !== 'absolute') h += k.getBoundingClientRect().height; return Math.round(h * 10) / 10; })()`)) as Promise<number>;
   const heights = async (n: number) => {
     const out: Record<string, number> = {};
     for (const w of [390, 1280]) {
@@ -328,22 +344,25 @@ try {
   };
   await fill(4);
   const h4 = await heights(4);
-  // how far the box's top moves when the list is shown, the larger of the two widths
+  // how far the box's top (and the page's height) moves when the candidates are shown, the larger of the two widths
   const shift: Record<string, number> = {};
   const byWidth: string[] = [];
   for (const w of [390, 1280]) {
     await sized(w);
     for (const where of ["home", "task"] as const) {
       await gotoBox(where);
-      const top = () => evaluate(`(() => { const r = document.querySelector(${JSON.stringify(where === "home" ? ".compose textarea" : ".composer textarea")}).getBoundingClientRect(); return r.top + scrollY; })()`) as Promise<number>;
-      const was = await top();
-      await openPicker();
+      const probe = () => evaluate(`(() => { const r = document.querySelector(${JSON.stringify(boxOf(where))}).getBoundingClientRect(); return [r.top + scrollY, document.documentElement.scrollHeight]; })()`) as Promise<[number, number]>;
+      const was = await probe();
+      await focusBox(boxOf(where));
       await sleep();
-      const d = Math.round(Math.abs((await top()) - was) * 10) / 10; byWidth.push(`w${w}-${where}=${d}`); shift[where] = Math.max(shift[where] ?? 0, d);
+      const now = await probe();
+      await page(`document.querySelector(${JSON.stringify(boxOf(where))}).scrollIntoView({ block: "center" })`);
+      await shot(`${where}-suggest-${w}.png`);
+      const d = Math.round(Math.max(Math.abs(now[0] - was[0]), Math.abs(now[1] - was[1])) * 10) / 10; byWidth.push(`w${w}-${where}=${d}`); shift[where] = Math.max(shift[where] ?? 0, d);
     }
   }
   // a reply to a Task that waits for one: from the row on Home (the click on it is 1) and from the open Task (0), then the
-  // plain preset (the button 1 + the select 2 + 「本文に入れる」 1) and 「送信」 1
+  // plain preset (the cursor 1 + a press 1) and 「送信」 1
   await sized(1280);
   const replyOps = async (where: "home" | "task") => {
     await gotoBox(where);
@@ -352,14 +371,12 @@ try {
       await until(() => evaluate(`[...document.querySelectorAll('button.row.link')].some((b) => b.textContent.includes(${JSON.stringify(task.title)}))`), "the Task's row on Home");
       await page(`[...document.querySelectorAll('button.row.link')].find((b) => b.textContent.includes(${JSON.stringify(task.title)})).click()`);
       n += 1;
-      await until(() => evaluate(`!!document.querySelector('.composer textarea') && !!document.querySelector('.preset-picker button')`), "the Task's reply box");
+      await until(() => evaluate(`!!document.querySelector('.composer textarea') && !!document.querySelector('.preset-box')`), "the Task's reply box");
     }
-    n += 1; // 「定型の指示…」
-    await openPicker();
-    n += 2; // the select
-    await page(`pick('状況の確認')`);
-    n += 1; // 「本文に入れる」
-    await page(`button(picker(), '本文に入れる').click()`);
+    n += 1; // the cursor in the reply box
+    await focusBox(".composer textarea");
+    n += 1; // a press on the candidate
+    await page(`opt('状況の確認').click()`);
     await until(async () => (await evaluate(`document.querySelector('.composer textarea').value`)) === planText, "the preset in the reply box");
     const sent = received.length;
     n += 1; // 「送信」
@@ -371,17 +388,159 @@ try {
   const replyTask = await replyOps("task");
   await fill(30);
   const h30 = await heights(30);
+  // a preset that is not among the top 3 (each box uses another one, as the one just put in is the latest used): 2 characters narrow the 30 to it, then Tab. The cursor 1 + 2 characters + Tab 1.
+  const typedOps = async (where: "home" | "task", i: string) => {
+    await gotoBox(where);
+    let n = 0;
+    n += 1;
+    await focusBox(boxOf(where));
+    assert(!(await suggestions()).includes(`定型 ${i}`), `${where}: 定型 ${i} is not among the top 3`);
+    n += 2;
+    await typeChars(i);
+    await until(async () => JSON.stringify(await suggestions()) === JSON.stringify([`定型 ${i}`]), `${where}: the candidates narrowed to 定型 ${i}`);
+    n += 1;
+    await press("Tab");
+    await until(() => evaluate(`document.querySelector(${JSON.stringify(boxOf(where))}).value === '返事 ${i}'`), `${where}: the text in the box`);
+    assert(!(await evaluate(`!!document.querySelector('.preset-suggest')`)), `${where} typed: the candidates close once the text is in`);
+    return n;
+  };
+  const typedHome = await typedOps("home", "17");
+  const typedTask = await typedOps("task", "18");
+  console.log(`preset-ops-typed home=${typedHome} task=${typedTask}`);
+  assert(typedHome <= 4 && typedTask <= 4, `preset-ops-typed: ${typedHome} ${typedTask}`);
   const heightLine = [h4["w390-n4"], h30["w390-n30"], h4["w1280-n4"], h30["w1280-n30"]].map((v, i) => `${["w390-n4", "w390-n30", "w1280-n4", "w1280-n30"][i]}=${v}`).join(" ");
   const shiftLine = `home=${shift.home} task=${shift.task}`;
   console.log(`preset-height ${heightLine}`);
   console.log(`preset-shift ${shiftLine}`);
   console.log(`preset-shift-by-width ${byWidth.join(" ")}`);
   console.log(`preset-reply-ops home=${replyHome} task=${replyTask}`);
-  // heights depend on the fonts and the Chrome build, so they are compared within 1 px; the operation counts are exact
+  // heights are compared within 1 px; the operation counts are exact
   const near = (got: Record<string, number>, want: Record<string, number>) => Object.entries(want).every(([k, v]) => Math.abs((got[k] ?? NaN) - v) <= 1);
-  assert(near({ ...h4, ...h30 }, { "w390-n4": 44, "w390-n30": 44, "w1280-n4": 32.1, "w1280-n30": 32.1 }), `preset-height differs from the 評価項目 table: ${heightLine}`);
-  assert(near(shift, { home: 42, task: 42 }), `preset-shift differs from the 評価項目 table: ${shiftLine}`);
-  assert(`home=${replyHome} task=${replyTask}` === "home=6 task=5", `preset-reply-ops differs from the 評価項目 table: ${replyHome} ${replyTask}`);
+  assert(near({ ...h4, ...h30 }, { "w390-n4": 0, "w390-n30": 0, "w1280-n4": 0, "w1280-n30": 0 }), `preset-height differs from the 評価項目 table: ${heightLine}`);
+  assert(near(shift, { home: 0, task: 0 }), `preset-shift differs from the 評価項目 table: ${shiftLine}`);
+  assert(`home=${replyHome} task=${replyTask}` === "home=4 task=3", `preset-reply-ops differs from the 評価項目 table: ${replyHome} ${replyTask}`);
+
+  // 7c. the keys and the cases where nothing is offered: Esc, the arrows, Tab on an empty box, 390 wide, an IME, 1 character
+  await sized(1280);
+  const listShown = () => evaluate(`!!document.querySelector('.preset-suggest .preset-opt')`) as Promise<boolean>;
+  const selectedAt = () => evaluate(`[...document.querySelectorAll('.preset-suggest .preset-opt')].findIndex((o) => o.getAttribute('aria-selected') === 'true')`) as Promise<number>;
+  const valueOf = (where: "home" | "task") => evaluate(`document.querySelector(${JSON.stringify(boxOf(where))}).value`) as Promise<string>;
+  for (const where of ["home", "task"] as const) {
+    // Esc closes the list; it stays closed while typing and comes back once the box is emptied
+    await gotoBox(where);
+    await focusBox(boxOf(where));
+    await press("Escape");
+    await sleep();
+    assert(!(await listShown()), `${where}: Esc closes the list`);
+    await typeChars("定型");
+    await sleep();
+    assert(!(await listShown()), `${where}: the list stays closed while typing after Esc`);
+    await page(`set(document.querySelector(${JSON.stringify(boxOf(where))}), '')`);
+    await until(listShown, `${where}: the list again once the box is emptied`);
+    // the arrows choose (and wrap around)
+    assert((await selectedAt()) === 0, `${where}: the first candidate is chosen at first`);
+    await press("ArrowDown");
+    assert((await selectedAt()) === 1, `${where}: Down chooses the second`);
+    await press("ArrowDown"); await press("ArrowDown");
+    assert((await selectedAt()) === 0, `${where}: Down from the last wraps to the first`);
+    await press("ArrowUp");
+    assert((await selectedAt()) === 2, `${where}: Up from the first wraps to the last`);
+    // Tab on an empty box puts nothing in until an arrow was used
+    await focusBox(boxOf(where));
+    await press("Tab");
+    await sleep();
+    assert((await valueOf(where)) === "" && !(await evaluate(`!!document.querySelector('.preset-target input')`)), `${where}: Tab on an empty box puts nothing in`);
+    await focusBox(boxOf(where));
+    await press("ArrowDown");
+    await press("Tab");
+    await until(() => evaluate(`document.querySelector(${JSON.stringify(boxOf(where))}).value !== '' || !!document.querySelector('.preset-target input')`), `${where}: Tab after an arrow puts the chosen preset in`);
+  }
+  // IME: nothing is offered between compositionstart and compositionend
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  await page(`document.querySelector(${JSON.stringify(boxOf("home"))}).dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))`);
+  await sleep();
+  assert(!(await listShown()), "no list while an IME is composing");
+  await page(`document.querySelector(${JSON.stringify(boxOf("home"))}).dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))`);
+  await until(listShown, "the list after the composition ends");
+  // 1 character: nothing is offered, and Tab leaves the box without putting a preset in
+  const alpha = await fetch(`${base}/api/presets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Alpha", text: "返事 alpha" }) });
+  assert(alpha.status === 201, `the Alpha preset: ${alpha.status}`);
+  for (const where of ["home", "task"] as const) {
+    await gotoBox(where);
+    await focusBox(boxOf(where));
+    await typeChars("A");
+    await sleep();
+    assert(!(await listShown()), `${where}: 1 character offers nothing`);
+    await press("Tab");
+    await sleep();
+    assert((await valueOf(where)) === "A", `${where}: Tab after 1 character leaves the text as typed: ${await valueOf(where)}`);
+  }
+  // 2 characters that are only in a preset's text ("ok" in "token"): offered, but Tab leaves the text as typed; an arrow then Tab takes it
+  const token = await fetch(`${base}/api/presets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Beta", text: "token を確かめる" }) });
+  assert(token.status === 201, `the Beta preset: ${token.status}`);
+  for (const where of ["home", "task"] as const) {
+    await gotoBox(where);
+    await focusBox(boxOf(where));
+    await typeChars("ok");
+    await until(async () => (await suggestions()).includes("Beta"), `${where}: "ok" offers Beta by its text`);
+    await press("Tab");
+    await sleep();
+    assert((await valueOf(where)) === "ok", `${where}: Tab after a text-only match leaves the text as typed: ${await valueOf(where)}`);
+    await focusBox(boxOf(where));
+    await press("ArrowDown"); await press("ArrowUp");
+    await press("Tab");
+    await until(() => evaluate(`document.querySelector(${JSON.stringify(boxOf(where))}).value === 'token を確かめる'`), `${where}: an arrow then Tab takes the text-only match`);
+  }
+  // an arrow, then typing and emptying the box: Tab on the empty box takes nothing again
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  await press("ArrowDown");
+  await typeChars("x");
+  await page(`set(document.querySelector(${JSON.stringify(boxOf("home"))}), '')`);
+  await until(listShown, "the list again once the box is emptied after an arrow");
+  await press("Tab");
+  await sleep();
+  assert((await valueOf("home")) === "" && !(await evaluate(`!!document.querySelector('.preset-target input')`)), "Tab on an emptied box takes nothing after the text changed");
+  // 390 wide: with no room above the box the list lies over what is under it; 1280 wide keeps it above
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  assert(!(await evaluate(`!!document.querySelector('.preset-suggest.below')`)), "1280 wide: the list lies above the box");
+  await sized(390);
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  await sleep();
+  assert(await evaluate(`!!document.querySelector('.preset-suggest.below')`), "390 wide: the list lies below the box");
+  await sized(1280);
+
+  // 7d. a press on the target field's frame (not the input) keeps the field and what was typed; coming back to the box after a
+  // preset was put in does not offer that preset again, and rewriting the box does
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  await page(`opt(${JSON.stringify(targetPreset)}).click()`);
+  await until(() => evaluate(`!!document.querySelector('.preset-target input')`), "7d: the target field");
+  await page(`set(document.querySelector('.preset-target input'), '#12')`);
+  await sleep();
+  const hintAt = (await evaluate(`(() => { const r = document.querySelector('.preset-target .hint').getBoundingClientRect(); return { x: r.x + 4, y: r.y + r.height / 2 }; })()`)) as { x: number; y: number };
+  await call("Input.dispatchMouseEvent", { type: "mousePressed", x: hintAt.x, y: hintAt.y, button: "left", clickCount: 1 });
+  await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: hintAt.x, y: hintAt.y, button: "left", clickCount: 1 });
+  await sleep();
+  const kept = await evaluate(`({ value: document.querySelector('.preset-target input')?.value ?? null, focused: document.activeElement === document.querySelector('.preset-target input') })`);
+  assert(kept.value === "#12" && kept.focused, `a press on the target field's frame keeps the field and the typed target: ${JSON.stringify(kept)}`);
+  await gotoBox("home");
+  await focusBox(boxOf("home"));
+  await page(`opt('状況の確認').click()`);
+  await until(async () => (await valueOf("home")) === planText, "7d: the plain preset's text in the box");
+  await page(`document.activeElement.blur()`);
+  await sleep();
+  await page(`document.querySelector(${JSON.stringify(boxOf("home"))}).focus({ preventScroll: true })`);
+  await sleep();
+  assert(!(await listShown()), "coming back to the box with the text just put in offers nothing");
+  await page(`set(document.querySelector(${JSON.stringify(boxOf("home"))}), '状況')`);
+  await page(`document.activeElement.blur()`);
+  await sleep();
+  await page(`document.querySelector(${JSON.stringify(boxOf("home"))}).focus({ preventScroll: true })`);
+  await until(listShown, "coming back after rewriting the box offers the candidates");
 
   assert(!errors.length, `page errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ listed, refused: { empty: empty.hint, auto: auto.hint, otherRepo, stale: stale.warn }, sent: { title: box.title, text: box.text, permissionMode: mode, approval: perm.buttons }, reply, left, options, scrollWidth: { home: widthHome, settings: widthSettings } }, null, 1));

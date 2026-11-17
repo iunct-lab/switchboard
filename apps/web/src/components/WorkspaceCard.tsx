@@ -3,7 +3,7 @@ import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
 import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
 import { runnerConfigSummary } from "../foreignWorkspace.ts";
 import { GithubLoginRow } from "./GithubLoginRow.tsx";
-import { baselineWarning, canAdopt, canRemove, canStartBaseline, cloneRowText, removalWarning } from "../workspaceAdd.ts";
+import { RULES_MAX, baselineWarning, canAdopt, canRemove, canSaveRules, canStartBaseline, cloneRowText, removalWarning } from "../workspaceAdd.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
@@ -64,7 +64,7 @@ function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) =
 }
 
 /**
- * A repository of your own: 取り込み (the adopt-repo skill, on a GitHub one) and 立ち上げ (the p2-baseline candidate from a
+ * A repository of your own: 取り込み (the adopt-repo skill, with or without GitHub) and 立ち上げ (the p2-baseline candidate from a
  * concept). Each starts one Task and opens it. There is no confirmation here: 取り込み asks in the Task before it writes
  * anything, and 立ち上げ asks its decisions in the Task before its first pull request merges.
  */
@@ -99,7 +99,41 @@ function OwnRow(props: { workspace: Workspace; open: boolean; onOpen: (open: boo
           </div>
         </div>
       ) : null}
+      {w.rules ? <RulesFold workspace={w} onError={props.onError} /> : null}
     </>
+  );
+}
+
+/**
+ * The rules an adoption kept on Switchboard's side, folded under the row: read them and correct them. Only a workspace
+ * that has rules shows it (an adoption Task places them; there is no box to write them from nothing). When the kept
+ * text changes (a save here, or a change from elsewhere), the box starts again from it and the fold stays as it was.
+ */
+function RulesFold(props: { workspace: Workspace; onError: (msg: string) => void }) {
+  const saved = props.workspace.rules ?? "";
+  const [draft, setDraft] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setDraft(saved), [saved]);
+  return (
+    <details className="ws-rules">
+      <summary>{t(m.rulesHeading)}</summary>
+      <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+        <div className="hint">{t(m.rulesHint)}</div>
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} aria-label={t(m.rulesLabel)} rows={8} />
+        {draft.length > RULES_MAX ? <div className="hint">{t(m.rulesTooLong, { n: draft.length, max: RULES_MAX })}</div> : null}
+        <div className="row" style={{ justifyContent: "flex-start" }}>
+          <button
+            disabled={busy || !canSaveRules(draft, saved)}
+            onClick={() => {
+              setBusy(true);
+              api.setWorkspaceRules(props.workspace.id, draft).catch((e: unknown) => props.onError(String((e as Error).message ?? e))).finally(() => setBusy(false));
+            }}
+          >
+            {t(m.rulesSave)}
+          </button>
+        </div>
+      </div>
+    </details>
   );
 }
 

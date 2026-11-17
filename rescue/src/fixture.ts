@@ -6,14 +6,29 @@ import { run } from "./releases.ts";
 
 /** A daemon that answers what sb-rescue checks. `extra` runs at boot (throw, exit later, …). */
 export const daemonSource = (version: string, extra = "") => `
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { basename, join } from "node:path";
 const port = Number(process.env.SWITCHBOARD_PORT);
 let tasks = "ok"; // \`extra\` may set "500" (the list fails), "empty" (a host with no task yet), "html" (the list is not JSON), "detail500" / "other" (the first task does not read back)
 ${extra}
+// What a real daemon does on SIGHUP: serve the Web UI of \`releases/current\` from now on. A file in the home switches a behaviour on while it runs:
+// \`busy\` (a task is running), \`no-web-release\` (a daemon that does not know SIGHUP), \`no-reload\` (SIGHUP changes nothing), \`die-on-reload\` (SIGHUP ends the process).
+const home = process.env.SWITCHBOARD_HOME ?? "";
+const flag = (name: string) => existsSync(join(home, name));
+let served = process.cwd();
+const page = () => { try { return readFileSync(join(served, "apps", "web", "dist", "index.html"), "utf8"); } catch { return null; } };
+if (process.env.SWITCHBOARD_CANDIDATE && page()?.includes("BAD")) throw new Error("the web build is broken");
+process.on("SIGHUP", () => {
+  if (flag("die-on-reload")) process.exit(1);
+  if (flag("no-reload")) return;
+  try { served = realpathSync(join(home, "releases", "current")); } catch {}
+});
 Bun.serve({
   port, hostname: "127.0.0.1",
   fetch(req, srv) {
     const path = new URL(req.url).pathname;
-    if (path === "/api/health") return Response.json({ ok: true, version: ${JSON.stringify(version)}, repoRoot: process.env.SWITCHBOARD_REPO_ROOT, webUrl: process.env.SWITCHBOARD_WEB_URL ?? null, starterToken: process.env.SWITCHBOARD_STARTER_TOKEN ?? null, busyTasks: [] });
+    if (path === "/api/health") return Response.json({ ok: true, pid: process.pid, version: ${JSON.stringify(version)}, repoRoot: process.env.SWITCHBOARD_REPO_ROOT, webUrl: process.env.SWITCHBOARD_WEB_URL ?? null, starterToken: process.env.SWITCHBOARD_STARTER_TOKEN ?? null, busyTasks: flag("busy") ? [{ id: "t1", title: "fixture", status: "running" }] : [], ...(flag("no-web-release") ? {} : { webRelease: basename(served) }) });
+    if (path === "/") return page() === null ? new Response("no page", { status: 404 }) : new Response(page(), { headers: { "content-type": "text/html" } });
     if (path === "/api/tasks") return tasks === "500" ? new Response("boom", { status: 500 }) : tasks === "html" ? new Response("<html></html>", { headers: { "content-type": "text/html" } }) : Response.json(tasks === "empty" ? [] : [{ id: "t1", title: "fixture" }]);
     if (path === "/api/tasks/t1") return tasks === "detail500" ? new Response("boom", { status: 500 }) : Response.json({ task: { id: tasks === "other" ? "t2" : "t1", title: "fixture" }, events: [] });
     if (path === "/ws") return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
@@ -66,4 +81,4 @@ export async function until<T>(fn: () => T | Promise<T>, label: string, ms = 15_
   throw new Error(`timeout: ${label}`);
 }
 
-export const health = (port: number) => fetch(`http://127.0.0.1:${port}/api/health`).then((r) => (r.ok ? (r.json() as Promise<{ ok: boolean; version: string; repoRoot: string }>) : null));
+export const health = (port: number) => fetch(`http://127.0.0.1:${port}/api/health`).then((r) => (r.ok ? (r.json() as Promise<{ ok: boolean; pid: number; version: string; repoRoot: string; webRelease?: string }>) : null));

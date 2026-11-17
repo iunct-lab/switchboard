@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { BaselineInput } from "@switchboard/protocol";
-import { BASELINE_MAX, baselineWarning, canAdopt, canRemove, canStartBaseline, cloneRowText, removalWarning } from "./workspaceAdd.ts";
+import { BASELINE_MAX, RULES_MAX, baselineWarning, canAdopt, canRemove, canSaveRules, canStartBaseline, cloneRowText, removalWarning } from "./workspaceAdd.ts";
 
 test("cloneRowText: cloning and failed rows", () => {
   expect(cloneRowText({ repo: "acme/app", path: "/srv/app", state: "cloning" })).toBe("acme/app を /srv/app に clone しています");
@@ -22,12 +22,20 @@ test("canRemove: the exact name, and nothing running", () => {
   expect(canRemove("app", { name: "app", running: 1 })).toBe(false);
 });
 
-test("canAdopt: only a repository of your own that syncs with GitHub", () => {
-  expect(canAdopt({ kind: "repo", upstream: undefined, backlog: "github" })).toBe(true);
-  // someone else's repository, even one whose backlog points at GitHub
-  expect(canAdopt({ kind: "repo", upstream: "someone/app", backlog: "github" })).toBe(false);
-  expect(canAdopt({ kind: "repo", upstream: undefined, backlog: "switchboard" })).toBe(false);
-  expect(canAdopt({ kind: "meta", upstream: undefined, backlog: "github" })).toBe(false);
+test("canAdopt: a repository of your own, with or without GitHub", () => {
+  expect(canAdopt({ kind: "repo", upstream: undefined })).toBe(true);
+  expect(canAdopt({ kind: "repo", upstream: "someone/app" })).toBe(false);
+  expect(canAdopt({ kind: "meta", upstream: undefined })).toBe(false);
+});
+
+test("canSaveRules: only a text that differs from what is kept and fits; empty removes", () => {
+  expect(canSaveRules("テスト: make test", "テスト: make check")).toBe(true);
+  expect(canSaveRules("テスト: make test", "テスト: make test")).toBe(false);
+  // the API trims, so space around the kept text is no change
+  expect(canSaveRules("\n テスト: make test \n", "テスト: make test")).toBe(false);
+  expect(canSaveRules("", "テスト: make test")).toBe(true);
+  expect(canSaveRules("x".repeat(RULES_MAX), "y")).toBe(true);
+  expect(canSaveRules("x".repeat(RULES_MAX + 1), "y")).toBe(false);
 });
 
 test("canStartBaseline: something in it, and no longer than the API takes", () => {

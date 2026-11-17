@@ -42,7 +42,7 @@ Delete `.github/workflows/close-pull-requests.yml` so PRs on your fork are accep
 Use the workflows in `.github/workflows/` as they are, where you want them:
 
 - `release-tag.yml`: set the repository variable `SWITCHBOARD_RELEASE_TAGS=on` to create a tag and a Release on every push to main, without waiting for CI (`scripts/release-tag.ts`). Check that Actions has write permission.
-- `host.yml`: for an AWS host, follow [the AWS guide](../aws/README.md) for the first deployment into your own AWS and point the OIDC trust at your fork. Set the repository variables `SWITCHBOARD_AWS_REGION`, `SWITCHBOARD_HOST_STACK` (the region and stack name only if they differ from the defaults), `SWITCHBOARD_HOST_ROLE_ARN` (the GitHubOidcRole output) and `SWITCHBOARD_HOST_PARAMS` (parameter overrides without secrets). Token values are read from SSM; the stack decides their names.
+- `host.yml`: for the EC2 setup, follow [the AWS guide](../aws/README.md) for the first deployment into your own AWS and point the OIDC trust at your fork. Set the repository variables `SWITCHBOARD_AWS_REGION`, `SWITCHBOARD_HOST_STACK` (the region and stack name only if they differ from the defaults), `SWITCHBOARD_HOST_ROLE_ARN` (the GitHubOidcRole output) and `SWITCHBOARD_HOST_PARAMS` (parameter overrides without secrets). Token values are read from SSM; the stack decides their names.
 
 ## 7. Your own values in `CLAUDE.md`
 

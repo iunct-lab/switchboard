@@ -691,6 +691,12 @@ export class Db {
     return this.getWorkspace(id);
   }
 
+  /** The workspace's rules kept here (null = none); the repository is not touched. */
+  setWorkspaceRules(id: string, rules: string | null): Workspace | null {
+    this.sqlite.query("UPDATE workspaces SET rules = ? WHERE id = ?").run(rules, id);
+    return this.getWorkspace(id);
+  }
+
   /** backlog-next's slots of the workspace; a side not given stays as it is. */
   setWorkspaceSweep(id: string, patch: Partial<WorkspaceSweep>): Workspace | null {
     const ws = this.getWorkspace(id);
@@ -2592,6 +2598,7 @@ function migrate(db: Database) {
   if (!wsCols.has("project_var")) db.exec("ALTER TABLE workspaces ADD COLUMN project_var TEXT");
   if (!wsCols.has("backlog_source")) db.exec("ALTER TABLE workspaces ADD COLUMN backlog_source TEXT");
   if (!wsCols.has("upstream")) db.exec("ALTER TABLE workspaces ADD COLUMN upstream TEXT");
+  if (!wsCols.has("rules")) db.exec("ALTER TABLE workspaces ADD COLUMN rules TEXT");
   if (!wsCols.has("runner_config_ok")) db.exec("ALTER TABLE workspaces ADD COLUMN runner_config_ok TEXT");
   // backlog-next's slots move from the one setting backlogSweep to every workspace, once
   if (!wsCols.has("sweep_implement")) {
@@ -2804,7 +2811,7 @@ function rowToWorkspace(r: any): Workspace {
   // (backlog.ts syncsGithub); none, or a GitHub one = github
   const source = r.backlog_source ? (JSON.parse(r.backlog_source) as BacklogSource) : null;
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
-  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, allocation: { share: r.alloc_share, mode: r.alloc_mode }, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}) };
+  return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, allocation: { share: r.alloc_share, mode: r.alloc_mode }, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}), ...(r.rules ? { rules: r.rules } : {}) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

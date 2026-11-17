@@ -47,6 +47,11 @@ export const Workspace = z.object({
   backlog: z.enum(["github", "switchboard"]).default("github"),
   /** The repository's `owner/name` when it was added from someone else's repository. This workspace never writes there. */
   upstream: z.string().optional(),
+  /**
+   * The workspace's rules kept on Switchboard's side (what an adoption worked out, instead of a commit to the repository):
+   * added to the first prompt of every Task started in this workspace. Unset = none.
+   */
+  rules: z.string().optional(),
   /** backlog-next's slots here; a new workspace starts with one of each. */
   sweep: WorkspaceSweep.default({ implement: 1, plan: 1 }),
   /** The share of the weekly usage and the mode; a new workspace has no share and continues. */
@@ -629,6 +634,10 @@ export const NewRepoInput = z.object({
   purpose: z.string().trim().min(1).max(2_000),
 });
 export type NewRepoInput = z.infer<typeof NewRepoInput>;
+
+/** The rules of a workspace kept on Switchboard's side; empty = none. */
+export const WorkspaceRulesInput = z.object({ rules: z.string().max(8_000) });
+export type WorkspaceRulesInput = z.infer<typeof WorkspaceRulesInput>;
 
 /** 立ち上げ: the concept the baseline Task starts from (the p2-baseline candidate). It goes into the Task's first prompt as data, and is kept nowhere else. */
 export const BaselineInput = z.object({ concept: z.string().trim().min(1).max(8_000) });
@@ -1781,10 +1790,16 @@ export type Preset = z.infer<typeof Preset>;
 /** POST /api/presets, PATCH (partial): any other key (`permissionMode`, `runner`, …) is 400. */
 export const PresetInput = Preset.pick({ name: true, text: true }).strict();
 export type PresetInput = z.infer<typeof PresetInput>;
-export const PresetList = z.object({ presets: z.array(Preset) });
+/** Where a preset was put in: Home's request box or a Task's reply box. */
+export const PresetScene = z.enum(["home", "task"]);
+export type PresetScene = z.infer<typeof PresetScene>;
+/** Uses of one preset in the last 14 days per scene; `lastAt` = the latest use in ms, null when none. */
+export const PresetUse = z.object({ id: z.string(), home: z.number(), task: z.number(), lastAt: z.number().nullable() });
+export type PresetUse = z.infer<typeof PresetUse>;
+export const PresetList = z.object({ presets: z.array(Preset), uses: z.array(PresetUse) });
 export type PresetList = z.infer<typeof PresetList>;
-/** POST /api/presets/:id/expand: the workspace to send in and the Issue / PR (`12`, `#12`, `owner/name#12`, its URL). */
-export const PresetExpandInput = z.object({ workspaceId: z.string().optional(), target: z.string().optional() }).strict();
+/** POST /api/presets/:id/expand: the workspace to send in and the Issue / PR (`12`, `#12`, `owner/name#12`, its URL); `scene` = where it is put in (nothing is recorded without it). */
+export const PresetExpandInput = z.object({ workspaceId: z.string().optional(), target: z.string().optional(), scene: PresetScene.optional() }).strict();
 export type PresetExpandInput = z.infer<typeof PresetExpandInput>;
 /** The text to put in the request / reply box as it will be sent; `target` = `owner/name#n`, null when not used. */
 export const PresetExpansion = z.object({ title: z.string(), text: z.string(), repo: z.string().nullable(), target: z.string().nullable() });
@@ -2106,7 +2121,7 @@ export const BacklogItem = z.object({
    * `outcome` / `reviewedAt` and `resumeAt` (a usage-limit stop's planned resume) are the Task's own, so backlog-next
    * can leave an item whose Task ended asking the person or could not run.
    */
-  lastTask: z.object({ id: z.string(), status: TaskStatus, statusAt: z.number(), createdAt: z.number(), updatedAt: z.number(), action: BacklogAction.nullable(), outcome: TaskOutcome, reviewedAt: z.number().nullable(), resumeAt: z.number().nullable() }).nullable(),
+  lastTask: z.object({ id: z.string(), status: TaskStatus, statusAt: z.number(), createdAt: z.number(), updatedAt: z.number(), action: BacklogAction.nullable(), outcome: TaskOutcome, reviewedAt: z.number().nullable(), resumeAt: z.number().nullable(), started: z.boolean() }).nullable(),
   /**
    * Its last stage Task waits for the person's reply: `awaitingReply`, or that Task's newest stop series
    * is `next = "decide"`. The daemon adds it (withActive), not stored.

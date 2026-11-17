@@ -115,7 +115,7 @@ describe("answers", () => {
 
   test("resume issue: an answered PBI's decision and an answered stop of its stage Task carry it; a failure is read by the question's id", () => {
     const answeredAt = "2026-10-07T11:00:00Z";
-    const lastTask = { id: "tk_new", status: "running" as const, statusAt: Date.parse(answeredAt) + 1000, createdAt: Date.parse(answeredAt) + 1000, updatedAt: Date.parse(answeredAt) + 1000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const lastTask = { id: "tk_new", status: "running" as const, statusAt: Date.parse(answeredAt) + 1000, createdAt: Date.parse(answeredAt) + 1000, updatedAt: Date.parse(answeredAt) + 1000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
     const [running] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask })], NOW);
     // the stage Task created after the answer is its resume: answered while it runs, failed once in error, resolved once done
     expect(running).toMatchObject({ state: "answered", resume: { state: "running", taskId: "tk_new" } });
@@ -137,7 +137,7 @@ describe("answers", () => {
   test("a stage Task started by the answer is its resume even when GitHub's comment time is later", () => {
     const createdAt = Date.parse("2026-10-07T11:00:00Z");
     const answeredAt = new Date(createdAt + 5000).toISOString();
-    const lastTask = { id: "tk_new", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const lastTask = { id: "tk_new", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
     const [a] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask })], NOW, { startedBy: (w, n) => (w === "ws_meta" && n === 2 ? "tk_new" : null) });
     expect(a).toMatchObject({ state: "answered", resume: { state: "running", taskId: "tk_new" } });
     // still its resume once the running Task is updated after the answer (a title or a permission), and resolved once done
@@ -151,7 +151,7 @@ describe("answers", () => {
   test("a running stage Task from before the answer, not started by it, stays queued", () => {
     const createdAt = Date.parse("2026-10-07T11:00:00Z");
     const answeredAt = new Date(createdAt + 5000).toISOString();
-    const lastTask = { id: "tk_old", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const lastTask = { id: "tk_old", status: "running" as const, statusAt: createdAt, createdAt, updatedAt: createdAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
     for (const startedBy of [undefined, () => null, () => "tk_other"]) {
       const [a] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask })], NOW, { startedBy });
       expect(a).toMatchObject({ state: "answered", resume: { state: "queued", reason: "次の定期実行で再開" } });
@@ -359,7 +359,7 @@ describe("asksFromBacklog", () => {
 
   test("states: an answered in-progress PBI is answered; once its next Task ran it is resolved; one older than a day is not returned", () => {
     const answeredAt = "2026-10-07T11:00:00Z";
-    const lastTask = (updatedAt: number) => ({ id: "tk", status: "done" as const, statusAt: updatedAt, createdAt: updatedAt, updatedAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null });
+    const lastTask = (updatedAt: number) => ({ id: "tk", status: "done" as const, statusAt: updatedAt, createdAt: updatedAt, updatedAt, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true });
     const [answered] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: lastTask(NOW - 7_200_000) })], NOW);
     expect(answered).toMatchObject({ kind: "decision", state: "answered", question: null, changedAt: Date.parse(answeredAt), id: `decision:ws_meta#2@${answeredAt}` });
     const [resolved] = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: lastTask(NOW - 60_000) })], NOW);
@@ -395,7 +395,7 @@ describe("dedupeAsks", () => {
   test("order: a person's open ones, then automatic ones, then answered, then resolved; newest first in each", () => {
     const asks = asksFromBacklog(
       [
-        item({ number: 2, stage: "in-progress", answeredAt: "2026-10-07T11:00:00Z", lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } }),
+        item({ number: 2, stage: "in-progress", answeredAt: "2026-10-07T11:00:00Z", lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } }),
         item({ number: 6, waits: [{ number: 70, kind: "pr", open: true, state: "pending", reason: "prerequisite", pbi: null }], waitsAt: "2026-10-07T09:00:00Z" }),
         item({ number: 3, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T08:00:00Z", issue: 3 } }),
         item({ number: 4, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 4 } }),
@@ -430,7 +430,7 @@ describe("rankAsks", () => {
   });
 
   test("orders the person's questions by how many wait, then Priority (P0 first, unset last), then newest; automatic, answered and resolved keep their order", () => {
-    const lastTask = { id: "tk", status: "done" as const, statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null };
+    const lastTask = { id: "tk", status: "done" as const, statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
     const items = [
       decide(1, "2026-10-07T11:00:00Z"),
       decide(2, "2026-10-07T10:00:00Z", { priority: "P2" }),
@@ -575,7 +575,7 @@ describe("asksFromTasks", () => {
 
   test("fold: a stage Task's check before the answer goes into its Issue's answered decision; one after it stays", () => {
     const answeredAt = "2026-10-07T11:00:00Z";
-    const pbi = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } })], NOW);
+    const pbi = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } })], NOW);
     const before = task({ id: "tk_a", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", createdAt: Date.parse(answeredAt) - 120_000, updatedAt: Date.parse(answeredAt) - 60_000 });
     const after = task({ id: "tk_b", workspaceId: "ws_meta", title: "#2 実装", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", createdAt: Date.parse(answeredAt) - 90_000, updatedAt: Date.parse(answeredAt) + 60_000 });
     const fromTasks = asksFromTasks({ approvals: [], tasks: [before, after], lastTurnQuestions: turnOf("続けるか"), permissionEvents: () => [], stops: () => [], workspaceName: () => "switchboard", now: NOW });
@@ -584,7 +584,7 @@ describe("asksFromTasks", () => {
 
   test("fold: the Issue of a stage Task comes from Task.stage, not its title", () => {
     const answeredAt = "2026-10-07T11:00:00Z";
-    const pbi = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null } })], NOW);
+    const pbi = asksFromBacklog([item({ number: 2, stage: "in-progress", answeredAt, lastTask: { id: "tk", status: "done", statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete", outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } })], NOW);
     const at = { createdAt: Date.parse(answeredAt) - 120_000, updatedAt: Date.parse(answeredAt) - 60_000 };
     const renamed = task({ id: "tk_r", workspaceId: "ws_meta", title: "renamed", stage: { issue: 2, action: "complete" }, outcome: "needs_action", status: "done", ...at });
     const plain = task({ id: "tk_p", workspaceId: "ws_meta", title: "#2 実装", stage: null, outcome: "needs_action", status: "done", ...at });

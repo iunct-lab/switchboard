@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
-import { appendHistory, buildRelease, currentOf, previousOf, readHistory, run, switchTo } from "./releases.ts";
+import { appendHistory, buildRelease, currentOf, previousOf, readHistory, restartNeeded, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -435,3 +435,164 @@ test("from a source repository (no git): promote by tag builds from the tarball,
     api.stop(true);
   }
 }, 120_000);
+
+// A release whose difference from the running daemon's is only the Web UI is read again by the daemon (SIGHUP), not restarted.
+// These tests share one repository and one running daemon, one after the other: what the daemon started from moves only with a restart.
+let w: Awaited<ReturnType<typeof makeRepo>> & { ctx: Ctx; web: (page: string, extra?: Record<string, string>) => Promise<string> };
+const webTimes = { ...FAST, webMs: 2500 };
+const rootPage = async (port: number) => (await fetch(`http://127.0.0.1:${port}/`)).text();
+async function webFixture() {
+  if (w) return w;
+  const g = await makeRepo();
+  switchTo(g.home, await buildRelease(g.repo, "HEAD", g.home));
+  const port = await freePort();
+  const wctx: Ctx = { home: g.home, repo: g.repo, source: null, port, sup: new Supervisor({ home: g.home, repo: g.repo, port, backoffMs: 50 }) };
+  wctx.sup.start();
+  await until(() => health(port), "web fixture up");
+  // The Web UI of a release is what its build writes from `page.txt` (the daemon serves apps/web/dist/index.html).
+  const web = async (page: string, extra: Record<string, string> = {}) => {
+    for (const [name, content] of Object.entries(extra)) writeFileSync(join(g.repo, name), content);
+    const pkg = { name: "web", private: true, scripts: { build: "mkdir -p dist && cp page.txt dist/index.html" } };
+    writeFileSync(join(g.repo, "apps", "web", "package.json"), JSON.stringify(pkg));
+    return commitFile(g.repo, "apps/web/page.txt", page, `web ${page}`);
+  };
+  return (w = { ...g, ctx: wctx, web });
+}
+afterAll(async () => {
+  if (!w) return;
+  await w.ctx.sup.stop();
+  rmSync(w.root, { recursive: true, force: true });
+});
+
+test("restartNeeded: only files under apps/web/ and packages/core/config/ are read again; anything else, or no way to compare, means a restart", async () => {
+  const g = await webFixture();
+  const base = g.v1;
+  const ui = await g.web("ui0");
+  const config = await commitFile(g.repo, "packages/core/config/routing.yaml", "a: 1\n", "config");
+  const mixed = await commitFile(g.repo, "bun.lock-ish.txt", "x", "outside");
+  const core = await commitFile(g.repo, "packages/core/src/main.ts", daemonSource("v1", "// touched"), "core touched");
+  expect(await restartNeeded(g.repo, base, ui)).toBe(false);
+  expect(await restartNeeded(g.repo, base, config)).toBe(false); // the default settings count as the Web UI
+  expect(await restartNeeded(g.repo, base, mixed)).toBe(true); // one file outside is enough, though the others are inside
+  expect(await restartNeeded(g.repo, ui, config)).toBe(false);
+  expect(await restartNeeded(g.repo, base, core)).toBe(true);
+  expect(await restartNeeded(g.repo, ui, ui)).toBe(true); // nothing differs: nothing to read again
+  expect(await restartNeeded(g.repo, null, ui)).toBe(true); // the daemon is not known to have started from anything
+  expect(await restartNeeded(g.repo, "0".repeat(40), ui)).toBe(true); // git cannot compare
+  expect(await restartNeeded(join(g.root, "not-a-repo"), base, ui)).toBe(true);
+  await run(["git", "reset", "-q", "--hard", base], g.repo); // the other tests build on the first release, not on these commits
+});
+
+test("a Web UI only release is read again by the running daemon: same process, new page, history says so; a later release with core changes restarts it", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  writeFileSync(join(g.home, "busy"), ""); // a task is running: a restart would stop it
+  const w1 = await g.web("UI one");
+  const r = await promote(g.ctx, w1, webTimes);
+  expect(r).toMatchObject({ action: "promote-web", ok: true, from: g.v1, to: w1 });
+  expect(g.ctx.sup.running).toBe(g.v1); // the daemon was not started again
+  const h = (await health(g.ctx.port))!;
+  expect([h.pid, h.webRelease, currentOf(g.home), previousOf(g.home)]).toEqual([pid, w1, w1, g.v1]);
+  expect(await rootPage(g.ctx.port)).toBe("UI one");
+  expect(readHistory(g.home).at(-1)).toEqual(r);
+
+  // compared with what the daemon started from (v1), not with the Web UI release before: this one differs in core code
+  const core = await commitFile(g.repo, "packages/core/src/main.ts", daemonSource("v2"), "core");
+  expect(await promote(g.ctx, core, webTimes)).toMatchObject({ action: "promote", ok: true, to: core });
+  const after = (await until(() => health(g.ctx.port), "restarted"))!;
+  expect([after.pid === pid, after.version, g.ctx.sup.running]).toEqual([false, "v2", core]);
+
+  // and the next Web UI release is compared with the core release that runs now: no restart, and what it started from stays on disk
+  const w2 = await g.web("UI two");
+  const second = await promote(g.ctx, w2, webTimes);
+  expect(second).toMatchObject({ action: "promote-web", ok: true, from: core, to: w2 });
+  expect([(await health(g.ctx.port))!.pid, g.ctx.sup.running]).toEqual([after.pid, core]);
+  rmSync(join(g.home, "busy"));
+});
+
+test("a file outside apps/web/ in the difference means a restart, also when the Web UI changed too", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  const mixed = await g.web("UI mixed", { "notes.txt": "outside the web ui" });
+  expect(await promote(g.ctx, mixed, webTimes)).toMatchObject({ action: "promote", ok: true, to: mixed });
+  const h = (await until(() => health(g.ctx.port), "restarted"))!;
+  expect([h.pid === pid, g.ctx.sup.running, await rootPage(g.ctx.port)]).toEqual([false, mixed, "UI mixed"]);
+});
+
+test("a Web UI only release whose candidate fails is rejected and nothing moves; one the daemon does not take up is put back", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  const was = currentOf(g.home);
+  const bad = await g.web("BAD page");
+  expect(await promote(g.ctx, bad, webTimes)).toMatchObject({ action: "rejected", ok: false, to: bad });
+  expect([currentOf(g.home), (await health(g.ctx.port))!.pid]).toEqual([was, pid]);
+
+  writeFileSync(join(g.home, "no-reload"), ""); // SIGHUP changes nothing: the daemon keeps serving the old release
+  const stuck = await g.web("UI stuck");
+  const r = await promote(g.ctx, stuck, webTimes);
+  expect(r).toMatchObject({ action: "auto-rollback", ok: false, from: stuck, to: was });
+  expect(r.reason).toContain("did not report");
+  // going back restarts the daemon on the older release: a fresh process serves the older page
+  const back = (await until(() => health(g.ctx.port), "restarted on the older release"))!;
+  expect([currentOf(g.home), back.pid === pid, g.ctx.sup.running, await rootPage(g.ctx.port)]).toEqual([was, false, was, "UI mixed"]);
+  rmSync(join(g.home, "no-reload"));
+});
+
+test("a daemon that does not report its web release is not sent SIGHUP: the release is switched by a restart", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  writeFileSync(join(g.home, "no-web-release"), ""); // an old daemon, for which SIGHUP would end the process
+  const rescue = startRescue(g.ctx, { port: 0 });
+  try {
+    const ui = await g.web("UI old daemon");
+    const ask = await fetch(`http://127.0.0.1:${rescue.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commit: ui, ifNoRestart: true }) });
+    expect(ask.status).toBe(409);
+    expect(await ask.json()).toEqual({ error: "this release needs a restart", restart: true });
+    expect(currentOf(g.home)).not.toBe(ui);
+    // the question is asked again after the build and the candidate: a caller that asked for no restart never gets one
+    const was = currentOf(g.home);
+    const history = readHistory(g.home).length;
+    await expect(promote(g.ctx, ui, webTimes, undefined, true)).rejects.toThrow("needs a restart now");
+    expect([currentOf(g.home), (await health(g.ctx.port))!.pid, readHistory(g.home).length]).toEqual([was, pid, history]);
+    expect(await promote(g.ctx, ui, webTimes)).toMatchObject({ action: "promote", ok: true, to: ui });
+    expect((await until(() => health(g.ctx.port), "restarted"))!.pid).not.toBe(pid);
+  } finally {
+    await rescue.stop();
+    rmSync(join(g.home, "no-web-release"), { force: true });
+  }
+});
+
+test("ifNoRestart on a Web UI only release is taken: 202, the running daemon reads it again, its process and tasks stay", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  writeFileSync(join(g.home, "busy"), "");
+  const rescue = startRescue(g.ctx, { port: 0 });
+  try {
+    const ui = await g.web("UI asked quietly");
+    const ask = await fetch(`http://127.0.0.1:${rescue.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commit: ui, ifNoRestart: true }) });
+    expect(ask.status).toBe(202);
+    const done = await until(() => readHistory(g.home).find((e) => e.to === ui), "promoted", 30_000);
+    expect(done).toMatchObject({ action: "promote-web", ok: true });
+    expect([(await health(g.ctx.port))!.pid, await rootPage(g.ctx.port)]).toEqual([pid, "UI asked quietly"]);
+  } finally {
+    await rescue.stop();
+    rmSync(join(g.home, "busy"), { force: true });
+  }
+});
+
+test("a daemon that dies on SIGHUP and is started again by the supervisor is not a switch without a restart: it goes back, and says why", async () => {
+  const g = await webFixture();
+  const was = currentOf(g.home);
+  const pid = (await health(g.ctx.port))!.pid;
+  writeFileSync(join(g.home, "die-on-reload"), ""); // reports webRelease, but SIGHUP ends it; the retry starts from the new current
+  try {
+    const ui = await g.web("UI crash");
+    const r = await promote(g.ctx, ui, webTimes);
+    expect(r).toMatchObject({ action: "auto-rollback", ok: false, from: ui, to: was });
+    expect(r.reason).toMatch(/did not survive the reload|stopped after the reload/); // which one depends on whether the retry has started yet
+    expect(currentOf(g.home)).toBe(was);
+  } finally {
+    rmSync(join(g.home, "die-on-reload"), { force: true });
+  }
+  expect((await until(() => health(g.ctx.port), "started again"))!.pid).not.toBe(pid);
+});

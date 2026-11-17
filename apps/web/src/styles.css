@@ -133,6 +133,9 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 /* 詳細 (#3354): the rarely set values under the buttons; the summary of what was changed wraps rather than widens the card. */
 .compose-details { margin-top: 8px; }
 .compose-details > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
+/* The rules an adoption kept on Switchboard's side, folded under a Workspace row of Settings. */
+.ws-rules > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; padding: 8px 0; }
+.ws-rules textarea { width: 100%; box-sizing: border-box; }
 .compose-details > .runners { margin-top: 8px; }
 .compose-improve { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 
@@ -741,11 +744,24 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 
 /* An artifact the agent registered (#1778): one line of the conversation with its 開く. */
 .artifact-row button { margin-left: 8px; }
-/* 定型の指示 in the request / reply box (#940): one row on a wide screen, stacked at phone width */
-.preset-picker { display: grid; gap: 4px; max-width: 760px; }
-.preset-picker-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.preset-picker-row select, .preset-picker-row input { min-width: 0; }
-@media (max-width: 767px) { .preset-picker-row { display: grid; } .preset-picker-row button { min-height: 44px; } }
+/* 定型の指示 over the request / reply box: up to 3 rows lie over the box's top edge, so nothing around the box moves */
+.preset-box { position: relative; }
+.preset-suggest { position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; z-index: 30; display: grid; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 14px #0006; overflow: hidden; }
+.preset-suggest.below { bottom: auto; top: 100%; margin: 4px 0 0; }
+.preset-opt { display: flex; gap: 10px; align-items: baseline; min-width: 0; padding: 6px 10px; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+.preset-opt:last-of-type { border-bottom: 0; }
+.preset-opt[aria-selected="true"] { background: #8884; }
+.preset-name, .preset-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-name { font-weight: 600; flex: 0 1 auto; max-width: 45%; }
+.preset-head { flex: 1 1 0; }
+.preset-head { font-size: 12px; color: var(--ink3); }
+.preset-suggest mark { background: #f5a62366; color: inherit; border-radius: 2px; }
+.preset-target { gap: 4px; padding: 8px 10px; }
+.preset-target .preset-name { max-width: none; }
+.preset-target input { min-width: 0; width: 100%; box-sizing: border-box; }
+.preset-suggest .hint { padding: 2px 10px 4px; }
+.preset-target .hint { padding: 0; min-height: 1.2em; }
+@media (max-width: 767px) { .preset-opt { display: grid; gap: 1px; min-height: 44px; } .preset-name { max-width: none; } }
 /* Settings の目的別のまとまり (#3356): the group's title above its cards */
 .settings-group { margin: 12px 0 -4px; font-size: 13px; font-weight: 600; color: var(--ink2); }
 /* its table of contents: wraps on a narrow screen instead of scrolling sideways */

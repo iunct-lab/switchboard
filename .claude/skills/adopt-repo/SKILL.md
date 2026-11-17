@@ -1,15 +1,15 @@
 ---
 name: adopt-repo
-description: 既存の自分のリポジトリを Switchboard で回し始めるときに、元の決まり（CLAUDE.md・AGENTS.md・Issue テンプレート・ラベル・Project・枝とコミットの決まり）を読んで対応表を作り、元の決まりを書き換えずに、アプリが動くのに要るものだけを足す PR を出すまでの手順。利用者に既存のリポジトリの取り込みを頼まれたときに読む。新しく作るなら new-repo。次は request-to-backlog
+description: 既存の自分のリポジトリを Switchboard で回し始めるときに、元の決まり（CLAUDE.md・AGENTS.md・Issue テンプレート・ラベル・Project・枝とコミットの決まり）を読んで対応表を作り、元の決まりを書き換えずに、アプリが動くのに要るものを Switchboard の側に置く（選べばそのリポジトリへの足すだけの PR にする）までの手順。利用者に既存のリポジトリの取り込みを頼まれたときに読む。新しく作るなら new-repo。次は request-to-backlog
 ---
 
-# 既存のリポジトリを取り込む（診断 → 対応表 → 衝突を聞く → 足すだけの PR → 開始条件 → 報告）
+# 既存のリポジトリを取り込む（診断 → 対応表 → 置き場と衝突を聞く → 置く → 開始条件 → 報告）
 
 何を元のまま活かし、何を足し、何を元の決まりで上書きできるかの正本は `docs/design/new-repo.md` の「Adopting an existing repository's rules」（決まりの 3 つの種類の表。同じ文書の冒頭の「The three layers」とは別の表）。ここは**それを実行する順番とコマンド**だけで、表は写さない。手順をスクリプトやデーモンのコードにしない。
 
-前提: 自分は Switchboard の Task で、`$SWITCHBOARD_REPO_ROOT` が Switchboard のチェックアウトを指す。対象は登録済みの workspace のうち、自分のリポジトリ（`upstream` が無い）で GitHub と連携するもの。対象のディレクトリは指示文にある。以下 `<dir>` は対象の clone、`<repo>` は `<dir>` で `gh repo view --json nameWithOwner -q .nameWithOwner` の答え、`<branch>` は同じく `gh repo view --json defaultBranchRef -q .defaultBranchRef.name` の答え。
+前提: 自分は Switchboard の Task で、`$SWITCHBOARD_REPO_ROOT` が Switchboard のチェックアウトを指す。対象は登録済みの workspace のうち、自分のリポジトリ（`upstream` が無い）。GitHub と連携しない workspace（バックログを Switchboard に置くもの。指示文にある）も対象で、そのときは GitHub を読む・書く行（1 のラベル・Project・既存の Issue・枝の保護、4 のラベル・Project・変数・`projectVar`）を飛ばす。対象のディレクトリと workspace の id は指示文にある。リモート `origin` の無いリポジトリでは、`fetch` をせず、下の `origin/<branch>` を `HEAD` に読み替え、`<repo>` は無い（報告には workspace の名前を書く）。以下 `<dir>` は対象の clone、`<repo>` は `<dir>` で `gh repo view --json nameWithOwner -q .nameWithOwner` の答え、`<branch>` は同じく `gh repo view --json defaultBranchRef -q .defaultBranchRef.name` の答え。GitHub と連携しない workspace で `gh repo view` が答えない（`origin` が GitHub でない、`gh` で読めない）ときは、`<branch>` を `git -C <dir> symbolic-ref --short refs/remotes/origin/HEAD` の答えから `origin/` を除いたもの（答えが無ければ、対象の git に書かない `git -C <dir> ls-remote --symref origin HEAD` の `ref: refs/heads/<branch>` の行から）とし、`<repo>` は無い。
 
-対象外: 他者のリポジトリ（`upstream` がある。`docs/design/new-repo.md` の「Other people's repositories」）、GitHub を使わないリポジトリ（`new-repo` の 7-2）、まだ無いリポジトリ（`new-repo`）。
+対象外: 他者のリポジトリ（`upstream` がある。`docs/design/new-repo.md` の「Other people's repositories」）、まだ無いリポジトリ（`new-repo`）。
 
 **元の決まりを書き換えない**（全段に効く）:
 - 既存のラベルを消さない・名前を変えない・色と説明を上書きしない（`gh label delete`、`gh label edit`、`gh label create --force` は使わない）
@@ -42,9 +42,9 @@ description: 既存の自分のリポジトリを Switchboard で回し始める
 - **足す**: 種類 2 で元に無いもの。消さずに足す
 - **衝突**: 種類 2 で、同じ名前で中身が違うもの、元の決まりと両立しないもの。3 で聞く
 
-種類 2 は元の決まりで変えられない（キットとスクリプトが値や名前で読む。Story Points の尺度、Task の枝の `sb/` の接頭辞、マージ判定が読む PR のレビューの印など）。元の決まりが違えば、元の決まりは人の作業のために残し、Switchboard の Task は種類 2 に従う、と CLAUDE.md の節に書く。
+種類 2 は元の決まりで変えられない（キットとスクリプトが値や名前で読む。Story Points の尺度、Task の枝の `sb/` の接頭辞、マージ判定が読む PR のレビューの印など）。元の決まりが違えば、元の決まりは人の作業のために残し、Switchboard の Task は種類 2 に従う、と 4 の決まりの文（置き場 A）か CLAUDE.md の節（置き場 B）に書く。
 
-種類 3 で元の決まりが勝つ行は、4 の CLAUDE.md の節にその違いを 1 行ずつ書く（スキルは CLAUDE.md の値を読むので、書けば Task は元の決まりで動く）。
+種類 3 で元の決まりが勝つ行は、4 の決まりの文（置き場 A）か CLAUDE.md の節（置き場 B）にその違いを 1 行ずつ書く（置き場 A では Task の指示文に足され、置き場 B ではスキルが CLAUDE.md の値を読むので、書けば Task は元の決まりで動く）。
 
 表は作業ファイル（`W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.adopt.XXXXXX")`）に Markdown で書き、Task の成果物に登録する（返答の中の `switchboard-artifact` のフェンス。`docs/design/artifacts.md`）。
 
@@ -52,20 +52,47 @@ description: 既存の自分のリポジトリを Switchboard で回し始める
 
 ## 3. 衝突の聞き方
 
-4 に進む前に（GitHub とアプリに何かを書く前に）、衝突が 0 件でも、Task の会話で対応表と 4 で書くもの（ラベル・Project・リポジトリ変数・workspace の `projectVar`・PR に入れるファイルと CLAUDE.md の節の中身）を見せて OK を取り、ターンを終える（取り込みは対象のリポジトリの運用を決めるので、利用者がその場で答える。対象のリポジトリの Issue には書かない）。「衝突」の行があれば、同じ問いで行ごとに問い・選択肢・推奨を書く。よくある形:
+4 に進む前に（GitHub とアプリに何かを書く前に）、衝突が 0 件でも、Task の会話で対応表と、置き場の選択と、4 で書くもの（決まりの文の中身。PR を選ぶならラベル・Project・リポジトリ変数・workspace の `projectVar`・PR に入れるファイルも）を見せて OK を取り、ターンを終える（取り込みは対象のリポジトリの運用を決めるので、利用者がその場で答える。対象のリポジトリの Issue には書かない）。「衝突」の行があれば、同じ問いで行ごとに問い・選択肢・推奨を書く。よくある形（Project・ラベル・Issue の 4 行は、GitHub に書く置き場 B のときだけ当たる。置き場 A では聞かない）:
 
 | 衝突の形 | 選択肢 | 推奨 |
 |---|---|---|
 | Project の Status の選択肢が違う（Todo / In Progress / Done など） | A. Switchboard 用の Project を別に作り、元の Project は元のまま / B. 元の Project を使い、Switchboard の Status を利用者が画面で足す | A（元のボードを変えない。選択肢を API で差し替えると全部の項目の Status が消える） |
-| 同じ名前のラベルで意味が違う（`type:task` が元では別の意味、など） | A. 元のラベルのまま Switchboard の Issue にも付ける / B. 取り込みを止める（GitHub と連携しない workspace にするかは利用者が設定で決める。この手順の対象外） | 意味が近ければ A、遠ければ B |
-| 元の運用が Issue を使わない（PR だけで進める、Issue を閉じている） | A. Switchboard の要望・PBI・Task の Issue を GitHub に足す / B. 取り込みを止める（同上） | 元が Issue を閉じているなら B |
+| 同じ名前のラベルで意味が違う（`type:task` が元では別の意味、など） | A. 元のラベルのまま Switchboard の Issue にも付ける / B. GitHub に Switchboard の Issue を作らない（置き場 A にして、バックログを Switchboard に置く） | 意味が近ければ A、遠ければ B |
+| 元の運用が Issue を使わない（PR だけで進める、Issue を閉じている） | A. Switchboard の要望・PBI・Task の Issue を GitHub に足す / B. GitHub に Issue を作らない（同上） | 元が Issue を閉じているなら B |
 | Project の Priority の選択肢が P0〜P3 でない（High / Medium / Low など） | A. Switchboard 用の Project を別に作る（キットの P0〜P3。元の Project は元のまま） / B. 取り込みを止める | A（デーモンは P0〜P3 の名前で順位を付けるので、元の選択肢のままでは順に進まない） |
-| 元の決まりが main の作業ツリーの更新（pull）に OK を求める（動いているサービスが見ている、など） | 4 のマージの後の `ops-kit pull-main` を、この OK に含めるか、回さずに利用者に任せるか | 含める（含めなければ回さず、6 の報告に書く） |
-| AGENTS.md に独自の中身があり、CLAUDE.md を読ませるのがその方針に反する（「CLAUDE.md は Claude 用」など） | A. AGENTS.md の末尾に CLAUDE.md を読む 1 行を足す / B. 取り込みを止める（Codex の Task が CLAUDE.md の値を読めないまま動くのを避ける） | 方針が読ませないと言っていなければ A |
+| （置き場 B のときだけ）元の決まりが main の作業ツリーの更新（pull）に OK を求める（動いているサービスが見ている、など） | 4 のマージの後の `ops-kit pull-main` を、この OK に含めるか、回さずに利用者に任せるか | 含める（含めなければ回さず、6 の報告に書く） |
+| AGENTS.md に独自の中身があり、CLAUDE.md を読ませるのがその方針に反する（「CLAUDE.md は Claude 用」など） | A. CLAUDE.md を読む 1 行を足す（置き場 A では決まりの文に、置き場 B では AGENTS.md の末尾に） / B. 取り込みを止める（Codex の Task が CLAUDE.md の値を読めないまま動くのを避ける） | 方針が読ませないと言っていなければ A |
 
-期待: 利用者の OK があり、全部の衝突の行に答えがある。OK が無い、または答えが「取り込みを止める」なら 4 に進まず、6 の報告に止めた理由を書いて終える。
+その workspace に既に決まりが置いてあれば（`curl -fsS -H "authorization: Bearer $(cat "$BACKLOG_TOKEN_FILE")" "${BACKLOG_URL%/api/backlog}/api/workspaces" | jq -r '.[] | select(.id == "<id>") | .rules // empty'` に出る。利用者が設定で直した文かもしれない）、問いに今の文と 4 で置く文の両方を見せ、置き換えてよいか、今の文のどの行を残すかを聞く（4-A は文を丸ごと置き換える）。置き場 B を選ぶなら、今の文を消してよいかを聞く（残すと Task の指示文に CLAUDE.md の節と古い文の両方が入る。消すのは 4-B のマージの後に、4-A の `PUT` に空の文 `{"rules":""}` を送る）。
 
-## 4. 足すだけの PR
+置き場は 2 つで、問いに必ず入れる（答えが無ければ A）:
+
+- **A. Switchboard の側に置く（既定）**: 決まりの文を Switchboard に置き、このリポジトリの Task の指示文に足す。リポジトリの作業ツリー・枝・リモートには何も書かない。Switchboard の外（手元のランナーなど）ではその文は効かない
+- **B. リポジトリに PR で足す**: `ops.config.json`・CLAUDE.md の節・AGENTS.md の 1 行をそのリポジトリにコミットする。どこで動かしても効くが、相手の git に Switchboard の記載が入る
+
+置き場と GitHub の連携は組で決まる。A を選ぶと、バックログ（要望・PBI・Task）も Switchboard に置く（リポジトリに `ops.config.json` が無いと GitHub のバックログの道具は設定を読めないので、A のまま GitHub の Issue・Project を使う形は無い）。GitHub と連携している workspace で A なら、利用者が設定の「GitHub 同期」でその workspace の連携を切り、済んだと返事をもらってから 4 に進む（問いにそう書く。同じリポジトリを別の workspace でも登録していれば、その workspace の GitHub との同期も一緒に無効になることも問いに書く）。GitHub の Issue・Project を使い続けたいなら B。GitHub と連携しない workspace では A だけ（B は GitHub への書き込みと PR を前提にする）。
+
+期待: 利用者の OK と置き場の答えがあり、全部の衝突の行に答えがある。OK が無い、または答えが「取り込みを止める」なら 4 に進まず、6 の報告に止めた理由を書いて終える。
+
+## 4. 置く（Switchboard の側か、足すだけの PR）
+
+### 4-A. Switchboard の側に置く
+
+置く前に、その workspace のバックログが Switchboard にあることを自分で確かめる（利用者の「切った」の返事だけで進まない）: `curl -fsS -H "authorization: Bearer $(cat "$BACKLOG_TOKEN_FILE")" "${BACKLOG_URL%/api/backlog}/api/workspaces" | jq -r '.[] | select(.id == "<id>") | .backlog'` が `switchboard`。`github` なら置かず、3 の問いに戻って連携を切ってもらう（そのまま進むと、後の Task が GitHub に Issue を作る）。
+
+決まりの文を 1 つ作る。中身は、下の表の CLAUDE.md の行が節に書くもの全部（チェックリストのうち元に無くて使うものの値、種類 3 で元が勝った行、種類 2 と違う元の決まりの扱い、取り込む前の Issue の扱い）と、Codex の Task のための 1 行（AGENTS.md が CLAUDE.md を指していなければ「CLAUDE.md も読む」）。元の文書にある値は写さず、節の名前で指す。認証に使える値は書かない（長すぎる文と認証の値は API が断る）。
+
+```bash
+{ git -C <dir> status --porcelain; git -C <dir> log --oneline origin/<branch>..; } > "$W/before.txt"     # 置く前の控え（origin が無ければ log の行を外す）
+B=${BACKLOG_URL%/api/backlog}; K=$(cat "$BACKLOG_TOKEN_FILE")
+jq -n --rawfile rules "$W/rules.md" '{rules:$rules}' | curl -fsS -X PUT "$B/api/workspaces/<id>/rules" -H "authorization: Bearer $K" -H 'content-type: application/json' --data-binary @- | jq -e -r '.rules | strings | length'
+jq -Rs 'gsub("^\\s+|\\s+$"; "") | length' "$W/rules.md"     # 置く前の字数（API は前後の空白を落として置く）
+{ git -C <dir> status --porcelain; git -C <dir> log --oneline origin/<branch>..; } | diff - "$W/before.txt"     # 置いた後。出力なしで exit 0（origin が無ければ、控えと同じく log の行を外す）
+```
+
+期待: 1 行目が exit 0 で、2 つの字数が同じ（`curl` が失敗か、応答に `rules` の文が無ければ exit が 0 でない。そのときは置けていないので、理由を読んで直す）。`git -C <dir> status --porcelain` と `git -C <dir> log --oneline origin/<branch>..`（`origin` が無ければ見ない）の出力が置く前に控えたもの（`$W/before.txt`）と同じで（利用者の作業中の変更や push していないコミットは元からあってよい）、`git -C <dir> branch --list 'sb/*'` に取り込みの枝が無い（リポジトリには何も書いていない）。
+
+### 4-B. リポジトリに PR で足す
 
 3 で OK を受けた範囲だけを（2 の「足す」の行と、下の CLAUDE.md の行が節に書くもの全部と、3 の答え）、`<dir>` の worktree で 1 本の PR にする。worktree の場所とコミットの題の形は、元の決まりがあればそれ、無ければ `git -C <dir> worktree add --detach ../<name>-adopt origin/<branch>`。枝はこの Task も Task なので `sb/adopt-switchboard`（種類 2。元の枝の決まりは人の作業のもの）。
 
@@ -78,29 +105,31 @@ description: 既存の自分のリポジトリを Switchboard で回し始める
 | AGENTS.md | CLAUDE.md を指していなければ、末尾に CLAUDE.md を読むことを 1 行足す（種類 2）。無ければ `$SWITCHBOARD_REPO_ROOT/ops-kit/template/AGENTS.md.tmpl` を写し、`__REPO__` をリポジトリ名に置換する（`grep -n '__[A-Z_]*__' AGENTS.md` が 0 件） |
 | Issue テンプレート・`scripts/setup/` の入口 | 足さない（Task は `ops-kit backlog` と `ops-kit lint --fresh` を使う。`docs/design/new-repo.md` の種類 1） |
 
-PR の本文に 2 の対応表を貼る。PR の中身が 3 で OK を受けた範囲から外れたら（レビューの指摘で中身が変わったときも）、マージせず、変わったところを Task の会話で見せて OK を取り直す。レビューとマージは `cross-runner-review` → `review-triage-and-merge` → `bun $SWITCHBOARD_REPO_ROOT/scripts/merge-gate.ts <PR> --repo <repo> --merge`（Switchboard のリポジトリの外の PR。`--repo` を必ず付ける）。マージしたら `<dir>` で `ops-kit pull-main` を回して workspace の作業ツリーを最新にする（元の決まりが pull に OK を求めるなら、3 でその OK を受けたときだけ。受けていなければ回さず、6 の報告に書く。アプリは `<dir>` の `ops.config.json` を読むので、古いままだと足した設定が後の Task に効かない。exit 1 / 2 なら、出力の 1 行を 6 の報告に書く）。
+PR の本文に 2 の対応表を貼る。PR の中身が 3 で OK を受けた範囲から外れたら（レビューの指摘で中身が変わったときも）、マージせず、変わったところを Task の会話で見せて OK を取り直す。レビューとマージは `cross-runner-review` → `review-triage-and-merge` → `bun $SWITCHBOARD_REPO_ROOT/scripts/merge-gate.ts <PR> --repo <repo> --merge`（Switchboard のリポジトリの外の PR。`--repo` を必ず付ける）。マージしたら `<dir>` で `ops-kit pull-main` を回して workspace の作業ツリーを最新にする（元の決まりが pull に OK を求めるなら、3 でその OK を受けたときだけ。受けていなければ回さず、6 の報告に書く。アプリは `<dir>` の `ops.config.json` を読むので、古いままだと足した設定が後の Task に効かない。exit 1 / 2 なら、出力の 1 行を 6 の報告に書く）。3 で今の決まり（Switchboard の側の古い文）を消すと答えていれば、pull-main が済んで作業ツリーに CLAUDE.md の節が入ってから、4-A の `PUT` に `{"rules":""}` を送って消す（pull しなかった・できなかったときは消さず、6 の報告に書く。先に消すと、pull までの Task にどちらの決まりも届かない）。
 
 期待: 既存のファイルから消えた行が無い。`git -C <worktree> diff -U0 origin/<branch>... | grep -E '^-' | grep -vE '^--- (a/|/dev/null)'` に出るのは、末尾に改行の無かった元の最後の行（同じ文が `+` の側にもある）だけ（`- ` で始まる箇条書きの行も、消せばここに出る）。足した行に雛形のプレースホルダーが残っていない（`git -C <worktree> diff -U0 origin/<branch>... | grep -E '^\+.*__[A-Z_]+__'` が 0 件。元からある文は見ない）。
 
 ## 5. 開始条件
 
-`docs/design/new-repo.md` の「Conditions to start」の表を上から回し（`new-repo` の 5 と同じ）、条件ごとに通った / 通らない / 未確認を控える。取り込んだリポジトリでは 2 つを読み替える:
+`docs/design/new-repo.md` の「Conditions to start」の表を上から回し（`new-repo` の 5 と同じ）、条件ごとに通った / 通らない / 未確認を控える。取り込んだリポジトリでは 3 つを読み替える:
 
-- 「The backlog rules」: `scripts/setup/` の入口を足さないので、`ops.config.json` のある 4 の worktree で `(cd <worktree> && GH_REPO=<repo> ops-kit lint --fresh)` を回す（設定の無いところで `GH_REPO` を付けると exit 2）。取り込む前の Issue の違反は 4 の CLAUDE.md の行のとおり数えず直さない。その数を控え、条件は「通った（取り込む前の Issue の違反 <n> 件は数えない）」と書く。取り込みの後に Switchboard が作った Issue の違反は直す
-- 「The 4 items of `CLAUDE.md`」: 見出しの名前が元の CLAUDE.md と違えば grep は当たらない。4 項目（テストの 3 コマンド・作業の場所と枝・live check・反映の OK）それぞれの値がある節の名前を控え、無いものは 4 の節に足す
+- 「The backlog rules」: `scripts/setup/` の入口を足さないので、`ops.config.json` のある 4 の worktree で `(cd <worktree> && GH_REPO=<repo> ops-kit lint --fresh)` を回す（設定の無いところで `GH_REPO` を付けると exit 2）。バックログを Switchboard に置く workspace では `(cd <dir> && env -u GH_REPO BACKLOG_WORKSPACE=<id> ops-kit lint --fresh)`（設定が無ければキットの既定で検査する）。「The Project URL」は対象外。取り込む前の Issue の違反は 4 の決まりの文（4-B では CLAUDE.md の行）のとおり数えず直さない。その数を控え、条件は「通った（取り込む前の Issue の違反 <n> 件は数えない）」と書く。取り込みの後に Switchboard が作った Issue の違反は直す
+- 「The 4 items of `CLAUDE.md`」: 見出しの名前が元の CLAUDE.md と違えば grep は当たらない。4 項目（テストの 3 コマンド・作業の場所と枝・live check・反映の OK）それぞれの値がある節の名前を控え、無いものは 4 の節（4-A では決まりの文）に足す
+- 「The merge judgement」: GitHub と連携しない workspace（PR が無い）では「対象外」と控える。置き場 A で GitHub のリモートがあるリポジトリでは、最初の PR が出るまで「未確認（最初の PR の後）」
 
 スキルの印は、その workspace の Task を 1 つ起動したあとでないと出ない（未起動なら「未確認（最初の Task の後）」）。
 
 既存の Issue はここでも書き換えない。Switchboard で進めたいものは、利用者が選んだものだけ `request-to-backlog` で、`## 出典` の経路を `Issue #<元の番号>` にした要望 Issue にする（元の Issue は開いたまま残り、要望 Issue から指す）。この手順では選ばない。
 
-期待: 表の 6 行すべてに「通った / 通らない / 未確認」がある。
+期待: 表の 6 行すべてに「通った / 通らない / 未確認 / 対象外」がある。
 
 ## 6. 報告
 
 ```
 取り込み <repo>（<dir>、workspace <id>）
 対応表: そのまま <n> / 足す <n> / 衝突 <n>（答え: …）。成果物: <題>
-PR: <URL>（マージ済み / レビュー中）。main: <pull-main の出力の 1 行 / 回していない（理由）>。GitHub に足したもの: ラベル <名前…> / Project <URL>（作ったとき）
+置き場: <Switchboard の側（決まり <n> 字。リポジトリにも GitHub にも何も書いていない）/ リポジトリに PR>
+PR: <URL>（マージ済み / レビュー中）/ なし。main: <pull-main の出力の 1 行 / 回していない（理由）>。GitHub に足したもの: ラベル <名前…> / Project <URL>（作ったとき）
 | 開始してよい条件 | 結果 |
 既存の Issue: open <n> 件（type:request <n> / type:pbi <n> / type:task <n> / type なし <n>）。進めるものは request-to-backlog で要望にする（元の Issue は書き換えない）
 利用者確認: Project のビュー 2 つ（新しく Project を作ったときだけ。`docs/design/new-repo.md` の「What stays manual」の 1）
@@ -108,7 +137,7 @@ PR: <URL>（マージ済み / レビュー中）。main: <pull-main の出力の
 
 秘密の値は報告に書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。
 
-期待: 報告の 6 行（取り込み・対応表・PR・開始条件の表・既存の Issue・利用者確認）がどれも埋まっている（当たらない行は「なし」）。
+期待: 報告の 7 行（取り込み・対応表・置き場・PR・開始条件の表・既存の Issue・利用者確認）がどれも埋まっている（当たらない行は「なし」）。
 
 ## やらないこと
 

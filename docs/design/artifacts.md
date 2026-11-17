@@ -14,7 +14,7 @@ the Task (`会話` / `差分` / `成果物` / `ターミナル`).
 ## Where things live
 
 - `~/.switchboard/artifacts/<taskId>/<artifactId>/` — the copy. A file: `<name>`; a folder: its contents as they were
-  (symlinks are not copied). On the cloud host `sb-runner-sync` keeps the copies in S3 with the runners' records, and
+  (symlinks are not copied). In the EC2 setup `sb-runner-sync` keeps the copies in S3 with the runners' records, and
   a rebuild brings them back (`aws/host/runner-sync.sh`). The row holds `kind` (`file` / `dir` / `url`), `source` (the path as registered, or the URL),
   `entry` (the page to open; a folder's is `index.html`, else its only top-level `.html`, else 400 naming the candidates),
   `mime`, `size`, `removedAt`.

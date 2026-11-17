@@ -32,7 +32,7 @@ bun run --cwd apps/web build && bun scripts/perf-bench.ts --json perf-result.jso
 ```
 
 ```markdown
-## 前後（AWS ホスト、`bun scripts/perf-bench.ts --runs 5`、前 = main <sha>、後 = この枝 <sha>）
+## 前後（`bun scripts/perf-bench.ts --runs 5`、前 = main <sha>、後 = この枝 <sha>）
 
 | journey | ms 中央値 前 → 後 | ms p90 前 → 後 | requests | layoutCount | recalcStyleCount | layoutShift | bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -51,7 +51,7 @@ bundle には上限が無い（`scripts/perf-budget.json` に無い）。タグ�
 改善の PR では上限を下げない。タグの CI は「良くなった」（`improved:`）では落ちず、Release の `## CI` に下げられる上限として残すだけ。1 回の低い値で下げると、同じコードの次の高い値が `over` になる（揺れ）ので、`update` は直近 3 タグ（`LOWER_AFTER`）が続けて `ceiling − 2 × 幅` を下回った数だけを、その 3 つの最大 + 幅に下げる。マージの後、タグが 3 つ付いて tag CI が測ってから回す（`perf-records` 枝の `counts.tsv` を読むので、結果ファイルは渡さない）:
 
 ```bash
-bun scripts/perf-ratchet.ts update                  # このホストの上限（local）。タグが 3 つに満たない数は `waiting <key>: n/3` と出る
+bun scripts/perf-ratchet.ts update                  # このマシンの上限（local）。タグが 3 つに満たない数は `waiting <key>: n/3` と出る
 ```
 
 下がった `scripts/perf-budget.json` は別の PR で出す（上限を下げるだけの PR）。`update` は下げる方向にしか書き換えない。bundle と `bytes`（`open-task` / `open-task-huge`）は上限が無いので下げるものも無い（前のタグとの増分を `grew:` に出す。`docs/design/perf.md` の「Ratchet (the CI ceilings)」の冒頭）。`loaded.healthMaxMs` は下げない。上限は環境ごとに 2 組（`github` / `local`）ある。`counts.tsv` に行を書くのはタグの CI（`local`）だけなので、`update --env github` は `waiting` のままで `github` の上限は下がらない。`github` の上限は手で下げる（`docs/design/perf.md` の「Initial values」の末尾の by hand）。

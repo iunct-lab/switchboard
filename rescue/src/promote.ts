@@ -11,7 +11,7 @@ import { basename, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip, constants } from "node:zlib";
 import { extractTarball, fetchTarball, shaOfTag } from "./github-release.ts";
-import { appendHistory, buildFromTree, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
+import { appendHistory, buildFromTree, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restartNeeded, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
 import type { Supervisor } from "./supervisor.ts";
 
 export interface Ctx {
@@ -29,6 +29,8 @@ export interface PromoteTimes {
   confirmMs?: number;
   /** … and still be up and answering this much later. */
   settleMs?: number;
+  /** A switch without a restart: the daemon must report the new release in `/api/health` within this after SIGHUP. */
+  webMs?: number;
 }
 
 /** Older states come back from Litestream (point in time) or the daily archive in S3 (docs/design/releases-and-rescue.md, Promotion). */
@@ -217,6 +219,25 @@ export async function tasksThatStop(port: number, home: string): Promise<{ id: s
   }
 }
 
+/** The `webRelease` the daemon's health reports (the release its Web UI is served from); null = it does not answer or does not report one (a daemon that does not know SIGHUP). */
+export async function webReleaseOf(port: number, home: string): Promise<string | null> {
+  const tokenFile = join(home, "token");
+  const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: token ? { authorization: `Bearer ${token}` } : undefined, signal: AbortSignal.timeout(3000) });
+    const web = r.ok ? ((await r.json()) as { webRelease?: unknown } | null)?.webRelease : null;
+    return typeof web === "string" ? web : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Can the running daemon take `sha` by reading it again (SIGHUP) instead of restarting? The difference stays in the Web UI and the default settings, and the daemon says which release it serves. */
+export async function switchesWithoutRestart(ctx: Ctx, sha: string): Promise<boolean> {
+  if (await restartNeeded(ctx.repo, ctx.sup.running, sha)) return false;
+  return (await webReleaseOf(ctx.port, ctx.home)) !== null;
+}
+
 async function freePort(): Promise<number> {
   const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
   const port = s.port as number;
@@ -285,6 +306,37 @@ async function confirm(ctx: Ctx, confirmMs: number, settleMs: number): Promise<s
   return `not confirmed within ${Math.round(confirmMs / 1000)} s: ${reason}`;
 }
 
+/**
+ * After SIGHUP: the process that got it (`pid`) still runs and reports `sha` as its `webRelease` within `webMs`, then the
+ * screens' smoke passes and `GET /` answers 200. A process started again in the meantime (a crash and the supervisor's
+ * retry, which starts from the new `current`) would report `sha` too, but its tasks were stopped: that is not a switch without a restart.
+ */
+async function confirmWeb(ctx: Ctx, sha: string, webMs: number, pid: number | null): Promise<string | null> {
+  const end = Date.now() + webMs;
+  let seen: string | null = null;
+  const replaced = () => (ctx.sup.pid !== pid ? `the daemon process did not survive the reload (it was started again): ${ctx.sup.logTail(5).join(" | ")}` : null);
+  while (Date.now() < end) {
+    if (ctx.sup.state !== "running") return `the daemon stopped after the reload (${ctx.sup.state}): ${ctx.sup.logTail(5).join(" | ")}`;
+    const gone = replaced();
+    if (gone) return gone;
+    seen = await webReleaseOf(ctx.port, ctx.home);
+    if (seen === sha) break;
+    await Bun.sleep(200);
+  }
+  if (seen !== sha) return `the daemon did not report ${sha.slice(0, 7)} as its web release within ${Math.round(webMs / 1000)} s (it reports ${seen ? seen.slice(0, 7) : "none"})`;
+  const failed = await checkFeatures(ctx.port, ctx.home);
+  if (failed) return failed;
+  try {
+    const tokenFile = join(ctx.home, "token");
+    const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
+    const page = await fetch(`http://127.0.0.1:${ctx.port}/`, { headers: token ? { authorization: `Bearer ${token}` } : undefined, signal: AbortSignal.timeout(5000) });
+    if (!page.ok) return `GET / answered ${page.status}`;
+  } catch (e) {
+    return `GET / did not answer (${String((e as Error).message ?? e)})`;
+  }
+  return replaced();
+}
+
 /** Build the release `tag` of `source` from its tarball (no git). The tag must be a version tag; the tree is checked on the way in. */
 
 async function buildFromSource(source: string, tag: string, home: string, expectSha?: string): Promise<string> {
@@ -305,9 +357,15 @@ async function buildFromSource(source: string, tag: string, home: string, expect
   }
 }
 
-/** `expectSha`: from a source repository, the commit the caller checked; a tag that now points elsewhere is rejected before any build. */
-export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string): Promise<HistoryEntry> {
-  const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000 } = times;
+/**
+ * `expectSha`: from a source repository, the commit the caller checked; a tag that now points elsewhere is rejected before any build.
+ * `ifNoRestart`: the caller asked for a switch that keeps its tasks. The check before the build is asked again here, after
+ * the candidate: when it now says restart (the daemon stopped answering health in time, for example), nothing is switched
+ * and this throws (the status shows it as the last error). No history entry: a rejected release is never asked for again,
+ * and this one is only waiting for the tasks to be idle.
+ */
+export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string, ifNoRestart = false): Promise<HistoryEntry> {
+  const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000, webMs = 10_000 } = times;
   const from = currentOf(ctx.home);
   const before = previousOf(ctx.home);
   let sha: string;
@@ -333,12 +391,31 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, e
     return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: `could not start the candidate: ${String((e as Error).message ?? e)}` });
   }
   if (refused) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: refused });
+  const quiet = from !== null && (await switchesWithoutRestart(ctx, sha));
+  if (!quiet && ifNoRestart) throw new Error(`${sha.slice(0, 7)} needs a restart now; asked without one, so nothing was switched`);
+  if (quiet && from) {
+    // Only the Web UI and the default settings differ from what the daemon started from: it reads them again, and keeps its tasks.
+    switchTo(ctx.home, sha);
+    const pid = ctx.sup.pid;
+    const reloaded = ctx.sup.reload();
+    const failedWeb = reloaded ? await confirmWeb(ctx, sha, webMs, pid) : "no daemon process to reload";
+    if (!failedWeb) {
+      const removed = pruneReleases(ctx.home, [ctx.sup.running]).length;
+      return appendHistory(ctx.home, { action: "promote-web", from, to: sha, ok: true, reason: `checked on a spare port, then read again by the running daemon (no restart) on port ${ctx.port}${snapshot ? `; database snapshot ${snapshot}` : ""}${removed ? `; removed ${removed} old releases` : ""}` });
+    }
+    // Going back restarts the daemon, as after a restart: only a fresh process is sure to serve the older release again
+    // (a daemon that half took the new one may not take the old one by SIGHUP either), and the `auto-rollback` line then
+    // means what the stop reasons read it as, a switch that ended the daemon's run.
+    restoreLinks(ctx.home, from, before);
+    await ctx.sup.restart();
+    return appendHistory(ctx.home, { action: "auto-rollback", from: sha, to: from, ok: false, reason: `went back by itself (restarted on the older release): ${failedWeb}` });
+  }
   switchTo(ctx.home, sha);
   await ctx.sup.restart();
   const failed = await confirm(ctx, confirmMs, settleMs);
   if (!failed) {
     // Only a confirmed promotion removes anything: a rejection or rollback must not shrink what can be gone back to.
-    const removed = pruneReleases(ctx.home).length;
+    const removed = pruneReleases(ctx.home, [ctx.sup.running]).length;
     return appendHistory(ctx.home, { action: "promote", from, to: sha, ok: true, reason: `checked on a spare port, then confirmed on port ${ctx.port}${snapshot ? `; database snapshot ${snapshot}` : ""}${removed ? `; removed ${removed} old releases` : ""}` });
   }
   if (!from) return appendHistory(ctx.home, { action: "promote", from, to: sha, ok: false, reason: `${failed}; there is no earlier release to go back to` });
