@@ -4,7 +4,7 @@
  * the start; a firing starts the check's Task, whose reply registers the HTML report (written by the real
  * `ui-layers-report.ts`, the history under SWITCHBOARD_HOME) and the report leads `GET /api/reports`; the second firing's
  * report has the first's values and the difference; the same findings filed twice create no request the second time (a
- * fake `create`); a hot 7-day window skips the firing with the reason in the log; Insights shows the report's row.
+ * fake `create`); Insights shows the report's row.
  * Prints one `ok` line per check and exits 0, or throws.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAdapter } from "@switchboard/protocol";
 import { loadConfig } from "../packages/core/src/config.ts";
-import { UI_LAYERS_PROMPT } from "../packages/core/src/scheduler.ts";
+import { UI_LAYERS_CHECK_PROMPT } from "../packages/core/src/scheduler.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import { readUiMetrics } from "./ui-layers-metrics.ts";
 import { fileRequests, type Finding } from "./ui-layers-requests.ts";
@@ -30,7 +30,7 @@ const adapter: RunnerAdapter = {
     let exit!: (code: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
     // the daemon's judges start claude too: only the check's own Task writes a report
-    if (opts.prompt !== UI_LAYERS_PROMPT) {
+    if (!opts.prompt.includes(UI_LAYERS_CHECK_PROMPT)) {
       queueMicrotask(() => { emit({ t: "session.start", runner: "claude", runnerSessionId: "s-other", cwd: opts.cwd }); emit({ t: "session.end", status: "ok" }); exit(0); });
       return { send() {}, respondPermission() {}, async abort() { exit(null); }, async close() { exit(0); }, exited };
     }
@@ -70,7 +70,7 @@ let chrome: ReturnType<typeof Bun.spawn> | undefined;
 let ws: WebSocket | undefined;
 try {
   // 1. the schedule is there from the start, and a firing's report leads the reports
-  const check = ((await get("/api/schedules")) as any[]).find((s) => s.action === "ui-layers");
+  const check = ((await get("/api/schedules")) as any[]).find((s) => s.title === "床・天井・壁の点検");
   assert(check && check.runner === "claude" && check.enabled, `the monthly check is there from the start: ${JSON.stringify(check)}`);
   ok(`既定の定期実行: ${check.title} (${check.cron})`);
   const reportOf = async (n: number) => {
@@ -102,17 +102,7 @@ try {
   assert(a.created.length === 1 && b.created.length === 0 && b.duplicates === 1, `requests: ${JSON.stringify({ a, b })}`);
   ok("同じ所見の 2 回目: 要望 0 件（重複 1）");
 
-  // 4. a hot 7-day window: no Task, the reason in the log
-  core.db.upsertQuota("claude", "seven_day", 0.95, Date.now() / 1000 + 3600);
-  const tasksBefore = ((await get("/api/tasks")) as any[]).length;
-  const skipped = await fire(check.id);
-  assert(skipped.status === 409, `a hot window: ${skipped.status}`);
-  assert(((await get("/api/tasks")) as any[]).length === tasksBefore, "no Task for a hot window");
-  const line = ((await get("/api/schedules/log")) as string[]).at(-1) ?? "";
-  assert(line.includes("ui-layers を飛ばした") && line.includes("95%"), `the log: ${line}`);
-  ok(`閾値以上: 409、Task は増えない、ログ「${line}」`);
-
-  // 5. Insights shows the report's row
+  // 4. Insights shows the report's row
   const profile = join(home, "chrome");
   chrome = Bun.spawn([process.env.CHROME_BIN ?? "/usr/local/bin/chromium", "--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdout: "ignore", stderr: "ignore" });
   const port = await until(() => { try { return readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]; } catch { return null; } }, "Chrome port");

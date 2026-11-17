@@ -132,7 +132,7 @@ describe("itemMarks", () => {
   const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
     item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, confirmations: [], overlap: null, prereqs: [], stopSummary: [], ...over });
   const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
-  const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null }) as BacklogItem["prereqs"][number];
+  const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null, confirming: false }) as BacklogItem["prereqs"][number];
   const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>
     ({ key: `k${next}${state}${count}`, op: "op", target: "", reason: "depends", evidence: "", count, state, lastAt: 1, lastAnswer: null, changes: [], actions: [], next }) as unknown as BacklogItem["stopSummary"][number];
   const keys = (i: BacklogItem, auto = false) => itemMarks(i, auto).map((x) => x.key);

@@ -201,7 +201,7 @@ describe("pickTop (#3959)", () => {
     const waiting = items.map((i) => (i.number === 1 ? ({ ...i, waits: [{ number: 9, kind: "pr", open: true, state: "pending", reason: "overlap", pbi: null }], waitsAt: "2026-10-04T00:00:00Z" } as BacklogItem) : i));
     expect(nums(pickTop(waiting, q, "priority", 12, false))).toEqual([2, 3]);
     // a prerequisite not done yet (前提) and one a person has to look at (進められない) leave it out too
-    const prereq = (state: "pending" | "withdrawn") => [{ number: 77, kind: "issue" as const, need: "done" as const, state, via: null }];
+    const prereq = (state: "pending" | "withdrawn") => [{ number: 77, kind: "issue" as const, need: "done" as const, state, via: null, confirming: false }];
     const held = items.map((i) => (i.number === 3 ? ({ ...i, prereqs: prereq("pending") } as BacklogItem) : i.number === 1 ? ({ ...i, prereqs: prereq("withdrawn") } as BacklogItem) : i));
     expect(nums(pickTop(held, q, "priority", 12, false))).toEqual([2]);
     expect(nums(pickTop(held, q, "priority", 12, true))).toEqual([2, 4, 1, 3]);

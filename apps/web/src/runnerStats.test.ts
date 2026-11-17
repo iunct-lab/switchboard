@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { RoutingStats, RunnerId, RunnerStats } from "@switchboard/protocol";
 import { countLabel, fmtMedianDuration, runnerRows, THIN_SAMPLE } from "./runnerStats.ts";
 
-const rec = (runner: string, total: number): RunnerStats => ({ runner: runner as RunnerId, total, outcomes: { finished: total, needs_action: 0, failed: 0, unknown: 0 }, medianCostUsd: 1, medianDurationMs: 60_000 });
+const rec = (runner: string, total: number): RunnerStats => ({ runner: runner as RunnerId, total, outcomes: { finished: total, needs_action: 0, waits: 0, failed: 0, unknown: 0 }, medianCostUsd: 1, medianDurationMs: 60_000 });
 const stats = (byRunner: RunnerStats[]): RoutingStats => ({ rule: { total: 0, agreed: 0 }, llm: { total: 0, agreed: 0 }, otherTotal: 0, days: 30, byRunner });
 
 test("runnerRows: every runner gets a row, and fewer than 5 records is thin (#612)", () => {
@@ -13,7 +13,7 @@ test("runnerRows: every runner gets a row, and fewer than 5 records is thin (#61
   // (b) 4 is thin, 5 is not
   expect(rows.map((r) => [r.total, r.thin])).toEqual([[4, true], [5, false], [0, true], [7, false]]);
   // (a) a runner with no record in the window is a zero row, not a missing one
-  expect(rows[2]).toEqual({ runner: "dak", total: 0, outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 0 }, medianCostUsd: null, medianDurationMs: null, thin: true });
+  expect(rows[2]).toEqual({ runner: "dak", total: 0, outcomes: { finished: 0, needs_action: 0, waits: 0, failed: 0, unknown: 0 }, medianCostUsd: null, medianDurationMs: null, thin: true });
 });
 
 test("the count cell says a thin runner is not worth comparing, and a short median is in seconds (#612)", () => {

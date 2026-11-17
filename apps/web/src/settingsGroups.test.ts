@@ -43,11 +43,11 @@ describe("SETTINGS_GROUPS", () => {
     for (const saved of ["save({ judge:", "save({ evals:", "save({ judgeAndChoice:"]) expect(card("judgeAndChoice")).toContain(saved);
   });
 
-  test("every card but the approval mode default is folded", () => {
+  test("every card but the login group and the approval mode default is folded", () => {
     // #3849: a card is a <SettingsCard> (a <details>); only 承認モードの既定 stays an open <section> (a safety setting)
     const open = [...body.matchAll(/<section className="card[^"]*">\s*<h5>(.*?)<\/h5>/g)].map((m) => m[1]);
-    expect(open).toEqual(["{t(settings.approvalDefaults)}"]);
-    expect(body.match(/<section\b/g)).toHaveLength(1);
+    expect(open).toEqual(["{t(settings.login)}", "{t(settings.approvalDefaults)}"]);
+    expect(body.match(/<section\b/g)).toHaveLength(2);
     // the cards drawn by their own component fold the same way, and so does the ADK card drawn below the screen's body
     for (const f of ["WorkspaceCard", "PolicySettings"]) {
       const own = readFileSync(new URL(`./components/${f}.tsx`, import.meta.url), "utf8");
@@ -56,7 +56,17 @@ describe("SETTINGS_GROUPS", () => {
     }
     expect(source).toContain("<SettingsCard title={t(settings.adk)}>");
     const folded = [...body.matchAll(/<SettingsCard title=/g)].length + 3; // + Workspace, Workspace MCP, 回答の方針
-    expect(folded).toBe(SETTINGS_GROUPS.flatMap((g) => g.sections).length - 1);
+    expect(folded).toBe(SETTINGS_GROUPS.flatMap((g) => g.sections).length - 2);
+  });
+
+  test("the logins are only in the login group: none of their parts is drawn by another card", () => {
+    expect(SETTINGS_GROUPS[0]?.id).toBe("settings-login");
+    expect(body).toContain("<LoginSettings ");
+    const workspace = readFileSync(new URL("./components/WorkspaceCard.tsx", import.meta.url), "utf8");
+    for (const part of ["RunnerLogin", "ClaudeLoginRow", "GithubLoginRow", "logoutPath("]) {
+      expect(body).not.toContain(part);
+      expect(workspace).not.toContain(part);
+    }
   });
 
   test("the values that can be set are the same as before the reordering", () => {

@@ -1,4 +1,4 @@
-import { personWait, RunnerId, StopRecord, type StopChange, type StopNext, type StopSummary, type Task, type TaskStopMark } from "@switchboard/protocol";
+import { HUMAN_STOP_REASONS, personWait, RunnerId, StopRecord, taskSummary, type StopChange, type StopNext, type StopSummary, type Task, type TaskListItem, type TaskOutcome, type TaskStopMark } from "@switchboard/protocol";
 import { z } from "zod";
 import type { Db } from "./db.ts";
 
@@ -259,6 +259,15 @@ export function stopMarks(db: Db, tasks: Task[]): Record<string, TaskStopMark> {
   return out;
 }
 
+/** The Tasks as `GET /api/tasks` lists them: each summary with its `stop` from `stopMarks`; a Task with no mark gets no `stop` field. */
+export function tasksWithStops(db: Db, tasks: Task[]): TaskListItem[] {
+  const marks = stopMarks(db, tasks);
+  return tasks.map((t) => {
+    const stop = marks[t.id];
+    return stop ? { ...taskSummary(t), stop } : taskSummary(t);
+  });
+}
+
 /**
  * The series a schedule keeps stopping on: its latest Task and the one before it (consecutive Tasks, newest first) each
  * have a stop of it that did not end resolved, it is still waiting / exhausted, and nothing released it — a met condition
@@ -310,6 +319,33 @@ export function openStops(records: StopRecord[]): StopRecord[] {
   const latest = new Map<string, StopRecord>();
   for (const r of records) latest.set(r.id, r);
   return [...latest.values()].filter((r) => r.state === "waiting" || r.state === "retrying");
+}
+
+/**
+ * The `outcome` a Task's stop records decide (docs/design/task-outcome.md), or null when it has none (the outcome is left as
+ * it is). Of each stop's newest record, those not `resolved` and not answered since the stop was last reported are open: one that waits for the person
+ * (a human reason, `waiting` / `exhausted`, no condition to wait on) is `needs_action`; any other open one is `waits`;
+ * records that are all closed are `unknown` during a turn (`inTurn`: the reply after them is still to come) and `finished`
+ * after it. Written each time a stop is recorded (`TaskManager.recordStopEvent`), so the column is the one place that
+ * says whether the Task waits on the person.
+ */
+export function outcomeFromStops(records: StopRecord[], inTurn: boolean): TaskOutcome | null {
+  if (!records.length) return null;
+  const latest = new Map<string, StopRecord>();
+  const before = new Map<string, StopRecord>();
+  for (const r of records) {
+    const prev = latest.get(r.id);
+    if (prev) before.set(r.id, prev);
+    latest.set(r.id, r);
+  }
+  // Answered: the newest record brought the answer to this stop's earlier record, or the answer is not older than it. An answer
+  // carried over (the stop reported again, or a first stop at a place answered before: `recordStop` keeps the last answer) is older.
+  const brought = (r: StopRecord) => before.has(r.id) && r.answer!.ref !== before.get(r.id)!.answer?.ref;
+  const answered = (r: StopRecord) => !!r.answer && (brought(r) || r.answer.at >= r.at);
+  const open = [...latest.values()].filter((r) => r.state !== "resolved" && !answered(r));
+  if (open.some((r) => HUMAN_STOP_REASONS.has(r.reason) && (r.state === "waiting" || r.state === "exhausted") && r.conditions.length === 0)) return "needs_action";
+  if (open.length) return "waits";
+  return inTurn ? "unknown" : "finished";
 }
 
 const MAX_FENCE = 8_000;

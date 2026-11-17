@@ -85,7 +85,8 @@ cleanup() {
   [ -z "$UP_BASE" ] || aws s3 rm "s3://$SB_DATA_BUCKET/$KEY_BASE.base.tar" --only-show-errors >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-trap 'trap - INT TERM; exit 130' INT TERM
+# the polling's background sleep holds the output pipe open after bash exits; stop it so the reader sees EOF at once
+trap 'trap - INT TERM; kill $(jobs -p) 2>/dev/null || true; exit 130' INT TERM
 
 if [ -z "$COLLECT" ]; then
   # tracked files (a submodule's too) and untracked ones. A tracked file deleted in the work tree is still listed:

@@ -1985,7 +1985,7 @@ exit 0`,
     expect(other.err).not.toContain("retry with --size");
   });
 
-  test("sb-offload stops the build and exits 130 when it is interrupted, and removes the upload in every case", async () => {
+  test("sb-offload removes the upload when the build succeeds and when it fails", () => {
     awsFake();
     setLog("SUCCEEDED", ["sb-offload: exit 0"]);
     offload(["true"]);
@@ -1995,6 +1995,11 @@ exit 0`,
     setLog("FAILED", []);
     offload(["true"]);
     expect(rm(calls())).toHaveLength(1);
+  });
+
+  test("sb-offload stops the build and exits 130 when it is interrupted, and removes the upload", async () => {
+    awsFake();
+    const rm = (c: string[]) => c.filter((l) => l.startsWith("aws s3 rm "));
     // interrupted while the build runs
     setLog("IN_PROGRESS", ["building"]);
     rmSync(log, { force: true });
@@ -2008,14 +2013,22 @@ exit 0`,
     });
     // load (the flake of #2939): a deadline, not a count of sleeps — the TERM must come in the first poll's wait: the
     // call with the token is pull_log's last, and only `sleep 5 & wait $!` follows it
-    for (const t0 = Date.now(); !calls().some((l) => l.startsWith("aws logs get-log-events") && l.includes("--next-token")) && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
+    const signalled = () => calls().some((l) => l.startsWith("aws logs get-log-events") && l.includes("--next-token"));
+    for (const t0 = Date.now(); !signalled() && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
+    if (!signalled()) {
+      p.kill("SIGKILL");
+      throw new Error("sb-offload did not call aws logs get-log-events with --next-token within 20 s");
+    }
     // TERM, as a stopped Task sends; INT takes the same trap (bun's test runner hands its children an ignored INT)
+    const t0 = Date.now();
     p.kill("SIGTERM");
     expect(await p.exited).toBe(130);
     const c = calls();
     expect(c).toContain("aws codebuild stop-build --id sb-host-offload:build-1");
     expect(rm(c)).toHaveLength(1);
     expect(await new Response(p.stderr).text()).toContain("stopped sb-host-offload:build-1");
+    // no background sleep keeps the pipe open after the exit
+    expect(Date.now() - t0).toBeLessThan(1000);
     expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-offload."))).toEqual([]);
   }, 30_000);
 

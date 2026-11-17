@@ -148,5 +148,7 @@ for (const r of health.runners) {
 const shutdown = shutdownOnce(() => core.stop(), (c) => process.exit(c));
 process.on("SIGINT", () => void shutdown(0));
 process.on("SIGTERM", () => void shutdown(0));
+// sb-rescue's switch of `releases/current` sends SIGHUP to the supervised daemon; a closed `bun run dev` terminal must not reload.
+if (process.env.SWITCHBOARD_SUPERVISED === "1") process.on("SIGHUP", () => void core.reloadRelease());
 process.on("uncaughtException", (e) => void shutdown(1, e));
 process.on("unhandledRejection", (e) => void shutdown(1, e));

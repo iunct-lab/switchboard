@@ -31,6 +31,7 @@ describe("parseBridgeRequest", () => {
       "/api/runners/claude/login",
       "/api/runners/x/login/code",
       "/api/github/login",
+      "/api/github/logout",
       "/api/tasks/t1/device-auth",
       "/api/tasks/t1/permission",
       "/api/tasks/t1/permission-mode",

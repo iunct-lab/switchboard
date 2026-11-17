@@ -93,10 +93,10 @@ export class InvalidTaskTransitionError extends Error {
  */
 export const STORED_OUTCOMES: Readonly<Record<TaskStatus, ReadonlySet<StoredOutcome>>> = {
   idle: new Set<StoredOutcome>(["unknown"]),
-  running: new Set<StoredOutcome>(["unknown"]),
+  running: new Set<StoredOutcome>(["unknown", "needs_action", "waits"]),
   waiting: new Set<StoredOutcome>(["unknown"]),
-  background: new Set<StoredOutcome>(["finished", "needs_action", "unknown"]),
-  done: new Set<StoredOutcome>(["finished", "needs_action", "unknown"]),
+  background: new Set<StoredOutcome>(["finished", "needs_action", "waits", "unknown"]),
+  done: new Set<StoredOutcome>(["finished", "needs_action", "waits", "unknown"]),
   error: new Set<StoredOutcome>(["unknown"]),
   aborted: new Set<StoredOutcome>(["unknown"]),
 };

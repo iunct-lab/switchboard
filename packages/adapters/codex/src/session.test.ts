@@ -8,6 +8,10 @@ import { bedrockModelName, telemetryArgs, CODEX_BEDROCK_MODELS, codexSessionExis
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
 
+test("the adapter names `codex logout` for the daemon's logout route", () => {
+  expect(createCodexAdapter().logoutArgs).toEqual(["logout"]);
+});
+
 describe("codexSessionExists", () => {
   test("finds the thread's rollout under sessions/YYYY/MM/DD; false when missing or there is no sessions folder", () => {
     const home = mkdtempSync(join(tmpdir(), "sb-codex-home-"));

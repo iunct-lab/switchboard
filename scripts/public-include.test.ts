@@ -1,4 +1,4 @@
-// test-reads: ops.config.json docs/ .claude/ .github/ apps/ aws/ container/ ops-kit/ packages/ rescue/ scripts/
+// test-reads: ./
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,8 +24,8 @@ test.skipIf(ls.exitCode !== 0)("publicSync.include names every top-level entry o
 // A document is public only when its file is named: a directory in include (code, `ops-kit/`, `.claude/`) is published as it is,
 // so a Markdown / HTML file under one must be in include (public) or in exclude (decided private); docs/, which include no longer
 // names, sends only the files include names, so every file under it must be named either way. A document added later then fails
-// here, and cannot be merged, until someone decides. The directories it lives in are declared in test-reads above, so the
-// affected-tests selection runs this check when only a document is added. How the kit sends directories and named files: ops-kit/README.md,
+// here, and cannot be merged, until someone decides. test-reads above declares the whole tree, so the
+// affected-tests selection runs this check whenever a file or directory is added anywhere, a document included. How the kit sends directories and named files: ops-kit/README.md,
 // "Syncing to the public repository".
 test.skipIf(ls.exitCode !== 0)("a document under an included directory is named file by file", () => {
   const { include, exclude }: { include: string[]; exclude: string[] } = JSON.parse(readFileSync(join(root, "ops.config.json"), "utf8")).publicSync;
@@ -40,7 +40,7 @@ test.skipIf(ls.exitCode !== 0)("a document under an included directory is named 
       !exclude.some((entry) => underEntry(file, entry)),
   );
   expect(unnamed).toEqual([]);
-  // The affected-tests selection finds this check only through test-reads: a directory added to include must be declared there too.
+  // The affected-tests selection finds this check only through test-reads: it must declare the whole tree, so a new root entry is found too.
   const reads = parseReads(readFileSync(import.meta.path, "utf8"));
-  expect(["docs/", ...dirs].filter((dir) => !reads.includes(dir))).toEqual([]);
+  expect(reads).toEqual(["./"]);
 });

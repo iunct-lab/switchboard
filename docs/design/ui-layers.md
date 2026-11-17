@@ -36,6 +36,18 @@ A backlog item (PBI) that changes how the web UI looks or is operated carries on
 
 The labels are Japanese because the backlog is written in Japanese (`床` = floor, `天井` = ceiling, `壁` = walls). Items that do not change the screen do not carry the line. Nothing checks the line automatically; missing lines are found by periodic review rather than by a lint, until it is clear the line is being used.
 
+## The monthly check
+
+A prompt schedule (`床・天井・壁の点検` in Schedules, put in once at first start by `server.ts`; its cron, runner and prompt are what Schedules shows and can change) starts one Task that checks the screens against this document. The schedule's prompt only points here; these are the steps. Work in the repository root, and keep the working files under `W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX)`.
+
+1. Count the measures: `bun scripts/ui-layers-metrics.ts > "$W/metrics.json"`.
+2. Name the screen backlog items that have no placement line: `bun scripts/ui-layers-placement.ts --days 30 > "$W/placement.json"`. If it exits 2, write the reason into the rating sentences of the report and continue with `{"checked":0,"missing":[]}`.
+3. Write the ratings: read this document, the values from step 1, the previous values (the last line of `${SWITCHBOARD_HOME:-$HOME/.switchboard}/ui-layers/history.jsonl`; none means the first check), and what the screen code (`apps/web/src`) shows. Write 2 to 4 sentences each for the floor, the ceiling and the walls, as `{"floor":"…","ceiling":"…","walls":"…"}` in `"$W/ratings.json"`.
+4. Make the report: `bun scripts/ui-layers-report.ts --metrics "$W/metrics.json" --placement "$W/placement.json" --ratings "$W/ratings.json" --out "$W/ui-layers.html"`. Every run appends one line to the history, so run it once per check. To make it again, copy the history into `"$W"`, drop its last line (this check's), and pass that copy with `--history`. Register the HTML as an artifact with a `switchboard-artifact` fence in the reply, titled `床・天井・壁の点検 YYYY-MM-DD`.
+5. File requests: only what got worse than last time and what is newly found, as a findings JSON (`[{"key","title","detail","source"}]`, at most 3, most important first; `source` is `定期の検査` for a change in the measures and `エージェント` for something read in the code), with `bun scripts/ui-layers-requests.ts --findings "$W/findings.json"`. Run nothing here when there is none.
+
+A worse measure stops nothing: do not merge, release, fix a screen or create a backlog item. End the reply with the numbers of the requests filed (`なし` when none) and a three-line summary of the ratings.
+
 ## Relation to the UI language rule
 
 `ui-language.md` says not to add explanatory text to a screen and to send rarely used operations to Settings. That rule limits how much text a screen carries; this document decides where a feature is placed. They do not conflict: a feature placed on the ceiling still follows the text limit, and a lower floor is never reached by adding text that explains the floor.

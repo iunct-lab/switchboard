@@ -157,6 +157,42 @@ describe("logout", () => {
   });
 });
 
+describe("logout of a runner whose adapter names logoutArgs", () => {
+  test("POST /api/runners/codex/logout runs the adapter's args, then health says the login expired", async () => {
+    const home = mkdtempSync(join(tmpdir(), "switchboard-test-codexlogout-"));
+    const marker = join(home, "loggedout");
+    const argsFile = join(home, "logout-args");
+    const bin = join(home, "codex");
+    writeFileSync(bin, `#!/bin/sh\nif [ "$1" = "logout" ]; then echo "$@" > "${argsFile}"; touch "${marker}"; exit 0; fi\nexit 9\n`);
+    chmodSync(bin, 0o755);
+    const codex: RunnerAdapter = {
+      id: "codex",
+      loginArgs: [],
+      logoutArgs: ["logout"],
+      async detect() {
+        return { available: true, version: "fake", path: bin, login: existsSync(marker) ? "expired" : "ok" };
+      },
+      start() {
+        throw new Error("no runs");
+      },
+    };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [codex], { port: 0, selfdevChecks: false });
+    try {
+      const base = `http://127.0.0.1:${c.server.port}`;
+      const login = async () => ((await (await fetch(`${base}/api/health`)).json()) as { runners: { id: string; login?: string }[] }).runners.find((r) => r.id === "codex")?.login;
+      expect(await login()).toBe("ok");
+      const res = await fetch(`${base}/api/runners/codex/logout`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(readFileSync(argsFile, "utf8").trim()).toBe("logout");
+      expect(await login()).toBe("expired");
+    } finally {
+      await c.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the account behind `claude auth status` stays out of the API and the logs", () => {
   test("health shows the kind and nothing else of the status output; a missing executable is a 502 for logout", async () => {
     const home = mkdtempSync(join(tmpdir(), "switchboard-test-authkind-"));

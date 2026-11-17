@@ -1,5 +1,6 @@
 // test-reads: apps/web/public/sw.js
 import { describe, expect, test } from "bun:test";
+import { switchboardRowView } from "./loginRow.ts";
 import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, RUNNER_LOGIN_WARN_MS, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 
 describe("login route (#211)", () => {
@@ -68,6 +69,13 @@ describe("logout entry (#1850)", () => {
     expect(logoutPath(undefined)).toBeNull();
     const sw = await Bun.file(new URL("../public/sw.js", import.meta.url)).text();
     expect(new RegExp(sw.match(/const LIVE = \/(.+)\/;/)![1]!).test("/_auth/logout")).toBe(true);
+  });
+});
+
+describe("Switchboard's login row", () => {
+  test("the passkey configuration shows logging in and the logout button; no login (inside the host) shows no button", () => {
+    expect(switchboardRowView("passkey")).toMatchObject({ text: "ログイン中（パスキー）", action: "logout" });
+    expect(switchboardRowView(undefined)).toMatchObject({ text: "このホストの中ではログイン不要", action: null });
   });
 });
 

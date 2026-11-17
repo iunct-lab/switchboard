@@ -283,6 +283,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
     bedrockModels: CODEX_BEDROCK_MODELS,
     efforts: CODEX_EFFORTS,
     loginArgs: ["login", "--device-auth"],
+    logoutArgs: ["logout"],
     loginHosts: ["auth.openai.com"],
     cliDefaultModel: () => defaultModelFromConfig(options.codexHome),
     hasSession: (id) => codexSessionExists(id, options.codexHome),

@@ -537,6 +537,26 @@ test("listEventsTail / listEventsBefore: the last `limit` events, and the page b
   db.close();
 });
 
+test("ui-layers migration: a schedule of the old kind becomes a prompt schedule with the check's sentence, once; its id, title, cron, enabled, last run and runner stay", () => {
+  const file = join(dir, "ui-layers-kind.db");
+  let db = new Db(file);
+  db.sqlite.query("INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, action, enabled, last_run_at, last_task_id, next_run_at, created_at) VALUES ('s_ui', 'my check', '30 8 2 * *', 'ws_m', 'claude', '', 'ui-layers', 0, 1234, 't_last', 5678, 1)").run();
+  db.sqlite.query("INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, action, created_at) VALUES ('s_p', 'nightly', '0 3 * * *', 'ws_m', 'codex', 'mine', 'prompt', 1)").run();
+  db.close();
+  const row = (id: string) => db.sqlite.query("SELECT id, title, cron, workspace_id, runner, prompt, action, enabled, last_run_at, last_task_id, next_run_at FROM schedules WHERE id = ?").get(id);
+  db = new Db(file);
+  const moved = row("s_ui");
+  expect(moved).toMatchObject({ id: "s_ui", title: "my check", cron: "30 8 2 * *", workspace_id: "ws_m", runner: "claude", action: "prompt", enabled: 0, last_run_at: 1234, last_task_id: "t_last", next_run_at: 5678 });
+  expect((moved as { prompt: string }).prompt).toContain("docs/design/ui-layers.md の「The monthly check」");
+  expect(row("s_p")).toMatchObject({ runner: "codex", prompt: "mine", action: "prompt" });
+  // the person edits the prompt; the next start does not put the sentence back
+  db.sqlite.query("UPDATE schedules SET prompt = 'edited' WHERE id = 's_ui'").run();
+  db.close();
+  db = new Db(file);
+  expect(row("s_ui")).toMatchObject({ prompt: "edited", action: "prompt" });
+  db.close();
+});
+
 /** A done task row for the events of the weekly request-count readers. */
 const eventsTask = (db: Db, id: string) =>
   db.sqlite.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, origin, shadow_stopped, outcome, created_at, updated_at, status_at) VALUES (?, 't', 'claude', '/work/app', '[]', 'done', 'switchboard', 0, 'finished', 1, 1, 1)").run(id);
@@ -943,6 +963,41 @@ test("statusAt moves only on a status change: title, outcome, 確認済み and a
   db.close();
 });
 
+test("migration: outcome from stops — a done Task takes the outcome its open stop records decide; a reviewed one, one without records or open stops and a running one are left", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  const put = raw.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, outcome, reviewed_at, created_at, updated_at, status_at) VALUES (?, 'ws', ?, 'claude', '/tmp', '[]', ?, ?, ?, 1000, 9000, 9000)");
+  const stopJson = (id: string, reason: string, state: string) => JSON.stringify({ t: "stop.record", stop: { id, work: { workspaceId: "ws", issue: null, taskId: "x" }, op: "ask", target: "t", reason, evidence: "e", safety: "unknown", conditions: [], answer: null, actions: [], state, at: 1 } });
+  const ev = raw.query("INSERT INTO events (task_id, seq, ts, json) VALUES (?, 1, 1, ?)");
+  put.run("t_decision", "d", "done", "finished", null);
+  ev.run("t_decision", stopJson("s", "decision", "waiting"));
+  put.run("t_depends", "w", "done", "needs_action", null);
+  ev.run("t_depends", stopJson("s", "depends", "waiting"));
+  put.run("t_reviewed", "r", "done", "finished", 5000);
+  ev.run("t_reviewed", stopJson("s", "decision", "waiting"));
+  put.run("t_none", "n", "done", "unknown", null);
+  // its stop was resolved and a later turn without a stop was judged: the judge's outcome stays
+  put.run("t_closed", "c", "done", "needs_action", null);
+  ev.run("t_closed", stopJson("s", "decision", "resolved"));
+  put.run("t_running", "g", "running", "unknown", null);
+  ev.run("t_running", stopJson("s", "decision", "waiting"));
+  raw.exec("PRAGMA user_version = 6");
+  raw.close();
+  const db = new Db(path);
+  const outcomes = Object.fromEntries(["t_decision", "t_depends", "t_reviewed", "t_none", "t_closed", "t_running"].map((id) => [id, db.getTask(id)!.outcome]));
+  expect(outcomes).toEqual({ t_decision: "needs_action", t_depends: "waits", t_reviewed: "finished", t_none: "unknown", t_closed: "needs_action", t_running: "unknown" });
+  expect(db.getTask("t_decision")!.updatedAt).toBe(9000);
+  db.close();
+  // run once: a person's later change is not undone by the next open
+  const again = new Database(path);
+  again.query("UPDATE tasks SET outcome = 'finished' WHERE id = 't_decision'").run();
+  again.close();
+  const reopened = new Db(path);
+  expect(reopened.getTask("t_decision")!.outcome).toBe("finished");
+  reopened.close();
+});
+
 test("statusAt migration: a tasks table without status_at gets each row's updated_at", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();
@@ -1193,7 +1248,7 @@ test("delegated model note migration: the （試験） tail of the status note i
   expect(ruleMetrics(evs).delegatedModel).toBe("claude-sonnet-5-5");
   expect(JSON.stringify(evs[1]!.ev)).toContain(oldNote);
   expect(evs[2]!.ev).toEqual({ t: "status", text: "Task ごとの実装は  に任せます（試験）" });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
   again.close();
 });
 
@@ -1211,7 +1266,7 @@ test("human answer migration: extra none becomes complexity and detour none, ext
   expect(again.getEval("a", "human")!.json).toEqual({ rating: 1, comment: "c", intent: "wrong", complexity: "none", detour: "none", value: "unused", by: "user", ts: 1 });
   expect(again.getEval("b", "human")!.json).toEqual({ rating: 3, comment: "", by: "user", ts: 2 });
   expect(again.getEval("c", "human")!.json).toEqual({ rating: 4, comment: "", by: "user", ts: 3 });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
   again.close();
 });
 
@@ -1237,7 +1292,7 @@ test("repeated thinking status is folded once at open", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();
@@ -1465,7 +1520,7 @@ test("stored outcome: a waiting or failed Task is never written needs_action / f
     if (status === "error") expect(() => db.updateTask("t", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
   }
   db.updateTask("t", { status: "running" });
-  expect(() => db.updateTask("t", { outcome: "needs_action" })).toThrow(InvalidTaskOutcomeError);
+  expect(() => db.updateTask("t", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
   expect(() => db.updateTask("t", { status: "waiting", outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
   expect(db.getTask("t")).toMatchObject({ status: "running", outcome: "unknown" });
   expect(stored("t")).toBe("unknown");

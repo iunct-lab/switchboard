@@ -2,7 +2,7 @@
 // 変更したファイルの一覧から、回すテストファイルの一覧と理由を出す。テストは実行しない。
 //   bun scripts/test-select.ts <path>...        （引数が無ければ stdin から 1 行 1 パス）
 // 1 行目は `full: <理由>`（全テストに倒した）か `selected: <件数>`、続けて `<テスト>  <理由>`。
-// 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（一時ディレクトリだけなら `none`）。
+// 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（ツリー全体を読むなら `./`、一時ディレクトリだけなら `none`）。
 // テストの共通部品（TEST_HELPERS）も倒さず、ほかのコードと同じに import の木と宣言で選ぶ。import で辿れない読み方（子プロセスなど）は `test-reads` で宣言する。
 // 判定できないものは全テストに倒す（classify）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -99,7 +99,7 @@ export function parseReads(src: string): string[] {
   return reads;
 }
 
-const matchesRead = (path: string, read: string) => (read.endsWith("/") ? path.startsWith(read) : path === read);
+const matchesRead = (path: string, read: string) => read === "./" || (read.endsWith("/") ? path.startsWith(read) : path === read);
 
 /** テストがリポジトリを読みうる印。ファイルを読む道具と、外のプロセス、文字列でない動的 import。 */
 const READS_FILES = /\b(readFile|readFileSync|readdir|readdirSync|existsSync|statSync|lstatSync|copyFileSync|cpSync|spawn|spawnSync|execSync|execFileSync)\b|\bBun\.(file|Glob|\$)|\$`|\bimport\((?!["'])/;

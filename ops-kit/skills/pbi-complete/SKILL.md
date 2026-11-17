@@ -62,6 +62,7 @@ PBI の `## 元要望` の原文を読み、PBI の解釈が原文からずれ�
 1. Task 本文の `**前提**: #N, #M（リリース）` の 1 行（`<guard> overlap` が `prereqs` に出す）で依存順。同じ PBI の Task が前提ならスタックの順番にする
 2. 同順位は Project の Priority（P0 → P3）、次に PBI の `## Tasks` に書いた着手順
 3. 「利用者に確認して止める」がある Task は、その工程が最後になるように後ろへ（他を止めない）
+4. 使用上限のランナーを要る Task（そのランナーでの実ランナーの録画・そのランナーでしかできない確認）は、そのランナーの枠が足りない間（見方は CLAUDE.md の利用上限）は順番の最後へ回し、ほかの Task を先に積む。PBI の決定ログに「YYYY-MM-DD: #<Task> は <ランナー> の使用上限で後回し（枠が戻る <日時>）」を 1 行。その Task を 1 の `**前提**:` に書いている Task も一緒に後へ回す（「3. 積む」の「使用上限を待つとき」の「上限のランナーを要るもの」にはそれも数える）。レビューは上限のランナーを待たず、`cross-runner-review` の 0 の代替で進める
 
 PBI の決定ログに「YYYY-MM-DD: /pbi-complete 開始。順番: #a → #b → #c。枠: …」（`ops-kit backlog edit <PBI> --body-file "$W/body.md"`）。PBI の Status を In progress（`ops-kit backlog set <PBI> Status "In progress"`）。
 
@@ -89,6 +90,7 @@ ops-kit backlog set <Task> Status "In progress"
 
 **前提が未完のとき**（verdict `wait`）: 下の「重なったとき」の 1〜2 と同じく後回しにして、独立した Task を積む。全部の Task が `wait` か、残りがそれを前提にしていれば `<guard> release <PBI> "後回し: #<Task>（前提 #N が未完）" --waits <N>`（`N` は `prereqs` の `state: pending` の番号）で止める。前提が閉じれば定期実行が再開する。待つのは定期実行（backlog-next）なので、止まるときの停止の記録は `waiting` で残さず、引き渡した印（`reason` は `depends` のまま、`state` は `resolved`、`evidence` は「backlog-next の前提待ちに引き渡した: #N」）で書いてターンを終える（引き渡した待ちを Task の停止として積まない。#2149）。
 **期日を待つとき**（受け入れ条件が日数の経過を待つ。`issue-workflow` の「日数の経過を待つ行」）: 期日（ISO 8601 のタイムゾーンつき日時）を書いて `<guard> release <PBI> "期日待ち: <何を待つか>" --after <日時>` で止める。期日の後の発火で定期実行（backlog-next）が再開する。停止の記録は引き渡した印（`reason` は `depends`、`state` は `resolved`、`evidence` は「backlog-next の期日待ちに引き渡した: <日時>」）で書いてターンを終える。再開したら検証の欄の集計を回して `## 結果` を書き、受け入れ条件が全部埋まれば閉じる。手で始めた Task（PBI の工程でない）は、止まりの報告の conditions に `{"key":"after","value":"<日時>"}` を書いて `depends` で止める（期日は 7 日以内）。
+**使用上限を待つとき**（残る Task が、上限のランナーを要るものと、それを `**前提**:` に書いているものだけ）: ランナーの使用上限での停止（アプリの使用上限の再開の予約）で待たない。枠が戻る時刻（ISO 8601 のタイムゾーンつき日時）を `--after` にして `<guard> release <PBI> "使用上限待ち: #<Task>（<ランナー> の枠が <日時> に戻る）" --after <日時>` で引き渡す。停止の記録は引き渡した印（`reason` は `depends`、`state` は `resolved`、`evidence` は「backlog-next の使用上限待ちに引き渡した: <日時>」）で書いてターンを終える。日付の待ちで引き渡した PBI の Task は、In progress のものも期日まで重なりの相手に数えられない。再開の予約で待つと、In progress の Task がほかの PBI を重なりで止め続けるため。
 **前提を人が直すとき**（verdict `stop`: 取り下げ = 未マージで閉じた PR・not planned の Issue / missing = 見つからない / unknown = Issue に `（リリース）` を付けた。`ops-kit lint` が書いた時点で出すので、PR の番号に書き直す）: その Task は始めない。`## 判断待ち` は出さず、理由を release の文に書いて（`<guard> release <PBI> "止めた: #<Task> の前提 #N が取り下げ"`。`--waits` は付けない）報告の「利用者へ」に書く。直すのは利用者（本文の前提を書き換える・前提を閉じ直す）。マージ済みの PR の `（リリース）` はガードでは成立として進む（動いている版に入ったかはデーモンが判定し、入るまで定期実行はその PBI を始めない）
 
 **重なったとき**（verdict `defer`）: 待たない。
@@ -163,7 +165,7 @@ PBI #<n>「<題>」: Task <k> 件 → PR #a, #b, #c を下から順にマージ�
 | Task | PR | レビュー（codex/<extra>） | 修正 / Issue 化 / 対処不要 |
 受け入れ条件: <満たした n / 全 m>。未達: <行と理由>
 残したもの: #.., #..（Issue 化した指摘）
-後回し: #<Task>（<PR #n / Task #n> と <path> が重なる。相手のマージ後に再開） / なし
+後回し: #<Task>（<PR #n / Task #n> と <path> が重なる。相手のマージ後に再開）/ #<Task>（<ランナー> の使用上限。<日時> に再開） / なし
 main: <pull 済み（pulled <old>..<new>） / up to date / pull していない（コマンドの出力の 1 行、キットが PATH に無い、OK 待ち）>。動いているコードの更新: <済み / Task の会話で確認中 / 不要>
 利用者へ: <確認待ちの項目があれば、`issue-workflow` の「利用者確認の項目」の「確認を頼むとき」の形で。「判断待ちへの回答で確かめる行」でチェックした行は出さない>
 ```

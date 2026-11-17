@@ -11,6 +11,8 @@ import type { GhRunner } from "./backlog.ts";
  */
 export const GITHUB_LOGIN_ARGS = ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--scopes", "project,workflow"];
 export const GITHUB_LOGIN_HOSTS = ["github.com"];
+/** The logout: gh removes its stored credentials for github.com (`gh auth logout` without `--user` asks nothing when one account is logged in). */
+export const GITHUB_LOGOUT_ARGS = ["auth", "logout", "--hostname", "github.com"];
 
 export interface GithubStatus {
   /** `missing`: no gh to run here, so there is no login to offer either. */

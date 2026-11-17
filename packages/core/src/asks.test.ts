@@ -408,7 +408,7 @@ describe("dedupeAsks", () => {
 
 describe("rankAsks", () => {
   const decide = (n: number, at: string, over: Partial<BacklogItem> = {}) => item({ number: n, stage: "needs-decision", decision: { body: DECISION, at, issue: n }, ...over });
-  const pre = (n: number, state: "met" | "pending" = "pending") => ({ number: n, kind: "issue" as const, need: "done" as const, state, via: null });
+  const pre = (n: number, state: "met" | "pending" = "pending") => ({ number: n, kind: "issue" as const, need: "done" as const, state, via: null, confirming: false });
   const wait = (n: number) => ({ number: n, kind: "pr" as const, open: true, state: "pending" as const, reason: "overlap" as const, pbi: null });
 
   test("unblocks: the other PBIs of the same Workspace naming the question's PBI, Issue or stage Issue with an unmet prerequisite or wait; a met one, another Workspace's same number and itself are not counted", () => {

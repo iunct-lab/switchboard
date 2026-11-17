@@ -449,6 +449,11 @@ export class WorkspaceMcp {
     private baseUrl: () => string = () => "",
   ) {}
 
+  /** Swap the policy (a release reload); each call reads it again. */
+  setPolicy(policy: McpPolicy): void {
+    this.policy = policy;
+  }
+
   /** How a retry waits; a test replaces it. */
   sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
   /** How exec.run starts a process; a test replaces it to make a start fail for a passing reason. */

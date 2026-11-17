@@ -1,11 +1,11 @@
 // test-reads: none
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GhRunner } from "./backlog.ts";
 import { loadConfig } from "./config.ts";
-import { afterGithubLogin, GITHUB_LOGIN_ARGS, githubStatus } from "./github-login.ts";
+import { afterGithubLogin, GITHUB_LOGIN_ARGS, GITHUB_LOGOUT_ARGS, githubStatus } from "./github-login.ts";
 import { startServer } from "./server.ts";
 
 const answer = (code: number, stdout = "", stderr = ""): GhRunner => async () => ({ code, stdout, stderr });
@@ -118,6 +118,38 @@ describe("the API", () => {
     }
     // the database and its journal, after the daemon closed them
     for (const f of readdirSync(dir).filter((n) => n.startsWith("switchboard.db"))) expect(readFileSync(join(dir, f)).includes(SHOWN)).toBe(false);
+  });
+
+  test("the logout runs gh's `auth logout`, then the status reads none; a failing gh is a 502; without gh it is a 404", async () => {
+    const mark = join(dir, "gh-token");
+    const logoutGh = join(dir, "gh-logout");
+    // `auth logout` removes the mark; `auth status` exits 1 without it, like gh with no stored login
+    writeFileSync(logoutGh, `#!/bin/sh\nif [ "$1 $2" = "auth logout" ]; then echo "$@" > "${join(dir, "logout-args")}"; [ -f "${join(dir, "gh-fail")}" ] && exit 1; rm -f "${mark}"; exit 0; fi\nexit 9\n`);
+    chmodSync(logoutGh, 0o755);
+    writeFileSync(mark, "");
+    const statusGh: GhRunner = async () => (existsSync(mark) ? { code: 0, stdout: "", stderr: "  ✓ Logged in to github.com account octocat (keyring)\n" } : { code: 1, stdout: "", stderr: "not logged in\n" });
+    const core = await start(logoutGh, statusGh);
+    const base = `http://127.0.0.1:${core.server.port}`;
+    try {
+      expect(await (await fetch(`${base}/api/github/status`)).json()).toEqual({ login: "ok", account: "octocat" });
+      writeFileSync(join(dir, "gh-fail"), "");
+      expect((await fetch(`${base}/api/github/logout`, { method: "POST" })).status).toBe(502);
+      expect(await (await fetch(`${base}/api/github/status`)).json()).toEqual({ login: "ok", account: "octocat" });
+      rmSync(join(dir, "gh-fail"));
+      const res = await fetch(`${base}/api/github/logout`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(await Bun.file(join(dir, "logout-args")).text()).toBe(`${GITHUB_LOGOUT_ARGS.join(" ")}\n`);
+      expect(await (await fetch(`${base}/api/github/status`)).json()).toEqual({ login: "none" });
+    } finally {
+      await core.stop();
+    }
+    const none = await start(null, answer(127, "", "gh を起動できません"));
+    try {
+      expect((await fetch(`http://127.0.0.1:${none.server.port}/api/github/logout`, { method: "POST" })).status).toBe(404);
+    } finally {
+      await none.stop();
+    }
   });
 
   test("without gh there is no login to start, and the status says gh is missing", async () => {

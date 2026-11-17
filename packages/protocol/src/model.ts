@@ -70,14 +70,15 @@ export function isWorkingStatus(status: TaskStatus): boolean {
 /**
  * What a stopped task came to, for the person, apart from whether its runner is running (`status`):
  * `finished` = finished, nothing to do (not the status `done`: the two sets share no value); `needs_action` = waits on the person (an approval, a question); `failed` = error /
- * aborted; `unknown` = not judged yet. Set by the rule in `Db.updateTask` when the status changes, by the person, and
- * by reading the last reply.
+ * aborted; `waits` = waits on something other than the person (another job, a limit, a retry; no action needed);
+ * `unknown` = not judged yet. Set by the rule in `Db.updateTask` when the status changes, by the person, by reading the
+ * last reply, and from the stop records each time one is written (`outcomeFromStops`).
  */
-export const TaskOutcome = z.enum(["finished", "needs_action", "failed", "unknown"]);
+export const TaskOutcome = z.enum(["finished", "needs_action", "waits", "failed", "unknown"]);
 export type TaskOutcome = z.infer<typeof TaskOutcome>;
 
 /** The outcomes written to the `outcome` column. `needs_action` for a waiting Task and `failed` for an error / aborted one come from the status, so they are not stored there. */
-export const StoredOutcome = z.enum(["finished", "needs_action", "unknown"]);
+export const StoredOutcome = z.enum(["finished", "needs_action", "waits", "unknown"]);
 export type StoredOutcome = z.infer<typeof StoredOutcome>;
 
 /**
@@ -189,7 +190,7 @@ export type SuggestInput = z.infer<typeof SuggestInput>;
 export const RunnerStats = z.object({
   runner: RunnerId,
   total: z.number(),
-  outcomes: z.object({ finished: z.number(), needs_action: z.number(), failed: z.number(), unknown: z.number() }),
+  outcomes: z.object({ finished: z.number(), needs_action: z.number(), waits: z.number(), failed: z.number(), unknown: z.number() }),
   /** Median ledger total in API-equivalent USD; null when there are no tasks. */
   medianCostUsd: z.number().nullable(),
   /** Median creation → last event (trailing `status` events, such as the cleanup note after `done`, not counted), in ms; null when there are no tasks. */
@@ -713,7 +714,7 @@ export type SendTaskInput = z.infer<typeof SendTaskInput>;
 
 /** `POST /api/tasks/:id/outcome`: mark reviewed / not reviewed, set the outcome by hand, or both. Only a stored outcome can be set by hand (`failed` comes from the status). */
 export const SetOutcomeInput = z
-  .object({ outcome: StoredOutcome.optional(), reviewed: z.boolean().optional() })
+  .object({ outcome: StoredOutcome.exclude(["waits"]).optional(), reviewed: z.boolean().optional() })
   .refine((x) => x.outcome !== undefined || x.reviewed !== undefined, { message: "outcome or reviewed is required" });
 export type SetOutcomeInput = z.infer<typeof SetOutcomeInput>;
 
@@ -847,8 +848,13 @@ export type TaskJudgement = z.infer<typeof TaskJudgement>;
 export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync", "adopt-repo", "baseline"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
-/** One kind's own runner / model / effort; `model` / `effort` empty = that runner's CLI default. */
-export const AutoStartChoice = z.object({ runner: RunnerId, model: z.string().default(""), effort: z.string().default("") });
+/**
+ * One kind's own runner / model / effort / permission mode; `model` / `effort` empty = that runner's CLI default.
+ * No `runner` = the kind follows the common (or the schedule's) runner and changes only the rest; `permissionMode`
+ * absent = the runner's default. `budgetUsd` absent = the schedule's / the settings' default; `shadow` absent = the
+ * common 並走, "off" = none, a runner = mirror to it.
+ */
+export const AutoStartChoice = z.object({ runner: RunnerId.optional(), model: z.string().default(""), effort: z.string().default(""), permissionMode: z.string().optional(), budgetUsd: z.number().positive().optional(), shadow: z.union([z.literal("off"), RunnerId]).optional() });
 export type AutoStartChoice = z.infer<typeof AutoStartChoice>;
 
 /**
@@ -1080,7 +1086,7 @@ export const ModelCandidates = z.array(
 );
 export type ModelCandidates = z.infer<typeof ModelCandidates>;
 
-const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), effort: z.string() }).partial().nullable();
+const autoStartChoicePatch = z.object({ runner: RunnerId, model: z.string(), effort: z.string(), permissionMode: z.string().nullable(), budgetUsd: z.number().positive().nullable(), shadow: z.union([z.literal("off"), RunnerId]).nullable() }).partial().nullable();
 
 /** PATCH body: null removes the override (back to the adapter default / off). */
 export const SettingsPatch = z.object({
@@ -1863,6 +1869,10 @@ export type StopSummary = z.infer<typeof StopSummary>;
 export const TaskStopMark = StopSummary.pick({ key: true, reason: true, state: true, conditions: true, count: true, answered: true });
 export type TaskStopMark = z.infer<typeof TaskStopMark>;
 
+/** One entry of `GET /api/tasks`: the summary plus the Task's last stop (`stop`), left off when it has none. */
+export const TaskListItem = TaskSummary.extend({ stop: TaskStopMark.optional() });
+export type TaskListItem = z.infer<typeof TaskListItem>;
+
 /** One session log the daemon follows: which task it feeds and how far it has been read. */
 export const HistorySession = z.object({
   sessionId: z.string(),
@@ -2082,7 +2092,7 @@ export type BacklogSyncInfo = z.infer<typeof BacklogSyncInfo>;
  * what makes it met (`done` an Issue, `merged` a PR, `release` with `（リリース）`); `via` = the Task that names it, null
  * for the PBI's own.
  */
-export const BacklogPrereq = z.object({ number: z.number(), kind: z.enum(["issue", "pr"]).nullable(), need: z.enum(["done", "merged", "release"]), state: BacklogPrereqState, via: z.number().nullable() });
+export const BacklogPrereq = z.object({ number: z.number(), kind: z.enum(["issue", "pr"]).nullable(), need: z.enum(["done", "merged", "release"]), state: BacklogPrereqState, via: z.number().nullable(), /** `met` because the PBI is left with only the user's checks. */ confirming: z.boolean() });
 export type BacklogPrereq = z.infer<typeof BacklogPrereq>;
 
 export const BacklogItem = z.object({

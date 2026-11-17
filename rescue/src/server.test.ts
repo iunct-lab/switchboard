@@ -74,6 +74,8 @@ test("status shows version, state, history and the log; the page is one self-con
   expect(html).toContain("前の版に戻す");
   expect(html).toContain("強制クリア"); // the /tmp section (#797)
   expect(html).toContain("api/tmp/clean");
+  expect(html).toContain('id="core-row"'); // the core line, shown only when it differs from the current version
+  expect(html).toContain("画面と既定の設定だけ（再起動なし）");
   expect(() => new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))).not.toThrow(); // the script parses
   expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/); // nothing to fetch from a daemon that may be down
 });
@@ -351,14 +353,14 @@ test("a recent cookie that is expired, signed with another key, is a session val
  * The page's script from its helpers to act() (render, refresh, confirmPasskey) runs against fakes: what was sent, in
  * order, and what the error line shows after the next 2 s refresh, with the service's status saying `lastError`.
  */
-function loadPage(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null; hostname?: string; stop?: boolean } = {}) {
+function loadPage(answers: Record<string, Array<{ status: number; body?: unknown }>>, o: { credential?: unknown; lastError?: string | null; hostname?: string; stop?: boolean; current?: string | null; running?: string | null } = {}) {
   const html = readFileSync(new URL("./page.html", import.meta.url), "utf8");
   const src = html.slice(html.indexOf("const short ="), html.indexOf('$("restart").onclick')) + html.slice(html.indexOf("var stopPressed"), html.indexOf('$("agent-start").onclick'));
   const sent: string[] = [];
   const el = () => ({ textContent: "", value: "", hidden: true, disabled: false, onclick: null as null | (() => Promise<void>), replaceChildren() {}, append() {} });
   const els = new Map<string, ReturnType<typeof el>>();
   const $ = (id: string) => els.get(id) ?? (els.set(id, el()), els.get(id)!);
-  const status = { current: null, previous: null, releases: [], snapshots: [], history: [], log: [], busy: null, lastError: o.lastError ?? null, unhealthy: null, port: 1, state: "running", rebuild: false, stop: o.stop ?? false, agent: { running: false, exitCode: null, output: "" } };
+  const status = { current: o.current ?? null, running: o.running ?? null, previous: null, releases: [], snapshots: [], history: [], log: [], busy: null, lastError: o.lastError ?? null, unhealthy: null, port: 1, state: "running", rebuild: false, stop: o.stop ?? false, agent: { running: false, exitCode: null, output: "" } };
   const fetch = async (path: string) => {
     if (path === "api/status") return Response.json(status);
     sent.push(path);
@@ -384,6 +386,19 @@ test("after a change that went through, the page asks the Starter to renew the l
   expect(refused.sent).toEqual(["api/restart"]);
   const local = await runAct({ "api/restart": [{ status: 202 }] }, { hostname: "127.0.0.1" });
   expect(local.sent).toEqual(["api/restart"]);
+});
+test("the core line shows only when the daemon runs from another version than the current one (a web-only promotion)", async () => {
+  const shown = async (o: Parameters<typeof loadPage>[1]) => {
+    const { page, $ } = loadPage({}, o);
+    await page.refresh();
+    return { hidden: $("core-row").hidden, running: $("running").textContent, label: $("current-label").textContent };
+  };
+  expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).hidden).toBe(false);
+  expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).running).toContain("bbbbbbb");
+  expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).label).toBe("Web UI と既定の設定"); // the current version is then only the UI's
+  expect((await shown({ current: "a".repeat(40), running: "a".repeat(40) })).hidden).toBe(true);
+  expect((await shown({ current: "a".repeat(40), running: "a".repeat(40) })).label).toBe("今の版");
+  expect((await shown({ current: "a".repeat(40), running: null })).hidden).toBe(true);
 });
 const needsCheck = { status: 401, body: { error: "操作の前にパスキーで確かめてください", reason: "recent" } };
 const challengeOk = { status: 200, body: { challenge: "AAAA", rpId: "d111.cloudfront.net" } };
