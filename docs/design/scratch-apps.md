@@ -37,7 +37,7 @@ A throwaway page is not tested, so a wrong button must not become an operation n
   waiting ones too. There is no "don't ask again" and no
   per-page allow list (a safety confirm is not folded, `ui-layers.md`).
 - Refused with 403 without a dialog (the read of the same path is unchanged): a runner's sign-in
-  and sign-out (`/api/runners/:id/login…`, `…/logout`), GitHub's sign-in (`/api/github/login`), a Task's device sign-in (`/api/tasks/:id/device-auth`), the answer to an approval
+  and sign-out (`/api/runners/:id/login…`, `…/logout`), GitHub's sign-in and sign-out (`/api/github/login`, `/api/github/logout`), a Task's device sign-in (`/api/tasks/:id/device-auth`), the answer to an approval
   (`/api/tasks/:id/permission`, `/api/asks/answer`) and a Task's permission mode (`/api/tasks/:id/permission-mode`), saved answer policies (`/api/policies…`), the settings
   (`/api/settings`), custom runners (`/api/custom-runners`), a workspace's runner files
   (`/api/workspaces/:id/runner-config`), a view key (`/api/artifacts/:id/view`), and a Task's new MCP token (`/api/tasks/:id/mcp/rotate`). A sign-in or an approval is the

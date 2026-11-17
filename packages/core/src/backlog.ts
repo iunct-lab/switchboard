@@ -189,6 +189,20 @@ export function confirmationsOf(body: string): Array<{ n: number; text: string; 
 }
 
 /**
+ * Whether a PBI is left with only the user's own checks: every Task closed (at least one) and every unchecked acceptance
+ * criterion a `（利用者確認: …）` line (at least one). What it waits for is the person, not more work, so a PBI that names
+ * it as a prerequisite goes on (`withPrereqs`; scripts/parallel-guard.ts reads the same). `needs-decision` is not counted
+ * (the decision can change what is left); `on-hold` is not looked at.
+ */
+export function onlyConfirmationsLeft(i: { labels: string[]; body: string; subIssues: { total: number; closed: number } }): boolean {
+  if (!i.labels.includes("type:pbi") || i.labels.includes("needs-decision")) return false;
+  if (i.subIssues.total === 0 || i.subIssues.closed < i.subIssues.total) return false;
+  const left = criteria(i.body).filter((c) => !c.checked);
+  const mine = new Set(confirmationsOf(i.body).map((c) => c.n));
+  return left.length > 0 && left.every((c) => mine.has(c.n));
+}
+
+/**
  * The time a confirmation line says to wait for: `（利用者確認: 期日 <ISO 8601 with a zone> 以降 — …）`, right after the
  * parenthesis as `confirmDecisionsOf`'s form is. Inline code does not count. null = no such time, or one `afterTime` cannot read
  * (no zone, not a time): the line is asked for as before.
@@ -1407,6 +1421,8 @@ export interface WaitTarget {
   stateReason: string | null;
   /** A merged PR's merge commit; null otherwise. */
   mergeCommit: string | null;
+  /** An open Issue left with only the user's checks (`onlyConfirmationsLeft`); false for a PR. */
+  confirmOnly: boolean;
 }
 
 /**
@@ -1567,9 +1583,12 @@ function withPrereqs(items: BacklogItem[], issues: Map<number, BacklogIssueData>
     const judge = (p: { number: number; release: boolean }, via: number | null): BacklogPrereq => {
       const t = targets.get(p.number);
       const need = p.release ? "release" : t?.kind === "pr" ? "merged" : "done";
-      const state = prereqState(t, need, released);
+      const read = prereqState(t, need, released);
+      // left with only the user's checks: met, told apart by `confirming`; `waits` keep `prereqState`
+      const confirming = read === "pending" && t?.kind === "issue" && t.confirmOnly;
+      const state = confirming ? "met" : read;
       const cycle = state === "pending" && t?.kind === "issue" && leadsTo(p.number, via === null ? [i.number] : [i.number, via]);
-      return { number: p.number, kind: t?.kind ?? null, need, state: cycle ? "cycle" : state, via };
+      return { number: p.number, kind: t?.kind ?? null, need, state: cycle ? "cycle" : state, via, confirming };
     };
     const tasks = openTasks(i.number);
     const ofTasks = tasks.map((t) => named(t).filter((p) => !tasks.includes(p.number)).map((p) => judge(p, t)));
@@ -1683,9 +1702,9 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       // as GitHub last answered, not as shown
       const stored = storedIssues.get(r.externalId);
       readOf.set(r.remote.number, { externalId: r.externalId, fetchedAt: stored?.fetchedAt ?? null, fetchState: stored?.fetchState ?? "unfetched" });
-      targets.set(r.remote.number, { kind: "issue", state: r.remote.state, isDraft: false, labels: r.remote.labels, closes: [], stateReason: r.remote.stateReason, mergeCommit: null });
+      targets.set(r.remote.number, { kind: "issue", state: r.remote.state, isDraft: false, labels: r.remote.labels, closes: [], stateReason: r.remote.stateReason, mergeCommit: null, confirmOnly: false });
     } else if (r.objectKind === "pull-request" && r.remote) {
-      targets.set(r.remote.number, { kind: "pr", state: r.remote.state, isDraft: r.remote.isDraft, labels: r.remote.labels, closes: r.remote.closes, mergeCommit: r.remote.mergeCommit, stateReason: null });
+      targets.set(r.remote.number, { kind: "pr", state: r.remote.state, isDraft: r.remote.isDraft, labels: r.remote.labels, closes: r.remote.closes, mergeCommit: r.remote.mergeCommit, stateReason: null, confirmOnly: false });
       pulls.push(r.remote);
     }
     else if (r.objectKind === "comment" && r.remote) comments.set(r.remote.issue, [...(comments.get(r.remote.issue) ?? []), r.remote]);
@@ -1696,6 +1715,11 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       fields.set(r.remote.issue, [{ project: { number: r.remote.project }, fieldValues: { nodes: values } }]);
       statuses.set(r.remote.issue, r.remote.fields.Status ?? null);
     }
+  }
+  for (const [n, t] of targets) {
+    const i = issues.get(n);
+    // a Task not stored counts as open
+    if (t.kind === "issue" && i) t.confirmOnly = onlyConfirmationsLeft({ labels: i.labels, body: i.body, subIssues: { total: i.subIssues.length, closed: i.subIssues.filter((m) => issues.get(m)?.state === "CLOSED").length } });
   }
   for (const c of comments.values()) c.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const commentsOf = (n: number) => comments.get(n) ?? [];

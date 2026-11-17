@@ -27,7 +27,8 @@
 <h1>Switchboard 救援</h1>
 <div class="card">
   <div>状態: <span id="state" class="state">読み込み中…</span></div>
-  <div>今の版: <code id="current">-</code></div>
+  <div><span id="current-label">今の版</span>: <code id="current">-</code></div>
+  <div id="core-row" hidden>core（デーモンが起動した版）: <code id="running">-</code></div>
   <div>前の版: <code id="previous">-</code></div>
   <div id="busy" class="dim"></div>
   <div id="error" class="bad"></div>
@@ -101,7 +102,7 @@ const $ = (id) => document.getElementById(id);
 const token = new URLSearchParams(location.search).get("token");
 const headers = { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) };
 const short = (sha) => (sha ? sha.slice(0, 7) : "なし");
-const ACTIONS = { install: "最初の版", promote: "昇格した", rejected: "昇格を却下", "auto-rollback": "自動で戻した", rollback: "戻した", restart: "再起動", "restore-db": "DB を戻した" };
+const ACTIONS = { install: "最初の版", promote: "昇格した", rejected: "昇格を却下", "auto-rollback": "自動で戻した", rollback: "戻した", restart: "再起動", "restore-db": "DB を戻した", "promote-web": "画面と既定の設定だけ（再起動なし）" };
 let subjects = {};
 let tags = {};
 /** Why this page's last action failed: shown over the 2 s refresh, before the service's (older) lastError, until the next action. */
@@ -131,6 +132,10 @@ function render(s) {
   $("state").textContent = up ? "動いています（ポート " + s.port + "）" : "応答なし: " + s.unhealthy + "（supervisor: " + s.state + "）";
   $("state").className = "state " + (up ? "ok" : "bad");
   $("current").textContent = name(s.current);
+  $("core-row").hidden = !s.running || s.running === s.current;
+  // the two differ after a promotion without a restart: the current version is then only what the Web UI and the defaults come from
+  $("current-label").textContent = $("core-row").hidden ? "今の版" : "Web UI と既定の設定";
+  $("running").textContent = name(s.running);
   $("previous").textContent = name(s.previous);
   $("busy").textContent = s.busy ? "実行中: " + s.busy + "…" : "";
   $("error").textContent = refused || s.lastError || "";

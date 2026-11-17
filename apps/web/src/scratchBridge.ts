@@ -31,7 +31,7 @@ export const DECLINED = "利用者が断った";
  */
 export const BRIDGE_REFUSED: RegExp[] = [
   /^\/api\/runners\/[^/]+\/(login|logout)(\/|$)/, // a runner's sign-in, its code, and its sign-out
-  /^\/api\/github\/login(\/|$)/, // gh's sign-in (GitHub)
+  /^\/api\/github\/(login|logout)(\/|$)/, // gh's sign-in and sign-out (GitHub)
   /^\/api\/tasks\/[^/]+\/device-auth$/, // a Task's device sign-in wait
   /^\/api\/tasks\/[^/]+\/permission(-mode)?$/, // the answer to a Task's approval, and how it asks for them
   /^\/api\/asks\/answer$/, // the same from the asks list, and a saved policy with it

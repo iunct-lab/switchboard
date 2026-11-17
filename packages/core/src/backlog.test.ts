@@ -951,6 +951,65 @@ test("autoStart by kind: a kind whose runner is not detected starts on the commo
   expect(task).toMatchObject({ runner: "claude", model: "m-common" });
 });
 
+test("autoStart permission by kind: 状況確認 starts with its own mode and 実装 with the runner's default; a stale mode starts on the default", async () => {
+  const claude = holdingClaude();
+  const adapter = { ...claude.adapter, permissionModes: [{ value: "default", label: "default", description: "d" }, { value: "plan", label: "plan", description: "p" }, { value: "yolo", label: "yolo", description: "y", danger: true }], defaultPermissionMode: "default" };
+  const base = await boot(fakeGh().gh, adapter);
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { check: { permissionMode: "plan" } } } });
+  const check = await (await start(base, 307, { action: "check" })).json() as Task;
+  const impl = await (await start(base, 304, { action: "complete" })).json() as Task;
+  expect(check).toMatchObject({ runner: "claude", permissionMode: "plan" });
+  expect(impl).toMatchObject({ runner: "claude", permissionMode: "default" });
+  for (let i = 0; claude.starts.length < 2 && i < 100; i++) await Bun.sleep(10);
+  expect(claude.starts.map((x) => x.permissionMode).sort()).toEqual(["default", "plan"]);
+  // a saved mode the runner no longer lists: the Task starts on the default, no error
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { close: { permissionMode: "gone" } } } });
+  const stale = await start(base, 308, { action: "close" });
+  expect(stale.status).toBe(201);
+  expect(await stale.json()).toMatchObject({ permissionMode: "default" });
+  // a saved mode that skips approvals on the runner it starts on (never saved by PATCH, but the runner it follows can change): the default
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { check: { permissionMode: "yolo" } } } });
+  const skipping = await start(base, 305, { action: "check" });
+  expect(skipping.status).toBe(201);
+  expect(await skipping.json()).toMatchObject({ permissionMode: "default" });
+});
+
+test("autoStart budget by kind: a button Task and a backlog-next Task get the kind's budget, else the schedule's", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { complete: { budgetUsd: 7 }, check: { budgetUsd: 2 } } } });
+  // backlog-next: 実装 takes its kind's budget over the schedule's; Task に分解 has none, so the schedule's
+  closeTried();
+  expect((await runSchedule(base, await backlogNextSchedule(base, 5))).status).toBe(201);
+  const byTitle = (p: string) => core!.db.listTasks().find((t) => t.title.startsWith(p))!;
+  expect(byTitle("#304 実装").budgetUsd).toBe(7);
+  expect(byTitle("#303 Task に分解").budgetUsd).toBe(5);
+  // a stage button: the kind's budget; a kind without one has none (the settings' default is unset)
+  expect(await (await start(base, 307, { action: "check" })).json()).toMatchObject({ budgetUsd: 2 });
+  expect((await (await start(base, 308, { action: "close" })).json() as Task).budgetUsd).toBeNull();
+});
+
+test("autoStart shadow by kind: a button Task is mirrored to the kind's shadow, off is not mirrored, backlog-next is never mirrored", async () => {
+  const dak: RunnerAdapter = { id: "dak", detect: async () => ({ available: true }), start() { return { send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise(() => {}) }; } };
+  const base = await boot(fakeGh().gh, [holdingClaude().adapter, dak]);
+  core!.db.setSetting("settings", { shadowRunner: "dak", autoStart: { runner: "claude", byKind: { close: { shadow: "off" }, complete: { shadow: "dak" }, "to-tasks": { shadow: "dak" } } } });
+  const mirrored = () => core!.db.listTasks().filter((t) => t.shadowOf !== null).map((t) => t.shadowOf);
+  // backlog-next never mirrors, whatever the kinds and the common 並走 say
+  closeTried();
+  expect((await runSchedule(base, await backlogNextSchedule(base))).status).toBe(201);
+  expect(startedTasks()).toHaveLength(2);
+  expect(mirrored()).toEqual([]);
+  const close = await (await start(base, 308, { action: "close" })).json() as Task; // the common 並走 is dak, the kind says off
+  expect(mirrored()).toEqual([]);
+  const check = await (await start(base, 307, { action: "check" })).json() as Task; // no value of its own: the common one
+  expect(mirrored()).toEqual([check.id]);
+  expect(close.id).not.toBe(check.id);
+  // no common 並走: a button Task follows the kind's own
+  core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { check: { shadow: "dak" } } } });
+  const own = await (await start(base, 305, { action: "check" })).json() as Task;
+  expect(mirrored().sort()).toEqual([check.id, own.id].sort());
+  expect(core!.db.listTasks().filter((t) => t.shadowOf === own.id).map((t) => t.runner)).toEqual(["dak"]);
+});
+
 test("start: a second start while the first is running is 409 with its id; GET /api/backlog shows it as active", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
@@ -2700,7 +2759,7 @@ test("backlog-next waiting: a stage Task started after the waits were written ma
 });
 
 describe("backlog-next prerequisite", () => {
-  type Pbi = { status?: string; priority: string; body?: string; comments?: Array<[string, string]>; tasks?: Array<{ number: number; state: string; body?: string }> };
+  type Pbi = { status?: string; labels?: string[]; priority: string; body?: string; comments?: Array<[string, string]>; tasks?: Array<{ number: number; state: string; body?: string }> };
   /**
    * A GitHub of Ready PBIs (`pbis`, by number) and what they name (`others`: the answers to the import's recheck, by
    * `w<n>`; a number not there is NOT_FOUND), in the shape the fixtures' gh answers (`importing` reads it).
@@ -2718,7 +2777,7 @@ describe("backlog-next prerequisite", () => {
       if (q.includes("issueOrPullRequest")) return answer({ repository: others });
       return answer({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: open.map(([n, p]) => ({
         number: n, title: `PBI ${n}`, url: `https://github.com/acme/app/issues/${n}`, state: "OPEN", body: p.body ?? "", createdAt: `2026-09-01T00:00:${String(n % 60).padStart(2, "0")}Z`, updatedAt: "2026-09-10T00:00:00Z",
-        labels: { nodes: [{ name: "type:pbi" }] }, subIssuesSummary: { total: p.tasks?.length ?? 0, completed: (p.tasks ?? []).filter((t) => t.state === "CLOSED").length, doneAt: null },
+        labels: { nodes: ["type:pbi", ...(p.labels ?? [])].map((name) => ({ name })) }, subIssuesSummary: { total: p.tasks?.length ?? 0, completed: (p.tasks ?? []).filter((t) => t.state === "CLOSED").length, doneAt: null },
         projectItems: { nodes: [{ project: { number: 11 }, fieldValues: { nodes: [{ name: p.status ?? "Ready", field: { name: "Status" } }, { name: p.priority, field: { name: "Priority" } }] } }] },
       })) } } });
     };
@@ -2800,7 +2859,7 @@ describe("backlog-next prerequisite", () => {
       expect(implementing(401)).toHaveLength(0);
       expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前提: #401（PR #450 リリース待ち）`));
       expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められない: #402（PR #451 の反映を確かめられない）`));
-      expect((await refreshed(base, false)).items.find((i) => i.number === 401)!.prereqs).toEqual([{ number: 450, kind: "pr", need: "release", state: "pending", via: null }]);
+      expect((await refreshed(base, false)).items.find((i) => i.number === 401)!.prereqs).toEqual([{ number: 450, kind: "pr", need: "release", state: "pending", via: null, confirming: false }]);
       // what runs is not in this checkout: git cannot tell, which is not "not released"
       current = "f".repeat(40);
       await runSchedule(base, id);
@@ -2838,7 +2897,7 @@ describe("backlog-next prerequisite", () => {
       const original = core!.db.listBacklogRecords.bind(core!.db);
       const spy = spyOn(core!.db, "listBacklogRecords").mockImplementation(original);
       const first = await get(); // the merge commit's answer is asked of git and kept
-      expect(first.prereqs).toEqual([{ number: 450, kind: "pr", need: "release", state: "met", via: null }]);
+      expect(first.prereqs).toEqual([{ number: 450, kind: "pr", need: "release", state: "met", via: null, confirming: false }]);
       const reads = issueReads();
       await get();
       // the answer is known now: no read to find what to ask. 3 = the one full read + the two the stage Tasks' rows (withActive) make; a read to find what to ask made it 4
@@ -2861,6 +2920,45 @@ describe("backlog-next prerequisite", () => {
     expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#403 実装"]);
     const line = (await scheduleLogAll(base)).find((l) => l.includes("進められない:"))!;
     for (const part of ["#401（#402 取り下げ）", "#404（#499 見つからない）", "#405（#406 と循環）", "#406（#405 と循環）"]) expect(line).toContain(part);
+  });
+
+  /** A PBI left in review: its Tasks as given, its criteria the given lines (checked ones first). */
+  const reviewing = (lines: string[], tasks: string[]): Pbi => ({
+    status: "In review", priority: "P3", body: `## 到達点 / 受け入れ条件\n${lines.join("\n")}\n`,
+    tasks: tasks.map((state, n) => ({ number: 480 + n, state })),
+  });
+  const mine = "- [ ] 2. Mac で動く（利用者確認: 手で確かめる）";
+
+  test("a prerequisite left with only the person's checks is met", async () => {
+    const pbis: Record<number, Pbi> = { 401: { priority: "P0", body: "**前提**: #402" }, 402: reviewing(["- [x] 1. 実装した", mine], ["CLOSED", "CLOSED"]) };
+    const base = await boot(prereqGh(pbis), holdingClaude().adapter);
+    const id = await backlogNextSchedule(base);
+    await runSchedule(base, id);
+    expect(implementing(401)).toHaveLength(1);
+    expect((await refreshed(base, false)).items.find((i) => i.number === 401)!.prereqs).toEqual([{ number: 402, kind: "issue", need: "done", state: "met", via: null, confirming: true }]);
+  });
+
+  const kept: Record<string, Pbi> = {
+    "a plain unchecked line": reviewing(["- [ ] 1. 実装する", mine], ["CLOSED"]),
+    "an open Task": reviewing(["- [x] 1. 実装した", mine], ["CLOSED", "OPEN"]),
+    "needs-decision": { ...reviewing(["- [x] 1. 実装した", mine], ["CLOSED"]), labels: ["needs-decision"] },
+    "no unchecked line": reviewing(["- [x] 1. 実装した"], ["CLOSED"]),
+  };
+  for (const [name, p] of Object.entries(kept)) {
+    test(`an unchecked line that is not the person's keeps the prerequisite pending: ${name}`, async () => {
+      const base = await boot(prereqGh({ 401: { priority: "P0", body: "**前提**: #402" }, 402: p }), holdingClaude().adapter);
+      await runSchedule(base, await backlogNextSchedule(base));
+      expect(implementing(401)).toHaveLength(0);
+      expect((await refreshed(base, false)).items.find((i) => i.number === 401)!.prereqs).toEqual([{ number: 402, kind: "issue", need: "done", state: "pending", via: null, confirming: false }]);
+    });
+  }
+
+  test("a prerequisite left with only the person's checks is met: on-hold does not change it", async () => {
+    const held: Pbi = { ...reviewing(["- [x] 1. 実装した", mine], ["CLOSED"]), labels: ["on-hold"] };
+    const base = await boot(prereqGh({ 401: { priority: "P0", body: "**前提**: #402" }, 402: held }), holdingClaude().adapter);
+    await runSchedule(base, await backlogNextSchedule(base));
+    expect(implementing(401)).toHaveLength(1);
+    expect((await refreshed(base, false)).items.find((i) => i.number === 401)!.prereqs).toEqual([{ number: 402, kind: "issue", need: "done", state: "met", via: null, confirming: true }]);
   });
 
   test("a PBI waiting only on a Draft PR's overlap goes on, while one with a prerequisite not done does not", async () => {
@@ -5331,8 +5429,8 @@ test("prereqsOf: the first **前提** line outside fences, its numbers once each
 });
 
 test("prereqState: Issues, pull requests and releases by how they closed; not stored is missing", () => {
-  const issue = (state: string, stateReason: string | null = null): WaitTarget => ({ kind: "issue", state, isDraft: false, labels: [], closes: [], stateReason, mergeCommit: null });
-  const pr = (state: string, more: Partial<WaitTarget> = {}): WaitTarget => ({ kind: "pr", state, isDraft: false, labels: [], closes: [], stateReason: null, mergeCommit: state === "MERGED" ? "m1" : null, ...more });
+  const issue = (state: string, stateReason: string | null = null): WaitTarget => ({ kind: "issue", state, isDraft: false, labels: [], closes: [], stateReason, mergeCommit: null, confirmOnly: false });
+  const pr = (state: string, more: Partial<WaitTarget> = {}): WaitTarget => ({ kind: "pr", state, isDraft: false, labels: [], closes: [], stateReason: null, mergeCommit: state === "MERGED" ? "m1" : null, confirmOnly: false, ...more });
   const none = () => null;
   expect(prereqState(issue("OPEN"), "done", none)).toBe("pending");
   expect(prereqState(issue("CLOSED", "COMPLETED"), "done", none)).toBe("met");
@@ -5407,8 +5505,8 @@ test("a stop that came again with nothing changed holds the item through an unre
   // a first stop with a condition still unmet is held; once the item's own prerequisite is met it goes
   const waitingOn = stopOf({ count: 1, unchanged: false, conditions: [{ key: "pr#12", value: "open", met: false }] });
   expect(stopHeld({ ...base, stopSummary: [waitingOn] })).toBe(true);
-  expect(stopHeld({ ...base, stopSummary: [waitingOn], prereqs: [{ number: 12, kind: "pr", need: "merged", state: "met", via: null }] })).toBe(false);
-  expect(stopHeld({ ...base, stopSummary: [waitingOn], prereqs: [{ number: 12, kind: "pr", need: "merged", state: "pending", via: null }] })).toBe(true);
+  expect(stopHeld({ ...base, stopSummary: [waitingOn], prereqs: [{ number: 12, kind: "pr", need: "merged", state: "met", via: null, confirming: false }] })).toBe(false);
+  expect(stopHeld({ ...base, stopSummary: [waitingOn], prereqs: [{ number: 12, kind: "pr", need: "merged", state: "pending", via: null, confirming: false }] })).toBe(true);
   // retries used up: held until something changes
   expect(stopHeld({ ...base, stopSummary: [stopOf({ count: 1, state: "exhausted", next: "decide" })] })).toBe(true);
   // a first stop waiting for the person's decision (asked to merge): held — starting again asks the same on top of it;
@@ -5442,7 +5540,7 @@ test("a stop that came again with nothing changed holds the item through an unre
   // an unmet condition's value moving is not a condition met; and an Issue 12 met is not PR 12 met
   const moved = stopOf({ unchanged: false, changes: [{ kind: "condition", detail: "pr#12: open → draft" }], conditions: [{ key: "pr#12", value: "draft", met: false }] });
   expect(stopHeld({ ...base, stopSummary: [moved] })).toBe(true);
-  expect(stopHeld({ ...base, stopSummary: [moved], prereqs: [{ number: 12, kind: "issue", need: "done", state: "met", via: null }] })).toBe(true);
+  expect(stopHeld({ ...base, stopSummary: [moved], prereqs: [{ number: 12, kind: "issue", need: "done", state: "met", via: null, confirming: false }] })).toBe(true);
 });
 
 /* ---------- a start goes on the stored data; only a conflict holds it ---------- */

@@ -1,6 +1,6 @@
 // test-reads: apps/web/src/policies.ts apps/web/src/priceForm.ts apps/web/src/login.ts apps/web/src/i18n.ts apps/web/src/i18n/settings.ts
 import { expect, test, describe } from "bun:test";
-import { describeRelease, rescueLink, shortSha } from "./release.ts";
+import { describeRelease, releasePanel, rescueLink, runningParts, shortSha } from "./release.ts";
 
 const entry = { ts: 0, from: "a".repeat(40), to: "b".repeat(40), ok: false, reason: "the candidate exited (1) before it answered: Error: boom" } as const;
 
@@ -272,4 +272,18 @@ describe("release review", () => {
     expect(newVersionLink({ ...managed, ahead: 0, latestRelease: { ...latest, ahead: 0 } })).toBeNull();
     expect(newVersionLink({ ...managed, ahead: 1, latestRelease: null })).toBe("新しい版 bbbbbbb →");
   });
+});
+
+test("a web-only promotion is told apart from the core: two lines only when the daemon runs another version than current", () => {
+  const a = "a".repeat(40);
+  const b = "b".repeat(40);
+  expect(runningParts({ managed: true, running: a, current: b })).toEqual({ core: "aaaaaaa", web: "bbbbbbb" });
+  expect(runningParts({ managed: true, running: a, current: a })).toBeNull();
+  expect(runningParts({ managed: true, running: null, current: b })).toBeNull();
+  expect(runningParts({ managed: true, current: b })).toBeNull();
+  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: null, history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "Web UI と既定の設定: bbbbbbb（再起動なしで入った）"]);
+  // sb-rescue busy (another promotion, or between a switch and its restart): both lines stay, without the "no restart" note
+  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: "promote", history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "Web UI と既定の設定: bbbbbbb"]);
+  expect(releasePanel({ managed: true, running: a, current: a, ahead: 0, busy: null, history: [] })!.lines[0]!.text).toBe("動いている版: aaaaaaa");
+  expect(describeRelease({ ...entry, action: "promote-web", ok: true, reason: "checked" })).toEqual({ text: "画面と既定の設定を再起動なしで昇格: bbbbbbb — checked", ok: true });
 });

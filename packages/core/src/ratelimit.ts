@@ -486,7 +486,7 @@ export class RateLimitResumer {
       if (prev === stop && standing && this.reportedOwner(taskId) !== stop.id) return;
       const now = this.now();
       // a repeat of an older stop that plans (no other plan stands) is written again, so the DB's newest stays the plan's owner
-      if (prev === stop && this.reportedOwner(taskId) !== stop.id) this.tasks.record(taskId, { t: "stop.record", stop: { ...stop, at: Date.now() } });
+      if (prev === stop && this.reportedOwner(taskId) !== stop.id) this.tasks.recordStopEvent(taskId, { ...stop, at: Date.now() });
       const resetsAt = reported.resetsAt ?? this.db.quotaFor(reported.runner).map((w) => w.resetsAt * 1000).filter((at) => at > stop.at).sort((a, b) => a - b)[0];
       // a new time for the stop whose plan stands moves the plan, not the count
       const count = same ? (this.stops.get(taskId) ?? 1) : this.resumedByUs.has(taskId) ? (this.stops.get(taskId) ?? 0) + 1 : 1;

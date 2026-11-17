@@ -19,7 +19,7 @@ import { currentRepo } from "./repo.ts";
  * which grows across a repository's issues.
  */
 
-import { prereqsOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog.ts";
+import { onlyConfirmationsLeft, prereqsOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog.ts";
 import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues, overlaps, pathsIn } from "./task-paths.ts";
 
@@ -71,7 +71,8 @@ export interface Work { ref: string; task?: number; paths: string[]; updatedAt: 
 export interface Hit { ref: string; path: string; updatedAt: string }
 export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[] }
 /** A prerequisite (#937): `sibling` = a Task of the same PBI (its order is the stack's, so it does not wait). */
-export interface Prereq { ref: string; state: ReturnType<typeof prereqState>; sibling: boolean; fix?: string }
+export interface Prereq { ref: string; state: ReturnType<typeof prereqState>; sibling: boolean; fix?: string;
+  /** `met` because only the person's own checks are left (`onlyConfirmationsLeft`, as the app counts it). */ confirming?: boolean }
 
 /** The prerequisites' verdict: `stop` (a person has to fix the body), `wait` (another PBI's, not done yet) or null. */
 export function prereqVerdict(prereqs: Prereq[]): "wait" | "stop" | null {
@@ -343,9 +344,10 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
     working: inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !checking.has(t.number)),
     target: async (n) => {
       try {
-        const r = JSON.parse(await run(["api", `repos/${repo}/issues/${n}`, "-q", "{state, state_reason, merged: (.pull_request.merged_at != null), pr: (.pull_request != null)}"])) as { state: string; state_reason: string | null; merged: boolean; pr: boolean };
+        const r = JSON.parse(await run(["api", `repos/${repo}/issues/${n}`, "-q", "{state, state_reason, merged: (.pull_request.merged_at != null), pr: (.pull_request != null), body, labels: [.labels[].name], sub: .sub_issues_summary}"])) as { state: string; state_reason: string | null; merged: boolean; pr: boolean; body: string | null; labels: string[]; sub: { total: number; completed: number } | null };
         const state = r.pr && r.merged ? "MERGED" : r.state.toUpperCase();
-        return { kind: r.pr ? "pr" : "issue", state, isDraft: false, labels: [], closes: [], stateReason: r.state_reason?.toUpperCase() ?? null, mergeCommit: null };
+        const confirmOnly = !r.pr && onlyConfirmationsLeft({ labels: r.labels, body: r.body ?? "", subIssues: { total: r.sub?.total ?? 0, closed: r.sub?.completed ?? 0 } });
+        return { kind: r.pr ? "pr" : "issue", state, isDraft: false, labels: r.labels, closes: [], stateReason: r.state_reason?.toUpperCase() ?? null, mergeCommit: null, confirmOnly };
       } catch (e) {
         if (!/HTTP 404|HTTP 410|Not Found|Gone/.test((e as Error).message)) throw e;
         return undefined;
@@ -375,9 +377,12 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && !waitsOnlyForCheck(t.number, linked)),
     target: async (n) => {
       const p = pulls.get(n);
-      if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null };
+      if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null, confirmOnly: false };
       const i = issues.get(n);
-      return i && !r.unread.includes(n) ? { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null } : undefined;
+      if (!i || r.unread.includes(n)) return undefined;
+      // a child not stored or not read counts as open
+      const closed = i.subIssues.filter((m) => issues.get(m)?.state === "CLOSED" && !r.unread.includes(m)).length;
+      return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly: onlyConfirmationsLeft({ labels: i.labels, body: i.body, subIssues: { total: i.subIssues.length, closed } }) };
     },
   };
 }
@@ -439,9 +444,12 @@ async function readPrereqs(bodies: string[], siblings: Set<number>, target: Mate
   for (const [n, release] of named) {
     const t = await target(n);
     // a PR's （リリース） is judged as merged here (see above)
-    const state = prereqState(t, t?.kind === "pr" ? "merged" : release ? "release" : "done", () => null);
+    const read = prereqState(t, t?.kind === "pr" ? "merged" : release ? "release" : "done", () => null);
+    // left with only the person's checks: met, as the app counts it
+    const confirming = read === "pending" && t?.kind === "issue" && t.confirmOnly;
+    const state = confirming ? "met" : read;
     const fix = t?.kind === "issue" && release && state === "unknown" ? "Issue に（リリース）が付いている。この Issue を閉じた PR の番号に書き直す" : undefined;
-    out.push({ ref: `${t?.kind === "pr" ? "PR " : ""}#${n}`, state, sibling: siblings.has(n), ...(fix ? { fix } : {}) });
+    out.push({ ref: `${t?.kind === "pr" ? "PR " : ""}#${n}`, state, sibling: siblings.has(n), ...(fix ? { fix } : {}), ...(confirming ? { confirming } : {}) });
   }
   return out;
 }

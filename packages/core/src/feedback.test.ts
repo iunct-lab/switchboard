@@ -196,6 +196,18 @@ test("feedback creates a meta task and hands its attachment path and original to
   expect((await post(base, { text, attachmentIds: [a!.id] })).status).toBe(409);
 });
 
+test("autoStart budget by kind: a feedback Task gets its kind's budget and shadow", async () => {
+  const base = await boot();
+  core.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { request: { budgetUsd: 3, shadow: "codex" } } } });
+  const task = await (await post(base, { text: "予算つき" })).json() as Task;
+  expect(task).toMatchObject({ runner: "claude", budgetUsd: 3 });
+  expect(core.db.listTasks().find((t) => t.shadowOf === task.id)).toMatchObject({ runner: "codex" });
+  // off: no shadow although the common one is saved
+  core.db.setSetting("settings", { shadowRunner: "codex", autoStart: { runner: "claude", byKind: { request: { shadow: "off" } } } });
+  const second = await (await post(base, { text: "並走なし" })).json() as Task;
+  expect(core.db.listTasks().some((t) => t.shadowOf === second.id)).toBe(false);
+});
+
 test("autoStart effort: a feedback Task starts with the saved effort; one the runner no longer lists falls back to the CLI default", async () => {
   const base = await boot();
   core.db.setSetting("settings", { autoStart: { runner: "codex", effort: "high" } });

@@ -71,6 +71,7 @@ const prompts: string[] = [];
 const adapter: RunnerAdapter = {
   id: "claude", detect: async () => ({ available: true }),
   models: [{ value: "m-e2e", label: "m-e2e" }],
+  permissionModes: [{ value: "default", label: "確認", description: "asks first" }, { value: "plan", label: "計画", description: "plans only" }, { value: "bypass", label: "全部飛ばす", description: "no confirmations", danger: true }],
   start(opts, emit) {
     prompts.push(opts.prompt);
     // waits on an approval, so the backlog's 承認待ち N 件 has something to count
@@ -513,7 +514,9 @@ try {
   // 返事待ち on a Ready row (#1619): that 中断 Task ended asking the person → 最後の Task: 返事待ち, which opens it; reviewed
   // before the firing below (which would leave a waiting #304 as 返事待ち, not for its overlap)
   const ready304 = ((await (await fetch(`${base}/api/backlog`)).json()) as { items: Array<{ number: number; workspaceId: string; lastTask: { id: string } | null }> }).items.find((i) => i.number === 304 && i.workspaceId === meta.id)!.lastTask!.id;
-  core.db.updateTask(ready304, { outcome: "needs_action" });
+  // an aborted Task cannot store needs_action (only a done / background one can): the stopped Task is taken back through running and ends done asking the person
+  core.db.updateTask(ready304, { status: "running" });
+  core.db.updateTask(ready304, { status: "done", outcome: "needs_action" });
   await click("再読込");
   await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 返事待ち（")`), "Ready #304 waiting for a reply");
   await clickIn(readyRow(304), "最後の Task: 返事待ち");
@@ -522,7 +525,7 @@ try {
   await until(() => evaluate(read), "backlog after Ready #304's waiting Task");
   assert((await fetch(`${base}/api/tasks/${ready304}/outcome`, { method: "POST", body: JSON.stringify({ reviewed: true }) })).ok, "#304 reviewed");
   await click("再読込");
-  await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 中断")`), "Ready #304 back to 中断 once reviewed");
+  await until(() => evaluate(`${read} && (${readyRow(304)}?.textContent ?? "").includes("最後の Task: 完了")`), "Ready #304 back to 完了 once reviewed");
   replyWaiting.ready = true;
   // 重なり (#1044): #304's two Tasks name `src/overlap.ts` and an open PR (#950, not its own) changes it → under the row
   // 「重なり: PR #950（src/overlap.ts）」 with the PR linked; the row's 実装する starts no Task and says why in the error
@@ -640,12 +643,12 @@ try {
   const afterBlank = await sweepOf();
   assert(JSON.stringify(afterBlank) === JSON.stringify({ implement: 2, plan: 1 }), `after a blank: ${JSON.stringify(afterBlank)}`);
 
-  // the kinds of 自動で始まる Task (#1337; 新しいリポジトリ makes 8): 8 lines on 共通 with the common selects only; 変える on 実装 → codex; a reload
+  // the kinds of 自動で始まる Task (#1337; the 10 kinds): 10 lines on 共通 with the common selects only; 変える on 実装 → codex; a reload
   // shows the selects on 実装 alone. lib's 実装する below then starts on codex
   // the two lists of kinds (フィードバック / バックログの工程); the third .auto-start-kinds is 上限のときの代わり (#834)
   const kindLines = `[...document.querySelectorAll('.auto-start-kinds')].slice(0, 2).flatMap(d => [...d.querySelectorAll('.row')]).map(r => r.textContent.trim())`;
   const runnerSelects = `[...document.querySelector('.auto-start-kinds').closest('.card').querySelectorAll('select')].map(s => s.getAttribute('aria-label')).filter(l => l.endsWith('のランナー'))`;
-  const kindsBefore = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 ? l : null; }, "8 kind lines") as string[];
+  const kindsBefore = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 ? l : null; }, "10 kind lines") as string[];
   assert(kindsBefore.every((l) => l.endsWith("共通変える")) && JSON.stringify(await evaluate(runnerSelects)) === JSON.stringify(["自動で始まる Task のランナー"]), `kinds: ${kindsBefore.join(" / ")}`);
   await clickIn(`[...document.querySelectorAll('.auto-start-kinds .row')].find(r => r.textContent.startsWith('実装'))`, "変える");
   await until(() => evaluate(`!!document.querySelector('select[aria-label="実装 のランナー"]')`), "実装's selects");
@@ -655,11 +658,11 @@ try {
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
   await click("Settings");
   for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
-  const kindsAfter = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 ? l : null; }, "8 kind lines after the reload") as string[];
+  const kindsAfter = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 ? l : null; }, "10 kind lines after the reload") as string[];
   const selectsAfter = await evaluate(runnerSelects) as string[];
   const kindRunner = await evaluate(`document.querySelector('select[aria-label="実装 のランナー"]')?.value`);
   const savedKinds = (await (await fetch(`${base}/api/settings`)).json() as { autoStart: { byKind: unknown } }).autoStart.byKind;
-  assert(kindsAfter.filter((l) => l.endsWith("共通変える")).length === 7 && JSON.stringify(selectsAfter) === JSON.stringify(["自動で始まる Task のランナー", "実装 のランナー"]) && kindRunner === "codex" && JSON.stringify(savedKinds) === JSON.stringify({ complete: { runner: "codex", model: "", effort: "" } }), `after the reload: ${kindsAfter.join(" / ")} ${JSON.stringify(selectsAfter)} ${kindRunner} ${JSON.stringify(savedKinds)}`);
+  assert(kindsAfter.filter((l) => l.endsWith("共通変える")).length === 9 && JSON.stringify(selectsAfter) === JSON.stringify(["自動で始まる Task のランナー", "実装 のランナー"]) && kindRunner === "codex" && JSON.stringify(savedKinds) === JSON.stringify({ complete: { runner: "codex", model: "", effort: "" } }), `after the reload: ${kindsAfter.join(" / ")} ${JSON.stringify(selectsAfter)} ${kindRunner} ${JSON.stringify(savedKinds)}`);
 
   // another workspace's stage button: the Task runs in that repository and reads the skills from the meta workspace
   await stopAll();
@@ -677,9 +680,43 @@ try {
   for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
   await until(() => evaluate(`!!document.querySelector('select[aria-label="実装 のランナー"]')`), "実装's selects again");
   await click("共通に戻す");
-  await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 8 && l.every((x) => x.endsWith("共通変える")); }, "every kind on 共通 again");
+  await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 && l.every((x) => x.endsWith("共通変える")); }, "every kind on 共通 again");
   const resetKinds = (await (await fetch(`${base}/api/settings`)).json() as { autoStart: { byKind: unknown } }).autoStart.byKind;
   assert(JSON.stringify(resetKinds) === "{}", `after 共通に戻す: ${JSON.stringify(resetKinds)}`);
+  // 承認モード・予算・並走 of one kind: 状況確認 → 変える → 承認モード 計画 and 予算 5; after a reload 状況確認 alone shows its selects (no runner of
+  // its own: 共通), the other lines stay 共通, and a mode that skips confirmations is not offered
+  const modeBox = 'select[aria-label="状況確認 の承認モード"]';
+  const savedCheck = async () => ((await (await fetch(`${base}/api/settings`)).json()) as { autoStart: { byKind: { check?: { runner?: string; permissionMode?: string; budgetUsd?: number; shadow?: string } } } }).autoStart.byKind.check;
+  await clickIn(`[...document.querySelectorAll('.auto-start-kinds .row')].find(r => r.textContent.startsWith('状況確認'))`, "変える");
+  await until(() => evaluate(`!!document.querySelector('${modeBox}')`), "状況確認's approval select");
+  assert(JSON.stringify(await evaluate(`[...document.querySelector('${modeBox}').options].map(o => o.textContent)`)) === JSON.stringify(["承認: 既定に従う", "承認: 確認", "承認: 計画"]), "approval options");
+  await setField(modeBox, "plan");
+  await until(async () => (await savedCheck())?.permissionMode === "plan", "状況確認 saved with plan");
+  await setField('input[aria-label="状況確認 の予算"]', "5");
+  await evaluate(`document.querySelector('input[aria-label="状況確認 の予算"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`); // Enter commits
+  await until(async () => (await savedCheck())?.budgetUsd === 5, "状況確認 budget saved");
+  // 並走: the kind's own runner (共通 = claude here) is not offered
+  const shadowBox = 'select[aria-label="状況確認 の並走"]';
+  assert(JSON.stringify(await evaluate(`[...document.querySelector('${shadowBox}').options].map(o => o.textContent)`)) === JSON.stringify(["並走: 全体の設定に従う", "並走: しない", "並走: codex"]), "並走 options");
+  await setField(shadowBox, "codex");
+  await until(async () => (await savedCheck())?.shadow === "codex", "状況確認 saved with 並走 codex");
+  await call("Page.reload");
+  await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
+  await click("Settings");
+  for (const c of ["バックログを進める", "自動で始まる Task の既定"]) await openSettingsCard(c);
+  await until(() => evaluate(`!!document.querySelector('${modeBox}')`), "状況確認's approval select after the reload");
+  const checkAfter = await savedCheck();
+  const modeShown = await evaluate(`document.querySelector('${modeBox}').value + "/" + document.querySelector('select[aria-label="状況確認 のランナー"]').selectedOptions[0].textContent`);
+  const othersAfter = await evaluate(kindLines) as string[];
+  assert(checkAfter?.permissionMode === "plan" && checkAfter.shadow === "codex" && checkAfter.runner === undefined && modeShown === "plan/共通" && othersAfter.filter((l) => l.endsWith("共通変える")).length === 9 && !(await evaluate(`!!document.querySelector('select[aria-label="実装 の承認モード"]')`)), `状況確認: ${JSON.stringify(checkAfter)} ${modeShown} ${othersAfter.join(" / ")}`);
+  // an emptied budget removes it (null); 並走 back to 全体の設定に従う removes that
+  await setField('input[aria-label="状況確認 の予算"]', "");
+  await evaluate(`document.querySelector('input[aria-label="状況確認 の予算"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+  await until(async () => { const c = await savedCheck(); return c?.budgetUsd === undefined && c?.permissionMode === "plan"; }, "状況確認 budget removed");
+  await setField(shadowBox, "");
+  await until(async () => { const c = await savedCheck(); return c?.shadow === undefined && c?.permissionMode === "plan"; }, "状況確認 並走 removed");
+  await click("共通に戻す");
+  await until(async () => (await savedCheck()) === undefined, "状況確認 back on 共通");
   await click("Backlog");
   await until(() => evaluate(`${read} && !!document.querySelector('.backlog-ws')`), "backlog with the switch again");
   await tab("すべて");

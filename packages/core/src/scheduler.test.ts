@@ -8,7 +8,7 @@ import { approvalWindowNote } from "./approval-batch.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { nextRun } from "./cron.ts";
-import { missedRuns, Scheduler, UI_LAYERS_PROMPT } from "./scheduler.ts";
+import { missedRuns, Scheduler, UI_LAYERS_CHECK_PROMPT, UI_LAYERS_PROMPT } from "./scheduler.ts";
 import { scanAllRepos } from "./secretscan.ts";
 import { noticeAsks, scanFindings } from "./asks.ts";
 import { promotionNote, type PromotionHold } from "./backlog.ts";
@@ -859,9 +859,38 @@ describe("scheduler ui-layers", () => {
   });
 });
 
-test("UI_LAYERS_PROMPT names scripts that exist, with flags they read", () => {
+describe("the monthly check as a prompt schedule", () => {
+  test("ui-layers: the check's row is a prompt schedule on meta — a saved runner and prompt are what the next firing's Task gets", async () => {
+    const metaPath = join(home, "meta");
+    mkdirSync(metaPath);
+    const metaId = db.upsertWorkspace({ name: "meta", path: metaPath, kind: "meta" }).id;
+    const codex = { ...fakeAdapter([{ t: "session.start", runner: "codex", runnerSessionId: "c", cwd: home }, { t: "session.end", status: "ok" }]), id: "codex" as const };
+    const both = new TaskManager(db, new Map([["codex", codex], ["claude", fakeAdapter([{ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: home }, { t: "session.end", status: "ok" }])]]), (m) => broadcasts.push(m), { idleMs: 0 });
+    const sc = new Scheduler(db, both, () => now);
+    const s = sc.create({ title: "床・天井・壁の点検", cron: "0 9 1 * *", workspaceId: metaId, runner: "claude", action: "prompt", prompt: UI_LAYERS_CHECK_PROMPT });
+    expect(s).toMatchObject({ action: "prompt", prompt: UI_LAYERS_CHECK_PROMPT, runner: "claude" });
+
+    // a firing as it is: the short prompt on claude, the schedule's own title
+    expect(await sc.runNow(s.id)).toMatchObject({ runner: "claude", scheduleId: s.id, title: "床・天井・壁の点検 (2026-09-06 00:00)" });
+    expect(started.at(-1)!.prompt).toContain(UI_LAYERS_CHECK_PROMPT);
+
+    // a saved runner and prompt are what the next firing starts with
+    expect(sc.update(s.id, { runner: "codex" })).toMatchObject({ runner: "codex", prompt: UI_LAYERS_CHECK_PROMPT });
+    expect(sc.update(s.id, { prompt: "手順を変えた点検" })).toMatchObject({ runner: "codex", prompt: "手順を変えた点検" });
+    db.updateSchedule(s.id, { lastTaskId: null });
+    const t = await sc.runNow(s.id);
+    expect(t).toMatchObject({ runner: "codex", scheduleId: s.id });
+    expect(started.at(-1)!.prompt).toContain("手順を変えた点検");
+    expect(started.at(-1)!.prompt).not.toContain("The monthly check");
+  });
+});
+
+test("the monthly check's steps in ui-layers.md name scripts that exist, with flags they read", () => {
   const root = join(import.meta.dir, "../../..");
-  const calls = [...UI_LAYERS_PROMPT.matchAll(/bun (scripts\/[\w-]+\.ts)([^。（\n]*)/g)];
+  const doc = readFileSync(join(root, "docs/design/ui-layers.md"), "utf8");
+  const section = doc.slice(doc.indexOf("## The monthly check"), doc.indexOf("\n## ", doc.indexOf("## The monthly check") + 1));
+  expect(UI_LAYERS_CHECK_PROMPT).toContain("The monthly check");
+  const calls = [...section.matchAll(/bun (scripts\/[\w-]+\.ts)([^。（\n]*)/g)];
   expect(calls.map((c) => c[1])).toEqual(["scripts/ui-layers-metrics.ts", "scripts/ui-layers-placement.ts", "scripts/ui-layers-report.ts", "scripts/ui-layers-requests.ts"]);
   for (const [, script, rest] of calls) {
     expect(existsSync(join(root, script!))).toBe(true);

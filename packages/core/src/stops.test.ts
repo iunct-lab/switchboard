@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { compareStopConditions, FenceReader, issueOf, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule } from "./stops.ts";
+import { compareStopConditions, FenceReader, issueOf, outcomeFromStops, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule, tasksWithStops } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -469,6 +469,30 @@ describe("stopMarks", () => {
   });
 });
 
+describe("tasksWithStops", () => {
+  const mk = (id: string, over: Partial<Task> = {}) =>
+    ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, ...over }) as Task;
+
+  test("a stopped Task carries the stopMarks value as `stop`; a Task with no mark has no `stop` field", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.twsx."));
+    const db = new Db(join(dir, "t.db"));
+    try {
+      const stopped = mk("s1"), plain = mk("p1", { status: "running", outcome: "unknown" });
+      db.insertTask(stopped);
+      db.insertTask(plain);
+      db.appendEvent("s1", { t: "stop.record", stop: stop({ reason: "decision", evidence: "どちらか決めてください", work: { workspaceId: null, issue: null, taskId: "s1" } }) });
+      const items = tasksWithStops(db, db.listTasks(false));
+      const byId = Object.fromEntries(items.map((x) => [x.id, x]));
+      expect(byId.s1?.stop).toEqual(stopMarks(db, db.listTasks(false)).s1);
+      expect(byId.s1?.stop).toMatchObject({ reason: "decision", state: "waiting" });
+      expect("stop" in byId.p1!).toBe(false);
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("answered", () => {
   const seq = (at: number) => ({ ref: "seq:9", at });
   test("the newest stop answered after it came; not a URL answer, not one carried over to a stop that came after it", () => {
@@ -514,4 +538,26 @@ describe("lastStopMark", () => {
       expect(lastStopMark(rs)).toEqual(mark(rs));
     }
   });
+});
+
+describe("outcomeFromStops", () => {
+  const issueCond = [{ key: "issue#10", value: "closed", met: false }];
+  const answer = { ref: "seq:3", at: 5_000 };
+  const table: Array<[string, StopRecord[], boolean, ReturnType<typeof outcomeFromStops>]> = [
+    ["no record leaves the outcome alone", [], false, null],
+    ["a decision waiting on the person", [stop({ reason: "decision", state: "waiting" })], false, "needs_action"],
+    ["a decision that ran out of retries", [stop({ reason: "decision", state: "exhausted" })], false, "needs_action"],
+    ["a decision that waits on an Issue only waits", [stop({ reason: "decision", state: "waiting", conditions: issueCond })], false, "waits"],
+    ["depends waits", [stop({ reason: "depends", state: "waiting" })], false, "waits"],
+    ["a retrying human reason waits", [stop({ reason: "permission", state: "retrying" })], false, "waits"],
+    ["every stop resolved: after the turn is finished", [stop({ id: "r", state: "waiting" }), stop({ id: "r", state: "resolved" })], false, "finished"],
+    ["every stop resolved: during the turn is not decided", [stop({ id: "r", state: "resolved" })], true, "unknown"],
+    ["a stop answered after it came is closed", [stop({ reason: "decision", state: "waiting", at: 1_000, answer })], false, "finished"],
+    ["an answer carried over from an earlier stop at the same place does not close a later one", [stop({ reason: "decision", state: "waiting", at: 9_000, answer })], false, "needs_action"],
+    ["an answer the newest record brings closes the stop", [stop({ id: "q", reason: "decision", state: "waiting", at: 1_000 }), stop({ id: "q", reason: "decision", state: "waiting", at: 9_000, answer })], false, "finished"],
+    ["the same stop reported again after its answer is open again", [stop({ id: "p", reason: "auth", state: "waiting", at: 1_000 }), stop({ id: "p", reason: "auth", state: "waiting", at: 6_000, answer }), stop({ id: "p", reason: "auth", state: "waiting", at: 9_000, answer })], false, "needs_action"],
+    ["only the newest record of a stop counts", [stop({ id: "n", reason: "decision", state: "waiting" }), stop({ id: "n", reason: "decision", state: "resolved" })], false, "finished"],
+    ["a person's stop beats an open one that only waits", [stop({ id: "a", reason: "depends", state: "waiting" }), stop({ id: "b", reason: "auth", state: "waiting" })], false, "needs_action"],
+  ];
+  for (const [name, records, inTurn, want] of table) test(name, () => expect(outcomeFromStops(records, inTurn)).toBe(want));
 });

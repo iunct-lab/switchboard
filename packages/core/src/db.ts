@@ -9,6 +9,7 @@ import type { StoredOutcome, AgentEvent, AskAnswerResult, Artifact, Attachment, 
 import { teleportWorktreePath } from "./config.ts";
 import { RULES_BY, delegatedNote } from "./evals.ts";
 import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
+import { outcomeFromStops } from "./stops.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskOutcomeError, InvalidTaskTransitionError, OUTCOME_SQL, outcomeOf, outcomeOnStatus, STORED_OUTCOMES, type WorkPurpose, workingSql } from "./task-status.ts";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "./backlog-merge.ts";
 import type { ReportedTotal } from "./pricing.ts";
@@ -1555,7 +1556,7 @@ export class Db {
     const by = new Map<RunnerId, { outcomes: RunnerStats["outcomes"]; costs: number[]; durations: number[] }>();
     for (const r of rows) {
       let acc = by.get(r.runner);
-      if (!acc) by.set(r.runner, (acc = { outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 0 }, costs: [], durations: [] }));
+      if (!acc) by.set(r.runner, (acc = { outcomes: { finished: 0, needs_action: 0, waits: 0, failed: 0, unknown: 0 }, costs: [], durations: [] }));
       // a value this version does not know (a newer daemon's) still counts, as not yet judged
       acc.outcomes[Object.hasOwn(acc.outcomes, r.outcome) ? r.outcome : "unknown"] += 1;
       acc.costs.push(r.costUsd);
@@ -2679,6 +2680,11 @@ function migrate(db: Database) {
       // a malformed row is reported and replaced by the defaults when it is read (server.ts settings())
     }
   }
+  // the monthly check was a kind of its own with its prompt in the code; it is a prompt schedule now (the steps are in docs/design/ui-layers.md).
+  // The sentence is the one at the time of this move, not the current constant: a row moved once stays as it was moved.
+  db.query("UPDATE schedules SET action = 'prompt', prompt = ? WHERE action = 'ui-layers'").run(
+    "床・天井・壁の月次の点検をしてください。手順は docs/design/ui-layers.md の「The monthly check」の節に従います。",
+  );
   if (!schCols.has("model")) db.exec("ALTER TABLE schedules ADD COLUMN model TEXT NOT NULL DEFAULT ''");
   if (!schCols.has("effort")) db.exec("ALTER TABLE schedules ADD COLUMN effort TEXT NOT NULL DEFAULT ''");
   if (!schCols.has("last_result")) db.exec("ALTER TABLE schedules ADD COLUMN last_result TEXT"); // JSON of ScheduleResult
@@ -2723,6 +2729,29 @@ function migrate(db: Database) {
       for (const [kind, key] of [["issue", "stateReason"], ["issue", "closedAt"], ["pull-request", "mergeCommit"], ["pull-request", "closedAt"], ["pull-request", "mergedAt"]])
         db.exec(`UPDATE backlog_records SET ${col} = json_set(${col}, '$.${key}', json('null')) WHERE object_kind = '${kind}' AND ${col} IS NOT NULL AND json_type(${col}, '$.${key}') IS NULL`);
   }).immediate();
+  // `outcome` comes from the stop records (docs/design/task-outcome.md): a stopped Task not reviewed nor archived takes the outcome its
+  // own stop records decide (one that waits for the person → needs_action, one that waits on something else → waits). `updated_at` stays.
+  // Only `done`: `error` / `aborted` store `unknown` alone (their status decides the outcome), and `waiting` is the person's already.
+  if ((db.query("PRAGMA user_version").get() as { user_version: number }).user_version < 7) {
+    db.transaction(() => {
+      const byTask = new Map<string, StopRecord[]>();
+      const rows = db
+        .query(
+          `SELECT e.task_id AS taskId, e.json AS json FROM events e JOIN tasks t ON t.id = e.task_id
+           WHERE substr(e.json, 1, 19) = '{"t":"stop.record",' AND t.reviewed_at IS NULL AND t.archived_at IS NULL AND t.status = 'done'
+           ORDER BY e.ts, e.seq`,
+        )
+        .all() as Array<{ taskId: string; json: string }>;
+      for (const r of rows) byTask.set(r.taskId, [...(byTask.get(r.taskId) ?? []), (JSON.parse(r.json) as { stop: StopRecord }).stop]);
+      const set = db.query("UPDATE tasks SET outcome = ? WHERE id = ?");
+      for (const [id, records] of byTask) {
+        // only an open stop moves the outcome: stops all closed say nothing of a later turn without a stop (the judge's or the person's outcome stays)
+        const outcome = outcomeFromStops(records, false);
+        if (outcome === "needs_action" || outcome === "waits") set.run(outcome, id);
+      }
+      db.exec("PRAGMA user_version = 7");
+    })();
+  }
 }
 
 /**

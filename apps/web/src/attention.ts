@@ -48,7 +48,7 @@ export function outcomeIsSettable(status: TaskStatus): boolean {
   return !outcomeIsDerived(status) && status !== "idle" && status !== "running";
 }
 
-const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, finished: 2, unknown: 2 };
+const RANK: Record<TaskOutcome, number> = { needs_action: 0, failed: 1, finished: 2, waits: 2, unknown: 2 };
 
 /** One row of 要対応 (#4480): the Tasks stopped by the same series (`TaskStopMark.key`), newest first; `tasks[0]` is the one the row opens. */
 export type AttentionGroup = { key: string; tasks: TaskSummary[]; count: number; reason: StopReasonCode | null; state: StopState | null };
@@ -90,7 +90,7 @@ export function attentionGroups(tasks: TaskSummary[], marks: Record<string, Task
   return { needs: [...byKey.values()], waiting };
 }
 
-const LABEL: Record<TaskOutcome, string> = { needs_action: t(m.outcomeNeedsAction), failed: t(m.statusFailed), finished: t(m.statusDone), unknown: t(m.outcomeUnknown) };
+const LABEL: Record<TaskOutcome, string> = { needs_action: t(m.outcomeNeedsAction), failed: t(m.statusFailed), finished: t(m.statusDone), waits: t(m.outcomeWaits), unknown: t(m.outcomeUnknown) };
 
 export function outcomeLabel(o: TaskOutcome): string {
   return LABEL[o];

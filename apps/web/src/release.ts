@@ -5,7 +5,7 @@ import { jstClock } from "./time.ts";
 /** Releases (#178): what `GET /api/daemon/release` returns under sb-rescue, and one line of its history in words. */
 export interface ReleaseHistoryEntry {
   ts: number;
-  action: "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild";
+  action: "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild" | "promote-web";
   from: string | null;
   to: string | null;
   ok: boolean;
@@ -25,6 +25,8 @@ export interface ReleaseStatus {
   busyTasks?: number;
   dirty?: boolean;
   current?: string | null;
+  /** The version the daemon was started from. Differs from `current` after a promotion that read the Web UI and defaults again without a restart. */
+  running?: string | null;
   previous?: string | null;
   state?: string;
   busy?: string | null;
@@ -71,8 +73,14 @@ export function describeRelease(h: ReleaseHistoryEntry): { text: string; ok: boo
     restart: t(settings.relRestart),
     "restore-db": t(settings.relRestoreDb),
     rebuild: t(settings.relRebuild),
+    "promote-web": t(settings.relPromotedWeb, { sha: shortSha(h.to) }),
   };
   return { text: `${what[h.action] ?? h.action} — ${h.reason}`, ok: h.ok };
+}
+
+/** The core (what the daemon started from) and the Web UI with the defaults (`current`), only when they differ: a promotion that did not restart. */
+export function runningParts(r: ReleaseStatus): { core: string; web: string } | null {
+  return r.running && r.current && r.running !== r.current ? { core: shortSha(r.running), web: shortSha(r.current) } : null;
 }
 
 /** The backlog screen's line (#626): the newest tag waiting for the running Tasks, or the failed tag the app stays behind. */
@@ -137,7 +145,10 @@ export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
     if (latest) lines.push({ text: t(settings.latestReleaseUnmanaged, { tag: latest.tag }), warn: false });
     return { lines, canPromote: false, promoteSha: null, busyTasks: 0, release: null };
   }
-  const lines: ReleasePanelView["lines"] = [{ text: t(settings.runningVersion, { sha: shortSha(r.current) }), warn: false }];
+  const parts = runningParts(r);
+  const lines: ReleasePanelView["lines"] = parts
+    ? [{ text: t(settings.runningCore, { sha: parts.core }), warn: false }, { text: t(r.busy ? settings.runningWebBusy : settings.runningWeb, { sha: parts.web }), warn: false }]
+    : [{ text: t(settings.runningVersion, { sha: shortSha(r.current) }), warn: false }];
   const latest = newerRelease(r);
   const headBehind = r.ahead === 0 && (r.behind ?? 0) > 0;
   const gap = headBehind ? t(settings.runningNewer) : r.ahead === 0 ? t(settings.upToDate) : r.ahead == null ? t(settings.cannotCount) : t(settings.commitsAhead, { n: r.ahead });

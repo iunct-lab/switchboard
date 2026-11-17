@@ -122,16 +122,16 @@ describe("task status transitions", () => {
     // a row is not inserted with an outcome its status cannot have; the derived one (what a Task shows) is stored as unknown
     expect(() => mk("bad_e", "error", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
     expect(() => mk("bad_w", "waiting", { outcome: "failed" })).toThrow(InvalidTaskOutcomeError);
-    expect(() => mk("bad_r", "running", { outcome: "needs_action" })).toThrow(InvalidTaskOutcomeError);
+    expect(() => mk("bad_r", "running", { outcome: "finished" })).toThrow(InvalidTaskOutcomeError);
     mk("shown", "error", { outcome: "failed" });
     expect(db.sqlite.query("SELECT outcome FROM tasks WHERE id = 'shown'").get()).toEqual({ outcome: "unknown" });
     expect(db.getTask("shown")?.outcome).toBe("failed");
-    for (const status of ALL) for (const stored of ["finished", "needs_action", "unknown"] as const) {
+    for (const status of ALL) for (const stored of ["finished", "needs_action", "waits", "unknown"] as const) {
       const id = `${status}_${stored}`;
       const allowed = STORED_OUTCOMES[status].has(stored);
       const derived = status === "waiting" || status === "error" || status === "aborted";
-      // the table is written out here as well: only done / background take a stored outcome, the rest store unknown
-      expect(allowed).toBe(stored === "unknown" || status === "done" || status === "background");
+      // the table is written out here as well: done / background take every stored outcome, a running turn the ones its stop records decide, the rest store unknown
+      expect(allowed).toBe(stored === "unknown" || status === "done" || status === "background" || (status === "running" && (stored === "needs_action" || stored === "waits")));
       if (allowed) {
         mk(id, status, { outcome: stored });
         expect(db.getTask(id)?.outcome).toBe(derived ? outcomeOf(status, stored) : stored);

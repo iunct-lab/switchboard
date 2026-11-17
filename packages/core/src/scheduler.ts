@@ -36,6 +36,12 @@ export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をして�
 
 指標が悪くなっても何も止めません。マージ・リリース・画面の修正・PBI の作成はしません。最後に、作った要望の番号（無ければ「なし」）と評価の要約を 3 行で返してください。`;
 
+/**
+ * What the monthly check's prompt schedule says: the steps are in docs/design/ui-layers.md, so the person edits the
+ * wording and the runner in Schedules like any prompt schedule's. Only the first start's seed uses it.
+ */
+export const UI_LAYERS_CHECK_PROMPT = "床・天井・壁の月次の点検をしてください。手順は docs/design/ui-layers.md の「The monthly check」の節に従います。";
+
 /** The kinds that run on claude only and fire as a Task of their own on a fixed instruction. */
 const claudeOnly = (action: string): action is "insights" | "ui-layers" => action === "insights" || action === "ui-layers";
 

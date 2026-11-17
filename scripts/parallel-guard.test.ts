@@ -153,7 +153,7 @@ describe("parallel-guard judge", () => {
 function github(opts: {
   bodies: Record<number, string>;
   parents?: Record<number, { number: number; subs: number[]; body?: string }>;
-  targets?: Record<number, { state: "open" | "closed"; state_reason?: string; pr?: boolean; merged?: boolean }>; // the Issues / PRs named as prerequisites; others 404
+  targets?: Record<number, { state: "open" | "closed"; state_reason?: string; pr?: boolean; merged?: boolean; body?: string; labels?: string[]; sub?: { total: number; completed: number } }>; // the Issues / PRs named as prerequisites; others 404
   inProgress?: number[];
   projects?: Record<number, { number: number; owner: { login: string }; status: string }[]>; // other Projects a Task is in, listed first
   prs?: { number: number; headRefName: string; body: string; files: string[]; isDraft?: boolean; labels?: { name: string }[] }[];
@@ -217,7 +217,7 @@ function github(opts: {
     if (target) {
       const t = opts.targets?.[Number(target[1])];
       if (!t) throw new Error("gh api repos/… failed: gh: Not Found (HTTP 404)");
-      return JSON.stringify({ state: t.state, state_reason: t.state_reason ?? null, merged: !!t.merged, pr: !!t.pr });
+      return JSON.stringify({ state: t.state, state_reason: t.state_reason ?? null, merged: !!t.merged, pr: !!t.pr, body: t.body ?? "", labels: t.labels ?? [], sub: t.sub ?? { total: 0, completed: 0 } });
     }
     if (args[0] === "pr") return JSON.stringify((opts.prs ?? []).map((p) => ({ isDraft: false, labels: [], ...p, updatedAt: fresh, files: p.files.map((path) => ({ path })) })));
     throw new Error(`unexpected gh ${args.join(" ")}`);
@@ -576,6 +576,43 @@ describe("parallel-guard prereqs (#937)", () => {
     expect(await overlap(ghBoard(REPO, g.run), 52, false, now)).toMatchObject({ verdict: "wait", prereqs: [{ ref: "PR #62", state: "pending", sibling: false }] });
     const none = await overlap(ghBoard(REPO, task("**前提**: なし").run), 52, false, now);
     expect(none).toEqual({ paths: ["packages/core/src/db.ts"], verdict: "go", blocking: [], stale: [] });
+  });
+
+  const pbi = (left: string) => `## 到達点 / 受け入れ条件\n- [x] 済んだ行\n${left}\n`;
+  const mine = "- [ ] 画面で見る（利用者確認: 見た目を見る）";
+
+  test("a prerequisite left with only the person's checks does not wait", async () => {
+    const closed = { total: 2, completed: 2 };
+    const t = (extra: { body?: string; labels?: string[]; sub?: { total: number; completed: number } }) => ({ 61: { state: "open" as const, labels: ["type:pbi"], sub: closed, body: pbi(mine), ...extra } });
+    const go = await overlap(ghBoard(REPO, task("**前提**: #61", { targets: t({}) }).run), 52, false, now);
+    expect(go).toMatchObject({ verdict: "go", prereqs: [{ ref: "#61", state: "met", confirming: true }] });
+    // a Task still open, or needs-decision: it waits as before
+    expect(await overlap(ghBoard(REPO, task("**前提**: #61", { targets: t({ sub: { total: 2, completed: 1 } }) }).run), 52, false, now)).toMatchObject({ verdict: "wait" });
+    expect(await overlap(ghBoard(REPO, task("**前提**: #61", { targets: t({ labels: ["type:pbi", "needs-decision"] }) }).run), 52, false, now)).toMatchObject({ verdict: "wait" });
+    // the same judgment from the app's stored records; a child not stored counts as open
+    const stored = (over: Partial<StoredRecords["issues"][number]>, children: StoredRecords["issues"]) => ({
+      workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], unread: [], pulls: [], comments: [],
+      issues: [
+        { number: 52, title: "", url: "", state: "OPEN", stateReason: null, body: `${db}\n\n**前提**: #61`, labels: ["type:task"], parent: 50, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null },
+        { number: 50, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:pbi"], parent: null, subIssues: [52], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null },
+        { number: 61, title: "", url: "", state: "OPEN", stateReason: null, body: pbi(mine), labels: ["type:pbi"], parent: null, subIssues: [62, 63], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over },
+        ...children,
+      ],
+    } as StoredRecords);
+    const child = (n: number, state: "OPEN" | "CLOSED") => ({ number: n, title: "", url: "", state, stateReason: null, body: "", labels: ["type:task"], parent: 61, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null } as StoredRecords["issues"][number]);
+    const run = (r: StoredRecords) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(r, 52) }, 52, false, now);
+    expect(await run(stored({}, [child(62, "CLOSED"), child(63, "CLOSED")]))).toMatchObject({ verdict: "go", prereqs: [{ ref: "#61", state: "met", confirming: true }] });
+    expect(await run(stored({}, [child(62, "CLOSED")]))).toMatchObject({ verdict: "wait" });
+    // a child stored as closed but not read on the last fetch counts as open: the guard leans to waiting
+    expect(await run({ ...stored({}, [child(62, "CLOSED"), child(63, "CLOSED")]), unread: [63] })).toMatchObject({ verdict: "wait" });
+  });
+
+  test("a prerequisite with an unchecked line that is not the person's still waits", async () => {
+    const targets = { 61: { state: "open" as const, labels: ["type:pbi"], sub: { total: 1, completed: 1 }, body: pbi(`${mine}\n- [ ] 直す行（検証: テスト）`) } };
+    expect(await overlap(ghBoard(REPO, task("**前提**: #61", { targets }).run), 52, false, now)).toMatchObject({ verdict: "wait", prereqs: [{ ref: "#61", state: "pending" }] });
+    // no unchecked line at all is not "only checks left" either
+    const none = { 61: { ...targets[61], body: pbi("") } };
+    expect(await overlap(ghBoard(REPO, task("**前提**: #61", { targets: none }).run), 52, false, now)).toMatchObject({ verdict: "wait" });
   });
 
   test("a Task that has to wait withdraws its claim", async () => {

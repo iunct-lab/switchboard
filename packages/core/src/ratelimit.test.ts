@@ -386,7 +386,7 @@ describe("rate limit: RateLimitResumer", () => {
     expect([cur.resumeAt, cur.resumeWindow, cur.resumeSince]).toEqual([null, null, null]);
     expect(await resumer.tick()).toEqual([]);
     // Codex's limit is out of scope (its detection is unverified): the same report leaves its wait alone
-    db.insertTask({ ...db.getTask(t.id)!, id: "t_codex", runner: "codex", status: "error", resumeAt: now + 3_600_000, resumeReason: "limit", resumeWindow: "five_hour", resumeSince: now - 1 });
+    db.insertTask({ ...db.getTask(t.id)!, id: "t_codex", runner: "codex", status: "error", outcome: "unknown", resumeAt: now + 3_600_000, resumeReason: "limit", resumeWindow: "five_hour", resumeSince: now - 1 });
     db.upsertQuota("codex", "five_hour", 0.4, RESETS_AT, now);
     expect(await resumer.tick()).toEqual([]);
     expect(db.getTask("t_codex")!.resumeAt).toBe(now + 3_600_000); // not tried (a try would fail here and move it)

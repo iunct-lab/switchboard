@@ -190,11 +190,11 @@ export interface PrereqPart { ref: string; url: string; after: string; via: numb
 
 /**
  * A Ready / in-progress row's prerequisites (#937, `item.prereqs`), in two lines: `waiting` = not done yet, which
- * backlog-next waits for by itself (前提: #12（未完）・PR #34（マージ待ち）・PR #56（リリース待ち）); `stuck` = what a person
+ * backlog-next waits for by itself (前提: #12（未完）・PR #34（マージ待ち）・PR #56（リリース待ち）); `confirming` = met with only the user's checks left (前提: #12 利用者確認だけ); `stuck` = what a person
  * has to fix (進められない: #12 取り下げ・#99 見つからない・#9 と循環・PR #56 の反映を確かめられない). `via` = the Task that
  * names it. Waits recorded by a release (`waits`) stay in their own line (waitText).
  */
-export function prereqLine(item: BacklogItem): { waiting: PrereqPart[]; stuck: PrereqPart[] } {
+export function prereqLine(item: BacklogItem): { waiting: PrereqPart[]; stuck: PrereqPart[]; confirming: PrereqPart[] } {
   const at = (n: number, pr = false) => item.url.replace(/\/issues\/\d+$/, `/${pr ? "pull" : "issues"}/${n}`);
   const part = (p: BacklogItem["prereqs"][number], after: string): PrereqPart => ({
     ref: `${p.kind === "pr" ? "PR " : ""}#${p.number}`, url: at(p.number, p.kind === "pr"), after, via: p.via, viaUrl: p.via === null ? null : at(p.via),
@@ -203,7 +203,9 @@ export function prereqLine(item: BacklogItem): { waiting: PrereqPart[]; stuck: P
   const stuck = item.prereqs.filter((p) => p.state !== "met" && p.state !== "pending").map((p) =>
     part(p, p.state === "withdrawn" ? t(m.stuckWithdrawn) : p.state === "missing" ? t(m.stuckMissing) : p.state === "cycle" ? t(m.stuckCycle) : p.need === "release" ? t(m.stuckRelease) : t(m.stuckUnknown)),
   );
-  return { waiting, stuck };
+  // met only because the PBI is left with the user's own checks (`confirming`): shown, never a wait
+  const confirming = item.prereqs.filter((p) => p.state === "met" && p.confirming).map((p) => part(p, t(m.prereqConfirming)));
+  return { waiting, stuck, confirming };
 }
 
 /** One side of an overlap as a row names it (#1044): its link (`PR #n` → /pull/n, `Task #m` → /issues/m) and the path. */

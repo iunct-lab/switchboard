@@ -769,8 +769,8 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
  * 進められない (a person fixes the body or the prerequisite), the latter in the warning colour. The row's button still starts it.
  */
 function Prereqs(props: { item: BacklogItem }) {
-  const { waiting, stuck } = prereqLine(props.item);
-  if (!waiting.length && !stuck.length) return null;
+  const { waiting, stuck, confirming } = prereqLine(props.item);
+  if (!waiting.length && !stuck.length && !confirming.length) return null;
   const parts = (ps: PrereqPart[]) =>
     ps.map((p, n) => (
       <Fragment key={`${p.via}:${p.ref}`}>
@@ -792,6 +792,7 @@ function Prereqs(props: { item: BacklogItem }) {
   return (
     <div className="backlog-prereqs hint" data-issue={props.item.url}>
       {waiting.length > 0 && <div>{t(m.prereqs)}{parts(waiting)}</div>}
+      {confirming.length > 0 && <div>{t(m.prereqs)}{parts(confirming)}</div>}
       {stuck.length > 0 && <div className="warn">{t(m.stuck)}{parts(stuck)}</div>}
     </div>
   );

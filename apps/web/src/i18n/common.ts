@@ -59,7 +59,7 @@ export const common = msgs({
   modelIdMissing: { ja: "モデルの id を入れてください", en: "Enter the model id" },
   modelListed: { ja: "{id} は一覧にあります", en: "{id} is already in the list" },
 
-  // loginRow.ts / components/ClaudeLoginRow.tsx: a runner's own login
+  // loginRow.ts / components/LoginSettings.tsx: a runner's own login
   loginBedrock: { ja: "使用中: サードパーティのプラットフォーム（Amazon Bedrock）", en: "In use: a third-party platform (Amazon Bedrock)" },
   loginClaudeAccount: { ja: ": Claude アカウント", en: ": Claude account" },
   loggedIn: { ja: "ログイン中{kind}", en: "Logged in{kind}" },
@@ -71,6 +71,13 @@ export const common = msgs({
   bedrockBackPlan: { ja: "定額の契約に戻す", en: "Back to the subscription" },
   bedrockUse: { ja: "Amazon Bedrock を使う", en: "Use Amazon Bedrock" },
   bedrockHint: { ja: "Bedrock では AWS の資格情報（ホストのロールなど）で動き、Switchboard は鍵を持ちません。モデルの選択肢は Bedrock の id になり、これから始まる Task に効きます。利用は AWS に課金されます。", en: "On Bedrock it runs with AWS credentials (the host's role, for example), and Switchboard holds no keys. The model choices become Bedrock ids and apply to Tasks that start from now on. AWS bills the usage." },
+  loginUnknown: { ja: "状態を確かめられません", en: "The state cannot be read" },
+  loginNoTool: { ja: "道具がありません（このマシンに入っていません）", en: "The tool is not installed on this machine" },
+  loginSwitchboardPasskey: { ja: "ログイン中（パスキー）", en: "Logged in (passkey)" },
+  loginSwitchboardToken: { ja: "トークンで接続中", en: "Connected with the token" },
+  loginSwitchboardInside: { ja: "このホストの中ではログイン不要", en: "No login is needed inside this host" },
+  logoutConfirm: { ja: "{label} からログアウトします。", en: "Log out of {label}." },
+  logoutConfirmBusy: { ja: "動いている Task が {n} 件この認証を使っています。{label} からログアウトすると、その Task は続けられなくなります。", en: "Running Tasks using this login: {n}. Logging out of {label} stops them from going on." },
   logoutFailed: { ja: "ログアウトできません: {error}", en: "Cannot log out: {error}" },
   logout: { ja: "ログアウト", en: "Log out" },
 
@@ -104,10 +111,10 @@ export const common = msgs({
   deleteCopy: { ja: "ローカルのコピーも消す", en: "Also delete the local copy" },
   cancel: { ja: "やめる", en: "Cancel" },
   addHeading: { ja: "追加", en: "Add" },
-  githubNone: { ja: "GitHub: ログインしていません（clone とバックログに要ります）", en: "GitHub: not logged in (cloning and the backlog need it)" },
-  githubAs: { ja: "GitHub: {account} でログイン中", en: "GitHub: logged in as {account}" },
-  githubOk: { ja: "GitHub: ログイン中", en: "GitHub: logged in" },
-  githubMissing: { ja: "GitHub: このマシンに gh がありません（clone とバックログに要ります）", en: "GitHub: gh is not installed on this machine (cloning and the backlog need it)" },
+  githubNone: { ja: "ログインしていません（clone とバックログに要ります）", en: "Not logged in (cloning and the backlog need it)" },
+  githubAs: { ja: "{account} でログイン中", en: "Logged in as {account}" },
+  githubOk: { ja: "ログイン中", en: "Logged in" },
+  githubMissing: { ja: "このマシンに gh がありません（clone とバックログに要ります）", en: "gh is not installed on this machine (cloning and the backlog need it)" },
   add: { ja: "追加", en: "Add" },
   fromGithub: { ja: "GitHub から", en: "From GitHub" },
   createNew: { ja: "新しく作る", en: "Create new" },

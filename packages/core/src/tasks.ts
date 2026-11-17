@@ -3,7 +3,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { diskFullHit, diskFullText } from "./diskfull.ts";
 import { githubLimitHit, usesGraphql } from "./ratelimit.ts";
 import type { AgentEvent, ApprovalRuleMatch, McpServerConfig, StopRecord, Attachment, CreateTaskInput, LlmSuggestion, PendingApproval, PermissionDecision, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerId, RunnerSession, ServerMessage, SetOutcomeInput, StoredOutcome, Task } from "@switchboard/protocol";
-import { CloudSessionRef, REPLY_QUEUED } from "@switchboard/protocol"; // REPLY_QUEUED: the queued reply's status line, which also answers the Task's open stops
+import { CloudSessionRef, isWorkingStatus, REPLY_QUEUED } from "@switchboard/protocol"; // REPLY_QUEUED: the queued reply's status line, which also answers the Task's open stops
 import { readCloudPreparation } from "./claude-cloud.ts";
 import { ledgerRowFor, usageSince } from "./pricing.ts";
 import { withAttachments, type AttachmentStore } from "./attachments.ts";
@@ -13,7 +13,7 @@ import { MAX_STOP_RESUMES, planResumeAfterStop } from "./interrupted.ts";
 import { recapOf } from "./recap.ts";
 import { canTransition, IN_FLIGHT, InvalidTaskTransitionError, OutcomeNotSettableError, outcomeOf, STORED_OUTCOMES, TERMINAL } from "./task-status.ts";
 import { setupScripts, syncSkills } from "./skillsync.ts";
-import { answerableStops, FenceReader, lastAttempt, meetEndedJobs, openStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
+import { answerableStops, FenceReader, lastAttempt, meetEndedJobs, openStops, outcomeFromStops, reduceStops, reserveStopRetry, StopFenceReader, stopRecordsFor, stopRecoveryPrompt, stopWork, type StopReport } from "./stops.ts";
 import { oneLine } from "./suggest-llm.ts";
 import { foreignWorkspaceOf, RunnerConfigUnconfirmed, runnerConfigOf } from "./runner-config.ts";
 import { originMismatch } from "./workspace-clone.ts";
@@ -814,7 +814,7 @@ export class TaskManager {
       const r = reserveStopRetry(prev, stop);
       if (!r.ok) {
         const refused: StopRecord = { ...stop, state: r.exhausted ? "exhausted" : "waiting", actions: [...(prev?.actions ?? []), { attempt: prev ? lastAttempt(prev) : 0, at: now, what: `再試行しない: ${r.why}`, ok: false }].slice(-20) };
-        if (!(prev && prev.state === refused.state && prev.actions.at(-1)?.what === refused.actions.at(-1)?.what)) this.record(taskId, { t: "stop.record", stop: refused });
+        if (!(prev && prev.state === refused.state && prev.actions.at(-1)?.what === refused.actions.at(-1)?.what)) this.recordStopEvent(taskId, refused);
         return { ok: false, why: r.why };
       }
       if (lastAttempt(stop) !== r.attempt) return { ok: false, why: `再試行 ${r.attempt - 1} 回目は予約済みです（次は ${r.attempt} 回目）` };
@@ -824,9 +824,31 @@ export class TaskManager {
       for (const l of this.stopRecordedListeners) l(taskId, prev, prev);
       return { ok: true, stop: prev };
     }
-    this.record(taskId, { t: "stop.record", stop });
+    this.recordStopEvent(taskId, stop);
     for (const l of this.stopRecordedListeners) l(taskId, stop, prev);
     return { ok: true, stop };
+  }
+
+  /**
+   * The one place a `stop.record` is written. Right after, the Task's `outcome` is set from its stop records
+   * (`outcomeFromStops`; docs/design/task-outcome.md), unless the person has reviewed the Task, its status decides its outcome
+   * (waiting, error, aborted) or the status cannot store the value. No stop record of its own leaves the outcome as it is.
+   * Stops that are all closed after the turn give `finished` only in place of what the stops had set before this record
+   * (`needs_action` / `waits`): an outcome the judge or the person set after them (a later turn without a stop) stays.
+   */
+  recordStopEvent(taskId: string, stop: StopRecord): void {
+    this.record(taskId, { t: "stop.record", stop });
+    const cur = this.db.getTask(taskId);
+    if (!cur || cur.reviewedAt !== null) return;
+    const records = this.db.listStopRecords([taskId]);
+    const outcome = outcomeFromStops(records, isWorkingStatus(cur.status));
+    if (outcome === null || outcome === cur.outcome || outcomeOf(cur.status, "unknown") !== "unknown" || !STORED_OUTCOMES[cur.status].has(outcome as StoredOutcome)) return;
+    if (outcome === "finished") {
+      const before = outcomeFromStops(records.slice(0, -1), false);
+      if (before !== cur.outcome || (before !== "needs_action" && before !== "waits")) return;
+    }
+    const t = this.db.updateTask(taskId, { outcome: outcome as StoredOutcome, updatedAt: cur.updatedAt });
+    if (t) this.broadcast({ type: "task.updated", task: t });
   }
 
   /** This task's stop `reportId` as last recorded; undefined when it never stopped so. */
@@ -838,7 +860,7 @@ export class TaskManager {
   private moveOpenStops(taskId: string, f: (s: StopRecord) => StopRecord | null, pick = openStops) {
     for (const s of pick(this.db.listStopRecords([taskId]))) {
       const next = f(s);
-      if (next) this.record(taskId, { t: "stop.record", stop: { ...next, at: Date.now() } });
+      if (next) this.recordStopEvent(taskId, { ...next, at: Date.now() });
     }
   }
 

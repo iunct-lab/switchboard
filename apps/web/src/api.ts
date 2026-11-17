@@ -1,4 +1,4 @@
-import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAllocation, BalanceView, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HumanAnswers, HistoryScanResult, HistorySession, HistoryStatus, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskStopMark, TaskSummary, TeleportProgress, Workspace, WorkspaceAllocation, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
+import type { AnswerPolicy, Artifact, AskAnswer, AskAnswerResult, AskBatch, AskBatchResult, AskList, Attachment, Backlog, BacklogAllocation, BalanceView, BacklogAction, BacklogCreateInput, BacklogEditInput, BacklogIssueDetail, BacklogQueue, BacklogQueueInput, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, CustomRunner, DeviceAuthView, EvalsListRow, EvalsSummary, EventEnvelope, FeedbackInput, FlowView, Footprint, HumanAnswers, HistoryScanResult, HistorySession, HistoryStatus, InterventionView, KnowledgeDoc, KnowledgeSearchHit, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, ModelCandidates, OpsLatency, OpsLoad, OpsResources, OpsStops, PendingApproval, PerfSample, PerfSummaryRow, PolicyInput, PolicyList, PolicyPatch, Preset, PresetExpandInput, PresetExpansion, PresetInput, PresetList, PricingTable, Queue, ReportRow, RoutingLogRow, RoutingStats, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, ScheduleInput, ServerMessage, Settings, SettingsPatch, SourceView, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskListItem, TaskStopMark, TeleportProgress, Workspace, WorkspaceAllocation, WorkspaceRemoval, WorkspaceSweep } from "@switchboard/protocol";
 import { acrossParams, type AcrossQuery } from "./reports.ts";
 import { hasTypedText, hostStopped, LEAVE_STOPPED, loginRoute, stoppedRoute, type LoginMode } from "./login.ts";
 import type { ReleaseStatus } from "./release.ts";
@@ -229,6 +229,7 @@ export const api = {
   runnerLoginCancel: (runner: string) => req<RunnerLoginView>(loginPath(runner), { method: "DELETE" }),
   /** gh's login on this machine: `none` until someone logs in (a machine without the cloud host's stored token). */
   githubStatus: () => req<GithubStatus>("/api/github/status"),
+  githubLogout: () => req<{ ok: boolean }>("/api/github/logout", { method: "POST" }),
   /** `recheck` = ask the runners' login status commands again now instead of within the minute (#180). */
   health: (opts: { recheck?: boolean } = {}) => req<Health>(opts.recheck ? "/api/health?recheck=1" : "/api/health").then((h) => ((loginMode = h.login), h)),
   workspaces: () => req<Workspace[]>("/api/workspaces"),
@@ -264,7 +265,7 @@ export const api = {
   setWorkspaceProjectVar: (id: string, projectVar: string | null) => req<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ projectVar }) }),
   workspaceBrief: (id: string) => req<{ workspaceId: string; text: string }>(`/api/workspaces/${id}/brief`),
   taskStops: () => req<Record<string, TaskStopMark>>("/api/tasks/stops"),
-  tasks: (opts: { archived?: boolean } = {}) => req<TaskSummary[]>(opts.archived ? "/api/tasks?archived=1" : "/api/tasks"),
+  tasks: (opts: { archived?: boolean } = {}) => req<TaskListItem[]>(opts.archived ? "/api/tasks?archived=1" : "/api/tasks"),
   // after: only the events past that seq (the catch-up after a dropped WebSocket, #1137)
   /** The Task without its events (#1142): what a turn's end changes besides them (cost, stops, history). */
   taskMeta: (id: string) => req<TaskDetail>(`/api/tasks/${id}?limit=0`),

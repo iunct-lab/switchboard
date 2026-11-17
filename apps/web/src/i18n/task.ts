@@ -151,6 +151,7 @@ export const task = msgs({
   waitCleared: { ja: "待ちが解けた", en: "Wait cleared" },
   waiting: { ja: "待ち", en: "Waiting" },
   prereqRelease: { ja: "（リリース待ち）", en: " (waiting for a release)" },
+  prereqConfirming: { ja: " 利用者確認だけ", en: " only the person's checks left" },
   prereqMerge: { ja: "（マージ待ち）", en: " (waiting for a merge)" },
   prereqOpen: { ja: "（未完）", en: " (not done)" },
   stuckWithdrawn: { ja: " 取り下げ", en: " withdrawn" },
@@ -162,6 +163,7 @@ export const task = msgs({
   // attention.ts
   outcomeNeedsAction: { ja: "要対応", en: "Needs action" },
   outcomeUnknown: { ja: "未判定", en: "Not judged" },
+  outcomeWaits: { ja: "待ち", en: "Waiting" },
   cliDefaultBy: { ja: "{runner}CLI 既定", en: "{runner} CLI default" },
   judgedTitle: { ja: "自動判定（{by}）", en: "Auto-judged ({by})" },
   termWorking: { ja: "端末: 作業中", en: "Terminal: working" },

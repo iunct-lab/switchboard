@@ -4,10 +4,10 @@ import { githubRepoOfRemote, readCloudPreparation, cloudTransferNotice, prepareT
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { isPublicCopy, RELEASE_REVIEW_ORIGIN, RELEASE_REVIEW_TITLE, releaseReviewOf, releaseReviewPrompt, type ReleaseReview } from "./release-review.ts";
 import type { ServerWebSocket } from "bun";
-import { AskAnswerInput, JobRequest, AutoStartKind, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, WorkspaceRulesInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogAllocation, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetExpansion, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
+import { AskAnswerInput, JobRequest, AutoStartKind, type AutoStartChoice, CustomRunnerList, BacklogAnswerInput, BacklogCommentInput, BacklogCreateInput, BacklogEditInput, BacklogQueueInput, BacklogStartInput, BacklogSyncInput, ClientMessage, CreateTaskInput, FeedbackInput, ForkTaskInput, NewRepoInput, BaselineInput, WorkspaceRulesInput, HumanEvalInput, type EvalsSummary, InboxAddInput, InboxCloseInput, InboxEditInput, InboxPromoteInput, MaterializeApplyInput, PatchTaskInput, PerfSamplesInput, PROTOCOL_VERSION, taskSummary, RunnerId, PresetExpandInput, PresetInput, ScheduleInput, SendTaskInput, SetArchivedInput, SetOutcomeInput, Settings, PolicyPatch, SettingsPatch, SuggestInput, type AgentEvent, type EventEnvelope, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type AskList, type Backlog, type BacklogAllocation, type McpServerConfig, type BacklogQueue, BacklogAction, type BacklogItem, type PolicyInput, type PolicySubject, type PolicyList, type Preset, type PresetExpansion, type PresetList, type Task, type TaskEvals, type TeleportProgress, type TerminalStatus, type LlmRoutingSettings, type PricingTable, type RoutingLogRow, type RoutingSuggestion, type RunnerAdapter, type RunnerInfo, type ServerMessage, type ScanCursors, type Workspace, type WorkspaceRemoval, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
 import type { CoreConfig } from "./config.ts";
 import { abortOrphanedTasks, createdIssuesOf, Db, deferredOf, displayPath, type ApiRequestRow } from "./db.ts";
 import { opsLatency } from "./ops-latency.ts";
@@ -36,7 +36,7 @@ import { ledgerRowFor, loadPricing } from "./pricing.ts";
 import { checksEnabledByDefault, isSupervised, RESTART_EXIT_CODE, restartArgv, SelfDev, spawnDetached } from "./selfdev.ts";
 import { isAuthText, LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "./login.ts";
 import { deferNote, fallbackNote, fallbackRunner, fmtTime, RateLimitResumer, RESUME_MARGIN_MS } from "./ratelimit.ts";
-import { type BacklogNextResult, Scheduler } from "./scheduler.ts";
+import { type BacklogNextResult, Scheduler, UI_LAYERS_CHECK_PROMPT } from "./scheduler.ts";
 import { BacklogSync, noticeTargets, type StoredBacklog } from "./backlog-sync.ts";
 import { AFTER_CHECK_MS, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd } from "./depends-resume.ts";
 import { scanAllRepos } from "./secretscan.ts";
@@ -61,7 +61,7 @@ import { copyDeletable, inspectRemoval } from "./workspace-remove.ts";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue, saveQueue } from "./backlog-queue.ts";
 import { allocationOf, sweepOrder, weekWindowStart } from "./allocation.ts";
 import { ACTION_FOR_STAGE, closableByApi, checkFieldTypes, localBacklogSource, syncsGithub, answerStoredConfirmation, answerStoredDecision, awaitingReply, BacklogEditError, holdStoredDecision, BacklogError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, buildDirectPrompt, buildStartPrompt, subagentModelAlias, failedIn, failedSince, isReplyWaiting, latestTag, pickNext, dueSoonOf, replyWaitingIn, readStoredIssue, readStoredRecords, storedFlowIssues, storedIssueHeads, storedIssueReader, screenAnswer, workspaceSyncOf, canStartStoredBacklog, commentStoredIssue, overlapIn, overlapLine, isOverlapped, promotionNote, promotionStep, type PromotionHold, QUOTA_FULL, GithubBudgetCache, reportPromoteFailure, type ReleaseState, backlogRepoOf, runGh, SLOT_OF_ACTION, type Slot, spinningIn, startTitle, isUnblocked, unchangedIn, heldIn, onHoldIn, flowHeldIn, flowHeldLine, allocationHeldLines, type AllocationHold, flowRunning, flowStopped, type FlowLimit, type GhRunner, type OtherRepo } from "./backlog.ts";
-import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule } from "./stops.ts";
+import { issueOf, reduceStops, stopMarks, stopRecordsFor, stuckSchedule, tasksWithStops } from "./stops.ts";
 import { MERGE_GRANT_ANSWERS_KEY, parseMergeGrants } from "./merge-grants.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "./approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, closedHits, asksFromTasks, blockersOf, dedupeAsks, noticeAsks, policyPbi, rankAsks, prFacts, questionsReply, resumeOfTask, type NoticeRecord, type PolicyEnv, type PrFacts } from "./asks.ts";
@@ -80,7 +80,7 @@ import { HistoryImporter } from "./history.ts";
 import { HostIdle, nextWakeFrom } from "./hostidle.ts";
 import { createDockerdIdle } from "./dockerd-idle.ts";
 import { RunnerLogins } from "./runnerlogin.ts";
-import { afterGithubLogin, GITHUB_LOGIN_ARGS, GITHUB_LOGIN_HOSTS, githubStatus, type GitConfigRunner } from "./github-login.ts";
+import { afterGithubLogin, GITHUB_LOGIN_ARGS, GITHUB_LOGIN_HOSTS, GITHUB_LOGOUT_ARGS, githubStatus, type GitConfigRunner } from "./github-login.ts";
 import { DeviceAuths, type DeviceAuthInput } from "./deviceauth.ts";
 import { archiveProblem } from "./archive-status.ts";
 
@@ -127,6 +127,8 @@ export interface CoreServer {
   token: string;
   /** Terminal tab; null when no PTY can be opened here. */
   pty: PtyManager | null;
+  /** Read the Web UI and the shipped defaults again from `<home>/releases/current` (SIGHUP, under sb-rescue). The version's sha, or null when there is no `current`. */
+  reloadRelease(): string | null;
   stop(): Promise<void>;
 }
 
@@ -210,6 +212,28 @@ function webhookSigned(body: Uint8Array, header: string | null, secret: string):
   const want = Buffer.from(`sha256=${createHmac("sha256", secret).update(body).digest("hex")}`);
   const given = Buffer.from(header);
   return given.length === want.length && timingSafeEqual(given, want);
+}
+
+/** The shipped defaults of the version at `root` with the user's copies under `home` first, as a release reload reads them.
+ *  A table left out (undefined) keeps its previous value: its shipped file is broken, or neither file exists. `kept` says why, one line each. */
+export function readShippedDefaults(home: string, root: string): { routing?: ReturnType<typeof loadRoutingTable>; pricing?: ReturnType<typeof loadPricing>; mcpPolicy?: ReturnType<typeof loadMcpPolicy>; kept: string[] } {
+  const kept: string[] = [];
+  const paths = (file: string) => [join(home, file), join(root, "packages", "core", "config", file)];
+  const usable = (what: string, file: string, problems: string[] = []) => {
+    if (!paths(file).some((p) => existsSync(p))) return kept.push(`${what}: ${file} is in neither ${home} nor the release`), false;
+    const bad = problems.find((p) => p.startsWith(`${root}${sep}`));
+    if (bad) return kept.push(`${what}: ${bad}`), false;
+    return true;
+  };
+  const out: ReturnType<typeof readShippedDefaults> = { kept };
+  const r = loadRoutingTable(paths("routing.yaml"));
+  if (usable("routing table", "routing.yaml", r.problems)) out.routing = r;
+  const p = loadPricing(paths("pricing.json"));
+  if (usable("pricing table", "pricing.json", p.problems)) out.pricing = p;
+  if (usable("MCP policy", "mcp.yaml")) {
+    try { out.mcpPolicy = loadMcpPolicy(paths("mcp.yaml")); } catch (e) { kept.push(`MCP policy: ${String((e as Error).message ?? e)}`); }
+  }
+  return out;
 }
 
 export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], opts: StartServerOptions = {}): Promise<CoreServer> {
@@ -347,7 +371,11 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     });
 
   // Rule table: the user's ~/.switchboard/routing.yaml wins over the shipped default. Loaded once per boot.
-  const routing = loadRoutingTable([join(cfg.home, "routing.yaml"), join(cfg.codeRoot, "packages", "core", "config", "routing.yaml")]);
+  // The shipped defaults are read from `liveRoot`: the code root at boot, the `releases/current` version after a reload (SIGHUP).
+  let liveRoot = cfg.codeRoot;
+  let webDist = cfg.webDist;
+  const shipped = (root: string, file: string) => join(root, "packages", "core", "config", file);
+  const routing = loadRoutingTable([join(cfg.home, "routing.yaml"), shipped(liveRoot, "routing.yaml")]);
 
   // The knowledge folder is optional at boot: an unwritable path or one unreadable file must not stop the daemon.
   const knowledge = new KnowledgeStore(cfg.knowledgeDir, db);
@@ -509,7 +537,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     }
   };
   const approval = new ApprovalRules(knowledge, (task) => (task.workspaceId ? db.getWorkspace(task.workspaceId) : null), (id) => db.getWorkspace(id), () => ({ list: readPolicies(db), pbiOpen: (wsId, n) => { const ws = wsId ? db.getWorkspace(wsId) : null; return !!ws && storedBacklog(ws).items.some((i) => i.number === n); } }));
-  const pricing = loadPricing([join(cfg.home, "pricing.json"), join(cfg.codeRoot, "packages", "core", "config", "pricing.json")]);
+  const pricing = loadPricing([join(cfg.home, "pricing.json"), shipped(liveRoot, "pricing.json")]);
   // The settings screen's price rows over the file's table, read on every use so a PATCH prices the next usage
   const pricingTable = (): PricingTable => ({ ...pricing.table, models: { ...pricing.table.models, ...settings().prices } });
   // Attachments: uploads wait in <home>/attachments/inbox until a turn sends them; a day-old leftover is swept at boot.
@@ -584,7 +612,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   // The compose projects each task started (the kit's `docker` front writes them)
   const dockerLogDir = join(cfg.home, "docker");
   mkdirSync(dockerLogDir, { recursive: true });
-  const mcpPolicy = loadMcpPolicy([join(cfg.home, "mcp.yaml"), join(cfg.codeRoot, "packages", "core", "config", "mcp.yaml")]);
+  let mcpPolicy = loadMcpPolicy([join(cfg.home, "mcp.yaml"), shipped(liveRoot, "mcp.yaml")]);
   // what a Task's Claude reads instead of the user-wide MCP servers: mcp.yaml `servers`, for its Workspace
   const taskMcpServers = (t: Task) => mcpServersFor(mcpPolicy, t.workspaceId ? (db.getWorkspace(t.workspaceId)?.name ?? null) : null);
   // The servers added in Settings as the adapters were built from them (main.ts reads the same row before this starts): a change
@@ -751,7 +779,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     const auto = settings().autoStart;
     if (runner && adapterMap.has(runner)) return runner;
     const own = auto.byKind[kind];
-    if (own && adapterMap.has(own.runner)) return own.runner;
+    if (own?.runner && adapterMap.has(own.runner)) return own.runner;
     const configured = runner ?? auto.runner;
     return adapterMap.has(configured) ? configured : !runner && adapterMap.has("claude") ? "claude" : null;
   };
@@ -778,7 +806,8 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     if (!existsSync(meta.path)) return { error: "workspace directory does not exist", status: 409 };
     const auto = settings().autoStart;
     const own = auto.byKind[req.kind];
-    if (!(req.runner && adapterMap.has(req.runner)) && own && adapterMap.has(own.runner)) req = { ...req, runner: own.runner, model: own.model, effort: own.effort };
+    // a kind without its own runner follows the caller's / the common one: its model and effort belong to its own runner only
+    if (!(req.runner && adapterMap.has(req.runner)) && own?.runner && adapterMap.has(own.runner)) req = { ...req, runner: own.runner, model: own.model, effort: own.effort };
     const decided = decidedRunner(req.kind, req.runner);
     if (!decided) return { error: "ランナーが検出されていません", status: 409 };
     // the decided runner at its limit: the order's next one, on its CLI default model and effort
@@ -792,12 +821,20 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       const why = attachments.check(req.attachmentIds);
       if (why) return { error: why.message, status: why.status };
     }
+    // the kind's own permission mode goes to the runner it starts on; one that runner no longer lists, or one that
+    // skips approvals there, starts on the runner's default
+    const mode = own?.permissionMode;
+    const permissionMode = mode && !tasks.checkPermissionMode(runner, mode) && !adapterMap.get(runner)?.permissionModes?.find((m) => m.value === mode)?.danger ? mode : "";
+    const budgetUsd = own?.budgetUsd ?? req.budgetUsd;
     const input = {
       workspaceId: meta.id, cwd: meta.path, runner, title: req.title, prompt: req.prompt, attachmentIds: req.attachmentIds, scheduleId: req.scheduleId,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
-      ...(req.shadowRunner === null ? { shadowRunner: null } : {}),
-      ...(req.budgetUsd ? { budgetUsd: req.budgetUsd } : {}),
+      ...(permissionMode ? { permissionMode } : {}),
+      // the unattended sweep (shadowRunner: null) never mirrors; otherwise the kind's own 並走 over the common one
+      ...(req.shadowRunner === null || own?.shadow === "off" ? { shadowRunner: null } : own?.shadow ? { shadowRunner: own.shadow } : {}),
+      // the kind's budget, else the caller's (the schedule's), else the settings' default (createRouted)
+      ...(budgetUsd ? { budgetUsd } : {}),
       ...(req.stage ? { stage: req.stage } : {}),
       ...(req.process ? { process: req.process, processReason: req.processReason } : {}),
     };
@@ -1405,7 +1442,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   };
 
   /** sb-rescue's view of the releases; `managed: false` when not under sb-rescue or when it does not answer. */
-  type RescueStatus = ReleaseState & { previous: string | null; state: string; busy: string | null; lastError: string | null };
+  type RescueStatus = ReleaseState & { previous: string | null; running?: string | null; state: string; busy: string | null; lastError: string | null };
   const releaseStatus = async (): Promise<RescueStatus | { managed: false; error?: string }> => {
     if (!cfg.rescueUrl) return { managed: false };
     try {
@@ -1971,7 +2008,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   const seedMeta = metaWorkspace();
   if (seedMeta && !db.getSetting("uiLayers.seeded", false)) {
     try {
-      scheduler.create({ title: "床・天井・壁の点検", cron: "0 9 1 * *", action: "ui-layers", runner: "claude", workspaceId: seedMeta.id });
+      scheduler.create({ title: "床・天井・壁の点検", cron: "0 9 1 * *", action: "prompt", prompt: UI_LAYERS_CHECK_PROMPT, runner: "claude", workspaceId: seedMeta.id });
       db.setSetting("uiLayers.seeded", true);
     } catch (e) {
       console.warn(`ui-layers: could not add the monthly check: ${String((e as Error).message ?? e)}`);
@@ -2739,7 +2776,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         const check = refreshLogins(force);
         if (force) await check;
         // busyTasks: the Tasks a restart would stop, so sb-rescue's status poll never reads every task.
-        return json({ ok: true, protocol: PROTOCOL_VERSION, login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` }, busyTasks: db.listWorkingTasks("gate").map(({ id, title, status }) => ({ id, title, status })) });
+        return json({ ok: true, protocol: PROTOCOL_VERSION, webRelease: basename(liveRoot), login, session: (auth.session && sessionTimes(auth.session, cfg.sessionPublicKey)) || undefined, runners: runnerInfo(), home: cfg.home, homeDisplay: cfg.homeDisplay, homeIsTemp: cfg.homeIsTemp, repoRoot: cfg.repoRoot, authRequired, features: { pty: pty !== null }, archive: archiveProblem(cfg.home), routing: { llm: { ...settings().routing.llm, available: adapterMap.has(settings().routing.llm.runner) } }, mcp: { base: `${publicUrl()}/mcp/<taskId>` }, busyTasks: db.listWorkingTasks("gate").map(({ id, title, status }) => ({ id, title, status })) });
       },
 
       // Settings the UI can change. A saved default mode must be one the runner offers and must not skip
@@ -2777,6 +2814,23 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
         DELETE: () => {
           const v = githubLogins.cancel("gh");
           return v ? json(v) : bad("no login in progress", 404);
+        },
+      },
+      "/api/github/logout": {
+        POST: async () => {
+          const bin = ghBin();
+          if (!bin) return bad("gh is not installed here", 404);
+          let code = -1;
+          try {
+            const proc = Bun.spawn([bin, ...GITHUB_LOGOUT_ARGS], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: runnerCliEnv() });
+            const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
+            code = await proc.exited;
+            clearTimeout(timer);
+          } catch {
+            // gh is gone or cannot run: the same answer as a command that failed
+          }
+          if (code !== 0) return bad("github logout failed", 502);
+          return json({ ok: true });
         },
       },
       "/api/runners/:id/logout": {
@@ -2959,17 +3013,44 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
                 continue;
               }
               if (kindPatch.runner !== undefined && !adapterMap.has(kindPatch.runner)) return bad(`runner "${kindPatch.runner}" is not installed`);
-              const { runner, model, effort } = next.autoStart.byKind[kind] ?? next.autoStart;
-              const kindRunnerChanged = kindPatch.runner !== undefined && kindPatch.runner !== runner;
-              const choice = { runner, model, effort, ...(kindRunnerChanged ? { model: "", effort: "" } : {}), ...kindPatch };
-              const kindWhy = kindPatch.effort ? tasks.checkEffort(choice.runner, kindPatch.effort) : undefined;
+              const saved = next.autoStart.byKind[kind];
+              const { model, effort } = saved ?? next.autoStart;
+              // a change is against the runner the kind starts on now: its own, else the common one it follows
+              const kindRunnerChanged = kindPatch.runner !== undefined && kindPatch.runner !== (saved?.runner ?? next.autoStart.runner);
+              const { permissionMode: modePatch, budgetUsd: budgetPatch, shadow: shadowPatch, ...rest } = kindPatch;
+              // a kind that changes only its permission mode keeps following the common runner (no runner of its own);
+              // a model or an effort belongs to one runner, so it pins the common runner to the kind as the no-choice case does
+              const pins = kindPatch.runner !== undefined || kindPatch.model !== undefined || kindPatch.effort !== undefined;
+              const base: AutoStartChoice = saved ? (saved.runner || !pins ? saved : { ...saved, runner: next.autoStart.runner }) : pins ? { runner: next.autoStart.runner, model, effort } : { model: "", effort: "" };
+              const choice: AutoStartChoice = { ...base, ...(kindRunnerChanged ? { model: "", effort: "", permissionMode: undefined } : {}), ...rest };
+              const choiceRunner = choice.runner ?? next.autoStart.runner;
+              const kindWhy = kindPatch.effort ? tasks.checkEffort(choiceRunner, kindPatch.effort) : undefined;
               if (kindWhy) return bad(kindWhy);
-              next.autoStart.byKind[kind] = choice;
+              if (modePatch === null) delete choice.permissionMode;
+              else if (modePatch !== undefined) {
+                const modeWhy = tasks.checkPermissionMode(choiceRunner, modePatch);
+                if (modeWhy) return bad(modeWhy);
+                if (adapterMap.get(choiceRunner)?.permissionModes?.find((m) => m.value === modePatch)?.danger) return bad(`"${modePatch}" skips approvals and cannot be a default; choose it per task`);
+                choice.permissionMode = modePatch;
+              }
+              if (budgetPatch === null) delete choice.budgetUsd;
+              else if (budgetPatch !== undefined) choice.budgetUsd = budgetPatch;
+              if (shadowPatch === null) delete choice.shadow;
+              else if (shadowPatch !== undefined) choice.shadow = shadowPatch;
+              // a runner change onto the kind's saved 並走 drops it, as it drops the mode; one sent with the change is checked below
+              if (kindRunnerChanged && shadowPatch === undefined && choice.shadow === choiceRunner) delete choice.shadow;
+              // a shadow is another runner than the one the kind starts on, and one that is detected
+              if (choice.shadow && choice.shadow !== "off") {
+                if (choice.shadow === choiceRunner) return bad("shadowRunner must differ from runner");
+                if (!adapterMap.has(choice.shadow)) return bad(`runner "${choice.shadow}" is not installed`);
+              }
+              if (!choice.runner && !choice.permissionMode && !choice.budgetUsd && !choice.shadow && !choice.model && !choice.effort) delete next.autoStart.byKind[kind];
+              else next.autoStart.byKind[kind] = choice;
             }
             // Task ごとの実装のモデル: a Claude model of claude's list, while 実装 runs on claude. A later runner change keeps it; the start leaves it out then
             const taskModel = patch.completeTaskModel;
             if (taskModel) {
-              if ((next.autoStart.byKind.complete ?? next.autoStart).runner !== "claude") return bad("Task ごとのモデルは「実装」のランナーが claude のときだけ選べます");
+              if ((next.autoStart.byKind.complete?.runner ?? next.autoStart.runner) !== "claude") return bad("Task ごとのモデルは「実装」のランナーが claude のときだけ選べます");
               const listed = (savedModels("claude") ?? adapterMap.get("claude")?.models ?? []).map((m) => m.value);
               if (!listed.includes(taskModel) || !subagentModelAlias(taskModel)) return bad(`model "${taskModel}" is not one of claude's`);
             }
@@ -3977,7 +4058,10 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       },
 
       "/api/tasks": {
-        GET: (req) => json(db.listTasks(new URL(req.url).searchParams.get("archived") === "1").map(taskSummary)),
+        GET: (req) => {
+          const archived = new URL(req.url).searchParams.get("archived") === "1";
+          return json(archived ? db.listTasks(true).map(taskSummary) : tasksWithStops(db, db.listTasks(false)));
+        },
         POST: async (req, srv) => {
           const parsed = CreateTaskInput.safeParse(await req.json().catch(() => ({})));
           if (!parsed.success) return bad(parsed.error.message);
@@ -4513,7 +4597,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           // a public copy's clone: the newest release and the check of its diff (null on a development origin)
           const latest = await latestRelease(s.current, s.source).catch(() => null);
           const review = latest ? releaseReviewFor(latest) : null;
-          return json({ managed: true, latestRelease: latest, review, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
+          return json({ managed: true, latestRelease: latest, review, rescuePage: cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: busyTasks(), dirty: dirty !== "", current: s.current, running: s.running ?? null, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: promotionAsked, hold: promotionHold ? { ...promotionHold, busyTasks: busyTasks() } : null });
         } catch (e) {
           return json({ managed: false, error: `sb-rescue did not answer at ${cfg.rescueUrl}: ${String((e as Error).message ?? e)}` });
         }
@@ -4640,7 +4724,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
           }
         },
       },
-      "/api/ledger/pricing": () => json({ ...pricingTable(), fromSettings: Object.keys(settings().prices), source: pricing.source.replace(cfg.home, "~/.switchboard").replace(cfg.codeRoot, "<repo>"), problems: pricing.problems }),
+      "/api/ledger/pricing": () => json({ ...pricingTable(), fromSettings: Object.keys(settings().prices), source: pricing.source.replace(cfg.home, "~/.switchboard").replace(liveRoot, "<repo>"), problems: pricing.problems }),
       "/api/tasks/:id/budget": {
         POST: async (req) => {
           const t = db.getTask(String(req.params.id));
@@ -4947,11 +5031,12 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       if (!hostOk(req)) return refused(req, srv, notAllowedHost());
       // Static web UI when built; otherwise point at the Vite dev server.
       const url = new URL(req.url);
-      if (existsSync(cfg.webDist)) {
+      const dist = webDist;
+      if (existsSync(dist)) {
         const rel = url.pathname === "/" ? "/index.html" : url.pathname;
-        const file = Bun.file(join(cfg.webDist, rel));
+        const file = Bun.file(join(dist, rel));
         if (await file.exists()) return new Response(file, { headers: WEB_HEADERS });
-        return new Response(Bun.file(join(cfg.webDist, "index.html")), { headers: WEB_HEADERS });
+        return new Response(Bun.file(join(dist, "index.html")), { headers: WEB_HEADERS });
       }
       return new Response(`Switchboard core is running. Web UI is not built; run "bun run dev" and open http://localhost:5173\n`, {
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -5069,6 +5154,23 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     return Object.fromEntries(Object.entries(routes).map(([path, h]) => [path, logged(path, limitedGuard(entryGuard(path === "/api/health" || path === "/ws" || path === "/ws/pty" || path.startsWith("/mcp/") || path.startsWith("/otel/") || path.startsWith("/artifacts/") || (path === "/api/backlog/webhooks/github" && webhookOpen) ? (h as AnyHandler) : guard(h as AnyHandler))))])) as T;
   }
 
+  /** Re-read what the shipped version carries. A broken or missing shipped file keeps the previous value (the user's copy under home still wins first). */
+  const reloadRelease = (): string | null => {
+    let root: string;
+    try { root = realpathSync(join(cfg.home, "releases", "current")); } catch { return null; }
+    const next = readShippedDefaults(cfg.home, root);
+    for (const why of next.kept) console.warn(`release reload: keeping the previous ${why}`);
+    if (next.routing) Object.assign(routing, next.routing);
+    if (next.pricing) Object.assign(pricing, next.pricing);
+    if (next.mcpPolicy) {
+      mcpPolicy = next.mcpPolicy;
+      mcp.setPolicy(mcpPolicy);
+    }
+    liveRoot = root;
+    webDist = join(root, "apps", "web", "dist");
+    return basename(root);
+  };
+
   const stopAll = async (cleanExit: CleanExit = "shutdown") => {
     adviceStop.abort(new Error("the daemon is stopping"));
     await Promise.all(adviceRunning);
@@ -5151,6 +5253,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     selfdev,
     history,
     pty,
+    reloadRelease,
     stop: () => stopAll(),
   };
 }

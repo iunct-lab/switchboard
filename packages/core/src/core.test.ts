@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rea
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { AgentEvent, AskList, AskQuestion, RunnerAdapter, RunnerDetection, RunnerId, RoutingStats, RunnerSession, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
-import { OpsLatency, OpsLoad, OpsResources, OpsStops, TaskSummary } from "@switchboard/protocol";
+import { OpsLatency, OpsLoad, OpsResources, OpsStops, StopRecord, TaskSummary } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { isTempDir, loadConfig, teleportWorktreePath } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
@@ -36,7 +36,7 @@ import { MAX_STOP_RESUMES } from "./interrupted.ts";
 import { StopReport } from "./stops.ts";
 import { deployApprovedText, SSO_REST_TEXT, SSO_RESUME_TEXT } from "./approval-batch.ts";
 import { makePrivateTmp, privateTmpOf, sweepPrivateTmps, TaskManager, taskAllowRules } from "./tasks.ts";
-import { Scheduler } from "./scheduler.ts";
+import { Scheduler, UI_LAYERS_CHECK_PROMPT } from "./scheduler.ts";
 import { loadProcess } from "./process-defs.ts";
 
 /** A gh that answers nothing: the ledger summary reads GitHub's budget, which a test must not ask the real GitHub for. */
@@ -2233,7 +2233,7 @@ describe("core daemon", () => {
         otherTotal: 0,
         days: 30,
         // the rule rows only: task_c has an LLM row and no rule row, so it is not a task of any runner here
-        byRunner: [{ runner: "claude", total: 2, outcomes: { finished: 0, needs_action: 0, failed: 0, unknown: 2 }, medianCostUsd: 0, medianDurationMs: 0 }],
+        byRunner: [{ runner: "claude", total: 2, outcomes: { finished: 0, needs_action: 0, waits: 0, failed: 0, unknown: 2 }, medianCostUsd: 0, medianDurationMs: 0 }],
       });
       // a source that never agreed reports 0, not a missing group
       log("task_d", "llm", "codex", "claude", now);
@@ -2278,14 +2278,14 @@ describe("core daemon", () => {
       const stats = (await fetch(`${b}/api/routing/stats?days=30`).then(j)) as RoutingStats;
       expect(stats.byRunner).toEqual([
         // (c) an odd count takes the middle value
-        { runner: "codex", total: 3, outcomes: { finished: 2, needs_action: 0, failed: 1, unknown: 0 }, medianCostUsd: 0.3, medianDurationMs: 2000 },
+        { runner: "codex", total: 3, outcomes: { finished: 2, needs_action: 0, waits: 0, failed: 1, unknown: 0 }, medianCostUsd: 0.3, medianDurationMs: 2000 },
         // an even count the mean of the middle two
-        { runner: "claude", total: 2, outcomes: { finished: 1, needs_action: 1, failed: 0, unknown: 0 }, medianCostUsd: 0.5, medianDurationMs: 2500 },
+        { runner: "claude", total: 2, outcomes: { finished: 1, needs_action: 1, waits: 0, failed: 0, unknown: 0 }, medianCostUsd: 0.5, medianDurationMs: 2500 },
       ]); // (d) dak has no record in the window, so no entry; most tasks first
       expect(stats.llm.total).toBe(1); // the LLM row still counts for agreement
       const wide = (await fetch(`${b}/api/routing/stats?days=90`).then(j)) as RoutingStats;
       expect(wide.byRunner.map((r) => [r.runner, r.total])).toEqual([["claude", 4], ["codex", 3], ["dak", 1]]); // ties by name
-      expect(wide.byRunner[0]!.outcomes).toEqual({ finished: 1, needs_action: 1, failed: 0, unknown: 2 });
+      expect(wide.byRunner[0]!.outcomes).toEqual({ finished: 1, needs_action: 1, waits: 0, failed: 0, unknown: 2 });
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -3113,6 +3113,71 @@ describe("core daemon", () => {
     }
   });
 
+  test("autoStart permission by kind: PATCH keeps a mode the kind's runner lists, refuses a danger one and an unknown one, null goes back to the default, a runner change clears it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-mode-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, modes: ["auto", "plan", "bypass"], dangerModes: ["bypass"], defaultMode: "auto", models: ["claude-sonnet-5-5", "m-x"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, modes: ["read-only", "plan"] })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const get = () => fetch(`${b}/api/settings`).then(j);
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      // a mode alone: the kind keeps following the common runner (no runner of its own)
+      expect((await patch({ autoStart: { byKind: { check: { permissionMode: "plan" } } } }).then(j)).autoStart.byKind).toEqual({ check: { model: "", effort: "", permissionMode: "plan" } });
+      expect((await patch({ autoStart: { byKind: { check: { permissionMode: "bogus" } } } })).status).toBe(400); // claude does not list it
+      const danger = await patch({ autoStart: { byKind: { check: { permissionMode: "bypass" } } } });
+      expect(danger.status).toBe(400);
+      expect(((await danger.json()) as { error: string }).error).toContain("cannot be a default");
+      expect((await get()).autoStart.byKind.check.permissionMode).toBe("plan"); // a refused PATCH saves nothing
+      // a model on a kind without its own runner pins the common runner, as it does on a kind with no choice (a model belongs to one runner)
+      await patch({ autoStart: { byKind: { close: { permissionMode: "plan" } } } });
+      expect((await patch({ autoStart: { byKind: { close: { model: "m-x" } } } }).then(j)).autoStart.byKind.close).toEqual({ runner: "claude", model: "m-x", effort: "", permissionMode: "plan" });
+      // naming the runner it already follows is no runner change: the mode stays
+      expect((await patch({ autoStart: { byKind: { check: { runner: "claude" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "claude", model: "", effort: "", permissionMode: "plan" });
+      // Task ごとの実装のモデル reads 実装's runner through a choice without one (the common claude here)
+      await patch({ autoStart: { byKind: { complete: { permissionMode: "plan" } } } });
+      expect((await patch({ autoStart: { completeTaskModel: "claude-sonnet-5-5" } })).status).toBe(200);
+      // the kind's own runner decides what is listed
+      expect((await patch({ autoStart: { byKind: { check: { runner: "codex", permissionMode: "auto" } } } })).status).toBe(400);
+      expect((await patch({ autoStart: { byKind: { check: { runner: "codex", permissionMode: "read-only" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "codex", model: "", effort: "", permissionMode: "read-only" });
+      // a runner change clears the mode (it belongs to one runner)
+      expect((await patch({ autoStart: { byKind: { check: { runner: "claude" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "claude", model: "", effort: "" });
+      // null goes back to the default; a choice left empty is removed
+      await patch({ autoStart: { byKind: { request: { permissionMode: "plan" } } } });
+      expect((await patch({ autoStart: { byKind: { request: { permissionMode: null } } } }).then(j)).autoStart.byKind.request).toBeUndefined();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("autoStart budget and shadow by kind: PATCH saves and clears them; a shadow on the kind's own runner or an undetected one is 400", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-budget-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const get = () => fetch(`${b}/api/settings`).then(j);
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      // a budget and a shadow alone: the kind keeps following the common runner
+      expect((await patch({ autoStart: { byKind: { complete: { budgetUsd: 5, shadow: "codex" } } } }).then(j)).autoStart.byKind).toEqual({ complete: { model: "", effort: "", budgetUsd: 5, shadow: "codex" } });
+      expect((await patch({ autoStart: { byKind: { complete: { shadow: "off" } } } }).then(j)).autoStart.byKind.complete).toEqual({ model: "", effort: "", budgetUsd: 5, shadow: "off" });
+      // the common runner is claude: a shadow on it, an undetected one and a budget of 0 are refused, and nothing is saved
+      expect((await patch({ autoStart: { byKind: { complete: { shadow: "claude" } } } })).status).toBe(400);
+      expect((await patch({ autoStart: { byKind: { complete: { shadow: "dak" } } } })).status).toBe(400);
+      expect((await patch({ autoStart: { byKind: { complete: { budgetUsd: 0 } } } })).status).toBe(400);
+      expect((await get()).autoStart.byKind.complete).toEqual({ model: "", effort: "", budgetUsd: 5, shadow: "off" });
+      // the kind's own runner is the one a shadow must differ from
+      expect((await patch({ autoStart: { byKind: { check: { runner: "codex", shadow: "codex" } } } })).status).toBe(400);
+      expect((await patch({ autoStart: { byKind: { check: { runner: "codex", shadow: "claude" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "codex", model: "", effort: "", shadow: "claude" });
+      // moving the kind onto its 並走's runner drops that 並走 (as a runner change drops the mode); a 並走 sent with it is still checked
+      expect((await patch({ autoStart: { byKind: { check: { runner: "claude" } } } }).then(j)).autoStart.byKind.check).toEqual({ runner: "claude", model: "", effort: "" });
+      // null clears each; a choice left empty is removed
+      expect((await patch({ autoStart: { byKind: { complete: { budgetUsd: null } } } }).then(j)).autoStart.byKind.complete).toEqual({ model: "", effort: "", shadow: "off" });
+      expect((await patch({ autoStart: { byKind: { complete: { shadow: null } } } }).then(j)).autoStart.byKind.complete).toBeUndefined();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("complete task model: 同じ by default; PATCH saves a Claude model of claude's list and GET reads it; another runner's 実装, an unknown model or one without a subagent alias is 400; \"\" goes back to 同じ", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-task-model-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true, models: ["claude-opus-5-5", "claude-sonnet-5-5", "m-plain"] }), fakeAdapter(SCRIPT, { id: "codex", lingers: true, models: ["gpt-6"] })], { port: 0 });
@@ -3505,7 +3570,7 @@ describe("core daemon", () => {
       async fetch(req) {
         const path = new URL(req.url).pathname;
         seen.push({ path, auth: req.headers.get("authorization"), body: req.method === "POST" ? await req.json() : null });
-        return path === "/api/status" ? Response.json({ current: "c".repeat(40), previous: null, state: "running", busy: null, lastError: "promote: disk full while taking the snapshot", history }) : Response.json({ started: "promote" }, { status: 202 });
+        return path === "/api/status" ? Response.json({ current: "c".repeat(40), running: "d".repeat(40), previous: null, state: "running", busy: null, lastError: "promote: disk full while taking the snapshot", history }) : Response.json({ started: "promote" }, { status: 202 });
       },
     });
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-promote-"));
@@ -3513,7 +3578,7 @@ describe("core daemon", () => {
     const url = `http://127.0.0.1:${c.server.port}`;
     try {
       const rel = await fetch(`${url}/api/daemon/release`).then(j);
-      expect(rel).toMatchObject({ managed: true, rescuePage: "https://d1.example.net/rescue/", current: "c".repeat(40), state: "running", busy: null, lastError: "promote: disk full while taking the snapshot" }); // a failure outside the history still reaches the UI
+      expect(rel).toMatchObject({ managed: true, rescuePage: "https://d1.example.net/rescue/", current: "c".repeat(40), running: "d".repeat(40), state: "running", busy: null, lastError: "promote: disk full while taking the snapshot" }); // a failure outside the history still reaches the UI
       expect(rel.head).toMatch(/^[0-9a-f]{40}$/);
       expect(typeof rel.dirty).toBe("boolean");
       expect(rel.history.map((x: { reason: string }) => x.reason)).toEqual(["reason 0", "reason 1", "reason 2", "reason 3", "reason 4"]);
@@ -3739,6 +3804,71 @@ describe("automatic judgement", () => {
   const daemon = (h: string, judge: typeof judgeTurn) =>
     // codex is slow, so its follow-up turn is still running when a test answers the previous judgement
     startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(ok, { lingers: true }), fakeAdapter(ok, { id: "codex", lingers: true, slowMs: 300 })], { port: 0, selfdevChecks: false, judge });
+
+  test("judge: a stop recorded while the judge is out sets the outcome, and the judge's answer keeps its own result next to it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-judge-stop-"));
+    const { calls, judge } = handJudge();
+    const c = await daemon(h, judge);
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = (await post(`${b}/api/tasks`, { cwd: h, title: "decision stop", prompt: "依頼文", runner: "claude" }).then(j)) as Task;
+      await waitFor(async () => calls.length === 1);
+      expect(c.db.getTask(t.id)).toMatchObject({ status: "done", outcome: "unknown" });
+      expect(c.tasks.recordStop(t.id, StopReport.parse({ id: "ask", op: "ask", target: "方針", reason: "decision", evidence: "どちらにするか" })).ok).toBe(true);
+      expect(c.db.getTask(t.id)!.outcome).toBe("needs_action");
+      calls[0]!.answer("finished");
+      await waitFor(async () => c.db.getTask(t.id)!.judgedResult === "finished");
+      expect(c.db.getTask(t.id)).toMatchObject({ status: "done", outcome: "needs_action", judgedResult: "finished" });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("judge: a turn that ends on a decision stop it reported is needs_action at done, and the judge is not asked", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-judge-fence-"));
+    const { calls, judge } = handJudge();
+    const fence = "\n```switchboard-stop\n" + JSON.stringify({ id: "ask", op: "ask", target: "方針", reason: "decision", evidence: "どちらにするか" }) + "\n```\n";
+    const script: AgentEvent[] = [...ok.slice(0, -1), { t: "message.delta", role: "assistant", text: fence }, ok.at(-1)!];
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(script, { lingers: true })], { port: 0, selfdevChecks: false, judge });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = (await post(`${b}/api/tasks`, { cwd: h, title: "decision fence", prompt: "依頼文", runner: "claude" }).then(j)) as Task;
+      await waitFor(async () => c.db.getTask(t.id)!.status === "done");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(c.db.getTask(t.id)).toMatchObject({ status: "done", outcome: "needs_action", judgingAt: null });
+      expect(calls.length).toBe(0);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("judge: after the turn, an old stop that closes does not undo the judge's outcome of a later turn, and a reviewed Task is left", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-judge-old-stop-"));
+    const { calls, judge } = handJudge();
+    const c = await daemon(h, judge);
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = (await post(`${b}/api/tasks`, { cwd: h, title: "old stop", prompt: "依頼文", runner: "claude" }).then(j)) as Task;
+      await waitFor(async () => calls.length === 1);
+      calls[0]!.answer("needs_action");
+      await waitFor(async () => c.db.getTask(t.id)!.outcome === "needs_action");
+      const report = { id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI 待ち" };
+      // a stop of an earlier turn, written straight to the log (as one reported before the judged turn)
+      c.db.appendEvent(t.id, { t: "stop.record", stop: StopRecord.parse({ ...report, id: `${t.id}/ci`, work: { workspaceId: null, issue: null, taskId: t.id }, at: 1, state: "waiting" }) });
+      c.tasks.recordStopEvent(t.id, StopRecord.parse({ ...report, id: `${t.id}/ci`, work: { workspaceId: null, issue: null, taskId: t.id }, at: Date.now(), state: "resolved" }));
+      expect(c.db.getTask(t.id)!.outcome).toBe("needs_action");
+      // the person reviewed it: a new open stop does not move it
+      c.tasks.setOutcome(t.id, { outcome: "finished", reviewed: true });
+      expect(c.tasks.recordStop(t.id, StopReport.parse({ id: "late", op: "x", target: "y", reason: "decision", evidence: "z" })).ok).toBe(true);
+      expect(c.db.getTask(t.id)).toMatchObject({ outcome: "finished" });
+      expect(c.db.getTask(t.id)!.reviewedAt).not.toBeNull();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
 
   test("judge: a turn that ended with a background process left (status background) is judged like a done one", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-judge-bg-"));
@@ -6224,13 +6354,13 @@ describe("ui-layers schedule", () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-ui-layers-"));
     const boot = () => startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const checks = async (c: Awaited<ReturnType<typeof boot>>) =>
-      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.action === "ui-layers");
+      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.title === "床・天井・壁の点検");
     try {
       let c = await boot();
       const [first, ...more] = await checks(c);
       expect(more).toHaveLength(0);
       const meta = ((await fetch(`http://127.0.0.1:${c.server.port}/api/workspaces`).then(j)) as Workspace[]).find((w) => w.kind === "meta")!;
-      expect(first).toMatchObject({ title: "床・天井・壁の点検", cron: "0 9 1 * *", runner: "claude", workspaceId: meta.id, enabled: true });
+      expect(first).toMatchObject({ title: "床・天井・壁の点検", cron: "0 9 1 * *", action: "prompt", prompt: UI_LAYERS_CHECK_PROMPT, runner: "claude", workspaceId: meta.id, enabled: true });
       await c.stop();
       c = await boot();
       expect((await checks(c)).map((s) => s.id)).toEqual([first!.id]);
@@ -6250,7 +6380,7 @@ describe("ui-layers schedule", () => {
     const boot = () =>
       startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_REPO_ROOT: repo, ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
     const checks = async (c: Awaited<ReturnType<typeof boot>>) =>
-      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.action === "ui-layers");
+      ((await fetch(`http://127.0.0.1:${c.server.port}/api/schedules`).then(j)) as Schedule[]).filter((s) => s.title === "床・天井・壁の点検");
     try {
       let c = await boot(); // repo does not exist yet: Scheduler.create refuses the meta workspace
       expect(await checks(c)).toHaveLength(0);

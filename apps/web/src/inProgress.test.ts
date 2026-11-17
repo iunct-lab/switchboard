@@ -126,7 +126,7 @@ test("waitText / waitRef: a wait withdrawn (#937) is 取り下げ, not 完了, a
 });
 
 test("prereqLine: 前提 for what is not done yet, 進められない for what a person fixes, the Task named; none for met", () => {
-  const p = (number: number, kind: "issue" | "pr" | null, need: "done" | "merged" | "release", state: BacklogItem["prereqs"][number]["state"], via: number | null = null) => ({ number, kind, need, state, via });
+  const p = (number: number, kind: "issue" | "pr" | null, need: "done" | "merged" | "release", state: BacklogItem["prereqs"][number]["state"], via: number | null = null, confirming = false) => ({ number, kind, need, state, via, confirming });
   const text = (parts: ReturnType<typeof prereqLine>["waiting"]) => parts.map((x) => `${x.via !== null ? `Task #${x.via} の前提 ` : ""}${x.ref}${x.after}`).join("・");
   const line = prereqLine(item({ url: "https://github.com/o/r/issues/1", prereqs: [
     p(12, "issue", "done", "pending"), p(34, "pr", "merged", "pending"), p(56, "pr", "release", "pending", 70),
@@ -138,12 +138,18 @@ test("prereqLine: 前提 for what is not done yet, 進められない for what a
   expect(line.stuck[1]!.url).toMatch(/\/issues\/99$/);
   expect(line.waiting[2]!.viaUrl).toBe("https://github.com/o/r/issues/70");
   // waits recorded by a release stay in their own line
-  expect(prereqLine(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(1, "pr", true, "overlap")] }))).toEqual({ waiting: [], stuck: [] });
+  expect(prereqLine(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(1, "pr", true, "overlap")] }))).toEqual({ waiting: [], stuck: [], confirming: [] });
+  // met with only the user's checks left: its own part, linked, not a wait
+  const left = prereqLine(item({ url: "https://github.com/o/r/issues/1", prereqs: [p(4042, "issue", "done", "met", null, true), p(5, "issue", "done", "met")] }));
+  expect(text(left.confirming)).toBe("#4042 利用者確認だけ");
+  expect(left.confirming[0]!.url).toMatch(/\/issues\/4042$/);
+  expect(left.waiting).toEqual([]);
+  expect(left.stuck).toEqual([]);
 });
 
 test("waitText: a wait solved does not promise the next firing while a prerequisite still holds the row (#937)", () => {
   const solved = { stage: "ready" as const, waitsAt: "2026-10-01T00:00:00Z", waits: [wait(13, "issue", false)] };
-  const pending = { number: 12, kind: "issue" as const, need: "done" as const, state: "pending" as const, via: null };
+  const pending = { number: 12, kind: "issue" as const, need: "done" as const, state: "pending" as const, via: null, confirming: false };
   expect(waitText(item({ ...solved, prereqs: [pending] }), true)!.next).toBe("前提が完了したら次の定期実行で再開");
   expect(waitText(item({ ...solved, prereqs: [{ ...pending, state: "withdrawn" }] }), true)!.next).toBe("定期実行は再開しない: 前提を確かめて「実装する」で再開");
   expect(waitText(item({ ...solved, prereqs: [{ ...pending, state: "met" }] }), true)!.next).toBe("待ちが解けたら再開");

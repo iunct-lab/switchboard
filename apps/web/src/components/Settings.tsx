@@ -5,14 +5,14 @@ import type { CustomRunner, AutoStartKind, Backlog, BacklogAllocation, HistorySt
 import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { taskModelOptions } from "../modelOptions.ts";
-import { ClaudeLoginRow } from "./ClaudeLoginRow.tsx";
+import { LoginSettings } from "./LoginSettings.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
 import { PolicySettings } from "./PolicySettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
-import { countriesUrl, logoutPath } from "../login.ts";
+import { countriesUrl } from "../login.ts";
 import { forgetPresets, presetRow } from "../presets.ts";
 import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText } from "../backlogSync.ts";
@@ -89,6 +89,12 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
   return (
     <main className="main settings">
       <SettingsToc />
+      <SettingsGroupHeading id="settings-login" />
+      <section className="card">
+        <h5>{t(settings.login)}</h5>
+        <LoginSettings health={props.health} tasks={props.tasks} bedrock={s.bedrock} onBedrock={(runner, next) => void save({ bedrock: { [runner]: next } })} onChanged={refresh} onError={props.onError} />
+      </section>
+
       <SettingsGroupHeading id="settings-task-start" />
       <SettingsCard title={t(settings.developSelfCard)}>
         <DevelopSelfToggle checked={s.developSelf} disabled={saving} onChange={(on) => void save({ developSelf: on })} />
@@ -142,7 +148,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           <div key={heading} className="auto-start-kinds">
             <div className="hint">{heading}</div>
             {kinds.map(([kind, label]) => (
-              <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} disabled={saving} save={save} />
+              <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} shadowRunners={listed.filter((r) => props.runnerOk.has(r))} defaultBudget={qr.defaultBudgetUsd} disabled={saving} save={save} />
             ))}
           </div>
         ))}
@@ -228,7 +234,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
               <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
               {t(settings.autoResumeToggle, { runner: r.id })}
             </label>
-            <ClaudeLoginRow runner={r} region={s.bedrock?.[r.id]?.region} onBedrock={(next) => void save({ bedrock: { [r.id]: next } })} onChanged={refresh} onError={props.onError} />
           </div>
         ))}
         <div className="hint">{t(settings.usageWait)}</div>
@@ -387,12 +392,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         <SettingsCard title={t(settings.abroad)}>
           <div className="muted">{t(settings.abroadHint)}</div>
           <a href={countriesUrl(props.health?.login)!}>{t(settings.abroadLink)}</a>
-        </SettingsCard>
-      )}
-
-      {logoutPath(props.health?.login) && (
-        <SettingsCard title={t(settings.login)}>
-          <button onClick={() => void logout(logoutPath(props.health?.login)!, props.onError)}>{t(settings.logout)}</button>
         </SettingsCard>
       )}
 
@@ -597,16 +596,6 @@ export function GithubSync() {
       <div className="hint">{t(settings.syncHint)}</div>
     </>
   );
-}
-
-async function logout(path: string, onError: (msg: string) => void) {
-  try {
-    const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" });
-    if (r.ok) location.assign("/_auth/");
-    else onError(t(settings.logoutFailed, { detail: r.status }));
-  } catch (e) {
-    onError(t(settings.logoutFailed, { detail: String((e as Error).message ?? e) }));
-  }
 }
 
 /** backlog-next's slots of each workspace (#561, #2656): what each firing reads, so a save applies from the next one. */
@@ -897,7 +886,7 @@ function NumberField(props: { label: string; unit?: string; scale?: number; step
 }
 
 /** A budget in USD that may be empty (= none): an emptied box saves null, a positive number saves itself, anything else is not saved. */
-function BudgetField(props: { label: string; hint?: string; value: number | null; def: number | null; disabled: boolean; onSave: (v: number | null) => Promise<void> }) {
+function BudgetField(props: { label: string; unit?: string; hint?: string; value: number | null; def: number | null; disabled: boolean; onSave: (v: number | null) => Promise<void> }) {
   const shown = (v: number | null) => (v === null ? "" : String(v));
   const [text, setText] = useState<string | null>(null);
   const commit = (typed: string) => {
@@ -911,7 +900,7 @@ function BudgetField(props: { label: string; hint?: string; value: number | null
       <label className="num-field">
         <span className="hint">{props.label}</span>
         <input type="number" step={1} min={0} aria-label={props.label} value={text ?? shown(props.value)} disabled={props.disabled} onChange={(e) => setText(e.target.value)} onBlur={(e) => commit(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)} style={{ width: 88 }} />
-        <span className="hint" />
+        <span className="hint">{props.unit ?? ""}</span>
         <span className="muted">{t(settings.defaultValue, { value: props.def === null ? t(settings.noBudget) : `$${props.def}` })}</span>
       </label>
       {props.hint && <div className="hint">{props.hint}</div>}
@@ -1160,6 +1149,9 @@ function KindRow(props: {
   auto: SettingsData["autoStart"];
   info: (id: RunnerId) => RunnerInfo | undefined;
   runnerOptions: (current: RunnerId, label: string) => React.ReactNode;
+  shadowRunners: RunnerId[];
+  /** what an empty kind budget falls back to on a button Task (バックログを進める: the schedule's first) */
+  defaultBudget: number | null;
   disabled: boolean;
   save: (patch: Parameters<typeof api.updateSettings>[0]) => Promise<void>;
 }) {
@@ -1179,27 +1171,64 @@ function KindRow(props: {
       </div>
     );
   const c = own ?? props.auto;
-  const pick = (choice: { runner?: RunnerId; model?: string; effort?: string } | null) => props.save({ autoStart: { byKind: { [props.kind]: choice } } });
+  const cRunner = c.runner ?? props.auto.runner; // a kind without its own runner follows the common one
+  const runnerInfo = props.info(cRunner);
+  const modes = (runnerInfo?.permissionModes ?? []).filter((m) => !m.danger || m.value === runnerInfo?.defaultPermissionMode);
+  // a saved value the runner no longer lists (or one not detected now) stays shown, so the box says what is saved
+  const savedMode = own?.permissionMode && !modes.some((m) => m.value === own.permissionMode) ? own.permissionMode : null;
+  const shadows = props.shadowRunners.filter((r) => r !== cRunner || r === own?.shadow);
+  const savedShadow = own?.shadow && own.shadow !== "off" && !shadows.includes(own.shadow as RunnerId) ? own.shadow : null;
+  const pick = (choice: { runner?: RunnerId; model?: string; effort?: string; permissionMode?: string | null; budgetUsd?: number | null; shadow?: string | null } | null) => props.save({ autoStart: { byKind: { [props.kind]: choice } } });
   return (
-    <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start" }}>
+    <div className="row" style={{ alignItems: "center", gap: 6, justifyContent: "flex-start", flexWrap: "wrap" }}>
       {name}
       {/* a runner change goes back to that runner's CLI default, as for the common values */}
-      <select className="mode" value={c.runner} disabled={props.disabled} aria-label={t(settings.kindRunner, { label: props.label })} onChange={(e) => void pick({ runner: e.target.value as RunnerId })}>
-        {props.runnerOptions(c.runner, t(settings.runner))}
+      {/* a kind that changed only its approval mode / budget / 並走 has no runner of its own: 共通 until one is chosen */}
+      <select className="mode" value={c.runner ?? ""} disabled={props.disabled} aria-label={t(settings.kindRunner, { label: props.label })} onChange={(e) => e.target.value && void pick({ runner: e.target.value as RunnerId })}>
+        {!c.runner && <option value="">{t(settings.common)}</option>}
+        {props.runnerOptions(cRunner, t(settings.runner))}
       </select>
-      <ModelSelect runner={props.info(c.runner)} value={c.model} onChange={(model) => void pick({ model })} label={t(settings.model)} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
-      <EffortSelect runner={props.info(c.runner)} value={c.effort} onChange={(effort) => void pick({ effort })} label={t(settings.effort)} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
+      <ModelSelect runner={props.info(cRunner)} value={c.model} onChange={(model) => void pick({ model })} label={t(settings.model)} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
+      <EffortSelect runner={props.info(cRunner)} value={c.effort} onChange={(effort) => void pick({ effort })} label={t(settings.effort)} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
       {/* Task ごとのモデル: 実装 on claude only */}
-      {props.kind === "complete" && c.runner === "claude" && (
+      {props.kind === "complete" && cRunner === "claude" && (
         <select className="model-select" value={props.auto.completeTaskModel} disabled={props.disabled} aria-label={t(settings.taskModel)} title={t(settings.taskModelTitle)} onChange={(e) => void props.save({ autoStart: { completeTaskModel: e.target.value } })}>
-          {taskModelOptions(props.info(c.runner), props.auto.completeTaskModel).map((o) => (
+          {taskModelOptions(props.info(cRunner), props.auto.completeTaskModel).map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>
           ))}
         </select>
       )}
-      <button className="ghost" disabled={props.disabled} onClick={() => void pick(null).then(() => setOpen(false))} title={t(settings.backToCommonTitle)}>
+      {/* approval mode / budget / 並走 on their own line: the budget box is a grid that needs room */}
+      <div style={{ flexBasis: "100%", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+      {/* the same choices as 承認モードの既定: a mode that skips confirmations is not offered */}
+      {(modes.length > 0 || savedMode) && (
+        <select className="mode" value={own?.permissionMode ?? ""} disabled={props.disabled} aria-label={t(settings.kindApproval, { label: props.label })} onChange={(e) => void pick({ permissionMode: e.target.value || null })}>
+          <option value="">{t(settings.kindFollowDefault)}</option>
+          {modes.map((m) => (
+            <option key={m.value} value={m.value} title={m.description}>
+              {t(settings.approvalOption, { label: m.label })}
+            </option>
+          ))}
+          {savedMode && <option value={savedMode}>{t(settings.approvalOption, { label: savedMode })}</option>}
+        </select>
+      )}
+      <div style={{ width: "min(100%, 24em)" }}>
+        <BudgetField label={t(settings.kindBudget, { label: props.label })} unit={t(settings.unitUsd)} value={own?.budgetUsd ?? null} def={props.defaultBudget} disabled={props.disabled} onSave={(v) => props.save({ autoStart: { byKind: { [props.kind]: { budgetUsd: v } } } })} />
+      </div>
+      <select className="mode" value={own?.shadow ?? ""} disabled={props.disabled} aria-label={t(settings.kindShadow, { label: props.label })} onChange={(e) => void pick({ shadow: e.target.value || null })}>
+        <option value="">{t(settings.kindShadowFollow)}</option>
+        <option value="off">{t(settings.kindShadowOff)}</option>
+        {shadows.map((r) => (
+          <option key={r} value={r}>
+            {t(settings.kindShadowRunner, { runner: r })}
+          </option>
+        ))}
+        {savedShadow && <option value={savedShadow}>{t(settings.kindShadowRunner, { runner: savedShadow })}</option>}
+      </select>
+      </div>
+      <button className="ghost" style={{ whiteSpace: "nowrap" }} disabled={props.disabled} onClick={() => void pick(null).then(() => setOpen(false))} title={t(settings.backToCommonTitle)}>
         {t(settings.backToCommon)}
       </button>
     </div>

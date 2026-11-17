@@ -160,7 +160,7 @@ describe("pickNext prerequisite", () => {
 
   test("A waits on B: B goes first, then A once B is done; B withdrawn holds A as stuck while C goes on", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #2"), ...pbi(2, "P1"), ...pbi(3, "P2")]);
-    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null }]);
+    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null, confirming: false }]);
     expect(pick(ws)).toBe(2);
     expect(heldIn(readStoredBacklog(db, ws).items, "implement")).toMatchObject([{ item: { number: 1 }, pending: [{ number: 2 }], stuck: [] }]);
     db.putBacklogSnapshot(SOURCE, { records: [closed(2, "COMPLETED")], cursor: null, syncedAt: 6000 });
@@ -177,8 +177,8 @@ describe("pickNext prerequisite", () => {
       { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" },
     ]);
     expect(byNumber(ws)[1]!.prereqs).toEqual([
-      { number: 2, kind: "issue", need: "done", state: "pending", via: 10 },
-      { number: 40, kind: "pr", need: "release", state: "unknown", via: 11 },
+      { number: 2, kind: "issue", need: "done", state: "pending", via: 10, confirming: false },
+      { number: 40, kind: "pr", need: "release", state: "unknown", via: 11, confirming: false },
     ]);
     expect(pick(ws)).toBe(2);
     // released: Issue 11 is free to go, so the PBI goes on
@@ -190,20 +190,20 @@ describe("pickNext prerequisite", () => {
   test("A and D wait on each other: both are a cycle, and the independent C goes on", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #4"), ...pbi(4, "P0", "", { subIssues: [40] }), issue(40, ["type:task"], { body: "**前提**: #1" }), ...pbi(3, "P2")]);
     const items = byNumber(ws);
-    expect(items[1]!.prereqs).toEqual([{ number: 4, kind: "issue", need: "done", state: "cycle", via: null }]);
-    expect(items[4]!.prereqs).toEqual([{ number: 1, kind: "issue", need: "done", state: "cycle", via: 40 }]);
+    expect(items[1]!.prereqs).toEqual([{ number: 4, kind: "issue", need: "done", state: "cycle", via: null, confirming: false }]);
+    expect(items[4]!.prereqs).toEqual([{ number: 1, kind: "issue", need: "done", state: "cycle", via: 40, confirming: false }]);
     expect(pick(ws)).toBe(3);
   });
 
   test("a closed PBI's open Tasks lead nowhere: A → B → closed C (whose open Task names A) is pending, not a cycle", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #2"), ...pbi(2, "P1", "**前提**: #3"), issue(3, ["type:pbi"], { state: "CLOSED", stateReason: "COMPLETED", subIssues: [30] }), issue(30, ["type:task"], { body: "**前提**: #1" })]);
-    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null }]);
+    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null, confirming: false }]);
   });
 
   test("a prerequisite not stored is missing and holds; the fenced and the free-text ones are not read", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #99\n前提: #3 が Done"), ...pbi(3, "P2", "```\n**前提**: #1\n```")]);
     const items = byNumber(ws);
-    expect(items[1]!.prereqs).toEqual([{ number: 99, kind: null, need: "done", state: "missing", via: null }]);
+    expect(items[1]!.prereqs).toEqual([{ number: 99, kind: null, need: "done", state: "missing", via: null, confirming: false }]);
     expect(items[3]!.prereqs).toEqual([]);
     expect(pick(ws)).toBe(3);
   });

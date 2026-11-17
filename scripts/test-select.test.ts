@@ -179,6 +179,12 @@ describe("test-reads", () => {
     expect(select(["docs/b.md"], graph, ["t.test.ts"], reads).tests).toEqual([]);
   });
 
+  test("`./` の宣言は root の新しいファイルと新しい root のディレクトリの下のファイルの変更で選ぶ", () => {
+    const reads = new Map([["t.test.ts", ["./"]]]);
+    expect(select(["known-failures.json"], new Map(), ["t.test.ts"], reads).tests).toEqual(["t.test.ts"]);
+    expect(select(["newdir/a.ts"], new Map(), ["t.test.ts"], reads).tests).toEqual(["t.test.ts"]);
+  });
+
   test("宣言したコードが import するファイルの変更でも選ぶ（パスで起動するテスト）", () => {
     const { graph } = tree({ "s/run.ts": `import "./lib";`, "s/lib.ts": "" });
     const s = select(["s/lib.ts"], graph, ["t.test.ts"], new Map([["t.test.ts", ["s/run.ts"]]]));

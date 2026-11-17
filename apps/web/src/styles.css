@@ -859,3 +859,10 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
   table.pricing.balance-table .balance-kinds td { display: block; }
   .balance-table .balance-kinds td::before { content: none; }
 }
+/* the login group of Settings: who, the state, the button; wraps to two lines on a phone */
+.login-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 6px 0; border-top: 1px solid var(--border, #e3e3e3); }
+.login-row:first-of-type { border-top: 0; }
+.login-who { min-width: 6.5em; }
+.login-state { flex: 1 1 10em; }
+.login-bedrock { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 0; border-top: 1px solid var(--border, #e3e3e3); }
+.login-bedrock input { min-width: 0; width: 9em; }
