@@ -1,8 +1,9 @@
 import type { RunnerId } from "@switchboard/protocol";
 import type { Routes, ServerContext } from "../server/context.ts";
+import { RunnerCommandsError, runnerCommands } from "../server/runner-commands.ts";
 
 /** The routes under /api/runners. */
-export function runnersRoutes(sc: Pick<ServerContext, "runnerLogins" | "json" | "bad" | "loginTarget" | "logoutTarget" | "runnerCliEnv" | "loginExpired" | "loginCheck" | "loginCheckedAt" | "refreshLogins">): Routes {
+export function runnersRoutes(sc: Pick<ServerContext, "adapters" | "db" | "runnerLogins" | "json" | "bad" | "loginTarget" | "logoutTarget" | "runnerCliEnv" | "loginExpired" | "loginCheck" | "loginCheckedAt" | "refreshLogins">): Routes {
   return {
     // Settings the UI can change. A saved default mode must be one the runner offers and must not skip
     // approvals (danger modes are a per-task choice, never a default — schedules run unattended on the default);
@@ -21,6 +22,17 @@ export function runnersRoutes(sc: Pick<ServerContext, "runnerLogins" | "json" | 
       DELETE: (req) => {
         const v = sc.runnerLogins.cancel(req.params.id as RunnerId);
         return v ? sc.json(v) : sc.bad("no login in progress", 404);
+      },
+    },
+    // What the request and reply boxes offer after "/": read from the runner, kept in the daemon's memory.
+    "/api/runners/:id/commands": {
+      GET: async (req) => {
+        try {
+          return sc.json(await runnerCommands(sc, req.params.id ?? "", new URL(req.url).searchParams.get("workspaceId") ?? ""));
+        } catch (e) {
+          if (e instanceof RunnerCommandsError) return sc.bad(e.message, e.status);
+          throw e;
+        }
       },
     },
     "/api/runners/:id/logout": {

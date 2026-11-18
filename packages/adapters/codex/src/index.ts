@@ -11,6 +11,7 @@ import type { ThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { Turn } from "./generated/v2/Turn";
 import type { TurnStartParams } from "./generated/v2/TurnStartParams";
 import type { TurnSteerParams } from "./generated/v2/TurnSteerParams";
+import { listCodexSkills } from "./commands.ts";
 import { approvalDecision, CLIENT_INFO, createCodexParser, deferredUserInput, jsonRpcError, jsonRpcNotification, jsonRpcRequest, jsonRpcResult } from "./parse.ts";
 
 export * from "./parse.ts";
@@ -296,6 +297,12 @@ export function codexSessionExists(threadId: string, codexHome = process.env.COD
   }
 }
 
+/** How long reading the "/" list may take: `SWITCHBOARD_RUNNER_COMMANDS_TIMEOUT_MS`, 15 s when unset or not a positive number (a name shared by the runners that read a list). */
+export function commandsTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWITCHBOARD_RUNNER_COMMANDS_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 15_000;
+}
+
 export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAdapter {
   return {
     id: "codex",
@@ -330,6 +337,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
       } catch (e) {
         return { available: false, note: String(e) };
       }
+    },
+    async listCommands(cwd) {
+      const { exe } = resolveBin(options);
+      if (!exe) throw new Error(`codex not found. Install Codex CLI: ${CODEX_INSTALL_HINT}`);
+      // the flags of a session's app-server, without a task's own choices (Bedrock, telemetry opt-in): reading the list needs neither
+      const args = ["-c", MEMORY_OFF, "-c", QUESTION_TOOL_ON];
+      for (const c of options.config ?? []) args.push("-c", c);
+      args.push(...telemetryArgs({}));
+      return listCodexSkills(exe, cwd, commandsTimeoutMs(), { args, env: childEnv() });
     },
     start(opts, emit) {
       const { exe } = resolveBin(options);

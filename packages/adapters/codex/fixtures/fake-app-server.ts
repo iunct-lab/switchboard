@@ -15,15 +15,18 @@
  * A prompt starting with "limits:" reports the usage limits (account/rateLimits/updated) and ends the turn.
  * `account/read` answers with the JSON in the file FAKE_CODEX_ACCOUNT_FILE names, read at each request (a login that
  * changes under a running app-server); without the variable the method is unknown, as on an app-server without it.
+ * `skills/list` answers three skills (two enabled, one not). With FAKE_CODEX_SKILLS_HANG set it never answers, and
+ * FAKE_CODEX_PID_FILE names a file the process writes its pid to at start, so a test can see it did not stay.
  * Prompts containing "crash" make the process exit 3 without a result; "sleep" keeps the turn open until interrupted.
  */
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const wireLog = process.argv.find((arg) => arg.startsWith("test_wire_log="))?.slice("test_wire_log=".length);
 if (process.argv.includes("features") && process.argv.includes("list")) {
   console.log(`memories  stable  ${process.env.FAKE_CODEX_MEMORIES ?? "false"}`);
   process.exit(0);
 }
 if (wireLog) appendFileSync(wireLog, `${JSON.stringify({ argv: process.argv.slice(2) })}\n`);
+if (process.env.FAKE_CODEX_PID_FILE) writeFileSync(process.env.FAKE_CODEX_PID_FILE, String(process.pid));
 const enc = (o: unknown) => process.stdout.write(JSON.stringify(o) + "\n");
 let turnSeq = 0;
 let active: { id: string; threadId: string; sleeping: boolean } | null = null;
@@ -132,6 +135,14 @@ for await (const chunk of Bun.stdin.stream()) {
         enc({ id: m.id, result: { userAgent: "fake" } });
         break;
       case "initialized":
+        break;
+      case "skills/list":
+        if (process.env.FAKE_CODEX_SKILLS_HANG) break;
+        enc({ id: m.id, result: { data: [{ cwd: m.params.cwds?.[0] ?? "", errors: [], skills: [
+          { name: "alpha", description: "Alpha long description", shortDescription: "Alpha short", path: "/skills/alpha/SKILL.md", scope: "repo", enabled: true, pluginId: null },
+          { name: "beta", description: "Beta description", path: "/skills/beta/SKILL.md", scope: "user", enabled: true, pluginId: null },
+          { name: "gamma", description: "Gamma is off", path: "/skills/gamma/SKILL.md", scope: "user", enabled: false, pluginId: null },
+        ] }] } });
         break;
       case "account/read":
         if (process.env.FAKE_CODEX_ACCOUNT_FILE) enc({ id: m.id, result: JSON.parse(readFileSync(process.env.FAKE_CODEX_ACCOUNT_FILE, "utf8")) });

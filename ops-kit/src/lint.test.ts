@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { main } from "./cli.ts";
 import { loadConfig } from "./config.ts";
 import { fakeGh, GhError, type FakeCall } from "./gh.ts";
-import { askProceed, bodyLoss, formatLint, lint, LintFetchError, releasePrereqs, speakerOf } from "./lint.ts";
+import { askProceed, bodyLoss, formatLint, lint, LintFetchError, postMergeProblems, releasePrereqs, speakerOf } from "./lint.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
@@ -512,5 +512,64 @@ describe("lint: registry of known failures", () => {
       nodes[0].projectItems.nodes[0].fieldValues.nodes = nodes[0].projectItems.nodes[0].fieldValues.nodes.filter((v: any) => v.field.name !== "Priority");
     });
     expect(noPriority.find((l) => l.startsWith("#1: "))).toContain("（Priority が未設定）");
+  });
+});
+
+describe("マージの後の印", () => {
+  const pbi = (...rows: string[]) => `## ユーザーストーリー\nx\n\n## 到達点 / 受け入れ条件\n${rows.join("\n")}\n\n## スコープ外\n- なし\n`;
+  const due = "期日 2026-12-01T00:00:00+09:00 以降";
+
+  test("a kind outside 画面 / E2E / 実ランナー / 観測 is a problem that names the kind", () => {
+    const p = postMergeProblems(pbi("- [ ] 1. 見る（マージの後: 手動 確認する）"));
+    expect(p).toHaveLength(1);
+    expect(p[0]).toContain("種類は 画面 / E2E / 実ランナー / 観測 のどれか（今: 手動");
+  });
+
+  test("an 観測 without 期日 and a time zone is a problem; a date without an offset does not count", () => {
+    expect(postMergeProblems(pbi("- [ ] 1. 待つ（マージの後: 観測 7 日）"))).toHaveLength(1);
+    expect(postMergeProblems(pbi("- [ ] 1. 待つ（マージの後: 観測 期日 2026-12-01 以降）"))).toHaveLength(1);
+    expect(postMergeProblems(pbi("- [ ] 1. 待つ（マージの後: 観測 期日 2026-12-01T00:00:00 以降）"))).toHaveLength(1);
+  });
+
+  test("a mark and （利用者確認: on the same line is a problem", () => {
+    const p = postMergeProblems(pbi("- [ ] 1. 見る（マージの後: 画面 撮る）（利用者確認: 見た目）"));
+    expect(p).toHaveLength(1);
+    expect(p[0]).toContain("同じ行");
+  });
+
+  test("the four kinds, with a due for 観測 (Z and an offset), are not problems; nor is a checked line", () => {
+    expect(
+      postMergeProblems(
+        pbi(
+          "- [ ] 1. a（マージの後: 画面 撮る）",
+          "- [ ] 2. b（マージの後: E2E 回す）",
+          "- [ ] 3. c（マージの後: 実ランナー 1 回）",
+          `- [ ] 4. d（マージの後: 観測 ${due}）`,
+          "- [x] 5. e（マージの後: 観測 期日 2026-12-01T00:00:00Z 以降）",
+          "- [ ] 6. f（利用者確認: 見た目）",
+          "- [ ] 7. g 印なし",
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("a mark inside inline code, inside a fence, or outside 受け入れ条件 is not read", () => {
+    expect(postMergeProblems(pbi("- [ ] 1. 書き方は `（マージの後: 手動）` と書く"))).toEqual([]);
+    expect(postMergeProblems(pbi("```", "- [ ] 1. a（マージの後: 手動）", "```"))).toEqual([]);
+    expect(postMergeProblems(`## 背景\n- [ ] 1. a（マージの後: 手動）\n\n${pbi("- [ ] 1. ok")}`)).toEqual([]);
+  });
+
+  test("a span of two backticks hides its mark, every mark on a line is read, and a #-line without a space does not end the section", () => {
+    expect(postMergeProblems(pbi("- [ ] 1. 書き方は `` 例 `x` （マージの後: 手動） `` と書く"))).toEqual([]);
+    expect(postMergeProblems(pbi("- [ ] 1. a（マージの後: 画面 撮る）（マージの後: 手動）"))).toHaveLength(1);
+    expect(postMergeProblems(pbi("#5629 で足す", "- [ ] 2. b（マージの後: 手動）"))).toHaveLength(1);
+  });
+
+  test("lint reports the problem as a violation of the PBI", async () => {
+    const d = page("ok")();
+    const pbiNode = d.repository.issues.nodes[0];
+    pbiNode.body = `${pbiNode.body}\n`.replace(/(## 到達点 \/ 受け入れ条件\n)/, "$1- [ ] 9. a（マージの後: 手動）\n");
+    const out = formatLint((await lint(fakeGh([() => d]), cfg, { sleep: noSleep })).violations);
+    expect(out.some((l) => l.startsWith("#10: 受け入れ条件の「マージの後」の種類は"))).toBe(true);
   });
 });
