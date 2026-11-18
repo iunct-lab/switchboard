@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, closedHits, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, noticeAsks, ON_HOLD_RESUME, parseAskBlock, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import type { Ask, ProceedingQuestion } from "@switchboard/protocol";
+import { PROCEED_SETTLED, proceedingAsks, withGone, type GoneFacts } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, ON_HOLD_RESUME, parseAskBlock, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { closedHits, noticeAsks } from "./asks-notices.ts";
 import { approvalBatches } from "./approval-batch.ts";
-import { heldSince, type GhRunner } from "./backlog.ts";
+import { heldSince } from "./backlog-comments.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { reduceStops } from "./stops.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
@@ -20,8 +24,12 @@ const turnOf = (question: string | null, options: Array<string | [string, string
   question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9, askedAt };
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null }, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
+
+/** The last stage Task of an item whose stop asks the person: the Task's outcome (written from its stop records) is what opens the question. */
+const stageTask = (outcome: NonNullable<BacklogItem["lastTask"]>["outcome"] = "needs_action", id = "tk_5"): NonNullable<BacklogItem["lastTask"]> =>
+  ({ id, status: "done", statusAt: NOW - 3_600_000, createdAt: NOW - 3_600_000, updatedAt: NOW - 3_600_000, action: "complete", outcome, reviewedAt: null, resumeAt: null, started: true });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
   key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
@@ -82,7 +90,7 @@ describe("answers", () => {
     ]);
     expect(blockersOf({ waits: [], stops, approvalPending: true }).map((b) => b.kind)).toEqual(["condition"]);
     // the item's stage Task has a tool approval waiting: its permission stop is answered by that approval
-    const refused = item({ number: 5, stage: "in-progress", stopSummary: [stops[1]!] });
+    const refused = item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stops[1]!] });
     expect(asksFromBacklog([refused], NOW)[0]).toMatchObject({ blockers: [{ kind: "runner" }], answers: [] });
     expect(asksFromBacklog([refused], NOW, { approvalPending: (i) => i.number === 5 })[0]).toMatchObject({ blockers: [], answers: ["text"] });
   });
@@ -200,7 +208,7 @@ describe("lastReply", () => {
   const issueTask = { id: "tk_5", workspaceId: null, title: "t", status: "done", outcome: "needs_action", reviewedAt: null, resumeAt: null, stage: null, createdAt: NOW - 600_000, updatedAt: NOW - 60_000 } as unknown as Task;
 
   test("an open stop a person has to answer carries the Task's last reply: a stage Task's and a Task with no Issue's", () => {
-    const [stage] = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({})] })], NOW, { lastReply: reply("マージ判定は CI だけが赤です。どうしますか。") });
+    const [stage] = asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({})] })], NOW, { lastReply: reply("マージ判定は CI だけが赤です。どうしますか。") });
     expect(stage).toMatchObject({ kind: "stop", needs: "person", state: "open", lastReply: "マージ判定は CI だけが赤です。どうしますか。" });
     const [plain] = asksFromTasks({ ...noTurn, tasks: [issueTask], stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" } })], lastReply: reply("途中までです。") });
     expect(plain).toMatchObject({ kind: "stop", needs: "person", state: "open", lastReply: "途中までです。" });
@@ -212,18 +220,26 @@ describe("lastReply", () => {
     expect(asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW)[0]!.lastReply).toBeNull();
   });
 
+  test("a stop that waits for a decision opens a question for the person only while the Task's outcome is needs_action", () => {
+    const of = (outcome: NonNullable<BacklogItem["lastTask"]>["outcome"]) => asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(outcome), stopSummary: [stop({})] })], NOW)[0]!;
+    expect(of("needs_action")).toMatchObject({ kind: "stop", needs: "person", state: "open" });
+    // finished: the Task ended with nothing to do, so the old question is over, not left open as an automatic wait
+    expect(of("finished")).toMatchObject({ kind: "stop", needs: "auto", state: "resolved" });
+    for (const outcome of ["waits", "unknown"] as const) expect(of(outcome)).toMatchObject({ kind: "stop", needs: "auto", state: "open" });
+  });
+
   test("a reply over the limit is cut to LAST_REPLY_MAX characters and an ellipsis; one at the limit is whole", () => {
     expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX))).toBe("あ".repeat(LAST_REPLY_MAX));
     expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX + 1))).toBe(`${"あ".repeat(LAST_REPLY_MAX)}…`);
-    const [s] = asksFromBacklog([item({ number: 5, stopSummary: [stop({})] })], NOW, { lastReply: reply("x".repeat(LAST_REPLY_MAX + 1)) });
+    const [s] = asksFromBacklog([item({ number: 5, lastTask: stageTask(), stopSummary: [stop({})] })], NOW, { lastReply: reply("x".repeat(LAST_REPLY_MAX + 1)) });
     expect(s!.lastReply).toBe(`${"x".repeat(LAST_REPLY_MAX)}…`);
   });
 
   test("an automatic wait, an answered stop and a resolved stop carry no reply", () => {
     const answer = { ref: "seq:12", at: NOW - 600_000 };
     const stops = [stop({ reason: "usage-limit", next: "wait" }), stop({ next: "resume", lastAnswer: answer }), stop({ state: "resolved", next: "none", lastAt: NOW - 60_000 })];
-    for (const s of stops) expect(asksFromBacklog([item({ number: 5, stopSummary: [s] })], NOW, { lastReply: reply("返答") })[0]!.lastReply).toBeNull();
-    expect(asksFromTasks({ ...noTurn, tasks: [issueTask], stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" }, next: "wait" })], lastReply: reply("返答") })[0]!.lastReply).toBeNull();
+    for (const s of stops) expect(asksFromBacklog([item({ number: 5, lastTask: stageTask("waits"), stopSummary: [s] })], NOW, { lastReply: reply("返答") })[0]!.lastReply).toBeNull();
+    expect(asksFromTasks({ ...noTurn, tasks: [{ ...issueTask, outcome: "waits" }], stops: () => [stop({ work: { workspaceId: "ws_meta", issue: null, taskId: "tk_5" }, next: "wait" })], lastReply: reply("返答") })[0]!.lastReply).toBeNull();
   });
 });
 
@@ -248,15 +264,15 @@ describe("grants", () => {
   });
 
   test("permission stop grant: a permission stop with a grant is not in the way and is answered by it; one without stays the runner's refusal", () => {
-    const [g] = fromTasks(task({ outcome: "unknown" }), [refused({ grant: GRANT })], null);
+    const [g] = fromTasks(task({ outcome: "needs_action" }), [refused({ grant: GRANT })], null);
     expect(g).toMatchObject({ kind: "stop", needs: "person", state: "open", grant: GRANT, blockers: [], answers: ["grant", "text"] });
     expect(g!.policy).toMatchObject({ scopes: [], note: "許可文は 1 回きりで、方針には保存しません" });
-    const [none] = fromTasks(task({ outcome: "unknown" }), [refused()], null);
+    const [none] = fromTasks(task({ outcome: "needs_action" }), [refused()], null);
     expect(none).toMatchObject({ grant: null, answers: [] });
     expect(none!.blockers.map((b) => b.kind)).toEqual(["runner"]);
     // only a permission stop's grant counts: an auth refusal stays the runner's
     expect(blockersOf({ waits: [], stops: [refused({ reason: "auth", grant: GRANT })], approvalPending: false }).map((b) => b.kind)).toEqual(["runner"]);
-    const [auth] = fromTasks(task({ outcome: "unknown" }), [refused({ reason: "auth", grant: GRANT })], null);
+    const [auth] = fromTasks(task({ outcome: "needs_action" }), [refused({ reason: "auth", grant: GRANT })], null);
     expect(auth!.grant).toBeNull();
   });
 
@@ -287,7 +303,7 @@ describe("asksFromBacklog", () => {
         item({ number: 3, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 9 } }),
         item({ number: 4, stage: "in-progress", confirmations: [{ n: 2, text: "PC で見える（利用者確認: 画面）", after: null }, { n: 3, text: "スマホで見える（利用者確認: 画面）", after: null }] }),
         item({ number: 6, waits: [{ number: 70, kind: "pr", open: true, state: "pending", reason: "prerequisite", pbi: null }, { number: 71, kind: "issue", open: false, state: "met", reason: "prerequisite", pbi: null }], waitsAt: "2026-10-07T09:00:00Z" }),
-        item({ number: 5, stage: "in-progress", stopSummary: [stop({}), stop({ key: "ws_meta#5\u0000codex exec\u0000\u0000usage-limit\u0000", op: "codex exec", target: "", reason: "usage-limit", evidence: "5h window", next: "wait", conditions: [{ key: "resetsAt", value: "2026-10-07T15:00:00Z", met: false }] })] }),
+        item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({}), stop({ key: "ws_meta#5\u0000codex exec\u0000\u0000usage-limit\u0000", op: "codex exec", target: "", reason: "usage-limit", evidence: "5h window", next: "wait", conditions: [{ key: "resetsAt", value: "2026-10-07T15:00:00Z", met: false }] })] }),
       ],
       NOW,
     );
@@ -327,6 +343,14 @@ describe("asksFromBacklog", () => {
     // the id does not move when the Issue is edited
     const [later] = asksFromBacklog([item({ number: 8, title: "PBI 8", stage: "needs-decision", decision: null, updatedAt: "2026-10-07T11:59:00Z" })], NOW);
     expect(later!.id).toBe(a!.id);
+  });
+
+  test("stops: a stop that asks is the person's when its failed Task is the item's newest stage Task, not when a later stage Task took the work over", () => {
+    const gaveUp = stop({ state: "exhausted", next: "decide" });
+    const failed = { id: "tk_5", outcome: "failed", status: "aborted", resumeAt: null, updatedAt: NOW } as Task;
+    const of = (lastTask: NonNullable<BacklogItem["lastTask"]>) => asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask, stopSummary: [gaveUp] })], NOW, { taskOf: (id) => (id === "tk_5" ? failed : null) }).find((a) => a.kind === "stop");
+    expect(of(stageTask("failed", "tk_5"))).toMatchObject({ needs: "person", state: "open" });
+    expect(of(stageTask("unknown", "tk_6"))).toMatchObject({ needs: "auto", state: "open" });
   });
 
   test("stops: resume with an answer is answered at the answer's time, without one it goes on by itself; a resolved usage-limit stop was automatic", () => {
@@ -380,6 +404,89 @@ describe("asksFromBacklog", () => {
   });
 });
 
+describe("proceedingAsks", () => {
+  const GO = ["## 判断待ち", "**問い**: どちらの読みで作るか", "**選択肢**:", "- A: 置き換える — 影響: URL はそのまま", "- B: 新しい画面 — 影響: Rail が増える", "**推奨**: A — 画面を増やさない", "**進め方**: 推奨で進める（種類: implementation-choice） — 戻せる"].join("\n");
+  const q = (over: Partial<ProceedingQuestion> = {}): ProceedingQuestion => ({ workspaceId: "ws_meta", workspaceName: "meta", issue: { number: 51, url: `${ISSUES}/51` }, pbi: { number: 5, title: "PBI", url: `${ISSUES}/5`, open: true }, body: GO, at: "2026-10-07T00:00:00Z", answer: null, closedAt: null, stopped: null, ...over });
+
+  test("an open PBI's is open, going on by itself, and takes a confirmation, a choice or words — never a hold or a policy", () => {
+    const [a] = proceedingAsks([q()], NOW);
+    expect(a).toMatchObject({ id: "proceed:ws_meta#51@2026-10-07T00:00:00Z", kind: "decision", needs: "auto", state: "open", proceeding: true, pbi: { number: 5 }, issue: { number: 51 }, question: "どちらの読みで作るか", recommendation: { choice: "A", why: "画面を増やさない" }, answers: ["confirm", "choice", "text"], policy: { scopes: [] }, route: "backlog" });
+    expect(a!.choices).toHaveLength(2);
+  });
+
+  test("one the reversibility table did not let go on is the person's to answer: not proceeding (never confirmed in one press), with the table's reason", () => {
+    const [a] = proceedingAsks([q({ stopped: "種類が書かれていない" })], NOW);
+    expect(a).toMatchObject({ kind: "decision", needs: "person", state: "open", answers: expect.arrayContaining(["choice", "text"]) });
+    expect(a!.proceeding).toBeUndefined();
+    expect(a!.reason).toContain("止めて聞く");
+    expect(a!.reason).toContain("種類が書かれていない");
+    expect(a!.next).not.toContain("答えなくても");
+  });
+
+  test("answered once a ## 回答 came (confirmed or overturned), for a day", () => {
+    const at = "2026-10-07T06:00:00Z";
+    expect(proceedingAsks([q({ answer: { at, body: "## 回答\n\n**確定**: 推奨のまま A — 問い 2026-10-07T00:00:00Z" } })], NOW)[0]).toMatchObject({ state: "answered", changedAt: Date.parse(at), reason: "実装の判断（推奨のままで確定）", answers: [] });
+    expect(proceedingAsks([q({ answer: { at, body: "## 回答\n\n**覆す**: 推奨 A → B — 問い 2026-10-07T00:00:00Z\n\nB: 新しい画面" } })], NOW)[0]).toMatchObject({ state: "answered", reason: "実装の判断（推奨を覆した）" });
+    expect(proceedingAsks([q({ answer: { at, body: "## 回答\nA" } })], NOW + ASK_HISTORY_MS + Date.parse(at) - NOW + 1)).toEqual([]);
+  });
+
+  test("a closed PBI's with no answer is resolved as 推奨で確定した, not left open; gone a day after the PBI closed", () => {
+    const closedAt = "2026-10-07T09:00:00Z";
+    const closed = q({ pbi: { number: 5, title: "PBI", url: `${ISSUES}/5`, open: false }, closedAt });
+    expect(proceedingAsks([closed], NOW)[0]).toMatchObject({ state: "resolved", reason: PROCEED_SETTLED, changedAt: Date.parse(closedAt), answers: [] });
+    expect(PROCEED_SETTLED).toBe("推奨で確定した");
+    expect(proceedingAsks([closed], Date.parse(closedAt) + ASK_HISTORY_MS + 1)).toEqual([]);
+  });
+
+  test("it does not take a stage Task's own question into it, as a waiting decision of the Issue does", () => {
+    const stopOf = (decided: Ask[]) => dedupeAsks([...decided, ...asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({})] })], NOW)]).filter((a) => a.kind === "stop");
+    expect(stopOf(proceedingAsks([q({ issue: { number: 5, url: `${ISSUES}/5` } })], NOW))).toHaveLength(1);
+    // the same Issue asked as a waiting decision folds it
+    expect(stopOf(asksFromBacklog([item({ number: 5, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T11:00:00Z", issue: 5 } })], NOW))).toHaveLength(0);
+  });
+});
+
+describe("withGone", () => {
+  const none: GoneFacts = { endOf: () => null, newerStageDone: () => null };
+  const decision = () => asksFromBacklog([item({ number: 5, stage: "needs-decision", decision: { body: DECISION.replace("Task #9", "PR #12"), at: "2026-10-07T00:00:00Z", issue: 51 } })], NOW)[0]!;
+  const stopped = (conditions: StopSummary["conditions"] = []) => asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({ conditions })] })], NOW)[0]!;
+  const open = (list: Ask[]) => list.filter((a) => a.needs === "person" && (a.state === "open" || a.state === "held")).length;
+
+  test("what is still there stays open", () => {
+    expect(withGone([decision(), stopped()], none, NOW).map((a) => a.state)).toEqual(["open", "open"]);
+  });
+
+  test("a decision on a closed Issue is resolved with what went, not counted as the person's", () => {
+    const at = NOW - 3_600_000;
+    const out = withGone([decision()], { ...none, endOf: (w, n) => (w === "ws_meta" && n === 51 ? { kind: "issue", state: "CLOSED", at } : null) }, NOW);
+    expect(out).toMatchObject([{ state: "resolved", reason: "#51 が閉じた（対象が無くなった）", changedAt: at, answers: [] }]);
+    expect(open(out)).toBe(0);
+    // gone from the list a day after it went
+    expect(withGone([decision()], { ...none, endOf: () => ({ kind: "issue", state: "CLOSED", at: NOW - ASK_HISTORY_MS - 1 }) }, NOW)).toEqual([]);
+  });
+
+  test("a question about a merged PR (where it stopped, or a stop's unmet pr# condition) is resolved; a closed one says closed", () => {
+    const merged: GoneFacts = { ...none, endOf: (_w, n) => (n === 12 ? { kind: "pr", state: "MERGED", at: NOW - 60_000 } : null) };
+    expect(withGone([decision()], merged, NOW)).toMatchObject([{ state: "resolved", reason: "PR #12 がマージされた（対象が無くなった）" }]);
+    expect(withGone([stopped([{ key: "pr#12", value: "open", met: false }])], merged, NOW)).toMatchObject([{ kind: "stop", state: "resolved", reason: "PR #12 がマージされた（対象が無くなった）" }]);
+    expect(withGone([stopped([{ key: "pr#12", value: "open", met: false }])], { ...none, endOf: () => ({ kind: "pr", state: "CLOSED", at: NOW }) }, NOW)[0]!.reason).toBe("PR #12 が閉じた（対象が無くなった）");
+    // a number that is an Issue's is not the PR
+    expect(withGone([stopped([{ key: "pr#12", value: "open", met: false }])], { ...none, endOf: (_w, n) => (n === 12 ? { kind: "issue", state: "CLOSED", at: NOW } : null) }, NOW)[0]!.state).toBe("open");
+  });
+
+  test("a stop whose Issue had a newer stage Task finish is resolved", () => {
+    const out = withGone([stopped()], { ...none, newerStageDone: (w, n, taskId) => (w === "ws_meta" && n === 5 && taskId === "tk_5" ? NOW - 1000 : null) }, NOW);
+    expect(out).toMatchObject([{ state: "resolved", reason: "#5 のより新しい工程 Task が終わった（対象が無くなった）", changedAt: NOW - 1000 }]);
+  });
+
+  test("a question going on by its recommendation, and a tool approval, are never taken off this way", () => {
+    const all: GoneFacts = { endOf: () => ({ kind: "issue", state: "CLOSED", at: NOW }), newerStageDone: () => NOW };
+    const going = proceedingAsks([{ workspaceId: "ws_meta", workspaceName: "meta", issue: { number: 51, url: `${ISSUES}/51` }, pbi: { number: 5, title: "PBI", url: `${ISSUES}/5`, open: true }, body: DECISION, at: "2026-10-07T00:00:00Z", answer: null, closedAt: null, stopped: null }], NOW);
+    const approval = { ...decision(), id: "approval:tk_1:p1", kind: "approval" as const };
+    expect(withGone([...going, approval], all, NOW).map((a) => a.state)).toEqual(["open", "open"]);
+  });
+});
+
 describe("dedupeAsks", () => {
   test("dedupe: an open decision and the decision stop of the same PBI's stage Task are one; the same id twice is one", () => {
     const asks = asksFromBacklog([item({ number: 5, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 11 }, stopSummary: [stop({})] })], NOW);
@@ -408,10 +515,10 @@ describe("dedupeAsks", () => {
 
 describe("rankAsks", () => {
   const decide = (n: number, at: string, over: Partial<BacklogItem> = {}) => item({ number: n, stage: "needs-decision", decision: { body: DECISION, at, issue: n }, ...over });
-  const pre = (n: number, state: "met" | "pending" = "pending") => ({ number: n, kind: "issue" as const, need: "done" as const, state, via: null, confirming: false });
+  const pre = (n: number, state: "met" | "pending" = "pending") => ({ number: n, kind: "issue" as const, need: "done" as const, state, via: [], confirming: false });
   const wait = (n: number) => ({ number: n, kind: "pr" as const, open: true, state: "pending" as const, reason: "overlap" as const, pbi: null });
 
-  test("unblocks: the other PBIs of the same Workspace naming the question's PBI, Issue or stage Issue with an unmet prerequisite or wait; a met one, another Workspace's same number and itself are not counted", () => {
+  test("waiting: the other PBIs of the same Workspace naming the question's PBI, Issue or stage Issue with an unmet prerequisite or wait; a met one, another Workspace's same number and itself are not counted; a question whose answer does not close its PBI unblocks none", () => {
     const items = [
       decide(5, "2026-10-07T10:00:00Z", { priority: "P1", prereqs: [pre(5)] }),
       item({ number: 20, title: "waits on 5", prereqs: [pre(5)] }),
@@ -422,14 +529,31 @@ describe("rankAsks", () => {
       item({ number: 25, title: "waits on the stage Issue", prereqs: [pre(40)] }),
     ];
     const [d] = rankAsks(dedupeAsks(asksFromBacklog(items, NOW)), items).filter((a) => a.kind === "decision");
-    expect(d).toMatchObject({ unblocks: [{ number: 20, title: "waits on 5", url: `${ISSUES}/20` }, { number: 21, title: "waits on 5 by release", url: `${ISSUES}/21` }], priority: "P1" });
+    expect(d).toMatchObject({ unblocks: [], waiting: [{ number: 20, title: "waits on 5", url: `${ISSUES}/20` }, { number: 21, title: "waits on 5 by release", url: `${ISSUES}/21` }], priority: "P1" });
     // a stage Task's question is about its Issue too
     const [s] = rankAsks(dedupeAsks(asksFromBacklog([item({ number: 9, stopSummary: [stop({ work: { workspaceId: "ws_meta", issue: 9, taskId: "tk_9" } })] })], NOW)).map((a) => ({ ...a, task: { ...a.task!, stageIssue: 40 } })), items);
-    expect(s!.unblocks.map((u) => u.number)).toEqual([25]);
+    expect(s!.waiting.map((u) => u.number)).toEqual([25]);
+    expect(s!.unblocks).toEqual([]);
     expect(s!.priority).toBeNull();
   });
 
-  test("orders the person's questions by how many wait, then Priority (P0 first, unset last), then newest; automatic, answered and resolved keep their order", () => {
+  test("unblocks: only the confirmation whose answer closes its PBI (progress.closesOnAnswer) lets the PBIs waiting on it go on", () => {
+    const line = (n: number) => ({ n, text: `${n}. 見た目（利用者確認: 画面で見る）`, after: null });
+    const building = (over: Partial<BacklogItem>) => item({ number: 5, stage: "in-progress", projectStatus: "In progress", tasks: { total: 2, done: 2, doneAt: null }, ...over });
+    const waiter = item({ number: 20, title: "waits on 5", prereqs: [pre(5)] });
+    const confirms = (own: BacklogItem) => rankAsks(dedupeAsks(asksFromBacklog([own, waiter], NOW)), [own, waiter]).filter((a) => a.kind === "confirmation").map((a) => [a.id.split(":").at(-1), a.unblocks.map((u) => u.number), a.waiting.map((u) => u.number)]);
+    // the last line of a PBI whose Tasks are all closed: answering it closes the PBI
+    expect(confirms(building({ confirmations: [line(3)], progress: { closableByApi: true, closesOnAnswer: 3 } }))).toEqual([["3", [20], []]]);
+    // two lines left: neither answer closes it, the PBI behind it only waits
+    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: null } }))).toEqual([["3", [], [20]], ["4", [], [20]]]);
+    // the line that closes is the one named, not any line of a PBI that has one (and it is ranked first)
+    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: 4 } }))).toEqual([["4", [20], []], ["3", [], [20]]]);
+    // a decision on the same PBI closes nothing, whatever the PBI's lines
+    const asked = item({ number: 5, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 5 }, tasks: { total: 2, done: 2, doneAt: null }, confirmations: [line(3)], progress: { closableByApi: false, closesOnAnswer: null } });
+    expect(rankAsks(dedupeAsks(asksFromBacklog([asked, waiter], NOW)), [asked, waiter]).map((a) => [a.kind, a.unblocks.length, a.waiting.length])).toEqual([["decision", 0, 1], ["confirmation", 0, 1]]);
+  });
+
+  test("orders the person's questions by how many an answer lets go on, then Priority (P0 first, unset last), then newest — not by how many only wait; automatic, answered and resolved keep their order", () => {
     const lastTask = { id: "tk", status: "done" as const, statusAt: NOW - 7_200_000, createdAt: NOW - 7_200_000, updatedAt: NOW - 7_200_000, action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
     const items = [
       decide(1, "2026-10-07T11:00:00Z"),
@@ -447,19 +571,25 @@ describe("rankAsks", () => {
       item({ number: 30, prereqs: [pre(4), pre(5)] }),
       item({ number: 31, prereqs: [pre(4), pre(9)] }),
       item({ number: 32, prereqs: [pre(10), pre(12)] }),
+      // the last user check of a PBI whose Tasks are all closed: answering it lets `#33` go on
+      item({ number: 40, stage: "in-progress", updatedAt: "2026-10-07T05:00:00Z", tasks: { total: 1, done: 1, doneAt: null }, confirmations: [{ n: 2, text: "2. 見た目（利用者確認: 画面）", after: null }], progress: { closableByApi: true, closesOnAnswer: 2 } }),
+      item({ number: 33, prereqs: [pre(40)] }),
     ];
     const deduped = dedupeAsks(asksFromBacklog(items, NOW));
     const ranked = rankAsks(deduped, items);
-    // Issue 9 is held (the person's, one waiting); Issues 2 and 8 tie on count and Priority, so the newer first
+    // `#40`'s answer lets one go on, so it is first though it is the oldest and has no Priority; `#4` (two wait for it), `#5` and
+    // `#9` (one each) are not moved up by those: Priority, then newest (Issues 2 and 8 tie on Priority, so the newer first)
     expect(ranked.map((a) => `${a.kind}/${a.state}#${a.pbi!.number}`)).toEqual([
-      "decision/open#4", "decision/open#5", "decision/held#9", "decision/open#3", "decision/open#2", "decision/open#8", "decision/open#1",
+      "confirmation/open#40", "decision/open#3", "decision/open#2", "decision/open#8", "decision/open#5", "decision/open#1", "decision/open#4", "decision/held#9",
       "wait/open#7", "wait/open#6", "decision/answered#10", "decision/answered#11", "stop/resolved#12",
     ]);
     // the other groups keep dedupeAsks' order even when PBIs wait on them
     const rest = (l: typeof ranked) => l.filter((a) => a.needs === "auto" || a.state === "answered" || a.state === "resolved").map((a) => a.id);
     expect(rest(ranked)).toEqual(rest(deduped));
-    expect(ranked.find((a) => a.pbi!.number === 10)!.unblocks.map((u) => u.number)).toEqual([32]);
-    expect(ranked.find((a) => a.pbi!.number === 6)!.unblocks.map((u) => u.number)).toEqual([7]);
+    expect(ranked.find((a) => a.pbi!.number === 40)).toMatchObject({ unblocks: [{ number: 33 }], waiting: [] });
+    expect(ranked.find((a) => a.pbi!.number === 4)!.waiting.map((u) => u.number)).toEqual([30, 31]);
+    expect(ranked.find((a) => a.pbi!.number === 10)!.waiting.map((u) => u.number)).toEqual([32]);
+    expect(ranked.find((a) => a.pbi!.number === 6)!.waiting.map((u) => u.number)).toEqual([7]);
   });
 });
 
@@ -525,16 +655,16 @@ describe("asksFromTasks", () => {
     expect(check).toMatchObject({ answers: ["questions"], blockers: [] });
   });
 
-  test("a check waits on personWait: a depends stop after the question makes no check", () => {
+  test("a check waits on personWait: the Task's outcome decides it, not the stops it left", () => {
     const asked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "needs_action", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
     expect(asked([])).toBe(true);
     const depends = (lastAt: number) => stop({ reason: "depends", next: "wait", lastAt, conditions: [{ key: "ci", value: "success", met: false }] });
-    expect(asked([depends(NOW + 1_000)])).toBe(false);
-    // a depends stop from before the question is an old one: the question is newer, so the check stays
-    expect(asked([depends(NOW - 1_000)])).toBe(true);
-    // a decision stop the person already answered asks nothing again once the Task ended done
+    // the stop does not decide it: the outcome does (a Task that only waits on a condition is `waits`, no check)
+    expect(asked([depends(NOW + 1_000)])).toBe(true);
+    expect(dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "waits", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => [depends(NOW + 1_000)], workspaceName: () => null, now: NOW })).some((a) => a.kind === "check")).toBe(false);
+    // a Task that ended done asks nothing again, whatever stop it left
     const doneAsked = (stops: StopSummary[]) => dedupeAsks(asksFromTasks({ approvals: [], tasks: [task({ outcome: "finished", status: "done" })], lastTurnQuestions: turnOf("続けるか", ["A", "B"]), permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW })).some((a) => a.kind === "check");
-    expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000 })])).toBe(true);
+    expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000 })])).toBe(false);
     expect(doneAsked([stop({ reason: "decision", lastAt: NOW + 1_000, answered: true, lastAnswer: { ref: "seq:9", at: NOW } })])).toBe(false);
   });
 
@@ -615,7 +745,7 @@ describe("asksFromTasks", () => {
   });
 });
 
-/* ---------- GET /api/asks: a fake runner and a fake gh, as core.test.ts and backlog.test.ts boot them ---------- */
+/* ---------- GET /api/asks: a fake runner and a fake gh, as the tests on api-test-harness.ts boot them ---------- */
 
 const pages = (await Bun.file(new URL("../fixtures/backlog-graphql.json", import.meta.url)).json()) as unknown[];
 const decisions = (await Bun.file(new URL("../fixtures/backlog-decisions.json", import.meta.url)).json()) as unknown;
@@ -629,7 +759,7 @@ const fakeGh: GhRunner = async (args) => {
 const CHECK_QS: AskQuestion[] = [{ header: null, question: "PR #12 をマージしてよいか\n[聞く] セキュリティ: security:github（+40/-5）", options: [{ label: "A: マージする (Recommended)", description: "CI が緑" }, { label: "B: 待つ", description: null }], multiSelect: false }];
 const ASK: AgentEvent = { t: "permission.ask", id: "perm1", kind: "write", tool: "Write", input: { file_path: "/tmp/x" }, detail: "write x" };
 
-/** A scripted runner (core.test.ts's fakeAdapter, cut down): replays `script`, pausing on a permission.ask until it is answered; lingers after its turn. */
+/** A scripted runner (api-test-harness.ts's fakeAdapter, cut down): replays `script`, pausing on a permission.ask until it is answered; lingers after its turn. */
 function runner(id: RunnerId, script: AgentEvent[]): RunnerAdapter {
   return {
     id,
@@ -851,7 +981,7 @@ describe("policy", () => {
   const savedFrom: PolicySubject = { kind: "decision", op: "gh pr merge", target: "PR #12", conditions: [{ key: "area", value: "web" }], head: null };
   const saved = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => ({
     id: "p1", scope: "repo", workspaceId: "ws_meta", pbi: null, askId: null, kind: "decision", op: "gh pr merge", target: "PR #12", when: [], answer: { kind: "choice", choice: "A: マージする" },
-    expiresAt: NOW - 1000, revokedAt: null, createdAt: NOW - 86_400_000, updatedAt: NOW - 86_400_000, from: savedFrom, uses: [], ...over,
+    expiresAt: NOW - 1000, revokedAt: null, createdAt: NOW - 86_400_000, updatedAt: NOW - 86_400_000, from: savedFrom, uses: [], useCount: 0, firstUsedAt: null, ...over,
   });
   let ghCalls = 0;
   const env = (policies: AnswerPolicy[] = [], confirmHit: ApprovalRuleMatch | null = null) => ({
@@ -894,10 +1024,10 @@ describe("policy", () => {
     const staged = fromTasks([], [], null, [decisionStop({ firstAt: NOW - 120_000 })], [task({ outcome: "needs_action", workspaceId: "ws_meta", stage: { issue: 938, action: "complete" } })], "続けるか")[0]!;
     expect(staged.policy).toMatchObject({ scopes: [], note: null });
     expect(decide([], []).policy).toMatchObject({ scopes: ["once"], note: "操作と対象が記録されていないため、今回のみ" });
-    const refused = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [stop({ reason: "permission", evidence: "denied by the runner", next: "decide" })] })], NOW, { policy: env() })[0]!;
+    const refused = asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({ reason: "permission", evidence: "denied by the runner", next: "decide" })] })], NOW, { policy: env() })[0]!;
     expect(refused.policy).toMatchObject({ scopes: [], note: "ランナー側の拒否は保存した方針では解除できません", defaults: null });
     // a stage Task's stop (on an Issue) is answered by a reply in its conversation: no scope, no note, though a decision of a PBI takes three
-    const stageStop = asksFromBacklog([item({ number: 5, stage: "in-progress", stopSummary: [decisionStop()] })], NOW, { policy: env() })[0]!;
+    const stageStop = asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [decisionStop()] })], NOW, { policy: env() })[0]!;
     expect(stageStop).toMatchObject({ kind: "stop", answers: ["text"], policy: { scopes: [], note: null, defaults: null } });
     const hit: ApprovalRuleMatch = { source: "rules/a.md", pattern: "bun*", mode: "confirm", subject: "bun test" };
     expect(fromTasks([exec("bun test")], [], hit)[0]!.policy).toMatchObject({ scopes: [], note: "都度確認のルール rules/a.md: bun* に当たります" });
@@ -948,6 +1078,9 @@ describe("approvalBatches", () => {
       { task: task("tk_k", { status: "waiting" }), records: [sso(task("tk_k"), NOW)] },
       // stopped on the login again after the answer: a new stop, carrying the earlier answer (recordStop), unanswered
       { task: h, records: [sso(h, NOW - 9_000, { answer: { ref: "seq:3", at: NOW - 8_000 } }), sso(h, NOW - 5_000, { id: "tk_h/sso2", answer: { ref: "seq:3", at: NOW - 8_000 } })] },
+      // a login still waiting, but the Task's outcome says the person is not wanted (finished, or only waits): no batch
+      { task: task("tk_l", { outcome: "finished" }), records: [sso(task("tk_l"), NOW - 9_000)] },
+      { task: task("tk_m", { outcome: "waits" }), records: [sso(task("tk_m"), NOW - 9_000)] },
     ];
     const asks = dedupeAsks(entries.flatMap((x) => asksFromTasks({ approvals: [], tasks: [x.task], lastTurnQuestions: turnOf(null), permissionEvents: () => [], stops: () => reduceStops(x.records), workspaceName: (id) => id, now: NOW })));
     const batches = approvalBatches(entries, asks);
@@ -971,6 +1104,26 @@ describe("approvalBatches", () => {
 describe("noticeAsks", () => {
   const ws = { id: "ws_1", name: "app" };
   const why = "origin は acme/app、登録は acme/app-dev です。登録のリポジトリの clone にする（`git remote set-url origin https://github.com/acme/app-dev.git` など）まで Task を起動しません";
+  test("noticeAsks: what a work machine put and was not taken in is told once per machine — open with the keys and reasons, closed by dismiss for those objects, open again only for a new one", () => {
+    const t0 = 1_000_000;
+    const a1 = { machine: "pc1", key: "uplink/pc1/pc1-2.tar.zst", reason: "its name is not a delta of this machine" };
+    const first = noticeAsks({ unusable: [], refused: [a1], now: t0 }, {});
+    expect(first.asks).toEqual([expect.objectContaining({ id: `notice:uplink-refused:pc1@${t0}`, kind: "notice", needs: "person", state: "open", question: "作業場 pc1 から届いたもの 1 件を取り込まなかった", reason: "uplink/pc1/pc1-2.tar.zst: its name is not a delta of this machine", answers: ["dismiss"] })]);
+    // read again: the same notice, nothing written
+    const again = noticeAsks({ unusable: [], refused: [a1], now: t0 + 1000 }, first.record);
+    expect(again.record).toBe(first.record);
+    // the person closed it (what the answer route writes): the same object is not told again
+    const key = "uplink-refused:pc1";
+    const closed = { ...again.record, [key]: { ...again.record[key]!, dismissed: closedHits(again.record[key]!), closed: true, resolvedAt: t0 + 2000 } };
+    const quiet = noticeAsks({ unusable: [], refused: [a1], now: t0 + 3000 }, closed);
+    expect(quiet.asks).toEqual([]);
+    expect(quiet.record).toBe(closed);
+    // a new refusal of that machine: told, with only the new object
+    const a2 = { machine: "pc1", key: "backlog/pc1/000000000007.json", reason: "pc1 is not registered for acme/secret" };
+    const more = noticeAsks({ unusable: [], refused: [a1, a2], now: t0 + 4000 }, quiet.record);
+    expect(more.asks).toEqual([expect.objectContaining({ state: "open", question: "作業場 pc1 から届いたもの 1 件を取り込まなかった", reason: "backlog/pc1/000000000007.json: pc1 is not registered for acme/secret" })]);
+  });
+
   test("noticeAsks: an unusable workspace is open until it is fixed, then resolved", () => {
     const t0 = 1_000_000;
     const first = noticeAsks({ unusable: [{ workspace: ws, why }], now: t0 }, {});

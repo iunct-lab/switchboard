@@ -1,6 +1,8 @@
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { Artifact } from "@switchboard/protocol";
-import { type AppUse, api, apiRaw } from "../api.ts";
+import { type AppUse } from "../api/artifacts.ts";
+import { api } from "../api/index.ts";
+import { apiRaw } from "../api/request.ts";
 import { appRequestDraft, appRequestOf, copyKind, frameUnavailable, isMarkdown, pickArtifact, viewOf } from "../artifacts.ts";
 import { requestFeedback } from "./Feedback.tsx";
 import { viewPath } from "../route.ts";
@@ -15,8 +17,8 @@ export const UNDO_MS = 5000;
 /** A fetched view url is used again for this long (the daemon's key lasts an hour). */
 const KEY_REUSE_MS = 30 * 60 * 1000;
 
-/** The 成果物 tab of a Task (#1777): register a file / folder / URL, switch between them, open, refresh, remove with undo. */
-export function Artifacts(props: { taskId: string; openId?: string; /** bumped by each request to open (#1778): the same id opens again */ openSeq?: number; hidden?: boolean; onCount: (n: number) => void }) {
+/** The 成果物 tab of a Task: register a file / folder / URL, switch between them, open, refresh, remove with undo. */
+export function Artifacts(props: { taskId: string; openId?: string; /** bumped by each request to open: the same id opens again */ openSeq?: number; hidden?: boolean; onCount: (n: number) => void }) {
   const [items, setItems] = useState<Artifact[]>([]);
   const [sel, setSel] = useState<string | null>(props.openId ?? null);
   const selRef = useRef(sel); // the selection as the list reads below see it
@@ -39,7 +41,7 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
     setUndo(null);
     return () => clearTimeout(undoTimer.current);
   }, [props.taskId]);
-  // One read of the list for the mount and for each request to open one (#1778 a row of the conversation, #1835 Insights'
+  // One read of the list for the mount and for each request to open one (a row of the conversation, Insights'
   // list — also while the tab is already mounted, and again on every press of the same row, by openSeq): the list is read
   // first (the agent may have registered the artifact since the tab was opened), then `pickArtifact` says what is selected;
   // a requested one that is gone since says so.
@@ -116,7 +118,7 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
               role="tab"
               aria-selected={a.id === sel}
               onClick={() => {
-                setErr(null); // a choice on the strip ends the message of a row's request too (#1778)
+                setErr(null); // a choice on the strip ends the message of a row's request too
                 setSel(a.id);
               }}
               title={a.source}
@@ -159,13 +161,13 @@ export function Artifacts(props: { taskId: string; openId?: string; /** bumped b
   );
 }
 
-/** One artifact opened in place (frame / image / text, 全画面, 取り直す). Also the body of a report on Insights (#1835). */
+/** One artifact opened in place (frame / image / text, 全画面, 取り直す). Also the body of a report on Insights. */
 export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: () => void }) {
   const { a } = props;
   const how = viewOf(a);
   const md = isMarkdown(a);
   const copy = copyKind(a);
-  const read = how === "text" || copy === "content"; // a page or an SVG is read as text too, for コピー (#3687); the frame still loads its url
+  const read = how === "text" || copy === "content"; // a page or an SVG is read as text too, for コピー; the frame still loads its url
   const [mdView] = useMdView();
   const [url, setUrl] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
@@ -173,7 +175,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   const [readStatus, setReadStatus] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  // 全画面 (#1826): the report over the whole screen, and three ways back to the Task screen — the 戻る button, Esc, and
+  // 全画面: the report over the whole screen, and three ways back to the Task screen — the 戻る button, Esc, and
   // the browser's / phone's back (an entry of its own in the history, so back closes it instead of leaving the app).
   const [full, setFull] = useState(false);
   const openFull = () => {
@@ -210,12 +212,12 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   const [ask, setAsk] = useState<{ req: BridgeRequest; answer: (yes: boolean) => void } | null>(null);
   const askRef = useRef(ask);
   askRef.current = ask;
-  // A throwaway app (#3683): the first request through the bridge tells the daemon the page was used today (it counts a
+  // A throwaway app: the first request through the bridge tells the daemon the page was used today (it counts a
   // day once and starts a request on the 3rd); the answer says whether that request was started.
   const [use, setUse] = useState<AppUse>({ appDays: a.appDays, appRequestTaskId: a.appRequestTaskId });
   const [usedNow, setUsedNow] = useState(false);
   const told = useRef(false);
-  // Leaving the artifact (another tab hides it, or it unmounts) declines what is asked and what waits behind it (#3880)
+  // Leaving the artifact (another tab hides it, or it unmounts) declines what is asked and what waits behind it
   const shownRef = useRef(props.shown);
   useEffect(() => {
     shownRef.current = props.shown;
@@ -262,10 +264,10 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
       askRef.current?.answer(false);
     };
   }, []);
-  // A view key lasts an hour (#1782): the tab stays mounted, so ask again when it is shown after a long time away.
+  // A view key lasts an hour: the tab stays mounted, so ask again when it is shown after a long time away.
   const keyAt = useRef(0);
   useEffect(() => {
-    // a frame's page is checked again when its check did not finish (hidden while it read, #4062)
+    // a frame's page is checked again when its check did not finish (hidden while it read)
     if (a.kind === "url" || !props.shown || (url !== null && (!read || text !== null) && (how !== "frame" || readStatus !== null) && Date.now() - keyAt.current < KEY_REUSE_MS)) return;
     let live = true;
     api
@@ -274,7 +276,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
         if (!live) return;
         keyAt.current = Date.now();
         setUrl(u);
-        // a page in a frame is read too (a folder's entry as well, #4062): its status tells whether the frame can show it
+        // a page in a frame is read too (a folder's entry as well): its status tells whether the frame can show it
         if (read || how === "frame") {
           const r = await fetch(u);
           const body = await r.text();
@@ -325,7 +327,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
   };
 
   const app = appRequestOf(use, usedNow);
-  // 要望にする (#3683): the dialog names the artifact's Task by its title; a screen that has no title for it (判断待ち's
+  // 要望にする: the dialog names the artifact's Task by its title; a screen that has no title for it (判断待ち's
   // mockups) reads it first, and the id stands in only when that read fails
   const openAppRequest = async () => {
     let taskTitle = "taskTitle" in a && typeof a.taskTitle === "string" ? a.taskTitle : undefined;
@@ -342,7 +344,7 @@ export function ArtifactBody(props: { a: Artifact; shown: boolean; onRefreshed: 
     dispatchEvent(new PopStateEvent("popstate"));
   };
 
-  // A .md in the preview (#3677) once its text is read; everything else (and the switch on テキスト) as it was.
+  // A .md in the preview once its text is read; everything else (and the switch on テキスト) as it was.
   const textBody = md && mdView === "preview" && text !== null
     ? <div className="art-text"><Markdown text={text} /></div>
     : <pre className="art-text">{text ?? t(m.loading)}</pre>;

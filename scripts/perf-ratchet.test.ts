@@ -18,10 +18,10 @@ const result = (send: Partial<Budget["journeys"][string]>) => ({
 describe("perf-ratchet judge", () => {
   const withLoaded: Budget = { ...budget, loaded: { healthMaxMs: 5000 } };
   const loaded = (healthMaxMs: number) => ({ ...result({}), loaded: { healthMaxMs, healthMaxMsP90: 99999 } });
-  test("judge: loaded.healthMaxMs over its ceiling is over (#2822)", () => {
+  test("judge: loaded.healthMaxMs over its ceiling is over", () => {
     expect(judge(loaded(5001), withLoaded)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5001, ceiling: 5000 }], improved: [] });
   });
-  test("judge: loaded.healthMaxMs far below its ceiling is not improved, so update keeps it (#3574)", () => {
+  test("judge: loaded.healthMaxMs far below its ceiling is not improved, so update keeps it", () => {
     const b: Budgets = { github: budget, local: { ...budget, loaded: { healthMaxMs: 5440 } } };
     // a quiet host: 1714 far below the ceiling (5440 − 2 × 1750 = 1940 with the band then), yet not improved
     const { over, improved } = judge(loaded(1714), b.local);
@@ -31,12 +31,12 @@ describe("perf-ratchet judge", () => {
     // a journey count below ceiling − 2 × band is still improved
     expect(judge({ ...result({ requests: 3 }), loaded: { healthMaxMs: 1714, healthMaxMsP90: 1901 } }, b.local).improved.map((i) => i.key)).toEqual(["journeys.send.requests"]);
   });
-  test("judge: a result that skipped loaded leaves its ceiling out; one without loaded and no reason still throws (#3635)", () => {
+  test("judge: a result that skipped loaded leaves its ceiling out; one without loaded and no reason still throws", () => {
     expect(judge({ ...result({}), loadedSkipped: "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない" }, withLoaded)).toEqual({ over: [], improved: [] });
     expect(judge({ ...result({ requests: 9 }), loadedSkipped: "docs only" }, withLoaded).over.map((i) => i.key)).toEqual(["journeys.send.requests"]);
     expect(() => judge(result({}), withLoaded)).toThrow("the result has no loaded.healthMaxMs");
   });
-  test("judge: a budget without loaded does not need it in the result (#2822)", () => {
+  test("judge: a budget without loaded does not need it in the result", () => {
     expect(judge(result({}), budget)).toEqual({ over: [], improved: [] });
   });
   test("over: a count above its ceiling, with its name, value and ceiling", () => {
@@ -64,7 +64,7 @@ describe("perf-ratchet judge", () => {
   });
 });
 
-describe("perf-ratchet loweredBy (#4150)", () => {
+describe("perf-ratchet loweredBy", () => {
   const row = (tag: string, key: string, value: number, env: "github" | "local" = "local", at = 0): CountsRow => ({ measuredAt: new Date(Date.UTC(2026, 10, 1 + at)).toISOString(), env, tag, sha: "a".repeat(40), key, value });
   const send = (key: string) => `journeys.send.${key}`;
   const rowsOf = (key: string, values: number[], env: "github" | "local" = "local") => values.map((v, i) => row(`v${i}`, send(key), v, env, i));
@@ -110,7 +110,7 @@ describe("perf-ratchet loweredBy (#4150)", () => {
   });
 });
 
-describe("perf-ratchet bytes against main's (#3921)", () => {
+describe("perf-ratchet bytes against main's", () => {
   const evals = (n: number) => ({ "/api/tasks/:id": { count: 2, bytes: 30000 }, "/api/tasks/:id/evals": { count: 2, bytes: n } });
   const main = { "open-task": { bytes: 35597, responses: evals(1000) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
   test("shapeOf: a task id, a uuid and digits are :id; words stay", () => {
@@ -199,7 +199,7 @@ describe("perf-ratchet raisedAgainst", () => {
   });
 });
 
-describe("perf-ratchet PERF_BASE_REF (#4219)", () => {
+describe("perf-ratchet PERF_BASE_REF", () => {
   test("check reads the ceilings to compare from that ref: a lower ceiling there is raised:, and a ref without the file is named", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     const dir = mkdtempSync(join(tmpdir(), "sb-perf-ratchet-test-"));
@@ -233,7 +233,7 @@ describe("perf-ratchet PERF_BASE_REF (#4219)", () => {
   });
 });
 
-describe("perf-ratchet durations (#1887)", () => {
+describe("perf-ratchet durations", () => {
   const timed: Budget = { ...budget, durations: { typecheck: 60, test: 50 } };
   test("test duration ceiling: the ceiling itself passes, 0.1 over is over, far below is no failure", () => {
     expect(judgeDurations({ typecheck: 60, test: 50 }, timed)).toEqual([]);
@@ -256,7 +256,7 @@ describe("perf-ratchet durations (#1887)", () => {
   });
 });
 
-describe("perf-ratchet exceptions (#1890)", () => {
+describe("perf-ratchet exceptions", () => {
   const item = { key: "journeys.send.layoutShift", value: 0.1, ceiling: 0.0727 };
   const other = { key: "journeys.send.requests", value: 7, ceiling: 6 };
   const exceptions = [{ key: "local.journeys.send.layoutShift", issue: 7 }];
@@ -279,8 +279,8 @@ describe("perf-ratchet exceptions (#1890)", () => {
   });
 });
 
-describe("perf-ratchet environments (#644)", () => {
-  test("the approved unstable metrics stay out of the gate in both environments (#644 answer A)", async () => {
+describe("perf-ratchet environments", () => {
+  test("the approved unstable metrics stay out of the gate in both environments (the owner's decision)", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     for (const env of ENVS) {
       const b = budgets[env];
@@ -290,7 +290,7 @@ describe("perf-ratchet environments (#644)", () => {
         const expected = ["requests", "layoutCount", "recalcStyleCount", "layoutShift"].filter((key) => !(name === "open-task" && key === "layoutShift") && !(name === "send" && key === "layoutCount"));
         expect(Object.keys(b.journeys[name]!).sort()).toEqual(expected.sort());
       }
-      // bytes is judged against main's tip, not a ceiling (#3921): open-task-huge has none
+      // bytes is judged against main's tip, not a ceiling: open-task-huge has none
       expect(b.journeys["open-task"]).not.toHaveProperty("bytes");
       expect(b.journeys).not.toHaveProperty("open-task-huge");
       for (const [layoutShift, layoutCount] of [[0.0002, 4], [0.047, 7], [0.5, 30]]) {
@@ -378,7 +378,7 @@ describe("perf-ratchet environments (#644)", () => {
   });
 });
 
-describe("perf-ratchet bundle growth (#3167)", () => {
+describe("perf-ratchet bundle growth", () => {
   test("bundleGrowth: the bundle line either way; grew only at 1% or more, js and css each", () => {
     expect(BUNDLE_GROWTH_LIMIT).toBe(0.01);
     expect(bundleGrowth({ js: 1005, css: 100 }, { js: 1000, css: 100 })).toEqual({ line: "bundle: js 1005 B (main 1000 B, +5 B, +0.50%) / css 100 B (main 100 B, +0 B, +0.00%)", grew: [] });
@@ -406,7 +406,7 @@ describe("perf-ratchet bundle growth (#3167)", () => {
       const small = await run({ js: 100500, css: 10000 });
       expect([small.code, small.out]).toEqual([0, expect.stringContaining("bundle: js 100500 B (main 100000 B, +500 B, +0.50%) / css 10000 B (main 10000 B, +0 B, +0.00%)")]);
       expect(small.out).not.toContain("grew:");
-      // a quiet host's loaded.healthMaxMs far below its ceiling: exit 0, no improved: line (#3574)
+      // a quiet host's loaded.healthMaxMs far below its ceiling: exit 0, no improved: line
       const quiet = await run({ js: 100000, css: 10000 }, budgets.local.journeys, ["--base", base], { healthMaxMs: 1714, healthMaxMsP90: 1901 });
       expect([quiet.code, quiet.out.includes("improved:")]).toEqual([0, false]);
       const big = await run({ js: 101100, css: 10000 });
@@ -475,7 +475,7 @@ describe("perf-ratchet bundle records", () => {
   });
 });
 
-describe("perf-ratchet bytes records (#3921)", () => {
+describe("perf-ratchet bytes records", () => {
   const A = "a".repeat(40);
   const B = "b".repeat(40);
   const responses = (evals: number) => ({ "/api/tasks/:id/evals": { count: 2, bytes: evals }, "/api/tasks/:id": { count: 1, bytes: 30000 } });

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The E2E of the stand-alone mode (#4191): in the image of container/Dockerfile a fake runner's Task finishes, and after
+# The E2E of the stand-alone mode: in the image of container/Dockerfile a fake runner's Task finishes, and after
 # the container is recreated the Task list and the session file are still there. No real runner is run. Not in CI (the
 # image build is heavy); run it by hand: sb-offload --size medium 'bash container/e2e.sh'
 # The same compose.yaml as container/up.sh, with an override file that (a) starts container/boot-fake.ts, the fake

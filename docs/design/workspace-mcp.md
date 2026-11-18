@@ -46,6 +46,7 @@ POST /mcp/<taskId>?token=<token>  or  Authorization: Bearer <token>             
 - Off loopback (`SWITCHBOARD_HOST=0.0.0.0`) every `/api/*` route except health, and `/ws`, require the token: `Authorization: Bearer <token>` for `/api` (the query form is refused there so the token stays out of history and logs), `?token=` accepted only on `/ws` and `/mcp`. Health then reveals only `authRequired`. The web UI asks for the token once and keeps it in `localStorage`.
 - Browser cross-site defence on every interface: a request carrying an `Origin` that is not the daemon's own is refused (403) on `/api` and `/ws`. The Vite dev server proxies both, so it stays same-origin.
 - `/mcp/<taskId>` always requires its per-task token, on any interface.
+- A request made for a Task says so with two headers: `x-task-id: <taskId>` and `x-task-token: <that Task's /mcp token>` (read from `GET /api/tasks/<taskId>/mcp` for the call; `scripts/promote.ts` and `ops-kit backlog comment` send them). Only a request with a matching pair is treated as that Task's: it is the one Task left out of a promotion's count of busy Tasks, and the one Task whose turn a refused `推奨で進める` comment ends. A Task id written in a request's body is a statement and does neither. **Not a boundary between Tasks**: the pair is handed to any caller that already passes the API guard, and Tasks of the same OS user all do — it keeps a request from acting for a Task it merely names, by mistake or by a relayed text, and says nothing about a process that fetches another Task's token on purpose.
 
 ## Trying it
 

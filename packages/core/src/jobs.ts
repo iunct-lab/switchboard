@@ -1,12 +1,15 @@
-import type { AgentEvent, Job, JobRequest, PricingTable, RunnerId } from "@switchboard/protocol";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import type { AgentEvent, Job, JobRequest, LoginKind, PricingTable, RunnerId } from "@switchboard/protocol";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { childEnv } from "@switchboard/adapter-claude";
+import { primaryReviewer } from "../../../ops-kit/src/conditions.ts";
+import { REVIEWER_ISOLATION, reviewPrompt } from "../../../ops-kit/src/review-note.ts";
 import type { Db } from "./db.ts";
 import { TASK_MARK } from "./detached.ts";
 import { readBootId } from "./ops-stops.ts";
 import { ledgerRowFor } from "./pricing.ts";
+import { workspaceConfigEnv } from "./workspace-config.ts";
 
 /**
  * Jobs a Task asks the daemon to run for it: local CI and a review, the long waits a Task used to
@@ -47,6 +50,11 @@ export const spawnCollectPending = (repoRoot: string, env: Record<string, string
 /** A kind's command: argv, then shell text after it that only names the wrapper's variables (`$J`, `$JOB_PROMPT`, `$JOB_OUT`). */
 export type JobCommand = { argv: string[]; tail: string };
 
+/** A request whose reviewer is decided (`requestJob` decides it from the setting and the Task's runner when the request names none). */
+export type ResolvedJobRequest =
+  | (Exclude<JobRequest, { kind: "review" }> & { /** Another repository's PR: Switchboard's own `scripts/local-ci.ts` (that repository has none) and the `owner/name` it is given as `--repo`. */ other?: { script: string; repo: string } })
+  | (Extract<JobRequest, { kind: "review" }> & { runner: "codex" | "claude" });
+
 export type JobDeps = {
   db: Db;
   /** Where each job's folder goes (`<dir>/<id>`: log, exit). */
@@ -54,7 +62,11 @@ export type JobDeps = {
   /** The environment the jobs start from (the daemon's, with the kit's bin on PATH). */
   env: Record<string, string | undefined>;
   /** The command of a request; tests put a fake in its place. */
-  command?: (req: JobRequest) => JobCommand;
+  command?: (req: ResolvedJobRequest) => JobCommand;
+  /** The review setting (production: the saved one). The main reviewer of a Task follows from it and the Task's runner. Absent = "other". */
+  reviewRunner?: () => "other" | "same";
+  /** The model and thinking effort a review of this runner runs with (production: the runner's saved defaults). Empty = the CLI's own. */
+  reviewChoice?: (runner: RunnerId) => { model?: string; effort?: string };
   /** How long a review may print nothing before it is cut (seconds; default 900, SWITCHBOARD_JOB_REVIEW_IDLE_S). */
   reviewIdleS?: number;
   /** Called once when a job ends (pass / fail / aborted). */
@@ -69,6 +81,10 @@ export type JobDeps = {
   collectPending?: () => void;
   /** The price table a review job's usage is priced with (production: the daemon's); without it the rows are unpriced. */
   pricing?: () => PricingTable;
+  /** The login a runner is on now, for the billing kind of a review job's usage; undefined = not known. */
+  loginKind?: (runner: RunnerId) => LoginKind | undefined;
+  /** Whether this machine runs the CI's steps in a build off the host (production: `sb-offload` is on PATH, as `scripts/local-ci.ts` decides). */
+  offHost?: () => boolean;
   now?: () => number;
 };
 
@@ -76,14 +92,19 @@ export type JobDeps = {
 // `fromjson?` skips a line that is not JSON, so jq does not fail the pipeline (pipefail) on it.
 const CODEX_TAIL = ` < "$JOB_PROMPT" | tee "$J/codex.jsonl" | jq -rR 'fromjson? | select(.type == "error" or .type == "turn.failed") | "codex: \\(.message // .error.message // tostring)"'`;
 
-/** The argv of each kind, as `cross-runner-review` runs a review and CLAUDE.md runs local CI. */
-export function jobCommand(req: JobRequest, idleS = 900): JobCommand {
-  if (req.kind === "local-ci") return { argv: ["bun", "scripts/local-ci.ts", String(req.pr), ...(req.local ? ["--local"] : [])], tail: "" };
+/**
+ * The argv of each kind, as `cross-runner-review` runs a review and CLAUDE.md runs local CI. A reviewer is started with
+ * `REVIEWER_ISOLATION` (the kit's review-note.ts, the same values the skill's direct commands carry): it reads the review's
+ * instructions and material, not the clone's CLAUDE.md / AGENTS.md nor the user's memory, MCP servers, skills and plugins.
+ */
+export function jobCommand(req: ResolvedJobRequest, idleS = 900, choice: { model?: string; effort?: string } = {}): JobCommand {
+  // this repository's PR runs the checkout's own script; another repository's, Switchboard's script from that repository's folder with `--repo`
+  if (req.kind === "local-ci") return { argv: ["bun", req.other?.script ?? "scripts/local-ci.ts", String(req.pr), ...(req.other ? ["--repo", req.other.repo] : []), ...(req.local ? ["--local"] : [])], tail: "" };
   // a review takes no heavy slot, only waits for the memory floor (the kit README, Heavy-process slots): local CI keeps its slot
   const head = ["ops-kit", "heavy", "--memory-only", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
-  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--json", "-o", req.outFile, "-"], tail: CODEX_TAIL };
+  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", ...REVIEWER_ISOLATION.codex.args, "--json", ...(choice.model ? ["-m", choice.model] : []), ...(choice.effort ? ["-c", `model_reasoning_effort="${choice.effort}"`] : []), "-o", req.outFile, "-"], tail: CODEX_TAIL };
   // stream-json: text output says nothing until the end, and idle-run would cut it
-  return { argv: [...head, "claude", "-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
+  return { argv: [...head, "env", ...REVIEWER_ISOLATION.claude.env, "claude", "-p", "--permission-mode", "plan", ...REVIEWER_ISOLATION.claude.args, "--output-format", "stream-json", "--verbose", ...(choice.model ? ["--model", choice.model] : []), ...(choice.effort ? ["--effort", choice.effort] : [])], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
 }
 
 type UsageEvent = Extract<AgentEvent, { t: "usage" }>;
@@ -174,6 +195,9 @@ export function sameRepository(taskCwd: string, cwd: string, workspaceOrigins: s
   return workspaceOrigins.some((w) => remoteKey(git(w, "remote", "get-url", "origin")) === rb);
 }
 
+/** `owner/name` of a checkout's origin on GitHub, or null. */
+const githubRepoOf = (cwd: string): string | null => /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)$/.exec(remoteKey(git(cwd, "remote", "get-url", "origin"))?.replace(/^ssh:\/\/git@github\.com\//, "https://github.com/") ?? "")?.[1] ?? null;
+
 /** Whether `p` (it, or else its folder, as the links resolve) is inside `root`. */
 const within = (root: string, p: string): boolean => {
   try {
@@ -232,7 +256,7 @@ const pruneQuietly = (deps: JobDeps) => {
 function recordUsage(deps: JobDeps, job: Job, jobDir: string, ts: number): void {
   try {
     // the job's runner and model, not the Task's: an audit Task on one runner asks for a review by the other
-    for (const u of jobUsage(job.runner!, jobDir)) deps.db.insertLedger({ ...ledgerRowFor(deps.pricing?.(), { id: job.taskId, runner: job.runner!, model: null }, u, ts), source: "job" });
+    for (const u of jobUsage(job.runner!, jobDir)) deps.db.insertLedger({ ...ledgerRowFor(deps.pricing?.(), { id: job.taskId, runner: job.runner!, model: null }, u, ts, deps.loginKind?.(job.runner!)), source: "job" });
   } catch (e) {
     console.error(`[jobs] usage of job#${job.id}: ${String((e as Error)?.message ?? e)}`);
   }
@@ -254,7 +278,11 @@ function finish(deps: JobDeps, id: number): Job | null {
 
 /**
  * Starts a job for a Task: checks the request, records the job and starts it as the daemon's detached child.
- * Throws JobError (404: no such Task; 400: a folder or file outside the Task's repository).
+ * Throws JobError (404: no such Task; 400: a folder or file outside the Task's repository, or a reviewer the setting does not name).
+ *
+ * A review's runner is the app's to decide: the main reviewer follows from the review setting as it is now and the Task's
+ * runner (`primaryReviewer`). A request that names another runner is refused unless it says why (`as`: a usage-limit
+ * fallback, a recheck, an audit) — which runner does the main review is not left to what the Task read earlier.
  */
 export function requestJob(deps: JobDeps, req: JobRequest): Job {
   const task = deps.db.getTask(req.taskId);
@@ -264,7 +292,16 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
   const cwd = resolve(req.cwd);
   if (!sameRepository(task.cwd, cwd, deps.db.listWorkspaces().map((w) => w.path))) throw new JobError(`cwd is not a checkout of the task's repository: ${req.cwd}`, 400);
   const files: Record<string, string> = {};
+  let reviewer: "codex" | "claude" | null = null;
   if (req.kind === "review") {
+    const setting = deps.reviewRunner?.() ?? "other";
+    const primary = primaryReviewer(task.runner, setting);
+    if (!req.runner && !primary) throw new JobError(`この Task のランナー（${task.runner}）からは主レビュアーを決められません。--runner codex|claude で名指ししてください`, 400);
+    if (req.as && !req.runner) throw new JobError("as（主レビュアーでないランナーに頼む理由）は runner の名指しが要ります", 400);
+    if (req.runner && primary && req.runner !== primary && !req.as) {
+      throw new JobError(`設定（レビューのランナー: ${setting}）では、この Task（${task.runner}）の主レビュアーは ${primary} です。主レビューは --runner ${primary} で頼んでください。主レビュアーでないランナーに頼むのは、理由を --as で名指ししたときだけです（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査）`, 400);
+    }
+    reviewer = req.runner ?? primary!;
     const prompt = resolve(cwd, req.promptFile);
     if (!existsSync(prompt)) throw new JobError(`promptFile not found: ${req.promptFile}`, 400);
     // the review reads and writes only inside the checkout (`_review/` in cross-runner-review): a path that leads out,
@@ -278,17 +315,36 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
     if (!isAbsolute(req.fixtures)) throw new JobError(`fixtures must be absolute: ${req.fixtures}`, 400);
     files.SWITCHBOARD_FIXTURES = req.fixtures;
   }
-  const resolved: JobRequest = req.kind === "review" ? { ...req, cwd, promptFile: files.JOB_PROMPT!, outFile: files.JOB_OUT! } : { ...req, cwd };
-  const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.pr, runner: req.kind === "review" ? req.runner : null, cwd, startedAt: (deps.now ?? Date.now)() });
+  // the registered workspace the checkout belongs to: its saved settings go to the job as they go to its Tasks
+  const workspaces = deps.db.listWorkspaces();
+  const ws = workspaces.find((w) => sameRepository(w.path, cwd));
+  const meta = workspaces.find((w) => w.kind === "meta");
+  // someone else's repository (a workspace with an upstream): the steps of its PR's CI are code nobody here reviewed. They
+  // run only in a build off the host, which has none of this user's files or logins — never here as the host's user
+  if (req.kind === "local-ci" && ws?.upstream && (req.local || !(deps.offHost ?? (() => Bun.which("sb-offload", { PATH: deps.env.PATH ?? "" }) !== null))())) {
+    throw new JobError("他者のリポジトリ（元の更新を取り込む workspace）のローカル CI は、外のビルド（sb-offload）があるマシンでだけ回します（PR の CI の手順がこのホストの利用者の権限で走るため。--local も不可）", 409);
+  }
+  let other: { script: string; repo: string } | undefined;
+  // local CI of a repository that is not Switchboard's: it has no scripts/local-ci.ts, so Switchboard's runs from its folder
+  if (req.kind === "local-ci" && meta && !sameRepository(meta.path, cwd)) {
+    const repo = githubRepoOf(cwd);
+    if (!repo) throw new JobError(`cwd の origin から GitHub の owner/name を読めません: ${req.cwd}（アプリが持つ変更は bun ${join(meta.path, "scripts/local-ci.ts")} --change <n>）`, 400);
+    other = { script: join(meta.path, "scripts/local-ci.ts"), repo };
+  }
+  const resolved: ResolvedJobRequest = req.kind === "review" ? { ...req, runner: reviewer!, cwd, promptFile: files.JOB_PROMPT!, outFile: files.JOB_OUT! } : { ...req, cwd, ...(other ? { other } : {}) };
+  const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.pr, runner: reviewer, cwd, startedAt: (deps.now ?? Date.now)() });
   const jobDir = join(deps.dir, String(job.id));
-  const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS);
+  // what the reviewer reads: the Task's instructions (left as written) and the note of the runner that reviews, in the job's folder
+  const prompt = resolved.kind === "review" ? reviewPrompt(readFileSync(resolved.promptFile, "utf8"), resolved.runner) : null;
+  if (prompt !== null) files.JOB_PROMPT = join(jobDir, "prompt.md");
+  const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS, resolved.kind === "review" ? deps.reviewChoice?.(resolved.runner) : undefined);
   // not the Task's: without its mark (the Task's end stops what carries it) and without SWITCHBOARD_SUPERVISED
   // (a Task's variable; local CI's tests fail with it), and without Claude Code's session markers and the OTEL_*
   // destinations, as the Task's own claude gets it (`childEnv`). OPS_KIT_TASK_ID still names the Task to `ops-kit heavy`.
   const env = childEnv(deps.env);
   delete env[TASK_MARK];
   delete env.SWITCHBOARD_SUPERVISED;
-  Object.assign(env, files, { J: jobDir, OPS_KIT_TASK_ID: req.taskId });
+  Object.assign(env, files, workspaceConfigEnv(ws), { J: jobDir, OPS_KIT_TASK_ID: req.taskId });
   let proc: ReturnType<typeof Bun.spawn>;
   let log: number | null = null;
   try {
@@ -296,6 +352,7 @@ export function requestJob(deps: JobDeps, req: JobRequest): Job {
     // hand this one its exit code: the folder starts empty
     rmSync(jobDir, { recursive: true, force: true });
     mkdirSync(jobDir, { recursive: true });
+    if (prompt !== null) writeFileSync(join(jobDir, "prompt.md"), prompt);
     log = openSync(join(jobDir, "log"), "w");
     proc = Bun.spawn(["bash", "-c", WRAPPER(tail), "job", ...argv], { cwd, env, stdin: "ignore", stdout: log, stderr: log, detached: true });
   } catch (e) {

@@ -1,9 +1,9 @@
 /**
  * bun scripts/check-models.ts — the model lists offered in the UI (the settings screen's, else CLAUDE_MODELS / CODEX_MODELS) against the tables the
- * installed CLIs carry (PBI #248). The tables are local data, never a vendor API and never an API key (PBI #155:
+ * installed CLIs carry. The tables are local data, never a vendor API and never an API key (
  * Switchboard holds no key): claude — the model table embedded in the installed executable; codex — `codex debug models
  * --bundled`, the table shipped in the binary (without `--bundled` it refreshes over the network, so the flag is always
- * given). The one network read is the version check against the public npm registry (#1273, below), still with no key.
+ * given). The one network read is the version check against the public npm registry (below), still with no key.
  *
  * Prints one line per runner and finding:
  *   <runner> stale: <ids>   — listed in the UI but not in the CLI's table (an old or mistyped id)
@@ -14,8 +14,8 @@
  *   unpriced (ledger): ...       — the claude / codex model names the ledger could not price, split into new (in the CLI's
  *                                  table: the price table lags behind) and unknown (not in it: a wrong name?). Report only:
  *                                  past ledger rows cannot be fixed, so they do not change the exit code
- *   <runner> outdated: <installed> → <latest> — the installed CLI is behind the npm registry's latest (#1273: an old CLI
- *                                  carries an old table, so a new model shows as "no drift"; Haiku 5.5, #1071). Drift (exit 1)
+ *   <runner> outdated: <installed> → <latest> — the installed CLI is behind the npm registry's latest (an old CLI
+ *                                  carries an old table, so a new model shows as "no drift"; it happened with Haiku 5.5). Drift (exit 1)
  *   <runner> version: <installed>（最新） / <runner> latest: 分からない（<why>） — the registry could not be read: report
  *                                  only, the exit code is the table comparison's. The CLI is never updated here.
  * Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is missing, or its table read as empty = its format changed).
@@ -91,7 +91,7 @@ function savedSettings(dbPath: string): Settings | null {
 }
 
 /**
- * The model ids each runner offers (#1400): the list saved on the settings screen, else the bundled CLAUDE_MODELS /
+ * The model ids each runner offers: the list saved on the settings screen, else the bundled CLAUDE_MODELS /
  * CODEX_MODELS — also when there is no database, table or row.
  */
 export function listedModels(dbPath: string): Record<Runner, string[]> {
@@ -100,7 +100,7 @@ export function listedModels(dbPath: string): Record<Runner, string[]> {
 }
 
 /**
- * The ids each runner leaves out of its list on purpose (#1401): the settings' 載せない list, else the bundled list's
+ * The ids each runner leaves out of its list on purpose: the settings' 載せない list, else the bundled list's
  * (SHIPPED_HIDDEN_MODELS) — also when there is no database, table or row.
  */
 export function hiddenModels(dbPath: string): Record<Runner, string[]> {
@@ -108,7 +108,7 @@ export function hiddenModels(dbPath: string): Record<Runner, string[]> {
   return { claude: saved.claude ?? SHIPPED_HIDDEN_MODELS.claude, codex: saved.codex ?? SHIPPED_HIDDEN_MODELS.codex };
 }
 
-/** The price rows saved on the settings screen's モデルの価格 (#1402); {} when there is none. */
+/** The price rows saved on the settings screen's モデルの価格; {} when there is none. */
 export function settingsPrices(dbPath: string): Record<string, SettingsPrice> {
   return savedSettings(dbPath)?.prices ?? {};
 }
@@ -127,10 +127,10 @@ export function classifyUnpriced(names: { runner: Runner; model: string }[], cat
   return out;
 }
 
-/** The npm package each CLI ships as; its `latest` dist-tag is the newest version (#1273). */
+/** The npm package each CLI ships as; its `latest` dist-tag is the newest version. */
 export const PACKAGES: Record<Runner, string> = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex" };
 
-/** Where the installed and the newest version of each CLI come from (#1273). */
+/** Where the installed and the newest version of each CLI come from. */
 export interface VersionReaders {
   /** The installed CLI's version (`x.y.z`); null when the CLI is not on PATH. Throws when `--version` fails or shows no version. */
   installed(runner: Runner): Promise<string | null>;
@@ -213,7 +213,7 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
   let code: 0 | 1 | 2 = 0;
   const listed = listedModels(src.dbPath);
   const hidden = hiddenModels(src.dbPath);
-  // the settings screen's rows over the file's, as the daemon layers them (#1402)
+  // the settings screen's rows over the file's, as the daemon layers them
   const pricing: PricingTable = { ...src.pricing, models: { ...src.pricing.models, ...settingsPrices(src.dbPath) } };
   const ids = (parse: (s: string) => { value: string }[]) => (s: string) => parse(s).map((m) => m.value);
   const runners: [Runner, string[], (s: string) => string[], () => Promise<string | null>][] = [
@@ -259,7 +259,7 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
     if (!stale.length && !unseen.length) lines.push(`${runner}: ズレなし（${catalog.length} 件）`);
     else if (code === 0) code = 1;
   }
-  // The CLI's version against the registry's latest (#1273): an old CLI carries an old table, which the comparison
+  // The CLI's version against the registry's latest: an old CLI carries an old table, which the comparison
   // above cannot see. Only when the CLI is there; the registry not answering is reported, not counted.
   for (const runner of ["claude", "codex"] as Runner[]) {
     let installed: string | null;
@@ -316,8 +316,8 @@ export function requestFor(report: Report, source: { date: string; versions: str
     "```",
     "",
     "直し方（docs/design/check-models.md）:",
-    "- `stale`: 設定画面の「モデルの選択肢」で古い / 誤った ID を外す・直す（保存していないランナーの一覧は同梱の `CLAUDE_MODELS` / `CODEX_MODELS`。設定画面で直すとその一覧が保存される）",
-    "- `unseen`: 設定画面の「モデルの選択肢」で「CLI の表を読む」を押し、候補を「足す」か「載せない」を選ぶ（PR は要らない。次の実行で設定を読む）",
+    "- `stale`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で古い / 誤った ID を外す・直す（保存していないランナーの一覧は同梱の `CLAUDE_MODELS` / `CODEX_MODELS`。設定画面で直すとその一覧が保存される）",
+    "- `unseen`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で「CLI の表を読む」を押し、候補を「足す」か「載せない」を選ぶ（PR は要らない。次の実行で設定を読む）",
     "- `価格表未整備`: 設定画面の「モデルの価格」で公式の価格を入れる（`pricing.json` の PR は要らない。次の実行で設定の価格を読む）",
     "- `outdated`: CLI を更新する（Switchboard は更新しない。更新した次の実行で `version: …（最新）` になる）",
     "",

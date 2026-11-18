@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sb-stop <ISO time | -> — the daemon's SWITCHBOARD_IDLE_STOP_CMD on the cloud host (#227, #230).
+# sb-stop <ISO time | -> — the daemon's SWITCHBOARD_IDLE_STOP_CMD on the cloud host.
 # Registers one EventBridge Scheduler wake-up at the given time (nothing when "-"), lets Litestream finish its
 # last sync, and shuts the OS down; the instance's shutdown behaviour is "stop", so the disk stays.
 set -euo pipefail
@@ -22,7 +22,7 @@ else
   # nothing due: a wake-up left from an earlier stop must not start the machine for nothing
   aws scheduler delete-schedule --name switchboard-wake >/dev/null 2>&1 || true
 fi
-# the runners' records as of now (#401): a machine that is stopped has nothing newer to lose on a 作り直す. A failure
+# the runners' records as of now: a machine that is stopped has nothing newer to lose on a 作り直す. A failure
 # here does not keep the machine running
 "${SB_RUNNER_SYNC:-/usr/local/bin/sb-runner-sync}" || echo "sb-stop: the runners' records were not saved" >&2
 as_root systemctl stop litestream   # its last sync to S3 happens on stop

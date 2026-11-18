@@ -223,7 +223,7 @@ fixtures are not proof of the installed CLI's exact messages.
 Verified: installed version/help, official distinction between creation and
 existing-session send, existing Local adapter and core exit path review,
 and real CLI refusal of non-TTY creation before session startup.
-`packages/core/src/tasks.ts` separates Cloud launcher exit from Local
+`packages/core/src/tasks/sessions.ts` (`startCloudSession`) separates Cloud launcher exit from Local
 completion and preserves idle/unknown with a validated reference.
 
 Verified additionally: authorized setup, successful PTY creation and natural

@@ -289,7 +289,7 @@ export class OpsLoadSampler {
   }
 }
 
-/** `YYYY-MM-DD HH` of the JST hour: JST has no daylight saving, so +9 h of UTC (as db.ts's jstDay). */
+/** `YYYY-MM-DD HH` of the JST hour: JST has no daylight saving, so +9 h of UTC (as db/ledger.ts's jstDay). */
 const jstHour = (ts: number) => new Date(ts + 9 * 3_600_000).toISOString().slice(0, 13).replace("T", " ");
 
 /**

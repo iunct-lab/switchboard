@@ -22,7 +22,7 @@ A Task made without starting is started by the automatic resume at its runner's 
 
 `COUNTS` says which phases count for each purpose. The purposes are fixed; they are not a setting.
 
-| Phase | dedupe | slot | gate | display | drain |
+| Phase | dedupe | slot | gate | display | output |
 |---|---|---|---|---|---|
 | `turn` | yes | yes | yes | yes | yes |
 | `approval` | yes | yes | yes | yes | no |
@@ -32,9 +32,9 @@ A Task made without starting is started by the automatic resume at its runner's 
 
 - dedupe: do not start a second Task for the same item.
 - slot: the queue and the backlog sweep's capacity.
-- gate: promotion and restart wait for no one.
+- gate: what a promotion or a restart would cut, so both wait for none of these to be left: a turn in progress, a turn stopped on an approval or a question (it is the middle of a turn, and the open approval is lost with it) and a background process. The promotion's hold on new starts (the drain) waits for the same set.
 - display: lists and badges that show what is moving.
-- drain: what a held-back start waits for before the daemon is replaced: a turn in progress and a background process, not an open approval (a person decides that) and not a queued row.
+- output: a runner that is expected to say something (the silence wait of `waits.ts`): a turn in progress and a background process, not an open approval (the person is the one to speak).
 
 ## The `background` status
 

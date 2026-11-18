@@ -3,7 +3,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildKey, fileLog, recordDays, type OffloadRecord } from "./offload-record.ts";
+import { buildKey, fileLog, findReusable, recordDays, reusableOutput, reuseHours, type OffloadLog, type OffloadRecord } from "./offload-record.ts";
 
 const W = mkdtempSync(join(tmpdir(), "switchboard.offload-record."));
 afterAll(() => rmSync(W, { recursive: true, force: true }));
@@ -28,7 +28,10 @@ describe("buildKey", () => {
     expect(await key("s2")).not.toBe(base);
     expect(await key("s", "medium")).not.toBe(base);
     expect(await key("s", "small", false)).not.toBe(base);
-    // a recording's mtime
+    // a recording is told by its content: the same length and mtime with other bytes is another key, and a touch alone is not
+    utimesSync(join(fixtures, "r.json"), new Date(1e12), new Date(1e12));
+    expect(await key()).toBe(base);
+    writeFileSync(join(fixtures, "r.json"), "[]");
     utimesSync(join(fixtures, "r.json"), new Date(1e12), new Date(1e12));
     expect(await key()).not.toBe(base);
     const base2 = await key();
@@ -79,5 +82,48 @@ describe("fileLog", () => {
     expect(recordDays({ SWITCHBOARD_OFFLOAD_RECORD_DAYS: "7" })).toBe(7);
     expect(recordDays({ SWITCHBOARD_OFFLOAD_RECORD_DAYS: "0" })).toBe(30);
     expect(recordDays({ SWITCHBOARD_OFFLOAD_RECORD_DAYS: "x" })).toBe(30);
+  });
+});
+
+describe("reuse", () => {
+  const NOW = Date.parse("2026-11-17T12:00:00Z");
+  const at = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString();
+  const logOf = (rows: OffloadRecord[]): OffloadLog => ({ append: (r) => void rows.push(r), read: (since) => rows.filter((r) => Date.parse(r.at) >= since) });
+
+  test("findReusable: the newest ci row of exactly this key inside the window; not an image row, another key, a row without a key, or one outside the window", () => {
+    const rows: OffloadRecord[] = [
+      { ...row(at(30), "old"), key: "k" },
+      { ...row(at(5), "five"), key: "k" },
+      { ...row(at(2), "two"), key: "k" },
+      { ...row(at(1), "other"), key: "k2" },
+      { ...row(at(1), "nokey") },
+      { at: at(0.5), caller: "typecheck", kind: "image", build: "img", size: "small", key: "k", tree: "/t" },
+    ];
+    const log = logOf(rows);
+    expect(findReusable(log, "k", 24, NOW)?.build).toBe("two");
+    expect(findReusable(log, "k", 1.5, NOW)).toBeUndefined();
+    expect(findReusable(log, "k3", 24, NOW)).toBeUndefined();
+    expect(findReusable(log, "k", 48, NOW)?.build).toBe("two");
+    // a width of 0 reuses nothing
+    expect(findReusable(log, "k", 0, NOW)).toBeUndefined();
+  });
+
+  test("reusableOutput: only a build whose command ran to its end (its exit line) — a stop, a timeout, a failure before the command and an unreadable log are not", () => {
+    expect(reusableOutput("sb-step: 0 begin 1\nsb-step: 0 exit 0 2\nsb-offload: exit 0\n")).toBe(true);
+    expect(reusableOutput("sb-step: 0 begin 1\n(fail) a\nsb-step: 0 exit 1 2\nsb-offload: exit 1\n")).toBe(true);
+    // no sb-step line and 130: stopped
+    expect(reusableOutput("sb-offload: proj:1 ended STOPPED without the command's exit code\n")).toBe(false);
+    expect(reusableOutput("sb-step: 0 begin 1\n")).toBe(false);
+    expect(reusableOutput("sb-offload: proj:1 ended FAILED without the command's exit code\n")).toBe(false);
+    expect(reusableOutput("sb-offload: no build proj:1\n")).toBe(false);
+    expect(reusableOutput("")).toBe(false);
+  });
+
+  test("reuseHours: a number of 0 or more from the environment, else 24", () => {
+    expect(reuseHours({})).toBe(24);
+    expect(reuseHours({ SWITCHBOARD_OFFLOAD_REUSE_HOURS: "2" })).toBe(2);
+    expect(reuseHours({ SWITCHBOARD_OFFLOAD_REUSE_HOURS: "0" })).toBe(0);
+    expect(reuseHours({ SWITCHBOARD_OFFLOAD_REUSE_HOURS: "0.5" })).toBe(0.5);
+    for (const bad of ["", "x", "-1"]) expect(reuseHours({ SWITCHBOARD_OFFLOAD_REUSE_HOURS: bad })).toBe(24);
   });
 });

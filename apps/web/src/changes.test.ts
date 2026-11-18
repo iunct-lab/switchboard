@@ -9,7 +9,7 @@ const B = "b".repeat(40);
 const B2 = "c".repeat(40);
 const at = (n: number) => `2026-11-04T00:00:0${n}Z`;
 
-test("the marks are read by the scripts' own patterns (#2486)", async () => {
+test("the marks are read by the scripts' own patterns", async () => {
   expect(LOCAL_CI_RESULT.source).toBe(SCRIPT_LOCAL_CI.source);
   expect(RECHECK_PASS.source).toBe(SCRIPT_RECHECK.source);
   const gate = Bun.file(new URL("../../../scripts/merge-gate.ts", import.meta.url));
@@ -40,7 +40,7 @@ test("changeStateLabel: open, merged, closed without a merge", () => {
   expect(changeStateLabel({ state: "CLOSED", mergeCommit: null })).toBe("閉じた");
 });
 
-test("mergedPair: reviewed → merged in 7 digits, なし for one merged before it was kept, null when not merged (#3971)", () => {
+test("mergedPair: reviewed → merged in 7 digits, なし for one merged before it was kept, null when not merged", () => {
   expect(mergedPair({ mergeCommit: B, reviewedHead: H })).toBe("aaaaaaa → bbbbbbb");
   expect(mergedPair({ mergeCommit: B, reviewedHead: null })).toBe("なし → bbbbbbb");
   expect(mergedPair({ mergeCommit: null, reviewedHead: null })).toBeNull();

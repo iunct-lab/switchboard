@@ -1,7 +1,7 @@
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
@@ -24,7 +24,7 @@ const REPORT_LINES = 3;
 /** The workspace the list is narrowed to ("" = every workspace), kept across visits. */
 const SHOWN_KEY = "switchboard.backlog.workspace";
 
-/** #441: the list last read, kept while the tab is away so that opening it shows this at once; a page reload forgets it. */
+/** the list last read, kept while the tab is away so that opening it shows this at once; a page reload forgets it. */
 let lastBacklog: BacklogData | null = null;
 
 /**
@@ -103,7 +103,7 @@ function WorkspaceError(props: { error: BacklogData["errors"][number]; loaded: b
 }
 
 
-/** A row's or a workspace's sync state (#908): the word, when it was last read in full, what waits and why; the promise on hover. */
+/** A row's or a workspace's sync state: the word, when it was last read in full, what waits and why; the promise on hover. */
 function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnType<typeof syncLine> }) {
   const l = props.line ?? syncLine(props.sync);
   return (
@@ -114,10 +114,10 @@ function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnT
   );
 }
 
-/** Whether a workspace's backlog is kept here, with no GitHub to send it to (#2343): the words of what is saved depend on it. */
+/** Whether a workspace's backlog is kept here, with no GitHub to send it to: the words of what is saved depend on it. */
 const KeptHere = createContext<(workspaceId: string) => boolean>(() => false);
 
-/** An Issue's number or title: a link to GitHub, the plain text for an Issue with no page there (#2343; the list opens it by 編集). */
+/** An Issue's number or title: a link to GitHub, the plain text for an Issue with no page there (the list opens it by 編集). */
 function IssueLink(props: { url: string; className?: string; children: ReactNode }) {
   const href = issueHref(props.url);
   if (!href) return <span className={props.className}>{props.children}</span>;
@@ -129,7 +129,7 @@ function IssueLink(props: { url: string; className?: string; children: ReactNode
 }
 
 /**
- * An Issue's edit form under its row (#910): the values as the daemon shows them (stored edits over GitHub's), saved
+ * An Issue's edit form under its row: the values as the daemon shows them (stored edits over GitHub's), saved
  * here at once and sent later — the two are told apart. What was typed is kept while the save fails (and across a reload,
  * localStorage) until it is saved; a held conflict shows both sides and takes an explicit choice.
  */
@@ -227,7 +227,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
       })
       .finally(() => setSaving(false));
   };
-  // a refused send, its cause put right (#2885): back in the queue, sent with the next run
+  // a refused send, its cause put right: back in the queue, sent with the next run
   const retry = (operation: string) => {
     setSaving(true);
     return api
@@ -353,7 +353,7 @@ function Editor(props: { target: EditTarget; onChanged: () => void; onError: (ms
   );
 }
 
-/** The Issue an edit form opens on: a row's, or one the sync line holds operations for (#1872, Closed ones too). */
+/** The Issue an edit form opens on: a row's, or one the sync line holds operations for (Closed ones too). */
 type EditTarget = Pick<BacklogItem, "workspaceId" | "number" | "url">;
 
 /**
@@ -399,7 +399,7 @@ function Made(props: { workspaceId: string; localId: string; title: string }) {
 }
 
 /**
- * One local change opened (#2486): its branches' tips now, the marks merge-gate counts (main review, local-ci of this
+ * One local change opened: its branches' tips now, the marks merge-gate counts (main review, local-ci of this
  * head and base, rechecks), then its body and every comment oldest first — the review, the triage, the results.
  */
 function ChangeDetail(props: { workspaceId: string; number: number }) {
@@ -436,7 +436,7 @@ function ChangeDetail(props: { workspaceId: string; number: number }) {
 }
 
 /**
- * The local changes of the workspaces in view (#2486): one row each, opened in place. Only open ones are on the floor;
+ * The local changes of the workspaces in view: one row each, opened in place. Only open ones are on the floor;
  * the closed ones (merged or not) are folded. Nothing when none is open.
  */
 function Changes(props: { changes: BacklogData["changes"] }) {
@@ -481,7 +481,7 @@ function Changes(props: { changes: BacklogData["changes"] }) {
 }
 
 /**
- * A new Issue (#910): kept here and created on GitHub later. Made as a request or a PBI (the labels the Backlog lists
+ * A new Issue: kept here and created on GitHub later. Made as a request or a PBI (the labels the Backlog lists
  * by), its localId is followed to the number; what is typed stays until it is kept.
  */
 function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: () => void }) {
@@ -557,12 +557,12 @@ function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: 
   );
 }
 
-/** The open question of a needs-decision item as plain text (no Markdown renderer) and a free-text answer (#266). */
+/** The open question of a needs-decision item as plain text (no Markdown renderer) and a free-text answer. */
 function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const d = props.item.decision;
-  // the screen mockups of the same question on the asks list (#2221); none when it cannot be read — the answer goes on
+  // the screen mockups of the same question on the asks list; none when it cannot be read — the answer goes on
   const [mockups, setMockups] = useState<Artifact[]>([]);
   const { workspaceId } = props.item;
   useEffect(() => {
@@ -593,7 +593,7 @@ function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (ite
       {d ? (
         <>
           {d.issue !== props.item.number && (
-            // asked on one of the in-progress PBI's Tasks (#562); the answer goes there
+            // asked on one of the in-progress PBI's Tasks; the answer goes there
             <div className="task-decision">
               <IssueLink url={props.item.url.replace(/\/issues\/\d+$/, `/issues/${d.issue}`)}>
                 Task #{d.issue}
@@ -614,7 +614,7 @@ function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (ite
       </button>
     </>
   );
-  // the list's card (#4064): the question in one line, the whole body and the answer box when opened — one card took
+  // the list's card: the question in one line, the whole body and the answer box when opened — one card took
   // more than a phone's screen and the list could not be read through
   if (props.folded && d)
     return (
@@ -641,7 +641,7 @@ function reportHead(body: string): string {
 }
 
 /**
- * An in-progress row's moving / stopped, Project Status, time since the Issue changed and its last stage Task (#522);
+ * An in-progress row's moving / stopped, Project Status, time since the Issue changed and its last stage Task;
  * a running one is the row's 実行中 already.
  */
 function InProgressFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void }) {
@@ -661,8 +661,8 @@ function InProgressFacts(props: { item: BacklogItem; now: number; onOpenTask: (i
 }
 
 /**
- * A row's last stage Task when it is not the running one (#522; Ready rows too, #1045): opens its Task screen. One
- * waiting for the person's reply says 返事待ち, on a request / 分解待ち row too (#1619).
+ * A row's last stage Task when it is not the running one (Ready rows too): opens its Task screen. One
+ * waiting for the person's reply says 返事待ち, on a request / 分解待ち row too.
  */
 function LastTask(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void }) {
   const last = props.item.lastTask;
@@ -675,9 +675,9 @@ function LastTask(props: { item: BacklogItem; now: number; onOpenTask: (id: stri
 }
 
 /**
- * What a Ready / in-progress row waits for (#817, #1046): the PRs / Issues with their states (linked), how that comes
+ * What a Ready / in-progress row waits for: the PRs / Issues with their states (linked), how that comes
  * undone and whether backlog-next goes on by itself; the waits behind them folded under a <details>. Each of the row's
- * own waits names the PBI behind it and that PBI's stage Task (#1045, `waitOwner`): the Task opens, a stopped one can be
+ * own waits names the PBI behind it and that PBI's stage Task (`waitOwner`): the Task opens, a stopped one can be
  * continued (続きを始める).
  */
 function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; starting: number | null; onOpenTask: (id: string) => void; onStart: (pbi: number) => void }) {
@@ -765,7 +765,7 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
 }
 
 /**
- * A Ready / in-progress row's prerequisites (#937, `prereqLine`): 前提 (not done yet; backlog-next waits for them) and
+ * A Ready / in-progress row's prerequisites (`prereqLine`): 前提 (not done yet; backlog-next waits for them) and
  * 進められない (a person fixes the body or the prerequisite), the latter in the warning colour. The row's button still starts it.
  */
 function Prereqs(props: { item: BacklogItem }) {
@@ -773,13 +773,19 @@ function Prereqs(props: { item: BacklogItem }) {
   if (!waiting.length && !stuck.length && !confirming.length) return null;
   const parts = (ps: PrereqPart[]) =>
     ps.map((p, n) => (
-      <Fragment key={`${p.via}:${p.ref}`}>
+      <Fragment key={p.ref}>
         {n > 0 && t(m.listSep)}
-        {p.via !== null && (
+        {p.via.length > 0 && (
           <>
-            <IssueLink url={p.viaUrl!}>
-              Task #{p.via}
-            </IssueLink>
+            {p.via.map((v, k) => (
+              <Fragment key={v.number}>
+                {k > 0 && t(m.listSep)}
+                <IssueLink url={v.url}>
+                  {k === 0 ? "Task " : ""}#{v.number}
+                </IssueLink>
+              </Fragment>
+            ))}
+            {p.moreVia > 0 && t(m.prereqMoreVia, { n: p.moreVia })}
             {t(m.prereqOf)}
           </>
         )}
@@ -799,7 +805,7 @@ function Prereqs(props: { item: BacklogItem }) {
 }
 
 /**
- * A Ready / in-progress row's overlap with other work (#1044, `overlapLine`): the PR / Task whose files its Tasks name, or
+ * A Ready / in-progress row's overlap with other work (`overlapLine`): the PR / Task whose files its Tasks name, or
  * why that cannot be judged, in the warning colour. backlog-next leaves the row; the button still starts it.
  */
 function Overlap(props: { item: BacklogItem }) {
@@ -827,7 +833,7 @@ function Overlap(props: { item: BacklogItem }) {
 }
 
 /**
- * A row's buttons (#2696: a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
+ * A row's buttons (a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
  * when the PBI can be closed.
  */
 function RowActions(props: { item: BacklogItem; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
@@ -852,7 +858,7 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
           {direct[1]}
         </button>
       )}
-      {/* #531: every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}
+      {/* every Task closed and no confirmation left — pbi-complete's step 6 writes the result and closes it */}
       {i.closable && (
         <>
           <span className="m">{t(m.closable)}</span>
@@ -866,9 +872,9 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
 }
 
 /**
- * A row's facts after its title (#3708: the list row's and an opened board tile's): the workspace, the Task count,
+ * A row's facts after its title (the list row's and an opened board tile's): the workspace, the Task count,
  * 分解済み, SP · Priority, an in-progress row's moving / stopped and its last stage Task (a Ready row's too, and one
- * waiting for the person's reply). `compact` (#3709: an opened list row, whose title line already has the workspace,
+ * waiting for the person's reply). `compact` (an opened list row, whose title line already has the workspace,
  * the Task count and SP · Priority) is the rest.
  */
 function ItemFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: string) => void; compact?: boolean }) {
@@ -886,7 +892,7 @@ function ItemFacts(props: { item: BacklogItem; now: number; onOpenTask: (id: str
 }
 
 /**
- * What a row shows under its facts (#3708: one part for the list row and an opened board tile, so what is added to the
+ * What a row shows under its facts (one part for the list row and an opened board tile, so what is added to the
  * list shows on the board too): the sync line, the PBI's mockups, an in-progress row's report, its waits,
  * prerequisites, overlap and stops, and 編集. `onStart` continues the PBI behind a wait (続きを始める).
  */
@@ -897,7 +903,7 @@ function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: bool
       <div className="backlog-syncline">
         <SyncLine sync={i.sync} />
       </div>
-      {/* #2296: the screen the PBI decided, as a question's mockups (#2221); nothing without a **画面イメージ** line */}
+      {/* the screen the PBI decided, as a question's mockups; nothing without a **画面イメージ** line */}
       <Mockups list={i.mockups} />
       {i.stage === "in-progress" && i.report && (
         <div className="backlog-report">
@@ -915,9 +921,9 @@ function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: bool
 }
 
 /**
- * A list row (#3709: a request, one waiting to be split, a Ready or an in-progress PBI): one line of what matters, the
+ * A list row (a request, one waiting to be split, a Ready or an in-progress PBI): one line of what matters, the
  * ▶ (outside the title, first so it lines up), the numbered title (the Issue's link), the workspace, the Task count, SP ·
- * Priority, the marks (#3707) and the row's buttons. ▶ opens the rest under it: the facts left (分解済み, an in-progress row's moving /
+ * Priority, the marks and the row's buttons. ▶ opens the rest under it: the facts left (分解済み, an in-progress row's moving /
  * stopped, the last stage Task) and ItemDetail, the same part an opened board tile shows; whether it is open is not
  * kept. A closed row shows the stops that need the person (not folded); an open one has all of them in ItemDetail.
  */
@@ -959,8 +965,8 @@ function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean
 }
 
 /**
- * A board tile (#2696): the numbered title (the Issue's link), SP · Priority, the marks of the row's sections (#3707)
- * and the row's buttons. ▶ (outside the title, #3708) opens it on what the list row shows: its facts in place of SP ·
+ * A board tile: the numbered title (the Issue's link), SP · Priority, the marks of the row's sections
+ * and the row's buttons. ▶ (outside the title) opens it on what the list row shows: its facts in place of SP ·
  * Priority and the marks, then ItemDetail; whether it is open is not kept. A needs-decision tile is its title only and
  * opens on the list card's parts: the sync line, the question and the answer box (which stays, with what was typed,
  * when it is closed again) and 編集.
@@ -1000,7 +1006,7 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
         ) : (
           <>
             {facts && <span className="m">{facts}</span>}
-            {/* #3707: which of the row's sections (待ち・前提・重なり・停止・返事待ち) the item has, without opening it */}
+            {/* which of the row's sections (待ち・前提・重なり・停止・返事待ち) the item has, without opening it */}
             {itemMarks(i, props.auto).map((x) => (
               <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
                 {x.label}
@@ -1020,7 +1026,7 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
 }
 
 /**
- * One row of the queue view (#3957): the order number (waiting rows), the numbered title, the list row's facts and
+ * One row of the queue view: the order number (waiting rows), the numbered title, the list row's facts and
  * marks, its buttons and 外す; ▶ opens what the list row shows under it (a needs-decision item: the question and the
  * answer box). `item` null = its workspace's backlog does not have it here: the number and 外す only.
  */
@@ -1029,13 +1035,13 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
   const [open, setOpen] = useState(false);
   const i = row.item;
   const label = t(open ? m.closeTile : m.openTile);
-  // #4055: one button for the stage, as the list row's (RowActions), short enough for a phone
+  // one button for the stage, as the list row's (RowActions), short enough for a phone
   const action = i && !i.activeTaskId ? startButton(i) : null;
   return (
     <div className={"queue-row" + (props.drag?.dy != null ? " dragging" : "")} data-queue={`${row.entry.workspaceId}:${row.entry.number}`} data-issue={i?.url} style={props.drag?.dy != null ? { transform: `translateY(${props.drag.dy}px)` } : undefined}>
       <div className="queue-main">
         {props.drag ? (
-          // #3958: drag to reorder — mouse and touch alike (Pointer Events); a long press is not needed, the handle does not scroll
+          // drag to reorder — mouse and touch alike (Pointer Events); a long press is not needed, the handle does not scroll
           <span className="queue-handle" aria-label={t(m.queueDrag)} title={t(m.queueDrag)} data-queue-handle onPointerDown={props.drag.onDown} onPointerMove={props.drag.onMove} onPointerUp={props.drag.onUp} onPointerCancel={props.drag.onCancel}>
             ≡
           </span>
@@ -1100,7 +1106,7 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
             </>
           ) : (
             <>
-              {/* the list row's facts (#4055): its last stage Task, a stopped or waiting one too, opens from here */}
+              {/* the list row's facts: its last stage Task, a stopped or waiting one too, opens from here */}
               <div className="row backlog-item">
                 <ItemFacts item={i} now={props.now} onOpenTask={props.onOpenTask} />
               </div>
@@ -1114,14 +1120,14 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
 }
 
 /**
- * The queue view (#3957): the backlog queue's on / off and how many run at once, its last decision, then the running
+ * The queue view: the backlog queue's on / off and how many run at once, its last decision, then the running
  * and the waiting PBIs in order (外す), the PBIs not in it (＋ キューに入れる) and the newest left ones (folded). Every
  * change is saved at once (`PUT /api/backlog/queue`); no save button, no draft.
  */
 function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; metaId: string | null; onSave: (input: BacklogQueueInput) => unknown; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { queue, items } = props;
   const s = queueSections(queue, items);
-  // #3958: the waiting row being dragged — by its entry, with the waiting entries when it was taken, where the pointer
+  // the waiting row being dragged — by its entry, with the waiting entries when it was taken, where the pointer
   // started, how far it moved, and the other rows' middles then
   const [drag, setDrag] = useState<{ key: string; keys: string[]; startY: number; dy: number; mid: number; mids: number[] } | null>(null);
   const waitingList = useRef<HTMLDivElement>(null);
@@ -1158,7 +1164,7 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
     };
   };
   const outside = s.outside.filter((i) => props.inView(i.workspaceId));
-  // #3959: several at once, by what to put first and how many (not kept: a choice made now and then)
+  // several at once, by what to put first and how many (not kept: a choice made now and then)
   const [axis, setAxis] = useState<PickAxis>("priority");
   const [count, setCount] = useState(5);
   const [withWaitingOnes, setWithWaitingOnes] = useState(false);
@@ -1208,7 +1214,7 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
           </label>
           <span className="hint">{t(m.queueHow)}</span>
         </div>
-        {/* #4055: the last decision in one line with its time; every reason folded */}
+        {/* the last decision in one line with its time; every reason folded */}
         {queue.lastNote && note && (
           <details className="queue-note">
             <summary className="hint">
@@ -1320,9 +1326,9 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
 }
 
 /**
- * Backlog screen (#264): the open requests and PBIs on GitHub of every registered workspace (#294), grouped by the stage
+ * Backlog screen: the open requests and PBIs on GitHub of every registered workspace, grouped by the stage
  * they are stuck at, each row naming its workspace. Read when opened and on 再読込 only (the daemon answers what it
- * imported from GitHub, #885; 再読込 imports first); the last list shows first and the new one replaces it once read (#441). GitHub stays the place to edit them. The stage buttons and answers act on the row's own workspace. The list
+ * imported from GitHub; 再読込 imports first); the last list shows first and the new one replaces it once read. GitHub stays the place to edit them. The stage buttons and answers act on the row's own workspace. The list
  * can be narrowed to one workspace (remembered in localStorage).
  */
 /** Toggles `v` in `list`: in when absent, out when present. */
@@ -1331,7 +1337,7 @@ function toggle<T>(list: T[], v: T): T[] {
 }
 
 /**
- * The 表示 button and what it opens (#2695): sort, the stage / type / Priority chips and the title or number search. The
+ * The 表示 button and what it opens: sort, the stage / type / Priority chips and the title or number search. The
  * one part always on the heading; the conditions it sets are kept by the caller.
  */
 const LAYOUTS: Array<[BacklogView["layout"], string]> = [
@@ -1391,11 +1397,11 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const [approvals, setApprovals] = useState(0);
   const [promotion, setPromotion] = useState<ReturnType<typeof promotionLine>>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
-  // whether backlog-next resumes a row whose waits closed (#817): an enabled バックログを進める and an implement slot
+  // whether backlog-next resumes a row whose waits closed: an enabled バックログを進める and an implement slot
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
   const [view, setView] = useState(() => loadView(localStorage));
-  // the backlog queue (#3957): read with the list, saved at each change
+  // the backlog queue: read with the list, saved at each change
   const [queue, setQueue] = useState<BacklogQueue | null>(null);
   const [queueFailure, setQueueFailure] = useState<string | null>(null);
   // each change shows at once and is sent after the one before it has been answered (queueSaver)
@@ -1408,7 +1414,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       failed: (e) => props.onError(t(m.queueSaveFailed, { error: String((e as Error).message ?? e) })),
     }),
   );
-  // the board's stage on a phone (#2703): not kept; none chosen = the first with a tile
+  // the board's stage on a phone: not kept; none chosen = the first with a tile
   const [boardStage, setBoardStage] = useState<BacklogStage | null>(null);
   const changeView = (next: BacklogView) => {
     setView(next);
@@ -1556,7 +1562,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           </nav>
         )}
         {failure && <div className="muted">{t(m.githubReadFailed, { error: failure })}</div>}
-        {/* #4064: each workspace's sync line and what to fix to read one, folded under one line (they took a phone's
+        {/* each workspace's sync line and what to fix to read one, folded under one line (they took a phone's
             whole first screen before the first item); open by itself when something is to be looked at */}
         {data && (() => {
           const syncs = data.syncs.filter((x) => inView(x.workspaceId));
@@ -1673,7 +1679,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           );
         })}
       <Flow items={shownItems} now={now} />
-      {/* after the list's first read (#4119): interventions reads the whole event log in one synchronous pass, which holds the daemon and the list behind it */}
+      {/* after the list's first read: interventions reads the whole event log in one synchronous pass, which holds the daemon and the list behind it */}
       {(data !== null || failure !== null) && <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />}
     </main>
     </KeptHere.Provider>

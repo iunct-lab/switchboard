@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AnswerPolicy } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { editWarnings, policyRow, policyState, useLines } from "../policies.ts";
 import { jstDay } from "../time.ts";
 import { t } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
 
-/** 回答の方針 (#938): the saved policies with their range, expiry and uses; edited or revoked here, never deleted. */
+/** 回答の方針: the saved policies with their range, expiry and uses; edited or revoked here, never deleted. */
 export function PolicySettings(props: { onError: (msg: string) => void }) {
   const [list, setList] = useState<AnswerPolicy[] | null>(null);
   const [names, setNames] = useState<Map<string, string>>(new Map());

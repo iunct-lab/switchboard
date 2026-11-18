@@ -11,7 +11,7 @@ export type ResumeBlock = {
   /** The sentence's start (before the time / the reason-specific tail). */
   stopped: string;
   parts: ResumePart[];
-  /** "Resume now" needs a session to resume, except for a Task made at the limit that has not run a turn (`start`, #2768). */
+  /** "Resume now" needs a session to resume, except for a Task made at the limit that has not run a turn (`start`). */
   canResumeNow: boolean;
   /** The note field above "Resume now": a Task not started yet (`start`) has no conversation to add a note to, so none there. */
   canNote: boolean;

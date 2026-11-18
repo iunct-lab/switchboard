@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readPins } from "../scripts/host-pins.ts";
 
-// The image repeats what aws/host/devtools.sh and node.sh pin (PBI #4042: two places, kept equal by this test)
+// The image repeats what aws/host/devtools.sh and node.sh pin (two places, kept equal by this test)
 const root = join(import.meta.dir, "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 const dockerfile = read("container/Dockerfile");

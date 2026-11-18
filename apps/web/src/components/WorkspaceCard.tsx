@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Task, Workspace, WorkspaceRemoval } from "@switchboard/protocol";
-import { api, type RunnerConfigView, type WorkspaceClone } from "../api.ts";
+import type { Task, Workspace, WorkspaceConfigView, WorkspaceRemoval } from "@switchboard/protocol";
+import { api } from "../api/index.ts";
+import { type RunnerConfigView, type WorkspaceClone } from "../api/workspaces.ts";
 import { runnerConfigSummary } from "../foreignWorkspace.ts";
-import { RULES_MAX, baselineWarning, canAdopt, canRemove, canSaveRules, canStartBaseline, cloneRowText, removalWarning } from "../workspaceAdd.ts";
+import { CONFIG_MAX, RULES_MAX, baselineWarning, canAdopt, canRemove, canSaveConfig, canSaveRules, canStartBaseline, cloneRowText, configSourceLine, configUsedLabel, removalWarning } from "../workspaceAdd.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
-/** A foreign repository (#2576): its runner config shown as text until confirmed, then 元の更新を取り込む. */
+/** A foreign repository: its runner config shown as text until confirmed, then 元の更新を取り込む. */
 function ForeignRow(props: { workspace: Workspace; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
   const { workspace: w, onError } = props;
   const [config, setConfig] = useState<RunnerConfigView | null>(null);
@@ -99,6 +100,7 @@ function OwnRow(props: { workspace: Workspace; open: boolean; onOpen: (open: boo
         </div>
       ) : null}
       {w.rules ? <RulesFold workspace={w} onError={props.onError} /> : null}
+      {canAdopt(w) ? <ConfigFold workspace={w} /> : null}
     </>
   );
 }
@@ -136,6 +138,62 @@ function RulesFold(props: { workspace: Workspace; onError: (msg: string) => void
   );
 }
 
+/**
+ * The settings kept on Switchboard's side for a repository of your own, folded under the row (beside the rules): the
+ * line says which settings the workspace runs with now (the repository's own ops.config.json wins as a whole), and
+ * inside they are read, corrected and saved. A refusal's reason is shown under the box, where it was typed. Read when
+ * the row appears and again whenever the list of workspaces is read again (a save here, an adoption Task's save, an
+ * answer to the change that waits).
+ */
+function ConfigFold(props: { workspace: Workspace }) {
+  const { id } = props.workspace;
+  const kept = props.workspace.config ?? "";
+  const [view, setView] = useState<WorkspaceConfigView | null>(null);
+  const [draft, setDraft] = useState(kept);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // the text typed is reset only when the kept text changes: a list read again must not throw away what is being typed
+  useEffect(() => setDraft(kept), [id, kept]);
+  // the view (the source, the version, the change that waits) is read again whenever the list is — `props.workspace`
+  // is a new object after every `workspaces.updated` — and not only when the kept text moves: a pending change that is
+  // rejected, or confirmed, from another tab leaves the kept text as it was, and its 保留 line must still go
+  useEffect(() => {
+    let live = true;
+    api.workspaceConfig(id).then((v) => live && setView(v)).catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [id, kept, props.workspace]);
+  const used = configUsedLabel(view?.source ?? null);
+  return (
+    <details className="ws-rules">
+      <summary>{t(m.configHeading)}{used ? ` — ${used}` : ""}</summary>
+      <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+        {view ? <div className="hint" style={{ overflowWrap: "anywhere" }}>{configSourceLine(view.source, kept)}</div> : null}
+        <div className="hint">{t(m.configHint)}</div>
+        <textarea value={draft} onChange={(e) => { setDraft(e.target.value); setError(null); }} aria-label={t(m.configLabel)} placeholder={t(m.configPlaceholder)} rows={10} spellCheck={false} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
+        {draft.length > CONFIG_MAX ? <div className="hint">{t(m.configTooLong, { n: draft.length, max: CONFIG_MAX })}</div> : null}
+        {error ? <div className="hint" role="alert" style={{ color: "var(--red)", overflowWrap: "anywhere" }}>{error}</div> : null}
+        {view?.file ? <div className="hint" style={{ overflowWrap: "anywhere" }}>{t(m.configFile, { file: view.file })}</div> : null}
+        {view?.version ? <div className="hint">{t(m.configVersion, { version: view.version })}</div> : null}
+        {view?.pending ? <div className="hint" role="status" style={{ color: "var(--red)", overflowWrap: "anywhere" }}>{t(m.configPending, { keys: view.pending.keys.join(", ") })}</div> : null}
+        <div className="row" style={{ justifyContent: "flex-start" }}>
+          <button
+            disabled={busy || !canSaveConfig(draft, kept)}
+            onClick={() => {
+              setBusy(true);
+              setError(null);
+              api.setWorkspaceConfig(id, draft).then(setView).catch((e: unknown) => setError(String((e as Error).message ?? e))).finally(() => setBusy(false));
+            }}
+          >
+            {t(m.configSave)}
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** The name the server will give the copy, for display only: after the last separator, without `.git` and a trailing `/`. */
 function repoName(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, "").replace(/\.git$/, "");
@@ -165,9 +223,9 @@ export function OwnCopyFields(props: { ownCopy: boolean; owner: string; repo: st
 }
 
 /**
- * Workspace (#1447): the registered repositories and the ways to add one, in one place. 新しく作る asks a Task to create
+ * Workspace: the registered repositories and the ways to add one, in one place. 新しく作る asks a Task to create
  * and register a repository (the steps are the skill's, not the daemon's); GitHub から clones one of the owner's own next
- * to the checkout (#2575); ホストのディレクトリ registers a directory that already exists.
+ * to the checkout; ホストのディレクトリ registers a directory that already exists.
  */
 export function WorkspaceCard(props: { workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean, ownCopyOwner: string) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; onError: (msg: string) => void }) {
   const [method, setMethod] = useState<"github" | "new" | "path">("github");
@@ -176,13 +234,13 @@ export function WorkspaceCard(props: { workspaces: Workspace[]; clones: Workspac
   const [purpose, setPurpose] = useState("");
   const [newPath, setNewPath] = useState("");
   const [repo, setRepo] = useState("");
-  // a workspace without GitHub (#2265): its backlog kept in Switchboard; off by default
+  // a workspace without GitHub: its backlog kept in Switchboard; off by default
   const [localBacklog, setLocalBacklog] = useState(false);
   // 他者のリポジトリを自分の GitHub の非公開のコピーにもする印: always offered (whether it is yours is not known before adding); off by default and put back after an add
   const [ownCopy, setOwnCopy] = useState(false);
   // where that copy goes: empty means the owner's own account
   const [copyOwner, setCopyOwner] = useState("");
-  // the row whose 登録を外す is open (#2600): what removing it would do, the typed name, and whether the copy goes too
+  // the row whose 登録を外す is open: what removing it would do, the typed name, and whether the copy goes too
   const [removing, setRemoving] = useState<{ id: string; info: WorkspaceRemoval; typed: string; deleteCopy: boolean } | null>(null);
   // the row whose 立ち上げ is open: one at a time, like 登録を外す
   const [launching, setLaunching] = useState<string | null>(null);

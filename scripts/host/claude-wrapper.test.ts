@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * scripts/host/claude-wrapper.sh (#180) with a fake `aws` and a fake `claude`: the token read from Parameter Store
+ * scripts/host/claude-wrapper.sh with a fake `aws` and a fake `claude`: the token read from Parameter Store
  * reaches the real `claude` only, through its environment, and a failed read stops before `claude` starts.
  */
 const WRAPPER = join(import.meta.dir, "claude-wrapper.sh");
@@ -34,7 +34,7 @@ function run(env: Record<string, string>, path = `${join(dir, "wrap")}:${join(di
   return { code: p.exitCode, stderr: p.stderr.toString() };
 }
 
-describe("claude-wrapper.sh (#180)", () => {
+describe("claude-wrapper.sh", () => {
   test("reads the parameter with decryption and execs the next claude on PATH with the token in its environment only", () => {
     const r = run({ SWITCHBOARD_CLAUDE_TOKEN_PARAM: "/switchboard/claude-oauth-token" });
     expect(r).toEqual({ code: 0, stderr: "" });

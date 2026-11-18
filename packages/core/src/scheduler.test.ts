@@ -4,16 +4,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentEvent, type AskBatch, type RunnerAdapter, type RunnerSession, type StartOptions, StopRecord, type Task } from "@switchboard/protocol";
-import { approvalWindowNote } from "./approval-batch.ts";
+import { approvalWindowLine, approvalWindowNote, proceedingLine } from "./approval-batch.ts";
+import { proceedingAsks } from "./asks.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { nextRun } from "./cron.ts";
-import { missedRuns, Scheduler, UI_LAYERS_CHECK_PROMPT, UI_LAYERS_PROMPT } from "./scheduler.ts";
-import { scanAllRepos } from "./secretscan.ts";
-import { noticeAsks, scanFindings } from "./asks.ts";
-import { promotionNote, type PromotionHold } from "./backlog.ts";
+import { missedRuns, SCHEDULE_LOG_CUT, SCHEDULE_LOG_MAX_LIMIT, SCHEDULE_LOG_SINCE_LIMIT, Scheduler } from "./scheduler.ts";
+import { UI_LAYERS_CHECK_PROMPT } from "./scheduleSamples.ts";
+import { REMEDY, remedyLines, scanAllRepos } from "./secretscan.ts";
+import { SECRET_KINDS } from "../../../ops-kit/src/secrets.ts";
+import { noticeAsks, scanFindings } from "./asks-notices.ts";
+import { promotionNote, type PromotionHold } from "./promotion.ts";
 import { startServer } from "./server.ts";
-import { TaskManager } from "./tasks.ts";
+import { TaskManager } from "./tasks/manager.ts";
+import { stopArmedQueues } from "./tasks/state.ts";
 
 /** A runner that finishes instantly with a scripted status, so a schedule's "previous run" can be controlled. */
 const started: StartOptions[] = [];
@@ -61,6 +65,8 @@ beforeEach(() => {
   now = Date.parse("2026-09-06T00:00:00");
 });
 afterEach(() => {
+  // a manager a test made and did not shut down would tick on this test's closed database
+  stopArmedQueues();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -144,15 +150,16 @@ describe("scheduler", () => {
 
   test("a schedule without a budget takes the settings' default budget; its own budget is kept", async () => {
     let dflt: number | null = 3;
-    const asked: (string | null | undefined)[] = [];
-    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, undefined, (model) => (asked.push(model), dflt));
+    const asked: Array<[string | null | undefined, string]> = [];
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, undefined, (model, runner) => (asked.push([model, runner]), dflt));
     const plain = sc.create({ title: "plain", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p" });
     const own = sc.create({ title: "own", cron: "0 3 * * *", workspaceId: wsId, runner: "claude", prompt: "p", budgetUsd: 1 });
     now = Date.parse("2026-09-06T03:00:00");
     const started = await sc.tick();
     expect(started.find((t) => t.scheduleId === plain.id)!.budgetUsd).toBe(3);
     expect(started.find((t) => t.scheduleId === own.id)!.budgetUsd).toBe(1);
-    expect(asked).toEqual([undefined]); // the default is asked with the schedule's model (none here), for the Fable value
+    // the default is asked with the schedule's model (none here) and the runner it starts on, whose saved default model decides the Fable value
+    expect(asked).toEqual([[undefined, "claude"]]);
     dflt = null; // no default: no budget, as before
     now = Date.parse("2026-09-07T03:00:00");
     db.updateTask(started[0]!.id, { status: "done" });
@@ -662,6 +669,61 @@ describe("scheduler secret-scan", () => {
     expect(r.summary).toEqual({ repos: 4, hits: 2, failed: 3 });
   });
 
+  test("secret-scan: a registered repository's publicSync.target is scanned too, once, with its own cursor", async () => {
+    scans.length = 0;
+    const withConfig = (name: string, repo: string, config: unknown) => {
+      const path = join(home, name);
+      mkdirSync(path);
+      repoOfPath[path] = repo;
+      if (config !== undefined) writeFileSync(join(path, "ops.config.json"), typeof config === "string" ? config : JSON.stringify(config));
+      return { name, path };
+    };
+    const workspaces = [
+      withConfig("dev", "o/clean", { publicSync: { target: "o/public" } }),
+      withConfig("dev-2", "o/clean", { publicSync: { target: "o/public" } }), // a second checkout: the target is still read once
+      withConfig("self", "o/leak", { publicSync: { target: "o/leak" } }), // publishes to itself: once
+      withConfig("plain", "o/down", {}), // no publicSync: nothing more
+      withConfig("broken", "o/nokit", "{not json"), // a file that does not read: ignored
+    ];
+    mkdirSync(join(home, "dev", "sub"));
+    repoOfPath[join(home, "dev", "sub")] = "o/sub"; // no file of its own: the one above it (dev's) is not its target
+    answers["o/public"] = { code: 1, stdout: "https://github.com/o/public/issues/1: device-code（3 行目）\nhits: 1 / scanned: 5\n", stderr: "" };
+    answers["o/sub"] = { code: 0, stdout: "hits: 0 / scanned: 1\n", stderr: "" };
+    const r = await scanAllRepos({ workspaces: [...workspaces, { name: "sub", path: join(home, "dev", "sub") }], metaPath: join(home, "meta"), gh, spawn, now: () => 1_000 });
+    expect(scans.map((c) => c.at(-1))).toEqual(["o/clean", "o/public", "o/leak", "o/down", "o/nokit", "o/sub"]);
+    expect(r.lines).toContain("o/public: 当たり 1 件（scanned 5）");
+    expect(r.lines).toContain("  https://github.com/o/public/issues/1: device-code（3 行目）");
+    expect(r.cursors["o/public"]).toEqual({ since: new Date(1_000).toISOString(), hits: ["https://github.com/o/public/issues/1"] });
+    // the next firing reads the public copy from its cursor too
+    scans.length = 0;
+    await scanAllRepos({ workspaces: workspaces.slice(0, 1), metaPath: join(home, "meta"), gh, spawn, cursors: r.cursors });
+    expect(scans.find((c) => c.at(-1) === "o/public")!.slice(3)).toEqual(["--since", new Date(1_000).toISOString(), "--recheck", "https://github.com/o/public/issues/1", "o/public"]);
+  });
+
+  test("secret-scan: the note says how to clean up each kind and carries no value", async () => {
+    setUp();
+    const r = await scanAllRepos({ workspaces: db.listWorkspaces(), metaPath: join(home, "meta"), gh, spawn });
+    const hits = scanFindings({ at: 0, ...r.summary, lines: r.lines }).hits;
+    const lines = remedyLines(hits);
+    // one line per kind that was hit, then how a text is fixed; nothing for a kind that was not hit
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/^account-id: 識別子（失効はできない）/);
+    expect(lines[1]).toMatch(/^github-token: 長く使える値。先に失効させて作り直し/);
+    expect(lines[2]).toMatch(/^直し方: /);
+    expect(remedyLines(["https://github.com/o/r/issues/1: device-code（1 行目）"])[0]).toMatch(/^device-code: 数分で失効する値。.*伏せ字に直すだけ/);
+    expect(remedyLines(["https://github.com/o/r/issues/1: brand-new-kind（1 行目）"])[0]).toMatch(/^brand-new-kind: 本物の値なら先に失効/);
+    expect(remedyLines([])).toEqual([]);
+    expect(lines.join("\n")).not.toContain(token);
+    expect(lines.join("\n")).not.toContain("https://");
+    // every kind the kit can report has its own line
+    expect(Object.keys(REMEDY).sort()).toEqual([...SECRET_KINDS].sort());
+    // the notice in 判断待ち carries them, and no value
+    const { asks } = noticeAsks({ unusable: [], scans: [{ schedule: { id: "s1", title: "検査" }, result: { at: 0, ...r.summary, lines: r.lines } }], now: 5 }, {});
+    expect(asks[0]!.next).toContain("片づけ方 — account-id: 識別子");
+    expect(asks[0]!.next).toContain("github-token: 長く使える値");
+    expect(JSON.stringify(asks)).not.toContain(token);
+  });
+
   test("secret-scan: a firing that ends after the next due time does not fire again the same day", async () => {
     setUp();
     // overdue since yesterday's 04:00, the host up at 03:59: the scan ends at 04:08
@@ -700,8 +762,18 @@ describe("scheduler secret-scan", () => {
       const log = async () => (await (await fetch(`${base}/api/schedules/log`)).json()) as string[];
       for (const t0 = Date.now(); !(await log()).some((l) => l.includes("acme/app: 当たり")) && Date.now() - t0 < 20_000; ) await Bun.sleep(25);
       expect(await log()).toContainEqual(expect.stringContaining("検査: acme/app: 当たり 1 件（scanned 7） (manual)"));
-      // no Inbox note: the notice is in 判断待ち
-      expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
+      // the route's arguments: since (epoch ms) and limit; a since that is no time is refused
+      const logOf = async (q: string) => { const res = await fetch(`${base}/api/schedules/log?${q}`); return { status: res.status, body: await res.json() as string[] }; };
+      expect((await logOf("since=0")).body).toEqual(await log());
+      expect((await logOf(`since=${Date.now() + 60_000}`)).body).toEqual([]);
+      const one = (await logOf("since=0&limit=1")).body;
+      expect(one).toHaveLength(2);
+      expect(one[0]).toContain(SCHEDULE_LOG_CUT);
+      expect(one[1]).toBe((await log()).at(-1)!);
+      expect((await logOf("since=0&limit=0")).body).toHaveLength(2); // held to 1 at least
+      expect((await logOf("since=yesterday")).status).toBe(400);
+      expect((await logOf("since=-1")).status).toBe(400);
+      expect((await logOf("since=0&limit=many")).status).toBe(400);
       const notices = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; kind: string; state: string; question: string; reason: string; source: { label: string }; answers: string[] }> }).asks.filter((a) => a.kind === "notice");
       const [n] = await notices();
       expect(n).toMatchObject({ state: "open", question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ", reason: "https://github.com/acme/app/issues/9: device-code（1 行目）", source: { label: "予定「検査」" }, answers: ["dismiss"] });
@@ -739,6 +811,34 @@ describe("scheduler approval-window", () => {
   beforeEach(() => {
     mkdirSync(join(home, "meta"));
     wsId = db.upsertWorkspace({ name: "m", path: join(home, "meta"), kind: "meta" }).id;
+  });
+
+  test("approval-window: the firing's line counts the questions going on by their recommendation per Workspace, and has none when there are none", async () => {
+    const at = "2026-10-01T00:00:00Z";
+    const asked = (workspaceName: string, issue: number, answer: { at: string; body: string } | null = null) => ({ workspaceId: `ws_${workspaceName}`, workspaceName, issue: { number: issue, url: "" }, pbi: { number: issue, title: "t", url: "", open: true }, body: "## 判断待ち\n**進め方**: 推奨で進める（種類: implementation-choice）", at, answer, closedAt: null, stopped: null });
+    const t = Date.parse(at) + 1000;
+    // two Workspaces; one already looked at is not counted
+    const asks = proceedingAsks([asked("other-repo", 1), asked("switchboard", 2), asked("switchboard", 3), asked("switchboard", 4, { at, body: "## 回答\nA" })], t);
+    expect(proceedingLine(asks)).toBe("推奨で進行中: switchboard 2 / other-repo 1");
+    expect(proceedingLine([])).toBeNull();
+    expect(proceedingLine(asks.filter((a) => a.state !== "open"))).toBeNull();
+    const sso: AskBatch = { id: "batch:sso", kind: "sso", asks: [{ askId: "s1", taskId: "tk_a", title: "A", workspaceId: "ws_1", op: "aws sso login", at: 1 }], loggingIn: null, deviceAuth: null };
+    expect(approvalWindowLine([], [])).toBe("待ちなし");
+    expect(approvalWindowLine([sso], [])).toBe("SSO・配備の承認待ち: 1");
+    expect(approvalWindowLine([sso], asks)).toBe("SSO・配備の承認待ち: 1 / 推奨で進行中: switchboard 2 / other-repo 1");
+    // the note of the batches carries the line first; the questions alone make no notice for the person
+    expect(approvalWindowNote([sso], asks)!.body.split("\n")[0]).toBe("推奨で進行中: switchboard 2 / other-repo 1");
+    expect(approvalWindowNote([], asks)).toBeNull();
+    let list = asks;
+    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, undefined, undefined, async () => approvalWindowLine([], list));
+    const s = sc.create({ title: "承認待ち", cron: "0 0 * * *", workspaceId: wsId, runner: "claude", prompt: "", action: "approval-window" });
+    now = s.nextRunAt!;
+    await sc.tick();
+    expect(db.getSchedule(s.id)!.lastResult).toMatchObject({ failed: 0, lines: ["推奨で進行中: switchboard 2 / other-repo 1"] });
+    list = [];
+    now += 86_400_000;
+    await sc.tick();
+    expect(db.getSchedule(s.id)!.lastResult).toMatchObject({ lines: ["待ちなし"] });
   });
 
   test("approval window memo", async () => {
@@ -828,34 +928,6 @@ describe("scheduler approval-window", () => {
     now += 86_400_000;
     await sc.tick();
     expect(shown(newer, 2, now + 1).asks.map((a) => a.question)).toEqual(["昇格待ち: v0.9.1（18 時間、動いている Task 2 件）— ヘッダーの「新しい版 →」から昇格できる"]);
-  });
-});
-
-describe("scheduler ui-layers", () => {
-  test("ui-layers: claude only on meta; a firing starts the check's Task with its fixed instruction, and a hot 7-day window skips it with the reason", async () => {
-    const metaPath = join(home, "meta");
-    mkdirSync(metaPath);
-    const metaId = db.upsertWorkspace({ name: "meta", path: metaPath, kind: "meta" }).id;
-    const sc = new Scheduler(db, tasks, () => now, undefined, undefined, () => 0.8);
-    expect(() => sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: metaId, runner: "codex", action: "ui-layers" })).toThrow("ui-layers runs on claude");
-    expect(() => sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: wsId, runner: "claude", action: "ui-layers" })).toThrow("meta workspace only");
-    const s = sc.create({ title: "点検", cron: "0 9 1 * *", workspaceId: metaId, runner: "claude", action: "ui-layers" });
-    expect(() => sc.update(s.id, { runner: "codex" })).toThrow("ui-layers runs on claude");
-
-    // at the threshold, the window not reset yet: no Task, the reason in the log
-    db.upsertQuota("claude", "seven_day", 0.85, now / 1000 + 3600);
-    expect(await sc.runNow(s.id)).toBeNull();
-    expect(db.listTasks()).toHaveLength(0);
-    expect(sc.recentLog().at(-1)).toMatch(/点検: ui-layers を飛ばした \(manual\): Claude の 7 日枠が 85% で閾値 80% 以上/);
-    expect(db.recentScheduleLog(1)[0]!.scheduleId).toBe(s.id);
-
-    // under it: one Task on claude with the fixed instruction, tied to the schedule
-    db.upsertQuota("claude", "seven_day", 0.5, now / 1000 + 3600);
-    const t = await sc.runNow(s.id);
-    expect(t).toMatchObject({ runner: "claude", scheduleId: s.id, title: "床・天井・壁の点検 (2026-09-06 00:00)" });
-    // the instruction goes with the usual preamble (unlike insights' bare /insights): the Task registers its report as an artifact
-    expect(started.at(-1)!.prompt).toContain(UI_LAYERS_PROMPT);
-    expect(started.at(-1)!.preamble).toContain("switchboard-artifact");
   });
 });
 
@@ -971,6 +1043,51 @@ describe("scheduler log in the database", () => {
     expect(log).toHaveLength(50);
     expect(log[0]).toContain("line 10");
     expect(log.at(-1)).toContain("line 59");
+  });
+
+  test("log since: lines from the time on, oldest first; none given reads the last 50 as before", () => {
+    let at = now;
+    const sc = new Scheduler(db, tasks, () => at);
+    for (let i = 0; i < 60; i++) { at = now + i * 60_000; sc.note(`line ${i}`); }
+    const since = sc.recentLog({ since: now + 5 * 60_000 });
+    expect(since).toHaveLength(55);
+    expect(since[0]).toBe(`${new Date(now + 5 * 60_000).toISOString()} line 5`);
+    expect(since.at(-1)).toContain("line 59");
+    expect(sc.recentLog({ since: at + 1 })).toEqual([]);
+    expect(sc.recentLog()).toHaveLength(50);
+    expect(sc.recentLog()[0]).toContain("line 10");
+    // a limit alone: the last that many
+    expect(sc.recentLog({ limit: 3 }).map((l) => l.split(" ").slice(1).join(" "))).toEqual(["line 57", "line 58", "line 59"]);
+  });
+
+  test("log since: over the limit keeps the newest lines and says how many were cut", () => {
+    let at = now;
+    const sc = new Scheduler(db, tasks, () => at);
+    for (let i = 0; i < 12; i++) { at = now + i * 1000; sc.note(`line ${i}`); }
+    const cut = sc.recentLog({ since: now, limit: 5 });
+    expect(cut).toHaveLength(6);
+    expect(cut[0]).toBe(`${new Date(now + 7000).toISOString()} ${SCHEDULE_LOG_CUT} since 以降の 12 行のうち古い 7 行を返していない（limit 5。limit は ${SCHEDULE_LOG_MAX_LIMIT} まで。超えるなら since を新しくして分けて読む）`);
+    expect(cut.slice(1).map((l) => l.split(" ").slice(1).join(" "))).toEqual(["line 7", "line 8", "line 9", "line 10", "line 11"]);
+    // exactly the limit, and under it: no mark
+    expect(sc.recentLog({ since: now, limit: 12 })).toHaveLength(12);
+    expect(sc.recentLog({ since: now }).some((l) => l.includes(SCHEDULE_LOG_CUT))).toBe(false);
+    expect(SCHEDULE_LOG_SINCE_LIMIT).toBe(2000);
+  });
+
+  test("log since: three hours of a 20,000-line log are read in well under a second", () => {
+    // the size of the real log (about 9 lines a firing, every 2 minutes, for days): rows written straight to the table
+    const insert = db.sqlite.query("INSERT INTO schedule_log (ts, schedule_id, text) VALUES (?, NULL, ?)");
+    const start = now - 20_000 * 13_000;
+    db.sqlite.transaction(() => { for (let i = 0; i < 20_000; i++) insert.run(start + i * 13_000, `キュー: 行 ${i} ${"x".repeat(120)}`); })();
+    const sc = new Scheduler(db, tasks, () => now);
+    const t0 = performance.now();
+    const hours = sc.recentLog({ since: now - 3 * 3600_000 });
+    const all = sc.recentLog({ since: 0, limit: SCHEDULE_LOG_MAX_LIMIT });
+    const ms = performance.now() - t0;
+    expect(hours.length).toBeGreaterThan(800);
+    expect(hours.length).toBeLessThanOrEqual(SCHEDULE_LOG_SINCE_LIMIT);
+    expect(all).toHaveLength(20_000);
+    expect(ms).toBeLessThan(1000);
   });
 
   test("a line from 91 days ago is dropped by the next write", () => {

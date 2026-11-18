@@ -3,7 +3,7 @@
  * (`backlog-graphql.json` pages, `backlog-decisions.json` comments): tests keep those fixtures and their per-test
  * variations.
  */
-import type { GhRunner } from "../src/backlog.ts";
+import type { GhRunner } from "../src/backlog-gh.ts";
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 /**

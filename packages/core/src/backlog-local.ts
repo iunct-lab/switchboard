@@ -1,15 +1,14 @@
 /**
  * A backlog kept in Switchboard only: its edits are not sent anywhere — each operation an edit queued
- * is applied to the stored records at once, as if the service had answered it. The edit functions in backlog.ts are the
+ * is applied to the stored records at once, as if the service had answered it. The edit functions in backlog-edit.ts are the
  * same for every workspace; only where their operations go differs (BacklogSync.send).
  */
 import type { BacklogCommentData, BacklogIssueData, BacklogObjectKind, BacklogProjectField, BacklogProjectItemData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
 import { applyBacklogField, type BacklogOperation, type BacklogSnapshotEntry, type Db } from "./db.ts";
-import { BacklogEditError, type BacklogCreatePayload } from "./backlog.ts";
-import { existsSync } from "node:fs";
+import { BacklogEditError, type BacklogCreatePayload } from "./backlog-edit.ts";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { CONFIG_FILE, STORY_POINTS, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
+import { CONFIG_FILE, STORY_POINTS, configFileOf, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
 import { STATUS_OPTIONS } from "../../../ops-kit/src/bootstrap.ts";
 import { fieldChoice, UsageError } from "../../../ops-kit/src/set.ts";
 import { forgeOf, LOCAL_SERVICE } from "../../../ops-kit/src/forge.ts";
@@ -59,7 +58,7 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
         // the API refuses a parent that is not there (checkLocalParent); one gone meanwhile is not kept
         const parent = p.parent !== null && byNumber(p.parent) ? p.parent : null;
         const id = `sb:${op.id}`;
-        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null, ...(p.change ? { change: { ...p.change, mergeCommit: null, mergedAt: null, reviewedHead: null } } : {}) };
+        const value: BacklogIssueData = { number, title: p.title, url: "", state: p.state, stateReason: null, body: p.body, labels: p.labels, milestone: p.milestone, parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: p.state === "CLOSED" ? at : null, ...(p.change ? { change: { ...p.change, pr: p.change.pr ?? null, mergeCommit: null, mergedAt: null, reviewedHead: null, reportedAt: null } } : {}) };
         db.setBacklogOperationResult(op.id, { status: "done", remoteId: id, record: { externalId: id, remote: value } }, now);
         if (p.project) store("project-item", `sb:item:${op.id}`, { issue: number, owner: p.project.owner, project: p.project.number, fields: p.project.fields } satisfies BacklogProjectItemData);
         if (parent !== null) moveSub(number, null, parent);
@@ -102,6 +101,8 @@ export function applyLocalOperations(db: Db, source: BacklogSource, now = Date.n
  * check of what it was made on; so does an operation sent or lost on the way (`sending` / `unknown`, …).
  */
 const appliesHere = (op: BacklogOperation) =>
+  // a report for the Issue on GitHub is nothing to decide here: it waits for the sync to be on
+  op.kind !== "artifact" &&
   op.status === "pending" && !op.remoteId && (op.kind !== "set" || op.issue.startsWith("sb:") || op.issue.startsWith("local:")) &&
   // a create of turning the sync on (backlog-enable.ts) makes an Issue made here on GitHub: it waits for GitHub
   !(op.kind === "create" && "former" in (op.payload as object));
@@ -124,16 +125,27 @@ function choiceOf(cfg: OpsConfig, name: string, value: string | number | null): 
 }
 
 /**
+ * The settings the checkout `dir` is run with and what to call them in a message: one rule for every reader (the kit's
+ * `configFileOf`) — the repository's own `ops.config.json` when it has one, else `saved` (the workspace's settings kept on
+ * Switchboard's side), else the kit's template. A file as a whole: the two are never mixed key by key. Throws when the file cannot be read.
+ */
+function settingsOf(dir: string, saved: string): { cfg: OpsConfig; source: string } {
+  const file = configFileOf(dir, saved);
+  if (file === null) return { cfg: defaultConfig(), source: "既定の選択肢: ops-kit/template/ops.config.json" };
+  return { cfg: loadConfig(file), source: file === join(dir, CONFIG_FILE) ? CONFIG_FILE : "Switchboard の側の設定（設定の Workspace の行）" };
+}
+
+/**
  * The fields of an edit of a backlog kept on GitHub, corrected to the choices of the workspace's `ops.config.json` (or
  * the kit's template) before anything is stored: the case of a choice is fixed, a value that is none is 422. A field
  * without choices (TEXT, DATE, …) and null (a value taken off) pass; the Project is not read. Throws BacklogEditError.
+ * `saved`: the workspace's settings kept on Switchboard's side ("" = none), read when `dir` has no `ops.config.json` (`settingsOf`).
  */
-export function checkFieldChoices(dir: string, fields: Record<string, string | number | null> | null | undefined): Record<string, string | number | null> | undefined {
+export function checkFieldChoices(dir: string, fields: Record<string, string | number | null> | null | undefined, saved = ""): Record<string, string | number | null> | undefined {
   if (!fields || Object.keys(fields).length === 0) return fields ?? undefined;
-  const own = existsSync(join(dir, CONFIG_FILE));
   let cfg: OpsConfig;
   try {
-    cfg = own ? loadConfig(join(dir, CONFIG_FILE)) : defaultConfig();
+    cfg = settingsOf(dir, saved).cfg;
   } catch {
     throw new BacklogEditError(`${CONFIG_FILE} を読めないので Project のフィールドの選択肢を確かめられません`, 422);
   }
@@ -148,15 +160,14 @@ export function checkFieldChoices(dir: string, fields: Record<string, string | n
  * null (a value taken off) passes. Without a config the kit's template (`defaultConfig`) gives the choices; with
  * one that cannot be read, any field or Milestone is refused. Throws BacklogEditError 422; returns the fields to store.
  */
-export function checkLocalFields(dir: string, input: { fields?: Record<string, string | number | null> | null; milestone?: string | null }): Record<string, string | number | null> | undefined {
+export function checkLocalFields(dir: string, input: { fields?: Record<string, string | number | null> | null; milestone?: string | null }, saved = ""): Record<string, string | number | null> | undefined {
   const fields = input.fields ?? undefined;
   const named = Object.keys(fields ?? {}).length > 0 || (input.milestone !== undefined && input.milestone !== null);
   if (!named) return fields;
-  const own = existsSync(join(dir, CONFIG_FILE));
-  const source = own ? CONFIG_FILE : "既定の選択肢: ops-kit/template/ops.config.json";
   let cfg: OpsConfig;
+  let source: string;
   try {
-    cfg = own ? loadConfig(join(dir, CONFIG_FILE)) : defaultConfig();
+    ({ cfg, source } = settingsOf(dir, saved));
   } catch {
     throw new BacklogEditError(`${CONFIG_FILE} を読めないので Project のフィールドと Milestone は付けられません`, 422);
   }
@@ -179,10 +190,10 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
  * The fields a backlog kept here can set, as the Project's definitions are for one on GitHub: the choices of
  * `checkLocalFields` (a single select each; Story Points a number). A `ops.config.json` that cannot be read gives none.
  */
-export function localProjectFields(dir: string): BacklogProjectField[] {
+export function localProjectFields(dir: string, saved = ""): BacklogProjectField[] {
   let cfg: OpsConfig;
   try {
-    cfg = existsSync(join(dir, CONFIG_FILE)) ? loadConfig(join(dir, CONFIG_FILE)) : defaultConfig();
+    cfg = settingsOf(dir, saved).cfg;
   } catch {
     return [];
   }
@@ -201,11 +212,12 @@ export function branchTip(dir: string, branch: string): string | null {
 }
 
 /**
- * Checks a new local change before anything is stored: only on a backlog kept here (422), both branches there
- * in the workspace's checkout (422), no other open change of the same branch (409). Throws BacklogEditError.
+ * Checks a new local change before anything is stored: `source` is where the workspace's changes are kept
+ * (`changeSourceOf`: never a service's records, 422), both branches there in the workspace's checkout (422), no other open
+ * change of the same branch (409; its number is in the error's `open`). Throws BacklogEditError.
  */
 export function checkLocalChange(db: Db, source: BacklogSource, dir: string, change: { head: string; base: string }): void {
-  if (source.service !== "switchboard") throw new BacklogEditError("変更は GitHub 連携の無い workspace だけで作れます", 422);
+  if (source.service !== "switchboard") throw new BacklogEditError("変更は連携の無い保存元にだけ作れます", 422);
   for (const b of [change.head, change.base]) if (!branchTip(dir, b)) throw new BacklogEditError(`枝 ${b} がありません`, 422);
   if (change.head === change.base) throw new BacklogEditError("head と base が同じ枝です", 422);
   const open = db.listBacklogRecords(source, "issue").map((r) => (r.remote ?? r.local) as BacklogIssueData | null).find((v) => v?.state === "OPEN" && v.change?.head === change.head);
@@ -216,9 +228,9 @@ export function checkLocalChange(db: Db, source: BacklogSource, dir: string, cha
  * Whether a checkout's changes are kept here: the kit's `forgeOf` names the app (no remote and no `forge`, or a
  * `forge` naming it). A `forge` that cannot be read is not (its stage Task then says so where it reads it).
  */
-export function localForgeOf(dir: string): boolean {
+export function localForgeOf(dir: string, saved = ""): boolean {
   try {
-    return forgeOf(dir) === LOCAL_SERVICE;
+    return forgeOf(dir, saved) === LOCAL_SERVICE;
   } catch {
     return false;
   }

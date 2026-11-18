@@ -4,7 +4,7 @@ import { jstDay, jstStamp } from "./time.ts";
 import { t } from "./i18n.ts";
 import { settings } from "./i18n/settings.ts";
 
-/* The settings screen's list of saved answer policies (#938). */
+/* The settings screen's list of saved answer policies. */
 
 const DAY_MS = 86_400_000;
 const dayOf = jstDay;
@@ -15,7 +15,7 @@ export type PolicyTone = "ok" | "wait" | "bad";
 /** 有効 / 期限切れ (`now === expiresAt` is expired) / 無効 (revoked) / 使用済み (a 今回のみ one that answered). */
 export function policyState(p: AnswerPolicy, now: number): { text: string; tone: PolicyTone } {
   if (p.revokedAt !== null) return { text: t(settings.policyRevoked), tone: "bad" };
-  if (p.scope === "once" && p.uses.length > 0) return { text: t(settings.policyUsed), tone: "wait" };
+  if (p.scope === "once" && p.useCount > 0) return { text: t(settings.policyUsed), tone: "wait" };
   if (p.expiresAt !== null && now >= p.expiresAt) return { text: t(settings.policyExpired), tone: "wait" };
   return { text: t(settings.policyActive), tone: "ok" };
 }
@@ -27,7 +27,8 @@ export function policyRow(p: AnswerPolicy, workspaceName: (id: string) => string
     subject: `${p.op}: ${p.target}`,
     when: p.when.length ? p.when.map((w) => `${w.key}=${w.value}`).join(" ") : t(settings.noCondition),
     expires: p.expiresAt === null ? t(settings.noExpiry) : t(settings.expiresIn, { day: dayOf(p.expiresAt), days: Math.max(0, Math.ceil((p.expiresAt - now) / DAY_MS)) }),
-    uses: p.uses.length ? t(settings.usesLine, { n: p.uses.length, at: stamp(p.uses[0]!.at) }) : t(settings.unused),
+    // the total and the first use are the stored ones (the history is cut at the newest 20); the last use is the history's newest
+    uses: p.firstUsedAt !== null ? t(settings.usesLine, { n: p.useCount, first: stamp(p.firstUsedAt), last: stamp(p.uses[0]?.at ?? p.firstUsedAt) }) : t(settings.unused),
   };
 }
 

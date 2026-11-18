@@ -38,7 +38,7 @@ The labels are Japanese because the backlog is written in Japanese (`床` = floo
 
 ## The monthly check
 
-A prompt schedule (`床・天井・壁の点検` in Schedules, put in once at first start by `server.ts`; its cron, runner and prompt are what Schedules shows and can change) starts one Task that checks the screens against this document. The schedule's prompt only points here; these are the steps. Work in the repository root, and keep the working files under `W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX)`.
+A prompt schedule (`（サンプル）床・天井・壁の点検` in Schedules: one of the schedule samples of `packages/core/src/scheduleSamples.ts`, put in once at first start, disabled until the person turns it on; its cron, runner and prompt are what Schedules shows and can change) starts one Task that checks the screens against this document. The schedule's prompt only points here; these are the steps. Work in the repository root, and keep the working files under `W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX)`.
 
 1. Count the measures: `bun scripts/ui-layers-metrics.ts > "$W/metrics.json"`.
 2. Name the screen backlog items that have no placement line: `bun scripts/ui-layers-placement.ts --days 30 > "$W/placement.json"`. If it exits 2, write the reason into the rating sentences of the report and continue with `{"checked":0,"missing":[]}`.

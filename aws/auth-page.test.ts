@@ -1,7 +1,7 @@
 // test-reads: aws/auth-page.html
 import { describe, expect, test } from "bun:test";
 
-/** The start page's recovery paths (aws/auth-page.html, #1394), run with a fake clock, api, sleep and elements. */
+/** The start page's recovery paths (aws/auth-page.html), run with a fake clock, api, sleep and elements. */
 const page = await Bun.file(new URL("./auth-page.html", import.meta.url)).text();
 const between = (from: string, to: string) => page.slice(page.indexOf(from), page.indexOf(to));
 const src = [between("async function waitForDaemon", "const FORCE_AFTER_MS"), between("const FORCE_AFTER_MS", "const START_WAIT_MS")].join("\n");
@@ -48,7 +48,7 @@ function run(o: { states: string[]; daemonAt?: number; rescue?: boolean; confirm
   return { fns, said, shown, posts, children, disabledWhenShown };
 }
 
-describe("aws/auth-page.html recovery (#1394)", () => {
+describe("aws/auth-page.html recovery", () => {
   test("running and not answering shows stop and 作り直す at 0 s, with the boot note", async () => {
     const t = run({ states: ["running"], daemonAt: 9000 });
     await t.fns.waitForDaemon(0);
@@ -114,7 +114,7 @@ describe("aws/auth-page.html recovery (#1394)", () => {
   });
 });
 
-describe("aws/auth-page.html countries (#1639)", () => {
+describe("aws/auth-page.html countries", () => {
   const src = between("function countriesBody", "async function render");
   /** The section's functions with fake elements, api and withRecent. */
   function env(o: { view: unknown; saved?: unknown }) {
@@ -172,7 +172,7 @@ describe("aws/auth-page.html countries (#1639)", () => {
   });
 });
 
-describe("aws/auth-page.html passkeys (#414)", () => {
+describe("aws/auth-page.html passkeys", () => {
   const src = [between("/** One row of the passkey list", "async function render"), between("const pad = ", "/** The state line")].join("\n");
   type El = { hidden: boolean; textContent: string; disabled: boolean; className: string; onclick?: () => unknown; children: El[]; replaceChildren: (...c: El[]) => void; append: (...c: El[]) => void };
   const el = (): El => {
@@ -258,7 +258,7 @@ describe("aws/auth-page.html passkeys (#414)", () => {
     expect(own.rendered).toEqual(["この端末のパスキーを消しました"]);
   });
 
-  test("opened at #devices (or #countries) while the daemon starts, the page stays when it answers (review #2511)", async () => {
+  test("opened at #devices (or #countries) while the daemon starts, the page stays when it answers", async () => {
     for (const stay of ["devices", "countries"]) {
       const t = run({ states: ["pending", "running"], daemonAt: 6000, stay });
       await t.fns.waitForDaemon(0);

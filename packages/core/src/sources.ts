@@ -2,7 +2,8 @@ import type { CreatedIssue, SourceRow, SourceView } from "@switchboard/protocol"
 import { speakerOf } from "../../../ops-kit/src/lint.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { revertedShas } from "../../../scripts/merge-audit.ts";
-import { readStoredRecords, requestOf } from "./backlog.ts";
+import { readStoredRecords } from "./backlog-stored.ts";
+import { requestOf } from "./backlog-item.ts";
 import { deferredTasksSince, scheduledIssuesSince, type Db } from "./db.ts";
 import { median, type FlowWorkspace } from "./flow.ts";
 

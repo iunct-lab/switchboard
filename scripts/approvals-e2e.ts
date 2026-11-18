@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/approvals-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * A fake runner asks for a write in two tasks; the 承認 screen at 390 × 844 (iPhone 14) answers one with one tap (#26).
+ * A fake runner asks for a write in two tasks; the 承認 screen at 390 × 844 (iPhone 14) answers one with one tap.
  * SCREENSHOT=<file.png> saves the phone-sized screen before the answer.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -94,8 +94,8 @@ try {
     const shot = await call("Page.captureScreenshot", { format: "png" });
     await Bun.write(process.env.SCREENSHOT, Buffer.from(shot.data, "base64"));
   }
-  // the 判断待ち cards carry their facts (#935), so the second one may start below the fold: scroll its button in, then one tap
-  // (承認して続行 once the list has it, #936; 許可 before)
+  // the 判断待ち cards carry their facts, so the second one may start below the fold: scroll its button in, then one tap
+  // (承認して続行 once the list has it; 許可 before)
   const point = await evaluate(`(() => { const e = [...document.querySelectorAll('.approval')].find(c => c.textContent.includes('approve-a')).querySelector('.approval-actions .pri, .ask-buttons .pri'); e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; })()`);
   await call("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
   await call("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
@@ -103,7 +103,7 @@ try {
   await until(() => answered.includes("approve-a:allow"), "the runner got allow");
   const after = await evaluate(`({ left: [...document.querySelectorAll('.approval .t')].map(b => b.textContent), badge: document.querySelector('.rail-approvals .badge')?.textContent })`);
   assert(JSON.stringify(after) === JSON.stringify({ left: ["approve-b"], badge: "1" }), `after: ${JSON.stringify(after)}`);
-  // PWA (#26): installable, the service worker controls the page, and the API never goes through it.
+  // PWA: installable, the service worker controls the page, and the API never goes through it.
   const types = Object.fromEntries(await Promise.all(["/sw.js", "/manifest.webmanifest"].map(async (p) => [p, (await fetch(`${base}${p}`)).headers.get("content-type")])));
   assert(String(types["/sw.js"]).includes("javascript"), `sw.js content-type: ${types["/sw.js"]}`);
   assert(String(types["/manifest.webmanifest"]).includes("manifest+json"), `manifest content-type: ${types["/manifest.webmanifest"]}`);
@@ -120,7 +120,7 @@ try {
   assert(installErrors.length === 0, `installability: ${JSON.stringify(installErrors)}`);
   assert(viaSw === false && shellViaSw === true, `api via sw: ${viaSw}, shell via sw: ${shellViaSw}`);
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  // the live approval is still answered with one tap when GET /api/asks does not answer (#935)
+  // the live approval is still answered with one tap when GET /api/asks does not answer
   await call("Network.setBlockedURLs", { urls: ["*/api/asks*"] });
   await call("Page.reload");
   // the screen says the list failed (the block took effect), and the approval is still there to answer

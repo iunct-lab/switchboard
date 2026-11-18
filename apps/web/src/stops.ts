@@ -2,7 +2,7 @@ import type { StopSummary } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
-/** 停止の系列 (#939) を画面に出す文言: 何回目か、前回の回答、前回からの変化、次に必要な対処。記録に無いものは「不明」。 */
+/** 停止の系列 を画面に出す文言: 何回目か、前回の回答、前回からの変化、次に必要な対処。記録に無いものは「不明」。 */
 export interface StopDisplay {
   key: string;
   /** 見出し: 操作と対象、理由 */
@@ -64,7 +64,7 @@ export function shownStops(stops: StopSummary[]): StopSummary[] {
     .sort((a, b) => Number(b.next === "decide") - Number(a.next === "decide") || b.lastAt - a.lastAt);
 }
 
-/** 人の操作が要る系列だけ (#3709): 閉じた一覧の行の下に畳まずに出す。開いた行は詳細 (`ItemDetail`) の中に全部出す。 */
+/** 人の操作が要る系列だけ: 閉じた一覧の行の下に畳まずに出す。開いた行は詳細 (`ItemDetail`) の中に全部出す。 */
 export function personStops(stops: StopSummary[]): StopSummary[] {
   return shownStops(stops).filter((s) => stopDisplay(s).needsPerson);
 }

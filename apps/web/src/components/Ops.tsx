@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { OpsLatency, OpsLoad, OpsStops } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { fmtBytes, latencyRows, loadDays, reasonLabel, stopsTable, topGroups, type StopsDay } from "../ops.ts";
 import { perfRows, type PerfRow } from "../perf.ts";
 import { fmtClock } from "./ui.tsx";
@@ -8,9 +8,9 @@ import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";
 
 /**
- * 運用 (#2085): the host's own numbers, apart from the per-Task evaluations. デーモンの停止 = how often the daemon
- * stopped and why, and the turns it cut; ホストの負荷 (#2086) = the unit's daily peaks and the heaviest task × kind;
- * 速さ (#2104) = the everyday journeys, the last 7 days against the 7 before them, and
+ * 運用: the host's own numbers, apart from the per-Task evaluations. デーモンの停止 = how often the daemon
+ * stopped and why, and the turns it cut; ホストの負荷 = the unit's daily peaks and the heaviest task × kind;
+ * 速さ = the everyday journeys, the last 7 days against the 7 before them, and
  * API の所要時間 = the slowest routes by p90 (docs/design/perf.md). Each is read on its own, so a failure in one leaves the rest.
  */
 export function Ops(props: { onOpenTask: (id: string) => void }) {

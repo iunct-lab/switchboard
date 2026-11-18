@@ -1,31 +1,35 @@
 /**
- * CI on this machine when GitHub Actions does not start (#387): `bun scripts/local-ci.ts <PR>` runs the `run:` steps of
+ * CI on this machine when GitHub Actions does not start: `bun scripts/local-ci.ts <PR>` runs the `run:` steps of
  * .github/workflows/ci.yml — its `bun scripts/ci.ts` step as that checkout's scripts/ci.ts steps, the ones Actions runs
- * (#912) — on what Actions' pull_request run tests: the PR's latest head merged into its base branch's latest tip, merged
- * here (#913: GitHub's pull/<n>/merge is not needed) — in a throwaway worktree under ~/.cache (not /tmp: a small RAM
+ * — on what Actions' pull_request run tests: the PR's latest head merged into its base branch's latest tip, merged
+ * here (GitHub's pull/<n>/merge is not needed) — in a throwaway worktree under ~/.cache (not /tmp: a small RAM
  * tmpfs on the cloud host) with TMPDIR under the OS's temp dir (the one the `local` perf ceilings were measured with:
- * on the disk, launch.layoutShift goes over, #1056), with only PATH and HOME from this environment, plus the external
+ * on the disk, launch.layoutShift goes over), with only PATH and HOME from this environment, plus the external
  * recordings directory only when supplied (a daemon's SWITCHBOARD_* would change what the tests see).
  * The result goes on the PR whether or not Actions ran: all green → `[local-ci] pass <head sha> base=<base sha>`, which
  * merge-gate takes in place of an Actions CI that never started; a failure or a conflict → `[local-ci] fail <head sha>
  * base=<base sha>` and exit 1. Before posting, head and base are read again: either moved → nothing posted, exit 1
  * (run again). Each failed step's whole output stays in a log dir under ~/.cache (a perf step's failure does not stop
- * `bun test`, so a run can have two, #2945); the perf steps do not run here (the tag CI's, #4076).
+ * `bun test`, so a run can have two); the perf steps do not run here (the tag CI's).
  * After every step passed, the type check's and bun test's seconds are compared with the `local` ceilings of the checkout's
- * scripts/perf-budget.json (#1887), bun test's only when every test ran (#3297): over one → still a pass, with the `over:`
+ * scripts/perf-budget.json, bun test's only when every test ran: over one → still a pass, with the `over:`
  * lines as a warning in the comment (`warnings`). A checkout without that file or those ceilings is not compared.
  * `bun test` runs the tests of the checkout's scripts/test-select.ts for what the PR and the PRs below it changed; a
  * change it cannot judge, or a selection that cannot be read, runs all of them, and so does `--all`. Only this script
- * narrows: tag-ci's `runCheckout` runs every test, and the other steps run, except in an incremental run (below) (#3297).
+ * narrows: tag-ci's `runCheckout` runs every test, and the other steps run, except in an incremental run (below).
  * Incremental run: when the PR's newest result is a pass of an earlier head and the commits added since (`git cherry`) hold no
- * merge commit the pass lacks, `bun test` is chosen from those commits' files only and only the install, the type check
- * and that `bun test` run; the other steps are the tag CI's (`incrementalBase`, `incrementalSteps`). A change the
+ * merge commit the pass lacks, `bun test` is chosen from those commits' files only and only the install, the type check,
+ * the quick tree checks (`INCREMENTAL_ALSO`) and that `bun test` run; the other steps are the tag CI's (`incrementalBase`, `incrementalSteps`). A change the
  * selection cannot judge, `--all`, `--change` or a missing earlier pass run every step. The mark is the usual pass.
- * A head whose newest result merge-gate already counts as a pass is not run again (`existingPass`, #1882): `--force` runs
+ * A head whose newest result merge-gate already counts as a pass is not run again (`existingPass`): `--force` runs
  * it, and `--all` does too (a narrowed pass is not what it asks for). GitHub only.
  * A checkout whose `ops.config.json` has `ci.steps` runs those instead of ci.yml's (a repository that keeps no CI on
- * GitHub, #3932); one with neither exits 2 with one line naming where they go, nothing posted.
- * `--repo <owner/name>` (#1203): another repository's PR, run from that repository's working tree (its origin must be
+ * GitHub); a checkout without that file runs the `ci.steps` of the settings Switchboard keeps for its workspace (nothing
+ * is committed to the repository; the comment then names the workspace and the steps' hash), else ci.yml's; one with
+ * none of them exits 2 with one line naming where they go, nothing posted.
+ * A build off the host that could not be started (sb-offload's own failure, before any step) is no result: nothing is
+ * posted and the exit is 2.
+ * `--repo <owner/name>`: another repository's PR, run from that repository's working tree (its origin must be
  * owner/name); the mark goes on that PR. Without it: the repository of the clone this script is in (that clone's
  * origin), run in that clone.
  * On the cloud host (`sb-offload` on PATH) every step of the CI runs off the host in one build, in the CI's order: here only the
@@ -39,22 +43,24 @@ import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { githubForge } from "../ops-kit/src/forge-github.ts";
 import { appForge } from "../ops-kit/src/forge-app.ts";
-import { CiConfig, CONFIG_FILE } from "../ops-kit/src/config.ts";
+import { CiConfig, CONFIG_FILE, ciStepsHash } from "../ops-kit/src/config.ts";
+import { type WorkspaceSettings, workspaceSettingsOf } from "./workspace-settings.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
-import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail } from "./merge-gate.ts";
+import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail, sharedMoved } from "./merge-gate.ts";
+import { sharedFilesOf } from "../ops-kit/src/config.ts";
 import { isTest } from "./test-select.ts";
-import { buildKey, fileLog, offloadRecordPath, type OffloadCaller, type OffloadLog } from "./offload-record.ts";
+import { buildKey, fileLog, findReusable, offloadRecordPath, reusableOutput, type OffloadCaller, type OffloadLog } from "./offload-record.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 
 export type { Step };
 
-/** A result's first line: pass or fail, the head, then the base it was merged into (#913). A mark without the base is none. */
+/** A result's first line: pass or fail, the head, then the base it was merged into. A mark without the base is none. */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
 
-/** A pass's line after the first line (#1886): the type check's and bun test's seconds as JSON, hidden in GitHub's view. */
+/** A pass's line after the first line: the type check's and bun test's seconds as JSON, hidden in GitHub's view. */
 export const LOCAL_CI_SECONDS = /^<!-- local-ci-seconds (\{.*\}) -->$/m;
 
 /** The type check's and bun test's seconds of a run. */
@@ -81,10 +87,10 @@ export function markerSeconds(body: string): StepSeconds | undefined {
   return typeof v.typecheck === "number" && typeof v.test === "number" ? { typecheck: v.typecheck, test: v.test } : undefined;
 }
 
-/** A result's machine line of its tests (#3297): how many files ran, null = all of them, of how many. */
+/** A result's machine line of its tests: how many files ran, null = all of them, of how many. */
 export const LOCAL_CI_TESTS = /^<!-- local-ci-tests (\{.*\}) -->$/m;
 
-/** The tests a result's body carries, or undefined when it has none (a run before #3297, `--all`). */
+/** The tests a result's body carries, or undefined when it has none (a run from before the tests were narrowed, `--all`). */
 export function testsOf(body: string): { ran: number | null; total: number } | undefined {
   const m = LOCAL_CI_TESTS.exec(body);
   if (!m) return undefined;
@@ -92,7 +98,7 @@ export function testsOf(body: string): { ran: number | null; total: number } | u
   return (typeof v.ran === "number" || v.ran === null) && typeof v.total === "number" ? { ran: v.ran, total: v.total } : undefined;
 }
 
-/** `log` = where the whole output of a step that failed was kept (#1232), `fails` = its failLines; passing steps keep nothing. */
+/** `log` = where the whole output of a step that failed was kept, `fails` = its failLines; passing steps keep nothing. */
 export interface StepResult extends Step { code: number; seconds: number; tail: string; log?: string; fails?: string[] }
 
 /** The lines of a step's output that name what failed: bun test's `(fail)` lines, perf-ratchet's `over:` / `raised:` / `improved:` / `grew:` lines, idle-run's reason and an off-host build's end (`sb-offload: exit`), once each, in order. */
@@ -125,43 +131,67 @@ export function withoutPerf(steps: Step[]): Step[] {
   return [...steps.slice(0, build), ...steps.slice(last + 1)];
 }
 
-/** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one (#912). */
+/** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one. */
 export const SHARED_ENTRY = "bun scripts/ci.ts";
 
-/** A checkout whose CI steps cannot be read: none in `ops.config.json`'s `ci.steps` nor in ci.yml, or `ci` is not in its shape (#3932). */
+/** A checkout whose CI steps cannot be read: none in `ops.config.json`'s `ci.steps` nor in ci.yml, or `ci` is not in its shape. */
 export class NoCiSteps extends Error {}
 
 /** Where a checkout keeps its CI's steps, for the message of `NoCiSteps`. */
-export const CI_STEPS_PLACES = "`ops.config.json` の `ci.steps`（GitHub と連携するなら `.github/workflows/ci.yml`）";
+export const CI_STEPS_PLACES = "リポジトリの `ops.config.json` の `ci.steps`、リポジトリに何も置かないなら Switchboard の側の workspace の設定（設定の Workspace の行の「設定（Switchboard の側）」）の `ci.steps`（GitHub と連携するなら `.github/workflows/ci.yml`）";
 
 /**
- * The steps of `ops.config.json`'s `ci.steps` in `dir` (#3932), or null when the file or the key is not there. Only
+ * The steps of `ops.config.json`'s `ci.steps` in `dir`, or null when the file or the key is not there. Only
  * `ci` is read (as `loadPublicSync` reads its key): another key's mistake is not the CI's to refuse.
  */
 export function configSteps(dir: string): Step[] | null {
-  const file = join(dir, CONFIG_FILE);
+  return fileSteps(join(dir, CONFIG_FILE), CONFIG_FILE);
+}
+
+/** `ci.steps` of the settings file `file` (`named` in the messages), or null when the file or the key is not there. */
+function fileSteps(file: string, named: string): Step[] | null {
   if (!existsSync(file)) return null;
   let json: { ci?: unknown } | null;
   try {
     json = JSON.parse(readFileSync(file, "utf8")) as { ci?: unknown } | null;
   } catch (e) {
-    throw new NoCiSteps(`${CONFIG_FILE} を読めない: ${(e as Error).message}`);
+    throw new NoCiSteps(`${named} を読めない: ${(e as Error).message}`);
   }
   if (json === null || typeof json !== "object" || json.ci === undefined) return null;
   const r = CiConfig.safeParse(json.ci);
-  if (!r.success) throw new NoCiSteps(`${CONFIG_FILE} の ci が不正: ${r.error.issues.map((i) => `ci.${i.path.join(".")}: ${i.message}`).join(" / ")}`);
+  if (!r.success) throw new NoCiSteps(`${named} の ci が不正: ${r.error.issues.map((i) => `ci.${i.path.join(".")}: ${i.message}`).join(" / ")}`);
   return r.data.steps.map((s) => ({ name: s.name ?? s.run.split("\n")[0]!, run: s.run }));
 }
 
+/** Where a run's steps came from when it was not the checkout: the workspace whose settings Switchboard keeps, and a hash of the steps (their scripts, in order). */
+export interface StepsSource { workspace: string; hash: string }
+
+/** The hash a result names its steps by: the first 12 hex digits of the sha256 of the steps' scripts. */
+export const stepsHash = (steps: Step[]): string => ciStepsHash(steps);
+
 /**
- * What a checkout's CI runs: `ops.config.json`'s `ci.steps` when it has them (a repository that keeps no CI on GitHub,
- * #3932; ci.yml is not read then), else ci.yml's `run:` steps, with the shared entry replaced by that checkout's own
- * scripts/ci.ts steps (another repository's ci.yml has none, #1203). Those are the PR's code: read by `--list` in a
+ * What a checkout's CI runs: `ops.config.json`'s `ci.steps` when it has them (a repository that keeps no CI on GitHub;
+ * ci.yml is not read then), else ci.yml's `run:` steps, with the shared entry replaced by that checkout's own
+ * scripts/ci.ts steps (another repository's ci.yml has none). Those are the PR's code: read by `--list` in a
  * process of its own with `env` (the steps' environment), never imported into this one. Neither → `NoCiSteps`.
  */
-export async function checkoutSteps(dir: string, env: Record<string, string>): Promise<Step[]> {
-  const configured = configSteps(dir);
-  if (configured) return configured;
+export async function checkoutSteps(dir: string, env: Record<string, string>, workspace?: WorkspaceSettings): Promise<Step[]> {
+  return (await checkoutCi(dir, env, workspace)).steps;
+}
+
+/**
+ * `checkoutSteps` with where the steps came from. Which settings apply is one rule, a file as a whole: the checkout's own
+ * `ops.config.json` when it has one (then `workspace` is not read, even for a key that file leaves out), else the
+ * settings Switchboard keeps for the workspace. So the order is: the repository's `ci.steps`, the workspace's `ci.steps`, ci.yml.
+ */
+export async function checkoutCi(dir: string, env: Record<string, string>, workspace?: WorkspaceSettings): Promise<{ steps: Step[]; source?: StepsSource }> {
+  const own = existsSync(join(dir, CONFIG_FILE));
+  const configured = own ? configSteps(dir) : workspace ? fileSteps(workspace.file, `workspace ${workspace.name} の設定（Switchboard の側）`) : null;
+  if (configured) return own ? { steps: configured } : { steps: configured, source: { workspace: workspace!.name, hash: stepsHash(configured) } };
+  return { steps: await workflowCi(dir, env) };
+}
+
+async function workflowCi(dir: string, env: Record<string, string>): Promise<Step[]> {
   const yml = join(dir, ".github/workflows/ci.yml");
   if (!existsSync(yml)) throw new NoCiSteps(`CI の手順が無い。${CI_STEPS_PLACES}に置く`);
   const steps: Step[] = [];
@@ -182,31 +212,33 @@ export function workflowSteps(yaml: string): Step[] {
 }
 
 /** What one run tested and how it went; `conflict` = the head did not merge into the base, nothing ran. */
-/** `seconds`: a pass's type check and bun test seconds (#1886), for a checkout with scripts/ci.ts. */
-/** `selection`: what chose this run's tests, none with `--all` (#3297). `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
+/** `seconds`: a pass's type check and bun test seconds, for a checkout with scripts/ci.ts. */
+/** `selection`: what chose this run's tests, none with `--all`. `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
 /** `incremental`: this run was only the commits since the earlier pass `pass` (`incrementalBase`). */
-export interface LocalCiResult { /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number }; /** bun test's failures taken off by the registry at the base (known-failures.json): `subtracted` are why a pass is a pass, `expired` were registered but past their date (still failures), `unreadable` = the registry could not be read (nothing taken off). */ known?: { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string } }
+export interface LocalCiResult { /** The build off the host could not be started (sb-offload's code and what it printed): no step ran, nothing is to be posted. */ notStarted?: { code: number; output: string }; /** The steps came from the workspace's settings kept by Switchboard, not from the checkout. */ source?: StepsSource; /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number }; /** bun test's failures taken off by the registry at the base (known-failures.json): `subtracted` are why a pass is a pass, `expired` were registered but past their date (still failures), `unreadable` = the registry could not be read (nothing taken off). */ known?: { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string } }
 
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
   if (!s) return ["テスト: 全ファイル（--all）"];
-  // none counted: "every test" would read as if they all ran (#3932). Only what `total` counts is named (isTest)
+  // none counted: "every test" would read as if they all ran. Only what `total` counts is named (isTest)
   const seen = s.total === 0 ? "テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）" : s.files ? `テスト: ${s.files.length} / ${s.total} ファイル（影響範囲の選択）` : `テスト: 全 ${s.total} ファイル（全テストに倒した: ${s.reason.length > 300 ? `${s.reason.slice(0, 300)}…` : s.reason}）`;
   return [seen, `<!-- local-ci-tests ${JSON.stringify({ ran: s.files?.length ?? null, total: s.total })} -->`];
 }
 
-/** The PR comment of a run, pass or not (#913): the mark (the first line only: merge-gate reads no more, #3118), a pass's seconds line, what was tested, the bundle against main's tip, every step that ran; a failure names its step and what failed in it. */
+/** The PR comment of a run, pass or not: the mark (the first line only: merge-gate reads no more), a pass's seconds line, what was tested, the bundle against main's tip, every step that ran; a failure names its step and what failed in it. */
 export function resultComment(r: LocalCiResult): string {
   const head = [
     `[local-ci] ${r.ok ? "pass" : "fail"} ${r.sha} base=${r.base}`,
     ...(r.ok && r.seconds ? [`<!-- local-ci-seconds ${JSON.stringify(r.seconds)} -->`] : []),
     "",
     "CI の手順（`ops.config.json` の `ci.steps`、無ければ `.github/workflows/ci.yml`。`bun scripts/ci.ts` は `scripts/ci.ts` の各手順）を、head を base にマージしたものでローカルで実行した（`bun scripts/local-ci.ts`）。",
+    // the steps are not in the PR's tree: who kept them and which ones ran
+    ...(r.source ? [`手順の出どころ: Switchboard の側の設定（workspace \`${r.source.workspace}\`、手順のハッシュ \`${r.source.hash}\`）。リポジトリには置いていない`] : []),
     "",
     `対象: head \`${r.sha}\` を base \`${r.base}\` にマージ`,
   ];
   if (r.conflict) return [...head, "", "結果: head を base にマージできない（衝突）。手順は実行していない。base を取り込んでから回し直す。"].join("\n");
-  // every failed step: a perf step's failure does not stop bun test (#2945)
+  // every failed step: a perf step's failure does not stop bun test
   const failed = r.results.filter((x) => x.code !== 0);
   return [
     ...head,
@@ -241,15 +273,17 @@ export interface Deps {
   slot: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
   /** The builds off the host (`sb-offload`, docs/design/local-ci-offload.md); none = every step runs here. */
   offload?: Offload;
+  /** The settings Switchboard keeps for the workspace of the clone `root` (`workspaceSettingsOf`); none = only the checkout is read. */
+  workspace?: (root: string) => WorkspaceSettings | undefined;
 }
 
 /** The size of an off-host build, `sb-offload --size`. */
 export type OffloadSize = "small" | "medium" | "large";
 
-/** What a build is given besides its script: its size, the directory of recordings (`--fixtures`), the file of the host's AWS names (`--names`, a path only: its content is in no script, argument or log) and the tar of the tag a perf run compares with (`--base-tree`). */
-export interface OffloadRun { size: OffloadSize; fixtures?: string; names?: string; baseTree?: string }
+/** What a build is given besides its script: its size, the directory of recordings (`--fixtures`), the file of the host's AWS names (`--names`, a path only: its content is in no script, argument or log) the tar of the tag a perf run compares with (`--base-tree`) and the tree whose container/Dockerfile is the ci image's source (`--image-root`; none = the work tree that is sent). */
+export interface OffloadRun { size: OffloadSize; fixtures?: string; names?: string; baseTree?: string; imageRoot?: string }
 
-/** `start` could not start the build: sb-offload's exit code and what it printed (`runBuild` makes it the failed result of the build's first step). */
+/** `start` could not start the build: sb-offload's exit code and what it printed (`runBuild` hands it back as `notStarted`: no step ran, so it is nobody's failed step). */
 export class OffloadStartError extends Error {
   constructor(readonly code: number, readonly output: string) {
     super(`sb-offload: ビルドを始められなかった（exit ${code}）`);
@@ -268,8 +302,8 @@ export interface Offload {
   /** 外のビルドを始めるたびに 1 行足す記録（`hostOffload` だけが持つ。無ければ記録も入力の鍵の計算もしない）。 */
   log?: OffloadLog;
   collect: (build: string) => Promise<{ code: number; output: string }>;
-  /** Whether the installed `sb-offload` takes `--base-tree` (its usage names it; the host's is replaced only at boot, so an older one may not). Not given = it does. */
-  knowsBaseTree?: () => Promise<boolean>;
+  /** Whether the installed `sb-offload` takes `flag` (`--base-tree`, `--image-root`: its usage names it; the host's is replaced only at boot, so an older one may not). Not given = it does. */
+  knows?: (flag: string) => Promise<boolean>;
 }
 
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
@@ -392,25 +426,49 @@ export function parseBuild(output: string, steps: Step[], code: number): Array<S
  * The one build of every step of a CI (`ciScript`): the host's AWS names go in a JSON of mode 600 in a directory of its own, given by path as
  * `names` and removed once the build has started (sb-offload has sent it by then); the value is in no script, argument other than that path, environment or log.
  * A host with no AWS config (or a `host` with none, as test-changed passes: its build runs no public-tree check) gives no file.
- * `started` is told the build's id before the wait, to be written down (`writePending`); a build that did not start is a failed one (sb-offload's code and output).
+ * `started` is told the build's id before the wait, to be written down (`writePending`). A build that could not be started comes back with
+ * `notStarted` (sb-offload's code and output): no step ran, so the caller must not read it as a step's failure.
+ * `imageRoot`: the tree whose container/Dockerfile the ci image is (another repository's work tree has none, or has its own); an
+ * `sb-offload` that does not know the flag yet starts nothing.
+ * `reuse`: a build of exactly the same input key (the script, the size, every file of the work tree, the recordings) recorded within
+ * `hours` is not started again: its result is collected (a running one is waited for) and comes back with `reused`. A build that
+ * did not run to its command's end (stopped, timed out, failed before it, a log that is gone) is not reused.
  */
-export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { caller: OffloadCaller; repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; started?: (build: string) => void }): Promise<{ code: number; output: string }> {
+export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { caller: OffloadCaller; repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; imageRoot?: string; reuse?: { hours: number; now?: number }; started?: (build: string) => void }): Promise<{ code: number; output: string; notStarted?: true; reused?: { build: string; at: string } }> {
   const host = o.host ?? hostAws();
   const hasNames = host.names.length + host.accountIds.length > 0;
   const script = ciScript(steps, { ...(o.repo ? { repo: o.repo } : {}), ...(offload.fixtures ? { fixtures: { required: offload.fixtures.required } } : {}), ...(o.perf ? { perf: true as const } : {}) });
+  const size = o.size ?? "small";
+  // the key is read from the work tree as it is when the build starts
+  const key = offload.log ? await buildKey(cwd, script, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}) }).catch(() => undefined) : undefined;
+  if (o.reuse && offload.log && key) {
+    // a record that cannot be read is no reason to fail the run: a new build
+    const prev = (() => {
+      try {
+        return findReusable(offload.log!, key, o.reuse!.hours, o.reuse!.now ?? Date.now());
+      } catch {
+        return undefined;
+      }
+    })();
+    if (prev) {
+      const out = await offload.collect(prev.build);
+      if (reusableOutput(out.output)) return { ...out, reused: { build: prev.build, at: prev.at } };
+    }
+  }
+  // an sb-offload from before the flag would take it for the command: nothing is started, and it says what is missing
+  if (o.imageRoot && (await offload.knows?.("--image-root")) === false) {
+    return { code: 2, output: "sb-offload が --image-root を知らない（ホストの次の起動で入る）", notStarted: true };
+  }
   const dir = hasNames ? mkdtempSync(join(tmpdir(), "switchboard.names.")) : undefined;
   let build: string;
   let image: string | undefined;
-  const size = o.size ?? "small";
   try {
     let names: string | undefined;
     if (dir) {
       names = join(dir, "names.json");
       writeFileSync(names, JSON.stringify({ names: host.names, accountIds: host.accountIds }), { mode: 0o600 });
     }
-    // the key is read from the work tree as it is when the build starts
-    const key = offload.log ? await buildKey(cwd, script, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}) }).catch(() => undefined) : undefined;
-    const started = await offload.start(script, cwd, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}) });
+    const started = await offload.start(script, cwd, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}), ...(o.imageRoot ? { imageRoot: o.imageRoot } : {}) });
     build = started.build;
     image = started.image;
     if (offload.log) {
@@ -423,7 +481,7 @@ export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: 
       }
     }
   } catch (e) {
-    if (e instanceof OffloadStartError) return { code: e.code, output: e.output };
+    if (e instanceof OffloadStartError) return { code: e.code, output: e.output, notStarted: true };
     throw e;
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -431,6 +489,9 @@ export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: 
   o.started?.(build);
   return offload.collect(build);
 }
+
+/** The lines of a build that could not be started, for the log: what happened, then what sb-offload printed. */
+export const notStartedLines = (n: { code: number; output: string }): string => `外のビルドを始められなかった（exit ${n.code}）${n.output.trim() ? `\n${n.output.trim()}` : ""}`;
 
 /**
  * The real build when `sb-offload` is on PATH (the cloud host), else none. Its environment has no GitHub token and no recordings' place.
@@ -443,24 +504,24 @@ export function hostOffload(): Offload | undefined {
   const given = process.env.SWITCHBOARD_FIXTURES;
   const usual = join(process.env.HOME || homedir(), ".switchboard", "fixtures");
   const fixtures = given ? { dir: given, required: true } : existsSync(usual) ? { dir: usual, required: false } : undefined;
-  let usage: Promise<boolean> | undefined;
+  let usage: Promise<string> | undefined;
   return {
     ...(fixtures ? { fixtures } : {}),
     log: fileLog(offloadRecordPath()),
     // called with no arguments sb-offload prints its usage (stderr, exit 2): read once per process
-    knowsBaseTree: () =>
-      (usage ??= (async () => {
+    knows: async (flag) =>
+      (await (usage ??= (async () => {
         try {
           const p = Bun.spawn([bin], { env, stdout: "pipe", stderr: "pipe" });
           const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-          return `${out}${err}`.includes("--base-tree");
+          return `${out}${err}`;
         } catch {
-          // it cannot be run: no base tree; the build's start then fails and says why
-          return false;
+          // it cannot be run: no flag is known; the build's start then fails and says why
+          return "";
         }
-      })()),
+      })())).includes(flag),
     start: async (script, cwd, o) => {
-      const p = Bun.spawn([bin, "--ci", "--detach", ...(o.fixtures ? ["--fixtures", o.fixtures] : []), ...(o.names ? ["--names", o.names] : []), ...(o.baseTree ? ["--base-tree", o.baseTree] : []), "--size", o.size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
+      const p = Bun.spawn([bin, "--ci", "--detach", ...(o.fixtures ? ["--fixtures", o.fixtures] : []), ...(o.names ? ["--names", o.names] : []), ...(o.baseTree ? ["--base-tree", o.baseTree] : []), ...(o.imageRoot ? ["--image-root", o.imageRoot] : []), "--size", o.size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
       const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       // the image build's log may come before it: only the started line names the build
       const build = out.split("\n").map((l) => /^sb-offload: started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
@@ -478,13 +539,13 @@ export function hostOffload(): Offload | undefined {
 }
 
 /**
- * The PR's head and its base branch's tip as they are now, both fetched into `repoRoot` (#913). The head comes by
+ * The PR's head and its base branch's tip as they are now, both fetched into `repoRoot`. The head comes by
  * refs/pull/<n>/head, which GitHub keeps for every PR (a fork's too); it must be the head the PR names.
  * Each is fetched into a ref of its own, refs/local-ci/<n>/base and refs/local-ci/<n>/head, and read from there: another
  * fetch in the same clone (a local-ci of another PR alongside) rewrites FETCH_HEAD in between.
  */
 export async function readTarget(pr: number, repoRoot: string, repo: string, d: Pick<Deps, "sh">, glab: Sh = runGlab): Promise<{ head: string; base: string }> {
-  // a GitLab checkout (#892): the MR `pr` of the project its forge names; GitLab keeps refs/merge-requests/<iid>/head
+  // a GitLab checkout: the MR `pr` of the project its forge names; GitLab keeps refs/merge-requests/<iid>/head
   const named = forgeTargetOf(repoRoot, originOf(repoRoot));
   const view = named.service === "gitlab"
     ? await viewGitlabMr(glab, named, pr).then((m) => ({ headRefOid: m.head, baseRefName: m.target }))
@@ -537,7 +598,7 @@ export async function selectTests(dir: string, base: () => Promise<string>, env:
 
 /**
  * Where the commits of a PR and the PRs below it start: HEAD's fork from the default branch. A stacked PR's base is the
- * branch below it, so a diff from that base would leave out the PRs below (#3297).
+ * branch below it, so a diff from that base would leave out the PRs below.
  */
 export async function mainFork(dir: string, repo: string, sh: Deps["sh"]): Promise<string> {
   const main = (await sh(["gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
@@ -579,10 +640,17 @@ export async function incrementalBase(pr: number, repo: string, repoRoot: string
   }
 }
 
-/** The steps of an incremental run: the install, the type check and `bun test` given `files`; none when the CI lacks one of them. */
+/** The checks of the whole tree that cost seconds and that the added commits can break as easily as the first ones: an incremental run keeps each one the CI has. */
+export const INCREMENTAL_ALSO = ["bun ops-kit/src/cli.ts issue-refs", "bun scripts/file-size.ts", "bun scripts/public-docs.ts check"];
+
+/**
+ * The steps of an incremental run: the install, the type check and `bun test` given `files` (none when the CI lacks one
+ * of them), and, where the CI has them, the tree checks of `INCREMENTAL_ALSO` in the CI's order — a pass on the added
+ * commits is not given without them.
+ */
 export function incrementalSteps(steps: Step[], files: string[]): Step[] | undefined {
   const keep = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"];
-  const kept = steps.filter((s) => keep.includes(s.run.trim()));
+  const kept = steps.filter((s) => keep.includes(s.run.trim()) || INCREMENTAL_ALSO.includes(s.run.trim()));
   return keep.every((k) => kept.some((s) => s.run.trim() === k)) ? narrowTestStep(kept, files) : undefined;
 }
 
@@ -595,7 +663,7 @@ export async function durationOver(dir: string, seconds: StepSeconds): Promise<s
 }
 
 /**
- * A local change (#2488) instead of a PR: its head and base read from the app with the checkout's own branches (no
+ * A local change instead of a PR: its head and base read from the app with the checkout's own branches (no
  * fetch: there is no remote), `label` naming its worktrees and logs. Its tests are chosen against the base's tip, and
  * no bundle row is recorded (that is a GitHub records branch).
  */
@@ -621,6 +689,8 @@ export interface Pending {
   incremental?: { pass: string; commits: number; files: number };
   /** The checkout has scripts/ci.ts: a pass carries its step seconds. */
   ciTs: boolean;
+  /** The steps came from the workspace's settings (the comment names them). */
+  source?: StepsSource;
   /** The local-ci process waiting for this build and this boot's id (null when unreadable): while it is alive it writes the result itself, and `--collect` leaves the record. */
   pid: number;
   boot: string | null;
@@ -696,7 +766,7 @@ async function resultOf(p: Pending, out: { code: number; output: string }, d: Pi
   const ran = parseBuild(out.output, p.steps, out.code);
   const { results, ok, bundle, outputs } = await settle(ran, d, `local-ci-${p.repo.replaceAll("/", "_")}-${p.pr}`, cache);
   const seconds = ok && p.ciTs ? stepSeconds(results) : undefined;
-  const r = { sha: p.head, base: p.base, results, ok, ...(seconds ? { seconds } : {}), ...(p.selection ? { selection: p.selection } : {}), ...(bundle.length ? { bundle } : {}), ...(p.incremental ? { incremental: p.incremental } : {}) };
+  const r = { sha: p.head, base: p.base, results, ok, ...(seconds ? { seconds } : {}), ...(p.selection ? { selection: p.selection } : {}), ...(bundle.length ? { bundle } : {}), ...(p.incremental ? { incremental: p.incremental } : {}), ...(p.source ? { source: p.source } : {}) };
   return ok ? r : withKnown(r, outputs, d.sh, p.root, today);
 }
 
@@ -783,8 +853,9 @@ export async function collectPending(d: Deps, cache: string, post = reportResult
   return left === 0 ? 0 : 1;
 }
 
-/** `cache`: where the worktree and the failure logs go (~/.cache; tests give their own). TMPDIR goes under tmpdir() (#1056). */
-export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; force?: boolean; change?: ChangeTarget; today?: string } = {}): Promise<LocalCiResult> {
+/** `cache`: where the worktree and the failure logs go (~/.cache; tests give their own). TMPDIR goes under tmpdir(). */
+/** `imageRoot`: the tree whose container/Dockerfile is the ci image's when the target is another repository (Switchboard's own clone); none = the checkout that is built (this repository's PR is tried on its own Dockerfile). */
+export async function localCi(pr: number, repoRoot: string, d: Deps, repo: string, cache = join(homedir(), ".cache"), opts: { all?: boolean; force?: boolean; change?: ChangeTarget; today?: string; imageRoot?: string } = {}): Promise<LocalCiResult> {
   const change = opts.change;
   const label = change ? `local-ci ${change.label}` : `local-ci ${repo}#${pr}`;
   let built: string | undefined;
@@ -830,13 +901,17 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       const selectionOf = (incremental: boolean) => (picked && inc && picked.files && !incremental ? { files: null, total: picked.total, reason: "増分に使える手順が無い", unjudged: true as const } : picked);
       const incrementalOf = (incremental: boolean) => (incremental && inc ? { pass: inc.pass, commits: inc.commits.length, files: inc.files.length } : undefined);
       // the build's id is written down as soon as it has started (a PR only): a run that is cut off then leaves its result to `--collect`
-      const started = change ? undefined : (build: string, steps: Step[], incremental: boolean) => {
+      const started = change ? undefined : (build: string, steps: Step[], incremental: boolean, source?: StepsSource) => {
         const selection = selectionOf(incremental);
         const summary = incrementalOf(incremental);
         built = build;
-        writePending(cache, { repo, pr, root: repoRoot, head: sha, base, build, at: Date.now(), pid: process.pid, boot: bootId(), steps, ...(selection ? { selection } : {}), ...(summary ? { incremental: summary } : {}), ciTs: existsSync(join(dir, "scripts/ci.ts")) });
+        writePending(cache, { repo, pr, root: repoRoot, head: sha, base, build, at: Date.now(), pid: process.pid, boot: bootId(), steps, ...(selection ? { selection } : {}), ...(summary ? { incremental: summary } : {}), ciTs: existsSync(join(dir, "scripts/ci.ts")), ...(source ? { source } : {}) });
       };
-      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, picked?.files, change ? undefined : repo, false, !!inc && !!picked?.files, started);
+      const workspace = d.workspace?.(repoRoot);
+      const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, picked?.files, change ? undefined : repo, false, !!inc && !!picked?.files, started, undefined, { ...(opts.imageRoot ? { imageRoot: opts.imageRoot } : {}), ...(workspace ? { workspace } : {}) });
+      // the build never started: no step ran and there is nothing to say about the head
+      if (run.notStarted) return { sha, base, results: [], ok: false, notStarted: run.notStarted };
+      const from = run.source ? { source: run.source } : {};
       const selection = selectionOf(run.incremental);
       const narrowed = selection ? { selection } : {};
       const summary = incrementalOf(run.incremental);
@@ -852,9 +927,9 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         const over = seconds ? await durationOver(dir, { typecheck: off(SECONDS_STEPS.typecheck) ? 0 : seconds.typecheck, test: selection?.files || off(SECONDS_STEPS.test) ? 0 : seconds.test }) : [];
         // a pass whatever the seconds: the comment carries the lines as a warning (the ceilings do not decide the merge)
         for (const l of over) d.log(`警告: ${l}`);
-        return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...(over.length ? { warnings: over } : {}), ...narrowed, ...bundle, ...incremental };
+        return { sha, base, results, ok: true, ...(seconds ? { seconds } : {}), ...(over.length ? { warnings: over } : {}), ...narrowed, ...bundle, ...incremental, ...from };
       }
-      return withKnown({ sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental }, run.outputs, d.sh, repoRoot, opts.today);
+      return withKnown({ sha, base, results, ok: false, ...narrowed, ...bundle, ...incremental, ...from }, run.outputs, d.sh, repoRoot, opts.today);
     } finally {
       await d.sh(["git", "-C", repoRoot, "worktree", "remove", "--force", dir]).catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });
@@ -868,7 +943,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
 }
 
 /**
- * Appends one row (when, js, css, main's sha) to bundle.tsv on the records branch of `repo` (#3169), from the
+ * Appends one row (when, js, css, main's sha) to bundle.tsv on the records branch of `repo`, from the
  * perf-base.json the CI wrote in `dir` (main's tip measured in the same run); "none" without that file. A measure is a
  * row: the same main measured twice is two rows.
  */
@@ -881,7 +956,7 @@ export async function recordBundle(repo: string, dir: string, measuredAt: string
 }
 
 /**
- * Appends main's `bytes` of the same measure to bytes.tsv on the records branch (#3921), a row per response's path
+ * Appends main's `bytes` of the same measure to bytes.tsv on the records branch, a row per response's path
  * (`bytesRows`); "none" without perf-base.json or without its `journeys` (a main measured before perf-ratchet measured them).
  */
 export async function recordBytes(repo: string, dir: string, measuredAt: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
@@ -951,19 +1026,24 @@ async function appendRecord(repo: string, path: string, header: string, rows: st
 }
 
 /**
- * A checkout's CI in `dir` (#2953; local-ci's merge, tag-ci's tag): its steps (`checkoutSteps`) run with `env` until one
+ * A checkout's CI in `dir` (local-ci's merge, tag-ci's tag): its steps (`checkoutSteps`) run with `env` until one
  * without `keepGoing` fails (`runCi`). Each failed step's whole output goes to one log dir `switchboard.<label>-log.*`
  * under `cache` (the latest of a label only: earlier ones go, the host's disk is small) and, for a perf step, its verdict
  * and perf-result.json there. A failure that is not a perf step is logged here; a perf step's is the caller's (the tag CI's). `outputs`: each failed step's whole output by its name.
  * `tests`: only those test files for `bun test` (local-ci); none, or null = every test.
  * `bundle`: the perf check's `bundle:` and `grew:` lines, whether it passed or not (none without that check).
  * `incremental`: `tests` choose the steps of `incrementalSteps` only (a PR's local CI after an earlier pass); `incremental` in the result says whether that happened.
- * `withPerf`: false = the steps without the perf ones (`withoutPerf`): a PR's local CI; the tag CI measures (#4076).
+ * `withPerf`: false = the steps without the perf ones (`withoutPerf`): a PR's local CI; the tag CI measures.
  * `baseTree`: off the host only, the tar of the tag the perf steps compare with (`sb-offload --base-tree`).
+ * `x.imageRoot`: off the host only, the tree whose container/Dockerfile is the ci image's (`sb-offload --image-root`); none = `dir`.
+ * `x.workspace`: the settings Switchboard keeps for the workspace, read when `dir` has no `ops.config.json` (`checkoutCi`); `source` in the result says the steps came from there.
+ * `notStarted`: the build off the host could not be started (no step ran: `results` is empty and `ok` false, and the caller writes no result).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean) => void, baseTree?: string): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean }> {
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean, source?: StepsSource) => void, baseTree?: string, x: { imageRoot?: string; workspace?: WorkspaceSettings } = {}): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean; source?: StepsSource; notStarted?: { code: number; output: string } }> {
+  const ci = await checkoutCi(dir, env, x.workspace);
+  const from = ci.source ? { source: ci.source } : {};
   // a perf step never stops the steps after it, whatever the repository's CI says: perf does not decide the result (docs/design/perf.md)
-  const all = (await checkoutSteps(dir, env)).map((s) => (isPerfStep(s) ? { ...s, keepGoing: true } : s));
+  const all = ci.steps.map((s) => (isPerfStep(s) ? { ...s, keepGoing: true } : s));
   const listed = withPerf ? all : withoutPerf(all);
   // incremental: `tests` came from the commits since an earlier pass, so they narrow only the install, type check and test steps; a CI without those runs every test
   const inc = incremental && tests ? incrementalSteps(listed, tests) : undefined;
@@ -981,14 +1061,16 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   // sb-offload: every step in one build, whatever the CI's step names are; here only the work tree is made and the result read (no step, no slot)
   else {
     d.log(`▶ 外: ${steps.map((s) => s.name).join(" → ")}`);
-    const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(started ? { started: (build) => started(build, steps, !!inc) } : {}) });
+    const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(x.imageRoot ? { imageRoot: x.imageRoot } : {}), ...(started ? { started: (build) => started(build, steps, !!inc, ci.source) } : {}) });
+    // not a step's failure: the first step would otherwise carry sb-offload's own exit as if the code had failed
+    if (r.notStarted) return { steps, results: [], ok: false, outputs: {}, bundle: [], offloaded: [], incremental: !!inc, ...from, notStarted: { code: r.code, output: r.output } };
     ran = parseBuild(r.output, steps, r.code);
     // a perf run's files come back in the log: written into `dir` as a run here would leave them, for the records and the judgement
     if (withPerf) for (const [name, bytes] of Object.entries(buildFiles(r.output))) writeFileSync(join(dir, name), bytes);
   }
   const offloaded = offload ? steps.map((s) => s.name) : [];
   const settled = await settle(ran, d, label, cache, dir);
-  return { steps, ...settled, offloaded, incremental: !!inc };
+  return { steps, ...settled, offloaded, incremental: !!inc, ...from };
 }
 
 /**
@@ -1044,25 +1126,28 @@ export function remoteRepo(url: string): string | undefined {
 
 /**
  * The URL of the PR's newest result when it is of the head as it is and merge-gate counts it (`localCiOf`, this PR as its
- * own top): a later fail runs (#1882); a base that moved under the same head does not (#3118).
+ * own top): a later fail runs; a base that moved under the same head does not — unless it moved on a
+ * shared file the PR touches (`sharedMoved`, read in the checkout `git`): merge-gate does not count that pass, so it runs.
  */
-export async function existingPass(pr: number, repo: string, run: Deps["sh"]): Promise<string | undefined> {
-  const view = JSON.parse(await run(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,comments"])) as {
+export async function existingPass(pr: number, repo: string, run: Deps["sh"], git?: { root: string; url: string }): Promise<string | undefined> {
+  const view = JSON.parse(await run(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefOid,comments"])) as {
     headRefOid: string;
+    baseRefOid: string;
     comments: Array<{ body: string; createdAt: string; url: string; authorAssociation?: string }>;
   };
   const marks = view.comments.filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
   const newest = newestLocalCi(marks);
   if (newest?.m[2] !== view.headRefOid) return undefined;
   // the pass is of this head: its commits are the PR's as they are (no git cherry to run)
-  const counted = await localCiOf(pr, pr, marks, () => Promise.reject(new Error("unused: the PR is its own top")), repo, async () => true);
+  const counted = await localCiOf(pr, pr, marks, () => Promise.reject(new Error("unused: the PR is its own top")), repo, async () => true,
+    async (passHead, passBase) => (git ? sharedMoved(git, sharedFilesOf(git.root), passHead, passBase, view.baseRefOid) : []));
   return counted.pass ? newest.c.url : undefined;
 }
 
 /** The pass to reuse: none with `--force` or `--all` (a narrowed pass is not what it asks for), on GitLab, or when unreadable (a normal run). */
 export async function reusablePass(t: { pr: number; repo: string; root: string; all?: true; force?: true }, run: Deps["sh"]): Promise<string | undefined> {
   if (t.force || t.all || forgeTargetOf(t.root, originOf(t.root)).service === "gitlab") return undefined;
-  return existingPass(t.pr, t.repo, run).catch(() => undefined);
+  return existingPass(t.pr, t.repo, run, { root: t.root, url: `https://github.com/${t.repo}.git` }).catch(() => undefined);
 }
 
 /** The PR, the repository and its clone from the arguments: `<PR> [--repo <owner/name>] [--all] [--force] [--local]`. `--local`: every step here, not in the off-host build. */
@@ -1082,7 +1167,7 @@ export async function resolveTarget(argv: string[], cwd: string, scriptRoot: str
   if (at < 0) {
     // the clone this script is in and its origin: the PR's head (refs/pull/<n>/head) and its base (refs/heads/<base>) are
     // fetched from that origin, and the result goes on its PR
-    // a GitLab checkout (#892): the project its forge names, checked against the origin
+    // a GitLab checkout: the project its forge names, checked against the origin
     let named;
     try {
       named = forgeTargetOf(scriptRoot, originOf(scriptRoot));
@@ -1090,7 +1175,7 @@ export async function resolveTarget(argv: string[], cwd: string, scriptRoot: str
       throw new TargetError((e as Error).message);
     }
     if (named.service === "gitlab") return { pr, repo: named.repository!, root: scriptRoot, ...flags };
-    // a forge naming the app (#2488): its changes have no PR, and the result would go on the change of the same number
+    // a forge naming the app: its changes have no PR, and the result would go on the change of the same number
     // (one without a forge or an origin fails below: no origin to read)
     if (named.service === LOCAL_SERVICE) throw new TargetError(`${scriptRoot} の変更はアプリにある（PR は無い）。--change <n> で回す`);
     const url = (await run(["git", "-C", scriptRoot, "remote", "get-url", "origin"]).catch(() => "")).trim();
@@ -1137,23 +1222,25 @@ export const stepWithIdle = (idleSeconds: number): Deps["step"] => async (script
 export const step = stepWithIdle(STEP_IDLE_SECONDS);
 
 /**
- * Posts a result on the PR as a forge `verification` (#920): the service is the target repository's `ops.config.json`
+ * Posts a result on the PR as a forge `verification`: the service is the target repository's `ops.config.json`
  * `forge` (none = GitHub); one without a verification is said, not posted some other way. The texts go through the
  * kit's check for values usable for auth first.
  */
-export async function reportResult(t: { pr: number; repo: string; root: string }, body: string, run: Deps["sh"], glab: Sh = runGlab, backlog: BacklogAccess = { env: process.env }): Promise<void> {
+export async function reportResult(t: { pr: number; repo: string; root: string; change?: true }, body: string, run: Deps["sh"], glab: Sh = runGlab, backlog: BacklogAccess = { env: process.env }): Promise<void> {
   // the repository is the origin's on github.com (`remoteRepo`), the one refs/heads/<base> and refs/pull/<n>/head are
-  // fetched from; a GitLab project is its `forge`'s, checked against the origin (#924): the note goes on the MR `pr`.
-  // A checkout whose changes the app keeps (#2488, forgeOf): the change `pr` of the workspace `repo`
-  const named = forgeOf(t.root) === LOCAL_SERVICE ? { service: LOCAL_SERVICE, host: "local", repository: t.repo } : forgeTargetOf(t.root, originOf(t.root));
+  // fetched from; a GitLab project is its `forge`'s, checked against the origin: the note goes on the MR `pr`.
+  // A checkout whose changes the app keeps (forgeOf): the change `pr` of the workspace `repo`
+  // `change`: a local change's result goes on the change whatever the checkout's forge is (a GitHub checkout has them
+  // while GitHub cannot be used): never on the PR of the same number
+  const named = t.change || forgeOf(t.root) === LOCAL_SERVICE ? { service: LOCAL_SERVICE, host: "local", repository: t.repo } : forgeTargetOf(t.root, originOf(t.root));
   const target = named.repository ? named : { ...named, host: "github.com", repository: t.repo };
   await runForgeOperation({ kind: "verification", target, texts: [body], payload: { pr: t.pr, body } }, { github: githubForge((cmd) => run(cmd)), gitlab: gitlabForge(glab), [LOCAL_SERVICE]: appForge(backlog.env, backlog.fetch) }, hostAws());
 }
 
 /**
- * Posts the run's result only if it still names the PR's head and base (#913): either moved since the run → nothing
+ * Posts the run's result only if it still names the PR's head and base: either moved since the run → nothing
  * posted (a pass for an old head or base would be taken for the new one), false. Which PRs of a stack the pass covers is
- * merge-gate's to work out with git (#3118), not written here.
+ * merge-gate's to work out with git, not written here.
  */
 export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult, read = () => readTarget(t.pr, t.root, t.repo, d)): Promise<boolean> {
   const now = await read().catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
@@ -1175,16 +1262,16 @@ async function notifyKeeping(t: { pr: number; repo: string; root: string }, r: L
   return { posted, readFailed };
 }
 
-/** The app the kit's backlog client reads a local change from (#2488): its env (BACKLOG_URL, BACKLOG_WORKSPACE, the key's file) and, in tests, its fetch. */
+/** The app the kit's backlog client reads a local change from: its env (BACKLOG_URL, BACKLOG_WORKSPACE, the key's file) and, in tests, its fetch. */
 export interface BacklogAccess { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }
 
 /**
- * `--change <n>` (#2488): a local change of the checkout `cwd` is in, run as a PR is — its head merged into its base's
+ * `--change <n>`: a local change of the checkout `cwd` is in, run as a PR is — its head merged into its base's
  * tip in a worktree of its own — and the result posted on the change (the app's verification, `reportResult`). Nothing
  * is fetched and gh is never called. A pass of the same head and base already there is not run again (`--force` /
  * `--all` run it). Exit codes as `main`'s.
  */
-export async function changeMain(args: string[], at: number, cwd: string, d: Deps, backlog: BacklogAccess, cache?: string): Promise<number> {
+export async function changeMain(args: string[], at: number, cwd: string, d: Deps, backlog: BacklogAccess, cache?: string, scriptRoot?: string): Promise<number> {
   const value = args[at + 1] ?? "";
   const rest = args.filter((_, i) => i !== at && i !== at + 1);
   if (!/^\d+$/.test(value) || rest.some((a) => a !== "--all" && a !== "--force")) {
@@ -1196,8 +1283,7 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
   let first: Awaited<ReturnType<typeof readChangeDetail>>;
   try {
     root = (await d.sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
-    // the result goes where the checkout's changes are: never on a PR of the same number
-    if (forgeOf(root) !== LOCAL_SERVICE) throw new Error(`${root} の変更はアプリに無い（forge が ${forgeOf(root)}）。PR は番号で回す`);
+    // read as a change (the app answers 404 for a number that is none): the result goes on it, never on a PR of the same number
     first = await readChangeDetail(n, backlog.env, { fetch: backlog.fetch, cwd });
   } catch (e) {
     console.error(`対象を読めない: ${(e as Error).message}`);
@@ -1215,16 +1301,20 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
   }
   let r: LocalCiResult;
   try {
-    r = await localCi(n, root, d, workspace, cache, { all: args.includes("--all"), change: { label, read } });
+    r = await localCi(n, root, d, workspace, cache, { all: args.includes("--all"), change: { label, read }, ...imageRootFor(root, scriptRoot) });
   } catch (e) {
-    // nothing to run: one line naming where the steps go, nothing posted (#3932)
+    // nothing to run: one line naming where the steps go, nothing posted
     if (!(e instanceof NoCiSteps)) throw e;
     console.error(e.message);
     return 2;
   }
-  const t = { pr: n, repo: workspace, root };
+  if (r.notStarted) {
+    console.error(`${notStartedLines(r.notStarted)}\n結果は付けない`);
+    return 2;
+  }
+  const t = { pr: n, repo: workspace, root, change: true as const };
   try {
-    if (!(await notify(t, r, d, (t, body, run) => reportResult(t, body, run, runGlab, backlog), read))) return 1;
+    if (!(await notify(t, r, d, (t, body, run) => reportResult({ ...t, change: true }, body, run, runGlab, backlog), read))) return 1;
   } catch (e) {
     console.error(`結果を変更 #${n} に投稿できなかった: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
@@ -1233,13 +1323,31 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
 }
 
 /**
- * The command: its exit code. 2 = the target cannot be run, or its checkout has no CI steps (nothing posted), 1 = a failure, a conflict, a result not
+ * The ci image's source for a run on the clone `root`: Switchboard's own clone (`scriptRoot`, where this script and container/Dockerfile are)
+ * when the target is another repository; none for Switchboard itself (the checkout that is built: a PR that changes the Dockerfile is
+ * tried on its own image). Never decided by whether the target has such a file.
+ */
+export const imageRootFor = (root: string, scriptRoot: string | undefined): { imageRoot?: string } => (scriptRoot && !sameClone(root, scriptRoot) ? { imageRoot: scriptRoot } : {});
+
+/** Are the two paths work trees of one clone (the same git common dir)? A path that is no work tree is its own. */
+function sameClone(a: string, b: string): boolean {
+  if (a === b) return true;
+  const common = (dir: string) => {
+    const p = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"], { stdout: "pipe", stderr: "ignore" });
+    return p.exitCode === 0 ? p.stdout.toString().trim() : null;
+  };
+  const [x, y] = [common(a), common(b)];
+  return x !== null && x === y;
+}
+
+/**
+ * The command: its exit code. 2 = the target cannot be run, its checkout has no CI steps, or the build off the host could not be started (nothing posted), 1 = a failure, a conflict, a result not
  * posted (moved, or the post failed), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
  * `cache`: where the run's worktrees and logs go (~/.cache; tests give their own).
  */
 export async function main(args: string[], cwd: string, d: Deps, post = reportResult, scriptRoot = join(import.meta.dir, ".."), cache?: string, backlog: BacklogAccess = { env: process.env }, live?: (p: Pending) => boolean): Promise<number> {
   const changeAt = args.indexOf("--change");
-  if (changeAt >= 0) return changeMain(args, changeAt, cwd, d, backlog, cache);
+  if (changeAt >= 0) return changeMain(args, changeAt, cwd, d, backlog, cache, scriptRoot);
   // `--collect` alone: the builds still pending (the daemon runs it at its start)
   if (args.length === 1 && args[0] === "--collect") return collectPending(d, cache ?? join(homedir(), ".cache"), post, live);
   let t: Awaited<ReturnType<typeof resolveTarget>>;
@@ -1280,10 +1388,15 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
   }
   let r: LocalCiResult;
   try {
-    r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all, force: t.force });
+    r = await localCi(t.pr, t.root, d, t.repo, cache, { all: t.all, force: t.force, ...imageRootFor(t.root, scriptRoot) });
   } catch (e) {
     if (!(e instanceof NoCiSteps)) throw e;
     console.error(e.message);
+    return 2;
+  }
+  // sb-offload's own failure says nothing about the PR: no mark (a fail would name the first step), no pending record
+  if (r.notStarted) {
+    console.error(`${notStartedLines(r.notStarted)}\n結果は付けない`);
     return 2;
   }
   try {
@@ -1300,11 +1413,11 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     console.error(`結果を PR に投稿できなかった（認証・権限を確かめる）: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
   }
-  // the same exit as Actions' entry (#912); a conflict ran nothing and is a failure
+  // the same exit as Actions' entry; a conflict ran nothing and is a failure
   return r.conflict ? 1 : ciExit(r.results);
 }
 
 if (import.meta.main) {
   const offload = hostOffload();
-  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn), ...(offload ? { offload } : {}) }));
+  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn), workspace: (root) => workspaceSettingsOf(root), ...(offload ? { offload } : {}) }));
 }

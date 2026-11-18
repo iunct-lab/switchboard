@@ -1,8 +1,8 @@
 /**
- * bun scripts/backlog-race-bench.ts --fixture   (#927, PBI #899)
+ * bun scripts/backlog-race-bench.ts --fixture
  *
- * Replays, against a fake forge, the window the send of 初期方式 A leaves open (#887),
- * and what the read after the write closes of it since #1329 (the history is read back):
+ * Replays, against a fake forge, the window the send of 初期方式 A leaves open,
+ * and what the read after the write closes of it (the history is read back):
  * one field (an Issue's body — the one whose history a revision can be deleted from or evicted out of) edited here
  * (v3) while someone edits it on the forge (v2), at each moment of the send —
  * before the edit here was made and no import told of theirs, before the check read, between the check and the
@@ -16,7 +16,8 @@
  */
 import { parseArgs } from "node:util";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
-import { editStoredIssue, type GhRunner } from "../packages/core/src/backlog.ts";
+import { editStoredIssue } from "../packages/core/src/backlog-edit.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { sendGithubOperations } from "../packages/core/src/backlog-send.ts";
 import { Db } from "../packages/core/src/db.ts";
 
@@ -132,7 +133,7 @@ function forge(kind: Forge, clock: () => number) {
       checkRead ??= version;
       r = ok({ data: { repository: { issue: fields() } } });
     } else if (isAfter(args)) {
-      // the read after the write (#1329): the value, the history since the check read, the viewer. Every forge gets the
+      // the read after the write: the value, the history since the check read, the viewer. Every forge gets the
       // body's query (the bench's field is the body); the `github-project-field` forge stands in for a field with no
       // history by answering an empty one, and never refuses (the send reads a real Project field's value only, so a
       // refusal there is not a case). One asked to refuse answers 403
@@ -202,7 +203,7 @@ export async function replay(moment: Moment, kind: Forge): Promise<RaceResult> {
     const held = op?.status === "conflict";
     const found = held ? op!.overwritten : null;
     // what the send holds of theirs: the value it got back, a trace of the edit without its value, or that the history
-    // could not be read — each is told, so the value is not lost without a word (#1329, the user's answer 4)
+    // could not be read — each is told, so the value is not lost without a word (the user's answer 4)
     const recoverable = found && "value" in found ? [String(found.value)] : [];
     const traced = Boolean(found && !("value" in found) && !found.unreadable);
     const unreadable = Boolean(found?.unreadable);

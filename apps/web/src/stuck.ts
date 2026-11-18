@@ -6,7 +6,7 @@ import { ago } from "./inProgress.ts";
 
 export type StuckSchedule = Schedule & { stuck: NonNullable<Schedule["stuck"]> };
 
-/** The schedules whose Tasks stopped the same way in a row (#4479), the longest-stuck first; Home's section is these, none = no section. */
+/** The schedules whose Tasks stopped the same way in a row, the longest-stuck first; Home's section is these, none = no section. */
 export function stuckSchedules(rows: Schedule[]): StuckSchedule[] {
   return rows.filter((s): s is StuckSchedule => s.stuck !== null).sort((a, b) => a.stuck.firstAt - b.stuck.firstAt);
 }

@@ -1,6 +1,6 @@
 ---
 name: stacked-pr-delivery
-description: Task を Stacked PR（GitHub public preview, gh stack）として積み、サブエージェントにレビューさせ、指摘に対応してコメント返信し、下から順にマージするまでの手順とハマりどころ。PR を作る・積む・rebase する・マージするときに読む。
+description: Task を Stacked PR（GitHub public preview, gh stack）として積み、レビューを頼み（`cross-runner-review`）、指摘に対応してコメント返信し、下から順にマージするまでの手順とハマりどころ。PR を作る・積む・rebase する・マージするときに読む。
 ---
 
 # Stacked PR delivery（gh stack）
@@ -13,16 +13,24 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 
 1. origin/main から worktree を作る（`git fetch -q origin && git worktree add --detach <場所> origin/main`。main の作業ツリーでは作業しない）。最初の枝: `git checkout -b <枝> && gh stack init <枝>`。
    上に積む: その枝にいる状態で `gh stack add <次の枝>`（新枝を作って積む）。
-   **ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: 積まない。1 枝ずつ `local-merge.ts` でマージしてから、次の枝を main から切る（`task-to-pr`）。
-2. 実装 → テスト（1 件 / 型検査 / `<関係するテスト>`。`task-to-pr` の 4）→ commit（本文に Issue 番号と検証内容。`Closes #N` は Task の PR だけで、手順が残る PR は `Refs #N`（`task-to-pr` の 5）。`BACKLOG_WORKSPACE` がある（GitHub 連携の無い workspace。Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照する）なら、閉じるキーワードも `#<番号>` も書かず `Backlog-Task: <Task>` の 1 行にする）。
+   **ローカルの変更では**（どの workspace かは `task-to-pr` の「ローカルの変更では」）: 積まない。1 枝ずつ `local-merge.ts` でマージしてから、次の枝を main から切る（`task-to-pr`）。
+2. 実装 → テスト（1 件 / 型検査 / `<関係するテスト>`。`task-to-pr` の 4）→ commit（本文に Issue 番号と検証内容。`task-to-pr` の 5）。
+<!-- when backlog=github -->
+   `Closes #N` は Task の PR だけで、手順が残る PR は `Refs #N`。
+<!-- end when -->
+<!-- when backlog=app -->
+   Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照するので（GitHub 連携の無い workspace）、閉じるキーワードも `#<番号>` も書かず `Backlog-Task: <Task>` の 1 行にする。
+<!-- end when -->
 3. `gh stack submit --auto --open` で push + PR 作成（`--open` で最初から ready。無いと draft）。**テンプレは未記入**なので必ず
    `gh pr edit <n> --title ... --body ...`（PULL_REQUEST_TEMPLATE.md の項目を埋める）。draft のままなら `gh pr ready <n>`。
-4. レビュー: `review-with-subagent` スキルの手順で、PR ごとにサブエージェントを起動しコメントさせる。
+4. レビュー: PR ごとに `cross-runner-review`（主レビュアー）と、使うなら `review-with-subagent`（追加）。どちらもレビュアーは PR に書かず、自分が接頭辞つきで転記する。
 5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`（`submit` と同じく全部の枝を atomic に push する。1 本でも断られたらどの枝も更新されない）。
-   各指摘コメントに個別返信（`gh api .../comments/<id>/replies`）し、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
+   `review-triage-and-merge` の 4 の形で返信し（`gh api .../comments/<id>/replies`。見送る nit は要約の表）、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
 6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
    スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
+<!-- when mergeGate=off -->
    マージ判定のコマンド（CLAUDE.md）にその引数が無いリポジトリでは、`gh stack merge <PR番号> --rebase -y` / 単発は `gh pr merge <n> --rebase --delete-branch`。
+<!-- end when -->
 7. マージそのものは `pbi-complete` の手順（下から 1 本ずつ、GitHub 側の retarget + rebase を待つ。ローカル rebase は CONFLICTING のときだけ）。
    `gh stack rebase` が要るのは**マージ後にローカルの上の枝で作業を続ける（commit を足す）とき**だけ: 同期せずに commit を足すと
    古いハッシュの commit が残り、後で `gh stack merge` が「rebase conflict」で失敗する（実際に起きた）。触らない枝は rebase しない。
@@ -44,8 +52,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 
 テンプレの「概要 / 影響コンポーネント / テスト観点 / チェックリスト」を埋める。テスト観点には
 **実際に実行したもの**（テスト数、実ランナー・実ブラウザで見た事実）だけを書く。やっていないことに [x] を付けない。
-末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` と session URL。
 
 ## コミット・PR の帰属
 
-commit 末尾: `Co-Authored-By:` と `Claude-Session:`（その時点の指示に従う）。
+commit の末尾と PR 本文の末尾の帰属の行は、そのときランナーが受けている指示（帰属の行の指定）に従う。無ければ書かない（ランナーごとの行をここに並べない）。

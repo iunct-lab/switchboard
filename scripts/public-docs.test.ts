@@ -35,7 +35,7 @@ describe("public-docs check", () => {
     expect(r.code).toBe(0);
   });
 
-  test("prose Japanese and #123 / (#1431) are counted with line numbers; &#123; and a/#12 are not", () => {
+  test("prose Japanese and an issue number, bare or in parentheses, are counted with line numbers; &#123; and a/#12 are not", () => {
     const p = doc("dirty.md", [
       "English line.",
       "これは日本語です。",

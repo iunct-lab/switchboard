@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import type { EventEnvelope } from "@switchboard/protocol";
-import type { TaskDetail } from "./api.ts";
+import type { TaskDetail } from "./api/tasks.ts";
 import { caughtUp, lastSeq, mergeEvents, taskReader } from "./catchup.ts";
 
 const env = (seq: number): EventEnvelope => ({ taskId: "t1", seq, ts: seq, ev: { t: "message.delta", role: "assistant", text: `m${seq}` } });
 const seqs = (events: EventEnvelope[]) => events.map((e) => e.seq);
 
-test("a live event that came before the catch-up answer shows once, in seq order (#1137)", () => {
+test("a live event that came before the catch-up answer shows once, in seq order", () => {
   const live = mergeEvents([env(8), env(9)], [env(12)]);
   expect(seqs(mergeEvents(live, [env(10), env(11), env(12)]))).toEqual([8, 9, 10, 11, 12]);
 });
@@ -56,7 +56,7 @@ function harness() {
   return { reader, calls, live, details: () => details };
 }
 
-test("a whole read on its way when the socket connects is followed past its snapshot: the event sent before the subscription shows (#1137)", async () => {
+test("a whole read on its way when the socket connects is followed past its snapshot: the event sent before the subscription shows", async () => {
   const h = harness();
   const load = h.reader.load("t1"); // the daemon snapshots [1, 2]; 3 is sent before the socket subscribes
   h.reader.connected(); // nothing held yet: nothing to catch up
@@ -83,7 +83,7 @@ test("a whole read with no connect meanwhile is not followed, and keeps the live
   expect(seqs(h.details().t1!.events)).toEqual([1, 2, 3]);
 });
 
-test("a live event for a Task whose whole read is on its way is followed past the snapshot (#1142: a turn's end no longer reads it whole)", async () => {
+test("a live event for a Task whose whole read is on its way is followed past the snapshot (a turn's end no longer reads it whole)", async () => {
   const h = harness();
   h.reader.connected();
   const load = h.reader.load("t1"); // the daemon snapshots [1]; 2 and 3 come live before the detail is held
@@ -109,14 +109,14 @@ test("each connect reads every held Task past its last seq", async () => {
   expect("t1" in h.details()).toBe(false);
 });
 
-test("an older page (#1142) goes in front of what the page holds; a row both have shows once", () => {
+test("an older page goes in front of what the page holds; a row both have shows once", () => {
   const held = [env(201), env(202), env(203)];
   const merged = mergeEvents(held, [env(1), env(2), env(201)]);
   expect(merged.map((e) => e.seq)).toEqual([1, 2, 201, 202, 203]);
   expect(mergeEvents(merged, [])).toBe(merged);
 });
 
-test("a failed whole read names its Task, so the page can tell a Task that is not there (404) from the one it is reading (#3427)", async () => {
+test("a failed whole read names its Task, so the page can tell a Task that is not there (404) from the one it is reading", async () => {
   const seen: [string, string][] = [];
   const reader = taskReader({
     read: () => Promise.reject(Object.assign(new Error("not found"), { status: 404 })),
@@ -128,7 +128,7 @@ test("a failed whole read names its Task, so the page can tell a Task that is no
   expect(seen).toEqual([["task_gone", "not found"]]);
 });
 
-test("a task.updated during a read beats the read's older snapshot, even with the same updatedAt (#2834: a title keeps it)", async () => {
+test("a task.updated during a read beats the read's older snapshot, even with the same updatedAt (a title keeps it)", async () => {
   const h = harness();
   const named = (title: string) => ({ id: "t1", status: "running", title, updatedAt: 5 }) as unknown as TaskDetail["task"];
   h.reader.connected();
@@ -151,7 +151,7 @@ test("a task.updated during a read beats the read's older snapshot, even with th
   expect(h.details().t1!.task.title).toBe("Read");
 });
 
-test("a read started later does not take an update an earlier read was told of (#2834: a reconnect while a catch-up is out)", async () => {
+test("a read started later does not take an update an earlier read was told of (a reconnect while a catch-up is out)", async () => {
   const h = harness();
   const named = (title: string) => ({ id: "t1", status: "running", title, updatedAt: 5 }) as unknown as TaskDetail["task"];
   h.reader.connected();

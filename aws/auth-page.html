@@ -67,7 +67,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
-// in the fragment, not the query: a query lands in CloudFront's access log (#1490)
+// in the fragment, not the query: a query lands in CloudFront's access log
 const code = new URLSearchParams(location.hash.slice(1)).get("register");
 // only a page of this site, never back into /_auth: resolved against this origin (a browser turns "/\evil" into
 // "//evil"), backslashes refused outright
@@ -79,7 +79,7 @@ function safeNext(raw) {
   return u.pathname + u.search + u.hash;
 }
 const next = safeNext(q.get("next"));
-/** Where to go once the daemon lets this browser in, marked so the daemon's UI does not send it straight back (#235). */
+/** Where to go once the daemon lets this browser in, marked so the daemon's UI does not send it straight back. */
 function back() {
   const u = new URL(next, location.origin);
   u.searchParams.set("from", "auth");
@@ -108,7 +108,7 @@ async function daemonUp() {
     return Array.isArray(h.runners);
   } catch { return false; }
 }
-/** The rescue page (sb-rescue, on the host) answers: it runs on the same machine, so if it does not, nothing there does (#1394). */
+/** The rescue page (sb-rescue, on the host) answers: it runs on the same machine, so if it does not, nothing there does. */
 async function rescueUp() {
   try {
     const r = await fetch("/rescue/api/status", { credentials: "same-origin", cache: "no-store" });
@@ -132,7 +132,7 @@ async function register() {
     await render("登録しました。次からはこの端末のパスキーで入れます。");
   } catch (e) { say(String(e.message || e), true); }
 }
-/** Tells the device that a passkey was removed from Switchboard (#1312): its password manager can hide it. False when the browser has no Signal API. */
+/** Tells the device that a passkey was removed from Switchboard: its password manager can hide it. False when the browser has no Signal API. */
 async function forgetPasskey(rpId, id) {
   if (typeof PublicKeyCredential === "undefined" || typeof PublicKeyCredential.signalUnknownCredential !== "function") return false;
   return await PublicKeyCredential.signalUnknownCredential({ rpId, credentialId: id }).then(() => true, () => false);
@@ -146,7 +146,7 @@ async function assertFresh() {
   const r = cred.response;
   return { rpId, signed: { challenge, id: cred.id, clientDataJSON: b64(r.clientDataJSON), authenticatorData: b64(r.authenticatorData), signature: b64(r.signature) } };
 }
-/** The passkey ceremony: logs in, and marks a check made just now (sb_recent, #497). False when cancelled. */
+/** The passkey ceremony: logs in, and marks a check made just now (sb_recent). False when cancelled. */
 async function confirmPasskey() {
   const a = await assertFresh();
   if (!a) return false;
@@ -167,7 +167,7 @@ async function login() {
     await render();
   } catch (e) { say(String(e.message || e), true); }
 }
-/** Starting and 作り直す need a passkey check within 5 minutes (#497): on that 401, check and send once more. */
+/** Starting and 作り直す need a passkey check within 5 minutes: on that 401, check and send once more. */
 async function withRecent(send) {
   try { return await send(); }
   catch (e) {
@@ -196,7 +196,7 @@ async function waitForDaemon(started) {
     last = state;
     if (state === "stopping") return waitForStop(Date.now()); // an idle or Spot stop that hangs
     const s = Math.round((Date.now() - t0) / 1000);
-    // the machine runs but Switchboard does not answer: stop / 作り直す at once, not after a wait (#1394)
+    // the machine runs but Switchboard does not answer: stop / 作り直す at once, not after a wait
     const stuck = state === "running";
     say(`起動しています… ${s} 秒（機械: ${state}）${stuck ? "。起動の途中なら 20〜30 秒で開きます" : ""}`);
     if (stuck) {
@@ -267,7 +267,7 @@ async function start() {
   try {
     $("start").disabled = true;
     // 409 = the machine is between states (still stopping, or its Spot request not startable yet), or AWS has no Spot
-    // capacity for it (#443): wait and try again, for 3 minutes
+    // capacity for it: wait and try again, for 3 minutes
     for (;;) {
       try { await withRecent(() => api("start", {})); break; }
       catch (e) {
@@ -341,7 +341,7 @@ function passkeyRow(p) {
   li.append(text, dates, del);
   return li;
 }
-/** The registered passkeys for a logged-in person (#414); a failure leaves the section hidden. */
+/** The registered passkeys for a logged-in person; a failure leaves the section hidden. */
 async function loadDevices() {
   try {
     const { passkeys } = await api("passkeys");
@@ -379,7 +379,7 @@ async function removePasskey(p) {
     await loadDevices();
   } catch (e) { say(String(e.message || e), true); }
 }
-/** The login's end (#498): the earlier of the idle time and the cap, and the cap. Nothing when logged out. */
+/** The login's end: the earlier of the idle time and the cap, and the cap. Nothing when logged out. */
 function showExpiry(session) {
   const at = (ms) => { const d = new Date(ms); return (d.getMonth() + 1) + "/" + d.getDate() + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
   $("expiry").hidden = !session;
@@ -396,7 +396,7 @@ async function render(note) {
   }
   // the Web UI's link (#countries): the section is opened, and a running daemon does not send this page on to it; a stopped or
   // stuck host keeps its controls (start / stop / 作り直す)
-  // #devices (#414) likewise opens the passkey list
+  // #devices likewise opens the passkey list
   const stay = stays();
   if (stay) {
     const link = $(stay === "countries" ? "cBack" : "dBack");

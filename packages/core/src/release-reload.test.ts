@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
-import { readShippedDefaults, startServer, type CoreServer } from "./server.ts";
+import { startServer, type CoreServer } from "./server.ts";
+import { readShippedDefaults } from "./server/helpers.ts";
 
 const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this test" });
 const price = (input: number) => JSON.stringify({ version: 1, billing: {}, models: { "m-test": { input, output: 1, cacheRead: 0, cacheWrite: 0 } }, aliases: {} });

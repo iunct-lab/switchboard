@@ -55,8 +55,24 @@ describe("ops-kit job", () => {
     expect(r.calls[0]!.body).toEqual({ kind: "review", taskId: "task_1", pr: 12, runner: "codex", cwd: "/tmp/clone", promptFile: "/tmp/clone/_review/prompt.md", outFile: "/tmp/clone/_review/codex.md" });
   });
 
+  test("request review without --runner leaves the reviewer to the app; --as says why another runner is named and needs --runner", async () => {
+    const files = ["--prompt", "p.md", "--out", "o.md", "--cwd", "/tmp/clone"];
+    const none = await run(["request", "review", "12", ...files], () => job({ kind: "review", runner: "claude" }));
+    expect(none.code).toBe(0);
+    expect(none.calls[0]!.body).toEqual({ kind: "review", taskId: "task_1", pr: 12, cwd: "/tmp/clone", promptFile: "/tmp/clone/p.md", outFile: "/tmp/clone/o.md" });
+    const stand = await run(["request", "review", "12", "--runner", "claude", "--as", "fallback", ...files], () => job({ kind: "review", runner: "claude" }));
+    expect(stand.calls[0]!.body).toMatchObject({ runner: "claude", as: "fallback" });
+    const unknown = await run(["request", "review", "12", "--runner", "claude", "--as", "because", ...files], () => job());
+    expect(unknown.code).toBe(1);
+    expect(unknown.calls).toEqual([]);
+    const alone = await run(["request", "review", "12", "--as", "audit", ...files], () => job());
+    expect(alone.code).toBe(1);
+    expect(alone.err).toContain("--runner");
+    expect(alone.calls).toEqual([]);
+  });
+
   test("usage errors are 1 and call nothing; the app's 400 is 1", async () => {
-    for (const argv of [["request", "review", "12", "--runner", "codex"], ["request", "shell", "12"], ["request", "local-ci", "x"], ["wait", "7"]]) {
+    for (const argv of [["request", "review", "12", "--runner", "codex"], ["request", "review", "12", "--runner", "gemini", "--prompt", "p", "--out", "o"], ["request", "shell", "12"], ["request", "local-ci", "x"], ["wait", "7"]]) {
       const r = await run(argv, () => job());
       expect(r.code, argv.join(" ")).toBe(1);
       expect(r.calls).toEqual([]);

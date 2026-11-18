@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { GithubBudget, RunnerId, Task, TeleportProgress } from "@switchboard/protocol";
 import { copyText } from "../clipboard.ts";
 import { jstClock } from "../time.ts";
+import { waitTag } from "../waits.ts";
 import { runnerLabel } from "../runners.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
@@ -11,10 +12,10 @@ export function RunnerPill(props: { runner: RunnerId }) {
   return <span className={`pill ${props.runner}`}>{runnerLabel(props.runner)}</span>;
 }
 
-/** "04:11", or "9/12 04:11" when not today — JST, like every other time the UI shows (#2028). */
+/** "04:11", or "9/12 04:11" when not today — JST, like every other time the UI shows. */
 export const fmtClock = jstClock;
 
-/** GitHub's GraphQL budget left (#549): "3,965 / 5,000 · 11:31 に戻る". */
+/** GitHub's GraphQL budget left: "3,965 / 5,000 · 11:31 に戻る". */
 export function githubBudgetLabel(g: GithubBudget, now = Date.now()): string {
   return t(m.githubBudget, { remaining: g.remaining.toLocaleString(), limit: g.limit.toLocaleString(), time: fmtClock(g.resetsAt * 1000, now) });
 }
@@ -23,9 +24,9 @@ export function githubBudgetLabel(g: GithubBudget, now = Date.now()): string {
 export const githubBudgetLow = (g: GithubBudget) => g.remaining / g.limit < 0.2;
 
 /**
- * A task stopped on the runner's usage limit (#102), or waiting for GitHub's API limit a turn met (#550, `reason`
+ * A task stopped on the runner's usage limit, or waiting for GitHub's API limit a turn met (`reason`
  * github): when it can go on. Whether it goes on by itself is the runner's setting (Home). `compact` (the Rail, where
- * a dated time would leave no room for the title) keeps the time in the tooltip. `plannedAt` (#2237): a long wait tries
+ * a dated time would leave no room for the title) keeps the time in the tooltip. `plannedAt`: a long wait tries
  * once at `resumeAt` and goes back to this time when refused.
  */
 /** The turn ended waiting for background jobs: the task is `done`, but work is still going on. */
@@ -38,6 +39,20 @@ export function BackgroundTag(props: { background: Task["background"]; compact?:
   return (
     <span className="tag" title={b.jobs.join("\n") || t(m.contentsUnknown)}>
       {props.compact || !b.jobs.length ? text : `${text}: ${b.jobs.join(" / ")}`}
+    </span>
+  );
+}
+
+/**
+ * What the Task waits for and until when (`Task.waits`): one tag — the runner's silence (応答なし), else a wait over its
+ * limit, else the wait whose limit comes first — with every wait in the tooltip. `compact` (the Rail) leaves the label there too.
+ */
+export function WaitTag(props: { task: Pick<Task, "waits">; compact?: boolean }) {
+  const v = waitTag(props.task, Date.now(), !!props.compact);
+  if (!v) return null;
+  return (
+    <span className={`tag wait ${v.tone}`} title={v.title}>
+      {v.text}
     </span>
   );
 }
@@ -76,7 +91,7 @@ export function ResumeTag(props: { resumeAt: Task["resumeAt"]; reason: Task["res
   );
 }
 
-/** Where a task was started (#91). Switchboard is the default and shows nothing; a session run in a terminal gets a tag. */
+/** Where a task was started. Switchboard is the default and shows nothing; a session run in a terminal gets a tag. */
 export function OriginTag(props: { origin: Task["origin"] }) {
   if (props.origin !== "terminal") return null;
   return (
@@ -86,7 +101,17 @@ export function OriginTag(props: { origin: Task["origin"] }) {
   );
 }
 
-/** Shadow run (#99): a task that mirrors another one on a second runner. */
+/** Where the Task ran, when its record came from another machine (read only here); nothing for this instance's own. */
+export function MachineTag(props: { machine?: string | null }) {
+  if (!props.machine) return null;
+  return (
+    <span className="tag machine" title={t(m.machineTagTitle, { machine: props.machine })}>
+      {props.machine}
+    </span>
+  );
+}
+
+/** Shadow run: a task that mirrors another one on a second runner. */
 export function ShadowTag(props: { task: Pick<Task, "shadowOf" | "shadowStopped"> }) {
   if (!props.task.shadowOf) return null;
   const title = props.task.shadowStopped
@@ -100,7 +125,7 @@ export function ShadowTag(props: { task: Pick<Task, "shadowOf" | "shadowStopped"
 }
 
 /**
- * A copy button (#695). `text` is read when pressed, so a running task copies what has come so far; `partial` says so on
+ * A copy button. `text` is read when pressed, so a running task copies what has come so far; `partial` says so on
  * the button. Always shown (not on hover): a phone has no hover. A failure goes to `onError` instead of doing nothing.
  */
 export function CopyButton(props: { text: () => string; partial?: boolean; label?: string; onError: (msg: string) => void }) {
@@ -129,7 +154,7 @@ export function CopyButton(props: { text: () => string; partial?: boolean; label
 export const fmtUsd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
 export const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-/** What "continue locally" shows for a Cloud Task (#1306): one place for the words. null = nothing to show. */
+/** What "continue locally" shows for a Cloud Task: one place for the words. null = nothing to show. */
 export function teleportView(p: TeleportProgress | null | undefined): { text: string; question?: string; answerInTerminal: boolean; active: boolean } | null {
   if (!p) return null;
   switch (p.phase) {
@@ -142,7 +167,7 @@ export function teleportView(p: TeleportProgress | null | undefined): { text: st
   }
 }
 
-/** A Local Task imported from a Cloud Task (#1634): in the sticky head, so it is seen without scrolling; `switched` adds the line
+/** A Local Task imported from a Cloud Task: in the sticky head, so it is seen without scrolling; `switched` adds the line
  *  for the screen "ローカルで続ける" just switched to. */
 export function CloudSourceTag(props: { source: Task; switched: boolean; onOpen: () => void }) {
   return (

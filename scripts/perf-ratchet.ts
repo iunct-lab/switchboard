@@ -1,7 +1,7 @@
 /**
- * The CI ratchet on the counts of `bun scripts/perf-bench.ts --json` (#638): the ceilings in scripts/perf-budget.json only
- * go down. The bundle and `bytes` (the size of open-task's and open-task-huge's /api/ responses) have no ceiling (#3167,
- * #3921): they are compared with main's tip, measured in the same run.
+ * The CI ratchet on the counts of `bun scripts/perf-bench.ts --json`: the ceilings in scripts/perf-budget.json only
+ * go down. The bundle and `bytes` (the size of open-task's and open-task-huge's /api/ responses) have no ceiling:
+ * they are compared with main's tip, measured in the same run.
  *   bun scripts/perf-ratchet.ts base <ref> <out.json>   builds <ref> in a worktree next to this checkout, runs its perf-bench
  *                                        once there (`--runs 1 --skip-loaded`: a response's size does not wobble) and
  *                                        writes `{ sha, bundle: { js, css }, journeys: { <open-task…>: { bytes, responses? } } }`
@@ -33,13 +33,13 @@
  * the ceiling and better below ceiling − 2 × band (more than a band below the measured value: a new low of the same code's
  * wobble is not an improvement, or every run that finds one would fail an unrelated PR). Fixed per count, not a setting: the band is how much the same code moves,
  * not how much worse a change may be.
- * A count over its ceiling that the user accepted is a known exception (`exceptions` in the budget, #1890): it does not fail
+ * A count over its ceiling that the user accepted is a known exception (`exceptions` in the budget): it does not fail
  * while its Issue is open. Adding one fails like raising a ceiling, so the user merges it by hand.
  *   bun scripts/perf-ratchet.ts history [--repo <owner/name>] [--since YYYY-MM-DD]
  *                                        main's bundle as local-ci measured it, in time order, with the increase from the
- *                                        first row (#3169): one read of `bundle.tsv` on the `perf-records` branch; nothing
+ *                                        first row: one read of `bundle.tsv` on the `perf-records` branch; nothing
  *                                        is built again. A row is one measure, not one commit (docs/design/perf.md). Then
- *                                        main's `bytes` the same way from `bytes.tsv` (#3921), summed per measure.
+ *                                        main's `bytes` the same way from `bytes.tsv`, summed per measure.
  *   bun scripts/perf-ratchet.ts spread [--repo <owner/name>] [--env github|local|offload] [--last N]
  *                                        the counts the tag CI measured (`counts.tsv` on `perf-records`, one row per tag and
  *                                        count): per count the last N tags' values (default 10), their min / max / spread
@@ -53,7 +53,7 @@ export interface Budget {
   journeys: Record<string, { requests?: number; layoutCount?: number; recalcStyleCount?: number; layoutShift?: number }>;
   /** The daemon's delay under load and overlap (perf-bench's `loaded`); `local` only: a ceiling nobody measured would be a guess. */
   loaded?: { healthMaxMs: number };
-  /** A result only: why perf-bench did not measure `loaded` (`--skip-loaded`, #3635); judge then leaves its ceiling out. */
+  /** A result only: why perf-bench did not measure `loaded` (`--skip-loaded`); judge then leaves its ceiling out. */
   loadedSkipped?: string;
   /** The type check's and bun test's seconds, compared by local-ci (`judgeDurations`); `local` only: Actions has no ceilings of its own. */
   durations?: { typecheck: number; test: number };
@@ -79,7 +79,7 @@ const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleC
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
  * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against the first ceiling and band, 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
- * the same reason as `judgeDurations` (a regression of #2822, #3574). */
+ * the same reason as `judgeDurations` (a regression seen in the loaded measure). */
 const HIGH_SIDE_ONLY = new Set(["loaded.healthMaxMs"]);
 
 /** Every ceiling as `journeys.<name>.<count>` / `loaded.healthMaxMs` → value (a result's `bytes` and `responses` are not ceilings). */
@@ -208,7 +208,7 @@ export function bundleGrowth(merged: Bundle, base: Bundle): { line: string; grew
   return { line, grew };
 }
 
-/** The journeys whose `bytes` are compared with main's (#2088, #3921): opening a task, and one as big as the real ones. */
+/** The journeys whose `bytes` are compared with main's: opening a task, and one as big as the real ones. */
 export const BYTES_JOURNEYS = ["open-task", "open-task-huge"] as const;
 /** A journey's /api/ responses by the shape of their path (`shapeOf`): how many finished and their bytes. */
 export type Responses = Record<string, { count: number; bytes: number }>;
@@ -224,7 +224,7 @@ export function shapeOf(pathname: string): string {
  * BUNDLE_GROWTH_LIMIT or more above main's — the same limit as the bundle, not a setting of its own (the user's rule,
  * 2026-10-30, applied to `bytes` 2026-11-05). Under each `bytes:` line, the responses whose size differs when both sides
  * have them: `  /api/tasks/:id/evals +22 B × 2` (the same count: the change per response × the count), else
- * `  <shape> +44 B（2 回、main 1 回）`. A base without journeys (main measured before #3921) judges nothing.
+ * `  <shape> +44 B（2 回、main 1 回）`. A base without journeys (main measured before `bytes` was recorded per journey) judges nothing.
  */
 export function bytesGrowth(merged: Partial<Record<string, JourneyBytes>>, base: Partial<Record<string, JourneyBytes>> | undefined): { lines: string[]; grew: string[] } {
   if (!base) return { lines: ["bytes: main の測定に journeys が無い（main の perf-bench が bytes を出す前）。判定しない"], grew: [] };
@@ -342,7 +342,7 @@ export function historyTable(rows: Row[], since?: string): string[] {
   ];
 }
 
-/** Where local-ci appends main's `bytes` of the same measure (`recordBytes`, #3921): a row per journey and response's path. */
+/** Where local-ci appends main's `bytes` of the same measure (`recordBytes`): a row per journey and response's path. */
 export const BYTES_RECORDS_PATH = "bytes.tsv";
 export const BYTES_RECORDS_HEADER = "measured_at\tjourney\tpath\tcount\tbytes\tmain";
 /** One response's path of one journey in one measure; `path` is `(total)` when main's perf-bench gave the journey's bytes alone. */
@@ -439,7 +439,7 @@ export function spreadTable(rows: CountsRow[], budgets: Budgets, env: Env, last:
   ];
 }
 
-/** How many tags in a row must be below a ceiling before `update` lowers it: one low run left the window under the real spread, and the next high one was `over`; the max of three sits inside it (#4124). */
+/** How many tags in a row must be below a ceiling before `update` lowers it: one low run left the window under the real spread, and the next high one was `over`; the max of three sits inside it. */
 export const LOWER_AFTER = 3;
 
 /**
@@ -487,7 +487,7 @@ async function readRecords(repo: string, path: string): Promise<string> {
   throw new Error(`${RECORDS_BRANCH}/${path} を読めない: ${err.trim().split("\n")[0]}`);
 }
 
-/** The ref the budgets are compared with: origin/main, or PERF_BASE_REF (the tag CI sets the tag before, #4219). */
+/** The ref the budgets are compared with: origin/main, or PERF_BASE_REF (the tag CI sets the tag before). */
 const baseRef = () => process.env.PERF_BASE_REF || "origin/main";
 
 /** The base ref's budgets, or why there are none (no such ref in a shallow checkout, or it has no budget yet). */

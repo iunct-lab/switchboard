@@ -1,5 +1,5 @@
 /**
- * The recordings' list, and their second copy (#3532): the branch `recordings-vault` of the repository (never merged,
+ * The recordings' list, and their second copy: the branch `recordings-vault` of the repository (never merged,
  * like `feedback-assets`; the public sync sends main's tree only). Written with git's plumbing, not in a working tree.
  *   bun scripts/fixtures.ts list             present / missing for each name in RECORDINGS
  *   bun scripts/fixtures.ts save [--create]  every file of the recordings folder onto the branch (a changed one replaces

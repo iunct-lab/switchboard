@@ -9,7 +9,7 @@ import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer, type CoreServer } from "../packages/core/src/server.ts";
 import { closedBy, main } from "./local-merge.ts";
 
-// A local change merged (#2489) against the real daemon with a fake runner and a repository with no remote: what
+// A local change merged against the real daemon with a fake runner and a repository with no remote: what
 // main's log, the branches and the app's states are after it.
 
 let core: CoreServer | undefined;
@@ -25,7 +25,7 @@ const idle: RunnerAdapter = {
   start: () => ({ send() {}, respondPermission() {}, async abort() {}, async close() {}, exited: new Promise(() => {}) }),
 };
 
-/** The daemon, a local workspace on a repository `main` → `sb/2-x` (2 commits), a PBI #1, its Task #2 and the change #3 of the branch, reviewed with a local-ci pass. */
+/** The daemon, a local workspace on a repository `main` → `sb/2-x` (2 commits), a PBI `#1`, its Task `#2` and the change `#3` of the branch, reviewed with a local-ci pass. */
 async function setup(o: { lines?: number } = {}) {
   home = mkdtempSync(join(tmpdir(), "sb-local-merge-"));
   const repo = join(home, "repo");
@@ -72,6 +72,7 @@ async function setup(o: { lines?: number } = {}) {
 test("(a, c) base not moved: main gets the branch's commits in order, no merge commit; the branch goes, the change is merged, its Task closed and the PBI's done grows", async () => {
   const s = await setup();
   const head = s.tip("sb/2-x");
+  const base = s.tip("main");
   expect((await s.done())).toMatchObject({ total: 1, done: 0 });
   const r = await s.run();
   expect(r.code).toBe(0);
@@ -81,7 +82,11 @@ test("(a, c) base not moved: main gets the branch's commits in order, no merge c
   expect(s.tip("main")).toBe(head);
   expect(s.branches()).toEqual(["main"]);
   expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED", change: { head: "sb/2-x", base: "main", mergeCommit: head, mergedAt: "2026-01-02T00:00:00.000Z", reviewedHead: head } });
-  // the Task had no Status (no field set when made): it is Done now (#3970)
+  // which commits the merge put on the base is recorded on the change: forge-resync sends only commits so recorded
+  expect((await s.view(3)).comments.map((c) => c.body)).toContain(`[local-merge] merged ${head} base=${base}`);
+  // a workspace that keeps its changes itself: its branch (and the checkout that has it) is where the merge lands, no landing ref
+  expect(() => s.git("rev-parse", "--verify", "-q", "refs/switchboard/landed/main")).toThrow();
+  // the Task had no Status (no field set when made): it is Done now
   const task = await s.view(2);
   expect(task.issue.state).toBe("CLOSED");
   expect(task.fields).toMatchObject({ Status: "Done" });
@@ -98,7 +103,7 @@ test("(b) base moved before: the branch's commits are rebased onto the new tip, 
   const reviewed = s.tip("sb/2-x");
   const r = await s.run();
   expect(r.code).toBe(0);
-  // the change keeps the head that was judged (#3971) beside the commit main got: the rebase made them differ
+  // the change keeps the head that was judged beside the commit main got: the rebase made them differ
   const merged = (await s.view(3)).issue.change!;
   expect(merged.reviewedHead).toBe(reviewed);
   expect(merged.mergeCommit).toBe(s.tip("main"));
@@ -214,7 +219,7 @@ test("(g') the same with the branch checked out in a Task's worktree: that workt
   expect(execFileSync("git", ["-C", other, "branch", "--show-current"], { encoding: "utf8" }).trim()).toBe("sb/2-x");
 });
 
-test("(h) main moved after the judgement while checked out nowhere: update-ref's old value refuses, nothing changes", async () => {
+test("(h) main moved after the judgement while checked out nowhere: it is not the tip that was judged, nothing changes", async () => {
   const s = await setup();
   s.git("switch", "-q", "--detach");
   let moved = false;
@@ -231,7 +236,7 @@ test("(h) main moved after the judgement while checked out nowhere: update-ref's
   };
   const r = await s.run(["3"], f);
   expect(r.code).toBe(1);
-  expect(r.out).toContain("main を進められない");
+  expect(r.out).toContain("main が判定の後に動いた");
   expect(s.git("log", "-1", "--format=%s", "main")).toBe("elsewhere");
   expect(s.branches()).toContain("sb/2-x");
   expect((await s.view(3)).issue.state).toBe("OPEN");

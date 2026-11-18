@@ -1,14 +1,14 @@
 /**
- * `bun scripts/local-change-e2e.ts` (#2491): a workspace without GitHub and without a remote goes from a request to a
+ * `bun scripts/local-change-e2e.ts`: a workspace without GitHub and without a remote goes from a request to a
  * merge on a fake-runner daemon, with no call to GitHub. A request, a PBI and its Task are made through the API; the
- * PBI's 実装 is started and its first prompt must choose local changes (#2490); the Task's branch gets two commits and a
- * change (#2485) with a `[claude] review` summary and a triage table; then, as a Task would, `scripts/local-ci.ts
- * --change` (#2488), `scripts/merge-gate.ts --change` (#2487) and `scripts/local-merge.ts` (#2489) run as child
+ * PBI's 実装 is started and its first prompt must choose local changes; the Task's branch gets two commits and a
+ * change with a `[claude] review` summary and a triage table; then, as a Task would, `scripts/local-ci.ts
+ * --change`, `scripts/merge-gate.ts --change` and `scripts/local-merge.ts` run as child
  * processes with BACKLOG_URL / BACKLOG_WORKSPACE, with a `gh` first on PATH that records any call and fails.
  * Checked: main has the two commits in order and no merge commit, the branch is gone, the change is closed with its
  * merge commit, the Task is closed and the PBI's done count is 1, and `gh` was never called. Prints each stage and `ok`.
  * SCREENSHOT=<file.png> (after `bun run --cwd apps/web build`, with Chrome: CHROME_BIN) also saves the Backlog screen
- * with the change opened (#2486). Its temporary directory is removed at the end.
+ * with the change opened. Its temporary directory is removed at the end.
  */
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

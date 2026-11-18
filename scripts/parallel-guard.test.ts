@@ -1,11 +1,13 @@
-// test-reads: scripts/parallel-guard.ts
+// test-reads: scripts/parallel-guard.ts docs/design/pbi-progress.md
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, waitsOnlyForCheck, type Work } from "./parallel-guard";
-import { linkedIssues, pathsIn, scopeIn } from "./task-paths";
+import { linkedIssues } from "./task-paths";
+import { pathsIn } from "../ops-kit/src/task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
+import { readProgressTable } from "../packages/core/src/pbi-progress.table";
 
 const REPO = "example/development";
 const now = new Date("2026-09-28T12:00:00Z");
@@ -35,71 +37,6 @@ describe("parallel-guard holder", () => {
   test("a takeover replaces a holder that is still there", () => {
     expect(holder([c(1, "claim"), c(2, "takeover")])).toEqual({ id: 2, token: "t2" });
   });
-});
-
-describe("parallel-guard pathsIn", () => {
-  test("reads paths under the root's directories and the root's files; drops the line number and a trailing period", () => {
-    const body = "触る: `packages/core/src/db.ts:120`、apps/web/src/App.tsx。docs/design/ 以下、aws/template.yaml、`package.json`、README.md";
-    expect(pathsIn(body, top)).toEqual([
-      "packages/core/src/db.ts", "apps/web/src/App.tsx", "docs/design/", "aws/template.yaml", "package.json", "README.md",
-    ]);
-  });
-
-  test("a root file name inside another path or word is not the root file", () => {
-    expect(pathsIn("docs/README.md と apps/web/package.json、mypackage.json、package.json5", top)).toEqual(["docs/README.md", "apps/web/package.json"]);
-  });
-});
-
-describe("parallel-guard pathsIn: a name without a directory (#4382)", () => {
-  test("a root file named in the middle of a step is a reference, not a touched file", () => {
-    expect(pathsIn("1. 昇格は README.md の規則に従う。`package.json` も読む\n- 手順の途中の `new-config.json` も参照", top)).toEqual([]);
-  });
-
-  test("the same name at the head of a step, or on a line starting with 触る, is touched", () => {
-    expect(pathsIn("1. README.md: 追記する\n- `new-config.json` — 足す\n2. 説明の中の package.json は参照", top)).toEqual(["README.md", "new-config.json"]);
-    expect(pathsIn("- 触るファイル: package.json", top)).toEqual(["package.json"]);
-    expect(pathsIn("1. `README.md`・`package.json`: 直す\n2. README.md と package.json: 直す", top)).toEqual(["README.md", "package.json"]);
-    expect(pathsIn("1. `scripts/a.ts` を直す。読み方は README.md と `new-config.json` の手順: 根拠は下", top)).toEqual(["scripts/a.ts"]);
-    expect(pathsIn("1. `new-config.json`（新規）: 足す\n2. `other.json:3`: 足す\n3. `x.ts` の /ws ルート: 直す", top)).toEqual(["new-config.json", "other.json", "x.ts"]);
-  });
-
-  test("a path from a root directory counts anywhere in a sentence", () => {
-    expect(pathsIn("昇格は docs/design/x.md の規則で、`apps/web/a.ts` も読む", top)).toEqual(["docs/design/x.md", "apps/web/a.ts"]);
-  });
-});
-
-describe("parallel-guard pathsIn: globs and commands are not touched paths", () => {
-  test("a glob is not a path, nor the directory before its wildcard", () => {
-    expect(pathsIn("`grep -n x docs/design/*.md` と packages/core/src/*.test.ts、apps/web/src/{a,b}.ts、docs/a?.md", top)).toEqual([]);
-    expect(pathsIn("docs/design/x.md と packages/core/src/ 以下", top)).toEqual(["docs/design/x.md", "packages/core/src/"]);
-  });
-
-  test("a backticked span with a space is a command: what it names is checked, not touched", () => {
-    const body = "1. `scripts/a.ts` `resolveTarget`: 直す\n確認: `bun test scripts/a.test.ts packages/core/src/b.test.ts` と `bun scripts/public-docs.ts check docs/x.md` が通る";
-    expect(pathsIn(body, top)).toEqual(["scripts/a.ts"]);
-    expect(scopeIn(body, top)).toEqual(["packages/core/src/b.test.ts", "docs/x.md", "scripts/a.ts"]); // merge-gate keeps them
-  });
-
-  test("a glob whose wildcard follows a word is not a path either; merge-gate's scope keeps the directory before a wildcard", () => {
-    expect(pathsIn("docs/design/foo-*.md と packages/adapters/claude-*/src", top)).toEqual([]);
-    expect(scopeIn("`packages/core/src/*.test.ts`", top)).toEqual(["packages/core/src/"]);
-  });
-
-  test("a span with a space that starts with a path is not a command", () => {
-    expect(pathsIn("触る: `docs/a.md の節`、`./x.sh --y` と `bun x docs/b.md`", top)).toEqual(["docs/a.md"]);
-    expect(pathsIn("`FOO=1 bun test docs/c.md` と `A=1 B=2 bun x docs/d.md`", top)).toEqual([]);
-  });
-});
-
-test("scopeIn: a top directory alone in backticks counts for merge-gate, pathsIn and a glob do not make it one", () => {
-  const body = "`docs/` と packages/core/ を触る。`scripts/*.ts`、`apps/<name>/x`、`docs/… の下`、`packages/{a,b}.ts`、`nothere/`";
-  expect(pathsIn("`docs/` だけ", top)).toEqual([]);
-  expect(scopeIn(body, top)).toEqual(["packages/core/", "docs/"]);
-  expect(scopeIn("`apps/` は触らない文でも名指し。`docs/a.md`", top)).toEqual(["docs/a.md", "apps/"]);
-});
-
-test("parallel-guard pathsIn: a backticked path counts even when no branch has it yet", () => {
-  expect(pathsIn("触る: `new-config.json:10-20`、`tools/gen.ts:3`、`gh stack add`、`readOthers`、`Bun.serve`、`.env`、`turn/completed`、`origin/main`、`@switchboard/protocol`", top)).toEqual(["tools/gen.ts", "new-config.json"]);
 });
 
 describe("parallel-guard judge", () => {
@@ -135,7 +72,7 @@ describe("parallel-guard judge", () => {
     expect(judge({ paths: db, claimId: 100 }, [task(40, db)], now).verdict).toBe("go");
   });
 
-  test("a Task that only refers to a root file in a step does not block; one that names it at the head of a step does, and two of those defer (#4382)", () => {
+  test("a Task that only refers to a root file in a step does not block; one that names it at the head of a step does, and two of those defer", () => {
     const refers = pathsIn("1. 規則は README.md に従う", top);
     const touches = pathsIn("1. README.md: 追記する", top);
     expect(judge({ paths: touches }, [task(40, refers)], now).verdict).toBe("go");
@@ -259,7 +196,7 @@ describe("parallel-guard claim", () => {
   });
 });
 
-describe("parallel-guard after (#4616)", () => {
+describe("parallel-guard after", () => {
   const AT = "2026-11-20T09:00:00+09:00";
   test("--after is written into the release mark, with or without waits, and holder() still reads it as a release", () => {
     expect(releaseBody("期日待ち", [], false, AT)).toBe(`<!-- pbi-complete:release after=${AT} -->\n/pbi-complete 終了: 期日待ち`);
@@ -404,7 +341,7 @@ describe("parallel-guard readOthers", () => {
     expect((await readOthers(11, await material("2026-09-28T12:00:00Z"))).others.map((w) => w.ref)).toEqual(["Task #12"]); // at the date it holds again
   });
 
-  // Codex's follow-up on #485: a root file only an open PR adds is not in the repository's root yet
+  // a review's follow-up: a root file only an open PR adds is not in the repository's root yet
   test("a new root file or directory an open PR adds is a path in the Task too", async () => {
     const g = github({
       bodies: { 11: "触る: new-config.json と tools/gen.ts を足す。packages/core/src/db.ts" },
@@ -464,14 +401,14 @@ describe("parallel-guard overlap", () => {
     expect(timelineCalls(none)).toBe(0);
   });
 
-  // Codex's case on #485: #40 and #60 both pass the check before either is In progress; #60 claims and rechecks first,
-  // then #40 claims. #40 must not go on just because its number is smaller.
+  // a review's case: `#40` and `#60` both pass the check before either is In progress; `#60` claims and rechecks first,
+  // then `#40` claims. `#40` must not go on just because its number is smaller.
   test("of two staggered starts on the same file only the first claim goes on", async () => {
     const g = github({ bodies: { 40: db, 60: db } });
     expect((await overlap(ghBoard(REPO, g.run), 60, false, now)).verdict).toBe("go"); // both checks pass: nothing In progress yet
     expect((await overlap(ghBoard(REPO, g.run), 40, false, now)).verdict).toBe("go");
     const g2 = github({ bodies: { 40: db, 60: db }, inProgress: [60] });
-    expect((await overlap(ghBoard(REPO, g2.run), 60, true, now)).verdict).toBe("go"); // #40 not In progress yet
+    expect((await overlap(ghBoard(REPO, g2.run), 60, true, now)).verdict).toBe("go"); // `#40` not In progress yet
     const g3 = github({ bodies: { 40: db, 60: db }, inProgress: [40, 60], comments: g2.comments });
     const late = await overlap(ghBoard(REPO, g3.run), 40, true, now);
     expect(late.verdict).toBe("defer");
@@ -482,7 +419,7 @@ describe("parallel-guard overlap", () => {
 
   test("claiming at the same time: the later claim yields, the earlier one goes on", async () => {
     const g = github({ bodies: { 40: db, 60: db }, inProgress: [40, 60] });
-    const first = await overlap(ghBoard(REPO, g.run), 60, true, now); // claims 100; #40 has no claim yet → #40 will yield
+    const first = await overlap(ghBoard(REPO, g.run), 60, true, now); // claims 100; `#40` has no claim yet → `#40` will yield
     expect(first.verdict).toBe("go");
     expect((await overlap(ghBoard(REPO, g.run), 40, true, now)).verdict).toBe("defer");
   });
@@ -508,7 +445,7 @@ describe("parallel-guard overlap", () => {
   });
 });
 
-describe("parallel-guard overlap conditions (#2045)", () => {
+describe("parallel-guard overlap conditions", () => {
   const hit = (ref: string) => ({ ref, path: "packages/a.ts", updatedAt: fresh });
 
   test("a blocking PR and Task become pr# / issue# wait keys, once each; another PBI's prerequisite waits by its state", () => {
@@ -534,7 +471,7 @@ describe("parallel-guard overlap conditions (#2045)", () => {
   });
 });
 
-describe("parallel-guard prereqs (#937)", () => {
+describe("parallel-guard prereqs", () => {
   const db = "`packages/core/src/db.ts`";
   const task = (prereq: string, more: Partial<Parameters<typeof github>[0]> = {}) =>
     github({ bodies: { 52: `${db}\n\n${prereq}` }, parents: { 52: { number: 50, subs: [52, 53] } }, ...more });
@@ -615,6 +552,33 @@ describe("parallel-guard prereqs (#937)", () => {
     expect(await overlap(ghBoard(REPO, task("**前提**: #61", { targets: none }).run), 52, false, now)).toMatchObject({ verdict: "wait" });
   });
 
+  test("prerequisites: the guard reads the same table as the app", async () => {
+    // every row of docs/design/pbi-progress.md a body can say (the decided / held columns come from the app's stored decisions),
+    // as an open Issue `#61` named as a prerequisite, read both ways the guard reads: from GitHub and from the app's records
+    const rows = readProgressTable().filter((r) => r.facts.decided.length === 0 && !r.facts.held);
+    expect(rows.length).toBeGreaterThanOrEqual(15);
+    expect(rows.some((r) => r.want.prereqMet) && rows.some((r) => !r.want.prereqMet)).toBe(true);
+    for (const { row, facts, want } of rows) {
+      const last = Math.max(0, ...facts.confirms) + facts.others + 1;
+      let others = facts.others;
+      const lines = Array.from({ length: last }, (_, k) => k + 1).map((n) => (facts.confirms.includes(n) ? `- [ ] ${n}. 見る（利用者確認: 画面で見る）` : others-- > 0 ? `- [ ] ${n}. 直す（検証: テスト）` : `- [x] ${n}. 済み`));
+      const body = `## 到達点 / 受け入れ条件\n${lines.join("\n")}\n`;
+      const labels = [facts.pbi ? "type:pbi" : "type:task", ...(facts.decision ? ["needs-decision"] : [])];
+      const expected = want.prereqMet ? { verdict: "go", prereqs: [{ ref: "#61", state: "met", confirming: true }] } : { verdict: "wait", prereqs: [{ ref: "#61", state: "pending" }] };
+      const fromGithub = await overlap(ghBoard(REPO, task("**前提**: #61", { targets: { 61: { state: "open" as const, labels, sub: { total: facts.tasks.total, completed: facts.tasks.done }, body } } }).run), 52, false, now);
+      expect({ row, from: "GitHub", ...fromGithub }).toMatchObject({ row, ...expected });
+      const issue = (n: number, over: Partial<StoredRecords["issues"][number]>) => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over } as StoredRecords["issues"][number]);
+      const children = Array.from({ length: facts.tasks.total }, (_, k) => issue(600 + k, { parent: 61, state: k < facts.tasks.done ? "CLOSED" : "OPEN" }));
+      const records = {
+        workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], unread: [], pulls: [], comments: [],
+        // the Status the table names is stored too: the guard must not read it
+        issues: [issue(52, { body: `${db}\n\n**前提**: #61`, parent: 50 }), issue(50, { labels: ["type:pbi"], subIssues: [52] }), issue(61, { body, labels, subIssues: children.map((c) => c.number), fields: facts.status ? { Status: facts.status } : null }), ...children],
+      } as StoredRecords;
+      const fromApp = await overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(records, 52) }, 52, false, now);
+      expect({ row, from: "the app's records", ...fromApp }).toMatchObject({ row, ...expected });
+    }
+  });
+
   test("a Task that has to wait withdraws its claim", async () => {
     const g = task("**前提**: #61", { targets: { 61: { state: "open" } }, inProgress: [52] });
     expect((await overlap(ghBoard(REPO, g.run), 52, true, now)).verdict).toBe("wait");
@@ -622,7 +586,7 @@ describe("parallel-guard prereqs (#937)", () => {
   });
 });
 
-describe("parallel-guard from the app's stored records (#919)", () => {
+describe("parallel-guard from the app's stored records", () => {
   const db = "`packages/core/src/db.ts`";
   const issue = (n: number, over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over });
   const pull = (n: number, closes: number[], files: string[] | null, over: Partial<StoredRecords["pulls"][number]> = {}): StoredRecords["pulls"][number] => ({ number: n, state: "OPEN", isDraft: false, labels: [], closes, mergeCommit: null, updatedAt: fresh, files, ...over });
@@ -704,8 +668,8 @@ describe("parallel-guard from the app's stored records (#919)", () => {
   });
 });
 
-describe("parallel-guard on a backlog kept in the app (#2265)", () => {
-  test("a withdrawn claim does not hold (#2265)", () => {
+describe("parallel-guard on a backlog kept in the app", () => {
+  test("a withdrawn claim does not hold", () => {
     const claimOf = (id: number, token: string) => ({ id, body: `<!-- pbi-complete:claim ${token} -->` });
     const withdraw = (id: number, token: string) => ({ id, body: `<!-- parallel-guard:withdraw ${token} -->\n取り下げ` });
     const release = (id: number) => ({ id, body: releaseBody("終了") });
@@ -718,7 +682,8 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
   });
 
   /** The app's backlog API over stored comments `sb:<seq>`; `beforePost` runs before a comment is stored (a rival's write). */
-  function app(issues: StoredRecords["issues"], beforePost?: (n: number) => void) {
+  /** `lease`: what the app answers on POST /:n/lease (the body, or a status to fail with); unset = it runs alone (`enabled: false`). */
+  function app(issues: StoredRecords["issues"], beforePost?: (n: number) => void, lease?: (action: string) => unknown) {
     let seq = 0;
     const comments: Record<number, Array<{ id: string; seq: number; body: string; createdAt: string }>> = {};
     const add = (n: number, body: string) => (comments[n] ??= []).push({ id: `sb:${String(++seq).padStart(12, "0")}`, seq, body, createdAt: fresh });
@@ -734,6 +699,10 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
       const m = /^\/(\d+)(\/comment)?/.exec(path)!;
       const n = Number(m[1]);
       if (method === "GET") return json({ comments: comments[n] ?? [] });
+      if (path.endsWith("/lease")) {
+        const answer = lease ? lease((JSON.parse(String(init.body)) as { action: string }).action) : { enabled: false };
+        return typeof answer === "number" ? json({ error: "S3 に届かない" }, answer) : json(answer);
+      }
       beforePost?.(n);
       add(n, (JSON.parse(String(init.body)) as { text: string }).text);
       return json({ operation: "op" }, 202);
@@ -741,7 +710,40 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     return { board: appBoard({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l" }, fetch), comments, add, calls };
   }
 
-  test("on a local backlog, claim / release / overlap go through the app, never gh (#2265)", async () => {
+  test("lease: an app that runs alone is asked and answers enabled false — claim and release go on as before", async () => {
+    const a = app([]);
+    expect(await claim(a.board, 1, false)).toMatchObject({ held: true });
+    await release(a.board, 1, "完了");
+    expect(a.calls.filter((c) => c.endsWith("/lease"))).toEqual(["POST /1/lease", "POST /1/lease"]);
+    expect(a.comments[1]!.map((c) => /pbi-complete:(\w+)/.exec(c.body)?.[1])).toEqual(["claim", "release"]);
+  });
+
+  test("lease: a PBI another machine holds is not claimed — the claim comment is taken back and the line says who holds it until when", async () => {
+    const line = "PBI #1 は pc1 が 2026-11-17 09:30 UTC まで持っている";
+    const a = app([], undefined, () => ({ enabled: true, ok: false, holder: "pc1", until: 1, error: line }));
+    expect(await claim(a.board, 1, false)).toEqual({ held: false, holder: null, leased: line });
+    expect(holder(await a.board.comments(1))).toBeNull();
+    expect(a.comments[1]!.map((c) => /(pbi-complete:claim|parallel-guard:withdraw)/.exec(c.body)?.[1])).toEqual(["pbi-complete:claim", "parallel-guard:withdraw"]);
+  });
+
+  test("lease: taken with the claim and given back with the release; a lease that cannot be asked for takes the claim back and is not judged", async () => {
+    const asked: string[] = [];
+    const a = app([], undefined, (action) => (asked.push(action), { enabled: true, ok: true }));
+    expect((await claim(a.board, 1, false)).held).toBe(true);
+    await release(a.board, 1, "完了");
+    expect(asked).toEqual(["acquire", "release"]);
+    const down = app([], undefined, () => 424);
+    await expect(claim(down.board, 2, false)).rejects.toThrow("S3 に届かない");
+    expect(holder(await down.board.comments(2))).toBeNull();
+  });
+
+  test("lease: GitHub's comments alone (no app) have no lease to ask for", async () => {
+    const g = github({ bodies: {} });
+    expect(ghBoard(REPO, g.run).lease).toBeUndefined();
+    expect(await claim(ghBoard(REPO, g.run), 7, false)).toMatchObject({ held: true });
+  });
+
+  test("on a local backlog, claim / release / overlap go through the app, never gh", async () => {
     const db = "`packages/core/src/db.ts`";
     const task = (n: number) => ({ number: n, title: "", state: "OPEN" as const, stateReason: null, body: db, labels: ["type:task"], parent: null, subIssues: [], updatedAt: fresh, fields: { Status: "In progress" } });
     const a = app([task(40), task(60)]);
@@ -760,13 +762,13 @@ describe("parallel-guard on a backlog kept in the app (#2265)", () => {
     expect(late).toMatchObject({ verdict: "defer", blocking: [{ ref: "Task #60" }] });
     expect(a.comments[40]!.map((c) => c.body.split("\n")[0]!.replace(/ [0-9a-f-]{36} /, " <token> "))).toEqual(["<!-- parallel-guard:task-claim <token> -->", "<!-- parallel-guard:withdraw <token> -->"]);
     expect(lastClaim(a.comments[40]!.map((c) => ({ id: c.seq, body: c.body })))).toBeUndefined();
-    // #60 still goes when it marks again (#40's mark is taken back); only the app was asked
+    // `#60` still goes when it marks again (`#40`'s mark is taken back); only the app was asked
     expect((await overlap(a.board, 60, true, now)).verdict).toBe("go");
-    expect([...a.calls, ...b.calls].every((c) => /^(GET|POST) (\/syncs|\/records\?.*|\/\d+(\?.*|\/comment))$/.test(c))).toBe(true);
+    expect([...a.calls, ...b.calls].every((c) => /^(GET|POST) (\/syncs|\/records\?.*|\/\d+(\?.*|\/comment|\/lease))$/.test(c))).toBe(true);
   });
 });
 
-test("a local backlog's Task that cannot reach the app stops (exit 2), never falling back to gh (#2265)", () => {
+test("a local backlog's Task that cannot reach the app stops (exit 2), never falling back to gh", () => {
   const dir = mkdtempSync(join(tmpdir(), "guard-local-"));
   try {
     const called = `${dir}/gh-called`;
@@ -785,7 +787,7 @@ test("a local backlog's Task that cannot reach the app stops (exit 2), never fal
   }
 });
 
-describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", () => {
+describe("parallel-guard on a GitHub-synced backlog through the app", () => {
   const stamp = "2026-09-28T11:00:00.000Z";
   const task = { number: 40, title: "", url: "", state: "OPEN", stateReason: null, body: "`packages/core/src/db.ts`", labels: ["type:task"], parent: null, subIssues: [], createdAt: stamp, updatedAt: stamp, closedAt: null, fields: { Status: "In progress" } };
 
@@ -808,6 +810,8 @@ describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", ()
         imports += 1;
         return json(syncStatus === 200 ? {} : { error: "GitHub に届かない" }, syncStatus);
       }
+      // this app runs alone: it has no lease to give
+      if (/^\/\d+\/lease$/.test(path)) return json({ enabled: false });
       const m = /^\/(\d+)(\/comment)?$/.exec(path)!;
       const n = Number(m[1]);
       if (req.method === "GET") return json({ comments: comments[n] ?? [] });
@@ -917,10 +921,77 @@ describe("parallel-guard on a GitHub-synced backlog through the app (#3069)", ()
   });
 });
 
-test("a local Task's PR links by Backlog-Task without a closing keyword (#2344)", () => {
+test("a local Task's PR links by Backlog-Task without a closing keyword", () => {
   expect(linkedIssues({ body: "## 概要\nBacklog-Task: 12\n本文", headRefName: "feat/x" })).toEqual([12]);
   expect(linkedIssues({ body: "Backlog-Task: 12", headRefName: "sb/12-x" })).toEqual([12, 12]);
   // only its own line: a mention in a sentence is not a link, and the GitHub forms are unchanged
   expect(linkedIssues({ body: "see Backlog-Task: 9 above", headRefName: null })).toEqual([]);
   expect(linkedIssues({ body: "Closes #3", headRefName: null })).toEqual([3]);
+});
+
+describe("parallel-guard shared files", () => {
+  const server = "packages/core/src/server.ts";
+  const asks = "packages/core/src/asks.ts";
+  const other = (paths: string[]): Work => ({ ref: "Task #60", task: 60, paths, updatedAt: fresh });
+
+  test("without a list every overlap holds, as before", () => {
+    expect(judge({ paths: [server] }, [other([server])], now)).toEqual({ verdict: "defer", blocking: [{ ref: "Task #60", path: server, updatedAt: fresh }], stale: [] });
+    expect(judge({ paths: [server] }, [other([server])], now, [])).toEqual(judge({ paths: [server] }, [other([server])], now));
+  });
+
+  test("an overlap only on a shared file goes and is reported; another file overlapping too defers, on that file alone", () => {
+    expect(judge({ paths: [server] }, [other([server])], now, [server])).toEqual({ verdict: "go", blocking: [], stale: [], shared: [{ ref: "Task #60", path: server, updatedAt: fresh }] });
+    const v = judge({ paths: [server, asks] }, [other([server, asks])], now, [server]);
+    expect(v.verdict).toBe("defer");
+    expect(v.blocking.map((h) => h.path)).toEqual([asks]);
+    expect(v.shared!.map((h) => h.path)).toEqual([server]);
+    // the other side names the directory: what both touch is still the shared file
+    expect(judge({ paths: [server] }, [other(["packages/core/src/"])], now, [server]).verdict).toBe("go");
+    expect(judge({ paths: ["packages/core/src/"] }, [other(["packages/core/src/"])], now, [server]).verdict).toBe("defer");
+    // my directory meets the other's shared file and another file under it: the second one still holds
+    const dir = judge({ paths: ["packages/core/src/"] }, [other([server, asks])], now, [server]);
+    expect([dir.verdict, dir.blocking.map((h) => h.path), dir.shared!.map((h) => h.path)]).toEqual(["defer", [asks], [server]]);
+  });
+
+  test("the guard's verdict from the stored records carries the app's list", async () => {
+    const issue = (n: number, over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over });
+    const r = (shared?: string[]): StoredRecords => ({ workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], unread: [], pulls: [], comments: [], ...(shared ? { shared } : {}),
+      issues: [issue(40, { body: `\`${server}\`` }), issue(60, { body: `\`${server}\``, fields: { Status: "In progress" } })] });
+    const run = (x: StoredRecords) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(x, 40) }, 40, false, now);
+    expect(await run(r([server]))).toMatchObject({ verdict: "go", blocking: [], shared: [{ ref: "Task #60", path: server }] });
+    expect((await run(r())).verdict).toBe("defer");
+  });
+});
+
+describe("parallel-guard overlap turn", () => {
+  const a = "`packages/core/src/a.ts`";
+  const issue = (n: number, over: Partial<StoredRecords["issues"][number]> = {}): StoredRecords["issues"][number] => ({ number: n, title: "", url: "", state: "OPEN", stateReason: null, body: "", labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: null, ...over });
+  // P (`#20`, Task 21) yielded first and holds the path; Y (`#30`, Task 31) came later
+  const records = (turns: StoredRecords["turns"]): StoredRecords => ({ workspaceId: "w", service: "github", repository: REPO, project: { owner: "example", number: 8 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], unread: [], pulls: [], comments: [], turns,
+    issues: [issue(20, { labels: ["type:pbi"], subIssues: [21] }), issue(21, { parent: 20, body: a }), issue(30, { labels: ["type:pbi"], subIssues: [31] }), issue(31, { parent: 30, body: a })] });
+  const first = { pbi: 20, since: "2026-09-20T00:00:00Z", task: 21, paths: ["packages/core/src/a.ts"] };
+  const run = (r: StoredRecords, task: number, claimed: boolean) => {
+    const g = github({ bodies: {} });
+    return overlap({ ...ghBoard(REPO, g.run), material: async () => storedMaterial(r, task) }, task, claimed, now).then((v) => ({ v, g }));
+  };
+
+  test("a Task of a PBI that is not first in the turn yields, even after claiming and however old the place is; the first one goes", async () => {
+    const r = records([first]);
+    for (const claimed of [false, true]) {
+      const { v, g } = await run(r, 31, claimed);
+      expect(v.verdict).toBe("defer");
+      expect(v.blocking).toEqual([{ ref: "Task #21", path: "packages/core/src/a.ts", updatedAt: first.since, turn: 20 }]);
+      expect(v.conditions).toEqual([{ key: "issue#21", value: "open", met: false }]);
+      expect(g.comments[31] ?? []).toHaveLength(0); // the claim is taken back
+    }
+    expect((await run(r, 21, true)).v.verdict).toBe("go");
+    // no place kept: as before
+    expect((await run(records([]), 31, true)).v.verdict).toBe("go");
+  });
+
+  test("of two PBIs that both yielded, the earlier goes and the later yields", async () => {
+    const r = records([first, { pbi: 30, since: "2026-09-21T00:00:00Z", task: 31, paths: ["packages/core/src/a.ts"] }]);
+    expect((await run(r, 21, true)).v.verdict).toBe("go");
+    expect((await run(r, 31, true)).v.blocking.map((h) => h.turn)).toEqual([20]);
+  });
 });

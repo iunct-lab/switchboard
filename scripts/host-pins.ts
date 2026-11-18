@@ -1,5 +1,5 @@
 /**
- * The versions aws/host/node.sh and aws/host/devtools.sh pin, against the distributors' latest (PBI #3345). Detection
+ * The versions aws/host/node.sh and aws/host/devtools.sh pin, against the distributors' latest. Detection
  * only: the pins are those two files' lines, read here and not copied, and nothing here changes them. Node.js also says
  * whether a newer release of the pinned major is a security release. No key: the GitHub reads are unauthenticated, so
  * its rate limit reads as "cannot tell".

@@ -15,7 +15,7 @@ auto: { maxBodyChars: 600, excludeLabels: [needs-decision, on-hold, flow-improve
 
 アプリでは、Backlog 画面の要望の行（派生 PBI の無い要望）の「直行で直す」でこの入口の Task が始まる（信号は要望の番号）。選ぶのは利用者のボタンと、バックログの自動処理（上の frontmatter の `auto` の基準。`maxBodyChars` は要望の `## 要望` の文の字数で、節が無いか文が無ければ本文全体）。ボタンが優先で、自動処理はボタンで始めた要望には動かない。どちらで始めたかは Task の由来の `processReason`（`direct button` / `auto direct: …`）に残る。2026-11-03 はボタンだけだったのを、2026-11-08 に自動処理も選ぶ形に変えた。PR のレビューは、merge-gate の判定で外れる場合がある（下の入口）。直行は小さくない・明確でないと分かれば変更を作らず戻す（下の入口。戻った要望は `direct-returned` が付き、自動処理は p0-pipeline で始める）。
 
-穴: `{{signal}}` = 読む信号（Issue の番号か、信号の文そのもの）。
+穴: `{{signal}}` = 読む信号（Issue の番号か、信号の文そのもの）。`{{reviewer}}` = 主レビュアーの呼び方（アプリのレビューの設定で決まる。別のランナーか、同じランナーの新しいセッション）。
 
 ## entry direct
 
@@ -27,5 +27,5 @@ auto: { maxBodyChars: 600, excludeLabels: [needs-decision, on-hold, flow-improve
 - 変更は、信号が求めることだけ。ついでの整形・改名・リファクタをしない
 - テストは変更の等級に応じて: 関数なら単体テスト、API なら偽の依存で起動して `fetch`。テストの無い PR は出さない。型検査と関係するテストのコマンドはリポジトリの CLAUDE.md
 - PBI・Task Issue は作らない。PR の本文に、読んだ信号・変えたこと・走らせたテスト・変えなかったことを書く。Issue・決定ログ・Project のフィールドは書かない（この型では作らない）。例外は要望 Issue への書き込みだけ（戻す印とコメントは上、閉じるのは下）: 信号が要望 Issue なら、PR を出したらその要望に `直行: PR #<番号>` の 1 行をコメントする（`ops-kit backlog comment <要望> --body-file -`）
-- PR を出したあとも、終わるまで通す。先に `bun scripts/merge-gate.ts <PR>`（`--merge` なし）で判定を見る。exit 2（判定できない）なら、レビューの要否も分からないので止まって理由を返答に書く。理由に「主レビュー」が出たときだけ、`.claude/skills/cross-runner-review/SKILL.md` で別のランナーにレビューさせ、`.claude/skills/review-triage-and-merge/SKILL.md` で指摘を処理する。出なければレビューを通さない。要否を自分で決めない。レビューを通さないときも CI は要る: CI が走らないリポジトリでは、リポジトリの CLAUDE.md のローカル CI を回す（アプリの Task の中なら `ops-kit job request local-ci <PR>` で頼む）。そのあと `bun scripts/merge-gate.ts <PR> --merge` でマージ判定とマージをする。判定が merge でなければマージせず、止まって理由を返答に書く。マージしたら、信号が要望 Issue なら `ops-kit backlog edit <要望> --state closed` で閉じる
+- PR を出したあとも、終わるまで通す。先に `bun scripts/merge-gate.ts <PR>`（`--merge` なし）で判定を見る。exit 2（判定できない）なら、レビューの要否も分からないので止まって理由を返答に書く。理由に「主レビュー」が出たときだけ、`.claude/skills/cross-runner-review/SKILL.md` で{{reviewer}}にレビューさせ、`.claude/skills/review-triage-and-merge/SKILL.md` で指摘を処理する。出なければレビューを通さない。要否を自分で決めない。レビューを通さないときも CI は要る: CI が走らないリポジトリでは、リポジトリの CLAUDE.md のローカル CI を回す（アプリの Task の中なら `ops-kit job request local-ci <PR>` で頼む）。そのあと `bun scripts/merge-gate.ts <PR> --merge` でマージ判定とマージをする。判定が merge でなければマージせず、止まって理由を返答に書く。マージしたら、信号が要望 Issue なら `ops-kit backlog edit <要望> --state closed` で閉じる
 - 返答に、PR の番号と、信号のうち扱わなかった部分があればそれを書く

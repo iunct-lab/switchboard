@@ -16,12 +16,12 @@ const REASON_LABEL: Record<BacklogSyncReason, string> = {
   import: t(m.reasonImport),
 };
 
-/** Where the public copy says how to set up a Project and its repository variable (#2362; the owner reads it, not this repository's own). */
+/** Where the public copy says how to set up a Project and its repository variable (the owner reads it, not this repository's own). */
 // ui-strings: value "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#starting-development-on-a-fork" — a URL whose anchor is the README's heading
 export const PROJECT_SETUP_DOC = "https://github.com/iunct-lab/switchboard/blob/main/ops-kit/README.md#starting-development-on-a-fork";
 
 /**
- * What a workspace that could not be read asks of the owner (#2362), by the error's kind: a lead line and the steps.
+ * What a workspace that could not be read asks of the owner, by the error's kind: a lead line and the steps.
  * `other` says the reason as it is. The kind is the daemon's (where gh was called); gh's wording is not read here.
  */
 export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: string | undefined): { lead: string; steps: Array<{ text: string; link?: string; githubLogin?: true }> } {
@@ -40,7 +40,7 @@ export function workspaceErrorGuide(e: Backlog["errors"][number], projectVar: st
 }
 
 /**
- * The backlog's heading (#2362, #2343): when it was imported from GitHub; with only workspaces kept here in view, that it
+ * The backlog's heading: when it was imported from GitHub; with only workspaces kept here in view, that it
  * is stored here, with no GitHub in it; with both, that only the GitHub ones were imported. `kinds` = where the workspaces in
  * view keep their backlogs; null = the workspaces have not arrived yet.
  */
@@ -53,17 +53,17 @@ export function backlogHeading(fetchedAt: number | null, busy: "open" | "refresh
   return `${line}${word}`;
 }
 
-/** What the backlog screen says of what was saved (#2343): nothing of GitHub for a workspace kept here. */
+/** What the backlog screen says of what was saved: nothing of GitHub for a workspace kept here. */
 export const savedWords = (keptHere: boolean) =>
   keptHere
     ? { edit: t(m.savedEditHere), comment: t(m.savedCommentHere), commentHint: t(m.commentHintHere), created: t(m.createdHere), made: t(m.madeHere) }
     : { edit: t(m.savedEditGithub), comment: t(m.savedCommentGithub), commentHint: t(m.commentHintGithub), created: t(m.createdGithub), made: t(m.madeGithub) };
 
-/** An Issue's link, or null for one with no page on GitHub (#2343): kept in Switchboard, or not created there yet. */
+/** An Issue's link, or null for one with no page on GitHub: kept in Switchboard, or not created there yet. */
 export const issueHref = (url: string): string | null => url || null;
 
 /**
- * A workspace's GitHub sync (#2266), for the settings and the backlog's sync line: off (with what waits to go when it is
+ * A workspace's GitHub sync, for the settings and the backlog's sync line: off (with what waits to go when it is
  * on), being turned on (how many of the Issues made here GitHub has made), or on — then the line of `syncLine`.
  */
 export function githubSyncText(s: Pick<Backlog["syncs"][number], "backlog" | "enabling" | "sync">, fmt: (ms: number) => string = jstDateTime): { state: BacklogSyncState; label: string; parts: string[] } {
@@ -88,11 +88,11 @@ export function syncLine(s: BacklogSyncInfo, fmt: (ms: number) => string = jstDa
 
 /** The name a held edit's row opens with: what was made or left, or the field that was changed. */
 export function heldEditName(h: BacklogHeldEdit): string {
-  return h.kind === "create" ? t(m.heldNew) : h.kind === "comment" ? t(m.heldComment) : h.field ?? "";
+  return h.kind === "create" ? t(m.heldNew) : h.kind === "comment" ? t(m.heldComment) : h.kind === "artifact" ? t(m.heldArtifact) : h.field ?? "";
 }
 
 /**
- * An Issue on the sync line that holds operations not sent (#1872), Closed ones too: `#354 題（競合 1 件 · 未送信 2 件 · Closed）`.
+ * An Issue on the sync line that holds operations not sent, Closed ones too: `#354 題（競合 1 件 · 未送信 2 件 · Closed）`.
  * A conflict is one of the operations not sent, so 未送信 counts the others; a count of 0 and Open are not said.
  */
 export function heldIssueText(i: Backlog["syncs"][number]["issues"][number]): string {
@@ -130,7 +130,7 @@ export function formOf(d: FormBase): EditForm {
     state: d.issue.state,
     milestone: d.issue.milestone ?? "",
     parent: d.issue.parent === null ? "" : String(d.issue.parent),
-    // laid out by the Project's definition (#1546), a field with no value too; what the definition lacks (Title) is not here
+    // laid out by the Project's definition, a field with no value too; what the definition lacks (Title) is not here
     fields: Object.fromEntries(d.projectFields.map((f) => [f.name, String(d.fields?.[f.name] ?? "")])),
   };
 }
@@ -187,7 +187,7 @@ export function loadDraft(store: Pick<Storage, "getItem">, key: string): EditDra
     const v = JSON.parse(store.getItem(key) ?? "null") as EditDraft | null;
     const f = v?.form;
     if (!(f && typeof f.title === "string" && typeof f.body === "string" && typeof f.fields === "object" && v.base?.issue)) return null;
-    // a draft kept before the form was built from the Project's definitions (#1546) has none in its base: the fields it
+    // a draft kept before the form was built from the Project's definitions has none in its base: the fields it
     // was typed over stand for them, so formOf(base) is the form it was typed from and the rebase keeps every edit
     if (!Array.isArray(v.base.projectFields)) v.base.projectFields = Object.keys(v.base.fields ?? {}).filter((k) => k !== "Title").map((name) => ({ name, dataType: "TEXT" as const, options: [] }));
     return v;
@@ -228,7 +228,7 @@ export const createWord = (state: BacklogSyncState) =>
 /** One free-text draft (a comment, a new Issue) kept across a failed save and a reload. */
 export const textDraftKey = (scope: string) => `switchboard.backlog.text.${scope}`;
 
-/** A new Issue's draft (#910): what is typed and the kind chosen, kept per workspace. */
+/** A new Issue's draft: what is typed and the kind chosen, kept per workspace. */
 export interface NewIssueDraft {
   title: string;
   body: string;
@@ -246,7 +246,7 @@ export function loadNewIssueDraft(store: Pick<Storage, "getItem">, key: string):
 }
 
 /**
- * The one line the folded sync section of the Backlog heading shows (#4064): how many workspaces, and how many of them
+ * The one line the folded sync section of the Backlog heading shows: how many workspaces, and how many of them
  * are not synced (a conflict, a failure, edits waiting to be sent) or cannot be read at all. `bad` = something to look at.
  */
 export function syncSummary(syncs: Array<Pick<Backlog["syncs"][number], "workspaceId" | "sync">>, errors: Array<Pick<Backlog["errors"][number], "workspaceId">>): { text: string; bad: boolean } {
@@ -258,7 +258,7 @@ export function syncSummary(syncs: Array<Pick<Backlog["syncs"][number], "workspa
 }
 
 /**
- * The question of a ## 判断待ち in one line (#4064): the text after `**問い**:` when there is one, else the first line
+ * The question of a ## 判断待ち in one line: the text after `**問い**:` when there is one, else the first line
  * that is not the heading; the Markdown marks taken off. The whole body is what opens.
  */
 export function decisionQuestion(body: string): string {

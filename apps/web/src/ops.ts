@@ -3,7 +3,7 @@ import { fmtMs } from "./perf.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
-/** What a daemon stop's cause is called on screen (#2093). */
+/** What a daemon stop's cause is called on screen. */
 export const reasonLabel: Record<StopReason, string> = {
   oomd: t(m.reasonOomd),
   restart: t(m.reasonRestart),
@@ -40,7 +40,7 @@ export function stopsTable(rows: OpsStopsRow[]): { reasons: StopReason[]; days: 
   return { reasons: ORDER.filter((r) => total.counts[r] > 0), days: [...byDay.values()].sort((a, b) => b.day.localeCompare(a.day)), total };
 }
 
-/** What a kind of load is called on screen (#2086). */
+/** What a kind of load is called on screen. */
 export const kindLabel: Record<LoadKind, string> = {
   runner: t(m.kindRunner),
   subagent: t(m.kindSubagent),
@@ -111,7 +111,7 @@ export function taskLoadLine(groups: OpsLoadGroup[]): string | null {
   return t(m.taskLoad, { total: fmtBytes(total), kinds: sorted.map((g) => `${kindLabel[g.kind]} ${fmtBytes(g.maxRss)}`).join(" / ") });
 }
 
-/** A response's size (#2104): `850 B`, `12.3 KB`, `3.3 MB`. */
+/** A response's size: `850 B`, `12.3 KB`, `3.3 MB`. */
 export function fmtSize(n: number): string {
   return n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`;
 }
@@ -127,7 +127,7 @@ export interface LatencyRow {
   days: Array<{ day: string; p50: string; p90: string; count: number }>;
 }
 
-/** The API 所要時間 table (#2104): the period's `top` slowest method × route by p90, each with its days, the newest first. */
+/** The API 所要時間 table: the period's `top` slowest method × route by p90, each with its days, the newest first. */
 export function latencyRows(l: OpsLatency, top = 10): LatencyRow[] {
   return l.total.slice(0, top).map((t) => ({
     key: `${t.method} ${t.route}`,

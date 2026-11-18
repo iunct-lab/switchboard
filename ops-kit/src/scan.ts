@@ -40,7 +40,8 @@ async function fetchWithRetry(gh: GhClient, path: string, what: string, sleep: (
  */
 function apiOf(repo: string, url: string): string | null {
   const m = /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/(?:issues|pull)\/(\d+)(?:#(issuecomment-|discussion_r|pullrequestreview-)(\d+))?$/.exec(url);
-  if (!m || m[1] !== repo) return null;
+  // GitHub's owner and repository names do not tell case: a URL written `Owner/Repo` is this repository's
+  if (!m || m[1]!.toLowerCase() !== repo.toLowerCase()) return null;
   const [, , n, frag, id] = m;
   if (frag === "issuecomment-") return `repos/${repo}/issues/comments/${id}`;
   if (frag === "discussion_r") return `repos/${repo}/pulls/comments/${id}`;

@@ -1,5 +1,5 @@
 import { publicCopyRefusal } from "../../../ops-kit/src/config.ts";
-import type { Task } from "@switchboard/protocol";
+import type { RunnerId, Task } from "@switchboard/protocol";
 import { isWorking } from "./task-status.ts";
 
 /**
@@ -30,15 +30,17 @@ export function isPublicCopy(originUrl: string, repoRoot: string): boolean {
   return publicCopyRefusal(originUrl, repoRoot) !== null;
 }
 
-export function releaseReviewPrompt(r: { from: string; to: string; tag: string; diffFile: string; tree?: string; stat: string }): string {
+/** `runner`: the one the review starts on — only Claude Code has a tool called Read, so only its text names it. */
+export function releaseReviewPrompt(r: { from: string; to: string; tag: string; diffFile: string; tree?: string; stat: string; runner: RunnerId }): string {
+  const read = r.runner === "claude" ? "Read で読んでください" : "読んでください";
   return [
     `あなたは、新しいリリース ${r.tag} を動かす前に、動いている版 ${r.from} からの差分を確かめるレビュアーです。差分の範囲は ${r.from} → ${r.to}（タグ ${r.tag}）です。`,
     "",
-    `差分は \`${r.diffFile}\` にあります。Read で読んでください。変更の一覧:`,
+    `差分は \`${r.diffFile}\` にあります。${read}。変更の一覧:`,
     "```",
     r.stat,
     "```",
-    ...(r.tree ? ["", `タグ ${r.tag} の木は \`${r.tree}\` にあります。周りのコードは Read で読んでください。`] : []),
+    ...(r.tree ? ["", `タグ ${r.tag} の木は \`${r.tree}\` にあります。周りのコードは${r.runner === "claude" ? " Read で" : ""}読んでください。`] : []),
     "",
     "守ること:",
     "- コマンドは走らせない。確かめる木のコード・スクリプト・`bun install`・テストを実行しない。読むだけにする",

@@ -32,7 +32,7 @@ tailscale serve --bg 47831                     # https://<ホスト名>.<tailnet
 
 ### Option A': `tailscale serve` + a required token
 
-The daemon's authentication is decided by where it listens (anything other than loopback requires the token; `authRequired` in `packages/core/src/server.ts`). Make it listen off loopback and point serve at it:
+The daemon's authentication is decided by where it listens (anything other than loopback requires the token; `authRequired` in `packages/core/src/server/guards.ts`). Make it listen off loopback and point serve at it:
 
 ```bash
 SWITCHBOARD_HOST=100.x.y.z bun run core        # Tailscale IP だけで listen（LAN には開かない）。トークン必須

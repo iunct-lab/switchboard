@@ -1,11 +1,12 @@
-# The image of the stand-alone mode (#4042): the tools, versions and paths of the EC2 host (aws/host/devtools.sh,
+# The image of the stand-alone mode: the tools, versions and paths of the EC2 host (aws/host/devtools.sh,
 # node.sh) in one image, built natively for arm64 or x86-64. HOME is /home/switchboard and the repositories live in
 # /home/switchboard/repos, as on the host, so a task's cwd and ~/.claude/projects read the same in both. Build from the repository root:
 #   docker build -t sb-local -f container/Dockerfile .
 # The versions and sha256 below that the host pins too are checked against those scripts by container/versions.test.ts.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS base
 
-RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq && dnf clean all
+# diffutils: sb-rescue makes the diff of a new release with `diff -ruN` for its check; without it no release is ever checked
+RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq diffutils && dnf clean all
 
 # pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256). The unsuffixed sha256 are the arm64 ones the
 # host pins; <NAME>_SHA256_X86_64 is the same version's x86-64 file from the same upstream release
@@ -106,13 +107,15 @@ RUN git grep --no-index -P x </dev/null; [ $? -ne 128 ]
 # the stand-alone image, the last stage and so the one `docker build` makes without --target
 FROM base AS stand-alone
 
-# the repository, installed and built, at a read-only place (root's)
+# the tree the image was built from, at a read-only place (root's). The daemon does not run from it: the entrypoint
+# bundles sb-rescue from it and reads where releases come from, and the running version is built in the sb-home volume
+# (which builds its own web UI). Installed, because container/e2e.sh starts a fake daemon from this tree.
 COPY . /opt/switchboard
 WORKDIR /opt/switchboard
-RUN bun install --frozen-lockfile && bun run --cwd apps/web build
+RUN bun install --frozen-lockfile
 
 USER switchboard
 WORKDIR /home/switchboard
 
-# the stand-alone daemon behind a relay to 127.0.0.1 (container/entrypoint.sh); started by container/up.sh
+# sb-rescue and its daemon behind relays to 127.0.0.1 (container/entrypoint.sh); started by container/up.sh
 ENTRYPOINT ["bash", "/opt/switchboard/container/entrypoint.sh"]

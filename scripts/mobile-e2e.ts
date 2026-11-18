@@ -1,14 +1,14 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/mobile-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * The phone layout (#359): at 390 × 844 (iPhone 14), 844 × 390 (its landscape) and a PC window narrowed to 390px, the task list
+ * The phone layout: at 390 × 844 (iPhone 14), 844 × 390 (its landscape) and a PC window narrowed to 390px, the task list
  * opens from the bottom bar, a task opens from it, and the list opens again to go to another task. On a phone the task screen
  * does not scroll sideways with long lines in it, a reply and an approval reach the runner, and 詳細 opens the task's Brief.
- * Home's new-task form fits a phone and 開始 starts a task from it (#391). Knowledge (a folded card in Settings) stacks its list, the note and its
- * details, and a note picked from the list can be read (#392). Ledger, Backlog and Schedules (its form open too) do not
- * scroll sideways, and a schedule is added from a phone (#393). Settings does not either, its toggles' labels wrapping inside
- * the screen, with the LLM suggestions' "not detected" note shown too (#3819); its folded cards' titles are 44px or taller (#3849). At 1280 and 390 the top bar's Rescue opens the rescue page
- * the daemon names (a fake sb-rescue standing in for the host's /rescue/, #399); when its answer comes late the tabs keep their
- * places and a tap before it lands on the tab, not on Rescue (#1485).
+ * Home's new-task form fits a phone and 開始 starts a task from it. Knowledge (a folded card in Settings) stacks its list, the note and its
+ * details, and a note picked from the list can be read. Ledger, Backlog and Schedules (its form open too) do not
+ * scroll sideways, and a schedule is added from a phone. Settings does not either, its toggles' labels wrapping inside
+ * the screen, with the LLM suggestions' "not detected" note shown too; its folded cards' titles are 44px or taller. At 1280 and 390 the top bar's Rescue opens the rescue page
+ * the daemon names (a fake sb-rescue standing in for the host's /rescue/); when its answer comes late the tabs keep their
+ * places and a tap before it lands on the tab, not on Rescue.
  * SCREENSHOT_DIR=<dir> saves Home, a task and Settings at 1280 × 800 first (compare them before and after a layout change).
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -42,7 +42,7 @@ const adapter: RunnerAdapter = {
         ask();
         return;
       }
-      // A model id with nothing to break at, as Ledger shows it in its task rows (#393).
+      // A model id with nothing to break at, as Ledger shows it in its task rows.
       emit({ t: "usage", source: "reported", model: `claude-sonnet-5@${"0123456789abcdef".repeat(4)}`, inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 });
       emit({ t: "session.end", status: "ok" });
       exit(0);
@@ -54,10 +54,10 @@ const adapter: RunnerAdapter = {
     };
   },
 };
-// A note with a long unbroken line, for Knowledge (#392).
+// A note with a long unbroken line, for Knowledge.
 mkdirSync(join(home, "knowledge", "notes"), { recursive: true });
 writeFileSync(join(home, "knowledge", "notes", "2026-09-27-mobile.md"), `---\ntitle: mobile note\ntags: [mobile]\n---\n# Mobile note\n\nRead on a phone.\n\n${LONG}\n`);
-// A fake sb-rescue (#399): its status makes the daemon "managed", and its /rescue/ stands in for the host's rescue page.
+// A fake sb-rescue: its status makes the daemon "managed", and its /rescue/ stands in for the host's rescue page.
 let holdStatus: Promise<void> | null = null;
 const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
   const path = new URL(req.url).pathname;
@@ -71,7 +71,7 @@ const rescuePage = `${rescueOrigin}/rescue/`;
 const cfg = loadConfig({ SWITCHBOARD_RESCUE_URL: rescueOrigin, SWITCHBOARD_WEB_URL: rescueOrigin, SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
 const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true });
 const base = `http://127.0.0.1:${core.server.port}`;
-// LLM suggestions on with a runner that has no adapter, so Settings shows its "not detected" note in the toggle's label (#3819).
+// LLM suggestions on with a runner that has no adapter, so Settings shows its "not detected" note in the toggle's label.
 // Written to the store: PATCH /api/settings refuses a runner that is not installed.
 const saved = await (await fetch(`${base}/api/settings`)).json();
 core.db.setSetting("settings", { ...saved, routing: { ...saved.routing, llm: { ...saved.routing.llm, enabled: true, runner: "codex" } } });
@@ -81,7 +81,7 @@ async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNul
   while (Date.now() < end) { const value = await fn(); if (value) return value as NonNullable<T>; await Bun.sleep(50); }
   throw new Error(`Timeout: ${label}`);
 }
-// A title as long as people write them (#391): Home's lists must cut it, not widen their card.
+// A title as long as people write them: Home's lists must cut it, not widen their card.
 const LONG_TITLE = "スマホアクセス版の画面が欲しい。PCからの表示は今のままでよいが、スマホからアクセスすると見づらいので最適化してほしい";
 for (const title of ["mobile-a", "mobile-b", "mobile-long", LONG_TITLE]) {
   await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: cfg.repoRoot, title, prompt: title, runner: "claude" }) });
@@ -137,7 +137,7 @@ try {
   // The PC layout first: 1280 × 800 keeps the rail's list, no 一覧 button.
   await size(1280, 800, false);
   const shots = process.env.SCREENSHOT_DIR;
-  /** Settings' cards are folded (#3849): opened all, so what is measured inside them is drawn. */
+  /** Settings' cards are folded: opened all, so what is measured inside them is drawn. */
   const openAllSettingsCards = `document.querySelectorAll('.settings details.card').forEach((d) => { d.open = true; })`;
   const shoot = async (name: string) => {
     if (!shots) return;
@@ -160,7 +160,7 @@ try {
   }
 
   const results: Record<string, unknown> = { pc };
-  // The rescue page (#399): Rescue in the top bar, on Home, inside the screen on a phone too; it opens the page the daemon names.
+  // The rescue page: Rescue in the top bar, on Home, inside the screen on a phone too; it opens the page the daemon names.
   for (const [width, height, mobile] of [[1280, 800, false], [390, 844, true]] as const) {
     const label = `rescue ${width}x${height}`;
     await size(width, height, mobile);
@@ -171,7 +171,7 @@ try {
     results[label] = { ...link, opened: rescuePage };
   }
   {
-    // #1485: the link's answer is held, so the tabs are measured and tapped before it comes, then again after.
+    // the link's answer is held, so the tabs are measured and tapped before it comes, then again after.
     const label = "rescue link arrives late 390x844";
     let release!: () => void;
     holdStatus = new Promise<void>((resolve) => { release = resolve; });
@@ -244,7 +244,7 @@ try {
     await until(() => answered.length === before + 1 && answered.at(-1)!.endsWith(":allow"), `${label}: allow reaches the runner`);
     await until(() => evaluate(`document.querySelectorAll('.perm').length === ${cards}`), `${label}: the answered card leaves`); // tap after the layout settles
 
-    // The Brief (#369): hidden beside the chat on a phone, 詳細 lays it over the screen and 閉じる goes back.
+    // The Brief: hidden beside the chat on a phone, 詳細 lays it over the screen and 閉じる goes back.
     assert(!(await visible(".side")), `${label}: the Brief shows before 詳細`);
     await tap(`document.querySelector('.brief-toggle')`, true);
     await until(() => visible(".side"), `${label}: 詳細 opens the Brief`);
@@ -266,7 +266,7 @@ try {
     results[label] = { scrollWidth, sent: reply, answered: answered.at(-1), brief: "詳細 → Brief → 閉じる" };
   }
 
-  // Home (#391): the new-task form is one column that fits the screen, and 開始 starts a task from it.
+  // Home: the new-task form is one column that fits the screen, and 開始 starts a task from it.
   for (const [width, height] of [[390, 844], [844, 390]] as const) {
     const label = `home ${width}x${height}`;
     await size(width, height, true);
@@ -287,7 +287,7 @@ try {
     results[label] = { sideways: sideways.over, started: text };
   }
 
-  // Knowledge (#392): the list, the note and its details one under another; a note picked from the list can be read.
+  // Knowledge: the list, the note and its details one under another; a note picked from the list can be read.
   for (const [width, height] of [[390, 844], [844, 390]] as const) {
     const label = `knowledge ${width}x${height}`;
     await size(width, height, true);
@@ -302,7 +302,7 @@ try {
     results[label] = { sideways: layout.over, listNoteDetails: layout.below, itemsUnder44px: layout.short };
   }
 
-  // Ledger, Backlog, Settings (#3819), Schedules (#393): nothing scrolls sideways (a table only inside itself); a schedule is
+  // Ledger, Backlog, Settings, Schedules: nothing scrolls sideways (a table only inside itself); a schedule is
   // added (Schedules stays last: the form below is filled on its screen).
   const overflow = (width: number) => evaluate(`(() => { const m = document.querySelector('.main'); return { over: Math.max(document.documentElement.scrollWidth - ${width}, m.scrollWidth - m.clientWidth), wide: [...m.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > ${width + 1} && !e.closest('table')).slice(0, 6).map(e => e.tagName + '.' + e.className) }; })()`);
   const openTab = async (name: string, cls: string) => {
@@ -322,7 +322,7 @@ try {
         await until(() => evaluate(`!!document.querySelector('.schedules .fields textarea')`), `${label}: the schedule form opens`);
       }
       if (cls === "settings") {
-        // folded, each card's title is a tap target of 44px or more on a phone (#3849)
+        // folded, each card's title is a tap target of 44px or more on a phone
         const titles = await evaluate(`[...document.querySelectorAll('.settings details.card > summary')].map(e => [e.textContent.trim(), e.getBoundingClientRect().height])`) as Array<[string, number]>;
         assert(titles.length > 0 && (width !== 390 || titles.every(([, h]) => h >= 44)), `${label}: Settings card titles under 44px: ${JSON.stringify(titles.filter(([, h]) => h < 44))}`);
         if (width === 390) measured.settingsTitlesMinHeight = Math.min(...titles.map(([, h]) => h));

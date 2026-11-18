@@ -23,7 +23,8 @@ function replayAdapter(id: RunnerId, events: AgentEvent[], opts: { starts?: Star
 
 const answer = (t: string, model: string): AgentEvent[] => [{ t: "message.delta", role: "assistant", text: t }, { t: "usage", source: "reported", model, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 }, { t: "session.end", status: "ok" }];
 const failed: AgentEvent[] = [{ t: "error", message: "You've hit your usage limit." }, { t: "session.end", status: "error" }];
-const run = (adapters: RunnerAdapter[]) => suggestTitle({ prompt: "README の誤字を直して", reply: "直しました" }, { adapters: new Map(adapters.map((a) => [a.id, a])), cwd: "/tmp/switchboard-home/suggest" });
+const TRIES = [{ runner: "codex" as const, model: "gpt-6-luna" }, { runner: "claude" as const, model: "claude-haiku-4-5" }];
+const run = (adapters: RunnerAdapter[], tries: Array<{ runner: RunnerId; model: string; effort?: string }> = TRIES) => suggestTitle({ prompt: "README の誤字を直して", reply: "直しました" }, { adapters: new Map(adapters.map((a) => [a.id, a])), cwd: "/tmp/switchboard-home/suggest", tries });
 
 describe("parseTitle", () => {
   test("takes the first non-empty line without quotes, #, or a title label, cut to 60 characters", () => {
@@ -60,6 +61,14 @@ describe("suggestTitle", () => {
   test("codex fails: Haiku names it; a codex that is not installed hands over the same way", async () => {
     expect((await run([replayAdapter("codex", failed), replayAdapter("claude", answer("誤字を直す", "claude-haiku-4-5"))])).runner).toBe("claude");
     expect((await run([replayAdapter("claude", answer("誤字を直す", "claude-haiku-4-5"))])).runner).toBe("claude");
+  });
+  test("the model and effort of each try reach the turn, in the order given", async () => {
+    const codexStarts: StartOptions[] = [];
+    const claudeStarts: StartOptions[] = [];
+    const r = await run([replayAdapter("codex", failed, { starts: codexStarts }), replayAdapter("claude", answer("誤字を直す", "claude-opus-5"), { starts: claudeStarts })], [{ runner: "codex", model: "gpt-6-nova", effort: "low" }, { runner: "claude", model: "claude-opus-5", effort: "high" }]);
+    expect(r).toEqual({ title: "誤字を直す", runner: "claude", model: "claude-opus-5" });
+    expect(codexStarts[0]).toMatchObject({ model: "gpt-6-nova", effort: "low" });
+    expect(claudeStarts[0]).toMatchObject({ model: "claude-opus-5", effort: "high" });
   });
   test("neither answers: it throws", async () => {
     await expect(run([replayAdapter("codex", failed), replayAdapter("claude", failed)])).rejects.toThrow();

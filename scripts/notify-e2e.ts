@@ -1,9 +1,9 @@
 /**
  * Run after `bun run --cwd apps/web build`: CHROME_BIN=/usr/local/bin/chromium bun scripts/notify-e2e.ts.
- * OS notices for approval waits (#1138) through a fake window.Notification: a fake runner asks once per task; the
+ * OS notices for approval waits through a fake window.Notification: a fake runner asks once per task; the
  * notice opens its Task, a reconnect and an answer do not notify again, a needs_action does, and with the permission
  * denied nothing is shown while the 承認 list and badge still answer. The 設定 → 端末通知 card asks only from its button.
- * Claude Code in a terminal tab (#1574): a fake shell prints the OSC 7501 sequences Claude Code prints; with the tab
+ * Claude Code in a terminal tab: a fake shell prints the OSC 7501 sequences Claude Code prints; with the tab
  * closed the rail shows 作業中 then 返事待ち, one notice opens the Task, a reload does not notify again, done shows no mark,
  * and the shell's exit takes the mark away.
  */
@@ -105,7 +105,7 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
-  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  /** Opens the folded Settings card with this title, once Settings has drawn it: a card shows only its title until opened. */
   const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   const notices = () => evaluate(`window.__notices.map(n => ({ title: n.title, body: n.body }))`) as Promise<Array<{ title: string; body: string }>>;
   const tap = async (selector: string) => {
@@ -141,7 +141,7 @@ try {
   assert(afterReconnect === 1, `after reconnect: ${afterReconnect}`);
   // (d) answering from the 判断待ち screen (opened from the rail, the same page) resolves the ask: no notice
   await tap(`document.querySelector('.rail-approvals')`);
-  // 承認して続行 once the card's facts are in (#936): tapping the earlier 許可 races its replacement
+  // 承認して続行 once the card's facts are in: tapping the earlier 許可 races its replacement
   await until(() => evaluate(`document.querySelectorAll('.approval').length === 1 && !!document.querySelector('.approval .ask-buttons .pri')`), "the approval");
   await tap(`[...document.querySelectorAll('.approval')].find(c => c.textContent.includes('notify-a')).querySelector('.ask-buttons .pri')`);
   await until(() => answered.includes("notify-a:allow"), "the runner got allow");
@@ -188,7 +188,7 @@ try {
   await until(() => answered.includes("notify-b:allow"), "the runner got allow for notify-b");
   const denied = { notices: deniedNotices, badge, answered: true };
   assert(deniedNotices === 0 && badge === "1", `denied: ${JSON.stringify(denied)}`);
-  // (h) Claude Code in notify-a's terminal (#1574): the tab is opened and closed, the shell goes on printing
+  // (h) Claude Code in notify-a's terminal: the tab is opened and closed, the shell goes on printing
   await evaluate(`localStorage.setItem('e2e-perm', 'granted')`);
   await call("Page.reload");
   await until(() => evaluate(`!!document.querySelector('.conn.ok')`), "connected for the terminal");

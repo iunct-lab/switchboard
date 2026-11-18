@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-wrapper.sh — the environment layer's `claude` on a cloud machine (#180, docs/design/cloud-hosting.md §4).
+# claude-wrapper.sh — the environment layer's `claude` on a cloud machine (docs/design/cloud-hosting.md §4).
 #
 # Installed ahead of the real `claude` on PATH (e.g. as /usr/local/bin/claude). Each start reads the long-lived token
 # made with `claude setup-token` from Parameter Store (SecureString, read with the instance role) and execs the real

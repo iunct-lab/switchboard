@@ -6,10 +6,11 @@ import { join } from "node:path";
 import type { AskAnswerResult, AskList, Backlog, RunnerAdapter, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
 import { ASK_HISTORY_MS } from "./asks.ts";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import type { judgeTurn } from "./judge.ts";
-import { heldWhy, startServer, type CoreServer } from "./server.ts";
+import { startServer, type CoreServer } from "./server.ts";
+import { heldWhy } from "./server/helpers.ts";
 
 /* What a restart of the daemon keeps: the same SWITCHBOARD_HOME opened by a second startServer, as asks-answer.test.ts boots one. */
 

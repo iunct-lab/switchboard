@@ -12,11 +12,11 @@ description: Task Issue 1 件を最小の実装で 1 本の PR にする型。�
 ### 1. 読む・記録する
 
 1. `ops-kit backlog view <Task> --fresh` と親 PBI（`## 親 PBI`）、PBI の `## 元要望`、Task が指す `docs/design/*.md`。「満たす受け入れ条件」を控える
-2. Task の手順に「利用者に確認して止める」があるか。あるなら、その工程の直前で `issue-workflow` の「判断待ちの出し方」で問いの種類を分けて**止める**: 実装の判断（要件の読み・設計の選択）は `## 判断待ち`（`**進め方**` の行つき。止めて待つ問いはラベル `needs-decision` を付けて止め、推奨で進める問いはラベルを付けずに推奨の案で続ける）、運用の確認（マージ・昇格・デプロイ・認証など利用者がその場でする操作、実行のタイミング）は Issue に書かず、Task の会話に問い・選択肢・推奨を書いてターンを終える（返事は同じ会話で来る）。実装の判断に headless（エージェント管理アプリの Task など）で返事が来ないときの扱いは種類で分ける:
+2. Task の手順に「利用者に確認して止める」があるか。あるなら、その工程の直前で `issue-workflow` の「判断待ちの出し方」で問いの種類を分けて**止める**: 実装の判断（要件の読み・設計の選択）は `## 判断待ち`（`**進め方**` の行とラベルは同じ節）、運用の確認（マージ・昇格・デプロイ・認証など利用者がその場でする操作、実行のタイミング）は Issue に書かず、Task の会話に問い・選択肢・推奨を書いてターンを終える（返事は同じ会話で来る）。実装の判断に headless（エージェント管理アプリの Task など）で返事が来ないときの扱いは種類で分ける:
    - **要件の解釈**（どちらの読みで作るか）: 実装しない。その Task を In progress のまま止め、他の Task に進む。勝手に一方の解釈で作らない
    - **お金 / 他 OS / 破壊的操作**: 安全側（何も消費しない、既定 off、消さない）だけ実装して進む。問いの `## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`）は出したまま残す（利用者が判断待ちの一覧で見つけられるように）
 3. 着手コメント（3 行: ブランチ / 進め方 / 想定する検証。`ops-kit backlog comment <Task> --body-file -`）→ `ops-kit backlog set <Task> Status "In progress"`
-4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。exit 1 / 2 なら着手せず（In progress にしていたら `ops-kit backlog set <Task> Status Backlog` で戻し）、重なった相手とパスを Task にコメントして（`ops-kit backlog comment <Task> --body-file -`）別の Task に進む（`pbi-complete` の「並列で動かす」）。進める Task が無く止まるなら、停止の報告（reason `depends`）の `conditions` に `overlap` の出力の `conditions` をそのまま写す
+4. 他のセッションと同じファイルを触らないか（並列ガードのコマンドが CLAUDE.md にあるとき。以下 `<guard>`）: 着手コメントの前に `<guard> overlap <Task>`、In progress にした後に `--claimed` を付けてもう一度。重なりが合流ファイルだけなら exit 0（出力の `shared`）で進める（衝突したときの扱いは `pbi-complete` の「並列で動かす」の「合流ファイルだけの重なりは止めない」）。exit 1 / 2 なら着手せず（In progress にしていたら `ops-kit backlog set <Task> Status Backlog` で戻し）、重なった相手とパスを Task にコメントして別の Task に進む（`pbi-complete` の「並列で動かす」）。進める Task が無く止まるなら、停止の報告（reason `depends`）の `conditions` に `overlap` の出力の `conditions` をそのまま写す
 
 ### 2. 場所を作る
 
@@ -42,8 +42,13 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 - **ついでの整形・改名・リファクタをしない。** Task に無い方針・拒否・機構の追加と、別 Task の修正も同じ（規則の文の追記はこの節の「Task の手順に書いたファイルと名前で作る」の項のとおり PR に入れない）。気づいたことは Issue コメント（`ops-kit backlog comment`）か新しい Task に。そうした変更が要るなら、PR に入れる前に Task へ逸脱としてコメントし（`issue-workflow` の「記録の義務」の 2。`ops-kit backlog comment <Task>`）、PR 本文の「逸脱」に書く
 - **互換層・フラグ・一度しか使わない抽象を足さない**（`pbi-to-tasks` の設計チェック。実装中に必要に見えたら、たいてい設計に戻る印）
 - **既存の型を守る**: 部品のあいだで共有する型を変えるなら、それを読む全員を同じ PR で直す。互換のための optional は足さない
+- **見つけた穴を次の Task に回すときは、受け取る Task の本文に書く**（`ops-kit backlog view <Task> --fresh --json | jq -r .issue.body > "$W/t.md"` → 手順か「守る条件」の行に追記 → `ops-kit backlog edit <Task> --body-file "$W/t.md"`）。自分の PR 本文にだけ書いた穴は、次の Task に届かない
 - 差分の目安 500 行（テスト込み）。超えるなら Task を割って Issue に書く
-- 秘密・絶対パス・ユーザー名を fixture / docs に入れない（`/Users/dev` に洗う）。Issue・PR・コメントにも認証に使える値を書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。作業ファイルはスクラッチに置き、`git status --short` を読んでから `git add`。作業ファイルは `/tmp` 直下に固定の名前で置かない（別セッションと固定名を共有すると、作業ファイルが上書き・削除される）。作業ごとに `W=$(mktemp -d /tmp/<リポジトリ名>.<用途>.XXXXXX)` で自分だけのディレクトリを作り、表示されたパスをそのまま使う（Bash の呼び出しをまたぐとシェル変数は消えるので、パスは文字で控える）。消すときもそのパスだけ（glob で消さない）。`/tmp` はマシンの停止や片付けで消えうる。再開してから読むもの（PR 本文の下書きなど）はすぐ投稿するか、消える前提で作り直せる形にする。CLAUDE.md が求めるなら、`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R <owner/name>` を付ける。`-R` を取れない `gh stack` は、作業しているリポジトリの worktree の中でだけ実行する（レビュー用の clone や別リポジトリのディレクトリから実行しない）
+- 秘密・絶対パス・ユーザー名を fixture / docs に入れない（`/Users/dev` に洗う）。Issue・PR・コメントにも認証に使える値を書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。作業ファイルはスクラッチに置き、`git status --short` を読んでから `git add`。作業ファイルは `/tmp` 直下に固定の名前で置かない（別セッションと固定名を共有すると、上書き・削除される）。作業ごとに `W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.<用途>.XXXXXX")` で自分だけのディレクトリを作り、表示されたパスをそのまま使う（Bash の呼び出しをまたぐとシェル変数は消えるので、パスは文字で控える）。消すときもそのパスだけ（glob で消さない）。置き場はマシンの停止や片付けで消えうるので、再開してから読むもの（PR 本文の下書きなど）はすぐ投稿するか、作り直せる形にする
+<!-- when runner=codex -->
+- 上の `mktemp` の形は Codex の Task でもそのまま通る（Codex の Task は `/tmp` に書けず、アプリが渡す `$TMPDIR` の下に作る。`TMPDIR` が無ければ `/tmp`）
+<!-- end when -->
+- CLAUDE.md が求めるなら、`gh` の書き込み（issue / pr の作成・コメント・編集・マージ・クローズ）には `-R <owner/name>` を付ける。`-R` を取れない `gh stack` は、作業しているリポジトリの worktree の中でだけ実行する（レビュー用の clone や別リポジトリのディレクトリから実行しない）
 
 ### 4. テスト（必ず）
 
@@ -58,6 +63,8 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 3. 足りないときだけ、新しいテスト・起動を伴うテストを書く
 
 足したテストは、実装を 1 か所壊して（例: 足した分岐・ガードの行を消す、戻り値を変える）赤になるのを実行して見る。壊し方と赤になったテスト名を PR 本文の「テスト観点」に書く。赤にならないテストは変更を確かめていないので直す。
+
+新しい動き方を証明するテストは、その動き方で動いていることを自分で確かめる: 条件が「〜の無い環境で」「〜の道で」と言うなら、その環境・道に入っていることをテストの中で断言する（例: 無いはずの道具を呼ぶと失敗する）。土台がいつも古い道を用意していると、古い道に頼る箇所が残っていても緑になる。Task が `守る条件:` を担うなら、そのテストは条件の両側を本物の実装でつなぐ（偽は外のサービスだけ）。
 
 断言は出来上がるもの（戻り値・出力・画面・保存された値）の振る舞いを確かめる。在るかどうかだけを見る断言（定義されている・文字列を含む）や、設定の文字列を読み直すだけのテストで済ませない（文書・スキルの文そのものを変える PR の、文の在りかのテストは除く）。テストが変える環境変数・グローバル状態・ポート・日付は後始末する（元に戻す・空きを確かめる・時刻を固定する）。
 
@@ -84,19 +91,31 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 ### 5. commit と PR
 
 ```bash
-git add <files> && git commit      # 題: feat(core): … (#Task。ローカルのバックログでは題にも `#<番号>` を書かず `(Task <番号>)`） / fix(web): … / docs: … / test: …  本文: 何を・なぜ・検証したこと。Task の PR だけ Closes #N（未実施の手順が残る PR は `Refs #N`。下の本文のひな形の規則。`BACKLOG_WORKSPACE` がある（GitHub 連携の無い workspace。Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照する）なら、閉じるキーワードも `#<番号>` も書かず `Backlog-Task: <Task>` の 1 行にする）
+<!-- when backlog=github -->
+git add <files> && git commit      # 題: feat(core): … (#Task) / fix(web): … / docs: … / test: …  本文: 何を・なぜ・検証したこと。Task の PR だけ Closes #N（未実施の手順が残る PR は `Refs #N`。下の本文のひな形の規則）
+<!-- end when -->
+<!-- when backlog=app -->
+git add <files> && git commit      # 題: feat(core): … (Task <番号>) / fix(web): … / docs: … / test: …  本文: 何を・なぜ・検証したこと。Task は GitHub の Issue ではなく、`#<番号>` は GitHub の同じ番号の別の Issue を閉じる・参照するので（ローカルのバックログ。GitHub 連携の無い workspace）、題にも本文にも閉じるキーワードと `#<番号>` を書かず `Backlog-Task: <Task>` の 1 行にする（下の本文のひな形の規則）
+<!-- end when -->
 gh stack submit --auto --open      # push + PR。draft なら gh pr ready <n>
-W=$(mktemp -d /tmp/<リポジトリ名>.pr<Task>.XXXXXX); echo "$W"     # 本文は "$W/pr.md" に書く（固定の /tmp/pr.md は別リポジトリの PR 本文と入れ替わりうる）
+W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.pr<Task>.XXXXXX"); echo "$W"     # 本文は "$W/pr.md" に書く（固定の /tmp/pr.md は別リポジトリの PR 本文と入れ替わりうる）
 gh pr edit <n> --title "<題>" --body-file "$W/pr.md"
 ops-kit backlog set <Task> Status "In review"
 echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 ```
 
-**ローカル CI を回すとき**（CLAUDE.md がローカル CI を名指しし、アプリの Task の中のとき）: 自分のシェルで回して待たず、`ops-kit job request local-ci <PR>` でアプリに頼む。仕事はアプリの子として重い処理の枠を取って走る。request は `job#<id>` の 1 行と、止まりの報告（アプリが Task に渡す書式）に書く JSON を出す。それを reason `depends`・conditions に `job#<id>` で書いてターンを終える。仕事が終わるとアプリが pass / fail の要約を添えて再開するので、その結果を読んで続ける（fail なら直して出し直し、再度頼む）。背景の `sleep` の繰り返しで結果を待たない — ターンを終えても背景の作業が残るとセッションが閉じず、1 本 150〜250 MB を何時間も開いたままにする。`gh pr view` で足りる数秒の確認は今まで通り直接でよい。アプリの Task の外では `ops-kit job` は使えないので、CLAUDE.md のコマンドを直接回す。
+<!-- when task=in -->
+**ローカル CI を回すとき**（CLAUDE.md がローカル CI を名指しするとき）: 自分のシェルで回して待たず、`ops-kit job request local-ci <PR>` でアプリに頼む（仕事はアプリの子として重い処理の枠を取って走る）。request は `job#<id>` の 1 行と、止まりの報告（アプリが Task に渡す書式）に書く JSON を出す。それを reason `depends`・conditions に `job#<id>` で書いてターンを終える。仕事が終わるとアプリが pass / fail の要約を添えて再開するので、その結果を読んで続ける（fail なら直して出し直し、再度頼む）。背景の `sleep` の繰り返しで結果を待たない — ターンを終えても背景の作業が残るとセッションが閉じず、1 本 150〜250 MB を何時間も開いたままにする。`gh pr view` で足りる数秒の確認は直接でよい。
+<!-- end when -->
+<!-- when task=out -->
+**ローカル CI を回すとき**（CLAUDE.md がローカル CI を名指しするとき）: アプリの Task の外では `ops-kit job` は使えないので、CLAUDE.md のコマンドを直接回す。
+<!-- end when -->
 
 **ローカル CI が登録に無い失敗で落ち、base でも落ちると確かめたら**（CLAUDE.md が既知の失敗の登録を名指しするとき）: (1) その失敗の要望を探し、無ければ作る (2) その場で P1 以上の PBI にするか、Priority の付いた open の既存の PBI に紐づける（`ops-kit lint` が、指す要望に Priority の付いた open の PBI が無い登録を違反にする） (3) 要望の番号で、登録に期限つきで足す PR を出す (4) 判定の外のマージの承認を利用者に求めない（登録がマージされれば、ローカル CI が差し引く） (5) 登録はローカル CI が PR の base の枝から読むので、登録の PR がマージされたら、スタックなら全部の枝を main に rebase して push し（`gh stack rebase` → `gh stack push`）base に登録を届かせてから、base が main の単発の PR ならそのまま、ローカル CI を頼み直す。base で落ちるかを手で確かめる手順は、登録に無い失敗を最初に見つけたときの 1 回だけ。
 
-**ローカルの変更では**（Task への指示が「この workspace の変更はアプリに置く」と言う workspace。リポジトリのサービスがアプリで、PR の代わりにアプリに置く「変更」を使う）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
+**ローカルの変更では**（2 の同名の段落の workspace）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
+
+**GitHub が使えないときは**（CLAUDE.md が `<GitHub 不在の切り替え>` を名指しするとき。`git push` / `gh stack submit` / `gh pr create` が GitHub の一時的な障害・上限で失敗する）: PR を作る gh のコマンドを `<GitHub 不在の切り替え> --task <Task> --pbi <PBI> --head <枝> -- pr create …` で呼び直す（push の失敗の後でもそのまま呼ぶ）。exit 0 = PR ができた（そのまま PR の流れ）。exit 3 = 切り替えた: 出力の `L<n>` がローカルの変更の番号（Task と PBI には道具が書く）。以降は各スキルの「ローカルの変更では」の行で進める — ただし番号は Issue と別の並びなので、変更を指す `ops-kit backlog view` / `comment` / `edit` には `--change` を付け、push・リリースタグ・`ops-kit pull-main` はしない。exit 1 = gh そのものの失敗（引数・入力。切り替えずに直す）。exit 2 = 切り替えられなかった（停止の報告 `transient` で止まる）。聞く理由（`[聞く]`）のある変更はローカルではマージしない（`[merge-answer] yes` は変更に投稿できない。GitHub が戻ってから PR で進める）
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:
 
@@ -106,24 +125,33 @@ PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上
 - 判断点: <レビュアーに見てほしい設計上の判断 1〜3 点。なぜそうしたか>
 - 変えなかったこと: <触りたくなるが Task の外、または意図して残したもの>
 - 逸脱: <Task に無い変更と、Task に記録したコメントの場所。無ければ「なし」>
+- 古い前提を持つ既存の箇所（語: `<語>` …）: <下の「古い前提の一覧」。当たらない PR は「古い前提を持つ既存の箇所: なし（理由 1 行）」>
 - 検証: <実行したコマンドと結果。E2E なら操作と出力。結果の無い検証にはチェックを付けない。Task が名指しした検証を手で変えて（コマンド・場面・データを改めて）走らせた pass は Task の検証の pass と数えず、変えた点を書く>
 - 対応表: <Task の `## 手順` の各番号・満たす親 PBI の受け入れ条件・`## 完了条件 (DoD)` の各行・`## 検証` の各項目を 1 行ずつ。「実施した / していない（理由）」と証跡の在りか（コマンドと結果、コミット、コメントの URL。検証の項目は対応するテストの場面（テスト名かコマンド））。後回しにした検証は後回し先（例: 「PBI の最後」）を書く>
 
 ## 概要 / Summary
-（ローカルのバックログなら `Closes #<Task>。` を書かず、この節の先頭に `Backlog-Task: <Task>` だけの 1 行を置く。後ろに文字を続けない）
+<!-- when backlog=github -->
 Closes #<Task>。<何を・なぜ。親 PBI #N の受け入れ条件 n, m>
+<!-- end when -->
+<!-- when backlog=app -->
+Backlog-Task: <Task>
+（上の 1 行はこの節の先頭に、それだけで置く。後ろに文字を続けない。ローカルのバックログなので `Closes #<Task>。` は書かない）
+<何を・なぜ。親 PBI の受け入れ条件 n, m>
+<!-- end when -->
 （対応表に「していない」の行（後回しの検証を含む。マージの後に書く結果コメントの行は「マージ後」と書き、数えない）が 1 つでもある PR、利用者の判断を待つ Task（`**進め方**: 止めて待つ` の `## 判断待ち` に回答が無い、`（利用者確認: …）` の行が残る）の PR は `Closes` ではなく `Refs #<Task>` にし、残りの手順を Task にコメントする。マージの後も Task は開いたままで、残りは次の PR（`Closes`）で終える。`**進め方**: 推奨で進める` の問いだけなら、推奨の案で終えたものとして `Closes` にする（答えが推奨と違えば `issue-workflow` の「進め方の行」のとおり直す））
 ## 影響コンポーネント / Affected components   （該当に [x]）
 ## テスト観点 / Testing                        （**実際に走らせたものだけ** [x]。テスト数、E2E の事実。後回し・改変した検証の書き方は「レビュアーへ」の「検証」と「対応表」）
 ## チェックリスト / Checklist   （CLAUDE.md が名指しする性能の上限を上げた PR は、上げた項目ごとに理由と増分（前 → 後、%）を本文に書く。上げるのは利用者の判断なので、マージの前に聞く（規則は CLAUDE.md が指す文書）。理由をコミットにだけ書かない）
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+<末尾の帰属の行は、そのときランナーが受けている指示（帰属の行の指定）に従う。無ければ書かない>
 ```
 
-commit 末尾に `Co-Authored-By:`（その時点の指示に従う）。
+**古い前提の一覧**（「レビュアーへ」の項目）: 当たる変更 = 既存の流れに条件で新しい道を足す / 既存の値・記録・状態の意味や鍵を変える。差分の外で古い道の前提（道具がある・識別子が変わらない・値の形や鍵）に頼る箇所を、レビューより先に挙げる。語（前提を持つ関数・値・鍵の名前。Task の本文の一覧があればその語から）を決めて `ops-kit old-paths list origin/<base> <語>…` を流し、出た項目を本文に貼って、各行の `<…>` を「新しい道で成り立つか・どう確かめたか」で埋める（成り立たない行は直すか、次の Task に回して上の「見つけた穴」の手順）。レビュアーには同じ語で探し直した結果が渡り、一覧に無い箇所は指摘になる（`ops-kit old-paths check origin/<base> "$W/pr.md"` で先に自分で見られる）。
+
+commit 末尾の帰属の行も同じく、そのときランナーが受けている指示に従う（無ければ書かない）。
 
 ### 6. 次
 
-`cross-runner-review`（別ランナー + 追加のレビュアーのレビュー）→ `review-triage-and-merge`。スタックの上に次の Task を積むなら、この枝から `gh stack add`。
+`cross-runner-review`（主レビュアーのレビュー）→ `review-triage-and-merge`。スタックの上に次の Task を積むなら、この枝から `gh stack add`。
 
 ## 報告（利用者への返事の型）
 

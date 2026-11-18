@@ -1,4 +1,4 @@
-# Switchboard under sb-rescue (#178: the rescue service runs the daemon from an immutable release and keeps it up).
+# Switchboard under sb-rescue (the rescue service runs the daemon from an immutable release and keeps it up).
 # @USER@, @HOME@ and @REPO@ are filled in by bootstrap.sh from the stack's parameters.
 [Unit]
 Description=Switchboard (sb-rescue + daemon)
@@ -10,27 +10,27 @@ Type=simple
 User=@USER@
 WorkingDirectory=@HOME@
 Environment=HOME=@HOME@
-# /usr/local/bin first: claude-wrapper.sh (#180) sits there as `claude` when a setup-token is used
+# /usr/local/bin first: claude-wrapper.sh sits there as `claude` when a setup-token is used
 Environment=PATH=/usr/local/bin:@HOME@/.local/bin:@HOME@/.bun/bin:/usr/bin:/bin
 Environment=SWITCHBOARD_REPO_ROOT=@REPO@
 Environment=SWITCHBOARD_HOST=0.0.0.0
 Environment=SWITCHBOARD_RESCUE_HOST=0.0.0.0
 Environment=SWITCHBOARD_IDLE_STOP_CMD=/usr/local/bin/sb-stop
-# 作り直す on the rescue page saves the runners' records first (#403)
+# 作り直す on the rescue page saves the runners' records first
 Environment=SWITCHBOARD_REBUILD_SAVE_CMD=/usr/local/bin/sb-runner-sync
 Environment=SWITCHBOARD_CLAUDE_TOKEN_PARAM=/switchboard/claude-oauth-token
 # the rescue page's 再起動 ends sb-rescue itself: systemd starts it again, and the ExecStartPre below read Parameter Store
-# and the host scripts again (#435)
+# and the host scripts again
 Environment=SWITCHBOARD_RESCUE_RESTART_BY_EXIT=1
 # /tmp is this machine's alone (a small tmpfs): the rescue page's /tmp clean also takes any old mktemp directory and cache,
-# not only Switchboard's own (#2058)
+# not only Switchboard's own
 Environment=SWITCHBOARD_RESCUE_OWNS_TMP=1
-# the development tools of devtools.sh (#371): the E2E scripts' browser and the rootless dockerd
+# the development tools of devtools.sh: the E2E scripts' browser and the rootless dockerd
 Environment=CHROME_BIN=/usr/local/bin/chromium
 Environment=CHROME_PATH=/usr/local/bin/chromium
 Environment=DOCKER_HOST=unix://@HOME@/.docker/run/docker.sock
 EnvironmentFile=/etc/switchboard-host.env
-# At every start: the host scripts again from main (#435; a failure keeps the installed ones), then the environment from
+# At every start: the host scripts again from main (a failure keeps the installed ones), then the environment from
 # Parameter Store (bootstrap writes it once before the first start). These two run as root, so they get root's HOME and a
 # PATH without the host user's folders: the agents can write ~/.local/bin, ~/.aws/config and ~/.gitconfig.
 ExecStartPre=-+/usr/bin/env HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/local/bin/sb-host-update

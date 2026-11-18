@@ -32,3 +32,15 @@ test.each([
 test("the public kit's workflow runs only with vars.PUBLIC_ACTIONS on, on top of its exclusions", () => {
   for (const c of conditions(KIT_COPY)) expect(c).toMatch(/^\$\{\{ vars\.PUBLIC_ACTIONS == 'on'\s+&& /);
 });
+
+test("the weekly credential scan outside the machine is there: it reads with the workflow's own token, so it does not need the daemon machine's gh login", () => {
+  const f = ".github/workflows/secret-scan.yml";
+  const w = Bun.YAML.parse(readFileSync(join(root, f), "utf8")) as { on: { schedule: { cron: string }[] }; permissions: Record<string, string>; jobs: { scan: { steps: { run?: string; env?: Record<string, string> }[] } } };
+  expect(w.on.schedule).toHaveLength(1);
+  // read-only, on what the scan reads
+  expect(w.permissions).toEqual({ contents: "read", issues: "read", "pull-requests": "read" });
+  const scan = w.jobs.scan.steps.find((s) => s.run?.includes("scan_issues.sh"))!;
+  expect(scan.run).toBe('bash scripts/setup/scan_issues.sh "$GITHUB_REPOSITORY"');
+  expect(scan.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
+  expect(readFileSync(join(root, "scripts/setup/scan_issues.sh"), "utf8")).toContain("scan-issues");
+});

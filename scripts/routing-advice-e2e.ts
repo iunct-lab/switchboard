@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/routing-advice-e2e.ts. Requires Chromium (CHROME_BIN overrides).
- * The LLM's proposal comes after the Task (#1143), with a fake runner and a fake suggester: a Task ends with the suggester
+ * The LLM's proposal comes after the Task, with a fake runner and a fake suggester: a Task ends with the suggester
  * still held and its Brief opens; released, the proposal appears without a reload next to the real runner and outcome,
  * which do not change, and it is there after a reload. Off, a failure and a timeout show no proposal and keep the Task.
  */

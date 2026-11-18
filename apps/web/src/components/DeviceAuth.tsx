@@ -6,7 +6,7 @@ import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 
 /**
- * A Task waiting for an approval elsewhere (#662): the URL and one-time code a command printed, handed over by the
+ * A Task waiting for an approval elsewhere: the URL and one-time code a command printed, handed over by the
  * kit's `device-auth`. The person approves in their own browser; the card goes when the command ends or the code
  * expires. The URL came from the agent's command, so the host and the command are shown to judge it by. Nothing kept.
  */

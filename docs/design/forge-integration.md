@@ -47,7 +47,7 @@ The service branching lives in this one place (the per-call `services` table), a
 2. Import: in the table of `BacklogSync`'s import in `backlog-sync.ts` (`runForgeOperation({ kind: "read" … }, { github: …, gitlab: … })`), add that service's `read` (the stored form is the record of `putBacklogSnapshot`; the `service` / `host` of the key are that service's)
 3. Sending: in the `services` table of `sendGithubOperations` in `backlog-send.ts`, add `write` / `create` / `comment` / `project`. A kind that is not added is reported as unsupported and becomes `failed` (GitLab has not added `project`)
 4. Local CI report: in the `reportResult` table of `scripts/local-ci.ts`, add `verification` (on the kit side, `forge-<service>.ts` next to `forge-github.ts`)
-5. Stored type: add its value to `BacklogRepositoryKey.service` ([`model.ts`](../../packages/protocol/src/model.ts)) (the DB column already has `service`; `gitlab` has been added)
+5. Stored type: add its value to `BacklogRepositoryKey.service` ([`model/backlog-records.ts`](../../packages/protocol/src/model/backlog-records.ts)) (the DB column already has `service`; `gitlab` has been added)
 
 ## GitLab
 
@@ -138,13 +138,88 @@ Current limits:
 - The sync wording in the settings screen is still `GitHub 同期` (the enable / disable operation also applies to a GitLab source)
 - The GitLab import is only the periodic re-read (webhook notifications are not read)
 
+## While GitHub cannot be used, and coming back
+
+A workspace whose Issues and PRs are GitHub's keeps working while GitHub cannot be used **for now**, and comes back without rewriting history. "For now" is the whole condition: the local path exists for failures that waiting mends, and for nothing else.
+
+**What counts as "cannot be used for now"** (`outageOf` in `ops-kit/src/gh.ts`, one function):
+
+| Observed | Counts | Why |
+|---|---|---|
+| The network did not answer, or the call timed out | Yes | Waiting mends it |
+| GitHub answered 5xx | Yes | Waiting mends it |
+| A rate limit GitHub gave an end for (a reset time, `Retry-After`, or a budget at 0 with its reset) | Yes | It ends at a known time |
+| A rate limit with no end to read | No | Nothing to wait for |
+| 401, 403, 404, a missing permission, an expired login | **No** | The token's or the configuration's: stop and report to the person. A token that may never read an endpoint (a 403 on every call) would otherwise switch work off GitHub while GitHub works |
+| A refused input (422), a wrong argument | No | The request's own fault |
+
+**Who decides.** The daemon, from what it observes itself — never a task's word, and never the output of a command a task chose. A local change that stands in for a pull request is made by `POST /api/backlog` with `change`, and for a GitHub workspace that route asks `githubOutage` (`packages/core/src/forge-outage.ts`): while the daemon's own sync stands in a wait for a limit or an outage, that is the observation; else the daemon makes one call of its own that costs no budget (`gh api rate_limit`) and classifies the answer with the table above. GitHub answering means 409 and no change, whatever the caller saw. `GET /api/backlog/outage?workspaceId=` answers the same question. A workspace that keeps its changes itself by design (no service behind its Issues) is not asked: its changes are made as before.
+
+**Switching** (`scripts/forge-fallback.ts`). A task runs the `gh` command of its PR flow through it. When that command fails in a way that may be an outage, the script asks the app for a local change of the branch; the app makes it only on its own observation (above), and the script's reading of the one failed command decides nothing. A login or permission failure, a refused input and a wrong argument are gh's failure: nothing is asked, nothing is made. On a switch one line is written on the Task and on the PBI (kept by the app and sent when GitHub is back, like every backlog edit). It never goes back by itself. `ops-kit backlog create --head … --base …` reaches the same route and is held to the same condition.
+
+**Where the change is kept.** Not among GitHub's Issues: in the workspace's records that have no service (`changeSourceOf` in `packages/core/src/backlog-gh.ts`), numbered from 1 there. Among GitHub's numbers it would take the number an Issue still waiting to be created gets when GitHub is back, and their comments would mix. The API and `ops-kit backlog` therefore name a change with a mark (`?change=1`, `--change`): the same number without it is GitHub's Issue or PR. Nothing of a change is ever queued for GitHub. A change carries the PR it stands in for (`pr`) and when its summary was left on GitHub (`reportedAt`).
+
+**The gate is the same, and what it cannot read stops.** `merge-gate.ts --change`, `local-ci.ts --change` and `local-merge.ts` judge the change by the rules of a PR (the same `judge`), reading git and the app's stored records instead of GitHub. Every reason `judge` can give, and how the local path evaluates it:
+
+| Reason of the gate | On the local path |
+|---|---|
+| Size over the limit; a protected path, a migration | The same, from git's diff of the branch against the base |
+| The security groups (`[聞く]`, `[再チェック]`), `rescue`, the responsibility files, the design rules of the README | The same kinds from the same file lists (git's diff, no rename guessing: both paths of a rename are judged) |
+| `[再チェック <kind>]` lifted by a `[recheck] <kind> pass <head>` | The same, from the change's comments |
+| `--allow-large` without the person's `[merge-answer] yes` of the head | Evaluated, and never lifted here: the yes is not kept on such a change — the kit's command refuses it and so does the app's route, both reading the text in the one form the gate reads (`markText`), so a leading space or a full-width bracket changes nothing. A change with an ask reason waits for GitHub |
+| Files the Task's body does not name | The same, from the Task as last imported; the stop is recorded for the Task as a PR's is. A linked Issue that is not stored, or records that cannot be read, is no judgement (exit 2) |
+| No CI check, or one not passed | A `[local-ci] pass` of the head and of the base's tip now (stricter than a PR: a base that moved runs it again) |
+| Unresolved review threads | **Cannot be read, and nothing stored has them.** So the gate does not count them as none: it stops whenever a pull request of the branch exists or may exist — the PR the change was made with (`pr`), an open PR the stored records have for an Issue the change closes, or a branch that was pushed to origin (it has a remote-tracking ref). None of the three rests on the task having said so. Only a branch that never left the machine is merged locally |
+| No main review newer than the last commit | The same, from the change's comments. A direct branch does not skip it here |
+| The merge state (a conflict, a closed change) | `git merge-tree` against the base's tip; the change's own state |
+| The base branch's protection on GitHub (`BLOCKED`) | Not visible to the gate. It is read where it matters: `forge-resync.ts` asks GitHub whether main is protected (branch protection or a ruleset) before it sends anything, and a protected main gets no direct push — the commits go through a sync PR, which the gate judges as a PR. Protection that cannot be read pushes nothing |
+| Whose comments count as marks (`MARK_AUTHORS` on GitHub) | No author to tell apart: a change's comments are written through the app's API by the person and their tasks. This is the loopback trust the whole app rests on, not a check |
+
+A reason whose data is not there is never a pass: it is a stop, or no judgement.
+
+`local-merge.ts` judges again itself, and merges a GitHub workspace's change only while the app still sees GitHub out of use; once GitHub answers, the work goes on as a pull request.
+
+**Where a local merge lands.** Not on `main`, and never in a work tree: on the landing ref `refs/switchboard/landed/main` (`packages/core/src/landing.ts`). The main work tree may be the checkout a running daemon reads; moving its files restarts a dev daemon and cuts the tasks it runs. So the fallback moves no work tree at all — updating the main work tree stays `ops-kit pull-main`, after the commits are on GitHub, the step that is the person's to allow where a dev daemon runs. Local work is based on the landing ref while it has commits `main` lacks (the app answers a change's base with it), and on `main` again once `main` has them. A workspace that keeps its changes itself by design is different on purpose: its checkout is where its code lives, and a merge fast-forwards its branch as before.
+
+**A Task is closed when its code is on GitHub.** In a GitHub workspace the local merge closes the change, not the Tasks it closes: a close kept by the app would be sent as soon as GitHub is back, before the commits. `forge-resync.ts --report` closes them once GitHub's main has the merge commit.
+
+**Coming back** (`scripts/forge-resync.ts`). First the local main is checked (`verifyLocal`): it must be GitHub's main plus only
+
+- the commits a local merge that passed the gate recorded on its change (`[local-merge] merged <tip> base=<base>`, written by `local-merge.ts`), each range a straight line with no merge in it, and
+- this script's own merges of GitHub's main: two parents, the second in GitHub's history, and exactly the tree git's own clean merge of the two gives.
+
+A commit made on main by hand, a merge resolved or edited by hand, a record that cannot be read from the app: nothing is merged, nothing is pushed, the ref the local main is on and the commits are listed, and how they go in is the person's decision (through a PR, the gate judges them). The stop is not a dead end — a local merge whose `[local-merge]` record could not be written after it landed would otherwise stop every later run. The output names two commands the person runs in a terminal, each with the full sha of the tip it saw (a tip that moved since is refused): `bun scripts/forge-resync.ts --adopt-landing <tip>` accepts the unrecorded commits of that tip for this run and goes on as usual (the check of a protected main and the sync PR still apply), and `bun scripts/forge-resync.ts --drop-landing <tip>` deletes the landing ref `refs/switchboard/landed/main` (the branch `main` and GitHub's main are untouched; the output says how to put the ref back, and the app's changes stay recorded as merged, so what should still go in is made again). The script never runs either by itself, and both refuse to run without a terminal or inside a Task (`SWITCHBOARD_TASK_ID`). That is a check against a slip, not a boundary: a Task runs as the same user. Then:
+
+| GitHub's main vs the local main | What happens |
+|---|---|
+| The same, or the local one behind | Nothing is sent |
+| Only the local one moved | A plain push: a fast-forward on GitHub |
+| Both moved | GitHub's main is merged into the local main with a merge commit, then pushed. That combination was reviewed and tested by nobody as a whole, as after any two PRs merged one after the other; the tag CI is what runs on it |
+| That merge conflicts | Nothing is pushed; a question on the PBI. A resolution made by hand goes in through a PR, not through this script |
+| GitHub's main is protected | No direct push: the same commit on `sb/sync-main-<7>` and a PR to main, merged with a Merge commit when the gate says merge (`--merge-sync`, which carries the gate's mark of that PR) |
+| GitHub is not reachable yet (the network, a 5xx, a limit) | Nothing changes (exit 4) |
+| A login or permission failure | Nothing changes (exit 2): stop and report, it is not waited for |
+
+- **No force push** (`--force`, `--force-with-lease`, a `+` refspec): it would drop the commits only GitHub's main has.
+- **No rebase of the local main**: the release tags already cut and the version already promoted name commits by sha; a rebase would change them.
+- **No release tag while away**: cutting one writes to GitHub.
+- **No work tree moved**: a main that is checked out is left to `ops-kit pull-main`.
+
+**The record** (`forge-resync.ts --report`), once per change after GitHub's main has its commit: one line saying what happened and the first lines of the change's marks (review, local CI, recheck, the local merge), as list items so that none of them counts as a mark of the PR. It goes on the PR the change stood in for — which is closed when GitHub did not take it as merged — or, when there never was a PR, on the Task the change closed (no PR is made after the fact). The Tasks the change closes are closed then. A change that stood in for a PR and was not merged locally is closed and summed up on that PR. `reportedAt` keeps it from being written twice; an answer lost between the comment and the mark is found by the summary's first line.
+
+**What this does not guarantee.** All of it runs as the person's OS user on loopback: a task can call the same routes, write the same refs and the same database. The conditions above keep a mistaken or misled task from leaving GitHub's flow, from merging what the gate could not judge, and from sending what no gate judged; they are not a fence against a task that sets out to get around them.
+
+Not verified against the real service: whether GitHub marks a PR as merged when the commits of its head reach main by a plain push (same sha) or by the local rebase (different sha) — the report reads the PR's state and closes it only when it is still open, so either answer is handled; and whether `protected` of the branches API and the rules API together show every kind of protection a repository can have (a push GitHub refuses for protection still falls back to the sync PR).
+
 ## Verification
 
 - `ops-kit/src/forge.test.ts`: the target's service, host and repository are passed to the implementation as they are; unsupported services and operations; the secret check just before sending (AWS names too); `forgeOf`; `forgeTargetOf` (matching a GitLab origin); and GitHub's `verification` being the same `gh pr comment` as before
 - `ops-kit/src/forge-gitlab.test.ts`: only glab is called, on the target's host; glab's output is not returned when not logged in
 - `packages/core/src/backlog-stored.test.ts`, the test that a GitHub issue 12 and a GitLab issue 12 are two records
 - `ops-kit/src/forge-gitlab.test.ts` "forge-gitlab read" (replay of [`gitlab-issues.json`](../../ops-kit/fixtures/gitlab-issues.json)), `packages/core/src/backlog-sync.test.ts` "a GitLab project is imported through glab"
-- `packages/core/src/backlog-send.test.ts` "forge operation": an operation containing a secret and an operation for another service are `failed` and write nothing to GitHub; `forgeKind`. The 4 "GitLab:" tests: the check against the original values and the read after writing, `failed` for a missing field, preventing a resend by the marker, and 401 / 429 / 4xx / 5xx
+- `packages/core/src/backlog-send-forge.test.ts` "forge operation": an operation containing a secret and an operation for another service are `failed` and write nothing to GitHub; `forgeKind`. The 4 "GitLab:" tests: the check against the original values and the read after writing, `failed` for a missing field, preventing a resend by the marker, and 401 / 429 / 4xx / 5xx
 - `packages/core/src/backlog-sync.test.ts` "the import is the read of the repository's forge": a workspace with an unsupported `forge.service` is an import failure (with the reason) and does not ask GitHub
 - `scripts/local-ci.test.ts` "forge verification", `ops-kit/src/config.test.ts` "forge" and "GitLab's forge"
 - `scripts/forge-e2e.ts` (`env -u SWITCHBOARD_SUPERVISED bun scripts/forge-e2e.ts`): with a temporary DB, a local bare repo, a fake GitHub and a fake glab, it checks in sequence the separation of identical numbers, the import, edits on both sides and conflicts (GitLab and GitHub), the marker when the answer to a comment or creation is lost (GitLab and GitHub), from a git push through the MR, discussions and resolve, the merge stop on a stale-head pass and on an unresolved discussion, the note for the local CI result, the merge at the head that was judged, that after switching back to the GitHub setting the import reads GitHub and that checkout reads GitHub's records and does not delete GitLab's stored data, and that outbound connections are 0
+- `ops-kit/src/gh.test.ts` "outageOf" and `packages/core/src/forge-outage.test.ts` (what counts as an outage, and the daemon's own observation); `packages/core/src/landing.test.ts` (the landing ref)
+- `scripts/forge-fallback.test.ts` (the real daemon, a GitHub workspace, a gh that fails): the switch for an outage and for a limit with its end; no switch for an expired login, a missing permission, a refused input, or while the app sees GitHub answering; the local merge on the landing ref with the main work tree unmoved and the Task left open; no merge once GitHub is back; a `[merge-answer] yes` refused on the change in every spelling; and a known or possible PR stopping the merge. `scripts/merge-gate.test.ts` "github workspace" (each gate check on a change), `scripts/forge-resync.test.ts` (the checks before a push: an unrecorded commit, a hand-made merge, a protected main, a login failure; the landing ref; "report"), `packages/core/src/backlog-local.test.ts` "change in a github workspace"

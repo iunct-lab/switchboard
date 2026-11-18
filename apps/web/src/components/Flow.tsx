@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BacklogItem, FlowView } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { waitSummary } from "../backlogView.ts";
 import { bottleneckLine, flowRows, slowRow } from "../flow.ts";
 import { t } from "../i18n.ts";
@@ -8,7 +8,7 @@ import { panels as m } from "../i18n/panels.ts";
 import { jstStamp, jstTime } from "../time.ts";
 
 /**
- * 流れ（直近 30 日）(#651): how long the PBIs closed in the last 30 days took, stage by stage, against the 30 days
+ * 流れ（直近 30 日）: how long the PBIs closed in the last 30 days took, stage by stage, against the 30 days
  * before. Read apart from the list, so that GitHub being unreadable leaves the list as it is — only this section says why.
  */
 export function Flow(props: { items: BacklogItem[]; now: number }) {

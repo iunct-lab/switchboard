@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: CHROME_BIN=/usr/local/bin/chromium bun scripts/ui-layers-e2e.ts.
- * The monthly floor / ceiling / walls check (#3353) through the real daemon with a fake runner: the schedule is there from
+ * The monthly floor / ceiling / walls check through the real daemon with a fake runner: the schedule is there from
  * the start; a firing starts the check's Task, whose reply registers the HTML report (written by the real
  * `ui-layers-report.ts`, the history under SWITCHBOARD_HOME) and the report leads `GET /api/reports`; the second firing's
  * report has the first's values and the difference; the same findings filed twice create no request the second time (a
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAdapter } from "@switchboard/protocol";
 import { loadConfig } from "../packages/core/src/config.ts";
-import { UI_LAYERS_CHECK_PROMPT } from "../packages/core/src/scheduler.ts";
+import { SAMPLE_TITLE_PREFIX, UI_LAYERS_CHECK_PROMPT } from "../packages/core/src/scheduleSamples.ts";
 import { startServer } from "../packages/core/src/server.ts";
 import { readUiMetrics } from "./ui-layers-metrics.ts";
 import { fileRequests, type Finding } from "./ui-layers-requests.ts";
@@ -69,9 +69,9 @@ const fire = (id: string) => fetch(`${base}/api/schedules/${id}/run`, { method: 
 let chrome: ReturnType<typeof Bun.spawn> | undefined;
 let ws: WebSocket | undefined;
 try {
-  // 1. the schedule is there from the start, and a firing's report leads the reports
-  const check = ((await get("/api/schedules")) as any[]).find((s) => s.title === "床・天井・壁の点検");
-  assert(check && check.runner === "claude" && check.enabled, `the monthly check is there from the start: ${JSON.stringify(check)}`);
+  // 1. the sample is there from the start, disabled; a firing's report leads the reports
+  const check = ((await get("/api/schedules")) as any[]).find((s) => s.title === `${SAMPLE_TITLE_PREFIX}床・天井・壁の点検`);
+  assert(check && check.runner === "claude" && check.enabled === false, `the monthly check is there from the start as a disabled sample: ${JSON.stringify(check)}`);
   ok(`既定の定期実行: ${check.title} (${check.cron})`);
   const reportOf = async (n: number) => {
     const res = await fire(check.id);

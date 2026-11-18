@@ -166,7 +166,7 @@ export function restartArgv(): string[] {
 /**
  * Start a replacement daemon that survives our exit: through `sh -c 'nohup … &'` (Bun.spawn cannot setsid) with its
  * output in ~/.switchboard/daemon.log, since our stdio may be a closed pipe once we are gone. `keep` puts back what the
- * daemon took out of its own environment (the idle stop command, server.ts).
+ * daemon took out of its own environment (the idle stop command, server/lifecycle.ts).
  */
 export function spawnDetached(argv: string[], home: string, cwd: string, keep: Record<string, string> = {}): void {
   mkdirSync(home, { recursive: true });

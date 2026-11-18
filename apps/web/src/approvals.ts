@@ -1,7 +1,7 @@
 import type { EventEnvelope, PendingApproval } from "@switchboard/protocol";
 
 /**
- * The approvals list (#26) kept current from the event stream: an ask adds a row, its answer (permission.resolved)
+ * The approvals list kept current from the event stream: an ask adds a row, its answer (permission.resolved)
  * removes it. Nothing else does — the daemon keeps an ask open past session.end — so the list is fetched again when the
  * connection comes back and when a turn ends. Newest first, like GET /api/approvals. The title is looked up at render.
  */

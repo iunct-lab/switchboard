@@ -1,5 +1,5 @@
 /**
- * The Starter (#181, #231): a Lambda behind a Function URL that the start page and sb-rescue call.
+ * The Starter: a Lambda behind a Function URL that the start page and sb-rescue call.
  *   GET  /status  → { state: "stopped" | "stopping" | "pending" | "running" | … }
  *   POST /start   → StartInstances on the one host instance (409 while it is still stopping, and with reason "capacity"
  *                   when AWS has no Spot capacity for it)
@@ -7,12 +7,12 @@
  *                   instance, its id, its VPC origins and its Spot request stay; EC2 reboots it, UserData runs again on
  *                   the fresh disk and sqlite comes back from Litestream. EC2 does this only for a running instance:
  *                   409 otherwise, and 409 while a replacement is still going on
- *   (passkey path only) POST /_auth/stop { force? } → StopInstances on the one host instance (#1394): running only;
+ *   (passkey path only) POST /_auth/stop { force? } → StopInstances on the one host instance: running only;
  *                   stopping only with force (Force: true), and force only for a stopping one; 409 otherwise
  * Every path needs `x-switchboard-edge` (the value CloudFront adds; 403 for a direct call to the Function URL, /status
  * included). These POSTs also need `x-switchboard-start-token` equal to the SecureString in Parameter Store: they are for machines
- * (the GitHub workflow, sb-rescue). A person uses `/_auth/*` (auth.ts, #211): a passkey and a cookie, no token.
- * A scheduled event (EventBridge, every 5 minutes; no `requestContext.http`) runs countries.reconcile (#1639): the
+ * (the GitHub workflow, sb-rescue). A person uses `/_auth/*` (auth.ts): a passkey and a cookie, no token.
+ * A scheduled event (EventBridge, every 5 minutes; no `requestContext.http`) runs countries.reconcile: the
  * temporary extra countries of the geo restriction end, or come back after a redeploy.
  * It starts, and replaces the root volume of, only this instance (aws/template.yaml gives it nothing else).
  */
@@ -34,9 +34,9 @@ export interface StarterDeps {
   instanceId: string;
   tokenParam: string;
   now?: () => number;
-  /** Passkey login (#211): absent = no `/_auth/*` (a test of the machine paths only). */
+  /** Passkey login: absent = no `/_auth/*` (a test of the machine paths only). */
   auth?: { s3: Sender; bucket: string; publicOrigin: string };
-  /** Temporary extra countries (#1639): CloudFront and the stack's always-allowed countries. Uses auth's s3 and bucket. */
+  /** Temporary extra countries: CloudFront and the stack's always-allowed countries. Uses auth's s3 and bucket. */
   countries?: { cloudfront: Sender; base: string[] };
 }
 /** The Function URL event and response, only the fields used. */
@@ -83,9 +83,9 @@ export function makeHandler(d: StarterDeps) {
     const err = e as { name?: string; message?: string };
     if (err.name === "IncorrectInstanceState") return { error: "機械はまだ停止の途中です（または状態が変わったところです）。少し待ってからもう一度押してください" };
     // Right after a stop, the persistent Spot request takes about a minute to become "disabled" (startable) again;
-    // StartInstances is refused until then. The page retries a 409 by itself (#211, seen on the first deploy).
+    // StartInstances is refused until then. The page retries a 409 by itself (seen on the first deploy).
     if (err.name === "IncorrectSpotRequestState") return { error: "止まった直後で、まだ起動できる状態になっていません（1 分ほどかかります）" };
-    // AWS has no Spot capacity of this type in this zone right now (#443, 2026-09-28): it may come back in minutes
+    // AWS has no Spot capacity of this type in this zone right now (2026-09-28): it may come back in minutes
     if (err.name === "InsufficientInstanceCapacity") return { error: "AWS に今この型の Spot の空きがありません。しばらく待つと空くことがあります", reason: "capacity" };
     return null;
   };
@@ -121,7 +121,7 @@ export function makeHandler(d: StarterDeps) {
   async function url(event: UrlEvent): Promise<UrlResult> {
     const method = event.requestContext.http.method;
     const path = event.rawPath.replace(/\/+$/, "") || "/";
-    // Only CloudFront reaches any path: it adds the shared header, as it does for the host (#228). Calling the Function URL
+    // Only CloudFront reaches any path: it adds the shared header, as it does for the host. Calling the Function URL
     // directly gets nothing, /status included. A mismatch reads the header again once (it may have just been rotated).
     const given = event.headers?.["x-switchboard-edge"] ?? "";
     let edge = await param(EDGE_PARAM);

@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/task-scroll-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * A long task (#1311): a fake runner answers in 60 turns (a reply of two or three lines, a tool call and its result each),
+ * A long task: a fake runner answers in 60 turns (a reply of two or three lines, a tool call and its result each),
  * and the task is opened at 1280 × 800 and at 390 × 844 (mobile). At each size: (a) right after opening, the end of the
  * conversation is on screen; (b) scrolled to the end, the task's head is still inside the scroll area and its ターミナル
  * tab is the element hit at its centre and switches to the terminal, 会話 back; (e) the task's instruction is read in full

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { modelOptions, taskModelOptions } from "./modelOptions.ts";
+import { modelOptions, optionText, taskModelOptions } from "./modelOptions.ts";
 
 const claude = { models: [{ value: "claude-fable-5-1", label: "Fable 5.1" }, { value: "claude-haiku-4-5", label: "Haiku 4.5" }], cliDefaultModel: "haiku" };
 
-describe("modelOptions (#155)", () => {
+describe("modelOptions", () => {
   test("the first choice is the CLI's default and says what it resolves to; the runner's models follow", () => {
     expect(modelOptions(claude, "")).toEqual([
       { value: "", label: "CLI 既定（haiku）" },
@@ -20,6 +20,18 @@ describe("modelOptions (#155)", () => {
   test("a current value that is not on the list (typed, or the full id a runner reported) stays selectable; one on the list is not doubled", () => {
     expect(modelOptions(claude, "claude-haiku-4-5-20251001").at(-1)).toEqual({ value: "claude-haiku-4-5-20251001", label: "claude-haiku-4-5-20251001" });
     expect(modelOptions(claude, "claude-haiku-4-5")).toHaveLength(3);
+  });
+
+  test("emptyLabel names the empty choice instead of the CLI default; the runner's models are unchanged", () => {
+    expect(modelOptions(claude, "", "ランナーの既定（opus）")).toEqual([{ value: "", label: "ランナーの既定（opus）" }, ...modelOptions(claude, "").slice(1)]);
+  });
+});
+
+describe("optionText", () => {
+  test("the label in front of each option, unless the row already names it (bare) or there is no label", () => {
+    expect(optionText("モデル", "Fable")).toBe("モデル: Fable");
+    expect(optionText("モデル", "Fable", true)).toBe("Fable");
+    expect(optionText("", "claude")).toBe("claude");
   });
 });
 

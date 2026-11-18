@@ -2,12 +2,13 @@
 import { describe, expect, test } from "bun:test";
 import { Db } from "./db.ts";
 import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
-import { requestOf } from "./backlog.ts";
+import { requestOf } from "./backlog-item.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import type { BacklogSource, FlowView } from "@switchboard/protocol";
-import { createStoredIssue, type GhRunner } from "./backlog.ts";
+import { createStoredIssue } from "./backlog-edit.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

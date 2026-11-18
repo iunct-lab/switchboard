@@ -114,6 +114,12 @@ describe("scanIssues since", () => {
     expect(paths(still).slice(3)).toEqual(["repos/o/r/issues/3", "repos/o/r/issues/comments/9", "repos/o/r/pulls/comments/7", "repos/o/r/pulls/5/reviews/8", "repos/o/r/issues/6"]);
   });
 
+  test("since: an earlier hit whose URL writes the repository in another case is this repository's and is read again", async () => {
+    const c = fakeGh([() => [], () => [], () => [], () => ({ title: "題", body: `コード ${code}` })]);
+    expect(await scanIssues(c, "Owner/Repo", async () => {}, undefined, { since: "2026-10-20T00:00:00Z", recheck: ["https://github.com/owner/repo/issues/12"] })).toEqual({ hits: [{ url: "https://github.com/owner/repo/issues/12", kind: "device-code", line: 1 }], scanned: 1 });
+    expect(paths(c).slice(3)).toEqual(["repos/Owner/Repo/issues/12"]);
+  });
+
   test("since: a place the difference already read is not asked again; another failure has no answer", async () => {
     const c = fakeGh([() => [{ html_url: `${gh}/issues/3`, title: "題", body: "直した" }], () => [], () => []]);
     expect(await scanIssues(c, "o/r", Bun.sleep, undefined, { since: "2026-10-20T00:00:00Z", recheck: [`${gh}/issues/3`] })).toEqual({ hits: [], scanned: 1 });

@@ -29,7 +29,7 @@ function brief(ws: Workspace, runners: readonly RunnerId[]): string {
   const lines: string[] = [];
   if (ws.kind === "meta") {
     lines.push("あなたは Switchboard（このアプリ自身）のリポジトリで作業しています。");
-    lines.push(`構成: packages/protocol（AgentEvent zod スキーマ）, packages/core（Bun デーモン: server.ts / tasks.ts / db.ts）, packages/adapters/{${runners.join(",")}}（各ランナーのアダプタ）, apps/web（React + Vite UI）。`);
+    lines.push(`構成: packages/protocol（AgentEvent zod スキーマ）, packages/core（Bun デーモン: server.ts / tasks/ / db.ts）, packages/adapters/{${runners.join(",")}}（各ランナーのアダプタ）, apps/web（React + Vite UI）。`);
   } else {
     lines.push(`あなたは ${ws.name}（${ws.path}）のリポジトリで作業しています。`);
     const layout = listLayout(ws.path);

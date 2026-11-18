@@ -8,7 +8,7 @@ export default defineConfig({
   server: {
     // The daemon's own UI is kept by its CSP `default-src 'self'`, which also stops a link in a report's frame from
     // loading another site into that frame — and the report bridge trusts that frame's window (docs/design/artifacts.md).
-    // Only frame-src here (#3726 review): a wider policy would break Vite's HMR and React's dev injections.
+    // Only frame-src here (found in review): a wider policy would break Vite's HMR and React's dev injections.
     // Proxied responses (/api, /artifacts) keep the daemon's headers; packages/core/src/devproxy.test.ts checks both.
     headers: { "content-security-policy": "frame-src 'self'" },
     proxy: {
@@ -16,10 +16,10 @@ export default defineConfig({
       // Origin host to equal the Host header. The proxy forwards Origin (http://localhost:5173) untouched, so Host
       // must stay localhost:5173 too — with changeOrigin it became 127.0.0.1:47831 and every POST and the
       // WebSocket upgrade from the dev UI was refused with 403. Host is also checked against the allowed names
-      // (core/src/auth.ts hostAllowed, #1135); the dev server's localhost:5173 passes.
+      // (core/src/auth.ts hostAllowed); the dev server's localhost:5173 passes.
       // packages/core/src/devproxy.test.ts runs this config against a real daemon.
       "/api": { target: CORE },
-      // A registered report is opened from /artifacts/<key>/… (#1777); the key in the path is its only credential.
+      // A registered report is opened from /artifacts/<key>/…; the key in the path is its only credential.
       "/artifacts": { target: CORE },
       "/ws": { target: CORE.replace(/^http/, "ws"), ws: true },
     },

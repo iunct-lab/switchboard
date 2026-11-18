@@ -431,8 +431,13 @@ describe("sb_session cookie", () => {
       expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: h, body: JSON.stringify({ shadowRunner: null }) })).status).toBe(200);
       const added = core.db.listWorkspaces().find((w) => w.path === tmpdir())!;
       expect((await fetch(`${base}/api/workspaces/${added.id}/rules`, { method: "PUT", headers: h, body: JSON.stringify({ rules: "テスト: make test" }) })).status).toBe(200);
+      expect((await fetch(`${base}/api/workspaces/${added.id}/config`, { method: "PUT", headers: h, body: JSON.stringify({ config: '{"ci":{"steps":[{"run":"make test"}]}}' }) })).status).toBe(200);
       const ops = logLines(spy, "op");
-      expect(ops.map((o) => o.op)).toEqual(["workspace.add", "settings.update", "workspace.rules"]);
+      expect(ops.map((o) => o.op)).toEqual(["workspace.add", "settings.update", "workspace.rules", "workspace.config"]);
+      // the settings' key names, never their values (the CI's steps are shell)
+      // (with the token, not the login cookie, the change only waits for the person: the line says so)
+      expect(ops[3]).toEqual(expect.objectContaining({ detail: { path: tmpdir(), change: expect.any(Number), state: "pending", source: "call", keys: ["ci"] } }));
+      expect(JSON.stringify(ops[3])).not.toContain("make test");
       // the rules' length, never their text
       expect(ops[2]).toEqual(expect.objectContaining({ detail: { path: tmpdir(), chars: 14 } }));
       expect(ops[0]).toMatchObject({ detail: { path: tmpdir() } });
@@ -465,6 +470,10 @@ describe("sb_session cookie", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_WEB_URL: "https://d1.example.net/" }).rescuePageUrl).toBe("https://d1.example.net/rescue/");
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue }).rescuePageUrl).toBe(rescue);
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_WEB_URL: "https://d1.example.net" }).rescuePageUrl).toBeUndefined();
+    // inside the stand-alone container sb-rescue's address opens in no browser outside it: no page is named, and the daemon knows why
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_RESCUE_IN_CONTAINER: "1" })).toMatchObject({ rescueUrl: rescue, rescueInContainer: true });
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_RESCUE_IN_CONTAINER: "1" }).rescuePageUrl).toBeUndefined();
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue }).rescueInContainer).toBe(false);
   });
 
   test("a removed passkey's cookie is refused within SESSION_RECHECK_MS: the daemon asks the Starter and caches the answer", async () => {

@@ -1,12 +1,14 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
 import { mergeGateOf, projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
 import { bodyLoss } from "./lint.ts";
+import { scopeIn } from "./task-paths.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
-import { MERGE_ANSWER_YES } from "./gh-guard.ts";
+import { mergeAnswerYesHeads } from "./gh-guard.ts";
 
 /**
  * `ops-kit backlog …`: the backlog the app running the Task stored, read and edited through its API — the same
@@ -23,7 +25,7 @@ export const triageUsage = (phase: boolean) => `triage <issue> <priority> ${phas
 export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [--state open|closed|all] [--fresh] [--json]
       保存済みの Issue を、取得の時刻と同期の状態つきで出す（行: #番号 type OPEN|CLOSED Status 題）。GitHub には問い合わせない
       --search: 題の部分一致（大文字小文字を区別しない）/ --label: すべてを持つもの / --state: 既定 open
-  backlog view <issue> [--fresh] [--json]
+  backlog view <issue> [--change] [--fresh] [--json]
       Issue 1 件（本文、コメント、Project のフィールド、送信待ち、同期の状態）。<issue> は番号か、ここで作ってまだ番号の無い Issue の localId。保留中の編集（競合・失敗・結果不明）は「保留:」の行に理由つき
   backlog retry <issue>
       GitHub が受け付けなかった（失敗で保留中の）編集を、原因を直した後に全部送り直す（アプリの Task の中だけ）。無ければ 1
@@ -31,7 +33,9 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       結果不明・失敗で保留中の編集を、GitHub に何も書かずに全部取り下げる（中身を確かめてから。アプリの Task の中だけ）。無ければ 1
   backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>] [--allow-empty]
       --allow-empty: 本文が空（空白と改行だけも）でも送る。無ければ空の本文は送らず 1（前段の失敗で空になった本文を保存しない）
-      --head / --base: PR の代わりのローカルの「変更」として作る（GitHub 連携の無い workspace だけ。両方そろえる）
+      --head / --base: PR の代わりのローカルの「変更」として作る（両方そろえる。GitHub の workspace では Issue と別に 1 から番号が付き、GitHub には送らない）
+      --pr <n>: その「変更」が代わりをする GitHub の PR（GitHub の workspace だけ。GitHub が使えない間の切り替え）
+      --change（view / edit / comment）: <issue> を Issue ではなくローカルの「変更」の番号として読む・書く
   backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
                [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]
       --body-file: 本文が先頭 null だけ、または type:pbi の必須の節・**Story Points**: の行を失う本文は保存せず 1（押し切る口は無い。節を消す --allow-empty でも同じ）
@@ -108,7 +112,7 @@ interface Sync {
   repository: string | null;
   syncedAt: number | null;
   syncing: boolean;
-  sync: { state: string; reason: string | null; pendingCount: number };
+  sync: { state: string; reason: string | null; pendingCount: number; replica?: { takenAt: number } };
 }
 
 /**
@@ -145,6 +149,9 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     const explicit = take("--workspace");
     const fresh = has("--fresh");
     const asJson = has("--json");
+    // the number names the workspace's local change, not the Issue (a GitHub workspace numbers them apart)
+    const asChange = has("--change");
+    const mark = asChange ? "&change=1" : "";
     const api = client(env, opts.fetch ?? fetch);
     // outside the app's Task: GitHub itself, in the same shape. Never when BACKLOG_URL is set and the app is down
     const direct = !env.BACKLOG_URL && opts.gh ? { gh: opts.gh, project: opts.project ?? (async () => null) } : null;
@@ -174,6 +181,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     // what the Project's commands say on GitHub goes to stderr: stdout keeps the lines the app's answers give
     const note = (s: string) => io.err(s);
     if (direct && explicit !== undefined) throw new Refused("--workspace はアプリの Task の中だけ（BACKLOG_URL が無いので GitHub に直接つなぐ）");
+    if (asChange && (direct || (sub !== "view" && sub !== "edit" && sub !== "comment"))) throw new Refused("--change は view / edit / comment だけ（ローカルの変更はアプリにある。BACKLOG_URL が要る）");
     const githubRepo = async () => {
       const [owner, name] = (await repoName(env, opts.cwd)).split("/") as [string, string];
       return { owner, name };
@@ -197,7 +205,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     };
     const edit = async (ref: string, body: Record<string, unknown>) => {
       const ws = await workspace();
-      await api("PATCH", `/${encodeURIComponent(issueRef(ref))}`, { workspaceId: ws.workspaceId, ...body });
+      await api("PATCH", `/${encodeURIComponent(issueRef(ref))}${asChange ? "?change=1" : ""}`, { workspaceId: ws.workspaceId, ...body });
       // pending or not shows in `view` (送信待ち): a backlog kept in the app is applied at once
       io.out(`#${issueRef(ref)} を保存しました`);
       return 0;
@@ -237,7 +245,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
       }
       case "view": {
         const [ref, ...extra] = args;
-        if (!ref || extra.length) throw new Refused("backlog view <issue> [--fresh] [--json]");
+        if (!ref || extra.length) throw new Refused("backlog view <issue> [--change] [--fresh] [--json]");
         if (direct) {
           const d = await viewFromGithub(direct.gh, await githubRepo(), await direct.project(), number(ref));
           io.out(asJson ? JSON.stringify(d) : formatDetail(d));
@@ -245,7 +253,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         }
         let ws = await workspace(!fresh);
         if (fresh) await settle(ws);
-        const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+        const d = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}${mark}`)) as Detail;
         io.out(asJson ? JSON.stringify(d) : formatDetail(d));
         return 0;
       }
@@ -259,7 +267,8 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const fields = Object.fromEntries(takeAll("--field").map(fieldPair));
         const head = take("--head");
         const base = take("--base");
-        if (!title || args.length || !head !== !base) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝>] [--allow-empty]");
+        const pr = take("--pr");
+        if (!title || args.length || !head !== !base || (pr !== undefined && !head)) throw new Refused("backlog create --title <t> [--body-file <f|->] [--label <l>]... [--milestone <m>] [--parent <n>] [--field <name>=<value>]... [--head <枝> --base <枝> [--pr <n>]] [--allow-empty]");
         if (body !== undefined && !body.trim() && !allowEmpty) throw new Refused(EMPTY_BODY("create"));
         if (direct && head) throw new Refused("--head / --base（ローカルの変更）はアプリの Task の中だけ（BACKLOG_URL が要る）");
         noSecrets(title, body, milestone, ...labels, ...Object.values(fields).map(String));
@@ -270,7 +279,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         const ws = await workspace();
-        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base } } : {}) })) as { localId: string; number?: number | null };
+        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base, ...(pr !== undefined ? { pr: number(pr) } : {}) } } : {}) })) as { localId: string; number?: number | null };
         // a backlog kept in the app numbers it at once; GitHub's once it is sent
         io.out(typeof r.number === "number" ? `#${r.number} を作りました（localId ${r.localId}）` : `作りました（送信待ち）: localId ${r.localId}。番号が付く前も backlog view ${r.localId} で読める`);
         return 0;
@@ -302,7 +311,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
             own = await ownRepo();
           } else {
             const ws = await workspace();
-            now = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+            now = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}${mark}`)) as Detail;
             // --workspace names a workspace: this clone's repository when its repository is origin's
             own = explicit === undefined ? await ownRepo() : !!ws.repository && ws.repository.toLowerCase() === (await repoName({ ...env, GH_REPO: undefined }, opts.cwd).catch(() => "")).toLowerCase();
           }
@@ -314,8 +323,9 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           // an Issue that has no number yet (only sent later) cannot have been named by a stopped PR. Its `number` is null then,
           // although Detail types it as a number, so keep the `n &&` below
           const n = now.issue.number;
-          if (env.BACKLOG_URL && n && now.issue.labels.includes("type:task") && mergeGateOf(opts.cwd) !== null && addedPaths(now.issue.body ?? "", body).length) {
-            const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", issue: String(n) });
+          if (env.BACKLOG_URL && n && now.issue.labels.includes("type:task") && body !== now.issue.body && mergeGateOf(opts.cwd) !== null && addedPaths(now.issue.body ?? "", body, repoTop(opts.cwd)).length) {
+            // the stop is the repository's whose Task this is: the workspace written to
+            const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo: (await workspace()).repository ?? "", issue: String(n) });
             const s = (await appRoot(env, opts.fetch ?? fetch)("GET", `/api/merge-grants/scope-stop?${q}`).catch(() => null)) as { stopped?: unknown; granted?: unknown } | null;
             if (s?.stopped === true && s.granted !== true) throw new Refused(`backlog edit: 保存しません — merge-gate が名指しの外のファイルで止めたあとの、#${n} の本文への名指しのパスの追加には利用者の許可が要ります。利用者が Task の会話に「Task #${n} の本文に名指しのパスを足してよい」と 1 行書いたあとに保存します`);
           }
@@ -342,10 +352,19 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const body = await text(take("--body-file"));
         if (!ref || !body?.trim() || args.length) throw new Refused("backlog comment <issue> --body-file <f|->");
         noSecrets(body);
+        // a change that stands in for a PR while GitHub cannot be used shares its number with a PR and an Issue: the person's
+        // grant names a PR, so the yes that lifts an ask is not written there — what needs the person waits for GitHub
+        // (an answer that does not say where the backlog is kept is a GitHub workspace's: the app's default)
+        // the mark is looked for in the form its readers compare (`markText`): a leading space or a full-width bracket does not hide it
+        const yesHeads = mergeAnswerYesHeads(body);
+        if (asChange && yesHeads.length && ((await workspace()).backlog ?? "github") === "github") throw new Refused(`backlog comment: [merge-answer] yes は GitHub の workspace のローカルの変更には投稿しません（利用者の許可文は PR の番号を指す。聞く理由のある変更は GitHub が戻ってから PR で進める）`);
         // `gh` is not in front of this path: the person's `[merge-answer] yes` mark is held to the same grant as in the guard
-        if (env.BACKLOG_URL && mergeGateOf(opts.cwd) !== null && MERGE_ANSWER_YES.test(body)) {
-          const granted = await mergeGranted(env, "answer", number(ref), opts.fetch ?? fetch);
-          if (!granted) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `#${number(ref)} に利用者の許可文の記録がありません`}）。利用者が Task の会話に「PR #${number(ref)} に [merge-answer] yes を投稿してよい」と 1 行書いたあとに投稿します`);
+        if (env.BACKLOG_URL && mergeGateOf(opts.cwd) !== null && yesHeads.length) {
+          // the grant is the repository's whose PR gets the mark: the workspace written to (none read: no grant), and the
+          // head the mark names: the grant holds for the head the PR had when it was given
+          const repo = direct ? null : await workspace().then((w) => w.repository, () => null);
+          const granted = await answerGranted(env, repo, number(ref), yesHeads, opts.fetch ?? fetch);
+          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話に「PR #${number(ref)} に [merge-answer] yes を投稿してよい」と 1 行書いたあとに投稿します`);
         }
         if (direct) {
           await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);
@@ -353,8 +372,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         const ws = await workspace();
-        await api("POST", `/${number(ref)}/comment`, { workspaceId: ws.workspaceId, text: body });
+        // the comment goes as this Task's (`taskProof`): the app ends only the turn of the Task that proves the question is its own
+        const made = (await api("POST", `/${number(ref)}/comment${asChange ? "?change=1" : ""}`, { workspaceId: ws.workspaceId, text: body }, await taskProof(env, opts.fetch ?? fetch))) as { waits?: unknown } | null;
         io.out(`#${number(ref)} にコメントを保存しました`);
+        // a question that said 推奨で進める and may not go on: it waits for the person, and the work stops here
+        if (typeof made?.waits === "string") io.out(`この問いは「推奨で進める」では進められません（${made.waits}）。アプリは止めて待つ問いとして判断待ちに出しました。推奨の案で作業を続けず、ここで作業を終えて回答を待ってください`);
         return 0;
       }
       case "set": {
@@ -467,6 +489,13 @@ export interface StoredRecords {
   /** Issues whose last read was not complete (404 / 403 / not read yet): what is stored of them is not current. */
   unread: number[];
   pulls: Array<{ number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; labels: string[]; closes: number[]; mergeCommit: string | null; updatedAt: string; files: string[] | null }>;
+  /** The checkout's `sharedFiles` (ops.config.json): an overlap only on these holds no one back. Absent = none. */
+  shared?: string[];
+  /**
+   * The places of the PBIs that yielded on an overlap and can move now, as the app's own judgement before a start reads
+   * them: `paths` of the PBI's Task `task` are kept for it since `since`. Absent = none.
+   */
+  turns?: Array<{ pbi: number; since: string; task: number; paths: string[] }>;
 }
 
 /**
@@ -562,20 +591,42 @@ function isSandboxRefusal(e: unknown): boolean {
   return code === "EPERM" || code === "EACCES" || /^(EPERM|EACCES)\b/.test(message);
 }
 
-/** Calls the app's backlog API: the parsed answer, or Refused (4xx) / Unknown (no app, 5xx, 424, not imported = 409 on a read). */
+/** The app's key from the file `BACKLOG_TOKEN_FILE` names ("" = none is asked for); it throws when the file cannot be read. */
+const appKey = (env: Record<string, string | undefined>): string => (env.BACKLOG_TOKEN_FILE ? readFileSync(env.BACKLOG_TOKEN_FILE, "utf8").trim() : "");
+
+/**
+ * The headers that say a request is this Task's (`OPS_KIT_TASK_ID`), with the proof the app asks for: the token of the
+ * Task's own endpoint, read from the app for this call (it changes when the Task's runner starts again). {} outside a
+ * Task and whenever the proof cannot be read — the request then goes as nobody's, and the app does for it only what it
+ * does for any caller.
+ */
+export async function taskProof(env: Record<string, string | undefined>, f: Fetch): Promise<Record<string, string>> {
+  const id = env.OPS_KIT_TASK_ID;
+  if (!id || !env.BACKLOG_URL) return {};
+  try {
+    const key = appKey(env);
+    const res = await f(new URL(`/api/tasks/${encodeURIComponent(id)}/mcp`, env.BACKLOG_URL).href, { headers: { ...(key && { authorization: `Bearer ${key}` }) }, signal: AbortSignal.timeout(10_000) });
+    const token = res.ok ? ((await res.json()) as { token?: unknown } | null)?.token : undefined;
+    return typeof token === "string" && token ? { "x-task-id": id, "x-task-token": token } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Calls the app's backlog API: the parsed answer, or Refused (4xx) / Unknown (no app, 5xx, 424, not imported = 409 on a read). `extra`: headers added to the call. */
 export function client(env: Record<string, string | undefined>, f: Fetch) {
-  return async (method: string, path: string, body?: unknown): Promise<unknown> => {
+  return async (method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<unknown> => {
     const base = env.BACKLOG_URL;
     if (!base) throw new Unknown("backlog: アプリの API の経路がありません（BACKLOG_URL がありません。アプリの Task の中で実行してください）。保存済みの値は読めません");
     let key = "";
     try {
-      if (env.BACKLOG_TOKEN_FILE) key = readFileSync(env.BACKLOG_TOKEN_FILE, "utf8").trim();
+      key = appKey(env);
     } catch {
       throw new Unknown(`backlog: アプリの鍵のファイルが読めません（BACKLOG_TOKEN_FILE）`);
     }
     let res: Response;
     try {
-      res = await f(`${base.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) }, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(120_000) });
+      res = await f(`${base.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }), ...extra }, ...(body !== undefined && { body: JSON.stringify(body) }), signal: AbortSignal.timeout(120_000) });
     } catch (e) {
       const message = (e as Error).message;
       // a sandbox closing loopback (Codex's Auto): an approved rerun reaches the app, so say so instead of asking the user
@@ -613,12 +664,16 @@ function appRoot(env: Record<string, string | undefined>, f: Fetch) {
 }
 
 /**
- * Whether the person's merge-grant sentence (`kind`: merge / answer / scope) for `target` stands in this Task's conversation
- * (GET /api/merge-grants). Null when the app cannot be asked (no BACKLOG_URL or task id, not reached, 4xx / 5xx, no answer in 5 seconds).
+ * Whether the app has a record of the person's merge grant (`kind`: merge / answer / scope) to this Task for `target` of
+ * `repo`, the repository about to be written to (GET /api/merge-grants). A merge or answer grant holds for the head the
+ * PR had when it was given: `head` is the head about to be merged or named by the mark, and a grant of another head does
+ * not answer (a scope grant has no head). Null when the app cannot be asked (no BACKLOG_URL or task id, not reached,
+ * 4xx / 5xx, no answer in 5 seconds). The Task is the one OPS_KIT_TASK_ID names: this keeps a slip from passing, it is
+ * no fence (docs/design/permission-modes.md, "Merge grants").
  */
-export async function mergeGranted(env: Record<string, string | undefined>, kind: string, target: number, f: Fetch = fetch): Promise<boolean | null> {
+export async function mergeGranted(env: Record<string, string | undefined>, repo: string, kind: string, target: number, f: Fetch = fetch, head?: string): Promise<boolean | null> {
   try {
-    const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", kind, target: String(target) });
+    const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo, kind, target: String(target), ...(head !== undefined ? { head } : {}) });
     const a = (await appRoot(env, f)("GET", `/api/merge-grants?${q}`)) as { granted?: unknown } | null;
     return typeof a?.granted === "boolean" ? a.granted : null;
   } catch {
@@ -626,18 +681,44 @@ export async function mergeGranted(env: Record<string, string | undefined>, kind
   }
 }
 
-/** The paths in backticks (a `/` or an extension in them; a `:line` after it left out) that `after` has and `before` does not. */
-export function addedPaths(before: string, after: string): string[] {
-  const paths = (t: string) => new Set([...t.matchAll(/`([^`\s]+)`/g)].map((m) => m[1]!.replace(/(?::\d+(?:-\d+)?)+$/, "")).filter((x) => /\/|\.[A-Za-z0-9]+$/.test(x)));
-  const had = paths(before);
-  return [...paths(after)].filter((x) => !had.has(x));
+/**
+ * Whether every yes mark a text posts on PR `target` of `repo` has the person's `answer` grant of the head it names
+ * (`heads`: `mergeAnswerYesHeads` of the text). True = all; `"head"` = a yes names no head (nothing to hold the grant
+ * to); `{ head }` = no grant of that head; null = the app could not be asked, or no repository was read.
+ */
+export async function answerGranted(env: Record<string, string | undefined>, repo: string | null | undefined, target: number, heads: Array<string | null>, f: Fetch = fetch): Promise<true | "head" | { head: string } | null> {
+  if (heads.some((h) => h === null)) return "head";
+  if (!repo) return null;
+  for (const head of new Set(heads as string[])) {
+    const granted = await mergeGranted(env, repo, "answer", target, f, head);
+    if (granted === null) return null;
+    if (!granted) return { head };
+  }
+  return true;
 }
 
-/** Records that the merge gate stopped PR `pr` for a file the Task `issue` does not name (POST /api/merge-grants/scope-stop). Best effort: false when it was not recorded. */
-export async function recordScopeStop(env: Record<string, string | undefined>, issue: number, pr: number, f: Fetch = fetch): Promise<boolean> {
+/** The paths the merge gate counts as named (`scopeIn`) that `after` has and `before` does not. */
+export function addedPaths(before: string, after: string, top: { name: string; dir: boolean }[]): string[] {
+  const had = new Set(scopeIn(before, top));
+  return scopeIn(after, top).filter((x) => !had.has(x));
+}
+
+/** The names at the top of the clone's HEAD (`dir` for a directory), from any directory of the clone; empty when git cannot read it. */
+export function repoTop(cwd?: string): { name: string; dir: boolean }[] {
+  // --full-tree: from a subdirectory, ls-tree would list that directory instead of the top
+  const r = spawnSync("git", ["ls-tree", "--full-tree", "HEAD"], { cwd, encoding: "utf8" });
+  if (r.status !== 0) return [];
+  return r.stdout.split("\n").flatMap((l) => {
+    const m = /^\d+ (\w+) \S+\t(.+)$/.exec(l);
+    return m ? [{ name: m[2]!, dir: m[1] === "tree" }] : [];
+  });
+}
+
+/** Records that the merge gate stopped PR `pr` of `repo` for a file the Task `issue` does not name (POST /api/merge-grants/scope-stop). Best effort: false when it was not recorded. */
+export async function recordScopeStop(env: Record<string, string | undefined>, repo: string, issue: number, pr: number, f: Fetch = fetch): Promise<boolean> {
   if (!env.BACKLOG_URL || !env.OPS_KIT_TASK_ID) return false;
   try {
-    await appRoot(env, f)("POST", "/api/merge-grants/scope-stop", { taskId: env.OPS_KIT_TASK_ID, issue, pr });
+    await appRoot(env, f)("POST", "/api/merge-grants/scope-stop", { taskId: env.OPS_KIT_TASK_ID, repo, issue, pr });
     return true;
   } catch {
     return false;
@@ -654,14 +735,16 @@ export async function repoName(env: Record<string, string | undefined>, cwd?: st
 const jst = (at: number | null) => (at === null ? "未取得" : new Date(at).toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }) + " JST");
 
 function freshness(ws: Sync): string {
-  return `# ${ws.repository ?? "?"}  最終取得 ${jst(ws.syncedAt)}  同期 ${ws.sync.state}${ws.sync.reason ? `（${ws.sync.reason}）` : ""}  送信待ち ${ws.sync.pendingCount}${ws.syncing ? "  取込み中" : ""}`;
+  // on a work machine the records are a copy of the instance's: 最終取得 is then the instance's own last import
+  const copy = ws.sync.replica ? `  写し（${jst(ws.sync.replica.takenAt)} に取得。書いた分は EC2 から送られる）` : "";
+  return `# ${ws.repository ?? "?"}  最終取得 ${jst(ws.syncedAt)}  同期 ${ws.sync.state}${ws.sync.reason ? `（${ws.sync.reason}）` : ""}  送信待ち ${ws.sync.pendingCount}${ws.syncing ? "  取込み中" : ""}${copy}`;
 }
 
 /** One Issue as `backlog view` shows it: the app's stored one, or GitHub's own without BACKLOG_URL (`sync.state` "github"). */
 export interface Detail {
   /** The workspace the app answered from; absent in GitHub's own (without BACKLOG_URL). */
   workspaceId?: string;
-  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null } };
+  issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null; pr?: number | null; reportedAt?: string | null } };
   /** A local change's branch tips now; absent / null otherwise. */
   changeRefs?: { head: string | null; base: string | null } | null;
   comments: Array<{ id: string; body: string; createdAt: string }>;
@@ -677,7 +760,7 @@ export interface Detail {
 /** A close that was not a completion; completed and none read as before. */
 const REASON = { NOT_PLANNED: " not planned", DUPLICATE: " duplicate" } as const;
 const HELD = { conflict: "競合", failed: "失敗", unknown: "結果不明" } as const;
-const HELD_KIND = { create: "新規作成", comment: "コメント" } as const;
+const HELD_KIND = { create: "新規作成", comment: "コメント", artifact: "成果物" } as const;
 
 export function formatDetail(d: Detail): string {
   const i = d.issue;
@@ -699,7 +782,7 @@ export function formatDetail(d: Detail): string {
 function changeLine(c: NonNullable<Detail["issue"]["change"]>, refs: Detail["changeRefs"]): string {
   const sha = (x: string | null | undefined) => (x ? x.slice(0, 7) : "なし");
   const tips = c.mergeCommit ? `MERGED ${c.mergeCommit.slice(0, 7)} (reviewed ${sha(c.reviewedHead)})` : `head ${sha(refs?.head)} base ${sha(refs?.base)}`;
-  return `変更: ${c.head} → ${c.base}  ${tips}`;
+  return `変更: ${c.head} → ${c.base}  ${tips}${c.pr ? `  PR #${c.pr}` : ""}${c.reportedAt ? `  reported ${c.reportedAt}` : ""}`;
 }
 
 function issueRef(s: string): string {

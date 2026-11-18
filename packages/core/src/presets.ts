@@ -1,4 +1,4 @@
-import { Preset as PresetSchema, type Preset, type PresetExpansion, type PresetInput, type PresetScene, type PresetUse } from "@switchboard/protocol";
+import { Preset as PresetSchema, StopReasonCode, type Preset, type PresetExpansion, type PresetInput, type PresetReply, type PresetScene, type PresetUse } from "@switchboard/protocol";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import type { Db } from "./db.ts";
 
@@ -64,18 +64,50 @@ const DAY = 86_400_000;
 const PRESET_USE_KEEP_MS = 30 * DAY;
 const PRESET_USE_WINDOW_MS = 14 * DAY;
 
-type Use = { id: string; scene: PresetScene; at: number };
+type Use = { id: string; scene: PresetScene; at: number; kind: StopReasonCode | null };
 
 function readUses(db: Db): Use[] {
   const raw = db.getSetting<unknown>(USES_KEY, []);
   if (!Array.isArray(raw)) return [];
-  return raw.filter((u): u is Use => !!u && typeof u.id === "string" && (u.scene === "home" || u.scene === "task") && typeof u.at === "number");
+  return raw
+    .filter((u) => !!u && typeof u.id === "string" && (u.scene === "home" || u.scene === "task") && typeof u.at === "number")
+    .map((u) => ({ id: u.id, scene: u.scene, at: u.at, kind: StopReasonCode.safeParse(u.kind).data ?? null }));
 }
 
-/** Notes that preset `id` was put in at `scene` at `now`; uses older than 30 days are dropped. No scene = nothing is recorded. */
-export function recordPresetUse(db: Db, id: string, scene: PresetScene | undefined, now: number) {
+/**
+ * Notes that preset `id` was put in at `scene` at `now`, with the reason of the stop it answered (`kind`, null when the
+ * use was not for a stopped Task); uses older than 30 days are dropped. No scene = nothing is recorded.
+ */
+export function recordPresetUse(db: Db, id: string, scene: PresetScene | undefined, now: number, kind: StopReasonCode | null = null) {
   if (!scene) return;
-  db.setSetting(USES_KEY, [...readUses(db).filter((u) => u.at > now - PRESET_USE_KEEP_MS), { id, scene, at: now }]);
+  db.setSetting(USES_KEY, [...readUses(db).filter((u) => u.at > now - PRESET_USE_KEEP_MS), { id, scene, at: now, kind }]);
+}
+
+/** How many presets are offered under one stop. */
+const REPLIES_PER_KIND = 3;
+
+/**
+ * Per stop reason: the presets answered to a stop of that reason in the last 14 days (`task` uses that have a kind), the
+ * most used first (the latest use first on a tie), 3 at most. A deleted preset and one with `{{target}}` are left out: a
+ * press has to send it as it is.
+ */
+export function presetReplies(db: Db, now: number): Map<StopReasonCode, PresetReply[]> {
+  const since = now - PRESET_USE_WINDOW_MS;
+  const presets = new Map(readPresets(db).filter((p) => !needsTarget(p)).map((p) => [p.id, p]));
+  const counts = new Map<StopReasonCode, Map<string, { n: number; at: number }>>();
+  for (const u of readUses(db)) {
+    if (u.scene !== "task" || !u.kind || u.at < since || !presets.has(u.id)) continue;
+    const per = counts.get(u.kind) ?? new Map<string, { n: number; at: number }>();
+    const c = per.get(u.id) ?? { n: 0, at: 0 };
+    per.set(u.id, { n: c.n + 1, at: Math.max(c.at, u.at) });
+    counts.set(u.kind, per);
+  }
+  const out = new Map<StopReasonCode, PresetReply[]>();
+  for (const [kind, per] of counts) {
+    const top = [...per].sort(([, a], [, b]) => b.n - a.n || b.at - a.at).slice(0, REPLIES_PER_KIND);
+    out.set(kind, top.map(([id]) => ({ id, name: presets.get(id)!.name, text: presets.get(id)!.text })));
+  }
+  return out;
 }
 
 /** Per preset in `presets`: uses in the last 14 days per scene and the latest one. Uses of a deleted preset are not counted. */

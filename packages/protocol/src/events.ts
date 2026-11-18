@@ -171,6 +171,13 @@ export const AgentEvent = z.discriminatedUnion("t", [
     status: z.string().optional(),
     /** The window the runner names as the binding one (Claude `rateLimitType`, e.g. five_hour) — which reset to wait for. */
     limitType: z.string().optional(),
+    /**
+     * Which account the report is about, as the adapter names it from what its runner reports about the login: a
+     * 16-character hash, never the provider's id ("" = the runner is logged in to no account). A pseudonym: the hash
+     * has no salt, so whoever can guess what it was made from can confirm the guess. Absent = the adapter could not
+     * tell; the report then counts for the account last named for the runner.
+     */
+    account: z.string().optional(),
   }),
   z.object({
     t: z.literal("artifact"),

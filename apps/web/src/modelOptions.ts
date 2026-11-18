@@ -9,14 +9,19 @@ export interface ModelChoice {
   label: string;
 }
 
+/** The text of one option of a select that sits in a row of selects: "<label>: <text>", or the text alone when the row's name already says what it is (`bare`, or no label). */
+export function optionText(label: string, text: string, bare?: boolean): string {
+  return bare || !label ? text : `${label}: ${text}`;
+}
+
 /**
- * The choices of a model select (#155): the CLI's own default first — named, so an empty model is never a surprise —
+ * The choices of a model select: the CLI's own default first — named, so an empty model is never a surprise —
  * then the runner's list, then the current value when it is not on the list (typed by hand, or the full id the runner
- * reported for a running task).
+ * reported for a running task). `emptyLabel` names the empty choice when it is not the CLI's own default (a Settings row says what it falls back to).
  */
-export function modelOptions(runner: Pick<RunnerInfo, "models" | "cliDefaultModel"> | undefined, current: string): ModelChoice[] {
+export function modelOptions(runner: Pick<RunnerInfo, "models" | "cliDefaultModel"> | undefined, current: string, emptyLabel?: string): ModelChoice[] {
   const models = runner?.models ?? [];
-  const out: ModelChoice[] = [{ value: "", label: runner?.cliDefaultModel ? t(home.cliDefaultNamed, { model: runner.cliDefaultModel }) : t(home.cliDefault) }];
+  const out: ModelChoice[] = [{ value: "", label: emptyLabel ?? (runner?.cliDefaultModel ? t(home.cliDefaultNamed, { model: runner.cliDefaultModel }) : t(home.cliDefault)) }];
   for (const m of models) out.push({ value: m.value, label: t(home.modelChoice, { label: m.label, value: m.value }) });
   if (current && !models.some((m) => m.value === current)) out.push({ value: current, label: current });
   return out;

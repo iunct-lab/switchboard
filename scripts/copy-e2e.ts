@@ -1,8 +1,8 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/copy-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * The task screen's copy buttons (#695) at 390 × 844: a fake runner answers in three messages split by tool rows (one
+ * The task screen's copy buttons at 390 × 844: a fake runner answers in three messages split by tool rows (one
  * tool result 300 lines long) and another stays mid-reply; each button's text is read back with clipboard.readText().
- * Prints one `ok` line per check, (a) to (g) of #698. Not in CI, like approvals-e2e: it needs Chrome.
+ * Prints one `ok` line per check, (a) to (g). Not in CI, like approvals-e2e: it needs Chrome.
  * On Linux, Chrome's --headless=new writes to a clipboard it cannot read back; chrome-headless-shell keeps one in memory.
  * Without CHROME_BIN, Linux uses the newest Playwright headless shell
  * (~/.cache/ms-playwright/chromium_headless_shell-<n>/chrome-headless-shell-linux-<arch>/chrome-headless-shell, which
@@ -140,7 +140,7 @@ try {
   await until(() => evaluate(`document.querySelector('.end.ok') !== null && document.querySelectorAll('.msg.assistant').length === 3`), "the finished reply");
 
   // (a) each YOU / runner row copies its own text as it is
-  // The runner's rows show the Markdown preview (#3677, the default), so their text on screen is not the source; the copy is.
+  // The runner's rows show the Markdown preview (the default), so their text on screen is not the source; the copy is.
   const rows = ["done", FIRST, "二通目", "三通目"];
   const count = await evaluate(`[...document.querySelectorAll('.msg')].filter((m) => m.querySelector('.tx')).length`) as number;
   assert(count === rows.length, `rows: ${count}`);

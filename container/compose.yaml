@@ -1,5 +1,6 @@
-# The stand-alone mode (#4042): one daemon in the image of container/Dockerfile. Start it with container/up.sh, which
-# also sets DOCKER_GID. The project name fixes the volumes' names (switchboard_sb-home ...) wherever the clone is.
+# The stand-alone mode: sb-rescue and the daemon it runs, in the image of container/Dockerfile. Start it with
+# container/up.sh, which also sets DOCKER_GID. The project name fixes the volumes' names (switchboard_sb-home ...)
+# wherever the tree is. The running version is in sb-home (~/.switchboard/releases), not in the image.
 name: switchboard
 services:
   switchboard:
@@ -9,8 +10,13 @@ services:
     image: sb-local
     restart: unless-stopped
     ports:
-      # the machine's 127.0.0.1 only; the relay in the container (container/relay.ts) makes the daemon see loopback
+      # the machine's 127.0.0.1 only; the relay in the container (container/relay.ts) makes the daemon (47831) see
+      # loopback. sb-rescue's port (47841) is not published: it trusts loopback, and stays inside the container
       - "127.0.0.1:47831:47831"
+    environment:
+      # the role: empty = releases from the public repository; a clone's path in sb-repos = releases from its tags
+      # (container/entrypoint.sh)
+      SWITCHBOARD_REPO_ROOT: "${SWITCHBOARD_REPO_ROOT:-}"
     volumes:
       - sb-home:/home/switchboard/.switchboard
       - sb-claude:/home/switchboard/.claude

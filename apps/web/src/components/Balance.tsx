@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BalanceView } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { balanceCells, capacityText, kindShares, type KindKey } from "../balance.ts";
 import { fmtClock, pct } from "./ui.tsx";
 import { t } from "../i18n.ts";

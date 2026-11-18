@@ -9,6 +9,7 @@ import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
+import { workspaceConfigFile, writeWorkspaceConfigs } from "./workspace-config.ts";
 
 // Jobs a Task asks the daemon to run: the daemon's child, not the Task's; its end is recorded once.
 
@@ -49,7 +50,7 @@ function fake(script: string) {
   const deps: JobDeps = { db, dir: join(root, "jobs"), env: { ...process.env, SWITCHBOARD_TASK_ID: "t1", SWITCHBOARD_SUPERVISED: "1" }, command: () => ({ argv: ["sh", "-c", script], tail: "" }), onFinish: done, pollMs: 50 };
   return { deps, ended };
 }
-const local = (cwd = repo): JobRequest => ({ kind: "local-ci", taskId: "t1", pr: 12, cwd });
+const local = (cwd = repo): Extract<JobRequest, { kind: "local-ci" }> => ({ kind: "local-ci", taskId: "t1", pr: 12, cwd });
 
 describe("jobs", () => {
   test("a job is the daemon's child and its end is recorded with the log's tail", async () => {
@@ -141,6 +142,65 @@ describe("jobs", () => {
     expect(() => requestJob(deps, local(clone))).toThrow("not a checkout");
   });
 
+  test("local CI of a repository that is not Switchboard's runs Switchboard's script with --repo from that repository's folder and gets the workspace's saved settings as OPS_KIT_CONFIG; Switchboard's own PR runs its checkout's script", async () => {
+    const mk = (name: string, origin: string | null) => {
+      const dir = join(root, name);
+      mkdirSync(dir);
+      sh(dir, "git", "init", "-q");
+      if (origin) sh(dir, "git", "remote", "add", "origin", origin);
+      return dir;
+    };
+    const [metaDir, libDir, bare] = [mk("meta-ws", "https://github.com/acme/switchboard.git"), mk("lib-ws", "git@github.com:acme/lib.git"), mk("no-origin-ws", null)];
+    // a database of its own: a meta workspace would change what the other tests' checkouts are
+    const db2 = new Db(join(root, "db2.sqlite"));
+    try {
+      db2.upsertWorkspace({ name: "switchboard", path: metaDir, kind: "meta" });
+      const lib = db2.upsertWorkspace({ name: "lib", path: libDir, kind: "repo" });
+      db2.upsertWorkspace({ name: "bare", path: bare, kind: "repo" });
+      for (const [id, cwd] of [["t-meta", metaDir], ["t-lib", libDir], ["t-bare", bare]] as const) db2.insertTask(mkTask(id, cwd));
+      // the settings saved for lib (nothing is in its repository), written where the daemon keeps them
+      db2.recordConfigChange({ workspaceId: lib.id, at: 1, source: "person", after: JSON.stringify({ ci: { steps: [{ run: "make check" }] } }), keys: ["ci"], state: "confirmed" });
+      // a change that only waits for the person is not what a job runs with
+      db2.recordConfigChange({ workspaceId: lib.id, at: 2, source: "call", after: JSON.stringify({ ci: { steps: [{ run: "true" }] } }), keys: ["ci"], state: "pending" });
+      const home = join(root, "home-ws");
+      writeWorkspaceConfigs(home, db2.listWorkspaces());
+      const run = async (taskId: string, cwd: string) => {
+        const f = fake("true");
+        const got: Parameters<NonNullable<JobDeps["command"]>>[0][] = [];
+        const deps: JobDeps = { ...f.deps, db: db2, command: (req) => (got.push(req), { argv: ["sh", "-c", 'env > "$J/env"'], tail: "" }) };
+        const job = requestJob(deps, { kind: "local-ci", taskId, pr: 7, cwd });
+        await f.ended;
+        return { argv: jobCommand(got[0]!).argv, env: readFileSync(join(root, "jobs", String(job.id), "env"), "utf8") };
+      };
+      const other = await run("t-lib", libDir);
+      expect(other.argv).toEqual(["bun", join(metaDir, "scripts/local-ci.ts"), "7", "--repo", "acme/lib"]);
+      expect(other.env).toContain(`OPS_KIT_CONFIG=${workspaceConfigFile(home, lib.id)}\n`);
+      expect(JSON.parse(readFileSync(workspaceConfigFile(home, lib.id), "utf8"))).toEqual({ ci: { steps: [{ run: "make check" }] } });
+      // Switchboard's own PR: the checkout's script (the PR's own), no settings handed over
+      const own = await run("t-meta", metaDir);
+      expect(own.argv).toEqual(["bun", "scripts/local-ci.ts", "7"]);
+      expect(own.env).not.toContain("OPS_KIT_CONFIG=");
+      // a checkout whose origin names no GitHub repository has no PR to run: refused with the way to run a local change
+      expect(() => requestJob({ ...fake("true").deps, db: db2 }, { kind: "local-ci", taskId: "t-bare", pr: 7, cwd: bare })).toThrow("owner/name を読めません");
+      // someone else's repository: its PR's steps would run here as the host's user, so the job is refused unless the
+      // machine builds off the host; --local (run here) is refused there too
+      const theirs = mk("theirs-ws", "https://github.com/acme/theirs.git");
+      db2.upsertWorkspace({ name: "theirs", path: theirs, kind: "repo", upstream: "https://github.com/else/theirs.git" });
+      db2.insertTask(mkTask("t-theirs", theirs));
+      const ask = (offHost: boolean, local = false) => requestJob({ ...fake("true").deps, db: db2, offHost: () => offHost, command: () => ({ argv: ["true"], tail: "" }) }, { kind: "local-ci", taskId: "t-theirs", pr: 7, cwd: theirs, ...(local ? { local: true } : {}) });
+      expect(() => ask(false)).toThrow("外のビルド（sb-offload）があるマシンでだけ");
+      expect(() => ask(true, true)).toThrow("外のビルド（sb-offload）があるマシンでだけ");
+      expect(ask(true).id).toBeGreaterThan(0);
+      // the settings taken away: the file goes and the next job gets none
+      db2.recordConfigChange({ workspaceId: lib.id, at: 3, source: "person", after: null, keys: ["ci"], state: "confirmed" });
+      writeWorkspaceConfigs(home, db2.listWorkspaces());
+      expect(existsSync(workspaceConfigFile(home, lib.id))).toBe(false);
+      expect((await run("t-lib", libDir)).env).not.toContain("OPS_KIT_CONFIG=");
+    } finally {
+      db2.close();
+    }
+  });
+
   test("a folder left by an earlier job of the same id starts empty; a relative cwd and a folder that cannot be made are refused", async () => {
     const { deps, ended } = fake('test -e "$J/exit" && echo stale; true');
     const next = (db.listJobs(0)[0]?.id ?? 0) + 1;
@@ -189,9 +249,101 @@ describe("jobs", () => {
     expect(claude.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]);
     expect(jobCommand({ kind: "local-ci", taskId: "t1", pr: 12, cwd: repo, local: true }).argv).toEqual(["bun", "scripts/local-ci.ts", "12", "--local"]);
     expect(jobCommand(local()).argv).toEqual(["bun", "scripts/local-ci.ts", "12"]); // local CI takes its own slot: no --memory-only
+    // a saved model / effort go to the CLI; empty ones leave the CLI's own
+    const argvOf = (runner: "claude" | "codex", choice?: { model?: string; effort?: string }) => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 900, choice).argv;
+    expect(argvOf("claude", { model: "m1", effort: "high" })).toEqual(expect.arrayContaining(["--model", "m1", "--effort", "high"]));
+    expect(argvOf("codex", { model: "m2", effort: "low" })).toEqual(expect.arrayContaining(["-m", "m2", "-c", 'model_reasoning_effort="low"']));
+    expect(argvOf("codex", { model: "m2", effort: "low" }).at(-1)).toBe("-"); // stdin stays last
+    for (const argv of [argvOf("claude"), argvOf("claude", { model: "", effort: "" }), argvOf("codex"), argvOf("codex", { model: "", effort: "" })]) {
+      expect(argv).not.toContain("--model");
+      expect(argv).not.toContain("--effort");
+      expect(argv).not.toContain("-m");
+      expect(argv.some((a) => a.startsWith("model_reasoning_effort"))).toBe(false);
+    }
     expect(codex.argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
     // the host may need longer (SWITCHBOARD_JOB_REVIEW_IDLE_S)
     expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 1800).argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
+  });
+
+  test("review: the reviewer reads neither CLAUDE.md / AGENTS.md nor the user's MCP and skills", () => {
+    const argvOf = (runner: "claude" | "codex") => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md" }).argv;
+    const claude = argvOf("claude");
+    // the variables go in front of the command, the flags after `-p`
+    expect(claude.slice(claude.indexOf("env"), claude.indexOf("claude") + 1)).toEqual(["env", "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", "claude"]);
+    expect(claude).toEqual(expect.arrayContaining(["--permission-mode", "plan", "--strict-mcp-config", "--disable-slash-commands"]));
+    expect(claude).not.toContain("--bare"); // it would drop the sign-in the host uses
+    const codex = argvOf("codex").join(" ");
+    for (const part of ["--sandbox read-only", "-c project_doc_max_bytes=0", "-c mcp_servers={}", "--disable plugins", "--disable apps"]) expect(codex).toContain(part);
+    expect(codex).not.toContain("--ignore-user-config"); // the user's model choice stays
+    expect(argvOf("codex").at(-1)).toBe("-");
+  });
+
+  describe("review runner from the setting", () => {
+    const ask = (setting: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "fallback" | "recheck" | "audit" } = {}, taskId = "t1") => {
+      writeFileSync(join(repo, "prompt.md"), "review");
+      const { deps, ended } = fake("true");
+      const job = requestJob({ ...deps, reviewRunner: () => setting }, { kind: "review", taskId, pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md", ...extra });
+      return { job, ended };
+    };
+
+    test("same: the Task's own runner reviews; another runner is refused unless the request says why", async () => {
+      const none = ask("same");
+      expect(none.job.runner).toBe("claude");
+      await none.ended;
+      const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
+      expect(() => ask("same", { runner: "codex" })).toThrow("主レビュアーは claude です");
+      expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before); // refused before a job is recorded
+      const fallback = ask("same", { runner: "codex", as: "fallback" });
+      expect(fallback.job.runner).toBe("codex");
+      await fallback.ended;
+    });
+
+    test("other: the runner that did not implement reviews, and the refusal names it", async () => {
+      const none = ask("other");
+      expect(none.job.runner).toBe("codex");
+      await none.ended;
+      let refusal: unknown;
+      try {
+        ask("other", { runner: "claude" });
+      } catch (e) {
+        refusal = e;
+      }
+      expect(refusal).toBeInstanceOf(JobError);
+      expect((refusal as JobError).status).toBe(400);
+      expect((refusal as JobError).message).toContain("--runner codex");
+      expect(() => ask("other", { as: "fallback" })).toThrow("runner の名指し");
+      // a recheck or an audit is read by a runner that is not the main reviewer, and says so
+      const audit = ask("other", { runner: "claude", as: "audit" });
+      expect(audit.job.runner).toBe("claude");
+      await audit.ended;
+    });
+
+    test("a Task whose runner reviews nothing must name the reviewer", async () => {
+      db.insertTask({ ...mkTask("t-adk", repo), runner: "dak" });
+      expect(() => ask("other", {}, "t-adk")).toThrow("主レビュアーを決められません");
+      const named = ask("other", { runner: "claude" }, "t-adk");
+      expect(named.job.runner).toBe("claude");
+      await named.ended;
+    });
+  });
+
+  describe("review prompt by runner", () => {
+    test("the job reads the Task's instructions followed by the note of the runner that reviews; the Task's file stays", async () => {
+      const seen: Record<string, string> = {};
+      for (const runner of ["codex", "claude"] as const) {
+        writeFileSync(join(repo, "prompt.md"), "Review this PR.\n");
+        const { deps, ended } = fake(`cat "$JOB_PROMPT" > "$J/seen"`);
+        const job = requestJob({ ...deps, reviewRunner: () => (runner === "claude" ? "same" : "other") }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+        await ended;
+        seen[runner] = readFileSync(join(root, "jobs", String(job.id), "seen"), "utf8");
+        expect(readFileSync(join(repo, "prompt.md"), "utf8")).toBe("Review this PR.\n");
+      }
+      expect(seen.codex).toStartWith("Review this PR.\n\n");
+      expect(seen.codex).toContain("read-only sandbox");
+      expect(seen.codex).not.toContain("plan mode");
+      expect(seen.claude).toContain("plan mode");
+      expect(seen.claude).not.toContain("sandbox");
+    });
   });
 
   test("review job usage goes to the ledger under the task", async () => {
@@ -210,7 +362,7 @@ describe("jobs", () => {
     writeFileSync(join(repo, "prompt.md"), "review");
     for (const [runner, file, body] of [["claude", "claude.jsonl", jsonl(claudeResult)], ["codex", "codex.jsonl", jsonl(codexTurn(10, 4, 2))]] as const) {
       const { deps, ended } = fake(`printf '%s' '${body.replace(/'/g, "")}' > "$J/${file}"`);
-      requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+      requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
       await ended;
     }
     const peek = new Database(join(root, "db.sqlite"), { readonly: true });
@@ -220,7 +372,7 @@ describe("jobs", () => {
     expect(rows[0]!.cost_usd).toBe(0.5);
     // a review that left nothing readable books nothing and still ends
     const { deps, ended } = fake("true");
-    requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+    requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
     expect((await ended).status).toBe("pass");
     expect(ledger()).toHaveLength(2);
     peek.close();

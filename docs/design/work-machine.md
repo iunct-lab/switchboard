@@ -1,0 +1,179 @@
+# A work machine beside the instance
+
+> **Not for use in this version. Closed in the code.** The settings of section 1 alone do not switch this feature on: `loadUplink` (`packages/core/src/config.ts`), the one place the mode is read, gives no mode unless a second, separately named variable is set as well — `SWITCHBOARD_UPLINK_PREVIEW=not-for-use`. That variable is **not for use until the deployment conditions listed in section 8 ("Before deployment") are met**; it exists so the feature's own tests can run it against an S3 kept in memory. Without it, an instance with `SWITCHBOARD_UPLINK=receive` runs alone (no request to the bucket, no timer of the uplink or the leases, no lease, no role; one line in its log says so), and a daemon with `SWITCHBOARD_UPLINK=send` does not start — a work machine must not run as an instance of its own instead (`uplink-server.test.ts`, "the settings of the feature alone switch nothing on in this version").
+>
+> **Not verified against real AWS. Do not deploy.** Everything here was written and tested against an S3 kept in memory and a faked `aws` CLI. No bucket, no IAM policy, no `litestream restore` and no second machine has been tried. Every check of "Before deployment" (section 8) has to be done by hand and its result written down first; two conditions known to be open are not in the code at all (a work machine's credentials read the whole of the instance's database through the replica, and nothing ties a lease's writer to its machine).
+
+There is one instance: one daemon that keeps the record (Tasks, costs, evaluations, the backlog) and is the only one that writes to the backlog's service. A second machine may run Tasks for it as a *work machine*. A work machine makes outbound requests only, keeps no record of its own that is not also sent to the instance, makes no write to the forge, and decides nothing by itself that the instance decides. The two meet in one S3 bucket (the *uplink bucket*), so nothing has to be reachable on either machine and the instance may be stopped while the work machine goes on.
+
+The instance treats everything it reads from the bucket as input from a machine it trusts less than itself: anything with the work machine's credentials — the daemon there, a Task there, a person with the same keys — can put an object. Section 5 says what is checked.
+
+Code: `packages/core/src/machine.ts` (the two judgements everything reads: "this Task belongs to another machine" and "this daemon is a work machine"), `s3.ts` (the one interface to the bucket and its in-memory fake), `uplink.ts`, `uplink-in.ts` and `uplink-s3.ts` (the records of Tasks), `backlog-replica.ts` and `backlog-upbox.ts` (the backlog), `lease.ts` (who works on a PBI), and the wiring in `server/backlog-read.ts` (`setupBacklog`) and `server/lease.ts`.
+
+## 1. Settings: off unless configured, and closed in this version
+
+In this version the variables below take effect only together with `SWITCHBOARD_UPLINK_PREVIEW=not-for-use` (see the note at the top: not for use until the conditions of section 8 are met). A daemon that sets none of the variables below runs alone, exactly as before: there is no mode, no bucket object, no timer of the uplink or of the leases, and S3 is never asked (`uplink-server.test.ts`, "alone, none of it runs"). A candidate daemon (`SWITCHBOARD_CANDIDATE=1`, a copy of a database) shares nothing either, whatever is set.
+
+| Variable | Work machine | Instance |
+|---|---|---|
+| `SWITCHBOARD_UPLINK` | `send` | `receive` |
+| `SWITCHBOARD_UPLINK_PREVIEW` | `not-for-use` — required for the row above to mean anything; without it the daemon does not start | `not-for-use` — required; without it the daemon runs alone |
+| `SWITCHBOARD_MACHINE` | required: a name that starts with a letter or digit and holds letters, digits, `_`, `-` (it shows on every Task that ran there, and is one key segment in the bucket) | optional, default `instance` |
+| `SWITCHBOARD_UPLINK_MACHINES` | — | the registry: `pc1=owner/app+owner/tools,pc2=owner/app`. Each work machine the instance takes anything from, with the repositories it may send Tasks and backlog edits for. Empty = the instance takes in from nobody and never reads `uplink/` or `backlog/` (it still takes leases). A value that cannot be read stops the start |
+| `SWITCHBOARD_UPLINK_BUCKET` | required | optional; when empty the name is read from the SSM parameter `/switchboard/uplink-bucket` |
+| `SWITCHBOARD_UPLINK_INTERVAL_S` | how often it sends, default 300 | how often it takes in, default 600 |
+| `SWITCHBOARD_UPLINK_MAX_BYTES` | the most one delta holds before it is cut, default 64 MiB (the instance refuses an object over its own limits, section 5) | — |
+| `SWITCHBOARD_REPLICA_URL` | the instance's Litestream replica, `s3://<data bucket>/litestream/switchboard.db` — see section 8 before setting it | — |
+| `SWITCHBOARD_REPLICA_INTERVAL_S` | how often the backlog copy is taken again, default 3600 | — |
+| `SWITCHBOARD_LEASE_TTL_S`, `SWITCHBOARD_LEASE_RENEW_S` | how long a lease lasts unrenewed (900) and how often it is renewed (60); the same values on both machines | same |
+
+A value that is wrong stops the start with the reason (`send` without a machine name or a bucket, a mode that is neither, a registry that cannot be read). The bucket is asked through the `aws` CLI with the machine's own credentials and region; the work machine also needs `litestream` on its `PATH`. A failed request is reported by its kind only (`AccessDenied`, `ExpiredToken`, …): the CLI's own text names the role and the bucket, and what is thrown ends in logs and API answers.
+
+What the credentials need, and nothing more. These are not in the template yet; section 8 lists them as a check:
+
+- work machine `<m>`: `s3:PutObject` on `uplink/<m>/*` and `backlog/<m>/*` only with `If-None-Match: *` (a key is written once and never over) and `s3:GetObject` on `backlog/<m>/*` (it reads back a key it finds taken, to tell its own earlier try from another's); `s3:GetObject` and `s3:ListBucket` on `backlog-refused/<m>/*` (what the instance refused of its edits; it cannot write there); `s3:GetObject` and `s3:PutObject` on `lease/*` only with `If-None-Match` or `If-Match`; `s3:ListBucket` on the `lease/` prefix. No delete anywhere, and no other machine's prefix (one role per machine, or `${aws:PrincipalTag/machine}`). For reading the backlog, see section 8.
+- instance: `s3:GetObject` and `s3:ListBucket` on the prefixes `uplink/`, `backlog/` and `lease/` of the uplink bucket; `s3:PutObject` on `lease/*` with a condition, and on `backlog-refused/*` only with `If-None-Match: *`. No delete.
+- the work machine's login to the forge (`gh`, git): **read only**. Section 4 says why this is the only thing that closes a Task's own `git push`.
+
+Nothing in this code deletes a key: deltas and backlog edits end by the bucket's lifecycle, a lease is overwritten.
+
+## 2. The records of Tasks (work machine → instance)
+
+On its interval the work machine packs what changed since its last send into deltas (`buildDelta`) and puts each under `uplink/<machine>/<delta id>.tar.zst`. A key that is already there is left as it is. The mark of what was sent moves only after every delta of a send is in the bucket, and the files built are removed either way. A delta's id carries a time that only grows on that machine, also when its clock goes back, so the instance — which takes keys in their order — never passes one over.
+
+A delta holds the rows of the Tasks (the Task, its events, costs, evaluations, check runs, decided staged changes, artifacts, attachments, and the usage limits per account) and the files of two kinds: a Task's attachments and the files of a Task's artifacts. **A runner's session file is not sent and not taken in.** It is that runner's own state on the machine it ran on; the conversation is in the events. Nothing a delta carries is ever written under `~/.claude`, `~/.codex`, a repository or a runner's memory on the instance, so taking a delta in cannot change what a runner there reads as its instructions.
+
+The instance takes the bucket in once at start — everything put while it was stopped goes in then — and on its interval, for the registered machines only. Each machine's deltas go in in the order they were made; the last key taken per machine is kept, so a round with nothing new is one list request per machine. A delta from a database newer than the instance's is not taken in: it is kept with both levels, shown as a band at the top of the screen and written to the log, and it holds that machine's later deltas (not another machine's) until the instance is updated.
+
+## 3. A Task of another machine is read only on the instance
+
+A Task taken in carries the name of the machine it ran on (`tasks.machine`). It shows in the Task list and on the Task's screen. The instance never runs it, resumes it, answers for it, stops it or writes to the forge for it.
+
+There is one predicate (`otherMachineOf`, `machine.ts`) and one place that enforces it: `TaskManager.requireLocal` / `requireOwn`, called first by every method that acts on a Task — `send` (a person's reply, the planned resume, the daemon's own turn), `startDeferred`, `abort`, `respondPermission`, `recordStop`, `setResumeAt`, `setPermissionMode`, `setModel`, `setEffort`, `forkTask`. A caller that made no check of its own is still refused, with `この Task は <machine> で動きました。返信は <machine> の Switchboard から行います。`. So the routes (409), the WebSocket's `task.send` / `permission.respond` / `task.abort` (an error message), an answer to a question (`/api/asks/answer`), the automatic resume of a Task that waited on other work (`depends-resume.ts`) and the wait watch are all refused by the same line. In addition:
+
+- the lists the daemon acts on by itself (`Db.listTasksUpdatedSince`, `listTasksOnStops`, `listTasksWithWaits`) hold this machine's own Tasks only, so such a Task is not among the questions put to the person and is not looked at by the automatic resume or the wait watch;
+- `TaskManager.record` writes nothing to such a Task: its events are numbered on its own machine, and one written here would take the place of one of its own;
+- a merge grant is never recorded for it (`noteMergeGrant`);
+- its row comes in with no state the instance acts on: a status of a turn in flight becomes idle, and the resume, queue and judging marks, a prompt held for a later start and the schedule it came from are emptied.
+
+What is not refused: marking such a Task reviewed or archived in the instance's list, and renaming it. Those change how the instance shows it and nothing else.
+
+## 4. A work machine writes nothing to the forge and decides nothing by itself
+
+`isWorkMachine` (`SWITCHBOARD_UPLINK=send`, not a candidate) is the one judgement.
+
+**The daemon.** Every `gh` call the daemon makes goes through the one runner the server is started with; on a work machine that runner is `workMachineGh`, which lets through only what is known to read (`ops-kit/src/gh-reads.ts`: anything not known to read counts as a write) and answers a write as a failed call without running it. The backlog itself is never asked: reading is the copy of section 6, writing is the bucket.
+
+**What it does not start by itself** (`decidesNothing`): the schedules (none fires), the backlog queue, the start of a PBI after an import, the automatic resume of a Task that waited on other work, the automatic answers of saved policies, the promotion check. The backlog sweep (`バックログを進める`) fired by hand starts nothing either and says why in the schedules log. `TaskManager.send` refuses the daemon's own turn (`daemon: true`) on a work machine, whatever asked for it. What stays: a PBI's stage started by its own button, a reply, and the resume of the work machine's own Task after a usage limit.
+
+**Its Tasks.** A Task's session gets `OPS_KIT_FORGE_READ_ONLY=1`, and the check in front of `gh` (`ops-kit/bin/gh`) then stops every command that is not known to read, before anything of it is read or sent: `gh pr create`, `gh pr comment`, `gh pr merge`, `gh api` with a write, a result of local CI posted to a PR. Issues, comments, labels and Project fields are written with `ops-kit backlog`, which goes through the bucket.
+
+**What this does not guarantee.** A Task is a process of the same OS user as the daemon. It can unset the variable, call the real `gh` by its path, or run `git push`, with whatever that user is logged in as. The daemon cannot stop that; only the login can. A work machine's forge login must therefore be read only (section 8). With a login that can write, the statement "a work machine writes nothing to the forge" holds for the daemon and for a Task that does not work around the check, and for nothing more.
+
+**Consequence.** Work done on a work machine reaches the forge only as backlog edits. Opening a PR for it is done by a Task on the instance. Whether a narrower write path for PRs should exist is an open question for the owner; none exists.
+
+## 5. What the instance takes in
+
+### Deltas (`uplink-s3.ts` `receiveUplink`, `uplink.ts` `applyDelta`, `uplink-in.ts`)
+
+Before a byte is fetched: the machine must be registered (a prefix nobody registered is never listed); the key must be exactly `uplink/<machine>/<machine>-<time>-<n>.tar.zst`; the time in it must not be ahead of the instance's clock (a day of slack); the object's size, read from the list, must be within the limit.
+
+While it is unpacked: as a stream, within limits (the object 96 MiB, everything it unpacks to 256 MiB, `delta.json` 96 MiB, one file 64 MiB, 20,000 files, 200 deltas a machine a round), so an object that expands without end is cut at the limit instead of filling memory. The entries are read by this code, not by an archive library: only plain files are accepted (a link or any other entry refuses the delta), and each is written to a numbered file in a stage — never by a name the object gives.
+
+Before anything is written to the database or placed:
+
+- the machine `delta.json` names, and the machine in its id, must be the one whose prefix the object lay under;
+- only the tables a delta carries are accepted (not the grants, not the settings), and every value must be a text or a number;
+- every Task it names must be new here or already that machine's. A Task of another machine refuses the delta; a Task of the instance's own is passed over with its rows and files. A row told apart by its own id (an artifact, an attachment, a staged change) stays with the Task it has here;
+- every file's name must have one of two shapes — `attachments/<task>/<file>` or `artifacts/<task>/<artifact>/<path…>` — with no `..`, no absolute path, no backslash, no control character, no hidden name, at most twelve levels; it must resolve inside that Task's own folder under the Switchboard home, with no link on the way. One file that fails refuses the whole delta. The sender asks the same function, so it never packs what would be refused;
+- a Task is put on a workspace only when its repository is one the machine is registered for;
+- a usage report dated ahead of the instance's clock, or a limit said to reset later than any window lasts, is dropped (a report otherwise moves the instance to wait for that account, which is the safe direction).
+
+A refused object does not hold what the machine sends after it. One that has a delta's name (refused for its size or for what it holds) is recorded and passed over: the mark moves past it and it is never listed again. One refused for its name — not a delta's, or dated ahead of this clock — is recorded and stepped over, unread, each round: the mark never moves to such a key, because its name is free to sort after every delta still to come. Either is told once: a notice under `判断待ち` per machine (`作業場 <machine> から届いたもの <n> 件を取り込まなかった`, with each key and its reason; closing it closes those objects, a new refusal opens it again), the log, and `/api/health` (`uplinkRefused`). The record keeps the newest 200 objects the mark passed and up to 50 a machine of those refused for their name; more of the latter are stepped over without a record.
+
+A later delta that depends on a refused one is not put on the hole. A delta continues each Task's events right after the last event its machine sent, so the instance refuses, with that reason, a delta whose events for a Task start past what it has of that Task, and (as before) one that has rows of a Task whose own row never arrived. Deltas about other Tasks go in. What the refused deltas held is then missing on the instance until the work machine sends it again: the person takes the work machine's mark back (delete the row `uplink.cursor` of its `settings` table and restart it — every record is put again under new keys, and taking a record in twice changes nothing). There is no button for this yet. Two things still hold a machine's later deltas, because waiting mends them: a delta from a newer database, and a bucket that does not answer.
+
+Where the files go: attachments and artifacts are placed in the two stores the screens read (`<home>/attachments/<task>/`, `<home>/artifacts/<task>/<artifact>/`), each inside the folder of a Task that belongs to that machine. They are not under one directory per machine, because the stores find a file by its Task's id.
+
+### Backlog edits (`backlog-upbox.ts` `importBacklogOperations`, `checkEnvelope`)
+
+An edit made on the work machine is put as `backlog/<machine>/<n>.json`, one key per version of the operation. The instance takes the registered machines' envelopes in key order, and an envelope is a closed set. It is taken only when:
+
+- its key has that shape, it is at most 512 KiB, and the machine it names is the one it lay under;
+- it is one of three operations, each with only the values it may carry: a new Issue (title, body, labels, milestone, parent, Project fields), a comment (`{ body }` and nothing else), or a field of an Issue or of its Project item with a value of that field's kind. A local change's branches (`change`), an artifact post, an unknown kind or field, or an extra key refuses it;
+- **it is not the person's answer.** A comment may not hold a line that begins with `## 回答`, `## 保留`, `**確定**: 推奨のまま`, `**覆す**: 推奨`, `[merge-answer]`, `[recheck]`, `[local-ci]` or `[tag-ci]`; it may not carry the mark that an answer was given on the screen or a confirmation; a field edit may not take `needs-decision` off; a body may not check off a line that waits for the person's confirmation. The instance sends comments under the owner's login, so such a line would read as theirs;
+- no text in it holds a value that signs in, by the instance's own check (it knows its own account's values; the work machine's check does not);
+- its repository is one that machine is registered for and a workspace of the instance reads;
+- the Issue it edits is stored on the instance; a draft it names was made by an envelope of the same machine.
+
+What is stored is made on the instance from the checked values, not taken from the envelope: the operation, under the id `m:<machine>:<id>` — which records where it came from and which no operation of the instance's own can have, so a "later version" can only replace that machine's own earlier one — and the draft of a new Issue or comment. `screenAnswer` reads only operations made on the instance, so nothing taken in is ever "the person's words" to a stage Task or a merge grant.
+
+An envelope that fails is refused with its reason (`upbox.refused`, the log, the same notice under `判断待ち`, `uplinkRefused` in `/api/health`) and passed over; it does not hold the ones after it (a key under the machine's prefix that is not an envelope's name is said once and stepped over; the mark never moves to it). The refusal goes back to the work machine: the instance writes `backlog-refused/<machine>/<the envelope's count>.json` (`{ key, reason, at }`, written once, before it passes the envelope — a write the bucket did not take is tried again with the envelope next round), and the work machine, after each put, reads the notes it has not read and ends the operation that was put under that count as failed with `Switchboard 本体が受け取りませんでした: <reason>` — if it still waits in the version that was put. It shows on the Issue as any edit that could not be sent, where the person edits it or sends it again. Without this an edit refused by a check only the instance runs (a line that waits for the person's confirmation, a value that signs in by the instance's own account, a repository the machine is not registered for) would wait on the work machine forever. The work machine runs the same check before it puts an envelope: an edit that would be refused — an answer given on the work machine's own screen among them — ends there as failed with `作業場からは送れません: …` and is never put. Answers are given on the instance.
+
+Not covered: an edit taken back on the work machine after it was put in the bucket is still sent by the instance.
+
+## 6. The backlog on a work machine
+
+**Reading.** The work machine never asks the backlog's service. Its backlog is a copy of what the instance stored, laid under its own workspace in the tables it already reads the backlog from; `ops-kit backlog list` / `view` and the screen answer from it, and the sync line says it is a copy, when it was taken, and when the instance last imported. Today the copy is taken by restoring the instance's Litestream replica (`litestream restore`) and keeping of it only the backlog part: the stored records as the service has them, which repository each workspace reads, and the outcome of that machine's own edits. The restored database is removed (`narrowReplica`); the Tasks, their conversations, the settings and the instance's own waiting edits do not stay on the work machine's disk. **The credentials for this can still read all of the instance's database** — see section 8: this read path must be replaced before deployment.
+
+**The result of an edit.** The next copy brings back what came of each edit the machine put: a sent Issue or comment takes the service's id and number, a sent field ends once the copy has its value, and an edit the instance could not send shows the instance's state and reason.
+
+Load: a restore reads the whole replica (about 40 MB today). At the default of once an hour while the work machine's daemon runs 8 hours a day that is about 240 restores, 10 GB and roughly $1.1 a month of transfer out of S3 ($0.114 per GB, Tokyo).
+
+## 7. Who works on a PBI: the lease
+
+Without it, the two machines could start the same PBI at once: the claim that keeps two sessions apart lives in the instance's records, which the work machine cannot write to.
+
+One object per PBI, `lease/<owner>/<repo>/<number>.json`: `{ pbi, machine, token, state: "held" | "released", expiresAt }`. S3 decides who gets it:
+
+- none there: written with `If-None-Match: *`. Of any number of machines writing at once exactly one succeeds.
+- given back, run out, or this machine's own: written over with `If-Match: <the etag just read>`. A machine that lost the write reads again and finds the holder.
+- held by another machine and not run out: not taken; the answer names the holder and the time.
+
+A CLI too old to know the conditions fails on the unknown argument, and the stage is not started.
+
+**Taking and giving back.** The daemon takes the lease before it starts any stage of a PBI or of a request, except a status check and a direct fix. A PBI another machine holds is not started; the reason (`PBI #N は <machine> が <time> まで持っている`) is the button's 409 and a line of the sweep's log. A lease taken for a start that then did not happen is given back at once. `scripts/parallel-guard.ts claim` asks the daemon after it won the claim comment and takes the comment back when the lease is held elsewhere; `release` gives it back. A PBI that closes gives its lease back at the next renewal round. So does a lease taken for a stage Task — by this daemon or by one before it — once no stage Task of that PBI is at it here any more (`leaseWanted` in `server/lease.ts`: none at work, queued, planned to resume, judged or with a job running, and the newest one not stopped on a wait it recorded or on the person's answer); a stage Task that ends gives it back at once, without waiting for the round. A Task that stopped on a question keeps its PBI's lease while the question is open — the other machine is refused the PBI for that long — and a lease a session took for itself through the route is left to that session.
+
+**Renewing, and losing.** The daemon renews every lease it holds on its interval with one conditional write over its own last one. A lease is lost when
+
+- another machine wrote over it meanwhile (the conditional write is refused), or
+- it could not be renewed — the bucket not reached, the credentials run out, the machine asleep with its lid closed — until a fifth of its life before the end this machine last wrote, or that end has passed. From then on another machine may take it at any moment, so this one stops acting as its holder, and does not write the lease again as if nothing happened.
+
+When a lease is lost, the PBI's stage Task on this machine **stops at its next turn boundary** (`server/lease.ts` `stopForLostLease`): a Task between turns stops at once — what it had planned by itself (a resume, a place in the queue) is dropped — and a Task whose turn runs is told, and stops when that turn ends. In both cases a stop that waits for the person is recorded, saying the lease was lost and that the PBI may be at work on two machines. Nothing else is decided: the lease is not taken back, nothing is retried, the other machine is not told. The person decides what comes next. Until the turn ends, the running turn goes on: the two machines can overlap for that long.
+
+The Task that is stopped is the one at the PBI (`leaseWanted`), also one between turns that waits for a PR, a date or the person — it would go on later. And the lease is checked again in the one place a follow-up turn of a stage Task starts (`leaseGate`, the Task manager's `turnGate`: a reply, a planned resume, a wait that was met, a turn after a daemon restart all pass it), so a lease lost while nobody looked is found there:
+
+- held by this machine: the turn starts, with no request to the bucket;
+- not held, and the daemon starts the turn by itself: the bucket is read once (a daemon that just started has not seen its own leases yet); a lease that is still not this machine's refuses the turn and stops the Task with the same stop that waits for the person, recorded once however often it is tried. This is what keeps a daemon that was down while its lease ran out, and another machine took the PBI, from resuming it;
+- not held, and the person replies: the reply is the person's decision to go on, so the lease is taken again for it — and the reply is refused with `PBI #N は <machine> が <time> まで持っている。…` while another machine holds it, or when the bucket cannot be asked.
+
+Alone (no uplink configured) none of this runs and nothing is asked.
+
+**Clocks.** Expiry is judged by each machine's clock, so the lease's life (15 minutes) must stay far above any difference between the clocks. A lease whose end lies more than two lives ahead — a holder whose clock runs ahead, or an end written by hand — is read as held for at most one life at a time, and as over once the same version has lain there unrenewed for a whole life as this machine saw it.
+
+The lease is part of the one overlap decision, not a second one: a PBI another machine holds counts as at work there, so its open Tasks' files hold back other PBIs here the same way a running stage Task's do. For that the daemon reads the leases in the bucket every third of a lease's life (one list request, and one read per lease that changed); between two looks what it knows may be up to that old, and a start asks S3 itself.
+
+A backlog that is not synced with its service has no lease. The instance's own judgement of an expired login reads only its own stage Tasks.
+
+**What it protects against, and what not.** It keeps two Switchboards that start PBIs through these paths apart. It does not stop anything with the same credentials from writing the bucket by hand (a work machine can write over the instance's lease with the etag it read), or a Task started without a PBI.
+
+**Cost.** S3 Standard in Tokyo charges $0.0047 per 1,000 PUT or LIST requests and $0.00037 per 1,000 GET requests (check the current price list before relying on this). One lease renewed every 60 seconds for 8 hours a day is 480 PUT a day. Three leases at once, 30 days: 43,200 PUT = $0.20 a month. Reading the leases every 5 minutes adds 2,880 LIST = $0.014 and at most a few thousand GET; the instance's lists of the registered prefixes every 10 minutes are another few thousand LIST. Together well under $1 a month.
+
+## 8. Before deployment
+
+None of these has been done. Each is a condition, not a suggestion.
+
+1. **Replace the Litestream read.** Read access to the replica is read access to the whole of the instance's database: every Task's conversation, the settings, the ledger, the instance's own waiting edits and their ids. One leaked work-machine credential reads all of it, and the data bucket's other prefixes may be within reach of the same policy. The narrower design, which is required before a work machine gets any credentials: on every successful import and before it stops, the instance writes one object per repository to the **uplink bucket**, `backlog-export/<owner>/<repo>.json.zst` — that repository's records as the service has them, the time of the last import, and the outcomes of the operations each registered machine put — and the work machine's only read permission for the backlog is `s3:GetObject` on `backlog-export/*` of the repositories it is registered for. It then never touches the data bucket, and each fetch is smaller than a restore. This export does not exist in the tree; `backlog-replica.ts` still restores the replica, and `SWITCHBOARD_REPLICA_URL` must not be set on a real work machine until it is replaced.
+2. **The IAM policies of section 1**, written in the template and checked against a real bucket: a work machine cannot write over or delete a key under `uplink/` and `backlog/`, cannot write under another machine's prefix, cannot read `uplink/`; a write to `lease/` without a condition is refused; the instance cannot delete. Check with the real `aws` CLI that a refused conditional write is read as a conflict (`s3.ts` `REFUSED`) and a missing key as none.
+3. **The work machine's forge login is read only**: a token that can read the repositories and cannot push, comment, merge or write contents. Check that `git push` and a `gh pr comment` with the variable unset are refused by the forge itself.
+4. **The registry** on the instance names each work machine and only the repositories it works on; a machine's name there is the name its credentials can write under.
+5. **Limits against real data**: a first send of the real database (thousands of Tasks) fits the limits of section 5 after being cut, and the instance's memory stays within its host while it takes them in (the instance's host has 3.8 GB).
+6. **A lease across two real machines**: taken by one, refused to the other; the work machine put to sleep past the lease's life, the instance takes the PBI, and the work machine's Task stops at its turn's end with the stop on the screen; clocks compared.
+7. **The screens**: the machine's tag on a Task, the reply box off with its reason, the band for a delta that could not be taken in. A refused delta or envelope is told by the notice under `判断待ち` (and in the log and the health answer); on the work machine a refused edit shows on its Issue.
+
+## 9. Checking it by hand (after section 8)
+
+1. Start the work machine's daemon with the variables of section 1 (in the container: pass them in the environment of `container/compose.yaml`, with the machine's AWS credentials available to the `aws` CLI inside it). Register it on the instance with `SWITCHBOARD_UPLINK_MACHINES`.
+2. Run a Task there. Within the send interval a key appears under `uplink/<machine>/`.
+3. Start the instance. Its log says `[uplink] took in <delta id>`, and the Task is in its list with the machine's name; a reply to it is refused.
+4. On the work machine, `ops-kit backlog create …` in a Task; after the instance has started, the Issue is on the service, and the work machine's next copy shows its number. `gh pr comment` in the same Task is stopped by the check in front of `gh`.

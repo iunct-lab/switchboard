@@ -1,17 +1,16 @@
 ---
 name: review-with-subagent
-description: PR ごとにサブエージェントへ敵対的コードレビューをさせ、PR にインラインコメントを投稿させ、指摘を採否判断して修正し、各コメントに返信するまでの型。PR を出した直後と、レビュー指摘に対応するときに読む。
+description: PR ごとにサブエージェントへ敵対的コードレビューをさせ、結果をファイルで受け取って自分が `[subagent]` の接頭辞つきで PR に転記し、指摘を採否判断して修正し、各コメントに返信するまでの型。PR を出した直後と、レビュー指摘に対応するときに読む。
 ---
 
 # Review with a subagent
 
-> レビュアーの選び方（別ランナー + 追加のレビュアー、フラットな文脈）は `cross-runner-review`、指摘の採否とマージ判断は `review-triage-and-merge`、PBI 単位の流れは `pbi-complete`。
+> レビュアーの選び方（主レビュアー、フラットな文脈）は `cross-runner-review`、指摘の採否とマージ判断は `review-triage-and-merge`、PBI 単位の流れは `pbi-complete`。
 > このスキルは Claude のサブエージェントを**追加の**レビュアーとして使うときの型（Codex が実装したときの Claude 側は `cross-runner-review` の `claude -p`）。
 
 ## 起動
 
-`Agent`（general-purpose, background）に以下を渡す。**diff を読むだけでなく、主張を再現させる**のが効く
-（レビュアーがランタイムの挙動をローカルで再現して裏取りしたことも、「修正の層が違う」と正しく指摘したこともある）。
+`Agent`（general-purpose, background）に以下を渡す。**diff を読むだけでなく、主張を再現させる**。
 
 プロンプトの骨子:
 ```
@@ -20,31 +19,17 @@ Adversarially review PR #N in <owner/name> (branch <b>, base main). Read the PR 
 work (other processes may run from it). Read surrounding code the same way — don't skim.
 Focus: <この PR で危ういところを 3〜6 点、具体的に>.
 Find concrete bugs with a failure scenario (input/state → wrong output). Reproduce claims where possible.
-Post each finding as an inline comment via `gh api repos/<owner/name>/pulls/N/comments`
-(-f path -F line -f side=RIGHT -f commit_id=$(gh pr view N --json headRefOid -q .headRefOid) -f body),
-tagged [blocker]/[should-fix]/[nit]/[question]. Then one summary via `gh pr comment -R <owner/name> N`. Do not modify files.
+Write the review to <出力のパス> in the output format of the cross-runner-review skill, section 1 (`### Findings` lines
+`- [blocker|should-fix|nit|question] <path>:<line> — <finding>`, then the other sections). Write nothing else:
+do not post to the PR (no comment, no review) and do not modify files of the repository.
+<`ops-kit review-note rules` の出力をここに貼る（主レビューと同じ重さの定義）>
 ```
 
-## 採否
+## 転記
 
-- blocker / should-fix: 直す。直さないなら理由を返信に書く。
-- nit: 同じ修正コミットに入る 1 行程度だけ直す。ほかは対処不要か記録（`review-triage-and-merge` の 3）。
-- question: 事実で答える。「分からない」なら調べてから答える（相手側のソースを読んで答えたこともある）。
-- **レビュアーが正しくて自分の修正が間違いのこともある**（サーバー側を緩めた最初の修正は、却下するのが正解だったことがある）。
-  自分の変更を守らず、より小さく安全な修正があればそちらに切り替える。
+レビュアーは PR に書かない。出力のファイルを自分が読み、`cross-runner-review` の 3 の `post_review <PR> subagent <出力のパス>` で転記する（接頭辞は `[subagent]`）。マージ判定が主レビューとして数えるのは主レビュアーの `[codex] review` / `[claude] review` だけで、`[subagent]` は追加の指摘として読まれる。`### Findings` の無い出力は転記しない。
 
-## 返信
+## 採否・返信・修正後
 
-```bash
-gh api repos/{owner}/{repo}/pulls/<N>/comments/<comment-id>/replies -f body="..."
-gh pr comment <N> --body "..."   # 要約: 何件を何にどう対応したか、テスト数
-```
-コメント ID 一覧: `gh api repos/{owner}/{repo}/pulls/<N>/comments --paginate | jq '.[] | {id, path, body: .body[0:80]}'`。
-review 本文（インラインでない指摘）も `gh api .../pulls/<N>/reviews` で読む。見落としやすい。
-
-対応内容は PR 返信だけでなく **Issue の結果コメント**にも要約を残す（`ops-kit backlog comment <Task> --body-file …`。`issue-workflow`）。
-
-## 修正後
-
-修正は指摘のある枝に commit → `gh stack rebase` → `gh stack push`（`stacked-pr-delivery`）。
-新しい回帰テストは `task-to-pr` の「足す前に」を通し（既存のテストに条件を足す・軽い階層を先に。回帰テストは要る）、「修正前で fail することを一度確認」する（`git stash push <file>` → test → `git stash pop`）。
+主レビューの指摘と同じく `review-triage-and-merge` の 1〜4 で処理する（一覧の読み方と review 本文、振り分け、修正と回帰テスト、1 コメント 1 返信、要約）。対応内容は **Issue の結果コメント**にも残す（`ops-kit backlog comment <Task> --body-file …`。同じスキルの 6）。
+回帰テストが修正前で fail することは、`git stash push <file>` → test → `git stash pop` で一度見られる。

@@ -1,4 +1,4 @@
-// The fake daemon of container/e2e.sh (#4191), in the stand-alone image in place of container/entrypoint.sh: the relay
+// The fake daemon of container/e2e.sh, in the stand-alone image in place of container/entrypoint.sh: the relay
 // on 47831 and a daemon on 47832 with one fake runner (a copy of the boot.ts of .claude/skills/verify-live-ui, the
 // runner of packages/core/src/devproxy.test.ts). SWITCHBOARD_HOME is the daemon's default, the sb-home volume.
 // SWITCHBOARD_CANDIDATE=1 comes from the override file of e2e.sh. The turn writes a marked session file as a real

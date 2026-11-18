@@ -3,13 +3,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Workspace } from "@switchboard/protocol";
 import { OwnCopyFields, WorkspaceCard } from "./components/WorkspaceCard.tsx";
-import { api, type WorkspaceClone } from "./api.ts";
+import { api } from "./api/index.ts";
+import { type WorkspaceClone } from "./api/workspaces.ts";
 
 const ws = { id: "w1", name: "app", path: "/srv/app", kind: "repo" } as Workspace;
 const html = (clones: WorkspaceClone[]) =>
   renderToStaticMarkup(createElement(WorkspaceCard, { workspaces: [ws], clones, onAddWorkspaceFromGithub: async () => undefined, onAddWorkspace: async () => undefined, onTaskStarted: () => undefined, onError: () => undefined }));
 
-test("WorkspaceCard: GitHub から is the first and default method, the host-path method keeps its own button (#2575)", () => {
+test("WorkspaceCard: GitHub から is the first and default method, the host-path method keeps its own button", () => {
   const h = html([]);
   expect(h.indexOf("GitHub から")).toBeLessThan(h.indexOf("新しく作る"));
   expect(h).toContain("owner/name か https://github.com/owner/name");

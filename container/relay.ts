@@ -1,7 +1,9 @@
-// A TCP relay for the stand-alone container (#4042): listens on 0.0.0.0:<listen-port> and passes every connection,
+// A TCP relay for the stand-alone container: listens on 0.0.0.0:<listen-port> and passes every connection,
 // byte for byte, to 127.0.0.1:<target-port>. The daemon only trusts loopback (packages/core/src/auth.ts), and a port
 // published by docker reaches it from the bridge's address, so the daemon sees the relay's own 127.0.0.1 instead.
 // WebSocket and SSE are bytes to this relay and pass as they are. Usage: bun container/relay.ts <listen-port> <target-port>
+// Whatever it relays to is open to every peer that can reach the container's address (the docker bridge), as loopback:
+// only the daemon's port is relayed, never sb-rescue's (container/entrypoint.sh).
 import type { Socket } from "bun";
 
 // `out` holds what the socket has not taken yet: Socket.write() may take only part of a chunk when the kernel buffer is

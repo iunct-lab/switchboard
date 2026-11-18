@@ -8,12 +8,12 @@ import { parseConfig, resolveProject } from "../ops-kit/src/config.ts";
 import { fakeGh, type FakeCall } from "../ops-kit/src/gh.ts";
 import { lint } from "../ops-kit/src/lint.ts";
 import { findSecrets } from "../ops-kit/src/secrets.ts";
-import { localChangeRules } from "../packages/core/src/backlog.ts";
+import { localChangeRules } from "../packages/core/src/backlog-prompt.ts";
 import { setupScripts } from "../packages/core/src/skillsync.ts";
 import { checkoutSteps } from "./local-ci.ts";
 
 /**
- * #1446: ops-kit/template/ filled with made-up values is a repository the shared tools work in. The test copies the
+ * ops-kit/template/ filled with made-up values is a repository the shared tools work in. The test copies the
  * template to a temp directory, replaces `__NAME__` with `values`, drops `.tmpl`, and runs the kit's checks on it.
  */
 const root = join(import.meta.dir, "..");
@@ -97,7 +97,7 @@ describe("new-repo template", () => {
     expect(hits).toEqual([]);
   });
 
-  test("new-repo template: local-ci reads at least one step from ci.yml (another repository has no scripts/ci.ts, #1203)", async () => {
+  test("new-repo template: local-ci reads at least one step from ci.yml (another repository has no scripts/ci.ts)", async () => {
     const dir = filled();
     const steps = await checkoutSteps(dir, {});
     expect(steps.length).toBeGreaterThanOrEqual(1);
@@ -128,7 +128,7 @@ describe("new-repo template", () => {
     return blocks.flatMap((b) => b.replace(/\\\n\s*/g, " ").split("\n")).map((l) => l.replace(/\s+#.*$/, "").trim()).filter(Boolean);
   }
 
-  test("new-repo skill: step 2 links the Project bootstrap created to the repository before the variable (#2599)", async () => {
+  test("new-repo skill: step 2 links the Project bootstrap created to the repository before the variable", async () => {
     const lines = skillCommands(2);
     const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
     expect(at(/ops-kit\/src\/cli\.ts" bootstrap/)).toBeGreaterThanOrEqual(0);
@@ -161,7 +161,7 @@ describe("new-repo template", () => {
     expect(gh.calls.find((c) => c.kind === "run" && c.args[1] === "link")).toEqual({ kind: "run", args: ["project", "link", "7", "--owner", "example", "-R", "example/sample-app"] });
   });
 
-  test("new-repo skill: step 4 sends the daemon's key and no skill says the API needs no token (#2599)", () => {
+  test("new-repo skill: step 4 sends the daemon's key and no skill says the API needs no token", () => {
     const lines = skillCommands(4);
     expect(lines).toContain('K=$(cat "$BACKLOG_TOKEN_FILE")');
     const curls = lines.filter((l) => /\bcurl\b/.test(l));
@@ -172,7 +172,7 @@ describe("new-repo template", () => {
   });
 });
 
-/** #4221: the template for a repository that does not use GitHub, checked against the Task prompt's `localChangeRules`. */
+/** the template for a repository that does not use GitHub, checked against the Task prompt's `localChangeRules`. */
 describe("new-repo template-local", () => {
   function filledLocal(): string {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.new-repo-template-local."));

@@ -1,5 +1,5 @@
 /**
- * May this change set be executed (#465)? Reads `aws cloudformation describe-change-set --output json` on stdin.
+ * May this change set be executed? Reads `aws cloudformation describe-change-set --output json` on stdin.
  * Two shapes are refused, with one line saying why:
  * - a VPC origin modified in place while Instance is replaced: CloudFront refuses it (CannotUpdateEntityWhileInUse) and
  *   the stack rolls back. That is a deploy that changes the launch template without a new LaunchGeneration.

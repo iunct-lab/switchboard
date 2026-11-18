@@ -54,7 +54,7 @@ function setup(o: { state?: string; code?: string; sessionKey?: string | null; c
   const sent: object[] = [];
   const client = (answer: (c: object) => unknown): Sender => ({ send: async (c) => (sent.push(c), answer(c)) });
   const notFound = (name: string) => Object.assign(new Error(name), { name });
-  // the geo restriction (#1639): a whitelist the fake CloudFront reads and writes
+  // the geo restriction: a whitelist the fake CloudFront reads and writes
   let whitelist = o.base ?? [];
   params.set("/switchboard/distribution-id", "EDIST");
   const cloudfront = client((c) => {
@@ -116,7 +116,7 @@ function setup(o: { state?: string; code?: string; sessionKey?: string | null; c
 }
 const challenge = async (t: ReturnType<typeof setup>) => (await t.call("POST", "/_auth/challenge", {})).json().challenge as string;
 
-describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
+describe("aws/auth.ts — passkey login on the Starter", () => {
   test("register with the one-time code → cookie → start; the code is consumed; login later with the same passkey", async () => {
     const t = setup({ code: "reg-code-1234567890.1900000000000" });
     const a = authenticator();
@@ -137,12 +137,12 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     const cookie = t.cookieOf(reg);
     const status = (await t.call("GET", "/_auth/status", undefined, cookie)).json();
     expect(status).toMatchObject({ registered: true, loggedIn: true });
-    expect(status.session).toEqual({ idleUntil: t.nowOf() + SESSION_IDLE_MS, expiresAt: t.nowOf() + SESSION_MAX_MS }); // #498: the page shows it
+    expect(status.session).toEqual({ idleUntil: t.nowOf() + SESSION_IDLE_MS, expiresAt: t.nowOf() + SESSION_MAX_MS }); // the page shows it
     expect((await t.call("GET", "/_auth/status")).json().session).toBeUndefined(); // not logged in: nothing
     t.advance(60_000); // inside the 5 minutes of the passkey check
     const start = await t.call("POST", "/_auth/start", {}, cookie);
     expect(start.statusCode).toBe(202);
-    // a start that went through counts as use (#498): the cookie comes back with the idle time moved on, the cap kept
+    // a start that went through counts as use: the cookie comes back with the idle time moved on, the cap kept
     const [, idle, cap] = Buffer.from(t.cookieOf(start).slice(`${SESSION_COOKIE}=`.length).split(".")[0]!, "base64url").toString().split(".");
     expect(Number(idle)).toBe(t.nowOf() + SESSION_IDLE_MS);
     expect(Number(cap)).toBe(t.nowOf() - 60_000 + SESSION_MAX_MS);
@@ -156,7 +156,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/start", {}, t.cookieOf(login))).statusCode).toBe(202);
   });
 
-  test("/_auth/renew moves the idle time 24 hours on and keeps the cap and the passkey; without a valid cookie it is 401 (#498)", async () => {
+  test("/_auth/renew moves the idle time 24 hours on and keeps the cap and the passkey; without a valid cookie it is 401", async () => {
     const t = setup({ code: "reg-code-1234567890.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -193,7 +193,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/renew", {})).statusCode).toBe(401);
   });
 
-  test("/_auth/renew signs nothing for a removed passkey's cookie or a recent-check value pasted as the session (#498)", async () => {
+  test("/_auth/renew signs nothing for a removed passkey's cookie or a recent-check value pasted as the session", async () => {
     const t = setup({ code: "reg-code-1234567890.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -204,7 +204,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/renew", {}, `${SESSION_COOKIE}=${sessionValue(KEY, a.id, later, later)}`)).statusCode).toBe(200); // the same passkey, a real session
   });
 
-  test("a start with the cookie when AWS has no Spot capacity is 409 with reason capacity, not a Lambda error (#443)", async () => {
+  test("a start with the cookie when AWS has no Spot capacity is 409 with reason capacity, not a Lambda error", async () => {
     const t = setup({ code: "reg-code-1234567890.1900000000000", startError: "InsufficientInstanceCapacity" });
     const a = authenticator();
     const c = await challenge(t);
@@ -216,7 +216,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(r.json().error).toContain("Spot の空きがありません");
   });
 
-  test("the cookie is the #235 contract: base64url(\"id.idleUntil.expires\").Ed25519(seed, first part), 7 days and 24 hours idle (#701)", async () => {
+  test("the cookie is the login contract: base64url(\"id.idleUntil.expires\").Ed25519(seed, first part), 7 days and 24 hours idle", async () => {
     const t = setup({ code: "c0de-c0de-c0de-c0de.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -230,7 +230,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(sessionOf(PUB, value.slice(0, -2) + "xx", t.nowOf())).toBeUndefined(); // tampered
   });
 
-  test("a cookie made from what the host can read is refused: HMAC keyed with the public key, or signed by another Ed25519 key (#701)", async () => {
+  test("a cookie made from what the host can read is refused: HMAC keyed with the public key, or signed by another Ed25519 key", async () => {
     const t = setup({ code: "hosthosthosthosthost.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -250,7 +250,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(t.sent.filter((x) => x instanceof StartInstancesCommand)).toHaveLength(1);
   });
 
-  test("a cookie the Starter signed passes; an expired or tampered one does not (Ed25519 contract, #701)", () => {
+  test("a cookie the Starter signed passes; an expired or tampered one does not (Ed25519 contract)", () => {
     const now = 1_800_000_000_000, value = sessionValue(KEY, "pk-1", now + 1000, now + 1000);
     expect(sessionOf(PUB, value, now)).toBe("pk-1");
     expect(sessionOf(PUB, value, now + 1000)).toBeUndefined(); // expired
@@ -261,7 +261,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(sessionOf("not-a-key", value, now)).toBeUndefined();
   });
 
-  test("a session ends at the 7-day cap or the 24-hour idle time, whichever comes first; the old two-field body is refused (#498)", () => {
+  test("a session ends at the 7-day cap or the 24-hour idle time, whichever comes first; the old two-field body is refused", () => {
     const now = 1_800_000_000_000;
     expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + SESSION_IDLE_MS, now + SESSION_MAX_MS), now)).toBe("pk-1");
     expect(sessionOf(PUB, sessionValue(KEY, "pk-1", now + 1000, now + SESSION_MAX_MS), now + 1000)).toBeUndefined(); // idle time over, cap left
@@ -312,7 +312,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/login", { challenge: c4, ...a.assert(c4) })).statusCode).toBe(400);
   });
 
-  test("an unknown passkey is 401 reason unknown; a registered one that fails is 401 without a reason (#1312)", async () => {
+  test("an unknown passkey is 401 reason unknown; a registered one that fails is 401 without a reason", async () => {
     const t = setup({ code: "abcabcabcabcabcabc.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -327,7 +327,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(JSON.parse(bad.body).reason).toBeUndefined();
   });
 
-  test("the page tells the device about a removed passkey, or says how to remove it (#1312)", async () => {
+  test("the page tells the device about a removed passkey, or says how to remove it", async () => {
     const page = await Bun.file(new URL("./auth-page.html", import.meta.url)).text();
     const src = page.slice(page.indexOf("async function forgetPasskey"), page.indexOf("async function login"));
     expect(page.indexOf("async function forgetPasskey")).toBeGreaterThanOrEqual(0);
@@ -376,7 +376,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(t.sent.some((x) => x instanceof StartInstancesCommand)).toBe(false);
   });
 
-  test("auth log (#1490): a failed login and the 429 each leave one JSON line with the address key, path and status — no challenge or cookie value", async () => {
+  test("auth log: a failed login and the 429 each leave one JSON line with the address key, path and status — no challenge or cookie value", async () => {
     const t = setup({ code: "abcabcabcabcabcabc.1900000000000" });
     const spy = spyOn(console, "log").mockImplementation(() => undefined);
     try {
@@ -400,7 +400,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     }
   });
 
-  test("the page reads the registration code from the fragment, not the query (#1490)", async () => {
+  test("the page reads the registration code from the fragment, not the query", async () => {
     const page = await setup().call("GET", "/_auth/");
     expect(page.body).toContain("location.hash");
     expect(page.body).not.toContain('q.get("register")');
@@ -413,7 +413,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(page.headers["content-type"]).toContain("text/html");
     expect(page.body).toContain("navigator.credentials.get");
     expect(page.body).toContain('userVerification: "required"');
-    // nothing to type for the login; the only inputs are the countries section's (#1639)
+    // nothing to type for the login; the only inputs are the countries section's
     expect([...page.body.matchAll(/<input id="(\w+)"/g)].map((m) => m[1])).toEqual(["cCountries", "cFrom", "cUntil"]);
     expect(page.body).not.toMatch(/type="(password|text)"/i);
     const out = await t.call("POST", "/_auth/logout", {});
@@ -421,7 +421,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(out.cookies?.[1]).toMatch(/^sb_recent=; .*Max-Age=0$/);
   });
 
-  test("the page's next is a page of this site only: no open redirect, never back into /_auth (review #348)", async () => {
+  test("the page's next is a page of this site only: no open redirect, never back into /_auth", async () => {
     const html = (await setup().call("GET", "/_auth/")).body;
     const src = html.slice(html.indexOf("function safeNext"), html.indexOf("const next = safeNext"));
     const safeNext = new Function("location", `${src}; return safeNext;`)({ origin: ORIGIN }) as (raw: string | null) => string;
@@ -435,7 +435,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(html).toContain("return Array.isArray(h.runners);");
   });
 
-  test("no session key, or a short one: 503, never a challenge or a cookie signed with an empty key (review #349)", async () => {
+  test("no session key, or a short one: 503, never a challenge or a cookie signed with an empty key", async () => {
     for (const key of [null, "", "short-key", "g".repeat(64), "a".repeat(66)]) {
       const t = setup({ sessionKey: key, code: "abcabcabcabcabcabc.1900000000000" });
       expect((await t.call("POST", "/_auth/challenge", {})).statusCode).toBe(503);
@@ -447,7 +447,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     }
   });
 
-  test("a rotated session key takes effect within a minute without recycling the Lambda: old cookies stop, new ones are signed with it (review #349)", async () => {
+  test("a rotated session key takes effect within a minute without recycling the Lambda: old cookies stop, new ones are signed with it", async () => {
     const t = setup({ code: "rotaterotaterotate.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -461,7 +461,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(sessionOf(publicKeyOf(OTHER), fresh.split("; ")[0]!.slice(SESSION_COOKIE.length + 1), t.nowOf())).toBe(a.id);
   });
 
-  test("the rate limit is per viewer (CloudFront-Viewer-Address, IPv6 by /64), not per edge node (review #349)", async () => {
+  test("the rate limit is per viewer (CloudFront-Viewer-Address, IPv6 by /64), not per edge node", async () => {
     const t = setup();
     for (let i = 0; i < MAX_FAILURES; i++) await t.call("POST", "/_auth/login", { challenge: "x" }, undefined, undefined, `2001:db8:1:2::${i + 1}:443`);
     expect((await t.call("POST", "/_auth/login", { challenge: "x" }, undefined, undefined, "2001:db8:1:2:ffff::9:443")).statusCode).toBe(429); // same /64
@@ -471,7 +471,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(addressKey("198.51.100.7")).toBe("198.51.100.7");
   });
 
-  test("the register code is consumed before the passkey is saved: two submissions of one link register one passkey (review #349)", async () => {
+  test("the register code is consumed before the passkey is saved: two submissions of one link register one passkey", async () => {
     const t = setup({ code: "onceonceonceonceonce.1900000000000" });
     const a = authenticator(), b = authenticator();
     const c1 = await challenge(t), c2 = await challenge(t);
@@ -480,7 +480,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(JSON.parse(t.objects.get("auth/passkeys.json")!).passkeys).toHaveLength(1);
   });
 
-  test("a write that lost to another (412) is redone on a fresh read, so neither is lost (review #349)", async () => {
+  test("a write that lost to another (412) is redone on a fresh read, so neither is lost", async () => {
     const t = setup({ code: "raceraceraceraceracer.1900000000000" });
     const a = authenticator();
     const c = await challenge(t);
@@ -493,14 +493,14 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(stored.spent.map((x: { challenge: string }) => x.challenge)).toContain(c2);
   });
 
-  test("the page may not be framed and runs only its own script (review #349)", async () => {
+  test("the page may not be framed and runs only its own script", async () => {
     const page = await setup().call("GET", "/_auth/");
     expect(page.headers["x-frame-options"]).toBe("DENY");
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(page.headers["content-security-policy"]).toContain("default-src 'self'");
   });
 
-  test("back to the page asked for with from=auth, its query and hash kept (#235's loop guard)", async () => {
+  test("back to the page asked for with from=auth, its query and hash kept (the loop guard)", async () => {
     const html = (await setup().call("GET", "/_auth/")).body;
     const src = html.slice(html.indexOf("function safeNext"), html.indexOf("async function api"));
     const back = (next: string) => new Function("location", "q", `${src}; return back();`)({ origin: ORIGIN }, new URLSearchParams({ next })) as string;
@@ -528,7 +528,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     return { t, a, reg, session, login };
   };
 
-  test("start and rebuild need a passkey check within 5 minutes: the session cookie alone is 401 recent, right after login it is 202 (#497)", async () => {
+  test("start and rebuild need a passkey check within 5 minutes: the session cookie alone is 401 recent, right after login it is 202", async () => {
     for (const [path, state] of [["/_auth/rebuild", "running"], ["/_auth/start", "stopped"], ["/_auth/stop", "running"]] as const) {
       const { t, session, login } = await registered(state);
       expect((await t.call("POST", path, {}, await login())).statusCode).toBe(202);
@@ -544,7 +544,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     }
   });
 
-  test("countries: reading needs the cookie, saving needs a recent passkey check (#1639)", async () => {
+  test("countries: reading needs the cookie, saving needs a recent passkey check", async () => {
     const { t, session, login } = await registered("stopped", ["JP"]);
     const until = t.nowOf() + 24 * 3600_000;
     const logs: Array<Record<string, unknown>> = [];
@@ -599,7 +599,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("GET", "/_auth/countries", undefined, session)).statusCode).toBe(404);
   });
 
-  test("stop needs the cookie and a passkey check within 5 minutes; it stops only a running machine, and a stopping one only with force (#1394)", async () => {
+  test("stop needs the cookie and a passkey check within 5 minutes; it stops only a running machine, and a stopping one only with force", async () => {
     const stops = (t: { sent: object[] }) => t.sent.filter((x): x is StopInstancesCommand => x instanceof StopInstancesCommand);
     const noCookie = setup({ state: "running" });
     expect((await noCookie.call("POST", "/_auth/stop", {})).statusCode).toBe(401);
@@ -634,7 +634,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect(stops(stopped.t)).toHaveLength(0);
   });
 
-  test("a recent cookie that is expired, signed with another key, is a session value, or names another passkey is refused (#497)", async () => {
+  test("a recent cookie that is expired, signed with another key, is a session value, or names another passkey is refused", async () => {
     const { t, a, session } = await registered();
     const later = t.nowOf() + RECENT_MS;
     for (const recent of [
@@ -652,7 +652,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await t.call("POST", "/_auth/start", {}, `${session}; ${RECENT_COOKIE}=${recentValue(KEY, a.id, later)}`)).statusCode).toBe(202);
   });
 
-  test("the recent cookie is HttpOnly, Secure, SameSite=Lax, Path=/, Max-Age=300 and comes with login and register (#497)", async () => {
+  test("the recent cookie is HttpOnly, Secure, SameSite=Lax, Path=/, Max-Age=300 and comes with login and register", async () => {
     const { t, a, reg, login } = await registered();
     const shape = /^sb_recent=([^;]+); HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=300$/;
     expect(reg.cookies?.[1]).toMatch(shape);
@@ -660,7 +660,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
     expect((await login()).split("; ")[1]).toStartWith(`${RECENT_COOKIE}=`);
   });
 
-  test("the page checks the passkey and sends start / 作り直す once more on 401 recent (#497)", async () => {
+  test("the page checks the passkey and sends start / 作り直す once more on 401 recent", async () => {
     const html = (await setup().call("GET", "/_auth/")).body;
     expect(html).toContain('e.reason !== "recent"');
     expect(html).toContain('withRecent(() => api("start", {}))');
@@ -669,7 +669,7 @@ describe("aws/auth.ts — passkey login on the Starter (#211, #234)", () => {
   });
 });
 
-describe("aws/auth.ts — another device from a logged-in one (#414)", () => {
+describe("aws/auth.ts — another device from a logged-in one", () => {
   const ADMIN = "admin-code-admin-code";
   /** One passkey registered with the agent's code: its authenticator and the browser's cookies. */
   async function first(t: ReturnType<typeof setup>) {
@@ -886,10 +886,10 @@ describe("aws/auth.ts — another device from a logged-in one (#414)", () => {
     const card = page.slice(page.indexOf('<div class="card" id="devices"'), page.indexOf("</div>\n<div class=\"dim\"><a href=\"#\" id=\"logout\""));
     expect(card).toContain('id="addDevice"');
     expect(card).not.toContain("<input");
-    expect(page).toContain("/_auth/#register=${code}"); // the fragment, as the agent's link (#1490)
+    expect(page).toContain("/_auth/#register=${code}"); // the fragment, as the agent's link
   });
 
-  test("a passkey removed while its delete was writing deletes nothing (412 re-read, review #2507)", async () => {
+  test("a passkey removed while its delete was writing deletes nothing (412 re-read)", async () => {
     const t = setup({ code: `${ADMIN}.1900000000000` });
     const { a, cookie } = await first(t);
     const b = authenticator(), c = authenticator();

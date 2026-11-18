@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import type { RunnerId } from "@switchboard/protocol";
-import { api, type RunnerLoginView } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type RunnerLoginView } from "../api/daemon.ts";
 import { t } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
 
 /**
- * The login buttons on the banner of a runner whose login ran out (#354). The daemon runs the runner's own login and relays
+ * The login buttons on the banner of a runner whose login ran out. The daemon runs the runner's own login and relays
  * what it prints: codex a device URL and a one-time code (approve on the page, this goes away by itself), claude a URL
  * and a box for the code its page shows. No terminal.
  */

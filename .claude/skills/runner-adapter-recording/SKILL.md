@@ -20,6 +20,7 @@ permission.ask / permission.resolved / usage / quota / artifact / session.end / 
    - Claude: `claude -p --input-format stream-json --output-format stream-json`（`docs/design/claude-stream-json.md`）
    - Codex: `codex app-server` stdio JSON-RPC（`docs/design/codex-app-server.md`）
    - DAK: ADK REST `POST /run_sse`（`docs/design/dak-adapter.md`。`docker compose up` で 127.0.0.1:8000）。DAK の録画は `packages/adapters/dak/fixtures/` のまま
+   - **保存する前にアカウントの値を伏せる**（録画は枝 `recordings-vault` に送られる。ワイヤにはログインしている人の値が載る）。伏せる場所: Codex は `account/read` の答え（`account.email`・`userId`・`account.workspaceName`）、Claude は `initialize` の `control_response` の `account`（`email`・`organization`）と、`claude auth status` の出力を録るならその `email`・`orgId`・`orgName`。値は固定の置き換え（email は `user@example.invalid`、id は `00000000-0000-0000-0000-000000000000`、名前は `Example Org`）にし、キーと形は変えない（再生テストが読む形のまま）。保存の前に `grep -lE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}' <録画>` で、`example.com` / `example.invalid` / `anthropic.com`（コミットの `noreply`）以外の email が残っていないことを確かめる。アダプタはこれらの値をイベントに載せない（`session.test.ts` の「account of the usage-limit reports」）ので、伏せても再生の結果は変わらない
 2. **再生テスト**: fixture を parse 関数に流し `AgentEvent` の列を assert。`AgentEvent.parse(ev)` で schema 準拠も見る。
 3. **偽サーバ / 偽プロセス**でセッション制御を検証（`packages/adapters/adk/fixtures/fake-adk.ts` の型）: 確認要求 → 応答、途中エラー、
    中断、ストリーム終了後の追加ターン。プロンプト接頭辞で挙動を切り替える。

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import type { Attachment } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 
@@ -20,7 +20,7 @@ export function formatBytes(n: number): string {
 }
 
 /**
- * Files chosen for the next turn (#125). Each is uploaded as soon as it is added (so the daemon's answer — a limit,
+ * Files chosen for the next turn. Each is uploaded as soon as it is added (so the daemon's answer — a limit,
  * a bad mime — shows before 送信), removed with DELETE if taken off again, and sent as ids with the turn.
  * `busy` is true while any upload is in flight: the turn must not go out before the ids exist. `clear()` after a
  * successful turn also disowns uploads still in flight (they are deleted when they land, not shown as new chips).
@@ -209,7 +209,7 @@ export function AttachmentBar(props: { items: Attachment[]; onRemove: (id: strin
   );
 }
 
-/** The bytes as an object URL, fetched with the API token (an <img src> could not carry it off-loopback, #31); revoked on unmount. */
+/** The bytes as an object URL, fetched with the API token (an <img src> could not carry it off-loopback); revoked on unmount. */
 function useAttachmentUrl(id: string): { src: string | null; failed: boolean } {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);

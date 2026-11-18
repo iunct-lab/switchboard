@@ -1,4 +1,4 @@
-/** #1114: build web first; CHROME_BIN=<Chrome> bun scripts/claude-cloud-e2e.ts.
+/** build web first; CHROME_BIN=<Chrome> bun scripts/claude-cloud-e2e.ts.
  * Own empty DB, local Git fixtures, real Claude adapter + fake CLI. No live Cloud or authentication.
  * stdout contains only pass/fail and counts. E2E_DEBUG_FILE optionally receives assertion labels.
  */
@@ -128,7 +128,7 @@ let buf='';for await (const chunk of Bun.stdin.stream()) {buf+=new TextDecoder()
     assert(latest().cloudSession === null && latest().outcome === "unknown", "error is unconfirmed");
     assert(!await evaluate(`document.body.textContent.includes('fixture-secret')`), "raw error redacted"); cases++;
   }
-  // Folder trust (#1288): the guidance shows before Start for a known-untrusted folder, no CLI is started, nothing is written.
+  // Folder trust: the guidance shows before Start for a known-untrusted folder, no CLI is started, nothing is written.
   const cloudStarts = () => entries().filter(e => e.args?.[0] === "--cloud").length;
   const guidance = (path: string) => `このフォルダ（${path}）は Claude Code でまだ信頼されていないため`;
   mkdirSync(configDir, { recursive: true });

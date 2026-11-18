@@ -3,7 +3,7 @@
  * TaskManager checks `canTransition` before it writes, and `Db.updateTask` throws
  * `InvalidTaskTransitionError` for a move the table does not have, so a row never takes a status it may not have.
  */
-import type { StoredOutcome, Task, TaskOutcome, TaskStatus } from "@switchboard/protocol";
+import { IN_FLIGHT, type StoredOutcome, type Task, type TaskOutcome, type TaskStatus } from "@switchboard/protocol";
 
 /** A Task that has ended. A person's action (a reply, a resume, a retry) moves it on, or a turn its attached runner starts on its own. */
 export const TERMINAL: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["done", "error", "aborted"]);
@@ -14,8 +14,8 @@ export const TURN_ENDED: ReadonlySet<TaskStatus> = new Set<TaskStatus>([...TERMI
 /** The turn ended ok (`done`, or `background` when a background process remains): what a reply is judged, checked and sent on after. `error` / `aborted` are in `TURN_ENDED` but not here. */
 export const TURN_DONE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["done", "background"]);
 
-/** A Task with a turn in progress: the only states a runner's events may change. */
-export const IN_FLIGHT: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["running", "waiting"]);
+/** A Task with a turn in progress: the only states a runner's events may change. Defined beside the statuses, where the web reads it too. */
+export { IN_FLIGHT };
 
 /**
  * Moves to a different status (staying put is always allowed). `idle` is where a Cloud Task lands when its start
@@ -47,7 +47,7 @@ export function workPhase(t: Pick<Task, "status" | "resumeAt">): WorkPhase {
 }
 
 /** What a count of "working" Tasks is for. The set is fixed, not a setting. */
-export type WorkPurpose = "dedupe" | "slot" | "gate" | "display" | "drain";
+export type WorkPurpose = "dedupe" | "slot" | "gate" | "display" | "output";
 
 /** Which phases count as working for each purpose: the one table (the same one is in docs/design/task-work-phase.md). */
 export const COUNTS: Record<WorkPurpose, ReadonlySet<WorkPhase>> = {
@@ -55,7 +55,7 @@ export const COUNTS: Record<WorkPurpose, ReadonlySet<WorkPhase>> = {
   slot: new Set<WorkPhase>(["turn", "approval", "background"]),
   gate: new Set<WorkPhase>(["turn", "approval", "background"]),
   display: new Set<WorkPhase>(["turn", "approval", "background"]),
-  drain: new Set<WorkPhase>(["turn", "background"]),
+  output: new Set<WorkPhase>(["turn", "background"]),
 };
 
 export function isWorking(t: Pick<Task, "status" | "resumeAt">, purpose: WorkPurpose): boolean {

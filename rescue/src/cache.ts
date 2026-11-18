@@ -1,9 +1,9 @@
 /**
- * What else fills the host's disk besides /tmp (#2549): the working directories local CI and hand-run checks leave under ~/.cache when they are killed
+ * What else fills the host's disk besides /tmp: the working directories local CI and hand-run checks leave under ~/.cache when they are killed
  * before its `finally`, and its failure logs, one per PR; and the review clones the kit leaves under ~/.cache/ops-kit/review (a clone goes only
  * once `gh` says its PR is closed); and the screens audit's work directory, and on a machine of Switchboard's own any `mktemp`-named directory
  * a Task named by hand (`CACHE_WORK_OWNED`). Judged like /tmp (`inspect` / `inUse` in tmp.ts) and swept on the same timer.
- * Only `node:` here: sb-rescue shares no code with Switchboard (#178).
+ * Only `node:` here: sb-rescue shares no code with Switchboard.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";

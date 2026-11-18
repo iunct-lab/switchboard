@@ -4,8 +4,8 @@ import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 
 /**
- * The stops of a row's stage Tasks (#939): how many times, the last answer, what changed and what is needed next; none
- * when it never stopped. `only="needs-person"` (#3709: under a closed list row) is the stops that need the person's
+ * The stops of a row's stage Tasks: how many times, the last answer, what changed and what is needed next; none
+ * when it never stopped. `only="needs-person"` (under a closed list row) is the stops that need the person's
  * action; the opened row's `ItemDetail` shows them all in place, so they are not shown twice.
  */
 export function Stops(props: { stops: StopSummary[]; issue: string; only?: "needs-person" }) {

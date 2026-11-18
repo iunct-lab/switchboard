@@ -1,11 +1,15 @@
 import { HUMAN_STOP_REASONS, personWait, RunnerId, StopRecord, taskSummary, type StopChange, type StopNext, type StopSummary, type Task, type TaskListItem, type TaskOutcome, type TaskStopMark } from "@switchboard/protocol";
 import { z } from "zod";
 import type { Db } from "./db.ts";
+import { presetReplies } from "./presets.ts";
 
 /**
  * Repeated stops: which stops are the same one again, what changed since the previous one, and what the work
  * needs next. The records are the tasks' `stop.record` events — the source of truth, so a restart forgets nothing.
  */
+
+/** A span for a sentence: minutes under two hours, hours under two days, else days. */
+export const spanText = (ms: number): string => (ms < 2 * 3600_000 ? `${Math.max(0, Math.round(ms / 60_000))} 分` : ms < 2 * 86_400_000 ? `${Math.round(ms / 3600_000)} 時間` : `${Math.round(ms / 86_400_000)} 日`);
 
 /** The work a stop belongs to: the Issue (workspace + number, so the same number in another repository is other work), else the schedule, else the task. */
 export function workKey(w: StopRecord["work"]): string {
@@ -106,8 +110,11 @@ function answeredAfter(stops: StopRecord[], first: Map<string, number>, last: St
  * The series of `records` (any order), newest stop last first. A record with an id seen before updates that stop (its
  * state moved: retrying → resolved …); a new id is the series stopping again. Changes are against the stop before the
  * newest one at the same work + op + target, of any reason — so a different cause shows as `cause`.
+ * `newestTaskId` (an Issue's stops, read for the item: its newest stage Task): a series still `waiting` whose newest stop
+ * is an earlier Task's is left out — a later stage Task took the work over, so nothing waits on that stop any more. A
+ * Task's own reading (its detail, its recovery prompt) passes none and keeps every series.
  */
-export function reduceStops(records: StopRecord[]): StopSummary[] {
+export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string | null } = {}): StopSummary[] {
   const byId = new Map<string, StopRecord>();
   const first = new Map<string, number>();
   for (const r of [...records].sort((a, b) => a.at - b.at)) {
@@ -121,6 +128,7 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
   const out: StopSummary[] = [];
   for (const [key, list] of series) {
     const last = list[list.length - 1]!;
+    if (opts.newestTaskId && last.state === "waiting" && last.work.taskId !== opts.newestTaskId) continue;
     const lastFirst = first.get(last.id)!;
     const newest = (rs: StopRecord[]) => rs.reduce<StopRecord["answer"]>((a, s) => (s.answer && (!a || s.answer.at >= a.at) ? s.answer : a), null);
     // Answers seen before `last`, at this place in any series: one that came back is not a new answer.
@@ -159,7 +167,7 @@ export function reduceStops(records: StopRecord[]): StopSummary[] {
  * without the answers, changes and next step the marks do not carry (those make `reduceStops` slow over thousands of
  * Tasks). A test holds the two equal.
  */
-export function lastStopMark(records: StopRecord[]): TaskStopMark | null {
+export function lastStopMark(records: StopRecord[]): Omit<TaskStopMark, "replies"> | null {
   const byId = new Map<string, StopRecord>();
   const first = new Map<string, number>();
   for (const r of [...records].sort((a, b) => a.at - b.at)) {
@@ -242,26 +250,28 @@ export function stopRecordsFor(db: Db, task: Task): StopRecord[] {
  * read in one query (`listStopRecordsOfStopped`). Of each, the newest series (`reduceStops` puts the latest `lastAt` first)
  * among the stops that Task itself reported — not `stopRecordsFor`, which also reads the other Tasks of the same Issue /
  * schedule (their newer stop is not this Task's last stop) and only the schedule's latest Tasks (an older Task's own stop
- * would be lost). A Task with no stop record of its own is left out. Whether the mark means the person is wanted is
- * `personWait`'s call, made by the reader.
+ * would be lost). A Task with no stop record of its own, or that waits on no one (`personWait`), is left out. The mark
+ * only carries what the stop was; whether the person is wanted is the Task's outcome.
  */
-export function stopMarks(db: Db, tasks: Task[]): Record<string, TaskStopMark> {
+export function stopMarks(db: Db, tasks: Task[], now: number): Record<string, TaskStopMark> {
   const out: Record<string, TaskStopMark> = {};
+  const replies = presetReplies(db, now);
   const records = db.listStopRecordsOfStopped();
   for (const t of tasks) {
     const own = records.get(t.id);
-    // a Task reviewed or at work waits on no one, whatever it stopped on (the outcome set aside, as the web's stopCandidates).
-    // listStopRecordsOfStopped narrows the same way in SQL (for speed); this decides again by the Tasks passed in.
-    if (!own || personWait({ ...t, outcome: "unknown" }, null) === "none") continue;
+    // a Task that waits on no one (reviewed, at work, or an outcome that needs nothing) has no mark; the mark is for showing
+    // the stop's reason and key, not for deciding whether the person is wanted (that is the outcome, `personWait`).
+    // listStopRecordsOfStopped narrows in SQL (for speed); this decides again by the Tasks passed in.
+    if (!own || personWait(t) === "none") continue;
     const mark = lastStopMark(own);
-    if (mark) out[t.id] = mark;
+    if (mark) out[t.id] = { ...mark, replies: replies.get(mark.reason) ?? [] };
   }
   return out;
 }
 
 /** The Tasks as `GET /api/tasks` lists them: each summary with its `stop` from `stopMarks`; a Task with no mark gets no `stop` field. */
 export function tasksWithStops(db: Db, tasks: Task[]): TaskListItem[] {
-  const marks = stopMarks(db, tasks);
+  const marks = stopMarks(db, tasks, Date.now());
   return tasks.map((t) => {
     const stop = marks[t.id];
     return stop ? { ...taskSummary(t), stop } : taskSummary(t);
@@ -469,29 +479,55 @@ export function reportedLimit(stop: StopRecord): { runner: RunnerId; resetsAt?: 
   return undefined;
 }
 
+/** What the app knows about a Task when it starts its runner, and the stop report's text depends on. */
+export interface PreambleConditions {
+  /** The Workspace MCP is among the servers the runner is started with (`task.note`, `exec.run`). */
+  workspaceMcp: boolean;
+  /** A PBI's stage Task: the only kind that holds an occupancy claim and is judged by the parallel guard. */
+  stage: boolean;
+  /** The runner is started in plan mode. */
+  planMode: boolean;
+}
+
 /**
- * What every runner start is told: how to report a stop (task.note's `stop`, or a `switchboard-stop` fence), the
- * retry rule, not to write beyond the request, and the stops of its work still open with the retries left. The runner retries its own tools itself;
- * the daemon never runs its commands. Short: it goes before every start's prompt.
+ * What a new session is told once: how to report a stop (task.note's `stop` where the Workspace MCP is attached, a
+ * `switchboard-stop` fence otherwise — one of the two, never both), the retry rule, not to write beyond the request,
+ * and the stops of its work still open with the retries left. Only the sentences that hold for `cond` are in it. The
+ * runner retries its own tools itself; the daemon never runs its commands.
  */
-export function stopRecoveryPrompt(open: StopSummary[]): string {
+export function stopRecoveryPrompt(open: StopSummary[], cond: PreambleConditions): string {
+  const how = "作業が止まったら（使用上限・承認や回答の待ち・依存の待ち・一時障害など）、理由を報告してください。";
   const lines = [
     "[Switchboard: 止まったときの報告]",
-    "作業が止まったら（使用上限・承認や回答の待ち・依存の待ち・一時障害など）、理由を報告してください。Workspace MCP の task.note が使えるなら引数 stop に、無ければ返答の中に次のフェンスで書きます（根拠は短く。秘密やコマンドの生の出力は書かない）:",
-    "```switchboard-stop",
-    '{"id":"<この停止の短い名前>","op":"<操作>","target":"<対象>","reason":"usage-limit|github-limit|transient|auth|permission|input|decision|depends|disk-full|unknown","safety":"read-only|before-effect|unknown","evidence":"<根拠>","state":"waiting|retrying|exhausted|resolved","conditions":[{"key":"pr#12","value":"open","met":false}],"actions":[{"attempt":1,"what":"<したこと>","ok":null}]}',
-    "```",
-    `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。`,
-    "依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {\"key\":\"after\",\"value\":\"<ISO 8601 のタイムゾーンつき日時>\"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。",
-    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
-    "依頼の範囲外の書き込み（計画モードでの commit・push・マージ、リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。",
+    ...(cond.workspaceMcp
+      ? [`${how}Workspace MCP の task.note の引数 stop に書きます（根拠は短く。秘密やコマンドの生の出力は書かない）。`]
+      : [
+          `${how}返答の中に次のフェンスで書きます（根拠は短く。秘密やコマンドの生の出力は書かない）:`,
+          "```switchboard-stop",
+          '{"id":"<この停止の短い名前>","op":"<操作>","target":"<対象>","reason":"usage-limit|github-limit|transient|auth|permission|input|decision|depends|disk-full|unknown","safety":"read-only|before-effect|unknown","evidence":"<根拠>","state":"waiting|retrying|exhausted|resolved","conditions":[{"key":"pr#12","value":"open","met":false}],"actions":[{"attempt":1,"what":"<したこと>","ok":null}]}',
+          "```",
+        ]),
+    `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。${cond.workspaceMcp ? "Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。" : ""}`,
+    `依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。${
+      cond.stage
+        ? "7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。"
+        : "7 日を超えるなら conditions を省く。"
+    }`,
+    "何かが済むのを待つときは `ops-kit wait --for \"<何を待つか>\" --timeout <秒> --on-timeout <fail|proceed> -- <判定コマンド>` を使い、until / while と sleep の繰り返しでは待たない（何を待つか・上限・切れたときの動作が無い待ちは書けない。待ちと上限は画面に出る）。fail で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を報告して止まる。",
+    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・[merge-answer] の投稿・Task の本文への名指しのパスの追加は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
+    `依頼の範囲外の書き込み（${cond.planMode ? "計画モードでの commit・push・マージ、" : ""}リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。`,
   ];
-  if (open.length) {
-    lines.push("この作業でまだ解けていない停止:");
-    for (const s of open.slice(0, 5)) {
-      const left = s.reason === "transient" && s.safety !== "unknown" ? `、再試行の残り ${Math.max(0, RETRY_DELAYS_MS.length - lastAttempt(s))} 回` : "";
-      lines.push(`- ${s.op}${s.target ? ` ${s.target}` : ""}: ${s.reason}（止まったのは ${s.count} 回、${s.state}${left}）`);
-    }
+  const stops = openStopsPrompt(open);
+  return stops ? `${lines.join("\n")}\n${stops}` : lines.join("\n");
+}
+
+/** The stops of the work still open, with the retries left; empty when there is none. All a continued session is told at a restart of its process. */
+export function openStopsPrompt(open: StopSummary[]): string {
+  if (!open.length) return "";
+  const lines = ["この作業でまだ解けていない停止:"];
+  for (const s of open.slice(0, 5)) {
+    const left = s.reason === "transient" && s.safety !== "unknown" ? `、再試行の残り ${Math.max(0, RETRY_DELAYS_MS.length - lastAttempt(s))} 回` : "";
+    lines.push(`- ${s.op}${s.target ? ` ${s.target}` : ""}: ${s.reason}（止まったのは ${s.count} 回、${s.state}${left}）`);
   }
   return lines.join("\n");
 }

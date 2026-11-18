@@ -1,5 +1,5 @@
 /*
- * Every time the Web UI shows is JST (Asia/Tokyo), whatever the browser's time zone is (#2028). `at` is epoch ms.
+ * Every time the Web UI shows is JST (Asia/Tokyo), whatever the browser's time zone is. `at` is epoch ms.
  */
 
 const PARTS = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23" });

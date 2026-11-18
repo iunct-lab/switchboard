@@ -1,8 +1,8 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/attention-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * 要対応 (#492) in and out, in one go: a fake runner stops three tasks as 要対応 / 失敗 / 未判定; Home and the rail list
+ * 要対応 in and out, in one go: a fake runner stops three tasks as 要対応 / 失敗 / 未判定; Home and the rail list
  * them; 確認済み on the Task screen moves one to Home's 最近, taking it back returns it, and setting its outcome to
- * 要対応 moves it to the top, and to 完了 moves it out to 最近. 実行中 sits above 要対応 on both. Then (f) (#4779, personWait): a Task whose outcome is 完了 but whose stop waits on a decision is under 要対応, and one whose outcome is 要対応 but whose stop waits on a dependency is in the folded 待ち. SCREENSHOT=<file.png> saves Home with the three; SCREENSHOT_TASK=<file.png> the Task screen.
+ * 要対応 moves it to the top, and to 完了 moves it out to 最近. 実行中 sits above 要対応 on both. Then (f): a Task whose turn ended on a decision stop is under 要対応 with the 要対応 label (never 完了), one whose turn ended on a dependency stop is in the folded 待ち and not in the rail, and Home's and the rail's headings show the same count, the rows. SCREENSHOT=<file.png> saves Home with the three; SCREENSHOT_TASK=<file.png> the Task screen.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -146,25 +146,29 @@ try {
   const ok = (await tasks()).find((t) => t.title === "task-ok")!;
   assert(ok.outcome === "finished" && ok.reviewedAt === null, `(e) stored ${ok.outcome} ${ok.reviewedAt}`);
 
-  // (f) the stop record decides before the outcome (personWait): 完了 + a decision stop → 要対応; 要対応 + a depends stop → 待ち
-  for (const [p, outcome] of [["stop-decision", "finished"], ["stop-depends", "needs_action"]] as const) {
+  // (f) the outcome alone splits (the stop records write it): a turn ended on a decision stop → 要対応 with the 要対応 label (never 完了); one ended on a depends stop → the folded 待ち, not in the rail; both headings count the rows
+  for (const p of ["stop-decision", "stop-depends"]) {
     await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: cfg.repoRoot, title: `task-${p}`, prompt: p, runner: "claude" }) });
     const t = await until(async () => (await tasks()).find((x) => x.title === `task-${p}` && x.status !== "running" && x.status !== "idle"), `task-${p} stopped`);
     await until(async () => ((await (await fetch(`${base}/api/tasks/stops`)).json()) as Record<string, unknown>)[t.id], `task-${p} stop recorded`);
-    await fetch(`${base}/api/tasks/${t.id}/outcome`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ outcome }) });
-    await until(async () => (await tasks()).find((x) => x.id === t.id)?.outcome === outcome, `task-${p} outcome ${outcome}`);
   }
+  const outcomeOf = async (title: string) => (await tasks()).find((x) => x.title === title)?.outcome;
+  await until(async () => (await outcomeOf("task-stop-decision")) === "needs_action" && (await outcomeOf("task-stop-depends")) === "waits", "stop records wrote needs_action / waits");
   await goHome();
   const foldedJs = `[...document.querySelectorAll('.waiting-folded .t')].map((n) => n.textContent)`;
-  const f = await until(async () => { const s = await state(); return s.onHome && s.home.includes("task-stop-decision") && s.rail.includes("task-stop-decision") && !s.rail.includes("task-stop-depends") && s; }, "task-stop-decision under 要対応, task-stop-depends out of the rail (its mark read)");
+  const headsJs = `(() => { const n = (s) => Number(s.match(/·\\s*(\\d+)/)?.[1]); const rail = [...document.querySelectorAll('.rail-list > .grp')].find((g) => g.textContent.startsWith('要対応')); const home = [...document.querySelectorAll('h5')].find((h) => h.textContent.startsWith('要対応')); return { rail: rail ? n(rail.textContent) : null, home: home ? n(home.textContent) : null, labels: [...document.querySelectorAll('.attn-group > .row .m')].map((m) => m.textContent.split(' · ')[0]) }; })()`;
+  const f = await until(async () => { const s = await state(); return s.onHome && s.home.includes("task-stop-decision") && s.rail.includes("task-stop-decision") && !s.rail.includes("task-stop-depends") && s; }, "task-stop-decision under 要対応, task-stop-depends out of the rail");
   const folded = (await until(async () => { const l = (await evaluate(foldedJs)) as string[]; return l.includes("task-stop-depends") && l; }, "task-stop-depends in the folded 待ち")) as string[];
   // `home` also picks up the folded 待ち's first row (its `<details>` follows the 要対応 rows), so the folded titles are set aside
   const homeRows = f.home.filter((x) => !folded.includes(x));
+  const heads = (await evaluate(headsJs)) as { rail: number | null; home: number | null; labels: string[] };
   assert(same(homeRows, ["task-stop-decision", "task-ask", "task-err"]) && !f.rail.includes("task-stop-depends") && !folded.includes("task-stop-decision"), `(f) ${JSON.stringify({ rail: f.rail, home: f.home, folded })}`);
+  assert(heads.home === homeRows.length && heads.rail === f.rail.length && heads.home === heads.rail, `(f) headings ${JSON.stringify({ heads, rows: homeRows.length, rail: f.rail.length })}`);
+  assert(heads.labels.length === homeRows.length && !heads.labels.includes("完了") && heads.labels[0] === "要対応", `(f) labels ${JSON.stringify(heads.labels)}`);
   await shot(process.env.SCREENSHOT_STOPS);
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ outcomes, a, b: { rail: bRail.rail, home: b.home, recent: b.recent }, c: { home: c.home, recent: c.recent }, d: { rail: dRail.rail, home: d.home }, e: { rail: eRail.rail, home: e.home, recent: e.recent }, f: { home: homeRows, folded }, consoleErrors: errors.length }));
+  console.log(JSON.stringify({ outcomes, a, b: { rail: bRail.rail, home: b.home, recent: b.recent }, c: { home: c.home, recent: c.recent }, d: { rail: dRail.rail, home: d.home }, e: { rail: eRail.rail, home: e.home, recent: e.recent }, f: { home: homeRows, folded, heads }, consoleErrors: errors.length }));
 } finally {
   ws?.close();
   chrome.kill();

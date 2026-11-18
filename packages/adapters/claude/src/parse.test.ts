@@ -5,7 +5,7 @@ import { AgentEvent, QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus, subagentEnv } from "./index.ts";
+import { accountName, buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus, subagentEnv } from "./index.ts";
 import { askQuestionsOf, createClaudeParser, permissionResponseLine, setPermissionModeLine, summarizeToolInput } from "./parse.ts";
 
 const fixture = recordingText("packages/adapters/claude/fixtures/write-with-permission.jsonl");
@@ -389,6 +389,13 @@ describe("spawn plumbing", () => {
     expect(childEnv(parent, subagentEnv({}))).toEqual({ PATH: "/bin" });
     expect(childEnv(parent, subagentEnv({ subagentEffort: "low" }))).toEqual({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_EFFORT: "low" });
   });
+  test("subagentModel: a chosen value becomes CLAUDE_CODE_SUBAGENT_MODEL, none adds nothing, the parent's same-named variable never passes", () => {
+    expect(childEnv({ PATH: "/bin" }, subagentEnv({ subagentModel: "claude-sonnet-5-5" }))).toEqual({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_MODEL: "claude-sonnet-5-5" });
+    expect(subagentEnv({})).toEqual({});
+    const parent = { PATH: "/bin", CLAUDE_CODE_SUBAGENT_MODEL: "opus" };
+    expect(childEnv(parent, subagentEnv({}))).toEqual({ PATH: "/bin" });
+    expect(subagentEnv({ subagentEffort: "low", subagentModel: "haiku" })).toEqual({ CLAUDE_CODE_SUBAGENT_EFFORT: "low", CLAUDE_CODE_SUBAGENT_MODEL: "haiku" });
+  });
 
   test("otel: logs go to the loopback endpoint only, metrics and traces none, the parent's OTEL_* dropped", () => {
     const parent = { PATH: "/bin", OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example.com", OTEL_RESOURCE_ATTRIBUTES: "team=x", OTEL_METRICS_EXPORTER: "otlp" };
@@ -624,6 +631,16 @@ describe("login", () => {
       }
       const none = await createClaudeAdapter({ bin: fakeClaude(dir, `echo '{"authMethod":"claude.ai"}'; exit 0`) }).detect();
       expect("loginExpiresAt" in none).toBe(false);
+      // the usage-limit reports are kept under a hash of the organization and email (a pseudonym: who knows both can
+      // compute it): the same login gives the same name, another another, and neither value appears in it; a status that
+      // names neither gives no name
+      const named = await status(`{"authMethod":"claude.ai","email":"a@example.com","orgId":"org-raw-0b9d3c1e"}`);
+      expect(named.account).toMatch(/^[0-9a-f]{16}$/);
+      expect(named.account).toBe(accountName("org-raw-0b9d3c1e:a@example.com"));
+      expect((await status(`{"orgId":"org-raw-0b9d3c1e","email":"a@example.com"}`)).account).toBe(named.account);
+      expect((await status(`{"orgId":"org-raw-0b9d3c1e","email":"b@example.com"}`)).account).not.toBe(named.account);
+      for (const raw of ["a@example.com", "org-raw", "0b9d3c1e"]) expect(JSON.stringify(named)).not.toContain(raw);
+      expect("account" in (await status(`{"authMethod":"claude.ai","orgId":""}`))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

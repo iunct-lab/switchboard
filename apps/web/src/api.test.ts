@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { api, RENEW_EVERY_MS, renewLogin, resetRenewal, wsUrl } from "./api.ts";
+import { api } from "./api/index.ts";
+import { RENEW_EVERY_MS, renewLogin, resetRenewal } from "./api/request.ts";
+import { wsUrl } from "./api/events.ts";
 
 test("wsUrl: the page's host, ws/wss by the page's scheme, the token and the query escaped", () => {
   const http = { protocol: "http:", host: "localhost:5173" };
@@ -10,7 +12,7 @@ test("wsUrl: the page's host, ws/wss by the page's scheme, the token and the que
 });
 
 // One request answered with CloudFront's start page while the daemon is up: the screen stays (what is typed survives);
-// the start page from /api/health as well means the host is off → the login page (#211), asked first when text is typed.
+// the start page from /api/health as well means the host is off → the login page, asked first when text is typed.
 test("req: the start page goes to /_auth/ only when /api/health is the start page too", async () => {
   const g = globalThis as Record<string, unknown>;
   const saved = { fetch: g.fetch, location: g.location, localStorage: g.localStorage, document: g.document, confirm: g.confirm };
@@ -62,7 +64,7 @@ test("runnerLogin: the Anthropic Console button posts billing=api, the Claude ac
   }
 });
 
-test("renameTask: PATCH /api/tasks/:id with the title (#491)", async () => {
+test("renameTask: PATCH /api/tasks/:id with the title", async () => {
   const g = globalThis as Record<string, unknown>;
   const saved = { fetch: g.fetch, localStorage: g.localStorage };
   g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
@@ -77,7 +79,7 @@ test("renameTask: PATCH /api/tasks/:id with the title (#491)", async () => {
   }
 });
 
-test("renewLogin: only a passkey login's changing request asks the Starter, at most once per RENEW_EVERY_MS (#498)", () => {
+test("renewLogin: only a passkey login's changing request asks the Starter, at most once per RENEW_EVERY_MS", () => {
   resetRenewal();
   let sent = 0;
   const send = () => { sent++; return Promise.resolve(); };

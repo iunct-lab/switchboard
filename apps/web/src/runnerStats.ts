@@ -2,15 +2,15 @@ import type { RoutingStats, RunnerId, RunnerStats } from "@switchboard/protocol"
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
-/** Fewer tasks than this in the window and a runner's record is too thin to compare with the others (#612). The default of `quotaAndResume.thinSample` (#835). */
+/** Fewer tasks than this in the window and a runner's record is too thin to compare with the others. The default of `quotaAndResume.thinSample`. */
 export const THIN_SAMPLE = 5;
 
 export type RunnerRow = RunnerStats & { thin: boolean };
 
 /**
- * One row per runner for the Ledger's per-runner card (#612): `runners` in their order, a runner with no record in the
+ * One row per runner for the Ledger's per-runner card: `runners` in their order, a runner with no record in the
  * window as a zero row (the API only lists runners that have records), then any runner only the daemon knows. `thin`:
- * the setting's count (#835).
+ * the setting's count.
  */
 export function runnerRows(stats: RoutingStats, runners: RunnerId[], thin = THIN_SAMPLE): RunnerRow[] {
   const empty = (runner: RunnerId): RunnerStats => ({ runner, total: 0, outcomes: { finished: 0, needs_action: 0, waits: 0, failed: 0, unknown: 0 }, medianCostUsd: null, medianDurationMs: null });

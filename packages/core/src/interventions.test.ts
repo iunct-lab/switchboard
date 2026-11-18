@@ -7,7 +7,8 @@ import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSourc
 import { createClaudeParser } from "@switchboard/adapter-claude";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
-import { collectInterventions, interventionView, PROCEED_OVERTURNED, questionCounts, type IssueInfo, summarizeInterventions, warmInterventions, type InterventionLookup } from "./interventions.ts";
+import { PROCEED_OVERTURNED } from "./backlog-comments.ts";
+import { collectInterventions, interventionView, questionCounts, type IssueInfo, summarizeInterventions, warmInterventions, type InterventionLookup } from "./interventions.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
@@ -445,46 +446,49 @@ describe("api interventions", () => {
 describe("questions", () => {
   const FROM = NOW - 7 * DAY;
   const WAIT = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 止めて待つ — 決められない";
-  const GO = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 推奨で進める — 戻せる";
+  // a PBI's own question about its Tasks' order: the kind a PBI's Issue can carry (its place is checked: backlog-comments.ts askPlaceOf)
+  const GO = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 推奨で進める（種類: task-order） — 戻せる";
+  const TOP = [{ name: "src", dir: true }];
+  const PBI = { number: 1, body: "", labels: ["type:pbi"], parent: null, subIssues: [] } as unknown as IssueInfo["data"];
   const ANSWER = "## 回答\n\nそれで";
-  const OVERTURN = `## 回答\n\n${PROCEED_OVERTURNED} 推奨 A → B\nB で`;
+  const OVERTURN = `## 回答\n\n${PROCEED_OVERTURNED} A → B\nB で`;
   const at = (ms: number) => iso(ms);
-  const repo = (...cs: Array<[string, number]>): Map<number, IssueInfo> => new Map([[1, { data: {} as IssueInfo["data"], comments: cs.map(([body, t], i) => ({ id: `c${i}`, body, createdAt: at(t) })) }]]);
+  const repo = (...cs: Array<[string, number]>): Map<number, IssueInfo> => new Map([[1, { data: PBI, comments: cs.map(([body, t], i) => ({ id: `c${i}`, body, createdAt: at(t) })) }]]);
 
   test("stop-and-wait and proceed-with-recommendation are counted apart, with the median time to the first answer", () => {
-    const r = questionCounts(repo([WAIT, NOW - 3 * DAY], [ANSWER, NOW - 3 * DAY + 10 * MIN], [GO, NOW - 2 * DAY], [ANSWER, NOW - 2 * DAY + 30 * MIN], [GO, NOW - DAY]), FROM, NOW);
+    const r = questionCounts(repo([WAIT, NOW - 3 * DAY], [ANSWER, NOW - 3 * DAY + 10 * MIN], [GO, NOW - 2 * DAY], [ANSWER, NOW - 2 * DAY + 30 * MIN], [GO, NOW - DAY]), FROM, NOW, TOP);
     expect(r).toEqual({ stopped: 1, proceeded: 2, overturned: 0, medianAnswerMs: 20 * MIN }); // the unanswered ask adds no time
   });
 
   test("an answer that starts a line with the overturn prefix makes its proceeded ask overturned; a stopped ask is not", () => {
-    const r = questionCounts(repo([GO, NOW - 3 * DAY], [OVERTURN, NOW - 3 * DAY + MIN], [GO, NOW - 2 * DAY], [ANSWER, NOW - 2 * DAY + MIN], [WAIT, NOW - DAY], [OVERTURN, NOW - DAY + MIN]), FROM, NOW);
+    const r = questionCounts(repo([GO, NOW - 3 * DAY], [OVERTURN, NOW - 3 * DAY + MIN], [GO, NOW - 2 * DAY], [ANSWER, NOW - 2 * DAY + MIN], [WAIT, NOW - DAY], [OVERTURN, NOW - DAY + MIN]), FROM, NOW, TOP);
     expect(r).toMatchObject({ stopped: 1, proceeded: 2, overturned: 1 });
   });
 
   test("an old ask with no 進め方 line counts as stopped", () => {
-    expect(questionCounts(repo(["## 判断待ち\n\n**問い**: x", NOW - DAY]), FROM, NOW)).toEqual({ stopped: 1, proceeded: 0, overturned: 0, medianAnswerMs: null });
+    expect(questionCounts(repo(["## 判断待ち\n\n**問い**: x", NOW - DAY]), FROM, NOW, TOP)).toEqual({ stopped: 1, proceeded: 0, overturned: 0, medianAnswerMs: null });
   });
 
   test("an ask outside the window is not counted, and its answer is not read for another ask", () => {
-    const r = questionCounts(repo([GO, FROM - 1], [OVERTURN, FROM + MIN], [WAIT, FROM + 2 * MIN], [WAIT, NOW]), FROM, NOW);
+    const r = questionCounts(repo([GO, FROM - 1], [OVERTURN, FROM + MIN], [WAIT, FROM + 2 * MIN], [WAIT, NOW]), FROM, NOW, TOP);
     expect(r).toEqual({ stopped: 1, proceeded: 0, overturned: 0, medianAnswerMs: null });
   });
 
   test("one answer after two asks adds one time from the first and overturns once", () => {
-    const r = questionCounts(repo([GO, NOW - 3 * DAY], [GO.replace("どちらか", "もう 1 つ"), NOW - 3 * DAY + MIN], [OVERTURN, NOW - 3 * DAY + 10 * MIN]), FROM, NOW);
+    const r = questionCounts(repo([GO, NOW - 3 * DAY], [GO.replace("どちらか", "もう 1 つ"), NOW - 3 * DAY + MIN], [OVERTURN, NOW - 3 * DAY + 10 * MIN]), FROM, NOW, TOP);
     expect(r).toEqual({ stopped: 0, proceeded: 2, overturned: 1, medianAnswerMs: 10 * MIN });
   });
 
   test("an ask the daemon sent again within the duplicate span counts once", () => {
-    const r = questionCounts(repo([`${WAIT}\n\n<!-- switchboard-op:a1 -->`, NOW - DAY], [`${WAIT}\n\n<!-- switchboard-op:b2 -->`, NOW - DAY + MIN], [ANSWER, NOW - DAY + 5 * MIN]), FROM, NOW);
+    const r = questionCounts(repo([`${WAIT}\n\n<!-- switchboard-op:a1 -->`, NOW - DAY], [`${WAIT}\n\n<!-- switchboard-op:b2 -->`, NOW - DAY + MIN], [ANSWER, NOW - DAY + 5 * MIN]), FROM, NOW, TOP);
     expect(r).toEqual({ stopped: 1, proceeded: 0, overturned: 0, medianAnswerMs: 5 * MIN });
     // as answers: the span runs from the last counted send, so a third send 12 minutes after the first counts again
     const op = (id: string) => `${WAIT}\n\n<!-- switchboard-op:${id} -->`;
-    expect(questionCounts(repo([op("a1"), NOW - DAY], [op("b2"), NOW - DAY + 6 * MIN], [op("c3"), NOW - DAY + 12 * MIN]), FROM, NOW).stopped).toBe(2);
+    expect(questionCounts(repo([op("a1"), NOW - DAY], [op("b2"), NOW - DAY + 6 * MIN], [op("c3"), NOW - DAY + 12 * MIN]), FROM, NOW, TOP).stopped).toBe(2);
   });
 
   test("summarizeInterventions gives a row per repository in each window", () => {
-    const lookup = { ...lookupOf([]), repositories: [{ workspaceId: "w", issues: repo([GO, NOW - 8 * DAY], [WAIT, NOW - DAY]) }] };
+    const lookup = { ...lookupOf([]), repositories: [{ workspaceId: "w", issues: repo([GO, NOW - 8 * DAY], [WAIT, NOW - DAY]), top: TOP }] };
     const v = sevenDays(summarizeInterventions([], [], [], lookup, NOW));
     expect(v.current.questions).toEqual([{ workspaceId: "w", stopped: 1, proceeded: 0, overturned: 0, medianAnswerMs: null }]);
     expect(v.previous.questions).toEqual([{ workspaceId: "w", stopped: 0, proceeded: 1, overturned: 0, medianAnswerMs: null }]);

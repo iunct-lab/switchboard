@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# archive — daily: the history (#179 export) encrypted to the age key in Parameter Store, to s3://<Data>/archive/.
+# archive — daily: the history (the daemon's export) encrypted to the age key in Parameter Store, to s3://<Data>/archive/.
 # Nothing is deleted here: the bucket's lifecycle expires archives after 30 days (aws/template.yaml).
 # Then the events of tasks finished 30 days ago go to s3://<Data>/history/events/ for good, and only those that arrived
-# are cut down in the database (#1431, docs/design/cloud-hosting.md). A failed upload exits 3 and is tried again next day.
-# Runners' records beyond the newest budget (a tenth of the disk) go to s3://<Data>/history/runner/ and off the disk (#1440); a failed one exits 4.
+# are cut down in the database (docs/design/cloud-hosting.md). A failed upload exits 3 and is tried again next day.
+# Runners' records beyond the newest budget (a tenth of the disk) go to s3://<Data>/history/runner/ and off the disk; a failed one exits 4.
 set -euo pipefail
 # shellcheck source=/dev/null
 . "${SB_HOST_ENV:-/etc/switchboard-host.env}"   # SB_DATA_BUCKET, SB_REPO_DIR
-# On the disk, not in /tmp (RAM on this host); a run killed before its trap (oom-kill) leaves it to the next run (#1201).
+# On the disk, not in /tmp (RAM on this host); a run killed before its trap (oom-kill) leaves it to the next run.
 OUT="$HOME/.switchboard/archive-out"
-# One line the daemon reads to show a failed or stopped archive (#1201): running <epoch> / ok <epoch> <key> / failed <epoch> <code>
+# One line the daemon reads to show a failed or stopped archive: running <epoch> / ok <epoch> <key> / failed <epoch> <code>
 # (code 3: the archive went up, but some task's events did not; code 4: the old runner records did not go up, none removed)
 STATUS="$HOME/.switchboard/archive.status"
 trap 'code=$?; [ $code -eq 0 ] || echo "failed $(date +%s) $code" > "$STATUS"; rm -rf "$OUT" || true' EXIT
@@ -29,12 +29,12 @@ disk_record() {
 disk_record || echo "archive: disk usage not recorded" >&2
 KEY="$(aws ssm get-parameter --name /switchboard/archive-age-pubkey --query Parameter.Value --output text)"
 NAME="switchboard-$(date -u +%Y%m%dT%H%M%SZ).tar.zst.age"
-# from the release sb-rescue runs (#178), not the working tree agents edit; the checkout only before the first release
+# from the release sb-rescue runs, not the working tree agents edit; the checkout only before the first release
 CODE="$HOME/.switchboard/releases/current"
 [ -d "$CODE" ] || CODE="$SB_REPO_DIR"
 bun "$CODE/packages/core/src/main.ts" export "$OUT/$NAME" --encrypt "$KEY"
 aws s3 cp "$OUT/$NAME" "s3://$SB_DATA_BUCKET/archive/$NAME" --only-show-errors
-# --- runner records (Claude's ~/.claude/projects, Codex's ~/.codex/sessions) beyond the newest budget (a tenth of the disk) (#1440) ---
+# --- runner records (Claude's ~/.claude/projects, Codex's ~/.codex/sessions) beyond the newest budget (a tenth of the disk) ---
 # One encrypted file per run to history/runner/ (no lifecycle), removed from the disk only once it is uploaded, each file
 # listed in runner-archive.tsv (path, session id, key, date). Kept: memory/ (not a record, and Claude reads it) and the
 # files of a running / waiting / idle task (they can still be resumed). The database is only read.
@@ -99,7 +99,7 @@ runner_archive() {
 runner_archive || RUNNER_FAILED=1
 runner_done() { [ "$RUNNER_FAILED" -eq 0 ] || exit 4; }
 
-# A release from before #1437 reads an unknown command as "start the daemon": not a second one on the same database
+# A release from before the events-archive command reads an unknown command as "start the daemon": not a second one on the same database
 if ! grep -q '"events-archive"' "$CODE/packages/core/src/main.ts"; then
   runner_done
   echo "ok $(date +%s) archive/$NAME" > "$STATUS"; echo "archive: s3://$SB_DATA_BUCKET/archive/$NAME (no events-archive in $CODE)"; exit 0

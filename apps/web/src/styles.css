@@ -61,12 +61,13 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .rail .grp { margin: 12px 6px 4px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
 .rail .it { width: 100%; text-align: left; display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 5px 8px; border: 0; background: transparent; border-radius: 4px; color: var(--ink2); }
 .rail .it.on { background: var(--sel); color: var(--ink); }
-/* two lines (#4060): one line left the title at "#2305 実装: PBI: …", the same for every row */
+/* two lines: one line left the title at `#2305 実装: PBI: …`, the same for every row */
 .rail .it .t { flex: 1; min-width: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .rail .it .m { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
 .rail .it .m.term-wait { color: var(--amber); }
 .tag { display: inline-block; margin-left: 6px; font: 400 9.5px/1.4 var(--mono); padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); }
 .tag.origin { border-color: var(--amber); color: var(--amber); white-space: nowrap; flex: none; }
+.tag.machine { white-space: nowrap; flex: none; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .tag.shadow { border-color: var(--dak); color: var(--dak); white-space: nowrap; flex: none; }
 .tag.shadow.stopped { opacity: .55; }
 .composer-hint { padding: 0 14px 8px; }
@@ -82,7 +83,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 
 .main { padding: 16px 20px; overflow-y: auto; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .card { background: var(--panel); border: 1px solid var(--line2); border-radius: 4px; padding: 12px 14px; }
-/* minmax(0, …): a long row in one card is cut in its row, it does not widen the column and push the other card out (#4060) */
+/* minmax(0, …): a long row in one card is cut in its row, it does not widen the column and push the other card out */
 .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--line2); width: 100%; }
 .row:last-child { border-bottom: 0; }
@@ -94,7 +95,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .row.stuck { background: var(--amber-soft); border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; }
 .row.stuck .t, .main .row.stuck:not(.head) > .t { white-space: normal; display: block; -webkit-line-clamp: unset; overflow-wrap: anywhere; }
 .row.stuck .why { font-size: 12px; color: var(--ink3); }
-/* 要対応 (#4522): a group = the first Task's row, and under it the same-cause line with its 確認済み; 待ち folds below */
+/* 要対応: a group = the first Task's row, and under it the same-cause line with its 確認済み; 待ち folds below */
 .attn-group { border-bottom: 1px solid var(--line2); }
 .attn-group:last-child { border-bottom: 0; }
 .attn-group > .row { border-bottom: 0; }
@@ -116,7 +117,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .meter i { display: block; height: 100%; background: var(--acc); }
 .meter.warn i { background: var(--amber); }
 
-.compose .fields { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 8px; } /* only the Workspace since 詳細 took the title (#3354) */
+.compose .fields { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 8px; } /* only the Workspace since 詳細 took the title */
 .compose label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink3); }
 .compose .runners { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .runner-opt { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid transparent; border-radius: 4px; }
@@ -125,12 +126,12 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .runner-opt input { margin: 0; }
 .compose .model { width: 200px; font-family: var(--mono); font-size: 11.5px; }
 .compose .mode { max-width: 240px; font-size: 12px; }
-/* Model select (#155): wide enough on Home for "自動選択のモデル: <label>（<id>）"; never wider than the Brief column. */
+/* Model select: wide enough on Home for "自動選択のモデル: <label>（<id>）"; never wider than the Brief column. */
 select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .compose select.model-select { max-width: 340px; }
 .hint.warn { color: var(--amber); }
 .compose .hint.warn { margin-top: 6px; }
-/* 詳細 (#3354): the rarely set values under the buttons; the summary of what was changed wraps rather than widens the card. */
+/* 詳細: the rarely set values under the buttons; the summary of what was changed wraps rather than widens the card. */
 .compose-details { margin-top: 8px; }
 .compose-details > summary { cursor: pointer; font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
 /* The rules an adoption kept on Switchboard's side, folded under a Workspace row of Settings. */
@@ -145,7 +146,7 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .pill.dak { border-color: var(--dak); color: var(--dak); }
 
 .task .task-head { display: flex; align-items: baseline; gap: 12px; }
-/* The head stays at the top of the scroll area (#1313): a long conversation's end and the head's tabs / 詳細 are seen together.
+/* The head stays at the top of the scroll area: a long conversation's end and the head's tabs / 詳細 are seen together.
    `.main`'s top padding moves into the head, so the stuck head covers what scrolls under it from the very top. */
 .main.task { padding-top: 0; }
 .task .task-head { position: sticky; top: 0; z-index: 1; background: var(--bg); padding-top: 16px; padding-bottom: 4px; }
@@ -161,7 +162,7 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .status.waiting { border-color: var(--amber); color: var(--amber); }
 .status.error { border-color: var(--red); color: var(--red); }
 .transcript { flex: 1; display: flex; flex-direction: column; gap: 8px; max-width: 760px; }
-/* 最新へ (#1315): floats at the bottom of the scroll area while the end of the conversation is out of view; opaque over the
+/* 最新へ: floats at the bottom of the scroll area while the end of the conversation is out of view; opaque over the
    text under it (scoped to `.transcript` to outrank `button.ghost`). */
 .transcript .older { align-self: center; }
 .transcript .jump-latest { position: sticky; bottom: 8px; align-self: center; z-index: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
@@ -202,7 +203,7 @@ select.model-select { max-width: 100%; min-width: 0; font-size: 12px; }
 .tool.asking .st { color: var(--amber); }
 .tool-detail pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line2); font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; }
 .tool-detail pre.err { color: var(--red); }
-/* copy buttons (#695): always visible (a phone has no hover), outside .tx so selecting the text works as before */
+/* copy buttons: always visible (a phone has no hover), outside .tx so selecting the text works as before */
 button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .msg .who .at { flex: none; color: var(--ink3); }
 .msg .who .copy { margin-left: auto; }
@@ -229,7 +230,7 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .side { border-left: 1px solid var(--line); background: var(--panel); padding: 12px 14px; overflow-y: auto; font-size: 12px; }
 .side .blk { padding: 10px 0; border-bottom: 1px solid var(--line2); }
 .side .blk:last-child { border-bottom: 0; }
-/* The task's instruction in the Brief (#1314): kept as written; a long one scrolls inside its box, not the Brief's other blocks. */
+/* The task's instruction in the Brief: kept as written; a long one scrolls inside its box, not the Brief's other blocks. */
 .brief-instruction .tx { white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; }
 .tree { font-family: var(--mono); font-size: 11px; line-height: 1.7; }
 .tree .on { background: var(--sel); display: inline-block; padding: 0 6px; margin-left: -6px; border-radius: 3px; }
@@ -239,8 +240,8 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .statusbar > span:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .statusbar b { color: var(--ink2); font-weight: 500; }
 .statusbar b.warn { color: var(--amber); }
-/* a phone held upright: the bar scrolls sideways instead of hiding what does not fit (#2666) */
-/* phones: no sideways scroll of its own (it showed a scrollbar under the page, #4060). The items wrap, and the data
+/* a phone held upright: the bar scrolls sideways instead of hiding what does not fit */
+/* phones: no sideways scroll of its own (it showed a scrollbar under the page). The items wrap, and the data
    location takes a line of its own, cut with … — never squeezed to nothing by the items before it */
 @media (max-width: 767px) {
   .statusbar { height: auto; min-height: 24px; flex-wrap: wrap; row-gap: 2px; padding: 3px 12px; }
@@ -298,7 +299,7 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .art-image { max-width: 100%; max-height: 100%; object-fit: contain; align-self: flex-start; }
 .art-text { flex: 1; min-height: 0; overflow: auto; margin: 0; white-space: pre-wrap; }
 .art-open { display: flex; gap: 8px; align-items: center; }
-/* 全画面 (#1826): above everything on the Task screen, below the passkey check (.recent-check) */
+/* 全画面: above everything on the Task screen, below the passkey check (.recent-check) */
 .art-full { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--panel); }
 .art-full-bar { display: flex; gap: 8px; padding: 6px 8px; }
 .art-full > :last-child { flex: 1; width: 100%; overflow: auto; border: 0; }
@@ -307,6 +308,12 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .transcript[hidden], .terminal-pane[hidden] { display: none; }
 .terminal { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .terminal-host { flex: 1; min-height: 240px; background: #000; border-radius: 4px; padding: 6px; overflow: hidden; }
+/* The keys a phone's keyboard lacks: shown in the phones' media query only. */
+.term-keys { display: none; }
+/* A Workspace's terminal (no Task): a heading, then the terminal fills what is left, as .terminal-pane does in a Task. */
+.main.workspace-terminal { display: flex; flex-direction: column; min-height: 0; gap: 6px; }
+.main.workspace-terminal .terminal-pane { flex: 1; }
+.rail .it .rail-term { flex: none; padding: 0 6px; font-size: 11px; }
 .diff-file { display: grid; grid-template-columns: 1fr; align-items: center; gap: 8px; border-bottom: 1px solid var(--line2); padding: 2px 0; }
 .diff-file .diff { grid-column: 1 / -1; white-space: pre; overflow: auto; max-height: 360px; font-size: 11.5px; background: var(--bg2); padding: 8px; border-radius: 4px; margin: 4px 0 8px; }
 
@@ -323,7 +330,7 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .legend { display: flex; gap: 14px; font-size: 11px; color: var(--ink3); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
 table.pricing { width: 100%; border-collapse: collapse; font-size: 12px; }
-/* #4035: a table scrolls sideways inside its own box; the page does not. On a phone it is as wide as its content needs
+/* a table scrolls sideways inside its own box; the page does not. On a phone it is as wide as its content needs
    (headings on one line, long text wrapped at about 18em) instead of being squeezed into a column of one letter */
 .table-scroll { max-width: 100%; overflow-x: auto; }
 .table-scroll > table.pricing { width: max-content; min-width: 100%; }
@@ -333,7 +340,7 @@ table.pricing { width: 100%; border-collapse: collapse; font-size: 12px; }
 .table-scroll > table.pricing td:first-child button { white-space: normal; text-align: left; }
 @media (max-width: 767px) {
   .table-scroll > table.pricing td { max-width: 12em; }
-  /* a list row (#4035): its title gets the first line to itself (two lines at most), the pills, model and numbers wrap
+  /* a list row: its title gets the first line to itself (two lines at most), the pills, model and numbers wrap
      under it — side by side they left the title one letter ("#·") */
   .main .row:not(.head):has(> .t) { flex-wrap: wrap; justify-content: flex-start; row-gap: 2px; }
   .main .row:not(.head) > .t { flex: 1 1 100%; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -350,7 +357,7 @@ table.flow-table tr[data-tone="faster"] td { color: var(--green); font-weight: 5
 .kv .m.ok { color: var(--green); }
 .kv .m.fail { color: var(--red); }
 
-/* #4058: a schedule (and a nightly result) is its title, two lines at most, over a small grey line of facts; the buttons
+/* a schedule (and a nightly result) is its title, two lines at most, over a small grey line of facts; the buttons
    are the same on every row, at the right (under the title on a phone) */
 .schedules .schedule-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line2); width: 100%; min-width: 0; }
 .schedules .schedule-row.link { background: transparent; border-left: 0; border-right: 0; border-top: 0; border-radius: 0; text-align: left; }
@@ -371,8 +378,11 @@ table.flow-table tr[data-tone="faster"] td { color: var(--green); font-weight: 5
 .schedules .fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink2); }
 .schedules .fields textarea { width: 100%; resize: vertical; }
 
-/* usage-limit resume (#102) */
+/* usage-limit resume */
 .tag.resume { border-color: var(--amber); color: var(--amber); white-space: nowrap; flex: none; }
+.tag.wait { white-space: nowrap; flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.tag.wait.over { border-color: var(--amber); color: var(--amber); }
+.tag.wait.silent { border-color: var(--red); color: var(--red); }
 /* In the Rail the title keeps at least 40 % of the row (Rail.tsx shows one tag at a time for the same reason). */
 .rail .it .t { min-width: 40%; }
 /* `.compose label` stacks its content (flex-direction: column); the checkbox sits beside its text. */
@@ -380,7 +390,7 @@ table.flow-table tr[data-tone="faster"] td { color: var(--green); font-weight: 5
 label.toggle input { margin: 0; }
 label.toggle.off { opacity: .45; cursor: default; }
 
-/* attachments (#125) */
+/* attachments */
 .dropzone { position: relative; width: 100%; }
 .composer .dropzone { flex: 1; min-width: 0; }
 .dropzone.dropping textarea { outline: 2px dashed var(--amber); outline-offset: -2px; }
@@ -408,6 +418,19 @@ label.toggle.off { opacity: .45; cursor: default; }
 .rail .rail-feedback { flex: none; margin-top: 8px; border-top: 1px solid var(--line); }
 .feedback-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
 .feedback-dialog::backdrop { background: #0006; }
+/* 並べて見る: a fork's parent and one fork, two columns; one under the other on a phone */
+.fork-compare { width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.fork-compare::backdrop { background: #0006; }
+.fork-compare header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fork-compare h2 { margin: 0; font-size: 16px; }
+.fork-pick { display: block; margin: 8px 0; }
+.fork-pick select { max-width: 100%; }
+.fork-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.fork-col { min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.fork-col h3 { margin: 0; font-size: 14px; }
+.fork-reply { flex: 1; min-height: 60px; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
+.fork-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+@media (max-width: 767px) { .fork-cols { grid-template-columns: minmax(0, 1fr); } .fork-actions button { min-height: 40px; } }
 .feedback-dialog h2 { margin: 0; font-size: 18px; }
 .feedback-dialog fieldset { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
 .feedback-dialog textarea { display: block; margin: 6px 0 10px; }
@@ -426,10 +449,10 @@ label.toggle.off { opacity: .45; cursor: default; }
 @media (max-width: 600px) { .backlog .backlog-sides { grid-template-columns: 1fr; } .backlog .backlog-editor, .backlog .backlog-new { margin-left: 0; } }
 .backlog [data-state="stopped"] { color: var(--amber); }
 .backlog .backlog-ws { margin-left: 0; flex-wrap: wrap; margin-top: 6px; }
-/* a row's facts wrap under its title when the width runs out (#4060): kept on one line they widened the page past the screen */
+/* a row's facts wrap under its title when the width runs out: kept on one line they widened the page past the screen */
 .backlog .row.backlog-item { flex-wrap: wrap; }
 .backlog .row.backlog-item .m { white-space: normal; }
-/* #4064: the sync lines folded under one line; amber when something is not synced or cannot be read */
+/* the sync lines folded under one line; amber when something is not synced or cannot be read */
 .backlog .backlog-syncs { margin-top: 6px; }
 .backlog .backlog-syncs > summary { cursor: pointer; }
 .backlog .backlog-syncs.bad > summary { color: var(--amber); }
@@ -445,7 +468,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .decision.folded > summary > .hint { display: block; }
 /* the question folded: the summary is four lines at most, the whole of it is what opens */
 .backlog .decision.folded .decision-q { font-weight: 500; }
-/* 表示 (#2695): the panel opens over the heading card (its box); on phones it spans the card. */
+/* 表示: the panel opens over the heading card (its box); on phones it spans the card. */
 .backlog > .card:first-child { position: relative; }
 .backlog .backlog-heading { flex: 1; }
 .backlog .backlog-view > summary { list-style: none; cursor: pointer; padding: 5px 12px; color: var(--ink2); }
@@ -456,15 +479,15 @@ label.toggle.off { opacity: .45; cursor: default; }
   .backlog .backlog-view-body { left: 8px; right: 8px; width: auto; max-width: none; }
   .backlog :is(.backlog-view summary, .backlog-view button, .backlog-view select, .backlog-view input, .backlog-view-line button) { min-height: 44px; }
 }
-/* ボード (#2696): the stages as columns; a tile is its title (3 lines at most), SP · Priority and the row's buttons. */
+/* ボード: the stages as columns; a tile is its title (3 lines at most), SP · Priority and the row's buttons. */
 .backlog .backlog-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: start; }
 .backlog .backlog-tile { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
 .backlog .backlog-tile .t { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .backlog .backlog-tile .row { flex-wrap: wrap; justify-content: flex-start; gap: 2px 8px; }
 .backlog .mark { font-size: 11px; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); white-space: nowrap; }
 .backlog .mark.warn { color: var(--amber); border-color: var(--amber); }
-/* #3708: an opened tile shows the list row's parts in the column's width */
-/* the queue view (#4055, the mockup of #3953): one bordered card per PBI — ≡ and the order at the left, the bold title
+/* an opened tile shows the list row's parts in the column's width */
+/* the queue view (as its mockup decided): one bordered card per PBI — ≡ and the order at the left, the bold title
    (two lines at most) over a small grey line of facts and marks, the buttons at the right (under the title on a phone) */
 .backlog .queue-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-bottom: 6px; }
 .backlog .queue-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
@@ -492,7 +515,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .queue-btn { font-size: 12px; padding: 3px 10px; white-space: nowrap; }
 .backlog .queue-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; border: 1px dashed var(--line); border-radius: 8px; padding: 6px 8px; margin: 4px 0 8px; }
 .backlog .queue-ended { margin-top: 8px; }
-/* ≡ is dragged with the mouse or a finger (no scrolling from it), the row follows it (#3958) */
+/* ≡ is dragged with the mouse or a finger (no scrolling from it), the row follows it */
 .backlog .queue-handle { cursor: grab; touch-action: none; user-select: none; width: 1.2em; text-align: center; font-size: 18px; color: var(--ink3); flex: none; }
 .backlog .queue-row.dragging { position: relative; z-index: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
 .backlog .queue-row.dragging .queue-handle { cursor: grabbing; }
@@ -506,7 +529,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .backlog-tile-detail { margin-top: 4px; min-width: 0; overflow-wrap: anywhere; }
 .backlog .backlog-tile .row .m { white-space: normal; }
 .backlog .backlog-tile-detail :is(.backlog-syncline, .backlog-report) { margin-left: 0; }
-/* a list row (#3709): one line of what matters; the title is 2 lines at most, the rest (opened with ▶) is indented under it */
+/* a list row: one line of what matters; the title is 2 lines at most, the rest (opened with ▶) is indented under it */
 .backlog .backlog-listrow > .row.backlog-item { gap: 2px 12px; }
 .backlog .backlog-listrow > .row.backlog-item > .t { flex: 1 1 22em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow-wrap: anywhere; }
 .backlog .backlog-row-detail { margin: 0 0 8px 16px; min-width: 0; overflow-wrap: anywhere; }
@@ -515,10 +538,10 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .backlog-row-facts button.link { text-align: left; }
 .backlog .backlog-row-detail :is(.backlog-syncline, .backlog-report, .backlog-editor) { margin-left: 0; }
 .backlog .backlog-board-tabs { display: none; }
-/* by width only (#2703): a landscape phone 768px or wider keeps the columns. The stage tabs (only the strip scrolls) show
+/* by width only: a landscape phone 768px or wider keeps the columns. The stage tabs (only the strip scrolls) show
    one column at a time; a tile's title is 2 lines. */
 @media (max-width: 767px) {
-  .backlog .backlog-board-tabs { display: flex; flex: none; flex-wrap: wrap; margin: 0; } /* every stage in sight: they wrap, they do not scroll out of view (#4064) */
+  .backlog .backlog-board-tabs { display: flex; flex: none; flex-wrap: wrap; margin: 0; } /* every stage in sight: they wrap, they do not scroll out of view */
   .backlog .backlog-board-tabs button { flex: none; min-height: 44px; }
   .backlog .backlog-board { display: block; }
   .backlog .backlog-col:not([data-current="true"]) { display: none; }
@@ -533,31 +556,33 @@ label.toggle.off { opacity: .45; cursor: default; }
 .approval-detail { margin: 8px 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 .approval-actions { display: flex; gap: 8px; }
 .approval-actions button { min-height: 44px; flex: 1; }
-/* 判断待ち (#935): a group per who acts, a card per question; its facts in two columns, one on a phone */
+/* 判断待ち: a group per who acts, a card per question; its facts in two columns, one on a phone */
 .ask-group { margin-top: 12px; }
 .ask-group-head { margin: 0 0 4px; }
 .ask-fold { margin-top: 8px; }
 .ask-fold-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 4px; cursor: pointer; font-weight: 600; }
 .ask-fold[open] > .ask-fold-head { margin-bottom: 4px; }
-/* #1673: under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
+/* under the screen's heading a button per Workspace (its own to answer), and in each group a heading per Workspace */
 .ask-filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
 .ask-filters:not(:empty) { margin-top: 8px; }
 .ask-filters > * { display: contents; }
 .ask-filters button { flex: none; }
 .ask-workspaces button { min-height: 44px; text-align: left; white-space: nowrap; }
-/* #1675: the 「すぐ答えられる」 toggle, first in the same row */
+/* the 「すぐ答えられる」 toggle, first in the same row */
 .ask-quick-row button { min-height: 44px; white-space: nowrap; }
 .ask-batch-tasks { list-style: none; margin: 8px 0; padding: 0; }
 .ask-workspace-head { margin: 8px 0 4px; font-size: 13px; overflow-wrap: anywhere; }
+.ask-confirm-all { min-height: 44px; margin: 0 0 8px; }
+.ask-settled { font-weight: 400; }
 .ask-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .ask-tags .badge { background: var(--line); color: var(--ink2); font-family: inherit; font-weight: 500; }
 .ask-tags .ask-state-open { background: var(--amber); color: #fff; }
-/* the other PBIs waiting on the question (#1674) */
+/* the other PBIs waiting on the question */
 .ask-tags .ask-unblocks { background: var(--acc); color: #fff; }
-/* answered with one press (#1675): green, apart from 未回答's amber */
+/* answered with one press: green, apart from 未回答's amber */
 .ask-tags .ask-quick { background: var(--green); color: #fff; }
 .ask-unblocks-list { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; min-width: 0; overflow-wrap: anywhere; }
-/* a question's screen mockups (#2221): the buttons wrap, never wider than the card */
+/* a question's screen mockups: the buttons wrap, never wider than the card */
 .mockups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; min-width: 0; }
 .mockup-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 .mockup-buttons .mockup { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
@@ -568,10 +593,10 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-fact dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .rail .rail-tasks { display: none; }
 .brief-toggle, .brief-close { display: none; }
-/* Phones (#26, #359): the rail shrinks to its 判断待ち and 一覧 buttons at the bottom, the tabs wrap, cards take the full width.
+/* Phones: the rail shrinks to its 判断待ち and 一覧 buttons at the bottom, the tabs wrap, cards take the full width.
    Portrait phones by width, landscape ones by height; a PC window 768px or wider keeps the layout above. */
 @media (max-width: 767px), (max-height: 480px) and (pointer: coarse) {
-  /* every tab in sight (#4060): they wrap onto a second line instead of scrolling out of the bar, so the screen open
+  /* every tab in sight: they wrap onto a second line instead of scrolling out of the bar, so the screen open
      and the others always show; the brand gives its room. The tabs, 新しい版 and 救援画面 flow in one line that wraps, so
      the bar takes no more rows than they need: the tabs in a box of their own pushed 救援画面 alone onto a third row, and
      beside 新しい版 they were squeezed onto four (2026-11-07) */
@@ -590,6 +615,9 @@ label.toggle.off { opacity: .45; cursor: default; }
   .body > .side { display: none; }
   .rail { flex: none; flex-direction: row; border-right: 0; border-top: 1px solid var(--line); padding: 6px 8px; }
   .rail .rail-list, .rail .rail-feedback { display: none; }
+  .term-keys { display: flex; gap: 4px; overflow-x: auto; flex: none; }
+  .term-keys button { flex: none; min-width: 40px; min-height: 40px; }
+  .terminal-host { min-height: 160px; }
   .rail-approvals, .rail-tasks { margin: 0; flex: 1; min-height: 44px; }
   .ask-facts { grid-template-columns: minmax(0, 1fr); }
   .ask-fact dd { margin-bottom: 4px; }
@@ -601,16 +629,16 @@ label.toggle.off { opacity: .45; cursor: default; }
   .rail.open .rail-approvals, .rail.open .rail-tasks { grid-row: 2; }
   .rail.open .rail-list .it { min-height: 44px; }
   .main { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
-  /* The task screen (#368): the question card stacks its buttons under the text, the composer puts its buttons under the
+  /* The task screen: the question card stacks its buttons under the text, the composer puts its buttons under the
      box, long lines scroll inside their own box, and every button is a 44px target. */
   .task .task-head { padding-top: 8px; }
-  /* the head stays on top (its tabs reachable at the end, scripts/task-scroll-e2e.ts) but shorter (#4066): with a long
+  /* the head stays on top (its tabs reachable at the end, scripts/task-scroll-e2e.ts) but shorter: with a long
      title and the judge's reason it took about 300px and left the conversation half the screen. The title and the
      reason take one line each here; the whole title shows when it is tapped to edit, the whole reason when it is tapped */
   .task .task-head h2 { -webkit-line-clamp: 1; line-clamp: 1; }
   .task .task-head .judged { flex-basis: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .task .task-head .judged.open { white-space: normal; overflow-wrap: anywhere; }
-  /* 最新へ (#4066): a small round ↓ in a gutter of its own at the right, so it covers no text */
+  /* 最新へ: a small round ↓ in a gutter of its own at the right, so it covers no text */
   .task .transcript { padding-right: 36px; }
   .transcript .jump-latest { align-self: flex-end; margin-right: -34px; width: 32px; padding: 0; border-radius: 16px; font-size: 0; }
   .transcript .jump-latest::after { content: "↓"; font-size: 15px; }
@@ -631,12 +659,12 @@ label.toggle.off { opacity: .45; cursor: default; }
   .composer button, .art-full-bar button { min-height: 44px; }
   .composer button.pri { flex: 1; }
   .composer textarea { font-size: 16px; } /* under 16px iOS Safari zooms the page in when the box takes focus */
-  /* The Brief (#369): 詳細 in the task's head lays it over the screen below the tabs, 閉じる at its top goes back. */
+  /* The Brief: 詳細 in the task's head lays it over the screen below the tabs, 閉じる at its top goes back. */
   button.copy, .jump-latest { min-height: 44px; }
   .brief-toggle { display: inline-block; margin-left: auto; min-height: 44px; }
   .brief-close { display: block; width: 100%; min-height: 44px; }
   .body > .side.open { display: block; position: fixed; inset: 36px 0 0 0; z-index: 10; overflow-y: auto; }
-  /* Home (#391): the new-task form is one column; a select as wide as its longest option (a Workspace's path) must not
+  /* Home: the new-task form is one column; a select as wide as its longest option (a Workspace's path) must not
      widen the grid, and the buttons go on their own line under the options. */
   .compose .fields, .grid2 { grid-template-columns: 1fr; }
   .grid2 > * { min-width: 0; } /* a long task title is cut in its row, not taken as the card's width */
@@ -649,13 +677,13 @@ label.toggle.off { opacity: .45; cursor: default; }
   .compose-details > .runners > label:not(.toggle) > input { width: 100%; min-width: 0; }
   .compose label.toggle, .settings label.toggle { white-space: normal; }
   .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
-  /* Knowledge (#392): the list, the note and its details one under another, with the page as the one scroll (a scroll
+  /* Knowledge: the list, the note and its details one under another, with the page as the one scroll (a scroll
      inside a scroll is hard to move with a finger); a long line already scrolls inside the note (`overflow: auto`). */
   .knowledge { grid-template-columns: 1fr; }
   .knowledge > * { min-width: 0; }
   .kn-tree, .kn-doc .kn-body { max-height: none; }
   .kn-tree .it { min-height: 44px; justify-content: center; }
-  /* Every screen's rows (#393, found in Ledger and Schedules with real data; Home's form relies on it too): a row wraps,
+  /* Every screen's rows (found in Ledger and Schedules with real data; Home's form relies on it too): a row wraps,
      and its trailing text (a waiting question, a model id, a path) breaks anywhere instead of stretching the row — all
      of it is kept, nothing is cut. Schedules' form is one column; the price table scrolls inside itself. */
   .main .row { flex-wrap: wrap; }
@@ -670,20 +698,20 @@ label.toggle.off { opacity: .45; cursor: default; }
   .schedules .fields button { min-height: 44px; }
   table.pricing { display: block; overflow-x: auto; }
 }
-/* A runner's login from the banner (#354) */
+/* A runner's login from the banner */
 .runner-login { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .runner-login a.button { display: inline-block; padding: 4px 12px; border-radius: 4px; text-decoration: none; background: var(--accent, #2f6fdd); color: #fff; }
 .runner-login .device-code { font-size: 15px; letter-spacing: 1px; }
 .runner-login input { min-width: 220px; }
 .runner-login-code { display: inline-flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
-/* 判断待ちの回答 (#936): one button per line on a phone (they wrap below 2 × 200px); a resume badge is amber (再開待ち) unless ok / bad */
+/* 判断待ちの回答: one button per line on a phone (they wrap below 2 × 200px); a resume badge is amber (再開待ち) unless ok / bad */
 .ask-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
 .ask-button { flex: 1 1 200px; min-width: 0; }
 .ask-button, .ask-text, .ask-resume { overflow-wrap: anywhere; }
 .ask-button button, .ask-text button { min-height: 44px; width: 100%; }
 /* a choice's impact on the button's second line */
 .ask-button-sub { display: block; margin-top: 2px; font-size: 0.8em; font-weight: 400; text-align: left; opacity: 0.85; }
-/* a question tool's questions on a card (#3058): a fieldset each, one 回答する; wraps on a phone */
+/* a question tool's questions on a card: a fieldset each, one 回答する; wraps on a phone */
 .ask-questions { display: grid; gap: 8px; margin: 6px 0; min-width: 0; overflow-wrap: anywhere; }
 .ask-questions fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .ask-questions legend { padding: 0; margin-bottom: 4px; font-weight: 600; white-space: pre-line; }
@@ -691,9 +719,9 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-questions .opt { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
 .ask-questions textarea { width: 100%; box-sizing: border-box; }
 .ask-questions > button { min-height: 44px; width: 100%; }
-/* a grant (#2745) on its own line, marked: the one operation the answer allows */
+/* a grant on its own line, marked: the one operation the answer allows */
 .ask-grant { background: var(--acc-soft); color: var(--acc-ink); border-left: 3px solid var(--acc); padding: 0 6px; }
-/* a Task's open questions on its screen (#2745), above the composer */
+/* a Task's open questions on its screen, above the composer */
 .task-asks { display: grid; gap: 8px; margin: 8px 0; max-width: 760px; }
 .ask-policy { margin: 6px 0; }
 .ask-policy summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
@@ -704,7 +732,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-previous ul, .ask-policy-summary { overflow-wrap: anywhere; }
 .ask-resume-ok { background: var(--green); }
 .ask-resume-bad { background: var(--red); }
-/* Evals (#1221): a count that points at trouble, and the sortable headings */
+/* Evals: a count that points at trouble, and the sortable headings */
 table.evals-table td.warn, table.evals-table tr.warn td:first-child { color: var(--amber); }
 table.evals-table th button.sort { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; padding: 0; }
 table.evals-table td button.open { font: inherit; color: inherit; padding: 0; text-align: left; }
@@ -721,28 +749,28 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .policy-edit { display: grid; gap: 6px; }
 .policy-uses { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
 @media (max-width: 767px) { .policy-main { display: grid; } .policy-actions button { min-height: 44px; } }
-/* 定型の指示 (#940): the policy rows' layout; the name and text boxes take the card's width, so 390px stacks them */
+/* 定型の指示: the policy rows' layout; the name and text boxes take the card's width, so 390px stacks them */
 .presets .policy-edit input, .presets .policy-edit textarea { width: 100%; min-width: 0; box-sizing: border-box; }
 .preset-new { padding-top: 8px; border-top: 1px solid var(--line, #3333); }
 
-/* Insights' レポート section (#1835): the rows are the Task list's rows; the body is the 成果物 tab's. */
+/* Insights' レポート section: the rows are the Task list's rows; the body is the 成果物 tab's. */
 .reports .row .t { text-align: left; padding: 0; }
 .reports .row.on .t { color: var(--ink); font-weight: 500; }
 .reports .art-body { margin-top: 8px; }
 .reports .art-frame { min-height: 480px; }
-/* the switch between the HTML ones and every artifact, and the filter (#1833) */
+/* the switch between the HTML ones and every artifact, and the filter */
 .reports-scope { display: flex; flex-wrap: wrap; gap: 4px; }
 .reports-scope button[aria-pressed="true"] { color: var(--ink); border-color: var(--line2); }
 .reports-q { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
 /* the line beside the title gives way first: a long Task title is cut, not the artifact's (phones: the title gets its own line) */
 .reports .row .m { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 767px) { .reports .row { flex-wrap: wrap; } .reports .row .t { flex-basis: 100%; } .reports .row .m { flex: 1; max-width: none; } }
-/* Ledger's 使用量（枠） and Home's rows (#1836): a window the runner has not reported for a day is faded. */
+/* Ledger's 使用量（枠） and Home's rows: a window the runner has not reported for a day is faded. */
 .stale { opacity: .6; }
 .usage .row.sub { margin-top: 8px; }
 .usage .kv .hint { display: block; margin-top: 3px; }
 
-/* An artifact the agent registered (#1778): one line of the conversation with its 開く. */
+/* An artifact the agent registered: one line of the conversation with its 開く. */
 .artifact-row button { margin-left: 8px; }
 /* 定型の指示 over the request / reply box: up to 3 rows lie over the box's top edge, so nothing around the box moves */
 .preset-box { position: relative; }
@@ -762,7 +790,7 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .preset-suggest .hint { padding: 2px 10px 4px; }
 .preset-target .hint { padding: 0; min-height: 1.2em; }
 @media (max-width: 767px) { .preset-opt { display: grid; gap: 1px; min-height: 44px; } .preset-name { max-width: none; } }
-/* Settings の目的別のまとまり (#3356): the group's title above its cards */
+/* Settings の目的別のまとまり: the group's title above its cards */
 .settings-group { margin: 12px 0 -4px; font-size: 13px; font-weight: 600; color: var(--ink2); }
 /* its table of contents: wraps on a narrow screen instead of scrolling sideways */
 .settings-toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
@@ -770,7 +798,7 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .settings-toc + .settings-group { margin-top: 0; }
 .settings-group:focus { outline: none; } /* focused only to carry Tab on from the table of contents */
 @media (max-width: 767px) { .settings-toc a { padding: 8px 0; } }
-/* the folded cards (#3849): only the title shows until pressed; the title keeps the h5's look */
+/* the folded cards: only the title shows until pressed; the title keeps the h5's look */
 .settings details.card > summary { cursor: pointer; list-style: none; }
 .settings details.card > summary::-webkit-details-marker { display: none; }
 .settings details.card > summary h5 { display: inline; margin: 0; }
@@ -778,7 +806,7 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .settings details.card[open] > summary h5::before { content: "▾ "; }
 .settings details.card[open] > summary { margin-bottom: 8px; }
 @media (max-width: 767px) { .settings details.card > summary { min-height: 44px; display: flex; align-items: center; } }
-/* Resources (#3333): the free memory and the slots side by side above the tables */
+/* Resources: the free memory and the slots side by side above the tables */
 .resources-stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0 12px; }
 .resources-stat { flex: 1 1 200px; padding: 10px 12px; border: 1px solid var(--line2); border-radius: 6px; }
 .resources-stat .label { font-size: 11px; color: var(--ink3); }
@@ -786,19 +814,24 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .resources-stat .value.warn { color: var(--amber); }
 .resources td button.link { text-align: left; padding: 0; }
 
-/* a local change's row is a button (#2486): laid out as the other rows, not centered */
+/* a local change's row is a button: laid out as the other rows, not centered */
 .backlog .change-row { width: 100%; text-align: left; justify-content: flex-start; }
 .backlog .change-detail { padding: 4px 0 12px 12px; }
 
-/* 止まった理由 (#4060): the reason and its counts, then the Tasks it names, wrapping */
+/* 止まった理由: the reason and its counts, then the Tasks it names, wrapping */
 .interventions .reason-row { padding: 7px 0; border-bottom: 1px solid var(--line2); min-width: 0; }
 .interventions .reason-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 .interventions .reason-head .t { font-weight: 600; overflow-wrap: anywhere; }
 .interventions .reason-head .m { white-space: normal; }
 .interventions .reason-links { display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px; font-size: 12px; }
-/* a question card (#4068): what it is about and the question above the answer buttons; the facts the records lack in one line */
+/* a question card: what it is about and the question above the answer buttons; the facts the records lack in one line */
 .ask .ask-title { font-weight: 600; margin: 4px 0 2px; overflow-wrap: anywhere; }
 .ask .ask-question { margin: 2px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* a confirmation's substance, above its button: the whole text, wrapped to the card's width; a long one scrolls inside its own box */
+.ask .ask-confirm-part { margin: 4px 0 8px; min-width: 0; }
+.ask .ask-confirm-part.warn .ask-confirm-value { border-left: 3px solid var(--warn, #b58900); padding-left: 8px; }
+.ask .ask-confirm-label { font-size: 12px; opacity: 0.75; }
+.ask .ask-confirm-value { margin: 2px 0 0; font: inherit; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
 /* the Task screen's card: a question tool's question keeps its lines there too */
 .task-asks .ask > b { white-space: pre-line; overflow-wrap: anywhere; }
 .ask details.ask-question > summary { cursor: pointer; }
@@ -815,18 +848,22 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .ask details.ask-lastreply-text[open] .q-less { display: inline; }
 .ask .ask-reply-target { margin: 2px 0; overflow-wrap: anywhere; }
 .ask .ask-unknown { margin-top: 2px; }
-/* a number of Settings (#4068): name, box, unit, default — the unit next to its box and the boxes in one column */
+/* a number of Settings: name, box, unit, default — the unit next to its box and the boxes in one column */
 .settings .num-field { display: grid; grid-template-columns: minmax(0, 1fr) 88px 2.5em minmax(8em, auto); align-items: center; gap: 6px; justify-content: stretch; }
 @media (max-width: 767px) {
   .settings .num-field { grid-template-columns: 88px 2.5em minmax(0, 1fr); }
   .settings .num-field > :first-child { grid-column: 1 / -1; }
 }
+/* under the flow limit's field: the PBIs counted and held, one workspace's side a line; long lists wrap */
+.settings .flow-state { margin: 2px 0 6px; padding-left: 1.2em; overflow-wrap: anywhere; }
+.settings div.flow-state { padding-left: 0; }
 /* a text of Settings: its name in the first column, the box and what follows it in the second */
 .settings .text-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 4px 6px; align-items: start; padding: 7px 0; }
 .settings .text-field > :nth-child(n + 2) { grid-column: 2; }
 .settings .text-field textarea, .settings .text-field input { width: 100%; }
+.settings .text-field select { max-width: 100%; justify-self: start; }
 @media (max-width: 767px) { .settings .text-field { grid-template-columns: minmax(0, 1fr); } .settings .text-field > :nth-child(n + 2) { grid-column: 1; } }
-/* Knowledge's 書き出し先 (#4068): the heading on one line, the choice beside or under it */
+/* Knowledge's 書き出し先: the heading on one line, the choice beside or under it */
 .kn-mat > .row.head { flex-wrap: wrap; justify-content: flex-start; }
 .kn-mat > .row.head h5 { flex: none; white-space: nowrap; }
 /* the 判断待ち screen's rows: a line per target that opens in place to its questions; a link goes elsewhere, a button answers */
@@ -866,3 +903,27 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .login-state { flex: 1 1 10em; }
 .login-bedrock { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 0; border-top: 1px solid var(--border, #e3e3e3); }
 .login-bedrock input { min-width: 0; width: 9em; }
+
+/* One-press replies under a stop: one line that never wraps (3 at most; the overflow scrolls sideways) and takes no height when empty */
+.preset-replies { flex: none; display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; overflow-x: auto; padding: 4px 0; }
+.preset-replies button { flex: 0 0 auto; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-replies .hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Settings の「ランナー」: a block per runner with the same rows, and a line per job with the same three selects */
+.settings .runner-block { border-top: 1px solid var(--line2); padding: 4px 0 8px; }
+.settings .runner-block > summary { cursor: pointer; padding: 4px 0; overflow-wrap: anywhere; }
+@media (max-width: 767px) { .settings .runner-block > summary { min-height: 44px; display: flex; align-items: center; flex-wrap: wrap; } }
+.settings .runner-row { display: grid; grid-template-columns: minmax(7em, 12em) minmax(0, 1fr); gap: 4px 8px; align-items: center; padding: 3px 0; }
+.settings .runner-row-name { font-size: 13px; overflow-wrap: anywhere; }
+.settings .runner-row-control { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.settings .runner-row-control select, .settings .runner-row-control input.model { max-width: 100%; min-width: 0; }
+.settings .runner-models { padding: 4px 0; }
+.settings .runner-models > summary { cursor: pointer; font-size: 13px; }
+.settings .job-row { display: grid; grid-template-columns: minmax(8em, 11em) repeat(3, minmax(0, 1fr)); gap: 4px 6px; align-items: center; padding: 4px 0; border-top: 1px solid var(--line2); }
+.settings .job-name { font-size: 13px; overflow-wrap: anywhere; }
+.settings .job-row select, .settings .job-row input.model { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; }
+/* narrow: the job's name on its own line, the three selects under it */
+@media (max-width: 767px) {
+  .settings .runner-row { grid-template-columns: minmax(0, 1fr); }
+  .settings .job-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .settings .job-row .job-name { grid-column: 1 / -1; }
+}

@@ -1,6 +1,7 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
 import { changedFiles, pickTests, runTests, type RunDeps } from "./test-changed";
+import { reusedLine, type OffloadRecord } from "./offload-record";
 
 const tree: Record<string, string> = {
   "packages/protocol/src/index.ts": "",
@@ -138,6 +139,47 @@ describe("runTests", () => {
     expect(await runTests({ tests: [A] }, deps)).toBe(1);
     expect(st.logs.join("\n")).toContain("sb-offload: no build");
     expect(st.host).toEqual([]);
+  });
+
+  test("reuse: the same selection on the same work tree starts no build and hands back the earlier build's result and code with one line; --force, a width of 0, another selection and a build that did not reach its end start a new one", async () => {
+    const rows: OffloadRecord[] = [];
+    const log = { append: (r: OffloadRecord) => void rows.push(r), read: (since: number) => rows.filter((r) => Date.parse(r.at) >= since) };
+    const DONE = "sb-step: 0 begin 1\n(fail) a > works\nsb-step: 0 exit 1 2\nsb-offload: exit 1\n";
+    const collected: string[] = [];
+    const logged = (o: { reuseHours?: number; output?: string; code?: number }) => {
+      const { st, deps } = rig();
+      deps.offload = { ...deps.offload!, log, collect: async (b) => (collected.push(b), { code: o.code ?? 1, output: o.output ?? DONE }) };
+      return { st, deps: { ...deps, ...(o.reuseHours === undefined ? {} : { reuseHours: o.reuseHours }) } };
+    };
+    const first = logged({ reuseHours: 24 });
+    expect(await runTests({ tests: [A] }, first.deps)).toBe(1);
+    expect(first.st.scripts).toHaveLength(1);
+    expect(rows.map((r) => [r.caller, r.kind, r.build])).toEqual([["test-changed", "ci", "build-1"]]);
+    // again: no start, the earlier build collected by its id, its code and its (fail) line
+    const again = logged({ reuseHours: 24 });
+    expect(await runTests({ tests: [A] }, again.deps)).toBe(1);
+    expect(again.st.scripts).toEqual([]);
+    expect(collected.at(-1)).toBe("build-1");
+    expect(again.st.logs).toContain(reusedLine({ build: "build-1", at: rows[0]!.at }));
+    expect(again.st.logs.join("\n")).toContain("回し直すなら --force");
+    expect(again.st.logs.join("\n")).toContain("(fail) a > works");
+    expect(rows).toHaveLength(1);
+    // --force (main passes no width) and a width of 0 (SWITCHBOARD_OFFLOAD_REUSE_HOURS=0)
+    for (const o of [{}, { reuseHours: 0 }]) {
+      const forced = logged(o);
+      expect(await runTests({ tests: [A] }, forced.deps)).toBe(1);
+      expect(forced.st.scripts).toHaveLength(1);
+      expect(forced.st.logs.join("\n")).not.toContain("前のビルド");
+    }
+    // another selection is another input
+    const other = logged({ reuseHours: 24 });
+    await runTests({ tests: [A, B] }, other.deps);
+    expect(other.st.scripts).toHaveLength(1);
+    // the earlier builds of this input were stopped (no exit line): a new build, not their 130
+    const stopped = logged({ reuseHours: 24, code: 130, output: "sb-step: 0 begin 1\n" });
+    expect(await runTests({ tests: [A] }, stopped.deps)).toBe(130);
+    expect(stopped.st.scripts).toHaveLength(1);
+    expect(stopped.st.logs.join("\n")).not.toContain("前のビルド");
   });
 
   test("a full run is one plain bun test in the build", async () => {

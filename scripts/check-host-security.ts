@@ -1,6 +1,6 @@
 /**
  * bun scripts/check-host-security.ts — the host's pending security updates, the kernel waiting for a reboot and the
- * pinned tools behind their distributors (PBI #3345). One line each; with nothing pending, one line with the counts.
+ * pinned tools behind their distributors. One line each; with nothing pending, one line with the counts.
  * Exit 0 = nothing pending / 1 = something is / 2 = cannot tell (never "nothing pending", and nothing filed).
  *
  * --file-request (the daily schedule, docs/design/check-host-security.md): on exit 1 also file through

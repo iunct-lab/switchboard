@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { noWriteTargets } from "./config.ts";
-import { fakeGh, GhError, GithubRetryState, parseIncluded, realGh, repoOf, responseOf, retryAtFromResponse, type GithubCallMetric } from "./gh.ts";
+import { fakeGh, GhError, GithubRetryState, outageOf, parseIncluded, realGh, repoOf, responseOf, retryAtFromResponse, type GithubCallMetric } from "./gh.ts";
 
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
@@ -145,6 +145,34 @@ describe("GitHub limits", () => {
   test("parseIncluded: status, headers (lower case) and body; output without a status line is all body", () => {
     expect(parseIncluded("HTTP/2.0 404 Not Found\r\nX-Ratelimit-Remaining: 4756\r\n\r\n{\"message\":\"Not Found\"}")).toEqual({ status: 404, headers: { "x-ratelimit-remaining": "4756" }, body: '{"message":"Not Found"}' });
     expect(parseIncluded('{"data":{}}')).toEqual({ headers: {}, body: '{"data":{}}' });
+  });
+
+  test("outageOf: only what waiting mends — the network, a timeout, a 5xx, a limit with its end; never a 401 / 403 / 404, a permission or a limit with no end", () => {
+    const of = (stdout: string, stderr: string) => outageOf(responseOf(stdout, stderr), now);
+    const reset = Math.floor(now / 1000) + 600;
+    // for now
+    expect(of("", "HTTP 502: Bad Gateway (https://api.github.com/graphql)")).toEqual({ kind: "transient", until: null });
+    expect(of("HTTP/2.0 503 Service Unavailable\n\n{}", "")).toMatchObject({ kind: "transient" });
+    expect(of("", "Post \"https://api.github.com/graphql\": net/http: request canceled (Client.Timeout exceeded while awaiting headers) timed out")).toMatchObject({ kind: "transient" });
+    for (const net of ["error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com", "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: no such host", "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com", "ssh: connect to host github.com port 22: Connection refused"]) expect([net, of("", net)]).toEqual([net, { kind: "network", until: null }]);
+    expect(of(`HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 0\nX-Ratelimit-Reset: ${reset}\n\n{"message":"API rate limit exceeded"}`, "")).toEqual({ kind: "primary", until: reset * 1000 });
+    expect(of("HTTP/2.0 403 Forbidden\nRetry-After: 60\n\n{\"message\":\"You have exceeded a secondary rate limit\"}", "")).toEqual({ kind: "secondary", until: now + 60_000 });
+    // not for now: the token's, the configuration's or the request's own
+    for (const stays of [
+      "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+      "HTTP 403: Resource not accessible by personal access token (https://api.github.com/repos/o/r/commits/x/check-runs)",
+      "HTTP 404: Not Found (https://api.github.com/repos/o/r)",
+      "HTTP 422: Validation Failed (https://api.github.com/repos/o/r/pulls)",
+      "GraphQL: Your token has not been granted the required scopes; must have admin permission",
+      "To get started with GitHub CLI, please run:  gh auth login",
+      "GraphQL: API rate limit exceeded for user ID 1.", // a limit, but GitHub gave no end: nothing to wait for
+      "gh: command not found",
+      "",
+    ]) expect([stays, of("", stays)]).toEqual([stays, null]);
+    // a 4xx whose text happens to say "timeout" is still the request's own
+    expect(of("HTTP/2.0 404 Not Found\n\n{\"message\":\"workflow timed out\"}", "")).toBeNull();
+    // a limit whose end is already past is no wait
+    expect(of(`HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 0\nX-Ratelimit-Reset: ${Math.floor(now / 1000) - 5}\n\n{}`, "")).toBeNull();
   });
 
   test("retryAtFromResponse: Retry-After, then X-RateLimit-Reset; null when GitHub gives no time", () => {

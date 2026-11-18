@@ -1,10 +1,10 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/approval-batch-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * The SSO batch end to end (#2046): two Tasks of a fake runner report an SSO login stop (a `switchboard-stop` fence in
+ * The SSO batch end to end: two Tasks of a fake runner report an SSO login stop (a `switchboard-stop` fence in
  * their reply) → GET /api/asks has one batch of both, and the 判断待ち screen one card for them (their own cards left out)
  * → 「ログインする」 sends the older Task on, which puts a device code (as the kit's `device-auth` does) shown on the card,
  * while the other is not sent anything → that Task logs in and ends its turn with no stop → the other is sent on, and the
- * card goes. Before the screen, an approval-window schedule (#2054) fired by hand puts one notice of the batch in 判断待ち (#2866).
+ * card goes. Before the screen, an approval-window schedule fired by hand puts one notice of the batch in 判断待ち.
  * SCREENSHOT_DIR=<dir> saves the three screens and the card's page as one HTML file (styles inlined).
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -92,13 +92,12 @@ const b1 = await until(async () => (await batches()).find((b) => b.id === "batch
 assert(JSON.stringify(b1.asks.map((a) => a.taskId)) === JSON.stringify([first, second]), `batch: ${JSON.stringify(b1)}`);
 report.api = { batches: (await batches()).map((b) => ({ id: b.id, tasks: b.asks.length })) };
 
-// #2054: an approval-window schedule fired now puts one notice of the batch in 判断待ち (#2866), no inbox note
+// an approval-window schedule fired now puts one notice of the batch in 判断待ち
 const sch = await post("/api/schedules", { title: "承認待ちのお知らせ", cron: "0 0 * * *", workspaceId: meta.id, runner: "claude", action: "approval-window" });
 assert(sch.id, `schedule: ${JSON.stringify(sch)}`);
 await post(`/api/schedules/${sch.id}/run`, {});
 const note = await until(async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Json[] }).asks.find((a) => a.kind === "notice" && a.question?.startsWith("SSO・配備の承認待ち")), "the approval-window notice");
 assert(note.question === "SSO・配備の承認待ち: 2" && note.reason.includes("配備を準備する Task — aws sso login"), `notice: ${JSON.stringify(note)}`);
-assert(((await (await fetch(`${base}/api/inbox`)).json()) as Json[]).length === 0, "no inbox note");
 report.note = { title: note.question, body: note.reason };
 
 const shots = process.env.SCREENSHOT_DIR;

@@ -1,13 +1,17 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/presets-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * 定型の指示 (#940) end to end on a daemon with a fake runner and a fake gh: saved, listed and
+ * 定型の指示 end to end on a daemon with a fake runner and a fake gh: saved, listed and
  * edited in 設定, kept over a reload, put into the request box with a target and started with one 開始, refused when
  * the target is empty / 自動 / another repository / the Workspace changed, put into a reply, and deleted. The Task it
  * starts still stops on the runner's write approval with 許可 / 拒否 (a preset is not a standing permission).
  * The call is the box itself: the cursor in the request / reply box lays the 3 most sent presets over it, typing narrows them,
  * Tab or a press puts one in. Also measures the 評価項目 (preset-ops, preset-ops-typed, preset-height, preset-shift,
  * preset-reply-ops) and checks them against the values in the table of docs/design/presets.md.
- * SCREENSHOT_DIR=<dir> saves Home and 設定 at 1280 and 390 wide, and both boxes with the candidates shown.
+ * The reply buttons under a stop: offered for the kind of stop a preset was sent to before and not for another kind, sent
+ * after the 5 seconds' 取り消す (cancelled, nothing is sent; left behind by opening the Task, it is sent once), no height
+ * without a stop, the same height with 4 and 30 presets, no sideways scroll at 390 wide.
+ * SCREENSHOT_DIR=<dir> saves Home and 設定 at 1280 and 390 wide, both boxes with the candidates shown, and the reply
+ * buttons (reply-buttons-*.png).
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,10 +36,20 @@ const adapter: RunnerAdapter = {
     let exit!: (code: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
     received.push(opts.prompt);
+    // a prompt `STOP:<reason>` makes the turn end on that stop (a `switchboard-stop` fence in the reply); the Task's reply then
+    // starts the turn that asks for a write, as every other Task here does
+    const stopReason = /^STOP:([a-z-]+)/.exec(opts.prompt)?.[1];
     queueMicrotask(() => {
       emit({ t: "session.start", runner: "claude", runnerSessionId: "s-presets", cwd: opts.cwd });
       // as the real adapters do: the prompt is the Task's first user message
       emit({ t: "message.delta", role: "user", text: opts.prompt });
+      if (stopReason) {
+        const report = { id: "ask", op: "ask", target: "方針", reason: stopReason, evidence: "どちらにするか", conditions: stopReason === "depends" ? [{ key: "pr#9", value: "CI 待ち", met: false }] : [] };
+        emit({ t: "message.delta", role: "assistant", text: "止まります。\n```switchboard-stop\n" + JSON.stringify(report) + "\n```\n" });
+        emit({ t: "session.end", status: "ok" });
+        exit(0);
+        return;
+      }
       emit({ t: "permission.ask", id: `p${received.length}`, kind: "write", tool: "Write", input: { file_path: "src/a.ts" }, detail: "write src/a.ts" });
     });
     return {
@@ -92,7 +106,7 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
-  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  /** Opens the folded Settings card with this title, once Settings has drawn it: a card shows only its title until opened. */
   const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   // React reads a typed value from the native setter + an input / change event
   const page = (body: string) => evaluate(`(() => {
@@ -361,32 +375,165 @@ try {
       const d = Math.round(Math.max(Math.abs(now[0] - was[0]), Math.abs(now[1] - was[1])) * 10) / 10; byWidth.push(`w${w}-${where}=${d}`); shift[where] = Math.max(shift[where] ?? 0, d);
     }
   }
-  // a reply to a Task that waits for one: from the row on Home (the click on it is 1) and from the open Task (0), then the
-  // plain preset (the cursor 1 + a press 1) and 「送信」 1
+  // The reply buttons under a stop. Tasks 1, 2, 4 and 5 stop on a decision, 3 on depends (a `switchboard-stop` in the runner's reply).
+  // The operations from seeing the question to sending a preset reply: one press on the button (the 5 seconds' wait and 取り消す are not counted).
   await sized(1280);
-  const replyOps = async (where: "home" | "task") => {
-    await gotoBox(where);
-    let n = 0;
-    if (where === "home") {
-      await until(() => evaluate(`[...document.querySelectorAll('button.row.link')].some((b) => b.textContent.includes(${JSON.stringify(task.title)}))`), "the Task's row on Home");
-      await page(`[...document.querySelectorAll('button.row.link')].find((b) => b.textContent.includes(${JSON.stringify(task.title)})).click()`);
-      n += 1;
-      await until(() => evaluate(`!!document.querySelector('.composer textarea') && !!document.querySelector('.preset-box')`), "the Task's reply box");
-    }
-    n += 1; // the cursor in the reply box
-    await focusBox(".composer textarea");
-    n += 1; // a press on the candidate
-    await page(`opt('状況の確認').click()`);
-    await until(async () => (await evaluate(`document.querySelector('.composer textarea').value`)) === planText, "the preset in the reply box");
-    const sent = received.length;
-    n += 1; // 「送信」
-    await page(`button(document.querySelector('.composer'), '送信').click()`);
-    await until(() => received.length > sent && received[received.length - 1] === planText, "the runner got the preset reply");
-    return n;
+  const UNDO_MS = 5000;
+  const marksNow = async () => (await (await fetch(`${base}/api/tasks/stops`)).json()) as Record<string, { reason: string; replies: Array<{ name: string; text: string }> }>;
+  const stopTask = async (title: string, reason: string) => {
+    const r = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dev, title, prompt: `STOP:${reason}`, runner: "claude" }) });
+    assert(r.ok, `${title}: ${r.status}`);
+    const t = (await r.json()) as Task;
+    await until(async () => (await marksNow())[t.id]?.reason === reason, `the stop mark of ${title}`);
+    return t;
   };
-  const replyHome = await replyOps("home");
-  const replyTask = await replyOps("task");
+  const openTask = async (id: string) => {
+    await call("Page.navigate", { url: `${base}/task/${id}` });
+    await until(() => evaluate(`!!document.querySelector('.composer textarea')`), "the Task's reply box");
+  };
+  const rowSel = (title: string) => `[...document.querySelectorAll('.attn-group, .waiting-folded > div')].find((g) => g.querySelector('button.row .t')?.textContent === ${JSON.stringify(title)})`;
+  const homeRow = async (title: string) => {
+    await gotoBox("home");
+    await until(() => evaluate(`!!(${rowSel(title)})`), `the Home row of ${title}`);
+  };
+  /** The one-press buttons in the scope (the whole page, or the Home row of a Task): their texts. */
+  const replyButtons = (title?: string) => evaluate(`[...((${title ? `${rowSel(title)}` : "document"})?.querySelectorAll('.preset-replies button') ?? [])].map((b) => b.textContent.trim())`) as Promise<string[]>;
+  /** The height the reply buttons' rows take (0 when none is drawn). */
+  const replyHeight = async (title?: string) => {
+    const read = () => evaluate(`[...(${title ? `${rowSel(title)}` : "document"}).querySelectorAll('.preset-replies')].reduce((a, e) => a + e.getBoundingClientRect().height, 0)`) as Promise<number>;
+    // the screen is still filling in: the value counts once it has not moved for 300 ms
+    let last = NaN, since = Date.now();
+    return until(async () => { const h = await read(); if (h !== last) { last = h; since = Date.now(); } return Date.now() - since >= 300 && (h > 0 || h === 0 ? { h } : null); }, "the reply row's height to settle").then((v) => v.h);
+  };
+  const showReplies = (title?: string) => evaluate(`(${title ? `${rowSel(title)}` : "document"}).querySelector('.preset-replies')?.scrollIntoView({ block: "center" })`);
+  const sideways = () => evaluate(`document.documentElement.scrollWidth`) as Promise<number>;
+  const approvalBy = async (id: string) => {
+    await openTask(id);
+    await until(() => evaluate(`!!document.querySelector('.perm')`), "the write approval of the Task");
+    const buttons = await evaluate(`[...document.querySelectorAll('.perm .actions button')].map((b) => b.textContent.trim())`);
+    assert(JSON.stringify(buttons) === JSON.stringify(["許可", "拒否"]), `the write still waits for 許可 / 拒否: ${JSON.stringify(buttons)}`);
+    // answered, so the run frees its slot (the daemon runs 3 at a time; a reply to another Task would wait for one)
+    await page(`button(document.querySelector('.perm'), '許可').click()`);
+    await until(async () => (await tasks()).find((x) => x.id === id)?.status !== "waiting", "the approval answered");
+  };
+
+  // nothing is drawn, and no height is taken, with no question: the Home with no stopped Task of this kind and a Task that has no stop
+  await gotoBox("home");
+  assert((await replyButtons()).length === 0 && (await replyHeight()) === 0, "Home with no stop reports takes no height for the reply buttons");
+  await gotoBox("task");
+  assert((await replyButtons()).length === 0 && (await replyHeight()) === 0, "a Task with no question takes no height for the reply buttons");
+
+  const t1 = await stopTask("stop 1", "decision");
+  const t2 = await stopTask("stop 2", "decision");
+  const t3 = await stopTask("stop 3", "depends");
+  const t4 = await stopTask("stop 4", "decision");
+  const t5 = await stopTask("stop 5", "decision");
+  const unanswered = await marksNow();
+  assert([t1, t2, t3, t4, t5].every((x) => unanswered[x.id]?.replies.length === 0), `no reply is offered before a preset was sent to a decision stop: ${JSON.stringify(unanswered)}`);
+
+  // Task 1: the person answers with the preset X (no target) from its reply box; the use is recorded with the stop's kind
+  await openTask(t1.id);
+  await focusBox(".composer textarea");
+  await page(`opt('状況の確認').click()`);
+  await until(async () => (await evaluate(`document.querySelector('.composer textarea').value`)) === planText, "the preset in Task 1's reply box");
+  await page(`button(document.querySelector('.composer'), '送信').click()`);
+  await until(() => received[received.length - 1] === planText, "the runner got Task 1's reply");
+  const uses = core.db.getSetting<Array<{ scene: string; kind: string | null }>>("presetUses", []);
+  assert(uses.at(-1)?.scene === "task" && uses.at(-1)?.kind === "decision", `the use is recorded with the stop's kind: ${JSON.stringify(uses.at(-1))}`);
+
+  // X is offered under Task 2's question and in its Home row, and not for Task 3 (a depends stop has no record of a reply)
+  await openTask(t2.id);
+  await until(async () => JSON.stringify(await replyButtons()) === JSON.stringify([planText]), "X under Task 2's question");
+  const taskH4 = await replyHeight();
+  await openTask(t3.id);
+  // opening reloads the page, and App reads the stop marks again (from `GET /api/tasks` or `GET /api/tasks/stops`):
+  // wait until those reads have answered, then a little for the screen to draw with them
+  await until(async () => (await evaluate(`performance.getEntriesByType('resource').some((e) => /\\/api\\/tasks(\\/stops)?$/.test(new URL(e.name).pathname) && e.responseEnd > 0)`)) === true, "the stop marks read for Task 3's screen");
+  await Bun.sleep(600);
+  assert((await replyButtons()).length === 0 && (await replyHeight()) === 0, "Task 3 (depends) has no reply buttons");
+  await homeRow(t2.title);
+  await until(async () => JSON.stringify(await replyButtons(t2.title)) === JSON.stringify([planText]), "X in Task 2's Home row");
+  assert((await replyButtons(t3.title)).length === 0 && (await replyHeight(t3.title)) === 0, "Task 3's Home row has no reply buttons");
+  const homeH4 = await replyHeight(t2.title);
+  assert(taskH4 > 0 && homeH4 > 0, `the buttons take a line: ${taskH4} ${homeH4}`);
+  await showReplies(t2.title);
+  await shot("reply-buttons-home-1280.png");
+  // 4 presets and 30 presets: the same height (the buttons are what was sent, not the list)
   await fill(30);
+  await openTask(t2.id);
+  await until(async () => (await replyButtons()).length === 1, "X under Task 2's question with 30 presets");
+  const taskH30 = await replyHeight();
+  await homeRow(t2.title);
+  await until(async () => (await replyButtons(t2.title)).length === 1, "X in Task 2's Home row with 30 presets");
+  const homeH30 = await replyHeight(t2.title);
+  assert(Math.abs(taskH4 - taskH30) <= 1 && Math.abs(homeH4 - homeH30) <= 1, `the row's height with 4 and 30 presets: Task ${taskH4} ${taskH30}, Home ${homeH4} ${homeH30}`);
+
+  // 390 wide: no sideways scroll with the buttons, nor while a press waits
+  await sized(390);
+  await openTask(t4.id);
+  await until(async () => (await replyButtons()).length === 1, "X under Task 4's question at 390");
+  const w390 = { task: await sideways(), home: 0 };
+  // the row is a flex child of the Task's column and must keep the height of its button (it can shrink to its padding when the screen is tight)
+  const clip = (await evaluate(`(() => { const r = document.querySelector('.preset-replies'); const b = r.querySelector('button'); return { row: r.getBoundingClientRect().height, button: b.getBoundingClientRect().height }; })()`)) as { row: number; button: number };
+  assert(clip.row >= clip.button, `the reply buttons are cut at 390: the row is ${clip.row}px high, the button ${clip.button}px`);
+  await showReplies();
+  await shot("reply-buttons-task-390.png");
+  await page(`document.querySelector('.preset-replies button').click()`);
+  await until(() => evaluate(`!!document.querySelector('.preset-replies') && document.querySelector('.preset-replies').innerText.includes('取り消す')`), "the wait with 取り消す at 390");
+  w390.task = Math.max(w390.task, await sideways());
+  await showReplies();
+  await shot("reply-buttons-task-390-waiting.png");
+  await page(`button(document.querySelector('.preset-replies'), '取り消す').click()`);
+  await homeRow(t2.title);
+  w390.home = await sideways();
+  await showReplies(t2.title);
+  await shot("reply-buttons-home-390.png");
+  assert(w390.task <= 390 && w390.home <= 390, `the reply buttons scroll sideways at 390: ${JSON.stringify(w390)}`);
+  await sized(1280);
+
+  // Home: a press waits with 取り消す; cancelled inside the 5 seconds, nothing reaches the runner
+  await homeRow(t2.title);
+  let replyHome = 0;
+  const sentBefore = received.length;
+  replyHome += 1; // the press on the button
+  await evaluate(`${rowSel(t2.title)}.querySelector('.preset-replies button').click()`);
+  await until(() => evaluate(`${rowSel(t2.title)}?.querySelector('.preset-replies')?.innerText.includes('取り消す') ?? false`), "the wait with 取り消す on Home (a press must not send at once)");
+  await evaluate(`[...${rowSel(t2.title)}.querySelectorAll('.preset-replies button')].find((b) => b.textContent.trim() === '取り消す').click()`);
+  await Bun.sleep(UNDO_MS + 700);
+  assert(received.length === sentBefore, `a cancelled press sent something: ${received.slice(sentBefore).join(" | ")}`);
+  await until(async () => JSON.stringify(await replyButtons(t2.title)) === JSON.stringify([planText]), "the button back after cancelling");
+  // pressed again and left: one message arrives, with X's text, and the write still waits for 許可 / 拒否
+  await evaluate(`${rowSel(t2.title)}.querySelector('.preset-replies button').click()`);
+  await until(() => received.length > sentBefore, "the runner got the reply after the wait");
+  await Bun.sleep(500);
+  assert(received.length === sentBefore + 1 && received[sentBefore] === planText, `one message with X's text: ${received.slice(sentBefore).join(" | ")}`);
+  await approvalBy(t2.id);
+  const usesHome = core.db.getSetting<Array<{ scene: string; kind: string | null }>>("presetUses", []);
+  assert(usesHome.at(-1)?.scene === "task" && usesHome.at(-1)?.kind === "decision", `the press is recorded with the stop's kind: ${JSON.stringify(usesHome.at(-1))}`);
+
+  // Task 4, from inside the Task: one press, then the same
+  await openTask(t4.id);
+  await until(async () => (await replyButtons()).length === 1, "X under Task 4's question");
+  let replyTask = 0;
+  const sentTask = received.length;
+  replyTask += 1; // the press on the button
+  await page(`document.querySelector('.preset-replies button').click()`);
+  await until(() => received.length > sentTask, "the runner got Task 4's reply after the wait").catch(async (e) => { console.error(await evaluate(`document.querySelector('.main').innerText.slice(0, 800)`), JSON.stringify(received.slice(-4))); throw e; });
+  await Bun.sleep(500);
+  assert(received.length === sentTask + 1 && received[sentTask] === planText, `Task 4: one message with X's text: ${received.slice(sentTask).join(" | ")}`);
+  await approvalBy(t4.id);
+
+  // Task 5: pressed on Home, then the Task is opened (Home is left) inside the 5 seconds: not cancelled, so exactly one message arrives
+  await homeRow(t5.title);
+  const sentLeave = received.length;
+  await evaluate(`${rowSel(t5.title)}.querySelector('.preset-replies button').click()`);
+  await until(() => evaluate(`${rowSel(t5.title)}?.querySelector('.preset-replies')?.innerText.includes('取り消す') ?? false`), "the wait with 取り消す before leaving Home");
+  await evaluate(`${rowSel(t5.title)}.querySelector('button.row').click()`);
+  await until(() => received.length > sentLeave, "the runner got the reply of the press left behind");
+  await Bun.sleep(UNDO_MS + 700);
+  assert(received.length === sentLeave + 1 && received[sentLeave] === planText, `leaving Home during the wait: one message with X's text: ${received.slice(sentLeave).join(" | ")}`);
+  await approvalBy(t5.id);
+  await fill(30); // already 30 from the reply buttons above
   const h30 = await heights(30);
   // a preset that is not among the top 3 (each box uses another one, as the one just put in is the latest used): 2 characters narrow the 30 to it, then Tab. The cursor 1 + 2 characters + Tab 1.
   const typedOps = async (where: "home" | "task", i: string) => {
@@ -418,7 +565,7 @@ try {
   const near = (got: Record<string, number>, want: Record<string, number>) => Object.entries(want).every(([k, v]) => Math.abs((got[k] ?? NaN) - v) <= 1);
   assert(near({ ...h4, ...h30 }, { "w390-n4": 0, "w390-n30": 0, "w1280-n4": 0, "w1280-n30": 0 }), `preset-height differs from the 評価項目 table: ${heightLine}`);
   assert(near(shift, { home: 0, task: 0 }), `preset-shift differs from the 評価項目 table: ${shiftLine}`);
-  assert(`home=${replyHome} task=${replyTask}` === "home=4 task=3", `preset-reply-ops differs from the 評価項目 table: ${replyHome} ${replyTask}`);
+  assert(`home=${replyHome} task=${replyTask}` === "home=1 task=1", `preset-reply-ops differs from the 評価項目 table: ${replyHome} ${replyTask}`);
 
   // 7c. the keys and the cases where nothing is offered: Esc, the arrows, Tab on an empty box, 390 wide, an IME, 1 character
   await sized(1280);

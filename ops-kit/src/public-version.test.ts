@@ -412,3 +412,29 @@ test("adopt: resumes a release create failure with v0.1.0", () => {
   expect(ledger().completed).toMatchObject({ version: "v0.1.0", commit: before });
   expect(ledger().pending).toBeUndefined();
 });
+
+test("independent dry-run with a non-tag source writes nothing", () => {
+  sync(opts("v4.2.0"), run); // a published target with its version record
+  writeFileSync(join(priv, "README.md"), "not tagged yet\n");
+  git(priv, "add", "."); git(priv, "commit", "-qm", "change");
+  const sha = git(priv, "rev-parse", "HEAD");
+  const state = () => [git(origin, "for-each-ref"), git(pub, "for-each-ref"), git(priv, "tag", "-l")];
+  const before = state();
+  calls = [];
+  for (const source of ["HEAD", "main", sha]) {
+    const out = sync(opts(source, true), run);
+    expect(out).toStartWith("version: 仮");
+    expect(out).toContain("public kit: added SECURITY.md");
+    expect(out).toContain("dry-run: would open a PR");
+    expect(out).toContain("checks: no private repository name");
+  }
+  expect(state()).toEqual(before);
+  expect(calls.filter((c) => c.includes("push") || (c[0] === "gh" && ["create", "merge"].includes(c[2]!)))).toEqual([]);
+  // a tree that must not go public still stops the dry run
+  writeFileSync(join(priv, "README.md"), "see example/app-dev/issues\n");
+  git(priv, "add", "."); git(priv, "commit", "-qm", "leak");
+  expect(() => sync(opts("HEAD", true), run)).toThrow("private repository name");
+  // without --dry-run the tag is still required, and nothing is written either
+  expect(() => sync(opts("HEAD"), run)).toThrow("independent version requires --source <vX.Y.Z tag>");
+  expect(state()).toEqual(before);
+});

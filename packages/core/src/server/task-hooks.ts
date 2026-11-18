@@ -1,0 +1,300 @@
+import { otherMachineOf } from "../machine.ts";
+import { githubRepoOfRemote } from "../claude-cloud.ts";
+import { capSnapshot, collectTaskDiff, mergeSnapshot, WRITE_TOOLS } from "../taskdiff.ts";
+import { API, OWNER, parseMergeGrants } from "../merge-grants.ts";
+import { runGh } from "../backlog-gh.ts";
+import { branchTip } from "../backlog-local.ts";
+import { readStoredIssue } from "../backlog-stored.ts";
+import type { ServerContext, ServerContextInit } from "./context.ts";
+import { statSync } from "node:fs";
+import { join } from "node:path";
+import type { RunnerId, AgentEvent, EventEnvelope } from "@switchboard/protocol";
+import { suggestTitle } from "../suggest-title.ts";
+import { loadRubric } from "../rubric.ts";
+import { loadTrustedSkills } from "../rubric-judge.ts";
+import { SKILL_SOURCE } from "../skillsync.ts";
+import { findRepoRoot } from "../config.ts";
+import { ledgerRowFor } from "../pricing.ts";
+import { isAuthText } from "../login.ts";
+import { TURN_DONE } from "../task-status.ts";
+import { withoutWorkspaceRules } from "../tasks/manager.ts";
+
+// A reply is copied to the task's shadow; a terminal turn on either side goes in before it.
+export const catchUpWithShadow = (sc: Pick<ServerContext, "db" | "history">, taskId: string) => {
+  if (sc.db.getTask(taskId)?.executionMode === "cloud") return;
+  sc.history.catchUp(taskId);
+  const shadow = sc.db.shadowTaskOf(taskId);
+  if (shadow) sc.history.catchUp(shadow.id);
+};
+
+export const snapshotTaskDiff = async (sc: Pick<ServerContext, "snapshotting" | "snapshotAgain" | "db" | "snapshotEvents" | "staging" | "stopped" | "snapshotTaskDiff">, taskId: string) => {
+  if (sc.snapshotting.has(taskId)) {
+    sc.snapshotAgain.add(taskId);
+    return;
+  }
+  sc.snapshotting.add(taskId);
+  try {
+    const t = sc.db.getTask(taskId);
+    if (!t) return;
+    const cached = sc.snapshotEvents.get(taskId) ?? { seq: 0, events: [] };
+    const fresh = sc.db.listEvents(taskId, cached.seq);
+    for (const e of fresh) if ((e.ev.t === "tool.call" && WRITE_TOOLS.includes(e.ev.name)) || e.ev.t === "artifact") cached.events.push(e);
+    if (fresh.length) cached.seq = fresh[fresh.length - 1]!.seq;
+    sc.snapshotEvents.set(taskId, cached);
+    const live = await collectTaskDiff(t, cached.events, sc.staging.list(taskId));
+    if (sc.stopped) return;
+    sc.db.putTaskDiffSnapshot(taskId, capSnapshot(mergeSnapshot(sc.db.getTaskDiffSnapshot(taskId), live, Date.now())));
+  } catch (e) {
+    console.warn(`task diff snapshot: ${String((e as Error).message ?? e)}`);
+  } finally {
+    sc.snapshotting.delete(taskId);
+    if (sc.snapshotAgain.delete(taskId) && !sc.stopped) void sc.snapshotTaskDiff(taskId);
+  }
+};
+
+/** The GitHub repository (`owner/name`) a directory's origin names; null when it has none (not a clone, moved or removed, another host). */
+export const originRepoOf = (_sc: unknown, dir: string): string | null => {
+  try {
+    const p = Bun.spawnSync(["git", "remote", "get-url", "origin"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 3000 });
+    return p.exitCode === 0 ? githubRepoOfRemote(p.stdout.toString().trim()) : null;
+  } catch {
+    return null;
+  }
+};
+
+/** How long the PR's head is waited for when a grant is recorded: past it the grant is recorded without one. */
+const GRANT_HEAD_TIMEOUT_MS = 8_000;
+
+/**
+ * The head a PR has now, read when a merge / answer grant of it is recorded: the grant then holds for that head only.
+ * `repo` a backlog kept here (the task's workspace keeps its changes itself): the tip of the change's branch in the
+ * workspace's checkout; else GitHub's (`gh pr view`). Null = not read (GitHub not reachable, no such PR or change, no
+ * answer in time): the grant is recorded without a head and answers for none.
+ */
+export const grantHeadOf = async (sc: Pick<ServerContext, "db" | "opts">, task: { workspaceId?: string | null; cwd: string }, repo: string, target: number): Promise<string | null> => {
+  const ws = task.workspaceId ? sc.db.getWorkspace(task.workspaceId) : null;
+  const source = ws ? sc.db.getWorkspaceBacklogSource(ws.id) : null;
+  if (ws && source?.service === "switchboard" && source.repository.toLowerCase() === repo.toLowerCase()) {
+    const change = readStoredIssue(sc.db, ws, target)?.issue.change;
+    return change ? branchTip(ws.path, change.head) : null;
+  }
+  const headOf = (out: string): string => {
+    try {
+      return String((JSON.parse(out) as { headRefOid?: unknown }).headRefOid ?? "").toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+  const read = (sc.opts.gh ?? runGh)(["pr", "view", String(target), "-R", repo, "--json", "headRefOid"], task.cwd).then((r) => (r.code === 0 ? headOf(r.stdout) : ""), () => "");
+  const sha = await Promise.race([read, Bun.sleep(GRANT_HEAD_TIMEOUT_MS).then(() => "")]);
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+};
+
+/**
+ * How a text that may carry the person's permission came in — the one rule of every route that can record a merge
+ * grant or keep an answer as the person's words (a reply, a resume note, an answer to a question, an answer to an
+ * Issue's ## 判断待ち). A request that names a sending Task is that Task's and never the person's; any other counts as
+ * the person's ("screen") only when it looks like the web UI's (`screenLook`), and as a bare call's ("api") otherwise.
+ * Not a proof of who typed it (merge-grants.ts): a help against a relayed text and a forgotten `from`.
+ */
+export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Request, srv: Parameters<ServerContext["screenLook"]>[1], sender?: string): Promise<{ sender?: string; via: "screen" | "api" }> =>
+  sender ? { sender, via: "api" } : { via: (await sc.screenLook(req, srv)) ? "screen" : "api" };
+
+/**
+ * A merge-grant sentence in a text sent to a task is recorded for the check in front of `gh` (merge-grants.ts): for the
+ * repository the sentence names, else the task's own — its workspace's backlog repository, else its directory's origin,
+ * which are what the checks ask with when the command names none (neither: not recorded — a grant for any repository
+ * is not made). A merge / answer grant is recorded with the head the PR has now (`grantHeadOf`): it holds for what the
+ * PR was when the grant was recorded (for a screen answer of an Issue that is the start of the next stage task, later
+ * than the answer: a head that moved in between is the one recorded), and commits pushed after it ask again — also the rebase GitHub makes after a merge
+ * below, as a `[merge-answer] yes` of an older head does not count either.
+ * `sender`: the Task the send said it came from; the record then says `task:<id>`. `via`: how the text came in when no
+ * sender was named (`grantSource` decides it for a request) — "screen" (a request that looked like the web UI's) is
+ * recorded as the person's, "api" (a bare call, and the default: a caller that does not say is not the person) is not. Only a record marked the person's answers a check. None of this proves who
+ * typed the text: see merge-grants.ts. `source`: the screen answer the text is, which gives its grants once.
+ * Resolves once every grant is recorded with its head: a caller that sends the text to the task afterwards awaits it,
+ * so the task does not check before the record is whole.
+ */
+export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api" } = {}): Promise<void> => {
+  // (every caller passes what `grantSource` said of its request; the start of a stage passes "screen" for an answer that route marked)
+  const grants = parseMergeGrants(text);
+  if (!grants.length) return;
+  const task = sc.db.getTask(taskId);
+  // a Task of another machine gets no grant here: this instance neither answers for it nor merges for it
+  if (otherMachineOf(task)) return;
+  // the task's own: the name its workspace's backlog goes by (what the kit's backlog commands and the merge gate ask with;
+  // a backlog kept here only has a name of its own), and — where that is not a GitHub repository — the directory's origin
+  let own: string[] | undefined;
+  const ownRepos = (): string[] => {
+    if (own || !task) return own ?? [];
+    const source = task.workspaceId ? sc.db.getWorkspaceBacklogSource(task.workspaceId) : null;
+    const origin = source && source.service !== "switchboard" ? null : sc.originRepoOf(task.cwd);
+    return (own = [...new Set([source?.repository, origin].flatMap((r) => (r ? [r.toLowerCase()] : [])))]);
+  };
+  const by = from.sender ? `task:${from.sender}` : (from.via ?? "api") === "screen" ? OWNER : API;
+  const at = Date.now();
+  const rows = grants.flatMap((g) => (g.repo ? [g.repo] : ownRepos()).map((repo) => ({ taskId, repo, kind: g.kind, target: g.target, by, source: from.source })));
+  // every row is there before anything is waited for (a source is spent from here on: two starts cannot both take one
+  // answer's grants — and spent for a release rolled back to as well, in the setting it reads); a merge / answer row
+  // answers nothing until its head is in
+  sc.db.recordMergeGrants(rows, at, from.source);
+  // only a record that can answer needs the head; a trace of another sender's text keeps none
+  await Promise.all(rows.filter((r) => r.kind !== "scope" && by === OWNER && task).map(async (r) => {
+    const head = await grantHeadOf(sc, task!, r.repo, r.target).catch(() => null);
+    if (head) sc.db.recordMergeGrant({ ...r, head }, at);
+  }));
+};
+
+export function setupTurnEndHooks(sc: Pick<ServerContextInit, "trustedSkills" | "tasks" | "bedrockTasks" | "loginExpired" | "detected" | "isMeta" | "selfdev" | "checksOn" | "restarting" | "countRules" | "db" | "cfg" | "artifacts" | "judgeStop" | "lastJudgingAt" | "applyPolicies" | "batchAnswers" | "settings" | "judgeReply" | "titling" | "pricingTable" | "loginKindOf" | "runnerChoice" | "opts" | "adapterMap" | "suggestDir" | "broadcast" | "rubric" | "rubricSeqNext" | "rubricSeq" | "judgeEvals">): void {
+  sc.tasks.onTurnEnd((taskId, t, turn) => {
+    // A turn on Amazon Bedrock says nothing about the Claude account's login, either way
+    if (sc.bedrockTasks.has(taskId)) return;
+    if (turn.end.status === "ok") {
+      // a turn that went through proves the login, also over a status-command answer from before the person logged in
+      sc.loginExpired.delete(t.runner);
+      const d = sc.detected.find((x) => x.adapter.id === t.runner);
+      if (d?.info.login === "expired") d.info = { ...d.info, login: "ok" };
+    }
+    if (turn.end.status !== "error" || ![turn.end.summary, ...turn.errors].some((text) => isAuthText(t.runner, text))) return;
+    const info = sc.detected.find((d) => d.adapter.id === t.runner)?.info;
+    if (info?.login === undefined) return;
+    sc.loginExpired.add(t.runner);
+    sc.tasks.record(taskId, { t: "status", text: `${t.runner} のログインが切れています。Task の「ターミナル」tab で \`${info.loginHint ?? t.runner}\` を実行してから返信してください` });
+  });
+  sc.tasks.onTurnEnd((taskId, t) => {
+    if (!sc.isMeta(t)) return;
+    // A shadow of a meta task shares the workspace but must not invalidate the primary's checks nor start a
+    // second, concurrent check run on the same tree.
+    if (t.shadowOf) return;
+    sc.selfdev.invalidate(); // the tree changed: earlier runs no longer vouch for it
+    if (TURN_DONE.has(t.status) && sc.checksOn && !sc.restarting) void sc.selfdev.run(taskId).catch(() => undefined);
+  });
+
+  // Evals: the rule counts of every finished turn. Synchronous and cheap; a failure must not stop the turn's end.
+  sc.tasks.onTurnEnd((taskId, t) => {
+    if (t.executionMode === "cloud") return;
+    try {
+      sc.countRules(t);
+    } catch (e) {
+      console.warn(`evals: task ${taskId} not counted (${String((e as Error).message ?? e)})`);
+    }
+  });
+
+  // insights: the schedule's Task ran `/insights` as its first turn; the report Claude Code wrote becomes the
+  // Task's artifact. Only that turn is looked at (a follow-up sent to the Task later is an ordinary turn and must not
+  // sweep in a report another run — a terminal's, say — made meanwhile), and only a report written since the turn
+  // started (an older one is another run's too). A failure is a line on the Task.
+  sc.tasks.onTurnEnd((taskId, t, turn) => {
+    if (!t.scheduleId || sc.db.getSchedule(t.scheduleId)?.action !== "insights" || turn.end.status !== "ok") return;
+    const events = sc.db.listEvents(taskId);
+    if (events.filter((e) => e.ev.t === "session.end").length > 1) return; // the ended turn is this one, the first; later ones are follow-ups
+    const file = join(sc.cfg.claudeUsageDataDir, "report.html");
+    try {
+      // the Task's creation, not the runner's session.start: /insights analyses and writes the report before Claude Code
+      // reports its session; the listener runs for the first turn only, so this is that turn's start
+      const started = t.createdAt;
+      if (statSync(file).mtimeMs <= started) {
+        sc.tasks.record(taskId, { t: "status", text: `report.html がこの実行の開始より古いので成果物に写しません（${file}）` });
+        return;
+      }
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, "0");
+      const a = sc.artifacts.addCopy(t, file, `Claude Code Insights ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`);
+      sc.tasks.record(taskId, { t: "status", text: `レポートを成果物に写しました: ${a.title}` });
+    } catch (e) {
+      const gone = (e as NodeJS.ErrnoException).code === "ENOENT";
+      sc.tasks.record(taskId, { t: "status", text: gone ? `report.html が無いので成果物に写しません（${file}）` : `レポートを成果物に写せませんでした: ${String((e as Error).message ?? e)}` });
+    }
+  });
+
+  /**
+   * The automatic judgement: a turn that ended done, on a task the rule left unknown, is judged from its last
+   * reply in the background. The judgement is always kept (judged*); the outcome takes it only while it is still
+   * unknown — the person may have set it meanwhile, and theirs wins. A shadow is not judged: the primary is
+   * enough, and it would spend the quota twice. `judgingAt` (a column) marks the reply being judged: a new turn
+   * clears it, so a judgement of an older reply writes nothing, and a daemon restart that cut one short has it judged again.
+   */
+  sc.judgeStop = new AbortController(); // aborted by stopAll before the database closes
+  sc.lastJudgingAt = 0; // the mark is a time, but never the same twice in this daemon (two turns in a millisecond, a clock set back)
+  // a saved policy may answer what this Task's turn left open
+  sc.tasks.onTurnEnd(() => void sc.applyPolicies());
+  // the Task sent on to log in for an SSO batch: once it went on, the rest go on
+  sc.tasks.onTurnEnd((taskId) => void sc.batchAnswers.turnEnded(taskId).catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
+  sc.tasks.onTurnEnd((taskId, t, turn) => {
+    const lastReply = turn.end.summary?.trim() ?? "";
+    if (t.executionMode === "cloud" || !sc.settings().judge.enabled || !TURN_DONE.has(t.status) || t.shadowOf || t.outcome !== "unknown" || !lastReply) return;
+    sc.judgeReply(taskId, t, lastReply, (sc.lastJudgingAt = Math.max(Date.now(), sc.lastJudgingAt + 1)));
+  });
+
+  /**
+   * The title after the first turn: a task whose title is still provisional is named once, in the background,
+   * from its request and the turn's last reply. `titlePending` is cleared first, so it is one try per task; a title
+   * the person changed meanwhile (PATCH) is kept. A turn that ended in an error or an abort is not named (the next one
+   * is). A shadow shows the primary's title, and Cloud is not asked.
+   */
+  sc.titling = new Set<string>(); // naming in flight; a rename (PATCH) takes the task out, so its title is not overwritten
+  sc.tasks.onTurnEnd((taskId, t, turn) => {
+    if (!t.titlePending || t.shadowOf || t.executionMode === "cloud" || !sc.settings().titles.auto || sc.judgeStop.signal.aborted) return;
+    if (turn.end.status !== "ok") return;
+    sc.db.updateTask(taskId, { titlePending: false, updatedAt: t.updatedAt });
+    sc.titling.add(taskId);
+    const provisional = t.title;
+    const onUsage = (runner: RunnerId, ev: Extract<AgentEvent, { t: "usage" }>) => {
+      if (!sc.judgeStop.signal.aborted) sc.db.insertLedger(ledgerRowFor(sc.pricingTable(), { id: taskId, runner, model: ev.model ?? null }, ev, Date.now(), sc.loginKindOf(runner)));
+    };
+    // the titles' own runner first, then the judge's fallback; one entry when they are the same runner, model and effort
+    const ti = sc.settings().titles;
+    const jc = sc.settings().judgeAndChoice;
+    const first = sc.runnerChoice(ti.runner, ti.model, ti.effort);
+    const second = sc.runnerChoice(jc.judgeFallbackRunner, jc.judgeFallbackModel, jc.judgeFallbackEffort);
+    const tries = first.runner === second.runner && first.model === second.model && first.effort === second.effort ? [first] : [first, second];
+    void (sc.opts.titleSuggester ?? suggestTitle)({ prompt: withoutWorkspaceRules(sc.db.firstUserText(taskId) ?? provisional), reply: turn.end.summary?.trim() ?? "" }, { adapters: sc.adapterMap, cwd: sc.suggestDir, onUsage, log: (m) => console.warn(m), signal: sc.judgeStop.signal, tries })
+      .then((r) => {
+        if (sc.judgeStop.signal.aborted) return;
+        const cur = sc.db.getTask(taskId);
+        if (!cur || cur.title !== provisional || !sc.titling.has(taskId)) return;
+        // updatedAt stays: a title is not activity and must not move the task in the list
+        const next = sc.db.updateTask(taskId, { title: r.title, updatedAt: cur.updatedAt });
+        if (next) sc.broadcast({ type: "task.updated", task: next });
+      })
+      .catch((e) => {
+        if (sc.judgeStop.signal.aborted) return;
+        console.warn(`title: task ${taskId} keeps its provisional title (${String((e as Error).message ?? e)})`);
+      })
+      .finally(() => sc.titling.delete(taskId));
+  });
+
+  /**
+   * The rubric judge: a turn that ended done is scored against the rubric in the background, on the judge
+   * runner (`settings.judge`); the row replaces the task's previous one and the screen is told to read it again.
+   * The rubric is read once at boot — the person's edit takes effect on the next start. Not a shadow, not Cloud.
+   * `rubricSeq` drops a score of an older reply, as `judgingAt` does for the two-way judge.
+   */
+  sc.rubric = loadRubric(sc.cfg.home, (m) => console.warn(m));
+  // the skills a request can name, read now from the tree this daemon runs from: the judge is never shown the judged Task's own copy
+  sc.trustedSkills = loadTrustedSkills(join(findRepoRoot(import.meta.dir), SKILL_SOURCE));
+  sc.rubricSeqNext = 0;
+  sc.rubricSeq = new Map<string, number>();
+  sc.tasks.onTurnEnd((taskId, t, turn) => {
+    // a turn that ended without a reply is not scored, as the turn judge does not judge it: there is no work reported to score
+    if (t.executionMode === "cloud" || t.shadowOf || !TURN_DONE.has(t.status) || !sc.settings().evals.judge.enabled || !turn.end.summary?.trim()) return;
+    sc.judgeEvals(taskId, t);
+  });
+}
+
+export function setupSnapshots(sc: Pick<ServerContextInit, "stopped" | "snapshotting" | "snapshotAgain" | "snapshotEvents" | "tasks" | "snapshotTaskDiff" | "snapshotTimer" | "db">): void {
+  // a copy of the task's diff, so it can still be shown after its worktree is removed: at each turn's end and every 60 s while running
+  sc.stopped = false;
+  sc.snapshotting = new Set<string>();
+  sc.snapshotAgain = new Set<string>(); // a call that came while one was running: run once more after it, so the last turn's end is not lost
+  // collectTaskDiff reads only write-class tool calls and artifacts from the transcript, so the timer keeps just those, and only the events after the last seq read
+  sc.snapshotEvents = new Map<string, { seq: number; events: EventEnvelope[] }>();
+  sc.tasks.onTurnEnd((taskId) => void sc.snapshotTaskDiff(taskId));
+  sc.snapshotTimer = setInterval(() => {
+    const active = [...sc.db.listTasksByStatus("running"), ...sc.db.listTasksByStatus("background")];
+    const ids = new Set(active.map((t) => t.id));
+    for (const id of sc.snapshotEvents.keys()) if (!ids.has(id)) sc.snapshotEvents.delete(id);
+    for (const id of ids) void sc.snapshotTaskDiff(id);
+  }, 60_000);
+  sc.snapshotTimer.unref();
+}

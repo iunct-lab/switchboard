@@ -169,7 +169,7 @@ test("heldIssueText: number, title, the counts that are not zero, Closed", () =>
   expect(heldIssueText(held({ state: "error", pendingCount: 1, closed: true }))).toBe("#354 題（同期失敗 · 未送信 1 件 · Closed）");
 });
 
-describe("workspaceErrorGuide (#2362)", () => {
+describe("workspaceErrorGuide", () => {
   const err = (kind: "gh-login" | "project-var" | "other") => ({ workspaceId: "w", workspaceName: "app", message: "gh variable get: variable SWITCHBOARD_PROJECT_URL was not found", kind });
   test("gh-login: the login button on the screen, then 再読込; no step sends the owner to a terminal", () => {
     const g = workspaceErrorGuide(err("gh-login"), undefined);
@@ -204,7 +204,7 @@ test("savedWords names GitHub only for a workspace that sends to it", () => {
   expect(Object.values(savedWords(false)).every((w) => w.includes("GitHub"))).toBe(true);
 });
 
-describe("backlogHeading (#2362)", () => {
+describe("backlogHeading", () => {
   test("names GitHub only for GitHub workspaces", () => {
     expect(backlogHeading(1000, null, ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得）");
   });
@@ -216,7 +216,7 @@ describe("backlogHeading (#2362)", () => {
     expect(backlogHeading(1000, null, ["switchboard"], fmt)).toBe("Switchboard に保存");
     expect(backlogHeading(1000, "refresh", ["switchboard"], fmt)).toBe("Switchboard に保存 · 読み込み中…");
   });
-  test("#4119: opened says the saved copy; a reload with a GitHub workspace says importing; one kept here only says loading", () => {
+  test("opened says the saved copy; a reload with a GitHub workspace says importing; one kept here only says loading", () => {
     expect(backlogHeading(1000, "open", ["github"], fmt)).toBe("t1000 に GitHub から取得 · 保存済みを読み込み中…");
     expect(backlogHeading(1000, "open", ["switchboard"], fmt)).toBe("Switchboard に保存 · 保存済みを読み込み中…");
     expect(backlogHeading(1000, "refresh", ["github", "switchboard"], fmt)).toBe("t1000 に読み込み（GitHub の workspace は GitHub から取得） · GitHub から取り込み中…");
@@ -228,7 +228,7 @@ describe("backlogHeading (#2362)", () => {
   });
 });
 
-test("githubSyncText says off, moving and on (#2266)", () => {
+test("githubSyncText says off, moving and on", () => {
   const row = (over: object) => ({ backlog: "github" as const, enabling: null, sync: info({}), ...over });
   expect(githubSyncText(row({ backlog: "switchboard" }), fmt)).toEqual({ state: "synced", label: "GitHub 同期: 無効", parts: [] });
   expect(githubSyncText(row({ backlog: "switchboard", sync: info({ state: "pending", pendingCount: 2 }) }), fmt).parts).toEqual(["未送信 2 件（有効にすると送ります）"]);
@@ -238,7 +238,7 @@ test("githubSyncText says off, moving and on (#2266)", () => {
   expect(githubSyncText(row({ sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "title", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "競合", parts: ["最終成功: t1000", "未送信 1 件", "競合 1 件"] });
 });
 
-describe("in English (#2447)", () => {
+describe("in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   test("the sync line, a held Issue, the heading, a schedule's kind, its scan result and a budget typo read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);

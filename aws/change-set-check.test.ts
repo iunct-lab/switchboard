@@ -9,7 +9,7 @@ const bumped: ChangeSet = { Changes: [...replace!, change("HostVpcOrigin20261026
 /** The same launch template change without a new LaunchGeneration: the origins in use would be updated in place. */
 const forgotten: ChangeSet = { Changes: [...replace!, change("HostVpcOrigin4", "Modify", "AWS::CloudFront::VpcOrigin", "False"), change("RescueVpcOrigin4", "Modify", "AWS::CloudFront::VpcOrigin", "False"), change("Cdn", "Modify", "AWS::CloudFront::Distribution", "False")] };
 
-describe("checkChangeSet (#465)", () => {
+describe("checkChangeSet", () => {
   test("changes that leave the instance alone pass", () => {
     expect(checkChangeSet({ Changes: [change("Starter", "Modify", "AWS::Lambda::Function", "False"), change("Cdn", "Modify", "AWS::CloudFront::Distribution", "False")] })).toEqual({ ok: true });
   });

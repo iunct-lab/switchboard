@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, StartOptions } from "@switchboard/protocol";
 import { Db, abortOrphanedTasks } from "./db.ts";
-import { TaskManager } from "./tasks.ts";
+import { TaskManager } from "./tasks/manager.ts";
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 const ref = { id: "session_0123456789abcdefghijklmn", url: "https://claude.ai/code/session_0123456789abcdefghijklmn" };
@@ -52,7 +52,7 @@ test("unsupported Cloud input is refused before insertion, suggestion or spawn",
   for (const extra of [{ runner: "codex" }, { budgetUsd: 1 }, { model: "model" }, { permissionMode: "default" }, { shadowRunner: "codex" }, { attachmentIds: ["id"] }, { scope: ["/other"] }, { scheduleId: "schedule" }]) {
     expect(() => s.tasks.create({ ...s.input, ...extra } as Parameters<TaskManager["create"]>[0])).toThrow();
   }
-  expect(s.starts).toHaveLength(0); expect(s.db.listTasks()).toHaveLength(0); s.db.close();
+  expect(s.starts).toHaveLength(0); expect(s.db.listTasks()).toHaveLength(0); s.tasks.stopQueue(); s.db.close();
 });
 
 test("orphaned Cloud launcher cannot schedule Local resume or report aborted Cloud work", async () => {

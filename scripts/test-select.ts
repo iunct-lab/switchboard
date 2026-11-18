@@ -85,6 +85,7 @@ export function classify(path: string): string | undefined {
   if (name === "package.json" || name === "bun.lock" || name === "bunfig.toml" || /^tsconfig.*\.json$/.test(name)) return "依存の定義や設定";
   if (path.startsWith(".github/workflows/") || path === "scripts/ci.ts") return "CI の手順";
   if (path.startsWith("scripts/test-select")) return "判定の道具自体";
+  if (path === "scripts/test-preload.ts") return "全テストの前後に走る部品";
   return JUDGED.test(name) ? undefined : "分類できないファイル";
 }
 

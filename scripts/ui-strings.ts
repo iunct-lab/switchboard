@@ -80,7 +80,7 @@ function walkFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir).sort()) {
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walkFiles(p, out);
-    // `.ts` too (#3898): a helper that builds a sentence for the screen can write Japanese past the dictionary as JSX can.
+    // `.ts` too: a helper that builds a sentence for the screen can write Japanese past the dictionary as JSX can.
     // The dictionaries themselves are where Japanese belongs.
     else if (!/\.test\.[jt]sx?$/.test(name) && /\.tsx?$/.test(name) && !/(^|[\\/])i18n[\\/]/.test(p)) out.push(p);
   }
@@ -192,7 +192,7 @@ export function collectFile(path: string, root = process.cwd()): UiString[] {
     }
     if (ts.isJsxAttributes(n)) return;
     // outside JSX (a `.ts` helper, a module constant of a `.tsx`): only Japanese is collected. English there is mostly values
-    // (keys, ids, paths); the rule is that Japanese reaches the screen through the dictionary (#3898)
+    // (keys, ids, paths); the rule is that Japanese reaches the screen through the dictionary
     if (!ctx.inJsx) {
       const t = literalText(n);
       if (t !== undefined && JA.test(t)) {

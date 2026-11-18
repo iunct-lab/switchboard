@@ -56,7 +56,11 @@ const supervisor = new Supervisor({ home, repo, source, port, rescueUrl: `http:/
 supervisor.start();
 const rescueHost = env.SWITCHBOARD_RESCUE_HOST ?? "127.0.0.1";
 const starter = env.SWITCHBOARD_STARTER_URL && env.SWITCHBOARD_STARTER_TOKEN ? { url: env.SWITCHBOARD_STARTER_URL, token: env.SWITCHBOARD_STARTER_TOKEN } : undefined;
-const rescue = startRescue({ home, repo, source, port, sup: supervisor }, { port: rescuePort, host: rescueHost, starter, beforeRebuild: env.SWITCHBOARD_REBUILD_SAVE_CMD ? [env.SWITCHBOARD_REBUILD_SAVE_CMD] : undefined, sessionPublicKey: /^[A-Za-z0-9_-]{43}$/.test(env.SWITCHBOARD_SESSION_PUBLIC_KEY ?? "") ? env.SWITCHBOARD_SESSION_PUBLIC_KEY : undefined, edge: env.SWITCHBOARD_EDGE_HEADER_VALUE || undefined, tmpOwned: env.SWITCHBOARD_RESCUE_OWNS_TMP === "1", exitToRestart: env.SWITCHBOARD_RESCUE_RESTART_BY_EXIT === "1" ? () => void rescue.stop().finally(() => process.exit(75)) : undefined });
+// The machine's heavy-process slots (the kit's `ops-kit heavy`): a promotion that builds while Tasks run takes one.
+// The kit's command on PATH, else the one in the tree the daemon runs from; SWITCHBOARD_RESCUE_HEAVY=off = no such limit here.
+const kitBin = env.SWITCHBOARD_RESCUE_HEAVY === "off" ? null : (Bun.which("ops-kit") ?? [join(repo, "ops-kit", "bin", "ops-kit")].find((f) => existsSync(f)) ?? null);
+const heavy = kitBin ? [kitBin, "heavy", "--name", "sb-rescue: Task を切らない昇格のビルドと候補", "--"] : null;
+const rescue = startRescue({ home, repo, source, port, sup: supervisor, heavy }, { port: rescuePort, host: rescueHost, starter, beforeRebuild: env.SWITCHBOARD_REBUILD_SAVE_CMD ? [env.SWITCHBOARD_REBUILD_SAVE_CMD] : undefined, sessionPublicKey: /^[A-Za-z0-9_-]{43}$/.test(env.SWITCHBOARD_SESSION_PUBLIC_KEY ?? "") ? env.SWITCHBOARD_SESSION_PUBLIC_KEY : undefined, edge: env.SWITCHBOARD_EDGE_HEADER_VALUE || undefined, tmpOwned: env.SWITCHBOARD_RESCUE_OWNS_TMP === "1", exitToRestart: env.SWITCHBOARD_RESCUE_RESTART_BY_EXIT === "1" ? () => void rescue.stop().finally(() => process.exit(75)) : undefined });
 console.log(`sb-rescue: daemon ${currentOf(home)} on port ${port}; log ${supervisor.logPath}`);
 console.log(`sb-rescue: rescue page http://${rescueHost}:${rescuePort}/`);
 

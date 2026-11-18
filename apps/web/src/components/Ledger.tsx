@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useState } from "react";
-import type { LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, PricingTable, RoutingStats, RunnerId, RunnerInfo } from "@switchboard/protocol";
-import { api } from "../api.ts";
-import { quotaAsOf, quotaByRunner, quotaStale, resetLabel, windowLabel } from "../quota.ts";
+import type { LedgerBilling, LedgerDaily, LedgerModelRow, LedgerSummary, LedgerTaskRow, PricingTable, RoutingStats, RunnerId, RunnerInfo } from "@switchboard/protocol";
+import { api } from "../api/index.ts";
+import { accountMark, quotaAsOf, quotaByRunner, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { countLabel, fmtMedianDuration, runnerRows } from "../runnerStats.ts";
 import { fmtUsd, OriginTag, pct, RunnerPill } from "./ui.tsx";
 import { jstDay } from "../time.ts";
+import { billingChoices, billingLabel, billingRows, ledgerReadKey, rowsFor, type ReadFor } from "../ledgerBilling.ts";
 import { ledgerRunners, listedRunners } from "../runners.ts";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";
@@ -12,33 +13,52 @@ import { insights as m } from "../i18n/insights.ts";
 /** Screen D: the cost ledger. API-equivalent and actually-billed figures side by side; the price table is data. */
 export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInfo[]; onOpenTask: (id: string) => void; onOpenInsights: () => void; onError: (msg: string) => void }) {
   const [days, setDays] = useState(7);
-  const [daily, setDaily] = useState<LedgerDaily[]>([]);
-  const [tasks, setTasks] = useState<LedgerTaskRow[]>([]);
+  /** The day rows and the Task rows, each kept with the period and billing kind they were read for (`rowsFor` shows them under those only). */
+  const [dailyRead, setDailyRead] = useState<ReadFor<LedgerDaily> | null>(null);
+  const [tasksRead, setTasksRead] = useState<ReadFor<LedgerTaskRow> | null>(null);
   const [pricing, setPricing] = useState<(PricingTable & { fromSettings: string[]; source: string; problems: string[] }) | null>(null);
-  /** Routing agreement (#25): how often each suggester named the runner that was actually used. */
+  /** Routing agreement: how often each suggester named the runner that was actually used. */
   const [routing, setRouting] = useState<RoutingStats | null>(null);
-  /** The setting's count below which a runner's row is too thin to compare (#835); undefined = the default. */
+  /** The setting's count below which a runner's row is too thin to compare; undefined = the default. */
   const [thinSample, setThinSample] = useState<number | undefined>(undefined);
-  /** Usage per runner × model in the period (#1836); null until read, [] when the read failed. */
+  /** Usage per runner × model in the period; null until read, [] when the read failed. */
   const [models, setModels] = useState<LedgerModelRow[] | null>(null);
+  /** The billing kind picked in 課金 ("" = すべて). Of this screen only: not saved. */
+  const [billing, setBilling] = useState<LedgerBilling | "">("");
+  const modelRows = billingRows(models ?? [], billing);
+  const readKey = ledgerReadKey(days, billing);
+  const daily = rowsFor(dailyRead, readKey);
+  const tasks = rowsFor(tasksRead, readKey);
 
   const { onError } = props;
   // Refetch on every summary change (the summary object is replaced whenever the daemon records usage); pricing once.
   useEffect(() => {
     let alive = true;
     api
-      .ledgerDaily(days)
-      .then((d) => alive && setDaily(d))
-      .catch((e) => alive && onError(String(e.message ?? e)));
+      .ledgerDaily(days, billing)
+      .then((d) => alive && setDailyRead({ key: readKey, rows: d }))
+      .catch((e) => {
+        if (!alive) return;
+        setDailyRead({ key: readKey, rows: [] }); // a failed read leaves no earlier numbers standing
+        onError(String(e.message ?? e));
+      });
     api
-      .ledgerTasks(days)
-      .then((t) => alive && setTasks(t))
-      .catch(() => undefined);
+      .ledgerTasks(days, billing)
+      .then((t) => alive && setTasksRead({ key: readKey, rows: t }))
+      .catch(() => alive && setTasksRead({ key: readKey, rows: [] }));
     // On failure the card is cleared rather than left showing the previous window's numbers under the new label.
     api
       .routingStats(days)
       .then((r) => alive && setRouting(r))
       .catch(() => alive && setRouting(null));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- readKey is days and billing
+  }, [days, billing, props.ledger, onError]);
+  // the model rows are read for every kind at once (they say which kinds 課金 offers) and narrowed here, so a pick does not read them again
+  useEffect(() => {
+    let alive = true;
     setModels(null); // the heading names the new period at once: no old rows under it while the read is in flight
     api
       .ledgerModels(days)
@@ -58,6 +78,8 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
   }, []);
   const periodApi = daily.reduce((a, r) => a + r.costUsd, 0);
   const periodBilled = daily.reduce((a, r) => a + r.billedUsd, 0);
+  // today's figure from the same rows as the period's, so it follows the picked kind too
+  const todayApi = daily.filter((r) => r.day === jstDay(Date.now())).reduce((a, r) => a + r.costUsd, 0);
 
   const dayList = [...Array(days)].map((_, i) => jstDay(Date.now() - (days - 1 - i) * 86_400_000));
   const RUNNERS = ledgerRunners(listedRunners(props.runners), daily.map((r) => r.runner));
@@ -76,6 +98,14 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
               </option>
             ))}
           </select>
+          <select value={billing} aria-label={t(m.billing)} onChange={(e) => setBilling(e.target.value as LedgerBilling | "")}>
+            <option value="">{`${t(m.billing)}: ${t(m.billingAll)}`}</option>
+            {billingChoices(models ?? [], billing).map((b) => (
+              <option key={b} value={b}>
+                {billingLabel(b)}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="ledger-head">
           <div>
@@ -88,9 +118,20 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
           </div>
           <div>
             <div className="hint">{t(m.today)}</div>
-            <div className="bigno">{fmtUsd(props.ledger?.todayUsd ?? 0)}</div>
+            <div className="bigno">{fmtUsd(todayApi)}</div>
           </div>
         </div>
+        {/* only when Tasks of another machine were taken in: one machine looks as it always did */}
+        {(props.ledger?.byMachine.length ?? 0) >= 2 && (
+          <div className="kv" style={{ marginTop: 10 }} data-testid="ledger-by-machine">
+            {props.ledger!.byMachine.map((b) => (
+              <Fragment key={b.machine ?? ""}>
+                <span>{b.machine ?? t(m.thisInstance)}</span>
+                <span className="num">{t(m.machineLine, { week: fmtUsd(b.weekUsd), billed: fmtUsd(b.billedWeekUsd), today: fmtUsd(b.todayUsd) })}</span>
+              </Fragment>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="card usage">
@@ -108,8 +149,8 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
               {g.rows.map((q) => {
                 const stale = quotaStale(q.ts);
                 return (
-                  <Fragment key={q.window}>
-                    <span className={stale ? "stale" : undefined}>{windowLabel(q.window)}</span>
+                  <Fragment key={`${q.account}-${q.window}`}>
+                    <span className={stale ? "stale" : undefined}>{[accountMark(g.rows, q), windowLabel(q.window)].filter(Boolean).join(" · ")}</span>
                     <span className={`num${stale ? " stale" : ""}`}>
                       {pct(q.utilization)}
                       <span className={`meter ${q.utilization > 0.8 ? "warn" : ""}`}>
@@ -130,14 +171,15 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
           <span className="hint">{t(m.byModelHint)}</span>
         </div>
         {models === null && <div className="muted">{t(m.loading)}</div>}
-        {models && models.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
-        {models && models.length > 0 && (
+        {models && modelRows.length === 0 && <div className="muted">{t(m.noRecords)}</div>}
+        {models && modelRows.length > 0 && (
           <div className="table-scroll">
           <table className="pricing">
             <thead>
               <tr>
                 <th>{t(m.runner)}</th>
                 <th>{t(m.model)}</th>
+                <th>{t(m.billing)}</th>
                 <th>{t(m.count)}</th>
                 <th>{t(m.tokens)}</th>
                 <th>{t(m.apiEquivalent)}</th>
@@ -145,12 +187,13 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
               </tr>
             </thead>
             <tbody>
-              {models.map((row) => (
-                <tr key={`${row.runner}-${row.model ?? ""}`}>
+              {modelRows.map((row) => (
+                <tr key={`${row.runner}-${row.model ?? ""}-${row.billing}`}>
                   <td>
                     <RunnerPill runner={row.runner} />
                   </td>
                   <td className="mono">{row.model ?? t(m.unknownModel)}</td>
+                  <td>{billingLabel(row.billing)}</td>
                   <td className="num">{row.tasks}</td>
                   <td className="num">{Math.round(row.tokens / 1000)}k</td>
                   <td className="num">{row.unpriced ? <span className="warn">{t(m.notInPriceTable)}</span> : fmtUsd(row.costUsd)}</td>
@@ -319,7 +362,7 @@ export function Ledger(props: { ledger: LedgerSummary | null; runners: RunnerInf
   );
 }
 
-/** The price table's rows; a row entered on the settings screen (#1402) carries the 設定 tag. */
+/** The price table's rows; a row entered on the settings screen carries the 設定 tag. */
 export function PriceRows(props: { models: PricingTable["models"]; fromSettings: string[] }) {
   return (
     <>

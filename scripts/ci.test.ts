@@ -81,6 +81,38 @@ describe("ci", () => {
     expect(ciExit(kept)).toBe(1);
   });
 
+  test("issue-refs step fails on an issue number in a comment", () => {
+    const step = ciSteps.find((s) => s.name === "no issue numbers in code comments")!;
+    // the step's command as it is, with this checkout's kit, in a small repository of its own
+    const run = step.run.replace("ops-kit/src/cli.ts", join(import.meta.dir, "../ops-kit/src/cli.ts"));
+    expect(run).not.toBe(step.run);
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.ci-refs."));
+    try {
+      const git = (...args: string[]) => expect(Bun.spawnSync(["git", "-C", dir, ...args]).exitCode).toBe(0);
+      const at = (text: string) => {
+        writeFileSync(join(dir, "src", "a.ts"), text);
+        writeFileSync(join(dir, "src", "a.test.ts"), 'test("adds", () => {});\n');
+        git("add", ".");
+        const p = Bun.spawnSync(["bash", "-e", "-c", run], { cwd: dir, env: { PATH: process.env.PATH!, HOME: process.env.HOME! } });
+        return [p.exitCode, p.stdout.toString()] as const;
+      };
+      Bun.spawnSync(["git", "init", "-q", dir]);
+      mkdirSync(join(dir, "src"));
+      mkdirSync(join(dir, "private"));
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ publicSync: { target: "o/public", include: ["src/"], exclude: ["private/"] } }));
+      // what is left out of the public tree is not looked at
+      writeFileSync(join(dir, "private", "b.ts"), "// see #123\n");
+      // a number as a value passes: a string, a code span in a comment
+      expect(at('export const title = "#123";\n// the form is `#12`\n')).toEqual([0, "hits: 0 / files: 2\n"]);
+      const hit = at('// see #123\nexport const title = "#123";\n');
+      expect(hit[0]).not.toBe(0);
+      expect(hit[1]).toContain("src/a.ts:1: // see #123");
+      expect(hit[1]).toContain("hits: 1 / files: 2");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("the steps: home paths, install, public tree check, licenses, Codex CLI, typecheck, public docs, web build, perf, then test — in that order; only the perf steps keep going", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
     const at = (cmd: string) => first.findIndex((r) => r === cmd || r.startsWith(`${cmd} `) || (cmd.endsWith(" ") && r.startsWith(cmd)));

@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { SettingsGroupHeading, SettingsToc } from "./components/Settings.tsx";
 import { SETTINGS_GROUPS } from "./settingsGroups.ts";
 
-test("SettingsToc: one link per group, each to the id of that group's heading (#3356)", () => {
+test("SettingsToc: one link per group, each to the id of that group's heading", () => {
   const html = renderToStaticMarkup(createElement(Fragment, null, createElement(SettingsToc), ...SETTINGS_GROUPS.map((g) => createElement(SettingsGroupHeading, { key: g.id, id: g.id }))));
   const toc = html.slice(0, html.indexOf("</nav>"));
   const hrefs = [...toc.matchAll(/href="#([\w-]+)"/g)].map((m) => m[1]);

@@ -2,7 +2,7 @@ import type { CustomRunner, RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { common } from "./i18n/common.ts";
 
-/** The runners the daemon registered, in the order it lists them. DAK is absent unless SWITCHBOARD_DAK_URL is set (#2558). */
+/** The runners the daemon registered, in the order it lists them. DAK is absent unless SWITCHBOARD_DAK_URL is set. */
 /** `keep` is a value already saved (a schedule's runner): it stays selectable even when the daemon no longer lists it. */
 export function listedRunners(runners: RunnerInfo[] | undefined, keep?: RunnerId): RunnerId[] {
   const out: RunnerId[] = runners ? runners.map((r) => r.id) : ["claude", "codex"];
@@ -39,7 +39,7 @@ export type CustomRunnerDraft = { port: CustomRunner["port"]; name: string; labe
 export const PORT_LABEL: Record<CustomRunner["port"], string> = { adk: "ADK", agui: "AG-UI" };
 
 /**
- * What to tell the person before they add an AG-UI server, as keys the screen words (#3409).
+ * What to tell the person before they add an AG-UI server, as keys the screen words.
  * `request`: the text leaves this machine. `token`: the Task's Workspace MCP token goes with it. `confirm`: always.
  */
 export function aguiNotices(d: Pick<CustomRunnerDraft, "url" | "sendWorkspaceMcp">): ("request" | "token" | "confirm")[] {

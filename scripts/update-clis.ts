@@ -1,6 +1,6 @@
 /**
  * bun scripts/update-clis.ts — updates the host's claude / codex CLIs when npm has a newer one, checks that one turn
- * still runs through the adapter, and puts the old version back when it does not (PBI #1626, docs/design/cli-update.md).
+ * still runs through the adapter, and puts the old version back when it does not (docs/design/cli-update.md).
  *
  * One line per runner:
  *   <runner> version: <v>（最新）                      — nothing to do

@@ -64,6 +64,33 @@ export function fileLog(path: string, keepDays = recordDays(process.env)): Offlo
   };
 }
 
+const DEFAULT_REUSE_HOURS = 24;
+
+/** 同じ入力の鍵のビルドの結果を使い回す時間の幅。`SWITCHBOARD_OFFLOAD_REUSE_HOURS` の 0 以上の数（0 = 使い回さない）、無いか読めなければ 24。 */
+export function reuseHours(env: Record<string, string | undefined>): number {
+  const raw = env.SWITCHBOARD_OFFLOAD_REUSE_HOURS;
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_REUSE_HOURS;
+}
+
+/**
+ * `key` と同じ入力の鍵で、`hours` 時間以内に始まった ci のビルドのうち、いちばん新しい行。鍵がまったく同じものだけで、
+ * 近い鍵・鍵の無い行・イメージ作りの行は拾わない。`hours` が 0 以下なら無し。
+ */
+export function findReusable(log: OffloadLog, key: string, hours: number, now: number): OffloadRecord | undefined {
+  if (!(hours > 0)) return undefined;
+  return log.read(now - hours * 3_600_000).filter((r) => r.kind === "ci" && r.key === key && Date.parse(r.at) <= now).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+}
+
+/**
+ * 集めたビルドの出力が使い回せるか: コマンドが終わりまで回って自分の終了コードを出した（`sb-offload: exit <n>` の行がある）ビルドだけ。
+ * 中断・時間切れ・始まる前の失敗・読めないログ（どれもその行が無い）は、入力の結果ではないので使い回さない。
+ */
+export const reusableOutput = (output: string): boolean => /^sb-offload: exit \d+$/m.test(output);
+
+/** 前のビルドの結果を使ったときの 1 行（test-changed と typecheck で同じ）。 */
+export const reusedLine = (r: { build: string; at: string }): string => `外: 前のビルド ${r.build}（${r.at} に開始）の結果を使った。回し直すなら --force`;
+
 async function gitOut(cwd: string, args: string[], input?: string): Promise<string> {
   const p = Bun.spawn(["git", ...args], { cwd, env: process.env, stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe" });
   const [out, , code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
@@ -83,7 +110,8 @@ function filesUnder(dir: string): string[] {
 
 /**
  * 外のビルドの入力の鍵: sha256 に `script`・大きさ・作業ツリーの各ファイルのパスと内容の hash（一覧は aws/host/offload.sh と同じ
- * 追跡 + 未追跡。消えたファイルとディレクトリは飛ばす）・録画の各ファイルの相対パス・大きさ・mtime を入れる。
+ * 追跡 + 未追跡。消えたファイルとディレクトリは飛ばす）・録画の各ファイルの相対パスと内容の hash を入れる（大きさと mtime では
+ * 見分けない: 同じ長さ・同じ時刻で中身だけ違う録画が、前のビルドの結果を使い回させない）。
  */
 export async function buildKey(cwd: string, script: string, run: { size: OffloadSize; fixtures?: string }): Promise<string> {
   const h = createHash("sha256");
@@ -99,10 +127,10 @@ export async function buildKey(cwd: string, script: string, run: { size: Offload
   const hashes = paths.length ? (await gitOut(cwd, ["hash-object", "--stdin-paths"], paths.join("\n") + "\n")).split("\n").filter(Boolean) : [];
   paths.forEach((p, i) => h.update(`${p}\0${hashes[i]}\0`));
   if (run.fixtures && existsSync(run.fixtures)) {
-    for (const f of filesUnder(run.fixtures).sort()) {
-      const s = statSync(f);
-      h.update(`fixture\0${relative(run.fixtures, f)}\0${s.size}\0${s.mtimeMs}\0`);
-    }
+    const files = filesUnder(run.fixtures).sort();
+    const of = files.length ? (await gitOut(cwd, ["hash-object", "--no-filters", "--stdin-paths"], files.join("\n") + "\n")).split("\n").filter(Boolean) : [];
+    if (of.length !== files.length) throw new Error("recordings could not be hashed");
+    files.forEach((f, i) => h.update(`fixture\0${relative(run.fixtures!, f)}\0${of[i]}\0`));
   }
   return h.digest("hex");
 }

@@ -17,6 +17,8 @@ body:
       label: やること
       description: >-
         1 段落。触るパッケージ / ファイルを名指しし、末尾に「満たす受け入れ条件: 親 PBI の n, m」を書く。前提となる Task があれば「前提: #N が Done」。
+        この Task が担う、部品や Task をまたぐ条件を「守る条件: 〜」の 1 行で（無ければ「守る条件: なし」。証明するテストは検証の欄）。
+        触らないが前提が変わる場所を「古い前提を持つ既存の箇所: 〜」で（`ops-kit old-paths list` の出力。当たらなければ「なし」）。
     validations:
       required: true
   - type: textarea

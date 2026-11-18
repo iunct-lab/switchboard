@@ -20,7 +20,14 @@ export interface JudgeInput {
   prompt: string;
   /** The last reply of the turn (`turn.end.summary`). */
   lastReply: string;
+  /** What the person sent to start the last turn, when the task had a turn before it (`Db.judgeContext`). */
+  lastRequest?: string;
+  /** The reply that ended the turn before the last one: what a short `lastRequest` ("A で") answers. */
+  previousReply?: string;
 }
+
+/** How much of each part goes into the judging prompt (characters). */
+export const JUDGE_CHARS = { prompt: 1200, previousReply: 1000, lastRequest: 1200, lastReply: 2000 } as const;
 
 export interface JudgeOptions {
   adapters: Map<RunnerId, RunnerAdapter>;
@@ -33,7 +40,7 @@ export interface JudgeOptions {
   /** Gives up at once (the daemon is stopping): the turn's session is closed and nothing more is tried. */
   signal?: AbortSignal;
   /** Asked once when the configured runner fails. Absent = `JUDGE_FALLBACK`. */
-  fallback?: { runner: RunnerId; model: string };
+  fallback?: { runner: RunnerId; model: string; effort?: string };
   /** How long one turn may take. Absent = `JUDGE_TIMEOUT_MS`. */
   timeoutMs?: number;
 }
@@ -45,9 +52,9 @@ export interface JudgeOptions {
  */
 export async function judgeTurn(input: JudgeInput, opts: JudgeOptions): Promise<TaskJudgement & { runner: RunnerId; model: string }> {
   const prompt = buildJudgePrompt(input);
-  const tries: Array<{ runner: RunnerId; model: string }> = [{ runner: opts.settings.runner, model: opts.settings.model }];
-  const fallback = opts.fallback ?? JUDGE_FALLBACK;
-  if (opts.settings.runner !== fallback.runner || opts.settings.model !== fallback.model) tries.push(fallback);
+  const tries: Array<{ runner: RunnerId; model: string; effort?: string }> = [{ runner: opts.settings.runner, model: opts.settings.model, effort: opts.settings.effort }];
+  const fallback: { runner: RunnerId; model: string; effort?: string } = opts.fallback ?? JUDGE_FALLBACK;
+  if (opts.settings.runner !== fallback.runner || opts.settings.model !== fallback.model || (opts.settings.effort || "") !== (fallback.effort || "")) tries.push(fallback);
   const timeoutMs = opts.timeoutMs ?? JUDGE_TIMEOUT_MS;
   let last: unknown;
   for (const t of tries) {
@@ -58,8 +65,8 @@ export async function judgeTurn(input: JudgeInput, opts: JudgeOptions): Promise<
       // A runner with modes but none known to be read-only would run in its default (writing) mode; a judgement is not worth that.
       const ro = readOnlyMode(adapter);
       if (ro.unconstrained && adapter.permissionModes?.length) throw new Error(`${t.runner} has no read-only permission mode`);
-      const text = await runSuggestionTurn({ adapter, cwd: opts.cwd, model: t.model, permissionMode: ro.mode, onUsage: (ev) => opts.onUsage?.(t.runner, ev), log: opts.log }, prompt, opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs));
-      return { ...parseJudgement(text), ...t };
+      const text = await runSuggestionTurn({ adapter, cwd: opts.cwd, model: t.model, effort: t.effort, permissionMode: ro.mode, onUsage: (ev) => opts.onUsage?.(t.runner, ev), log: opts.log }, prompt, opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs));
+      return { ...parseJudgement(text), runner: t.runner, model: t.model };
     } catch (e) {
       last = e;
       opts.log?.(`judge: ${t.runner}:${t.model} could not judge (${String((e as Error).message ?? e)})`);
@@ -68,20 +75,32 @@ export async function judgeTurn(input: JudgeInput, opts: JudgeOptions): Promise<
   throw last ?? new Error("the daemon is stopping");
 }
 
-/** The prompt: instructions, then the task and its last reply. Both come from the runner / the person and are capped, not trusted. */
+/**
+ * The prompt: instructions, then the task and its last reply. All of it comes from the runner / the person and is capped,
+ * not trusted. A task of one turn gets the request and the last reply. One of several turns also gets what the person
+ * sent to start the last turn and the reply before it, and is judged against that last request (the first request is
+ * context): a task asked again, or answered with "A で", is not judged by its first request alone. Not the whole
+ * conversation — the judgement stays one cheap turn however long the task is.
+ */
 export function buildJudgePrompt(input: JudgeInput): string {
+  const lastRequest = input.lastRequest?.trim();
+  const later = !!lastRequest && lastRequest !== input.prompt.trim();
+  const previousReply = later ? input.previousReply?.trim() : "";
   return [
     "あなたはエージェントのタスクが「完了」か「要対応」かを、最後の返答から判定します。JSON だけを返してください。",
     'ほかの文章・コードブロック・前置きは書かないこと。形式: {"result": "finished|needs_action", "reason": "<日本語で 60 字以内の理由>"}',
     "- finished（完了）: 依頼された作業を終えて、その結果を報告している",
     "- needs_action（要対応）: 利用者に質問・選択・確認・作業を求めて止まっている",
+    ...(later ? ["- このタスクは何度かやり取りしている。最後の返答が「最後のターンの依頼」に応えたかで決める（「依頼」は最初の依頼で、文脈として読む。「前のターンの返答」は最後のターンの依頼が答えている相手）"] : []),
     "",
     "## 依頼",
     `title: ${oneLine(input.title)}`,
-    `prompt: ${oneLine(input.prompt).slice(0, 1200)}`,
+    `prompt: ${oneLine(input.prompt).slice(0, JUDGE_CHARS.prompt)}`,
+    ...(previousReply ? ["", "## 前のターンの返答", previousReply.slice(0, JUDGE_CHARS.previousReply)] : []),
+    ...(later ? ["", "## 最後のターンの依頼", lastRequest.slice(0, JUDGE_CHARS.lastRequest)] : []),
     "",
     "## 最後の返答",
-    input.lastReply.trim().slice(0, 2000),
+    input.lastReply.trim().slice(0, JUDGE_CHARS.lastReply),
   ].join("\n");
 }
 

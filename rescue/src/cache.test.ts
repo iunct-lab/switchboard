@@ -93,7 +93,7 @@ test("sweepCacheWork: on a machine of Switchboard's own, an old mktemp-named dir
   expect(readdirSync(cache).sort()).toEqual([...others].sort());
 });
 
-test("sweepCacheWork: old local-CI worktrees, base worktrees and any PR's old logs go, and the repository forgets the worktrees; new, in-use and other names stay (#2549)", async () => {
+test("sweepCacheWork: old local-CI worktrees, base worktrees and any PR's old logs go, and the repository forgets the worktrees; new, in-use and other names stay", async () => {
   for (const name of ["switchboard.local-ci-2518.Ab12Cd", "switchboard.local-ci-2518-base.Zz98Yy"]) {
     await run(["git", "-C", repo, "worktree", "add", "-q", "--detach", join(cache, name)], repo);
     age(join(cache, name));
@@ -219,7 +219,7 @@ function entry(rel: string, days: number) {
 const ls = (rel: string) => readdirSync(join(home, rel)).sort();
 const PRUNED = "Deleted Images:\nuntagged: alpine:3.19\ndeleted: sha256:aaa\ndeleted: sha256:bbb\n\nTotal reclaimed space: 1.5GB\n";
 
-test("sweepCaches / sweepDocker on a machine of Switchboard's own: uv's and bun's entries untouched for CACHE_STALE_MS go, new ones and dot-names stay; docker prunes the unused images (#2711)", async () => {
+test("sweepCaches / sweepDocker on a machine of Switchboard's own: uv's and bun's entries untouched for CACHE_STALE_MS go, new ones and dot-names stay; docker prunes the unused images", async () => {
   expect(CACHE_STALE_MS).toBeGreaterThan(CACHE_WORK_STALE_MS);
   entry(".cache/uv/archive-v0/old1", 15);
   entry(".cache/uv/archive-v0/new1", 0);
@@ -250,7 +250,7 @@ test("sweepCaches / sweepDocker on a machine of Switchboard's own: uv's and bun'
   await expect(sweepDocker({ owned: true }, async () => Promise.reject(new Error("docker image prune exited 1: Cannot connect")))).rejects.toThrow("exited 1");
 });
 
-test("sweepCaches / sweepDocker elsewhere: the caches the user's other apps share stay and docker is not called (#2711)", async () => {
+test("sweepCaches / sweepDocker elsewhere: the caches the user's other apps share stay and docker is not called", async () => {
   entry(".cache/uv/archive-v0/old1", 15);
   entry(".bun/install/cache/left-pad@1.3.0@@@1", 15);
   expect(sweepCaches(home, { owned: false }).removed).toBe(0);
@@ -261,7 +261,7 @@ test("sweepCaches / sweepDocker elsewhere: the caches the user's other apps shar
   expect(calls).toEqual([]);
 });
 
-test("sweepCaches: an entry a running process uses stays, and without the running processes nothing goes (#2711)", async () => {
+test("sweepCaches: an entry a running process uses stays, and without the running processes nothing goes", async () => {
   entry(".cache/uv/archive-v0/busy1", 15);
   entry(".cache/uv/archive-v0/old1", 15);
   const child = Bun.spawn(["sleep", "30"], { cwd: join(home, ".cache/uv/archive-v0/busy1") });

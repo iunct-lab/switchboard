@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fetchVault, saveVault, VAULT_BRANCH, VaultError } from "./fixtures.ts";
 
-// #3532: the recordings' second copy is a branch of the repository, written and read with git's plumbing.
+// the recordings' second copy is a branch of the repository, written and read with git's plumbing.
 let root: string;
 let clone: string;
 let origin: string;

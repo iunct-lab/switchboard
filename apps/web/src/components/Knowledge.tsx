@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KnowledgeDoc, KnowledgeSearchHit, Workspace } from "@switchboard/protocol";
-import { api, type KnowledgeIndex, type KnowledgeDocDetail, type MaterializeFile } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type KnowledgeIndex, type KnowledgeDocDetail, type MaterializeFile } from "../api/knowledge.ts";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { brief as m } from "../i18n/brief.ts";

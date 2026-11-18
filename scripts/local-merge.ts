@@ -1,23 +1,39 @@
 /**
- * Merges a local change (#2489): `bun scripts/local-merge.ts <n> [--allow-large]`, in the checkout the change's branches
+ * Merges a local change: `bun scripts/local-merge.ts <n> [--allow-large]`, in the checkout the change's branches
  * are in, with BACKLOG_URL and BACKLOG_WORKSPACE (the app's Task has them). The change is judged again here by
  * merge-gate's rules (`readChange` + `judge`: what moved since the judgement is caught), and only a merge verdict merges.
  * The merge is GitHub's Rebase and merge: the branch's commits rebased one by one onto the base's tip (no merge commit,
- * author dates kept) in a throwaway worktree under ~/.cache, then the base fast-forwarded to them, the branch deleted (only at the judged head),
- * the change closed with its merge commit and the Tasks it closes (`Closes #n`, `Backlog-Task: n`, the branch `sb/<n>-`)
- * closed with their Status Done. A conflict, a stop, a dirty worktree of the base or a base that moved changes nothing (exit 1). Once the base
- * moved, a failure of the app is said with what is left (exit 1); the base is not moved back. No fetch, no push, no gh.
+ * author dates kept) in a throwaway worktree under ~/.cache. Where it lands:
+ * - a workspace that keeps its changes itself by design (no service behind its Issues): the base branch is
+ *   fast-forwarded, in the worktree that has it checked out when there is one — that checkout is where its code lives;
+ * - a workspace whose Issues are GitHub's (the change stands in for a pull request while GitHub cannot be used): on the
+ *   base's landing ref (packages/core/src/landing.ts), never on the branch — no work tree is touched, so the main work tree
+ *   a daemon may be running from does not move; it is updated by `ops-kit pull-main` after forge-resync, as after any
+ *   merge. Such a change is merged only while the app still sees GitHub out of use (`GET /api/backlog/outage`): once
+ *   GitHub answers, the work goes on as a pull request.
+ * Then the branch is deleted (only at the judged head), the merge is recorded on the change (`[local-merge] merged <tip>
+ * base=<base>`: forge-resync sends only commits such a record names) and the change closed with its merge commit. The
+ * Tasks it closes (`Closes #n`, `Backlog-Task: n`, the branch `sb/<n>-`) are closed with their Status Done — at once
+ * where the workspace keeps its changes itself; in a GitHub workspace by `forge-resync.ts --report`, once GitHub's main
+ * has the commits (a Task is not Done on GitHub before its code is there).
+ * A conflict, a stop, a dirty worktree of the base or a base that moved changes nothing (exit 1). Once the merge landed,
+ * a failure of the app is said with what is left (exit 1); it is not taken back. No fetch, no push, no gh.
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { client } from "../ops-kit/src/backlog-client.ts";
 import { sh } from "./local-ci.ts";
-import { judge, readChange, readChangeDetail } from "./merge-gate.ts";
+import { judge, noteScopeStop, readChange, readChangeDetail, readChangeRecords } from "./merge-gate.ts";
+import type { StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
+import { landedTip, landingRef } from "../packages/core/src/landing.ts";
 
 const USAGE = "usage: bun scripts/local-merge.ts <n> [--allow-large]";
 const BACKLOG_TASK = /^Backlog-Task: (\d+)\s*$/gm;
+/** The record local-merge leaves on a change it merged: the commits `base..tip` are that change's, as judged. */
+export const LOCAL_MERGE = /^\[local-merge\] merged ([0-9a-f]{40}) base=([0-9a-f]{40})\b/;
+export const localMergeMark = (tip: string, base: string) => `[local-merge] merged ${tip} base=${base}`;
 /** The identity the rebase commits as (local-ci's): the clone's settings do not decide it; the author stays the commit's. */
 const IDENTITY = ["-c", "user.name=local-merge", "-c", "user.email=local-merge@localhost", "-c", "commit.gpgSign=false"];
 
@@ -31,7 +47,7 @@ export interface MergeOpts {
   now?: () => Date;
 }
 
-/** The Issues a change closes (#2489): its body's `Closes #n` and `Backlog-Task: n`, and its branch `sb/<n>-`; not itself. */
+/** The Issues a change closes: its body's `Closes #n` and `Backlog-Task: n`, and its branch `sb/<n>-`; not itself. */
 export function closedBy(n: number, body: string, head: string): number[] {
   const all = [...linkedIssues({ body, headRefName: head }), ...[...body.matchAll(BACKLOG_TASK)].map((m) => Number(m[1]))];
   return [...new Set(all)].filter((x) => x !== n).sort((a, b) => a - b);
@@ -48,7 +64,7 @@ export async function worktreeOf(root: string, branch: string): Promise<string |
 }
 
 /**
- * Moves `branch` of the repository at `root` from `expected` to `to` (#2705: forge-resync moves main the same way). The
+ * Moves `branch` of the repository at `root` from `expected` to `to` (forge-resync moves main the same way). The
  * worktree that has it checked out, if any, is fast-forwarded only when it is clean and still at `expected`; with none, the
  * ref is updated only from `expected`. A branch that moved since is not overwritten: it throws, and nothing changed.
  */
@@ -64,6 +80,15 @@ export async function advanceBranch(root: string, branch: string, to: string, ex
   await sh(["git", "-C", tree, "merge", "-q", "--ff-only", to]);
 }
 
+/**
+ * Lands a merge of `branch` on its landing ref (landing.ts) without touching any work tree: `from` is what `landedTip`
+ * read when the base was judged. The ref is written only from the value it had then (none: it must not exist), so two
+ * merges at once do not both land.
+ */
+export async function landOn(root: string, branch: string, to: string, from: { landing: string | null }): Promise<void> {
+  await sh(["git", "-C", root, "update-ref", landingRef(branch), to, from.landing ?? "0".repeat(40)]);
+}
+
 /** The command: 0 = merged and every state written / 1 = stopped (nothing changed), or the app's update failed after the merge / 2 = not judged. */
 export async function main(args: string[], cwd: string, o: MergeOpts): Promise<number> {
   const log = o.log ?? console.log;
@@ -76,17 +101,24 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   let root: string;
   let detail: Awaited<ReturnType<typeof readChangeDetail>>;
   let facts: Awaited<ReturnType<typeof readChange>>;
+  let records: StoredRecords;
   try {
     root = (await sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
     detail = await readChangeDetail(n, o.env, { fetch: o.fetch, cwd });
-    facts = await readChange(detail, root);
+    records = await readChangeRecords(detail, o.env, o.fetch);
+    facts = await readChange(detail, root, records);
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") return 1;
+  if (j.verdict !== "merge") {
+    await noteScopeStop(facts, j, records, n, o);
+    return 1;
+  }
+  // a workspace whose Issues are a service's numbers its changes apart: the change's own number may be a Task's there
+  const apart = records.service !== "switchboard";
 
   const git = (...a: string[]) => sh(["git", "-C", root, ...a]);
   const { head: headName, base: baseName } = detail.issue.change;
@@ -96,7 +128,33 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
     err(`判定できなかった: #${n} の workspace が分からない（アプリの答えに workspaceId が無い）`);
     return 2;
   }
-  const baseTree = await worktreeOf(root, baseName);
+  const api = client(o.env, o.fetch ?? fetch);
+  // a change that stands in for a pull request is merged here only while GitHub cannot be used, as the app sees it now
+  if (apart) {
+    let outage: { unusable?: boolean; detail?: string; reason?: string };
+    try {
+      outage = (await api("GET", `/outage?workspaceId=${encodeURIComponent(workspace)}`)) as typeof outage;
+    } catch (e) {
+      err(`判定できなかった: GitHub が使えないかをアプリに確かめられない（${(e as Error).message}）`);
+      return 2;
+    }
+    if (outage.unusable !== true) {
+      err(outage.reason === "usable"
+        ? "GitHub は使えます（アプリが今確かめた）。ローカルではマージしない。何も変えていない。forge-resync.ts でローカルのマージを送り、この枝は PR で進める"
+        : `GitHub が一時的に使えないとは確かめられない（${outage.detail ?? "理由なし"}）。ローカルではマージしない。何も変えていない。止まって利用者に報告する`);
+      return 1;
+    }
+  }
+  // the tip the change was judged on must still be where local work is based (the branch, or its landing ref)
+  const landed = landedTip(root, baseName);
+  if (!landed || landed.sha !== base) {
+    err(`${baseName} が判定の後に動いた（${base.slice(0, 7)} → ${landed?.sha.slice(0, 7) ?? "無し"}）。何も変えていない（判定し直す）`);
+    return 1;
+  }
+  // a GitHub workspace's merge never moves a work tree; one that keeps its changes itself moves its branch, unless its
+  // merges already wait on the landing ref (forge-resync put a merge of GitHub's main there)
+  const toLanding = apart || landed.ref === landingRef(baseName);
+  const baseTree = toLanding ? undefined : await worktreeOf(root, baseName);
   if (baseTree && (await sh(["git", "-C", baseTree, "status", "--porcelain", "--untracked-files=no"])).trim()) {
     err(`${baseName} を checkout している作業ツリー（${baseTree}）に未コミットの変更がある。何も変えていない`);
     return 1;
@@ -124,12 +182,14 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
 
   // the base to the new tip: only from the base that was judged (one that moved since is not overwritten)
   try {
-    await advanceBranch(root, baseName, tip, base);
+    if (toLanding) await landOn(root, baseName, tip, landed);
+    else await advanceBranch(root, baseName, tip, base);
   } catch (e) {
     err(`${baseName} を進められない: ${(e as Error).message.split("\n")[0]}。何も変えていない（判定し直す）`);
     return 1;
   }
   log(`${baseName}: ${base.slice(0, 7)} → ${tip.slice(0, 7)}（${headName} のコミットを rebase で並べた）`);
+  if (toLanding) log(`${landingRef(baseName)} に置いた。枝 ${baseName} とその作業ツリーは動かしていない（GitHub へは forge-resync.ts、作業ツリーはそのあと ops-kit pull-main）`);
 
   // from here the base has moved: what fails is said with what is left, and the base stays
   const left: string[] = [];
@@ -143,16 +203,21 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   } catch (e) {
     left.push(`枝 ${headName} の削除（${(e as Error).message.split("\n")[0]}）`);
   }
-  const api = client(o.env, o.fetch ?? fetch);
   const mergedAt = (o.now ?? (() => new Date()))().toISOString();
   try {
-    await api("PATCH", `/${n}`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt, reviewedHead: head } });
+    // which commits are this change's: forge-resync sends the local merges only when every commit is named by such a record
+    await api("POST", `/${n}/comment?change=1`, { workspaceId: workspace, text: localMergeMark(tip, base) });
+    await api("PATCH", `/${n}?change=1`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt, reviewedHead: head } });
   } catch (e) {
-    left.push(`変更 #${n} をマージ済みにする（${(e as Error).message}）`);
+    // without this record forge-resync stops at this commit (it sends only recorded merges) and says what the person can do
+    left.push(`変更 #${n} をマージ済みにする（${(e as Error).message}）。記録が無いので bun scripts/forge-resync.ts はこのコミットで止まる（止まったときの出力に、利用者が端末で実行する --adopt-landing ${tip} / --drop-landing ${tip} が出る）`);
   }
-  for (const t of closedBy(n, detail.issue.body, headName)) {
+  // in a GitHub workspace the Tasks are closed once GitHub's main has the commits (forge-resync.ts --report): a close
+  // kept here would be sent as soon as GitHub is back, before the code
+  if (apart) log(`閉じる Task（${closedBy(0, detail.issue.body, headName).map((t) => `#${t}`).join(", ") || "無し"}）は、GitHub の main に入ってから forge-resync.ts --report が閉じる`);
+  for (const t of apart ? [] : closedBy(n, detail.issue.body, headName)) {
     try {
-      // its Status with it (#3970): a closed Task left In review on the board reads as not done
+      // its Status with it: a closed Task left In review on the board reads as not done
       await api("PATCH", `/${t}`, { workspaceId: workspace, state: "CLOSED", fields: { Status: "Done" } });
       log(`#${t} を閉じた`);
     } catch (e) {

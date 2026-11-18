@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# runner-sync (#401, #402, #1443, #2906, #3467) — what only this disk holds, to S3, so 作り直す brings it back with no hand
+# runner-sync — what only this disk holds, to S3, so 作り直す brings it back with no hand
 # on it: ~/.claude/projects (Claude's sessions, which --resume needs, and its memory), ~/.codex/sessions,
 # ~/.switchboard/artifacts (the copies; their rows are in the DB), the attachments, the recordings, Knowledge and the
 # user's own settings (SAVE below). The DB comes back from Litestream; these would not. Same protection as the Litestream replica (the bucket's encryption, this stack's role): the user's
-# decision on #401.
+# decision when this was added.
 # Every key is written once, never over: the bucket keeps old versions of an overwritten key for 30 days, so a whole
-# archive uploaded again on every run leaves one old version per run, many times its own size (#1443). A "set" is a base
+# archive uploaded again on every run leaves one old version per run, many times its own size. A "set" is a base
 # plus what changed after it:
 #   s3://<data>/archive/runner/<set>/base.tar.zst   everything, every 7 days (<set> = the epoch second it was made)
 #   s3://<data>/archive/runner/<set>/<epoch>.tar.zst the files whose ctime is newer than the last run's start
@@ -93,7 +93,7 @@ TMP="$(mktemp -d "$HOME/.cache/sb-runner-sync.XXXXXX")"; trap 'rm -rf "$TMP"' EX
 # keys are named by the second and written once: a run in the same second as the last upload waits, or it would write
 # over that difference and lose it. The second is the one the last run named its key by (date), kept as the marker's
 # text: its mtime comes from the kernel's coarse clock, which can lag date by some ms, so a run started just after a
-# second boundary got an mtime in the second before its key's, and the next run did not wait (#3525)
+# second boundary got an mtime in the second before its key's, and the next run did not wait
 NOW="$(date +%s)"
 LAST=; [ -f "$SINCE" ] && read -r LAST < "$SINCE" || true
 [ ! -f "$SINCE" ] || [[ "$LAST" =~ ^[0-9]{10}$ ]] || LAST="$NOW"   # a marker without a second (the empty one an older run left): its second is not known, so wait

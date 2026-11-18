@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/runner-login-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * #354: a runner whose login ran out shows "ログインする"; codex relays its device URL and code and the banner goes away
+ * a runner whose login ran out shows "ログインする"; codex relays its device URL and code and the banner goes away
  * once the (fake) approval lands; claude offers a box for its page's code. Fake CLIs only — never a real login.
  * SCREENSHOT=<file.png> saves the banner with both logins open.
  */

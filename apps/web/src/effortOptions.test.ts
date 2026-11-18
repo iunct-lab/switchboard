@@ -8,7 +8,7 @@ import { effortLabel, effortOptions } from "./effortOptions.ts";
 
 const claude = { efforts: [{ value: "low", label: "low" }, { value: "high", label: "high" }] };
 
-describe("effortOptions (#833)", () => {
+describe("effortOptions", () => {
   test("the CLI default comes first, then the runner's efforts", () => {
     expect(effortOptions(claude, "")).toEqual([
       { value: "", label: "CLI 既定" },
@@ -22,9 +22,13 @@ describe("effortOptions (#833)", () => {
     expect(effortOptions(claude, "ultra").at(-1)).toEqual({ value: "ultra", label: "ultra" });
     expect(effortOptions(claude, "high")).toHaveLength(3);
   });
+
+  test("emptyLabel names the empty choice (a Settings row says what it falls back to); the other choices are unchanged", () => {
+    expect(effortOptions(claude, "", "ランナーの既定（high）")).toEqual([{ value: "", label: "ランナーの既定（high）" }, ...effortOptions(claude, "").slice(1)]);
+  });
 });
 
-describe("effortLabel (#833)", () => {
+describe("effortLabel", () => {
   test("empty / null is the CLI default; a listed value reads as its label; another as it is", () => {
     expect(effortLabel(null, claude)).toBe("CLI 既定");
     expect(effortLabel("", claude)).toBe("CLI 既定");
@@ -34,7 +38,7 @@ describe("effortLabel (#833)", () => {
   });
 });
 
-describe("Brief (#833)", () => {
+describe("Brief", () => {
   const task: Task = { id: "task_e", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "e", runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: "high", origin: "switchboard", resumeAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
   const runners: RunnerInfo[] = [{ id: "claude", available: true, permissionModes: [], models: [], efforts: [{ value: "high", label: "深い" }] }];
   const render = (t: Task) => renderToStaticMarkup(createElement(Brief, { task: t, ledger: null, onAbort: () => {}, open: true, onClose: () => {}, runners }));
@@ -51,7 +55,7 @@ describe("Brief (#833)", () => {
   });
 });
 
-describe("in English (#2442)", () => {
+describe("in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   test("the CLI default, a listed model and a preset's target read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);

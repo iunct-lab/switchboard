@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertRecordings, recordingText, recordingsDir, requireRecordings, skipRecordings } from "./recordings.ts";
 
-// #1945: recordings live outside Git. Absent and not asked for → skip; asked for (SWITCHBOARD_FIXTURES) and absent → fail.
+// recordings live outside Git. Absent and not asked for → skip; asked for (SWITCHBOARD_FIXTURES) and absent → fail.
 const REL = "packages/x/fixtures/a.jsonl";
 let root: string;
 const saved = { fixtures: process.env.SWITCHBOARD_FIXTURES };

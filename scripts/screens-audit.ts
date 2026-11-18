@@ -1,5 +1,5 @@
 /**
- * Every screen, photographed on a phone held upright and on a PC (#4030): run after `bun run --cwd apps/web build`.
+ * Every screen, photographed on a phone held upright and on a PC: run after `bun run --cwd apps/web build`.
  *
  *   bun scripts/screens-audit.ts [--home <dir>] [--out <dir>] [--screens home,backlog-queue,…] [--widths phone,pc] [--max-frames 8]
  *

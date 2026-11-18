@@ -6,8 +6,10 @@
 import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
 import type { Database } from "bun:sqlite";
 import { deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
-import { readStoredRecords, requestOf, type GhRunner } from "./backlog.ts";
-import { closesOf } from "./backlog-sync.ts";
+import { readStoredRecords } from "./backlog-stored.ts";
+import { requestOf } from "./backlog-item.ts";
+import type { GhRunner } from "./backlog-gh.ts";
+import { closesOf } from "./backlog-fetch.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 
 export type RawComment = { createdAt: string; body: string };

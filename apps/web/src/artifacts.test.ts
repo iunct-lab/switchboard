@@ -17,7 +17,7 @@ test("artifactsLabel shows the count only when there is one", () => {
   expect(artifactsLabel(2)).toBe("成果物（2）");
 });
 
-test("pickArtifact (#1778): the requested one when present, else the current one, else the first; gone says a request missed", () => {
+test("pickArtifact: the requested one when present, else the current one, else the first; gone says a request missed", () => {
   const list = [{ id: "a" }, { id: "b" }];
   expect(pickArtifact(list, "b", "a")).toEqual({ id: "b", gone: false });
   expect(pickArtifact(list, "zz", "b")).toEqual({ id: "b", gone: true });
@@ -36,7 +36,7 @@ test("isMarkdown: only markdown files", () => {
   expect(isMarkdown({ kind: "url", mime: "text/markdown" })).toBe(false);
 });
 
-test("appRequestOf (#3683): 要望にする once the page used the bridge (earlier days or now); the link once a request Task was started", () => {
+test("appRequestOf: 要望にする once the page used the bridge (earlier days or now); the link once a request Task was started", () => {
   expect(appRequestOf({ appDays: 0, appRequestTaskId: null }, false)).toEqual({ offer: false, taskId: null });
   expect(appRequestOf({ appDays: 0, appRequestTaskId: null }, true)).toEqual({ offer: true, taskId: null });
   expect(appRequestOf({ appDays: 2, appRequestTaskId: null }, false)).toEqual({ offer: true, taskId: null });
@@ -52,7 +52,7 @@ test("copyKind: content for text and pages, url for links, none for images, fold
   expect([c("text/html", "dir"), c("text/plain", "dir")]).toEqual([null, null]);
 });
 
-test("frameUnavailable (#4062): an error reading the page keeps the frame from showing the server's error body", () => {
+test("frameUnavailable: an error reading the page keeps the frame from showing the server's error body", () => {
   expect(frameUnavailable(null)).toBe(false);
   expect(frameUnavailable(200)).toBe(false);
   expect(frameUnavailable(404)).toBe(true);

@@ -1,9 +1,9 @@
-# The cloud host (#181, #232): deploy / start / rebuild / status from a phone, with AWS reached through OIDC only
+# The cloud host: deploy / start / rebuild / status from a phone, with AWS reached through OIDC only
 # (no long-lived keys in Secrets). Repository variables: SWITCHBOARD_HOST_ROLE_ARN (the stack's GitHubOidcRole output)
 # and SWITCHBOARD_HOST_PARAMS (the non-secret --parameter-overrides, e.g. "ImageId=ami-… VpcId=vpc-… …"); SWITCHBOARD_AWS_REGION and
 # SWITCHBOARD_HOST_STACK only when they differ from ap-northeast-1 and switchboard-host.
 # The first deploy is a person's (aws/README.md); this one updates the existing stack, uploading to its data bucket.
-# The steps are scripts/host-ops.ts (#917), the same command a person runs with their own AWS login when Actions does not run.
+# The steps are scripts/host-ops.ts, the same command a person runs with their own AWS login when Actions does not run.
 # Deleting the stack is not here: the Spot request has to be cancelled by a person first (aws/README.md).
 name: host
 on:

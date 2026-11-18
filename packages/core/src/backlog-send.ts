@@ -1,5 +1,5 @@
 /**
- * Sends the backlog edits kept here (db.ts `backlog_operations`) to GitHub, oldest first. The operations of one
+ * Sends the backlog edits kept here (db/schema.ts `backlog_operations`) to GitHub, oldest first. The operations of one
  * Issue go one after the other: one not done (held, failed, waiting for its time) holds the ones after it, so an answer's
  * label comes off only after the answer is posted. No database transaction is open while GitHub is asked.
  *
@@ -18,12 +18,18 @@
  *   (no connection: nothing left, so a post waits as it is, not unknown) and the login refused (401: asked again by the
  *   next send, nothing failed for it); a permission refused on one thing (403) or a refused input (4xx) → `failed`,
  *   not sent again by itself; an outage → a `set` waits and is tried again, at most MAX_ATTEMPTS times.
+ * - An `artifact` (a closed PBI's report on its Issue) is sent with `gh issue artifact` (GitHub has no API for it): never
+ *   to a public repository, never a copy holding a value that signs in; one already there under its name is done, which
+ *   is also how a lost answer is settled (no marker is put into the document). It holds nothing else of its Issue back.
  * - A create's Project item, parent and state are sent after the Issue with the same operation: each step is the same
  *   when sent twice, and the Issue's id is kept (`remoteId`) as soon as GitHub gives it.
  */
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
-import type { BacklogOperation, BacklogOperationStatus, BacklogOverwritten, Db } from "./db.ts";
-import type { BacklogCreatePayload, GhRunner } from "./backlog.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { BacklogArtifactPayload, BacklogOperation, BacklogOperationStatus, BacklogOverwritten, Db } from "./db.ts";
+import type { BacklogCreatePayload } from "./backlog-edit.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { backlogFieldValue, sameBacklogValue } from "./backlog-merge.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubResponse } from "../../../ops-kit/src/gh.ts";
 import { fieldValue, type Field } from "../../../ops-kit/src/set.ts";
@@ -192,6 +198,33 @@ function waitOf(e: CallError, at: number): Limit | null {
 
 const SETTLED = "後の編集の値に GitHub が既になっています";
 const ALREADY = "GitHub に断られましたが、読み直すと GitHub は既に送る値でした";
+
+/**
+ * The `gh issue artifact` commands (a preview of GitHub's CLI, and the only way to Issue artifacts): the one place
+ * that knows their shape. `list` answers the names already on the Issue (`names` reads its output); `create` attaches a
+ * document — the copy's path with the name after `#` — or a link (`--name`). Not checked against the real CLI here: when
+ * its arguments or its JSON differ, this is what to correct.
+ */
+export const issueArtifactGh = {
+  list: (repo: string, issue: number): string[] => ["issue", "artifact", "list", String(issue), "-R", repo, "--json", "name"],
+  names: (stdout: string): string[] => (JSON.parse(stdout.trim() || "[]") as Array<{ name?: unknown }>).flatMap((a) => (typeof a?.name === "string" ? [a.name] : [])),
+  create: (repo: string, issue: number, a: { name: string; file: string } | { name: string; url: string }): string[] =>
+    "url" in a ? ["issue", "artifact", "create", String(issue), "-R", repo, a.url, "--name", a.name] : ["issue", "artifact", "create", String(issue), "-R", repo, `${a.file}#${a.name}`],
+  /** Whether a gh call is the one that writes (not made once the sync is off). */
+  writes: (args: string[]): boolean => args[0] === "issue" && args[1] === "artifact" && args[2] !== "list",
+};
+
+/** Where an artifact operation's copy is, and its text (what the secret check reads); null = the artifact is gone (removed, or its copy is). A link has no copy. */
+export function artifactCopy(db: Db, artifactsDir: string | undefined, p: BacklogArtifactPayload): { file: string | null; text: string } | null {
+  const a = db.getArtifact(p.artifactId);
+  if (!a || a.removedAt !== null) return null;
+  if (p.kind === "link") return { file: null, text: p.url ?? "" };
+  if (!artifactsDir || !a.entry) return null;
+  const file = join(artifactsDir, a.taskId, a.id, a.entry);
+  return existsSync(file) ? { file, text: readFileSync(file, "utf8") } : null;
+}
+const ARTIFACT_GONE = "成果物が消されているので送りません";
+export const ARTIFACT_PUBLIC = "公開リポジトリには成果物を送りません";
 const VERIFIED = "書いた後の編集履歴を読み直し、ほかの編集を上書きしていないと確かめました";
 
 /** A write that replaced another login's edit of the field: held with it, for the user to choose. */
@@ -213,6 +246,8 @@ class Sender {
   onWrite: () => void = () => undefined;
   /** A limit (or GitHub not reached) met by the read after a write: thrown once the operation's outcome is stored. */
   stopAfter: Limit | null = null;
+  /** Where the artifacts' copies are (the daemon's artifacts directory); unset = an `artifact` operation cannot be sent. */
+  artifactsDir: string | undefined;
   constructor(private gh: GhRunner, private db: Db, private cwd: string, private source: BacklogSource, private now: () => number) {}
   private get o() { return this.source.repository.split("/")[0]!; }
   private get r() { return this.source.repository.split("/")[1]!; }
@@ -540,11 +575,38 @@ class Sender {
     return { status: "done", remoteId: made.node_id, record: { externalId: made.node_id, remote } };
   }
 
+  /** gh's own subcommand (not `gh api`): its output, or a CallError carrying what gh said, read as any failed call is. */
+  private async cli(args: string[]): Promise<string> {
+    const r = await this.gh(args, this.cwd);
+    if (r.code !== 0) throw new CallError(`gh ${args.slice(0, 3).join(" ")}: ${(r.stderr.trim() || `exit ${r.code}`).slice(0, 200)}`, responseOf(r.stdout, r.stderr));
+    return r.stdout;
+  }
+
+  /**
+   * A report of a closed PBI's work onto its Issue. Only to a private repository (read just before); one already there
+   * under its name is done — a second send, or a first whose answer was lost, attaches nothing twice.
+   */
+  private async artifact(op: BacklogOperation, posting: { on: boolean }): Promise<Outcome> {
+    const p = op.payload as BacklogArtifactPayload;
+    const copy = artifactCopy(this.db, this.artifactsDir, p);
+    if (!copy) return { status: "done", error: ARTIFACT_GONE };
+    const n = this.numberOf(op.issue);
+    if (!n) return { status: "failed", error: "Issue の番号が分かりません" };
+    // anything but a plain `true` is not private: never sent
+    if ((await call(this.gh, this.cwd, [this.repo("")]))?.private !== true) return { status: "failed", error: ARTIFACT_PUBLIC };
+    if (issueArtifactGh.names(await this.cli(issueArtifactGh.list(this.source.repository, n))).includes(p.name)) return { status: "done" };
+    posting.on = true;
+    await this.cli(issueArtifactGh.create(this.source.repository, n, copy.file ? { name: p.name, file: copy.file } : { name: p.name, url: p.url ?? "" }));
+    this.onWrite();
+    posting.on = false;
+    return { status: "done" };
+  }
+
   /** Sends one operation and says how it went; throws Limit. */
   async send(op: BacklogOperation): Promise<Outcome> {
     const posting = { on: false };
     try {
-      return op.kind === "set" ? await this.set(op) : op.kind === "comment" ? await this.comment(op, posting) : await this.create(op, posting);
+      return op.kind === "artifact" ? await this.artifact(op, posting) : op.kind === "set" ? await this.set(op) : op.kind === "comment" ? await this.comment(op, posting) : await this.create(op, posting);
     } catch (e) {
       // the sync turned off before a write went out: the operation waits as it was
       if (e instanceof Limit && (e.kind === "off" || e === this.stopAfter)) throw e;
@@ -749,7 +811,7 @@ class GitlabSender {
 
 /** The forge operation a stored one is: a Project item and its fields are `project`, any other field `write`. */
 export const forgeKind = (op: Pick<BacklogOperation, "kind" | "field" | "targetKind">): ForgeKind =>
-  op.kind === "create" ? "create" : op.kind === "comment" ? "comment" : op.targetKind === "project-item" || op.field === "member" || op.field?.startsWith("field:") ? "project" : "write";
+  op.kind === "artifact" ? "artifact" : op.kind === "create" ? "create" : op.kind === "comment" ? "comment" : op.targetKind === "project-item" || op.field === "member" || op.field?.startsWith("field:") ? "project" : "write";
 
 /** The workspace Project's field definitions, read from GitHub once. Throws when GitHub is not reached. */
 export function readProjectFields(gh: GhRunner, db: Db, cwd: string, source: BacklogSource): Promise<Array<Field & { name: string }>> {
@@ -764,16 +826,17 @@ export function readProjectFields(gh: GhRunner, db: Db, cwd: string, source: Bac
  * the Issue of every Project item operation sent, written or not (GitHub had the value, or it was held as a conflict):
  * what is stored of the item has to be read again.
  */
-export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false, glab: Sh = runGlab, onItem = (_issue: number) => {}): Promise<number> {
+export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, source: BacklogSource, now = () => Date.now(), onWrite?: () => void, on = () => true, waits = (_op: BacklogOperation) => false, glab: Sh = runGlab, onItem = (_issue: number) => {}, artifactsDir?: string): Promise<number> {
   // a write is not made once the sync is off, inside an operation too (a set reads GitHub before it writes)
-  const writes = (args: string[]) => args.some((a, i) => (args[i - 1] === "-X" && a !== "GET") || /^query=\s*mutation/.test(a));
+  const writes = (args: string[]) => issueArtifactGh.writes(args) || args.some((a, i) => (args[i - 1] === "-X" && a !== "GET") || /^query=\s*mutation/.test(a));
   const sender = new Sender((args, c) => (writes(args) && !on() ? Promise.reject(new Limit(now(), "off")) : gh(args, c)), db, cwd, source, now);
+  sender.artifactsDir = artifactsDir;
   const lab = new GitlabSender((cmd) => (writes(cmd) && !on() ? Promise.reject(new Limit(now(), "off")) : glab(cmd)), db, source, now);
   if (onWrite) sender.onWrite = lab.onWrite = onWrite;
   const send = (o: ForgeOperation<BacklogOperation>) => sender.send(o.payload);
   const sendLab = (o: ForgeOperation<BacklogOperation>) => lab.send(o.payload);
   // the services an operation can be sent to (docs/design/forge-integration.md); GitLab has no Project (`project` is not supported)
-  const services: Record<string, ForgeImpl<BacklogOperation, Outcome>> = { github: { write: send, create: send, comment: send, project: send }, gitlab: { write: sendLab, create: sendLab, comment: sendLab } };
+  const services: Record<string, ForgeImpl<BacklogOperation, Outcome>> = { github: { write: send, create: send, comment: send, project: send, artifact: send }, gitlab: { write: sendLab, create: sendLab, comment: sendLab } };
   const held = new Set<string>();
   let done = 0;
   for (const listed of db.listPendingBacklogOperations(source)) {
@@ -797,8 +860,11 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
       }
       op = db.getBacklogOperation(op.id)!;
     }
+    // a report waits behind what its Issue still has to send (the close comes first), but holds nothing back itself:
+    // one refused or not sent yet does not stop the Issue's later edits, nor the other reports
+    const report = op.kind === "artifact";
     if (held.has(op.issue) || op.status === "conflict" || op.status === "failed" || (op.retryAt ?? 0) > now() || waits(op)) {
-      held.add(op.issue);
+      if (!report) held.add(op.issue);
       continue;
     }
     if (op.kind !== "create" && op.issue.startsWith("local:")) {
@@ -812,14 +878,16 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
     }
     // through the forge operation of the repository's service: one it does not support, or a value that signs
     // in, is held as failed with why — never sent
-    const forged: ForgeOperation<BacklogOperation> = { kind: forgeKind(op), target: { service: source.service, host: source.host, repository: source.repository }, texts: textsOf(op.payload), payload: op };
+    // a report's copy is what goes out: its text is checked with its name and URL
+    const copied = report ? artifactCopy(db, artifactsDir, op.payload as BacklogArtifactPayload) : null;
+    const forged: ForgeOperation<BacklogOperation> = { kind: forgeKind(op), target: { service: source.service, host: source.host, repository: source.repository }, texts: [...textsOf(op.payload), ...(copied ? [copied.text] : [])], payload: op };
     let run: (op: ForgeOperation<BacklogOperation>) => Promise<Outcome>;
     try {
       run = checkForgeOperation(forged, services);
     } catch (e) {
       if (!(e instanceof ForgeUnsupported || e instanceof ForgeRefused)) throw e;
       db.setBacklogOperationResult(op.id, { status: "failed", error: e.message }, now());
-      held.add(op.issue);
+      if (!report) held.add(op.issue);
       continue;
     }
     if (op.status === "pending") db.setBacklogOperationResult(op.id, { status: "sending", attempt: op.attempt + 1 }, now());
@@ -842,7 +910,7 @@ export async function sendGithubOperations(gh: GhRunner, db: Db, cwd: string, so
     if (sender.stopAfter ?? lab.stopAfter) throw sender.stopAfter ?? lab.stopAfter;
     if (out.status === "done") done++;
     // under the id it had and the one it has now (a create gives its Issue GitHub's id before its steps)
-    else held.add(op.issue).add(db.getBacklogOperation(op.id)!.issue);
+    else if (!report) held.add(op.issue).add(db.getBacklogOperation(op.id)!.issue);
   }
   return done;
 }

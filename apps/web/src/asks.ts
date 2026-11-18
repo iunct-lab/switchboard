@@ -1,11 +1,12 @@
 import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switchboard/protocol";
+import { choiceKey, isRecommendedChoice } from "@switchboard/protocol";
 import { issueHref } from "./backlogSync.ts";
 import { jstClock, jstDay } from "./time.ts";
 import { t } from "./i18n.ts";
 import { panels as pm } from "./i18n/panels.ts";
 import { task as m } from "./i18n/task.ts";
 
-/** 判断待ち (#935): what each kind of question is called on screen. */
+/** 判断待ち: what each kind of question is called on screen. */
 export const KIND_LABEL: Record<Ask["kind"], string> = {
   approval: t(m.kindApproval),
   decision: t(m.kindDecision),
@@ -16,32 +17,39 @@ export const KIND_LABEL: Record<Ask["kind"], string> = {
   notice: t(m.kindNotice),
 };
 
-// open is 未回答: 保留 is the person's hold (#936)
+// open is 未回答: 保留 is the person's hold
 export const STATE_LABEL: Record<Ask["state"], string> = { open: t(m.stateOpen), held: t(m.stateHeld), answered: t(m.stateAnswered), resolved: t(m.stateResolved) };
 
-type GroupKey = "person" | "auto" | "done";
+type GroupKey = "person" | "proceeding" | "auto" | "done";
 const GROUPS: Array<{ key: GroupKey; label: string }> = [
   { key: "person", label: t(m.groupPerson) },
+  { key: "proceeding", label: t(m.groupProceeding) },
   { key: "auto", label: t(m.groupAuto) },
   { key: "done", label: t(m.groupDone) },
 ];
 
-// a held one (#936) is still the person's to answer
-const groupKeyOf = (a: Ask): GroupKey => (a.state === "open" ? a.needs : a.state === "held" ? "person" : "done");
+// a held one is still the person's to answer; one the work went on from with its recommendation is looked at later, in a group of its own
+const groupKeyOf = (a: Ask): GroupKey => (a.state === "open" ? (a.proceeding ? "proceeding" : a.needs) : a.state === "held" ? "person" : "done");
+
+/** How many of the done ones are questions whose PBI closed with the recommendation standing (推奨で確定した). */
+export const settledCount = (asks: Ask[]): number => asks.filter((a) => a.proceeding && a.state === "resolved").length;
+
+/** How many of the questions going on by their recommendation 「全部推奨のままで確定」 confirms: the open ones with a recommendation to confirm. */
+export const confirmable = (asks: Ask[]): number => asks.filter((a) => a.proceeding && a.state === "open" && a.recommendation !== null).length;
 
 /** The screen's groups, in order and without the empty ones: open ones by who has to act, then the done ones (answered and resolved, whoever). */
 export function groupAsks(asks: Ask[]): Array<{ key: GroupKey; label: string; asks: Ask[] }> {
   return GROUPS.map((g) => ({ ...g, asks: asks.filter((a) => groupKeyOf(a) === g.key) })).filter((g) => g.asks.length > 0);
 }
 
-/** The heading of the questions whose Workspace is not known (#1673). */
+/** The heading of the questions whose Workspace is not known. */
 export const UNKNOWN_WORKSPACE = t(m.unknownWorkspace);
 
-/** The Workspace a question is filtered by (#1673): its id, "" when not known. */
+/** The Workspace a question is filtered by: its id, "" when not known. */
 export const workspaceKey = (a: Pick<Ask, "workspace">) => a.workspace?.id ?? "";
 
 /**
- * The questions of a group under one heading per Workspace (#1673): the most questions first, then by name, the unknown
+ * The questions of a group under one heading per Workspace: the most questions first, then by name, the unknown
  * one last; each keeps the order it was given.
  */
 export function workspaceSections(asks: Ask[]): Array<{ key: string; name: string; asks: Ask[] }> {
@@ -75,6 +83,8 @@ export interface AskRow {
   /** One of its questions answers with one press. */
   quick: boolean;
   unblocks: Ask["unblocks"];
+  /** The PBIs that wait for the row's PBI to be done and that no answer of the row lets go on. */
+  waiting: Ask["waiting"];
   asks: Ask[];
   /** One of its questions is open or held, whoever it waits on (the screen passes only the person's). */
   open: boolean;
@@ -89,9 +99,11 @@ export function askRows(asks: Ask[]): AskRow[] {
   for (const a of asks) if (a.kind !== "approval") by.set(rowKey(a), [...(by.get(rowKey(a)) ?? []), a]);
   return [...by].map(([key, list]) => {
     const parts = list.map(askCardParts);
-    const lead = parts.find((p) => p.question)?.question ?? list.find((a) => a.kind === "stop" && a.reason)?.reason ?? null;
+    const lead = parts.find((p) => p.question)?.question ?? list.find((a) => (a.kind === "stop" || a.kind === "wait") && a.reason)?.reason ?? null;
     const unblocks = new Map<number, Ask["unblocks"][number]>();
     for (const u of list.flatMap((a) => a.unblocks)) if (!unblocks.has(u.number)) unblocks.set(u.number, u);
+    const waiting = new Map<number, Ask["waiting"][number]>();
+    for (const u of list.flatMap((a) => a.waiting)) if (!unblocks.has(u.number) && !waiting.has(u.number)) waiting.set(u.number, u);
     return {
       key,
       title: parts[0]!.title ?? { text: parts[0]!.question ?? KIND_LABEL[list[0]!.kind] },
@@ -99,6 +111,7 @@ export function askRows(asks: Ask[]): AskRow[] {
       kinds: [...new Set(list.map((a) => a.kind))],
       quick: list.some(isQuick),
       unblocks: [...unblocks.values()],
+      waiting: [...waiting.values()],
       asks: list,
       open: list.some((a) => a.state === "open" || a.state === "held"),
     };
@@ -131,7 +144,7 @@ export const UNKNOWN = t(m.unknown);
 /** The facts of one question card, in the PBI's order; a value the records do not have says 不明. Choices and conditions only when there are some. */
 export function askFacts(a: Ask): Array<{ label: string; value: string; href?: string }> {
   const r = a.recommendation;
-  // a daemon's notice (#2866) has no PBI, Task or choice: what it is about, why, what to do, and what put it there
+  // a daemon's notice has no PBI, Task or choice: what it is about, why, what to do, and what put it there
   if (a.kind === "notice")
     return [
       { label: t(m.kindNotice), value: a.question ?? UNKNOWN },
@@ -154,13 +167,13 @@ export function askFacts(a: Ask): Array<{ label: string; value: string; href?: s
   ];
 }
 
-/** One answer button of a card (#936): what it sends, where it is written and what goes on after it. */
+/** One answer button of a card: what it sends, where it is written and what goes on after it. */
 export interface AnswerButton {
   label: string;
   answer: AskAnswer;
   /** The answer as written / sent. */
   send: string;
-  /** The grant it sends (#2745): the stop's, or the choice's ` — 許可: `; shown on a line of its own. */
+  /** The grant it sends: the stop's, or the choice's ` — 許可: `; shown on a line of its own. */
   grant: string | null;
   /** Where it goes: the Issue it is written on, or the Task it is sent to. */
   target: string;
@@ -170,11 +183,11 @@ export interface AnswerButton {
   primary: boolean;
 }
 
-/** Where an answer goes (#936): the Issue it is written on (a decision, a confirmation), else the Task it is sent to. */
+/** Where an answer goes: the Issue it is written on (a decision, a confirmation), else the Task it is sent to. */
 export const answerTarget = (a: Pick<Ask, "kind" | "issue" | "task">) =>
   a.kind === "decision" || a.kind === "confirmation" ? (a.issue ? `Issue #${a.issue.number}` : "Issue") : a.task ? t(m.taskTarget, { title: a.task.title ?? a.task.id }) : "Task";
 
-/** A choice's grant (#2745): what follows ` — 許可: ` in its line; null = none. The daemon's parseAskBlock reads the same. */
+/** A choice's grant: what follows ` — 許可: ` in its line; null = none. The daemon's parseAskBlock reads the same. */
 export function grantOf(choice: string): string | null {
   const m = / — 許可[:：]\s*(.+)$/.exec(choice); // compared with the daemon's choice line
   return m ? m[1]!.trim() : null;
@@ -204,12 +217,9 @@ export function answerRoute(a: Ask): string {
   return t(m.answerRouteIssue, { target: a.issue ? `Issue #${a.issue.number}` : "Issue", next });
 }
 
-/** `A` of `A: 置き換える — 影響: …`; the whole choice when it has no short head. */
-const choiceKey = (c: string) => /^([^:：\s]{1,12})(?::\s|：)/.exec(c)?.[1] ?? c;
-
 /**
- * The buttons of a question (#936), from what it takes (`answers`), its choices and its recommendation: a stop's grant
- * (#2745: この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (its head, the recommended one first with （推奨）), 確認した, a notice's 誤検知として閉じる (#2866), and 保留. None when it takes
+ * The buttons of a question, from what it takes (`answers`), its choices and its recommendation: a stop's grant
+ * (この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (its head, the recommended one first with （推奨）), 確認した, a notice's 誤検知として閉じる, and 保留. None when it takes
  * no answer; free text (and a confirmation's 違う) is the card's text box.
  */
 export function answerButtons(a: Ask): AnswerButton[] {
@@ -225,6 +235,17 @@ export function answerButtons(a: Ask): AnswerButton[] {
     out.push({ label: t(m.btnAllow), answer: { kind: "allow" }, send: `${tool} を許可`, grant: null, target, next, sub: null, primary: true });
   }
   if (takes.has("deny")) out.push({ label: t(m.deny), answer: { kind: "deny" }, send: "拒否" /* sent to the daemon */, grant: null, target, next: t(m.denyNext), sub: t(m.denyNext), primary: false });
+  // one the work went on from: 「<推奨> のまま」 confirms it, 「<ほか> にする」 overturns it (and a Task redoes that part)
+  if (a.proceeding) {
+    // the recommended choice by its own line when the question lists it (`A: 置き換える`), else as the recommendation names it
+    const kept = a.choices.find((x) => isRecommendedChoice(x, a.recommendation));
+    if (takes.has("confirm") && a.recommendation) out.push({ label: t(m.btnKeep, { choice: kept ? choiceParts(kept).head : choiceKey(a.recommendation.choice) }), answer: { kind: "confirm", ok: true }, send: `推奨のまま ${choiceKey(a.recommendation.choice)}` /* sent to the daemon */, grant: null, target, next: t(m.keepNext), sub: null, primary: true });
+    for (const c of takes.has("choice") ? a.choices.filter((x) => !isRecommendedChoice(x, a.recommendation)) : []) {
+      const { head, impact } = choiceParts(c);
+      out.push({ label: t(m.btnSwitch, { choice: head }), answer: { kind: "choice", choice: c }, send: c, grant: grantOf(c), target, next: t(m.switchNext), sub: impact, primary: false });
+    }
+    return out;
+  }
   if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;
     const choices = [...a.choices].sort((x, y) => Number(choiceKey(y) === rec) - Number(choiceKey(x) === rec));
@@ -241,16 +262,16 @@ export function answerButtons(a: Ask): AnswerButton[] {
 }
 
 /**
- * 「すぐ答えられる」 (#1675): the person's to answer (open or held), nothing an answer does not take away, and a button
+ * 「すぐ答えられる」: the person's to answer (open or held), nothing an answer does not take away, and a button
  * that answers it with one press (answerButtons' primary: 承認して続行, the recommended choice, 確認した). One that sends a
  * grant (a stop's この操作だけ許可して続ける, a recommended choice's ` — 許可: `) is not: it widens what the Task may do.
  */
 export const isQuick = (a: Ask) => groupKeyOf(a) === "person" && a.blockers.length === 0 && answerButtons(a).some((b) => b.primary && b.grant === null);
 
-/** The questions of one Task its screen answers (#2745): its open operational checks and stops a person answers. */
+/** The questions of one Task its screen answers: its open operational checks and stops a person answers. */
 export const taskAsks = (list: Ask[], taskId: string) => list.filter((a) => a.task?.id === taskId && (a.kind === "check" || a.kind === "stop") && a.state === "open" && a.needs === "person");
 
-/** How the work goes on after the answer (#936), as the card's badge; null while nothing is answered. */
+/** How the work goes on after the answer, as the card's badge; null while nothing is answered. */
 export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; tone: "ok" | "wait" | "bad" } | null {
   const r = a.resume;
   if (!r) return a.state === "answered" ? { text: t(m.stateAnswered), tone: "ok" } : null;
@@ -260,28 +281,34 @@ export function resumeLabel(a: Pick<Ask, "state" | "resume">): { text: string; t
   return { text: t(m.stateAnswered), tone: "ok" };
 }
 
-/** The Issues an Ask unblocks, each with its link — null when the Issue has no url (a workspace without GitHub sync, #2343). */
+/** The Issues an Ask unblocks, each with its link — null when the Issue has no url (a workspace without GitHub sync). */
 export const unblockLinks = (unblocks: Ask["unblocks"]): Array<{ number: number; title: string; href: string | null }> => unblocks.map((u) => ({ number: u.number, title: u.title, href: issueHref(u.url) }));
 
 /** Where "open the Issue" goes: the url of the Issue the Ask has (a decision's or a confirmation's PBI, a stage Task's Issue) unless it routes nowhere, else null (no link to show). */
 export const issueOpenHref = (x: Pick<Ask, "route" | "issue">): string | null => (x.route !== "none" && x.issue ? issueHref(x.issue.url) : null);
 
-/** How many other PBIs wait on the question (#1674); null = none. */
+/** How many other PBIs wait on the question; null = none. */
 export const unblocksLine = (a: Pick<Ask, "unblocks">) => (a.unblocks.length ? t(m.unblocks, { count: a.unblocks.length }) : null);
 
-/** What an answer does not take away (#936), one line each, shown above the buttons. */
+/** How many other PBIs wait for the question's PBI to be done when no answer here lets them go on; null = none, or `unblocksLine` says it. */
+export const waitingLine = (a: Pick<Ask, "unblocks" | "waiting">) => (a.unblocks.length === 0 && a.waiting.length ? t(m.waitingForPbi, { count: a.waiting.length }) : null);
+
+/** The one badge about the PBIs behind a question: what an answer lets go on, else what waits for its PBI. */
+export const waitersLine = (a: Pick<Ask, "unblocks" | "waiting">) => unblocksLine(a) ?? waitingLine(a);
+
+/** What an answer does not take away, one line each, shown above the buttons. */
 // a runner's refusal already says it
 export const blockerLines = (a: Pick<Ask, "blockers">) => a.blockers.map((b) => (b.kind === "runner" ? b.detail : t(m.blocker, { detail: b.detail })));
 
 /**
- * What a card answered on this screen shows (#936): the question the answer returned (`changed` = a 409: what changed,
+ * What a card answered on this screen shows: the question the answer returned (`changed` = a 409: what changed,
  * kept on the question now, under its id).
  */
 export type Answered = { ask: Ask; changes?: string[]; changed?: boolean };
 
 /**
  * The list has moved past the question answered here: a decision answered under another id (its id names the answer's
- * time); a Task's question, once the list has any other question of the same Task (#3059: the Task went on and stopped
+ * time); a Task's question, once the list has any other question of the same Task (the Task went on and stopped
  * again — open or answered, the card answered here gives way to it).
  */
 const answeredIn = (x: Ask, list: Ask[]) =>
@@ -291,10 +318,10 @@ const answeredIn = (x: Ask, list: Ask[]) =>
   );
 
 /**
- * What stays of the answers given here once a newer list comes (#936): an answer the list has the question of gives way to
+ * What stays of the answers given here once a newer list comes: an answer the list has the question of gives way to
  * the list, one whose question left the list (a check whose Task went on) stays until the list has moved past it
  * (answeredIn: the decision answered under a new id, the Task's next question — dropped then, so a later list without
- * that question does not bring the card back, #3059); a 409's notice stays on its question until the list has that
+ * that question does not bring the card back); a 409's notice stays on its question until the list has that
  * question changed again (or no longer has it).
  */
 export function pruneAnswered(answered: Map<string, Answered>, list: Ask[]): Map<string, Answered> {
@@ -308,12 +335,12 @@ export function pruneAnswered(answered: Map<string, Answered>, list: Ask[]): Map
 
 /**
  * The answers given here that the list no longer has, as their cards: not when the list has the decision answered under a
- * new id, nor once the list has another question of the same Task (#3059).
+ * new id, nor once the list has another question of the same Task.
  */
 export const keptAnswers = (answered: Map<string, Answered>, list: Ask[]) =>
   [...answered.entries()].filter(([id, v]) => !v.changed && !list.some((y) => y.id === id) && !answeredIn(v.ask, list)).map(([, v]) => v.ask);
 
-/* ---------- answer policies (#938) ---------- */
+/* ---------- answer policies ---------- */
 
 const DAY_MS = 86_400_000;
 const dayOf = jstDay;
@@ -405,7 +432,7 @@ export function policyInput(form: PolicyForm | null): PolicyInput | undefined {
   return { scope: form.scope, target: form.target.trim(), when: form.when.filter((w) => w.on).map(({ key, value }) => ({ key, value })), expiresAt: Date.parse(`${form.expires}T23:59:59+09:00`) };
 }
 
-/* ---------- batches (#2046) ---------- */
+/* ---------- batches ---------- */
 
 export const BATCH_LABEL: Record<AskBatch["kind"], string> = { sso: t(m.batchSso), deploy: t(m.batchDeploy) };
 
@@ -423,28 +450,34 @@ export function hiddenByBatches(asks: Ask[], batches: AskBatch[]): Ask[] {
 }
 
 /**
- * A question card's parts in the order a phone reads them (#4068): what it is about (the PBI, else the Task, else
+ * A question card's parts in the order a phone reads them: what it is about (the PBI, else the Task, else
  * nothing), the question itself (above the answer buttons), the facts that are known, and the labels of the ones the
  * records do not have — one line 「不明: …」 instead of a row each (docs/design/asks.md still says they are 不明).
+ * `confirm`: for a notice the person confirms (a change of a workspace's settings), what the confirmation is of — its
+ * content and what confirming does — shown above the answer buttons and never among the folded facts: a safety
+ * confirmation's substance is not behind a closed section while its button is in view (README, Design rules).
  */
-export function askCardParts(a: Ask): { title: { text: string; href?: string } | null; question: string | null; facts: Array<{ label: string; value: string; href?: string }>; unknown: string[] } {
+export function askCardParts(a: Ask): { title: { text: string; href?: string } | null; question: string | null; confirm: Array<{ label: string; value: string }>; facts: Array<{ label: string; value: string; href?: string }>; unknown: string[] } {
   const all = askFacts(a);
   const questionLabel = a.kind === "notice" ? t(m.kindNotice) : t(m.factQuestion);
   const q = all.find((f) => f.label === questionLabel);
-  const rest = all.filter((f) => f !== q);
+  const unfolded = a.kind === "notice" && a.answers.includes("confirm") ? [t(m.factTodo), t(m.factContent)] : [];
+  const confirm = unfolded.flatMap((label) => all.filter((f) => f.label === label && f.value !== UNKNOWN));
+  const rest = all.filter((f) => f !== q && !confirm.includes(f));
   const title = a.kind === "notice" ? null : a.pbi ? { text: `#${a.pbi.number} ${a.pbi.title}`, href: a.pbi.url } : a.task ? { text: a.task.title ?? a.task.id } : null;
   return {
     title,
     question: q && q.value !== UNKNOWN ? q.value : null,
+    confirm,
     facts: rest.filter((f) => f.value !== UNKNOWN),
     unknown: [...(q && q.value === UNKNOWN ? [q.label] : []), ...rest.filter((f) => f.value === UNKNOWN).map((f) => f.label)],
   };
 }
 
-/** How much of a long question a card shows before 全文 (#4068): six lines, and about 300 characters (a short screenful of Japanese on a phone). */
+/** How much of a long question a card shows before 全文: six lines, and about 300 characters (a short screenful of Japanese on a phone). */
 export const QUESTION_HEAD = 300;
 
-/** A question's first part and whether there is more (#4068): at most six lines, cut at a line end within QUESTION_HEAD characters when there is one; counted in characters, so an emoji is not split. */
+/** A question's first part and whether there is more: at most six lines, cut at a line end within QUESTION_HEAD characters when there is one; counted in characters, so an emoji is not split. */
 export function questionHead(q: string): { head: string; more: boolean } {
   const lines = q.split("\n");
   let head = lines.slice(0, 6).join("\n");

@@ -1,12 +1,12 @@
 // test-reads: none
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Provenance, RunnerAdapter, RunnerId, StartOptions, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
-import { withoutWorkspaceRules } from "./tasks.ts";
+import { withoutWorkspaceRules } from "./tasks/manager.ts";
 import { registerWorkspace } from "./workspace-clone.ts";
 
 // 取り込み and 立ち上げ from a Workspace row: one Task each; the steps are the skill's and the candidate's, not the daemon's.
@@ -193,6 +193,103 @@ test("rules: kept in the database on Switchboard's side and added to the first p
   // empty = none
   expect(await put(b.own.id, { rules: "  " })).toEqual({ status: 200, body: { id: b.own.id, rules: "" } });
   expect(b.core.db.getWorkspace(b.own.id)!.rules).toBeUndefined();
+});
+
+/** The page's answer to a pending change of the settings (the headers a browser adds on its own page). */
+const answerConfig = (base: string, askId: string, ok: boolean, page = true) =>
+  fetch(`${base}/api/asks/answer`, { method: "POST", headers: page ? { origin: base, "sec-fetch-site": "same-origin" } : {}, body: JSON.stringify({ id: askId, answer: { kind: "confirm", ok } }) });
+
+test("config: the workspace's settings are kept on Switchboard's side; a bare call's change of the CI's steps waits as a question and is in force only after the page confirms it; then written to a file the tools read and handed to its Tasks; a refusal says why in one line", async () => {
+  const b = await boot();
+  type View = { id?: string; config?: string; file?: string | null; source?: string; version?: string | null; pending?: { askId: string; keys: string[]; source: string; config: string } | null; error?: string };
+  const call = async (id: string, method: "GET" | "PUT", body?: unknown) => {
+    const r = await fetch(`${b.base}/api/workspaces/${id}/config`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: r.status, body: (await r.json()) as View };
+  };
+  // nothing saved, no file in the repository
+  expect(await call(b.own.id, "GET")).toEqual({ status: 200, body: { id: b.own.id, config: "", file: null, source: "none", version: null, pending: null } });
+  const config = { ci: { steps: [{ name: "test", run: "make test" }] } };
+  const text = `${JSON.stringify(config, null, 2)}\n`;
+  const file = join(root!, "home", "workspace-config", b.own.id, "ops.config.json");
+  // a call that does not look like the page's (a Task's curl, a script): recorded, not in force, no file
+  const asked = await call(b.own.id, "PUT", { config: JSON.stringify(config) });
+  expect(asked).toMatchObject({ status: 200, body: { config: "", file: null, source: "none", version: null, pending: { keys: ["ci"], source: "call", config: text } } });
+  expect(existsSync(file)).toBe(false);
+  expect(b.core.db.getWorkspace(b.own.id)!.config).toBeUndefined();
+  // it waits among the questions, and only the page can answer it
+  const askId = asked.body.pending!.askId;
+  const asks = ((await (await fetch(`${b.base}/api/asks`)).json()) as { asks: Array<{ id: string; state: string; answers: string[]; needs: string }> }).asks;
+  expect(asks.find((a) => a.id === askId)).toMatchObject({ state: "open", answers: ["confirm"], needs: "person" });
+  const bare = await answerConfig(b.base, askId, true, false);
+  expect(bare.status).toBe(403);
+  expect(((await bare.json()) as { reason: string }).reason).toBe("human");
+  expect(existsSync(file)).toBe(false);
+  expect((await answerConfig(b.base, askId, true)).status).toBe(200);
+  const saved = await call(b.own.id, "GET");
+  expect(saved).toEqual({ status: 200, body: { id: b.own.id, config: text, file, source: "switchboard", version: expect.stringMatching(/^[0-9a-f]{12}$/), pending: null } });
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(config);
+  // the record of the change: how it came in, both values, who confirmed
+  const changes = ((await (await fetch(`${b.base}/api/workspaces/${b.own.id}/config/changes`)).json()) as { changes: Array<Record<string, unknown>> }).changes;
+  expect(changes).toEqual([expect.objectContaining({ state: "confirmed", source: "call", decidedBy: "screen", before: null, after: text, keys: ["ci"] })]);
+  // the index the scripts find the file by, outside a Task: the workspace's folder and name, the version in force, and no change waiting
+  expect(JSON.parse(readFileSync(join(root!, "home", "workspace-config", "index.json"), "utf8"))).toEqual({ workspaces: [{ id: b.own.id, name: "widget", path: b.own.path, file, version: saved.body.version }], pending: [] });
+  // nothing was written to the repository
+  expect(existsSync(join(b.own.path, "ops.config.json"))).toBe(false);
+  // refused with the reason: not in the shape (an unknown key, a key in a wrong shape, not JSON), publicSync, a value that can authenticate
+  const refused = async (text: string) => {
+    const r = await call(b.own.id, "PUT", { config: text });
+    expect(r.status).toBe(400);
+    return r.body.error!;
+  };
+  expect(await refused(JSON.stringify({ ci: { steps: [] } }))).toStartWith("設定の形が不正です: ci.steps:");
+  expect(await refused(JSON.stringify({ nope: 1 }))).toStartWith("設定の形が不正です:");
+  expect(await refused("{ not json")).toStartWith("JSON として読めません:");
+  expect(await refused(JSON.stringify({ publicSync: { target: "o/public", exclude: [] } }))).toStartWith("publicSync は Switchboard の側には置けません");
+  expect(await refused(JSON.stringify({ ci: { steps: [{ run: `curl -H "Authorization: token ghp_${"a".repeat(36)}" https://example.com` }] } }))).toBe("認証に使える値を含む設定は保存できません");
+  expect((await refused("x".repeat(40_001))).length).toBeGreaterThan(0);
+  // every refusal left the saved settings as they were
+  expect((await call(b.own.id, "GET")).body.config).toBe(saved.body.config);
+  // someone else's repository, the meta workspace and an unknown id: 404, read or write
+  for (const id of [b.meta.id, b.foreign.id, "ws_missing"]) {
+    expect((await call(id, "GET")).status).toBe(404);
+    expect((await call(id, "PUT", { config: "{}" })).status).toBe(404);
+  }
+  // a Task there is started with the file's place (the kit's variable); a Task in another workspace is not
+  const start = (workspaceId: string, cwd: string) => fetch(`${b.base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId, cwd, runner: "claude", prompt: "直して", title: "t" }) });
+  started.length = 0;
+  expect((await start(b.own.id, b.own.path)).status).toBe(201);
+  await b.promptOf();
+  expect(started.at(-1)!.env).toMatchObject({ OPS_KIT_CONFIG: file });
+  started.length = 0;
+  expect((await start(b.local.id, b.local.path)).status).toBe(201);
+  await b.promptOf();
+  expect(started.at(-1)!.env).not.toHaveProperty("OPS_KIT_CONFIG");
+  // the repository's own ops.config.json wins as a whole: the row says which settings are in use
+  writeFileSync(join(b.own.path, "ops.config.json"), "{}");
+  expect((await call(b.own.id, "GET")).body.source).toBe("repository");
+  rmSync(join(b.own.path, "ops.config.json"));
+  // empty = none, once confirmed: the file goes
+  const emptied = await call(b.own.id, "PUT", { config: "  " });
+  expect(emptied.body).toMatchObject({ config: text, pending: { keys: ["ci"], config: "" } });
+  expect(existsSync(file)).toBe(true);
+  expect((await answerConfig(b.base, emptied.body.pending!.askId, true)).status).toBe(200);
+  expect(await call(b.own.id, "GET")).toEqual({ status: 200, body: { id: b.own.id, config: "", file: null, source: "none", version: null, pending: null } });
+  expect(existsSync(file)).toBe(false);
+  expect(b.core.db.getWorkspace(b.own.id)!.config).toBeUndefined();
+});
+
+test("config: written again from the database when the daemon starts (the files are a copy)", async () => {
+  const b = await boot();
+  const put = await fetch(`${b.base}/api/workspaces/${b.own.id}/config`, { method: "PUT", body: JSON.stringify({ config: '{"ci":{"steps":[{"run":"make"}]}}' }) });
+  expect((await answerConfig(b.base, ((await put.json()) as { pending: { askId: string } }).pending.askId, true)).status).toBe(200);
+  const file = join(root!, "home", "workspace-config", b.own.id, "ops.config.json");
+  rmSync(join(root!, "home", "workspace-config"), { recursive: true });
+  await b.core.stop();
+  core = undefined;
+  const again = await startServer(loadConfig({ SWITCHBOARD_HOME: join(root!, "home"), SWITCHBOARD_REPO_ROOT: join(root!, "switchboard"), SWITCHBOARD_KNOWLEDGE: join(root!, "home", "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(root!, "home", "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [], { port: 0, selfdevChecks: false, dryRunRestart: true });
+  core = again;
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ ci: { steps: [{ run: "make" }] } });
+  expect(((await (await fetch(`http://127.0.0.1:${again.server.port}/api/workspaces/${b.own.id}/config`)).json()) as { source: string }).source).toBe("switchboard");
 });
 
 test("rules: read back through the API after the daemon restarts", async () => {

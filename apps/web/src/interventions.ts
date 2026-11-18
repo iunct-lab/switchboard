@@ -20,7 +20,7 @@ const diff = (now: Counted, before: Counted): string => {
 const withUnknown = (count: number, unknown: number): string => (unknown > 0 ? t(m.withUnknown, { count, unknown }) : String(count));
 
 /**
- * The comparison table of one period against the one before (#651): by kind, the total, re-asks, manual resumes after what
+ * The comparison table of one period against the one before: by kind, the total, re-asks, manual resumes after what
  * the PBI waited for, and the interventions a finished PBI took (per PBI). What the records could not tell is 不明, not 0.
  */
 export function interventionRows(now: InterventionWindow, before: InterventionWindow): InterventionRow[] {

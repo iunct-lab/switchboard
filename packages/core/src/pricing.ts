@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { AgentEvent, LedgerRow, PricingTable, RunnerId, Task } from "@switchboard/protocol";
+import type { AgentEvent, LedgerBilling, LedgerRow, LoginKind, PricingTable, RunnerId, Task } from "@switchboard/protocol";
 import { PricingTable as PricingSchema } from "@switchboard/protocol";
 
 /**
@@ -79,12 +79,32 @@ export function priceUsage(table: PricingTable, model: string | null | undefined
 }
 
 /**
- * What the user actually pays for this usage: API price for pay-as-you-go runners, 0 under a subscription.
- * A runner missing from `billing` counts as pay-as-you-go: the conservative reading for the money column.
+ * The billing kind of a usage whose login is not known, from whether it is charged: a Bedrock model id is Bedrock's
+ * whatever the runner, a claude usage is the Claude account's (not charged) or the Anthropic Console's (charged), another
+ * runner's is its plan's or pay-as-you-go. Also how a row recorded before the kind was kept gets one (db/migrations/0030-ledger-billing.ts).
  */
-export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: number, model?: string | null): number {
-  if (model && isBedrockModel(model)) return apiCostUsd;
-  return (table.billing[runner] ?? "api") === "api" ? apiCostUsd : 0;
+export function billingFromRow(runner: RunnerId, model: string | null | undefined, charged: boolean): LedgerBilling {
+  if (model && isBedrockModel(model)) return "bedrock";
+  if (runner === "claude") return charged ? "console" : "claude.ai";
+  return charged ? "api" : "subscription";
+}
+
+/**
+ * Where the bill of this usage goes. A Bedrock model id first (the Task ran there whatever the login says now), then the
+ * login the runner reported (`claude auth status`), else pricing.json's `billing` for the runner — a runner missing
+ * from it counts as pay-as-you-go, the conservative reading for the money column.
+ */
+export function billingOf(table: PricingTable, runner: RunnerId, model?: string | null, login?: LoginKind): LedgerBilling {
+  if (model && isBedrockModel(model)) return "bedrock";
+  return login ?? billingFromRow(runner, model, (table.billing[runner] ?? "api") === "api");
+}
+
+/** Whether a billing kind is charged per use: everything but a plan that covers it. */
+export const isCharged = (billing: LedgerBilling): boolean => billing !== "claude.ai" && billing !== "subscription";
+
+/** What the user actually pays for this usage: the API price where the billing kind is charged per use, 0 under a plan. */
+export function billedUsd(table: PricingTable, runner: RunnerId, apiCostUsd: number, model?: string | null, login?: LoginKind): number {
+  return isCharged(billingOf(table, runner, model, login)) ? apiCostUsd : 0;
 }
 
 /**
@@ -100,10 +120,13 @@ export function isBedrockModel(model: string): boolean {
  * The ledger row for one usage event: the runner's own cost when it reported one (`reported`), else the table's
  * API-equivalent figure (`priced`; `unpriced` = unknown model, cost 0). The runner's model name is what is recorded,
  * not the price row it resolved to. Shared by the live task path and the history importer so both books agree.
+ * `login` = the runner's login when the usage happened (undefined = not known: pricing.json's `billing` decides); the
+ * row keeps the billing kind, and what is charged follows from it. Without a table everything not known to be a plan's is charged.
  */
-export function ledgerRowFor(table: PricingTable | undefined, task: Pick<Task, "id" | "runner" | "model">, ev: Extract<AgentEvent, { t: "usage" }>, ts: number): LedgerRow {
+export function ledgerRowFor(table: PricingTable | undefined, task: Pick<Task, "id" | "runner" | "model">, ev: Extract<AgentEvent, { t: "usage" }>, ts: number, login?: LoginKind): LedgerRow {
   const priced = ev.costUsd === undefined && table ? priceUsage(table, ev.model ?? task.model, task.runner, ev, ts) : null;
   const costUsd = ev.costUsd ?? priced?.costUsd ?? 0;
+  const billing = billingOf(table ?? { version: 1, billing: {}, models: {}, aliases: {} }, task.runner, ev.model ?? task.model ?? priced?.model, login);
   return {
     taskId: task.id,
     runner: task.runner,
@@ -114,7 +137,8 @@ export function ledgerRowFor(table: PricingTable | undefined, task: Pick<Task, "
     cacheWrite: ev.cacheWriteTokens,
     cacheWrite1h: ev.cacheWrite1hTokens ?? 0,
     costUsd,
-    billedUsd: table ? billedUsd(table, task.runner, costUsd, ev.model ?? task.model ?? priced?.model) : costUsd,
+    billedUsd: isCharged(billing) ? costUsd : 0,
+    billing,
     source: ev.costUsd !== undefined ? "reported" : priced?.priced ? "priced" : "unpriced",
     ts,
   };

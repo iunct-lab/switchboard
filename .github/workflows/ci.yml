@@ -17,5 +17,5 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # the steps (home paths, install, licenses, typecheck, test, web build, perf) are scripts/ci.ts's, which local-ci runs too (#912)
+      # the steps (home paths, install, licenses, typecheck, test, web build, perf) are scripts/ci.ts's, which local-ci runs too
       - run: bun scripts/ci.ts

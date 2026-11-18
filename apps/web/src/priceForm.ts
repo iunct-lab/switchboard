@@ -2,7 +2,7 @@ import type { SettingsPrice } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { settings } from "./i18n/settings.ts";
 
-/** The settings screen's price form (#1402): every box is text, USD / 1M tokens. */
+/** The settings screen's price form: every box is text, USD / 1M tokens. */
 export interface PriceForm {
   model: string;
   input: string;

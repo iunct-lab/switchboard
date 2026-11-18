@@ -1,10 +1,10 @@
 /**
- * The host's pending security updates and whether the running kernel is behind (PBI #3345). Pure functions over the
+ * The host's pending security updates and whether the running kernel is behind. Pure functions over the
  * commands' output, and a thin read of those commands. Read-only and without root: `dnf updateinfo list` and
  * `dnf check-update` work as a plain user (with a cache of their own), and nothing here installs anything. The severity
  * is Amazon's, taken as it stands.
  *
- * `--refresh` and `skip_if_unavailable` off for `amazonlinux`, as in aws/host/host-update.sh (#3344): a stale cache or a
+ * `--refresh` and `skip_if_unavailable` off for `amazonlinux`, as in aws/host/host-update.sh: a stale cache or a
  * skipped repository would read as "no updates". Without `-q` dnf prints its progress on stdout.
  */
 

@@ -1,12 +1,13 @@
 // test-reads: ops-kit/fixtures/config-with-phase.json
 import { afterEach, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backlog, BacklogIssueDetail, RunnerAdapter, Task, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
-import { createStoredIssue, editStoredIssue, localBacklogSource, type GhRunner } from "./backlog.ts";
+import { createStoredIssue, editStoredIssue } from "./backlog-edit.ts";
+import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
 import { applyLocalOperations, localForgeOf } from "./backlog-local.ts";
 import { Db } from "./db.ts";
 
@@ -34,11 +35,15 @@ const endingClaude: RunnerAdapter = {
 };
 
 /** The daemon with a gh that throws, recording the directory of every call (the meta workspace's import asks it, and fails). */
+/** What the app's own call to GitHub meets: by default there is no gh at all; a test may say GitHub answers 502. */
+const github = { down: false };
 async function boot() {
   home = mkdtempSync(join(tmpdir(), "sb-backlog-local-"));
+  github.down = false;
   const cwds: string[] = [];
-  const gh: GhRunner = async (_args, cwd) => {
+  const gh: GhRunner = async (args, cwd) => {
     cwds.push(cwd);
+    if (github.down && args.includes("rate_limit")) return { code: 1, stdout: "", stderr: "HTTP 502: Bad Gateway (https://api.github.com/rate_limit)" };
     throw new Error("spawn gh ENOENT");
   };
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
@@ -407,13 +412,15 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   // the review's summary and the triage's replies, oldest first
   for (const text of ["[claude] review\n要約", "振り分け\n| 指摘 | 振り分け | 返信 |"]) expect((await send("POST", "/api/backlog/2/comment", { workspaceId: ws.id, text })).status).toBe(202);
   const d = await view(ws, 2);
-  expect(d.issue.change).toEqual({ head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null });
+  expect(d.issue.change).toEqual({ head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null, pr: null, reportedAt: null });
   expect(d.changeRefs).toEqual({ head: tips.head, base: tips.main });
   expect(d.comments.map((c) => c.body.split("\n")[0])).toEqual(["[claude] review", "振り分け"]);
   // an Issue is no change
   expect((await view(ws, 1)).changeRefs).toBeNull();
   const list = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
-  expect(list.changes).toEqual([{ workspaceId: ws.id, number: 2, title: "Task 9 の変更", state: "OPEN", head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, updatedAt: expect.any(String) }]);
+  expect(list.changes).toEqual([{ workspaceId: ws.id, number: 2, title: "Task 9 の変更", state: "OPEN", head: "sb/9-x", base: "main", mergeCommit: null, mergedAt: null, updatedAt: expect.any(String), pr: null, reportedAt: null }]);
+  // a workspace without PRs has none to stand in for
+  expect((await create(ws, { title: "x", change: { head: "sb/9-x", base: "main", pr: 3 } })).status).toBe(422);
   // a branch not there is 422, a second open change of the same branch 409, head = base 422
   expect((await create(ws, { title: "x", change: { head: "sb/none", base: "main" } })).status).toBe(422);
   expect((await create(ws, { title: "x", change: { head: "sb/9-x", base: "nope" } })).status).toBe(422);
@@ -448,16 +455,54 @@ test("changes: every open one newest first, then the newest 10 closed", async ()
   expect(list.changes.map((c) => c.title)).toEqual(["c13", "c12", "c11", "c10", "c9", "c8", "c7", "c6", "c5", "c4", "c3"]);
 });
 
-test("a local change is refused on a GitHub workspace", async () => {
-  const { add, dir, send } = await boot();
+test("change in a github workspace: kept apart from GitHub's Issues, numbered from 1, never sent", async () => {
+  const { base, add, dir, send } = await boot();
   const gh = (await (await add(dir("gh"))).json()) as Workspace;
-  gitRepo(gh.path);
+  const tips = gitRepo(gh.path);
   const source = { service: "github" as const, host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
   core!.db.setWorkspaceBacklogSource(gh.id, source);
-  core!.db.putBacklogSnapshot(source, { records: [], cursor: null, syncedAt: Date.now() });
-  const r = await send("POST", "/api/backlog", { workspaceId: gh.id, title: "x", change: { head: "sb/9-x", base: "main" } });
-  expect(r).toMatchObject({ status: 422, body: { error: expect.stringContaining("GitHub 連携の無い") } });
-  expect((await send("PATCH", "/api/backlog/1", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: "a".repeat(40), mergedAt: "x", reviewedHead: "a".repeat(40) } })).status).toBe(422);
+  const issue = (n: number) => ({ number: n, title: `Issue ${n}`, url: "", state: "OPEN" as const, stateReason: null, body: "", labels: [], milestone: null, parent: null, subIssues: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", closedAt: null });
+  core!.db.putBacklogSnapshot(source, { records: Array.from({ length: 40 }, (_, i) => ({ objectKind: "issue" as const, externalId: `I_${i + 1}`, remote: issue(i + 1), fetchState: "fetched" as const })), cursor: null, syncedAt: Date.now() });
+  // a change stands in for a pull request only while the app itself sees GitHub out of use: a gh that cannot even be
+  // started is no such sight (nothing says GitHub is away), and nothing is made
+  const refused = await send("POST", "/api/backlog", { workspaceId: gh.id, title: "Task 9 の変更", body: "Closes #9", change: { head: "sb/9-x", base: "main", pr: 77 } });
+  expect([refused.status, (refused.body as { error: string }).error]).toEqual([409, expect.stringContaining("一時的に使えないとは確かめられませんでした")]);
+  expect((await fetch(`${base}/api/backlog/1?workspaceId=${gh.id}&change=1`)).status).toBe(404);
+  expect(await (await fetch(`${base}/api/backlog/outage?workspaceId=${gh.id}`)).json()).toMatchObject({ apart: true, unusable: false, reason: "unknown" });
+  github.down = true;
+  expect(await (await fetch(`${base}/api/backlog/outage?workspaceId=${gh.id}`)).json()).toMatchObject({ apart: true, unusable: true, kind: "transient" });
+  const made = await send("POST", "/api/backlog", { workspaceId: gh.id, title: "Task 9 の変更", body: "Closes #9", change: { head: "sb/9-x", base: "main", pr: 77 } });
+  // not 41: GitHub's numbers are not taken
+  expect(made).toMatchObject({ status: 202, body: { number: 1 } });
+  const get = async (q: string) => {
+    const r = await fetch(`${base}/api/backlog/1?workspaceId=${gh.id}${q}`);
+    return { status: r.status, body: (await r.json()) as BacklogIssueDetail };
+  };
+  const change = await get("&change=1");
+  expect(change.body.issue).toMatchObject({ number: 1, title: "Task 9 の変更", change: { head: "sb/9-x", base: "main", pr: 77, reportedAt: null } });
+  expect(change.body.changeRefs).toEqual({ head: tips.head, base: tips.main });
+  // without the mark, 1 is GitHub's Issue
+  expect((await get("")).body.issue).toMatchObject({ number: 1, title: "Issue 1" });
+  expect((await get("")).body.issue.change).toBeUndefined();
+  // a comment on the change does not land on GitHub's Issue 1
+  expect((await send("POST", "/api/backlog/1/comment?change=1", { workspaceId: gh.id, text: "[claude] review\n要約" })).status).toBe(202);
+  expect((await get("&change=1")).body.comments.map((c) => c.body.split("\n")[0])).toEqual(["[claude] review"]);
+  expect((await get("")).body.comments).toEqual([]);
+  // merged, then its summary left: both on the change alone
+  const at = new Date().toISOString();
+  expect((await send("PATCH", "/api/backlog/1?change=1", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } })).status).toBe(202);
+  expect((await send("PATCH", "/api/backlog/1?change=1", { workspaceId: gh.id, change: { reportedAt: at } })).status).toBe(202);
+  expect((await get("&change=1")).body.issue).toMatchObject({ state: "CLOSED", change: { mergeCommit: tips.head, pr: 77, reportedAt: at } });
+  expect((await get("")).body.issue.state).toBe("OPEN");
+  // the list has it, with the PR it stood in for
+  const list = (await (await fetch(`${base}/api/backlog`)).json()) as Backlog;
+  expect(list.changes.filter((c) => c.workspaceId === gh.id)).toMatchObject([{ number: 1, state: "CLOSED", pr: 77, reportedAt: at, mergeCommit: tips.head }]);
+  // a change is no Issue of GitHub's: a merge record without the mark is refused, a number that is no change is 404
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: gh.id, state: "CLOSED", change: { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head } })).status).toBe(422);
+  expect((await fetch(`${base}/api/backlog/2?workspaceId=${gh.id}&change=1`)).status).toBe(404);
+  expect((await send("POST", "/api/backlog/2/comment?change=1", { workspaceId: gh.id, text: "x" })).status).toBe(404);
+  expect((await send("PATCH", "/api/backlog/2?change=1", { workspaceId: gh.id, title: "x" })).status).toBe(404);
+  // nothing of it was ever queued for GitHub: the send has nothing to send
   expect(core!.db.listBacklogOperations(source)).toEqual([]);
 });
 
@@ -518,3 +563,40 @@ test("project fields: a workspace without GitHub gets the field definitions from
   expect(defs[0]).toMatchObject({ dataType: "SINGLE_SELECT", options: expect.arrayContaining(["Backlog", "Ready"]) });
   expect(defs[2]).toEqual({ name: "Story Points", dataType: "NUMBER", options: [] });
 });
+
+test("a repository with no ops.config.json takes the choices of the settings kept on Switchboard's side; its own file, once it has one, is used alone", async () => {
+  const { add, dir, send, create, local, view, base } = await boot();
+  const kept = readFileSync(join(import.meta.dir, "../../../ops-kit/fixtures/config-with-phase.json"), "utf8");
+  // the backlog's form only (no key the gates read): the page's save is in force at once
+  const save = async (ws: Workspace, config: string) => {
+    const r = await fetch(`${base}/api/workspaces/${ws.id}/config`, { method: "PUT", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ config }) });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { pending: unknown }).pending).toBeNull();
+  };
+  // a backlog kept here: Phase and the Milestone come from the saved settings (the kit's template has neither)
+  const ws = await local("kept");
+  expect((await create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", Phase: "Phase 1" }, milestone: "Phase 1 — first" })).status).toBe(422);
+  await save(ws, kept);
+  expect((await create(ws, { title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", Phase: "Phase 1" }, milestone: "Phase 1 — first" })).status).toBe(202);
+  expect((await view(ws, 1)).projectFields.map((f) => f.name)).toEqual(["Status", "Priority", "Phase", "Story Points"]);
+  const refused = await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Size: "L" } });
+  expect(refused.status).toBe(422);
+  expect(refused.body.error).toContain("Switchboard の側の設定");
+  // nothing was written to the repository
+  expect(existsSync(join(ws.path, "ops.config.json"))).toBe(false);
+  // the repository's own file wins as a whole: a key it leaves out (Phase) is not taken from the saved settings
+  const own = JSON.parse(kept) as { fields: { phase?: unknown } };
+  delete own.fields.phase;
+  writeFileSync(join(ws.path, "ops.config.json"), JSON.stringify(own));
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Phase: "Phase 0" } })).status).toBe(422);
+  expect((await view(ws, 1)).projectFields.map((f) => f.name)).toEqual(["Status", "Priority", "Story Points"]);
+  // a backlog on GitHub: the choices' spelling is fixed from the saved settings too
+  const gh = (await (await add(dir("gh-kept"))).json()) as Workspace;
+  const source = { service: "github" as const, host: "github.com", repository: "acme/kept", project: { owner: "acme", number: 1 } };
+  core!.db.setWorkspaceBacklogSource(gh.id, source);
+  await save(gh, kept);
+  expect((await create(gh, { title: "x", fields: { Phase: "phase 1" } })).status).toBe(202);
+  expect((core!.db.listPendingBacklogOperations(source).find((o) => o.kind === "create")!.payload as { project: { fields: unknown } }).project.fields).toEqual({ Phase: "Phase 1" });
+  expect((await create(gh, { title: "y", fields: { Phase: "Phase 9" } })).status).toBe(422);
+});
+

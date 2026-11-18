@@ -1,19 +1,23 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isWorkingStatus, type RunnerInfo, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, StoredOutcome, TaskDiffFile, TaskSummary, TeleportProgress } from "@switchboard/protocol";
-import { api, OLDER_PAGE, type TaskDetail } from "../api.ts";
+import { isWorkingStatus, type RunnerInfo, type TaskStopMark, type Ask, AskAnswer, DeviceAuthView, PolicyInput, StopSummary, EventEnvelope, Task, StoredOutcome, TaskDiffFile, TaskSummary, TeleportProgress } from "@switchboard/protocol";
+import { api } from "../api/index.ts";
+import { OLDER_PAGE, type TaskDetail } from "../api/tasks.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "../perf.ts";
 import { eventsArchiveNotice } from "../events-archive.ts";
 import { foldTranscript, itemText, spanText, toolInputText, toolResultText, transcriptMarkdown, turnReply, type Item, type PermissionAsk } from "../transcript.ts";
-import { CloudSessionNotice, CloudSourceTag, CopyButton, OriginTag, BackgroundTag, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
+import { CloudSessionNotice, CloudSourceTag, CopyButton, MachineTag, OriginTag, BackgroundTag, ResumeTag, RunnerPill, ShadowTag, WaitTag } from "./ui.tsx";
+import { readOnlyReason } from "../machine.ts";
 import { Terminal } from "./Terminal.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { Stops } from "./Stops.tsx";
-import { activeLabel, judgementNote, outcomeIsDerived, outcomeIsSettable, outcomeLabel } from "../attention.ts";
+import { activeLabel, judgementNote, outcomeIsDerived, outcomeIsSettable, outcomeLabel, outcomeOptions } from "../attention.ts";
 import { SINCE, taskTimes } from "../inProgress.ts";
 import { Artifacts } from "./Artifacts.tsx";
 import { artifactsLabel } from "../artifacts.ts";
 import { AttachButton, AttachmentBar, AttachmentGallery, useAttachments, useDropZone } from "./Attachments.tsx";
 import { PresetPicker } from "./PresetPicker.tsx";
+import { PresetReplies } from "./PresetReplies.tsx";
+import { repliesFor } from "../presetReplies.ts";
 import { jstDateTime, jstTime } from "../time.ts";
 import { titleToSave } from "../taskTitle.ts";
 import { continuationPrompt, overBudget } from "../budgetChoice.ts";
@@ -35,11 +39,13 @@ export function TaskView(props: {
   runners?: RunnerInfo[];
   /** A fork was made from a finished turn: the new Task, to be put in the list and opened. */
   onForked?: (task: Task) => void;
-  /** "ローカルで続ける" finished and opens the imported Local Task (#1634); falls back to `onOpenTask`. */
+  /** "ローカルで続ける" finished and opens the imported Local Task; falls back to `onOpenTask`. */
   onContinuedLocally?: (localTaskId: string) => void;
-  /** This Local Task was just switched to by "ローカルで続ける" (#1634): the head says so. */
+  /** This Local Task was just switched to by "ローカルで続ける": the head says so. */
   switchedFromCloud?: boolean;
   detail?: TaskDetail;
+  /** The last stop of this Task from `/api/tasks/stops` (App reads it once for Home and the Rail): its `replies` are the one-press buttons. */
+  stopMark?: TaskStopMark | null;
   /** Resolves once the daemon took the turn; rejects (after showing the error) otherwise — the composer keeps its text and chips then. */
   onSend: (text: string, attachmentIds?: string[]) => Promise<void>;
   onPermission: (id: string, decision: "allow" | "deny") => void;
@@ -47,20 +53,22 @@ export function TaskView(props: {
   shadowTask?: TaskSummary;
   /** health.features.pty: the daemon can open a shell. False = no terminal tab. */
   pty?: boolean;
-  /** Phones only (#369): the Brief is not beside the chat there; this lays it over the screen. */
+  /** Phones only: the Brief is not beside the chat there; this lays it over the screen. */
   onBrief: () => void;
-  /** The Task's approval wait elsewhere (#662), if any. */
+  /** The Task's approval wait elsewhere, if any. */
   deviceAuth?: DeviceAuthView | null;
-  /** "Continue locally" for this Cloud Task (#1306), from the WebSocket; the detail has the one from the first load. */
+  /** "Continue locally" for this Cloud Task, from the WebSocket; the detail has the one from the first load. */
   teleport?: TeleportProgress | null;
-  /** An artifact to show first when the 成果物 tab opens (#1778 links to it from the conversation). */
+  /** An artifact to show first when the 成果物 tab opens (a row of the conversation links to it). */
   openArtifact?: string;
-  /** Hide a stopped Task from the list, or bring it back (#1142). */
+  /** Hide a stopped Task from the list, or bring it back. */
   onArchive: (archived: boolean) => void;
-  /** 「以前の会話を読む」 (#1142): reads the page before the first event held; resolves with that page. */
+  /** 「以前の会話を読む」: reads the page before the first event held; resolves with that page. */
   onLoadOlder: () => Promise<EventEnvelope[]>;
 }) {
   const cloud = props.task.executionMode === "cloud";
+  // a Task that ran on another machine is read only here: the reply box is off and says why under it
+  const readOnly = readOnlyReason(props.task);
   const runnerInfo = props.runners?.find((r) => r.id === props.task.runner);
   const [forking, setForking] = useState(false);
   const fork = (seq: number) => {
@@ -72,7 +80,7 @@ export function TaskView(props: {
   };
   const archiveNotice = eventsArchiveNotice(props.detail?.eventsArchive);
   const transcript = useMemo(() => foldTranscript(props.detail?.events ?? []), [props.detail?.events]);
-  // The last assistant row of each turn with two or more of them: that row also copies the whole reply (#695).
+  // The last assistant row of each turn with two or more of them: that row also copies the whole reply.
   const turnEnds = useMemo(() => {
     const ends = new Set<string>();
     let last: string | undefined;
@@ -92,7 +100,7 @@ export function TaskView(props: {
   const [reasonOpen, setReasonOpen] = useState(false);
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  // 最新へ (#1315): shown only while the conversation's end is below the view; 48px of slack counts as the end. Measured
+  // 最新へ: shown only while the conversation's end is below the view; 48px of slack counts as the end. Measured
   // at `endRef`, not at the bottom of `.main`: the composer under the conversation is not part of "the latest".
   const mainRef = useRef<HTMLElement>(null);
   const [atEnd, setAtEnd] = useState(true);
@@ -101,12 +109,12 @@ export function TaskView(props: {
     if (el && end) setAtEnd(end.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 48);
   };
   const [showInput, setShowInput] = useState<Record<string, boolean>>({});
-  // Attachments (#125) for the next reply; a reply may be attachments only (the daemon adds a fixed sentence).
+  // Attachments for the next reply; a reply may be attachments only (the daemon adds a fixed sentence).
   const attach = useAttachments(props.onError);
   const drop = useDropZone((files) => void attach.add(files), props.onError);
   const [sending, setSending] = useState(false);
 
-  // Follows the newest event, not the row count: an older page added above (#1142) must not jump to the end
+  // Follows the newest event, not the row count: an older page added above must not jump to the end
   const lastSeq = props.detail?.events.at(-1)?.seq;
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -117,7 +125,7 @@ export function TaskView(props: {
     }
   }, [lastSeq, transcript.pending.length]);
 
-  // 「以前の会話を読む」 (#1142): the Task opens on its last events. The button stays until a page comes back short (the
+  // 「以前の会話を読む」: the Task opens on its last events. The button stays until a page comes back short (the
   // seqs can have holes — events moved to S3 — so a count of what is left is not shown); that end is the first seq it was
   // seen at, so a detail read again from its tail (a failed catch-up drops it) has the button again. The view keeps its
   // place: the distance to the bottom is the same after the page is drawn above.
@@ -192,15 +200,15 @@ export function TaskView(props: {
       .catch((e) => props.onError(String((e as Error).message ?? e)))
       .finally(() => setBudgetChoosing(false));
   };
-  // 結果 / 確認済み (#492): the answer comes back as task.updated too, which is what the lists redraw from
+  // 結果 / 確認済み: the answer comes back as task.updated too, which is what the lists redraw from
   const [outcomeErr, setOutcomeErr] = useState<string | null>(null);
   const setOutcome = (body: { outcome?: StoredOutcome; reviewed?: boolean }) => {
     setOutcomeErr(null);
     api.setOutcome(props.task.id, body).catch((e) => setOutcomeErr(String((e as Error).message ?? e)));
   };
   const [tab, setTab] = useState<"chat" | "diff" | "terminal" | "artifacts">("chat");
-  // The 成果物 tab's count (#1777), known before the tab is opened; the tab itself reports changes, and an agent's own
-  // registration (#1778, an artifact.saved row in the conversation) reads it again so the label keeps up with the row.
+  // The 成果物 tab's count, known before the tab is opened; the tab itself reports changes, and an agent's own
+  // registration (an artifact.saved row in the conversation) reads it again so the label keeps up with the row.
   const [artifactCount, setArtifactCount] = useState(0);
   // Mounted at the first open and then only hidden, so the opened report and a pending 元に戻す survive a switch to 会話.
   const [artifactsOpened, setArtifactsOpened] = useState(false);
@@ -212,7 +220,7 @@ export function TaskView(props: {
       live = false;
     };
   }, [props.task.id, savedRows]);
-  // A hidden conversation measures as "at the end"; back on 会話, measure it again (#1315 review).
+  // A hidden conversation measures as "at the end"; back on 会話, measure it again (found in review).
   useEffect(() => {
     if (tab === "chat") checkEnd();
   }, [tab]);
@@ -223,8 +231,8 @@ export function TaskView(props: {
   const lastPhase = useRef<string | undefined>(undefined);
   const [importDetail, setImportDetail] = useState<TaskDetail | null>(null);
   const teleportReason = (!props.task.cloudSession || !/^session_[A-Za-z0-9_-]+$/.test(props.task.cloudSession.id) || props.task.cloudSession.url !== `https://claude.ai/code/${props.task.cloudSession.id}`) ? t(m.teleportNoId) : isWorkingStatus(props.task.status) ? t(m.teleportRunning) : !props.pty ? t(m.teleportNoPty) : undefined;
-  // The terminal is only for the CLI's own questions (#1306); starting does not leave the screen.
-  // The title is edited in place (#491): Enter / blur saves, Esc drops, an empty or unchanged one is not sent
+  // The terminal is only for the CLI's own questions; starting does not leave the screen.
+  // The title is edited in place: Enter / blur saves, Esc drops, an empty or unchanged one is not sent
   const [editingTitle, setEditingTitle] = useState(false);
   const escaped = useRef(false);
   const saveTitle = (value: string) => {
@@ -268,8 +276,8 @@ export function TaskView(props: {
     setImportDetail(null);
     setTab("chat"); setTerminalOpened(false);
   }, [props.task.id]);
-  // The artifact to show on the 成果物 tab: from Insights' report list (#1835, the effect below) or a row of the
-  // conversation (#1778). The sequence makes the same artifact open again on a second press, after another one was picked on the tab.
+  // The artifact to show on the 成果物 tab: from Insights' report list (the effect below) or a row of the
+  // conversation. The sequence makes the same artifact open again on a second press, after another one was picked on the tab.
   const [artifactOpen, setArtifactOpen] = useState<{ id: string; seq: number }>();
   const openArtifact = (id: string) => {
     setArtifactOpen((o) => ({ id, seq: (o?.seq ?? 0) + 1 }));
@@ -297,7 +305,7 @@ export function TaskView(props: {
   }, [props.task.id, diffKey, tab, cloud]);
   const judgement = judgementNote(props.task);
   const headStatus = cloud ? (props.task.status === "running" ? t(m.cloudStarting) : t(m.cloudStatusUnchecked)) : (activeLabel(props.task) ?? SINCE[props.task.status]);
-  // a Cloud Task's times line does not name a state its head says is not known (#2030)
+  // a Cloud Task's times line does not name a state its head says is not known
   const times = taskTimes(props.task, Date.now(), cloud ? (props.task.status === "running" ? t(m.startingWord) : t(m.statusUncheckedWord)) : (activeLabel(props.task) ?? undefined));
   const diffShown = useMemo(() => diffRows(diff ?? []), [diff]);
   const diffCount = new Set(diffShown.files.filter((f) => f.stat !== "").map((f) => f.path)).size;
@@ -327,22 +335,18 @@ export function TaskView(props: {
         <span className={`status ${props.task.status}`}>{headStatus}</span>
         <span className="hint task-times">{`${times.started} · ${times.since}`}</span>
         <OriginTag origin={props.task.origin} />
+        <MachineTag machine={props.task.machine} />
         <ResumeTag resumeAt={props.task.resumeAt} reason={props.task.resumeReason} plannedAt={props.task.resumePlannedAt} />
         <BackgroundTag background={props.task.background} />
+        <WaitTag task={props.task} />
         <ShadowTag task={props.task} />
         {props.detail?.sourceCloudTask && <CloudSourceTag source={props.detail.sourceCloudTask} switched={!!props.switchedFromCloud} onOpen={() => props.onOpenTask?.(props.detail!.sourceCloudTask!.id)} />}
         <select className="outcome" value={props.task.outcome} disabled={busy || !outcomeIsSettable(props.task.status)} onChange={(e) => setOutcome({ outcome: e.target.value as StoredOutcome })} title={outcomeIsSettable(props.task.status) ? t(m.outcomeTitle) : outcomeIsDerived(props.task.status) ? t(m.outcomeDerivedTitle) : t(m.outcomeLaterTitle)}>
-          {(["needs_action", "finished", "unknown"] as const).map((o) => (
-            <option key={o} value={o}>
-              {outcomeLabel(o)}
+          {outcomeOptions(props.task.outcome).map((o) => (
+            <option key={o.value} value={o.value} disabled={o.disabled}>
+              {outcomeLabel(o.value)}
             </option>
           ))}
-          {/* a Task whose outcome follows from its status shows that value, which is not one of the three that can be set */}
-          {!StoredOutcome.safeParse(props.task.outcome).success && (
-            <option value={props.task.outcome} disabled>
-              {outcomeLabel(props.task.outcome)}
-            </option>
-          )}
         </select>
         <button className="ghost review-toggle" disabled={busy} onClick={() => setOutcome({ reviewed: props.task.reviewedAt === null })}>
           {props.task.reviewedAt === null ? t(m.markReviewed) : t(m.unmarkReviewed)}
@@ -353,7 +357,7 @@ export function TaskView(props: {
           </button>
         )}
         {judgement && (
-          // one line on a phone (#4066); a tap shows the whole reason
+          // one line on a phone; a tap shows the whole reason
           <span className={`hint judged${reasonOpen ? " open" : ""}`} title={judgement.title} onClick={() => setReasonOpen(!reasonOpen)}>
             {judgement.text}
           </span>
@@ -364,7 +368,7 @@ export function TaskView(props: {
         <button className="ghost brief-toggle" onClick={props.onBrief}>
           {t(m.details)}
         </button>
-        {/* the switch rides with the tabs (#3677): one item of the wrapping head, so a run's status line and the 完了-only
+        {/* the switch rides with the tabs: one item of the wrapping head, so a run's status line and the 完了-only
             buttons coming and going break the head's first line as before and do not push the switch to a line of its own */}
         <div className="task-tabs">
           {tab === "chat" && <MdViewToggle />}
@@ -415,7 +419,7 @@ export function TaskView(props: {
 
       {terminalOpened && (
         <div className="terminal-pane" hidden={tab !== "terminal"}>
-          <Terminal key={`${props.task.id}:${terminalEpoch}`} taskId={props.task.id} teleport={cloud} onEnded={importEnded} />
+          <Terminal key={`${props.task.id}:${terminalEpoch}`} target={{ task: props.task.id }} teleport={cloud} onEnded={importEnded} />
         </div>
       )}
 
@@ -456,6 +460,8 @@ export function TaskView(props: {
       {props.detail?.stopSummary && props.detail.stopSummary.length > 0 && <Stops stops={props.detail.stopSummary} issue={props.task.id} />}
       {!cloud && <DeviceAuth auth={props.deviceAuth} onError={props.onError} />}
       {!cloud && <TaskAsks task={props.task} stops={props.detail?.stopSummary ?? []} onError={props.onError} />}
+      {/* onSend shows its own error, so the buttons do not show it a second time */}
+      {!cloud && <PresetReplies taskId={props.task.id} replies={repliesFor(props.task.status, props.stopMark)} onSend={(text) => props.onSend(text).catch(() => undefined)} onError={props.onError} />}
       {transcript.pending.map((p) => {
         return (
           <div key={p.id} className="perm" role="alertdialog">
@@ -488,7 +494,7 @@ export function TaskView(props: {
       )}
       {!cloud && <div className="composer">
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...drop.handlers}>
-          <PresetPicker scene="task" workspaceId={props.task.workspaceId} text={text} onText={(s) => setText(s)} onError={props.onError}>
+          <PresetPicker scene="task" taskId={props.task.id} workspaceId={props.task.workspaceId} text={text} onText={(s) => setText(s)} onError={props.onError}>
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -497,16 +503,18 @@ export function TaskView(props: {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
               }}
               rows={2}
-              placeholder={`${t(home.presetHint)}${busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}`}
+              disabled={readOnly !== null}
+              placeholder={readOnly !== null ? t(m.placeholderMachine, { machine: props.task.machine! }) : `${t(home.presetHint)}${busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}`}
             />
           </PresetPicker>
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </div>
         <AttachButton onFiles={(files) => void attach.add(files)} />
-        <button className="pri" disabled={(!text.trim() && !attach.items.length) || attach.busy || sending} onClick={() => void send()} title={attach.busy ? t(m.waitUpload) : ""}>
+        <button className="pri" disabled={readOnly !== null || (!text.trim() && !attach.items.length) || attach.busy || sending} onClick={() => void send()} title={attach.busy ? t(m.waitUpload) : ""}>
           {attach.busy ? t(m.uploading) : t(m.send)}
         </button>
       </div>}
+      {readOnly !== null && <div className="hint composer-hint machine-readonly" role="note">{readOnly}</div>}
       {props.shadowTask && !props.shadowTask.shadowStopped && (
         <div className="hint composer-hint">
           {props.shadowTask.status === "waiting" ? t(m.shadowWaiting, { runner: props.shadowTask.runner }) : t(m.shadowCopies, { runner: props.shadowTask.runner })}
@@ -516,7 +524,7 @@ export function TaskView(props: {
   );
 }
 
-/** A runner's reply: Markdown preview or the plain text (#3677). Only this subscribes to the switch, so switching redraws the
+/** A runner's reply: Markdown preview or the plain text. Only this subscribes to the switch, so switching redraws the
  *  replies and not the tool rows around them. */
 function ReplyText(props: { text: string }) {
   const [view] = useMdView();
@@ -527,7 +535,7 @@ function TranscriptItem(props: {
   item: Item;
   runner: Task["runner"];
   showInput: boolean;
-  /** An artifact row (#1778): open it on the 成果物 tab. */
+  /** An artifact row: open it on the 成果物 tab. */
   onOpenArtifact: (id: string) => void;
   onToggle: () => void;
   /** The task is running: what is copied is the text so far. */
@@ -629,7 +637,7 @@ function permLabel(k: "exec" | "write" | "network" | "other") {
 }
 
 /**
- * The Task's open operational checks and the stops a person answers (#2745), with the 判断待ち screen's buttons: a choice
+ * The Task's open operational checks and the stops a person answers, with the 判断待ち screen's buttons: a choice
  * or a grant goes as the person's reply, as it does there. Read again whenever the Task changes and after an answer —
  * only while it can have one (stopped 要対応, or a stop a person decides), so an ordinary Task's screen asks nothing more.
  */

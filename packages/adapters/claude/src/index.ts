@@ -70,6 +70,8 @@ export interface ClaudeAdapterOptions {
   extraArgs?: string[];
   /** Where to look for the user's settings.json (model default). Default ~/.claude. */
   claudeHome?: string;
+  /** How old the last read of the login may be before a session reads it again (`rereadAccount`). Default `ACCOUNT_REREAD_MS`. */
+  accountRereadMs?: number;
 }
 
 /**
@@ -104,9 +106,9 @@ export function telemetryEnv(opts: Pick<StartOptions, "runnerTelemetry">): Recor
   return opts.runnerTelemetry ? {} : { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1" };
 }
 
-/** The subagents' thinking effort: only when the user chose one (`opts.subagentEffort`); `childEnv` drops the parent's same-named variable. */
-export function subagentEnv(opts: Pick<StartOptions, "subagentEffort">): Record<string, string> {
-  return opts.subagentEffort ? { CLAUDE_CODE_SUBAGENT_EFFORT: opts.subagentEffort } : {};
+/** The subagents' thinking effort and model: only what the user chose (`opts.subagentEffort` / `opts.subagentModel`); `childEnv` drops the parent's same-named variables. */
+export function subagentEnv(opts: Pick<StartOptions, "subagentEffort" | "subagentModel">): Record<string, string> {
+  return { ...(opts.subagentEffort ? { CLAUDE_CODE_SUBAGENT_EFFORT: opts.subagentEffort } : {}), ...(opts.subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: opts.subagentModel } : {}) };
 }
 
 /**
@@ -162,16 +164,46 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
   return args;
 }
 
+/**
+ * The account the last read of the login in this process found ("" = none), as `accountName`; undefined until one has
+ * answered. It is what the sessions put on their usage-limit reports: the login as last read, not the login the
+ * reporting process is using. `detect()` reads it, and so does `rereadAccount`.
+ */
+let loggedInAccount: string | undefined;
+/** The CLI the last `detect()` found and when its login was last read; none until a `detect()` has found the CLI. */
+let lastLoginRead: { exe: string; at: number; reading: boolean } | undefined;
+/** A session reads the login again when the last read is older than this: the same minute as the daemon's own recheck. */
+export const ACCOUNT_REREAD_MS = 60_000;
+
+/**
+ * Reads the login again when the last read is older than `maxAgeMs` (one read at a time, not waited for). A person can
+ * log in to another account in a terminal at any time and nothing tells the daemon, so a session asks when it starts
+ * and at each usage-limit report. What is left: a report that arrives before the answer, or within `maxAgeMs` of the
+ * last read, still carries the earlier account's name.
+ */
+function rereadAccount(maxAgeMs: number): void {
+  const r = lastLoginRead;
+  if (!r || r.reading || Date.now() - r.at < maxAgeMs) return;
+  r.reading = true;
+  void loginStatus(r.exe).then(({ login, account }) => {
+    if (lastLoginRead !== r) return; // a detect() ran meanwhile: its answer is the newer one
+    if (login !== "unknown") loggedInAccount = account ?? "";
+    r.at = Date.now();
+    r.reading = false;
+  });
+}
+
 /** What to type in a terminal tab when the login has run out. Prints a URL to open elsewhere, then takes the code. */
 export const CLAUDE_LOGIN_HINT = "claude auth login";
 
 /**
- * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Of its stdout only `authMethod` is read (`claude.ai` =
- * a Claude account, `api_key` = an Anthropic Console account); the account, email and organization it also
- * names are never looked at, and the credential files neither. `loginExpiresAt` (from 2.1.318) is read too, as
- * `expiresAt` in epoch ms. No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
+ * `claude auth status` (2.1.281): exit 0 = logged in, 1 = not. Of its stdout `authMethod` is read (`claude.ai` =
+ * a Claude account, `api_key` = an Anthropic Console account) and `loginExpiresAt` (from 2.1.318), as `expiresAt` in
+ * epoch ms. The organization and email it also names are used for one thing: `account`, a pseudonym of the account
+ * (`accountName`) that the usage-limit reports are kept under. They are not returned, stored or logged, and the
+ * credential files are never looked at. No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
  */
-export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; expiresAt?: number }> {
+export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; expiresAt?: number; account?: string }> {
   try {
     const proc = Bun.spawn([exe, "auth", "status"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: childEnv() });
     // Both pipes are collected as they arrive and awaited only briefly after the exit: a child the command left behind
@@ -192,8 +224,8 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ lo
     if (proc.signalCode) return { login: "unknown" };
     await Promise.race([drained, Bun.sleep(500)]);
     if (code === 0) {
-      const { kind, expiresAt } = loginFieldsOf(stdout);
-      return { login: "ok", kind, ...(expiresAt !== undefined ? { expiresAt } : {}) };
+      const { kind, expiresAt, account } = loginFieldsOf(stdout);
+      return { login: "ok", kind, ...(expiresAt !== undefined ? { expiresAt } : {}), ...(account ? { account } : {}) };
     }
     return { login: /unknown (command|option)|unrecognized/i.test(stderr) ? "unknown" : "expired" };
   } catch {
@@ -201,9 +233,21 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ lo
   }
 }
 
-/** Only `authMethod` and `loginExpiresAt` are read; the account, email and organization are not. */
-function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number } {
-  let parsed: { authMethod?: unknown; loginExpiresAt?: unknown } | null;
+/**
+ * The name an account's usage-limit reports are kept under: the first 16 hex characters of sha256("claude:<id>"),
+ * `<id>` being "<organization id>:<email>". The same account gives the same name on every machine, so two machines'
+ * reports for it meet in one row. It is a pseudonym, not an anonymous value: the hash has no salt, so whoever knows the
+ * organization id can confirm a guessed email with one hash, and the 8 characters the ledger shows are enough to pick
+ * one out of a small set of candidates. Without the organization id (a UUID) it cannot be guessed in practice.
+ * `docs/design/ledger.md` lists what would change that.
+ */
+export function accountName(id: string): string {
+  return new Bun.CryptoHasher("sha256").update(`claude:${id}`).digest("hex").slice(0, 16);
+}
+
+/** `authMethod` and `loginExpiresAt` are read as they are; the organization and email only pass through `accountName`. */
+function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number; account?: string } {
+  let parsed: { authMethod?: unknown; loginExpiresAt?: unknown; orgId?: unknown; email?: unknown } | null;
   try {
     parsed = JSON.parse(stdout);
   } catch {
@@ -211,7 +255,9 @@ function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number }
   }
   const method = parsed?.authMethod;
   const kind = method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
-  return { kind, expiresAt: expiresAtOf(parsed?.loginExpiresAt) };
+  // the limits belong to the organization the login is in; the email tells two people of one organization apart
+  const id = [parsed?.orgId, parsed?.email].filter((v): v is string => typeof v === "string" && v !== "").join(":");
+  return { kind, expiresAt: expiresAtOf(parsed?.loginExpiresAt), ...(id ? { account: accountName(id) } : {}) };
 }
 
 /**
@@ -270,7 +316,10 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
         await proc.exited;
         const version = text.match(/\d+\.\d+\.\d+/)?.[0] ?? text;
         if (proc.exitCode !== 0) return { available: false, version, path: which };
-        const { login, kind, expiresAt } = await loginStatus(which);
+        const { login, kind, expiresAt, account } = await loginStatus(which);
+        // what the sessions put on their usage-limit reports; a status that could not be read keeps the last one
+        if (login !== "unknown") loggedInAccount = account ?? "";
+        lastLoginRead = { exe: which, at: Date.now(), reading: false };
         return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), ...(expiresAt !== undefined ? { loginExpiresAt: expiresAt } : {}), loginHint: CLAUDE_LOGIN_HINT };
       } catch (e) {
         return { available: false, note: String(e) };
@@ -278,7 +327,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
     },
     start(opts, emit) {
       if (opts.executionMode === "cloud") return new CloudSession(bin, opts, emit, cloudChildEnv(childEnv(process.env, opts.env)));
-      return new ClaudeSession(bin, opts, emit, options.extraArgs ?? []);
+      return new ClaudeSession(bin, opts, emit, options.extraArgs ?? [], options.accountRereadMs ?? ACCOUNT_REREAD_MS);
     },
   };
 }
@@ -301,8 +350,10 @@ class ClaudeSession implements RunnerSession {
   /** set_permission_mode requests waiting for their control_response (request_id → settle). */
   private modeRequests = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
 
-  constructor(bin: string, private opts: StartOptions, private emit: (ev: AgentEvent) => void, extraArgs: string[]) {
+  constructor(bin: string, private opts: StartOptions, private emit: (ev: AgentEvent) => void, extraArgs: string[], private accountRereadMs: number) {
     const args = buildArgs(opts, extraArgs);
+    // the login may have changed since it was last read: ask now, so the answer is there before the first report
+    if (!opts.bedrock) rereadAccount(accountRereadMs);
     this.proc = Bun.spawn([bin, ...args], {
       cwd: opts.cwd,
       env: childEnv(process.env, { ...opts.env, ...bedrockEnv(opts), ...subagentEnv(opts), ...telemetryEnv(opts), ...otelEnv(opts) }),
@@ -483,7 +534,10 @@ class ClaudeSession implements RunnerSession {
     } catch {
       /* parser will report */
     }
-    for (const ev of this.parser.feed(line)) this.emit(ev);
+    for (const ev of this.parser.feed(line)) {
+      this.emit(ev.t === "quota" && loggedInAccount !== undefined ? { ...ev, account: loggedInAccount } : ev);
+      if (ev.t === "quota") rereadAccount(this.accountRereadMs); // a session can outlive a login: the next report carries what this read finds
+    }
   }
 
   private async pumpStderr(): Promise<void> {

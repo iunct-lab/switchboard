@@ -66,8 +66,8 @@ function fakeFile() {
   return { deps, filed, comments };
 }
 
-describe("latency-check (#2821)", () => {
-  test("slowHours: an hour with 5+ /api/health over 2 s is reported with its top 5 routes (#2821)", () => {
+describe("latency-check", () => {
+  test("slowHours: an hour with 5+ /api/health over 2 s is reported with its top 5 routes", () => {
     const hours = withDb([...healthy(52, 2500), ...busy], (db) => slowHours(db, NOW));
     expect(hours).toHaveLength(1);
     const h = hours[0]!;
@@ -82,7 +82,7 @@ describe("latency-check (#2821)", () => {
     expect(withDb(healthy(10, 2500), (db) => slowHours(db, NOW + 25 * 3_600_000))).toEqual([]);
   });
 
-  test("requestFor + fileRequest: the second run comments on the open request instead of filing (#2821)", async () => {
+  test("requestFor + fileRequest: the second run comments on the open request instead of filing", async () => {
     const hours = withDb([...healthy(52, 2500), ...busy], (db) => slowHours(db, NOW));
     const f = fakeFile();
     const log: string[] = [];
@@ -101,7 +101,7 @@ describe("latency-check (#2821)", () => {
     expect(requestFor(hours, { date: "2026-10-28" }).title).toBe(TITLE);
   });
 
-  test("no slow hour files and comments nothing (#2821)", async () => {
+  test("no slow hour files and comments nothing", async () => {
     const hours = withDb([...healthy(30, 300), ...busy], (db) => slowHours(db, NOW));
     expect(hours).toEqual([]);
     expect(report(hours)).toEqual({ code: 0, lines: ["遅れなし（直近 24 時間）"] });
@@ -111,14 +111,14 @@ describe("latency-check (#2821)", () => {
     expect(calls).toBe(0);
   });
 
-  test("main cannot tell when the database cannot be read: exit 2, nothing filed (#2821)", async () => {
+  test("main cannot tell when the database cannot be read: exit 2, nothing filed", async () => {
     const log: string[] = [];
     const code = await main(["--file-request"], { read: () => { throw new Error("api_requests の表が無い"); }, file: fakeFile().deps, now: () => new Date(NOW), log: (l) => log.push(l) });
     expect(code).toBe(2);
     expect(log[0]).toBe("判定できない（api_requests の表が無い）");
   });
 
-  test("the request has no secret and no address (#2821)", () => {
+  test("the request has no secret and no address", () => {
     const hours = withDb([...healthy(52, 2500), ...busy], (db) => slowHours(db, NOW));
     const r = requestFor(hours, { date: "2026-10-28" });
     for (const text of [r.body, r.comment]) {

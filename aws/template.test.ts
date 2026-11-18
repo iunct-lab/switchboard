@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
 /**
- * aws/template.yaml (#229) read as text: CloudFormation's short tags (!Ref, !Sub …) are not plain YAML, and
+ * aws/template.yaml read as text: CloudFormation's short tags (!Ref, !Sub …) are not plain YAML, and
  * `sam validate --lint` (run by hand, see aws/README.md) checks the rest. These pin what the PBI's criteria rest on.
  */
 const text = await Bun.file(new URL("./template.yaml", import.meta.url)).text();
@@ -17,7 +17,7 @@ function resource(name: string): string {
   return next < 0 ? rest : rest.slice(0, next + 1);
 }
 
-/** One VPC origin inside the `Fn::ForEach::Edge` loop (#465): from its `<name>${Gen}:` key to the next key at that indent. */
+/** One VPC origin inside the `Fn::ForEach::Edge` loop: from its `<name>${Gen}:` key to the next key at that indent. */
 function edgeOrigin(name: string): string {
   const start = text.indexOf(`${name}\${Gen}:\n`);
   if (start < 0) throw new Error(`no origin ${name}`);
@@ -38,7 +38,7 @@ function hostParams(): Set<string> {
   return new Set([...hostSsmStatement().matchAll(/parameter\/switchboard\/([a-z0-9-]+|\*)'/g)].map((m) => m[1]!));
 }
 
-describe("aws/template.yaml (#229)", () => {
+describe("aws/template.yaml", () => {
   test("has the resources the host needs", () => {
     for (const r of ["Data", "Sg", "RescueSg", "Boundary", "InstanceRole", "InstanceProfile", "LaunchTemplate", "Instance", "SchedulerRole", "StartPage", "StartPageAccess", "Cdn", "Starter", "DeployRole", "GitHubOidcRole", "BudgetLow", "BudgetHigh"]) {
       expect(text).toContain(`\n  ${r}:\n`);
@@ -59,7 +59,7 @@ describe("aws/template.yaml (#229)", () => {
 
   test("the instance is on-demand unless Market is spot, and stops (not terminates) on interruption and on shutdown", () => {
     const lt = resource("LaunchTemplate");
-    // on-demand by default (#443); Spot only when Market says so, and then it stops (not terminates) on interruption
+    // on-demand by default; Spot only when Market says so, and then it stops (not terminates) on interruption
     expect(text).toMatch(/  Market:\n    Type: String\n    Default: on-demand\n    AllowedValues: \[on-demand, spot\]/);
     expect(lt).toContain("- { MarketType: spot, SpotOptions: { SpotInstanceType: persistent, InstanceInterruptionBehavior: stop } }");
     expect(lt).toContain("InstanceMarketOptions: !If\n          - Spot");
@@ -76,7 +76,7 @@ describe("aws/template.yaml (#229)", () => {
     const amounts = [...text.matchAll(/BudgetLimit: \{ Amount: (\d+), Unit: USD \}/g)].map((m) => Number(m[1]));
     expect(amounts.sort((a, b) => a - b)).toEqual([7, 20]);
     expect(resource("BudgetLow")).toContain("Address: !Ref BudgetEmail");
-    // only this project's resources: another project may share the account (review #338)
+    // only this project's resources: another project may share the account
     for (const b of ["BudgetLow", "BudgetHigh"]) expect(resource(b)).toContain("CostFilters: { TagKeyValue: [!Join ['', ['user:Project$', !Ref CostTag]]] }");
   });
 
@@ -97,13 +97,13 @@ describe("aws/template.yaml (#229)", () => {
 
   test("the OIDC role trusts only the repository's main branch", () => {
     const oidc = resource("GitHubOidcRole");
-    // with the prefix only the id-pinned subject; without it only the name (review #466: never both)
+    // with the prefix only the id-pinned subject; without it only the name (never both)
     expect(oidc).toContain("- ImmutableSub\n                  - !Sub '${GitHubSubPrefix}:ref:refs/heads/main'\n                  - !Sub 'repo:${GitHubRepo}:ref:refs/heads/main'");
     expect(text).toContain("AllowedPattern: '(repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+)?'");
     expect(oidc).toContain("'token.actions.githubusercontent.com:aud': sts.amazonaws.com");
   });
 
-  test("the OIDC role makes or updates a change set only naming DeployRole, so it cannot use a role attached to the stack (#4088)", () => {
+  test("the OIDC role makes or updates a change set only naming DeployRole, so it cannot use a role attached to the stack", () => {
     const oidc = resource("GitHubOidcRole");
     const statements = oidc.split("- Effect: Allow").slice(1);
     const writes = statements.filter((st) => /cloudformation:(CreateChangeSet|UpdateStack)\b/.test(st) && st.includes(":stack/${AWS::StackName}/*"));
@@ -117,27 +117,27 @@ describe("aws/template.yaml (#229)", () => {
 
   test("CloudFront sends the shared header to the host, and a stopped host is answered by the start page", () => {
     const cdn = resource("Cdn");
-    expect(cdn.match(/HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue/g)).toHaveLength(3); // host, rescue, auth (#211)
+    expect(cdn.match(/HeaderName: x-switchboard-edge, HeaderValue: !Ref EdgeHeaderValue/g)).toHaveLength(3); // host, rescue, auth
     expect(cdn).toContain("ResponsePagePath: /_start/index.html");
     expect(text).toMatch(/EdgeHeaderValue:\n {4}Type: String\n {4}NoEcho: true/);
   });
 
-  test("CloudFront reaches the instance as a VPC origin by id, never its public address in plain text (review #338)", () => {
+  test("CloudFront reaches the instance as a VPC origin by id, never its public address in plain text", () => {
     const cdn = resource("Cdn");
     expect(cdn).not.toContain("PublicDnsName");
-    // the only custom origin is the Starter's Function URL (#211), over https only
+    // the only custom origin is the Starter's Function URL, over https only
     expect(cdn.match(/CustomOriginConfig: \{[^}]*\}/g)).toEqual(["CustomOriginConfig: { OriginProtocolPolicy: https-only, OriginSSLProtocols: [TLSv1.2] }"]);
     expect(cdn.match(/VpcOriginConfig: \{ VpcOriginId: !GetAtt \[!Sub '(Host|Rescue)VpcOrigin\$\{LaunchGeneration\}', Id\]/g)).toHaveLength(2);
     expect(cdn.match(/ConnectionAttempts: 1/g)).toHaveLength(2); // a stopped host falls through to the start page quickly
     for (const o of ["HostVpcOrigin", "RescueVpcOrigin"]) {
       const r = edgeOrigin(o);
       expect(r).toContain("Arn: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'");
-      expect(r).not.toContain("InstanceGeneration"); // an origin in use cannot be replaced by a rename (re-review #338)
+      expect(r).not.toContain("InstanceGeneration"); // an origin in use cannot be replaced by a rename
     }
-    expect(resource("InstanceRole")).not.toContain("cloudfront:"); // nothing on the host rewrites the distribution (only the Starter does, #1639)
+    expect(resource("InstanceRole")).not.toContain("cloudfront:"); // nothing on the host rewrites the distribution (only the Starter does)
   });
 
-  test("VPC origins take their logical ids from LaunchGeneration, so a launch template change creates new ones (#465)", () => {
+  test("VPC origins take their logical ids from LaunchGeneration, so a launch template change creates new ones", () => {
     // LanguageExtensions before Serverless (CloudFormation's order); Fn::ForEach is the only way to a logical id from a parameter
     expect(text).toStartWith("AWSTemplateFormatVersion: '2010-09-09'\nTransform: [AWS::LanguageExtensions, AWS::Serverless-2016-10-31]\n");
     // the default is the generation the stack has now: this change alone creates and deletes no origin
@@ -158,20 +158,20 @@ describe("aws/template.yaml (#229)", () => {
     }
   });
 
-  test("the Spot request is persistent (stop on interruption); nothing automatic terminates the instance or cancels the request (re-review #338)", () => {
+  test("the Spot request is persistent (stop on interruption); nothing automatic terminates the instance or cancels the request", () => {
     expect(resource("LaunchTemplate")).toContain("SpotInstanceType: persistent");
     expect(text).not.toContain("InstanceGeneration");
     expect(text).not.toContain("ec2:CancelSpotInstanceRequests");
   });
 
-  test("作り直す is a root volume replacement: the Starter may start, stop and replace the root of its one instance, and nothing else (re-review #338, #1394)", () => {
+  test("作り直す is a root volume replacement: the Starter may start, stop and replace the root of its one instance, and nothing else", () => {
     const starter = resource("Starter");
     expect(starter).toContain("Action: [ec2:StartInstances, ec2:StopInstances, ec2:CreateReplaceRootVolumeTask]\n              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'");
     for (const gone of ["cloudformation:", "iam:PassRole", "DeployRole", "SB_STACK_NAME", "ec2:TerminateInstances", "ec2:RebootInstances"]) expect(starter).not.toContain(gone);
     expect(resource("Boundary")).toContain("Action: [ec2:StartInstances, ec2:StopInstances, ec2:CreateReplaceRootVolumeTask]");
   });
 
-  test("the boundary names this stack's resources; '*' only for Describe, ECR's GetAuthorizationToken (no resource level) and for KMS through SSM / EC2 (re-review #338)", () => {
+  test("the boundary names this stack's resources; '*' only for Describe, ECR's GetAuthorizationToken (no resource level) and for KMS through SSM / EC2", () => {
     const boundary = resource("Boundary");
     for (const st of boundary.split("- Sid: ").slice(1)) {
       if (!st.includes("Resource: '*'")) continue;
@@ -187,14 +187,14 @@ describe("aws/template.yaml (#229)", () => {
     expect(deploy).toContain("StringNotEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': !Ref AWS::StackName }");
   });
 
-  test("the instance role writes only the replica and the archives; releases are read-only (review #338)", () => {
+  test("the instance role writes only the replica and the archives; releases are read-only", () => {
     const role = resource("InstanceRole");
     expect(role).toContain("Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]\n                Resource: [!Sub '${Data.Arn}/litestream/*', !Sub '${Data.Arn}/archive/*']");
     expect(role).not.toContain("Resource: !Sub '${Data.Arn}/*'");
     expect(role).not.toContain("host/");
   });
 
-  test("the host role can put and get under history/ but not delete, and history/ has no expiration (#1436)", () => {
+  test("the host role can put and get under history/ but not delete, and history/ has no expiration", () => {
     const role = resource("InstanceRole");
     const history = role.split("- Effect: ").filter((st) => st.includes("/history/*"));
     expect(history.map((st) => st.match(/Action: (.*)/)![1]).sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
@@ -206,7 +206,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(rules).toContain("{ Id: archives, Status: Enabled, Prefix: archive/, ExpirationInDays: 30 }");
   });
 
-  test("request logs (#1490): CloudFront's standard log goes to Data's cdn-logs/ for 90 days or more, without cookies, and the host sees the viewer address", () => {
+  test("request logs: CloudFront's standard log goes to Data's cdn-logs/ for 90 days or more, without cookies, and the host sees the viewer address", () => {
     const cdn = resource("Cdn");
     expect(cdn).toContain("Logging: { Bucket: !GetAtt Data.DomainName, Prefix: cdn-logs/, IncludeCookies: false }");
     const data = resource("Data");
@@ -220,7 +220,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(behaviours[1]).not.toContain("33f36d7e-f396-46d9-90e0-52428a34d9dc");
   });
 
-  test("the daemon's log group (#1490) keeps 90 days or more; the host role may only write to it — no delete, no retention change; nothing reads cdn-logs/", () => {
+  test("the daemon's log group keeps 90 days or more; the host role may only write to it — no delete, no retention change; nothing reads cdn-logs/", () => {
     const group = resource("HostLogs");
     expect(group).toContain("LogGroupName: /switchboard/host");
     expect(Number(group.match(/RetentionInDays: (\d+)/)?.[1])).toBeGreaterThanOrEqual(90);
@@ -232,7 +232,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(role).not.toContain("cdn-logs");
   });
 
-  test("every role but DeployRole carries the boundary; DeployRole makes roles only with it and never changes it (review #338)", () => {
+  test("every role but DeployRole carries the boundary; DeployRole makes roles only with it and never changes it", () => {
     for (const r of ["InstanceRole", "SchedulerRole", "Starter", "GitHubOidcRole"]) expect(resource(r)).toContain("PermissionsBoundary: !Ref Boundary");
     const deploy = resource("DeployRole");
     expect(deploy).toContain("Condition: { StringEquals: { 'iam:PermissionsBoundary': !Ref Boundary } }");
@@ -265,20 +265,20 @@ describe("aws/template.yaml (#229)", () => {
     }
   });
 
-  test("UpdateStack on the SAM template may create the transforms' change set (review #344, #465)", () => {
+  test("UpdateStack on the SAM template may create the transforms' change set", () => {
     expect(resource("GitHubOidcRole")).toContain("Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']");
     // Describe has no resource-level permissions: never behind a tag condition
     expect(resource("GitHubOidcRole")).toMatch(/Action: ec2:DescribeInstances\n {16}Resource: '\*'\n(?! {16}Condition)/);
   });
 
-  test("DeployRole may create the transforms' change set and nothing else in CloudFormation (#759, #465)", () => {
+  test("DeployRole may create the transforms' change set and nothing else in CloudFormation", () => {
     const deploy = resource("DeployRole");
     expect(deploy).toContain("- Effect: Allow\n                Action: cloudformation:CreateChangeSet\n                Resource: [!Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31', !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/LanguageExtensions']");
     // every action, wildcards too; not the condition keys or ARNs (aws:cloudformation:…)
     expect([...deploy.matchAll(/(?<!aws:)cloudformation:[^\s,\]']+/g)].map((m) => m[0])).toEqual(["cloudformation:CreateChangeSet"]);
   });
 
-  test("the host scripts come from the repository, so the first boot needs no upload (review #338)", () => {
+  test("the host scripts come from the repository, so the first boot needs no upload", () => {
     const lt = resource("LaunchTemplate");
     expect(lt).toContain("clone --depth 1");
     expect(lt).toContain("bash /opt/switchboard-host/aws/host/bootstrap.sh");
@@ -291,7 +291,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(text).toContain("ImageId: !Ref ImageId");
   });
 
-  test("passkey login (#211): /_auth* goes to the Starter uncached, with the shared header and without the viewer's Host", () => {
+  test("passkey login: /_auth* goes to the Starter uncached, with the shared header and without the viewer's Host", () => {
     const cdn = resource("Cdn");
     expect(cdn).toContain("- Id: auth\n            DomainName: !Select [2, !Split ['/', !GetAtt StarterUrl.FunctionUrl]]");
     const auth = cdn.slice(cdn.indexOf("- Id: auth"), cdn.indexOf("- Id: startpage"));
@@ -302,7 +302,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(behavior).toContain("AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]");
     expect(behavior).toContain("CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
     expect(behavior).toContain("OriginRequestPolicyId: !Ref AuthRequestPolicy");
-    // its own Host stays (not forwarded); CloudFront-Viewer-Address goes, for the per-viewer rate limit (review #349)
+    // its own Host stays (not forwarded); CloudFront-Viewer-Address goes, for the per-viewer rate limit
     const policy = resource("AuthRequestPolicy");
     expect(policy).toContain("Headers: [content-type, user-agent, x-switchboard-ask, CloudFront-Viewer-Address]");
     expect(policy.split("\n").find((l) => l.includes("Headers: ["))).not.toMatch(/\bhost\b/i);
@@ -320,14 +320,14 @@ describe("aws/template.yaml (#229)", () => {
     expect(resource("InstanceRole")).not.toContain("auth/");
   });
 
-  test("the rescue page's outside URL (#399): /switchboard/web-url is the distribution's https origin, readable by the instance", () => {
+  test("the rescue page's outside URL: /switchboard/web-url is the distribution's https origin, readable by the instance", () => {
     const param = resource("WebUrlParam");
     expect(param).toContain("Name: /switchboard/web-url");
     expect(param).toContain("Value: !Sub 'https://${Cdn.DomainName}'");
     expect(hostParams().has("web-url")).toBe(true);
   });
 
-  test("the host role cannot read the cookie signing key; the Starter can (#701)", () => {
+  test("the host role cannot read the cookie signing key; the Starter can", () => {
     expect(hostParams().has("session-signing-key")).toBe(false);
     expect(hostParams().has("*")).toBe(false);
     expect(resource("InstanceRole")).not.toContain("parameter/switchboard/session-signing-key");
@@ -337,7 +337,7 @@ describe("aws/template.yaml (#229)", () => {
     expect(hostParams().has("session-key")).toBe(false);
   });
 
-  test("the instance role's SSM reads are a list of names, without register-code (#700)", () => {
+  test("the instance role's SSM reads are a list of names, without register-code", () => {
     expect(hostParams().has("*")).toBe(false);
     expect(hostParams().has("register-code")).toBe(false);
   });
@@ -346,15 +346,15 @@ describe("aws/template.yaml (#229)", () => {
   async function scriptParams(): Promise<Set<string>> {
     const dir = new URL("./host/", import.meta.url);
     const texts = [resource("LaunchTemplate")];
-    // cloudwatch-agent.json names a log group (/switchboard/host, #1490), not a parameter
+    // cloudwatch-agent.json names a log group (/switchboard/host), not a parameter
     for (const f of new Bun.Glob("*").scanSync(fileURLToPath(dir))) if (!f.endsWith(".test.ts") && f !== "cloudwatch-agent.json") texts.push(await Bun.file(new URL(f, dir)).text());
     return new Set(texts.flatMap((t) => [...t.matchAll(/\/switchboard\/([a-z0-9-]+)/g)].map((m) => m[1]!)));
   }
 
-  /** Read on the host by a program outside this repository (DAK's agent/ssm_exec.py, #1155), not by a script here. */
+  /** Read on the host by a program outside this repository (DAK's agent/ssm_exec.py), not by a script here. */
   const EXTERNAL_PARAMS = ["anthropic-api-key"];
 
-  test("the names the host's scripts read + the one DAK reads = the instance role's SSM resources (#700, #1155)", async () => {
+  test("the names the host's scripts read + the one DAK reads = the instance role's SSM resources", async () => {
     const read = await scriptParams();
     for (const p of EXTERNAL_PARAMS) expect(read.has(p)).toBe(false); // it is DAK's, not a script's: the list below is the only place it is named
     expect([...read, ...EXTERNAL_PARAMS].sort()).toEqual([...hostParams()].sort());
@@ -373,7 +373,7 @@ describe("aws/template.yaml (#229)", () => {
   });
 });
 
-describe("aws/template.yaml memory alarms (#540)", () => {
+describe("aws/template.yaml memory alarms", () => {
   /** A resource that may be the last one: cut at the Outputs section. */
   const alarm = (name: string) => resource(name).split("\nOutputs:")[0];
   const line = (body: string, key: string) => body.split("\n").find((l) => l.startsWith(`      ${key}:`));
@@ -425,7 +425,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
       expect(line(a, "TreatMissingData")).toBe("      TreatMissingData: notBreaching");
       expect(a).not.toMatch(/ec2:(stop|reboot|terminate|recover)|OKActions|InsufficientDataActions/i);
     }
-    // the host's alarms are watched, not mailed: no action of any kind (the Starter's own alarm mails, #1639)
+    // the host's alarms are watched, not mailed: no action of any kind (the Starter's own alarm mails)
     for (const n of ["MemoryAlarm", "SwapAlarm", "ReadThrashAlarm"]) expect(alarm(n)).not.toMatch(/AlarmActions/);
   });
 
@@ -434,7 +434,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(resource("Instance")).not.toMatch(/cloudwatch|CWAgent|alarm/i);
   });
 
-  test("host bedrock-mantle (#1731): InstanceRole and Boundary have only CreateInference, on the account's projects in any region", () => {
+  test("host bedrock-mantle: InstanceRole and Boundary have only CreateInference, on the account's projects in any region", () => {
     for (const name of ["InstanceRole", "Boundary"]) {
       const body = resource(name);
       expect([...body.matchAll(/(?<!aws:)bedrock-mantle:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["bedrock-mantle:CreateInference"]);
@@ -442,7 +442,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     }
   });
 
-  test("host bedrock (#1730): InstanceRole and Boundary invoke any model but have no other bedrock action", () => {
+  test("host bedrock: InstanceRole and Boundary invoke any model but have no other bedrock action", () => {
     const resources = [
       "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*",
       "arn:aws:bedrock:*::foundation-model/*",
@@ -462,7 +462,7 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(text).not.toMatch(/iam:CreateAccessKey|bedrock:CreateApiKey|AWS::IAM::AccessKey|AWS::IAM::User\b/);
   });
 
-  test("the instance role reads cost and budgets, and changes neither (#2278)", () => {
+  test("the instance role reads cost and budgets, and changes neither", () => {
     for (const name of ["InstanceRole", "Boundary"]) {
       const body = resource(name);
       expect([...body.matchAll(/(?<![\w:])(ce|budgets):[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["ce:GetCostAndUsage", "ce:GetCostForecast", "budgets:ViewBudget"]);
@@ -489,13 +489,13 @@ describe("aws/template.yaml memory alarms (#540)", () => {
     expect(deploy).toContain("Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:TagResource, cloudwatch:UntagResource, cloudwatch:ListTagsForResource]\n                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*'");
     expect(deploy).toContain("Action: cloudwatch:DescribeAlarms\n                Resource: '*'");
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
-    // nothing else in the boundary changed: its statements are the ones before plus OffloadImage and EcrAuthToken (#4705), OffloadCi (#4706), Countries (#1639), AgentMetrics and HostLogs (#1490), CostRead and BudgetRead (#2278), BedrockMantle (#1731)
+    // nothing else in the boundary changed: its statements are the ones before plus OffloadImage and EcrAuthToken, OffloadCi, Countries, AgentMetrics and HostLogs, CostRead and BudgetRead, BedrockMantle
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
     expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "OffloadImage", "OffloadCi", "EcrAuthToken", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
   });
 });
 
-describe("aws/template.yaml offload (#678)", () => {
+describe("aws/template.yaml offload", () => {
   /** One statement of a policy: from its `- Effect:` / `- Sid:` line to the next one. */
   const statements = (body: string, sep: string) => body.split(sep).slice(1);
   const offloadArn = "!GetAtt Offload.Arn";
@@ -517,12 +517,12 @@ describe("aws/template.yaml offload (#678)", () => {
     // the buildspec is fixed here: the host only names the upload and the command, and the command's exit code is
     // the log's last `sb-offload: exit N` line (the build itself succeeds)
     expect(p).toContain("Type: NO_SOURCE");
-    // the buildspec as CodeBuild reads it: every command a string (an unquoted `echo "a: b"` is a YAML map, review #684)
+    // the buildspec as CodeBuild reads it: every command a string (an unquoted `echo "a: b"` is a YAML map)
     const spec = p.slice(p.indexOf("BuildSpec: !Sub |\n") + "BuildSpec: !Sub |\n".length, p.indexOf("      Artifacts:"));
     const commands = (Bun.YAML.parse(spec.replace(/^ {10}/gm, "")) as { phases: { build: { commands: unknown[] } } }).phases.build.commands;
     expect(commands).toEqual([
       'mkdir -p /sb/work && cd /sb/work && aws s3 cp "s3://${Data}/$SB_OFFLOAD_KEY" - | tar -xzf -',
-      // on a line of its own even when the command's output does not end in a newline (review #684)
+      // on a line of its own even when the command's output does not end in a newline
       'cd /sb/work && sh -c "$SB_OFFLOAD_CMD"; c=$?; echo; echo "sb-offload: exit $c"',
     ]);
     const logs = resource("OffloadLogs");
@@ -554,7 +554,7 @@ describe("aws/template.yaml offload (#678)", () => {
     expect(role).toContain(`Action: logs:GetLogEvents\n                Resource: ${logsArn}`);
     expect(role).toContain("Action: [s3:PutObject, s3:DeleteObject]\n                Resource: !Sub '${Data.Arn}/offload/*'");
     // nothing broader: no other CodeBuild action (no project edits, no role override), no other log group
-    expect(role.match(/codebuild:/g)).toHaveLength(9); // the offload project's 3, the image project's 3 (#4705) and the CI project's 3 (#4706)
+    expect(role.match(/codebuild:/g)).toHaveLength(9); // the offload project's 3, the image project's 3 and the CI project's 3
     expect(role).not.toMatch(/codebuild:\*|iam:PassRole\n\s+Resource: !GetAtt OffloadRole|logs:\*/);
     const boundary = resource("Boundary");
     const offload = statements(boundary, "- Sid: ").find((st) => st.startsWith("Offload\n"));
@@ -582,7 +582,7 @@ describe("aws/template.yaml offload (#678)", () => {
 
 const waf = await Bun.file(new URL("./waf.yaml", import.meta.url)).text();
 
-describe("aws/template.yaml emergency switches (#1492)", () => {
+describe("aws/template.yaml emergency switches", () => {
   const param = (name: string) => text.slice(text.indexOf(`\n  ${name}:\n`) + 1).split(/\n {2}[A-Za-z]/)[0]!;
 
   test("both parameters default to empty, and CloudFront's Restrictions / WebACLId vanish when they are", () => {
@@ -633,7 +633,7 @@ describe("aws/template.yaml emergency switches (#1492)", () => {
   });
 });
 
-describe("aws/template.yaml temporary countries (#1639)", () => {
+describe("aws/template.yaml temporary countries", () => {
   test("the Starter ticks every 5 minutes and knows the base countries", () => {
     const starter = resource("Starter");
     expect(starter).toContain("SB_ALLOWED_COUNTRIES: !Join [',', !Ref AllowedCountries]");
@@ -648,7 +648,7 @@ describe("aws/template.yaml temporary countries (#1639)", () => {
     expect([...policy.matchAll(/cloudfront:[A-Za-z]+/g)].map((m) => m[0])).toEqual(["cloudfront:GetDistributionConfig", "cloudfront:UpdateDistribution"]);
     expect(policy).toContain("distribution/${Cdn}'");
     expect(policy).not.toContain("distribution/*");
-    // nothing on the host can loosen the entrance (#701)
+    // nothing on the host can loosen the entrance
     expect(resource("InstanceRole")).not.toContain("cloudfront:");
     expect(resource("DistributionIdParam")).toContain("Value: !Ref Cdn");
   });
@@ -676,7 +676,7 @@ describe("aws/template.yaml temporary countries (#1639)", () => {
   });
 });
 
-describe("aws/template.yaml offload image (#4705)", () => {
+describe("aws/template.yaml offload image", () => {
   const statements = (body: string, sep: string) => body.split(sep).slice(1);
 
   test("the repository keeps the newest 2 images, scans on push and is tagged Project", () => {
@@ -734,7 +734,7 @@ describe("aws/template.yaml offload image (#4705)", () => {
     expect(role).toContain("Action: logs:GetLogEvents\n                Resource: !GetAtt OffloadImageLogs.Arn");
     expect(role).toContain("Action: ecr:DescribeImages\n                Resource: !GetAtt OffloadImageRepo.Arn");
     expect(role.match(/ecr:/g)).toHaveLength(1);
-    // the host reads the two parameters (sb-offload --ci, #4707; the list is the scripts' names)
+    // the host reads the two parameters (sb-offload --ci; the list is the scripts' names)
     expect(role).toContain("parameter/switchboard/offload-image-project'");
     expect(role).toContain("parameter/switchboard/offload-image-repo'");
     const boundary = resource("Boundary");
@@ -753,7 +753,7 @@ describe("aws/template.yaml offload image (#4705)", () => {
   });
 });
 
-describe("aws/template.yaml offload CI (#4706)", () => {
+describe("aws/template.yaml offload CI", () => {
   const statements = (body: string, sep: string) => body.split(sep).slice(1);
 
   test("the project runs the work tree in the ECR image with the service role, as Offload, and logs the tag first", () => {
@@ -770,7 +770,7 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     // the unpack and the run are Offload's, word for word; only the tag line comes first
     const ci = commands(body(p)) as string[];
     const offload = commands(body(resource("Offload"))) as string[];
-    // the recordings, the names (#4711) and the compared tag's tree come between the unpack and the run
+    // the recordings, the names and the compared tag's tree come between the unpack and the run
     expect([ci[0], ci[1], ci[ci.length - 1]]).toEqual(['echo "sb-offload: image $SB_IMAGE_TAG"', offload[0], offload[1]]);
     expect(ci).toHaveLength(6);
     expect(resource("OffloadCiLogs")).toContain("LogGroupName: !Sub '/aws/codebuild/${AWS::StackName}-offload-ci'");
@@ -793,7 +793,7 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     expect(role).not.toMatch(/ssm:|secretsmanager:|kms:|s3:PutObject|s3:\*|ecr:\*|ecr:Put|ecr:Upload/);
   });
 
-  test("the recordings and the names are read from the one-time objects, read-only, and no value or token reaches the build (#4711)", () => {
+  test("the recordings and the names are read from the one-time objects, read-only, and no value or token reaches the build", () => {
     const role = resource("OffloadCiRole");
     // the ci build can read offload/* and write its log, nothing else: no put, no delete, no parameter, no secret
     expect(role).not.toMatch(/s3:Put|s3:Delete|s3:Abort|ssm:|secretsmanager:|logs:\*/);
@@ -828,7 +828,7 @@ describe("aws/template.yaml offload CI (#4706)", () => {
     const role = resource("InstanceRole");
     expect(role).toContain("Action: [codebuild:StartBuild, codebuild:BatchGetBuilds, codebuild:StopBuild]\n                Resource: !GetAtt OffloadCi.Arn");
     expect(role).toContain("Action: logs:GetLogEvents\n                Resource: !GetAtt OffloadCiLogs.Arn");
-    // the host reads the parameter (sb-offload --ci, #4707)
+    // the host reads the parameter (sb-offload --ci)
     expect(role).toContain("parameter/switchboard/offload-ci-project'");
     const ci = statements(resource("Boundary"), "- Sid: ").find((st) => st.startsWith("OffloadCi\n"));
     expect(ci).toContain("project/${AWS::StackName}-offload-ci'");

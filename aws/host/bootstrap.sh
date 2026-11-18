@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bootstrap — first boot of a Switchboard host (#230), run by the instance's UserData with the stack's parameters:
+# bootstrap — first boot of a Switchboard host, run by the instance's UserData with the stack's parameters:
 #   SB_HOST_USER SB_HOST_HOME SB_REPOS_DIR SB_GITHUB_REPO SB_DATA_BUCKET SB_SCHEDULER_ROLE_ARN
 # Installs the tools, clones the repository, restores sqlite from Litestream when the disk is new, and enables the
 # units. Idempotent: a second run on the same disk does nothing. The runners log in themselves (terminal tab, §4).
@@ -9,8 +9,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DONE=/var/lib/switchboard-host/bootstrapped
 [ -f "$DONE" ] && { echo "bootstrap: already done"; exit 0; }
 
-# --- main of /switchboard/github-repo (#2231): UserData clones the stack's GitHubRepo, which keeps its old name until an
-# instance-replacing deploy (#465); run the administrator's repository's main instead, fetched the way sb-host-update
+# --- main of /switchboard/github-repo: UserData clones the stack's GitHubRepo, which keeps its old name until an
+# instance-replacing deploy; run the administrator's repository's main instead, fetched the way sb-host-update
 # does. Anything unreadable is said and this clone goes on. Its own clone (origin = the parameter) does not fetch again.
 # SB_HOST_CLONE is for the tests.
 from_main() {
@@ -65,7 +65,7 @@ id "$SB_HOST_USER" >/dev/null 2>&1 || useradd --create-home --home-dir "$SB_HOST
 usermod -aG systemd-journal "$SB_HOST_USER"
 mkdir -p "$SB_REPOS_DIR" && chown "$SB_HOST_USER:" "$SB_REPOS_DIR"
 
-# --- security updates (#2186): 作り直す puts back the AMI's packages, and the AMI is pinned (aws/template.yaml) ---
+# --- security updates: 作り直す puts back the AMI's packages, and the AMI is pinned (aws/template.yaml) ---
 # AL2023's dnf is locked to the AMI's release, where no newer kernel is ever seen; take every later dnf from the latest
 # release. A failure is logged and skipped, as devtools: the host still serves, and 作り直す can try again
 echo latest > /etc/dnf/vars/releasever
@@ -90,11 +90,11 @@ as_user bash -c 'command -v bun >/dev/null || curl -fsSL https://bun.sh/install 
 as_user bash -c 'command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash'
 as_user bash -c 'command -v codex >/dev/null || curl -fsSL https://chatgpt.com/codex/install.sh | sh'
 
-# --- swap (#537): somewhere for a short peak under the unit's limits; a failure is logged and skipped, as devtools ---
+# --- swap: somewhere for a short peak under the unit's limits; a failure is logged and skipped, as devtools ---
 # (a failing mkswap would stop the bootstrap and the host would never serve: a host without swap is still better)
 bash "$HERE/memory.sh" || echo "bootstrap: swap failed (exit $?); the host starts without it" >&2
 
-# --- memory metrics (#539): mem_used_percent and swap_used_percent to CWAgent, for the alarm (#540) ---
+# --- memory metrics: mem_used_percent and swap_used_percent to CWAgent, for the alarm ---
 # a failure is logged and skipped, as with devtools: without the agent the host still serves Switchboard, and 作り直す can try again
 # (&& not set -e: inside { } || the shell ignores set -e, so a failed install would not stop the ctl call)
 CWA=/opt/aws/amazon-cloudwatch-agent
@@ -110,7 +110,7 @@ install -m 755 "$HERE/archive.sh" /usr/local/bin/sb-archive
 install -m 755 "$HERE/runner-sync.sh" /usr/local/bin/sb-runner-sync
 install -m 755 "$HERE/pre-rebuild.sh" /usr/local/bin/sb-pre-rebuild
 install -m 755 "$HERE/offload.sh" /usr/local/bin/sb-offload
-# the kit's gh first in the host user's interactive shells (#824): a runner started by hand posts through the same check
+# the kit's gh first in the host user's interactive shells: a runner started by hand posts through the same check
 sed -e "s|@REPO@|$REPO_DIR|g" -e "s|@HOME@|$SB_HOST_HOME|g" -e "s|@USER@|$SB_HOST_USER|g" "$HERE/sb-gh-guard.sh" > /etc/profile.d/sb-gh-guard.sh
 chmod 644 /etc/profile.d/sb-gh-guard.sh
 install -m 755 "$HERE/host-update.sh" /usr/local/bin/sb-host-update
@@ -142,8 +142,8 @@ GITHUB_REPO="$(timeout 15 aws ssm get-parameter --name /switchboard/github-repo 
 [ -d "$REPO_DIR/.git" ] || as_user git clone "https://github.com/$GITHUB_REPO.git" "$REPO_DIR"
 as_user bash -c "cd '$REPO_DIR' && bun install --frozen-lockfile && bun rescue/install.ts"
 
-# --- development tools (#371): what a runner needs to develop here as on the Mac; gh is logged in by now ---
-# a failure here is logged and skipped (#389): without the tools the host still serves Switchboard, and 作り直す can try again
+# --- development tools: what a runner needs to develop here as on the Mac; gh is logged in by now ---
+# a failure here is logged and skipped: without the tools the host still serves Switchboard, and 作り直す can try again
 bash "$HERE/devtools.sh" || echo "bootstrap: devtools failed (exit $?); the daemon starts without some development tools" >&2
 
 # --- setup-token for claude only if one was put in Parameter Store (§4.2): the wrapper goes ahead of the real claude ---
@@ -161,7 +161,7 @@ if [ ! -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then
   if [ -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then chown "$SB_HOST_USER:" "$SB_HOST_HOME/.switchboard/switchboard.db"*; fi
 fi
 
-# --- the one-time move from the Mac (#179, #232): only onto a machine with no history of its own ---
+# --- the one-time move from the Mac: only onto a machine with no history of its own ---
 # The person puts a `main.ts export` package at s3://<data>/releases/migration/import.tar.zst. It is imported only when
 # nothing came back from Litestream (a machine that already has history never takes it again).
 IMPORT="s3://$SB_DATA_BUCKET/releases/migration/import.tar.zst"
@@ -177,10 +177,10 @@ fi
 # --- the registered workspaces: cloned to their paths in the database (those under ReposDir), so their tasks' folders exist ---
 # On every bootstrap, not only after the import: a rebuilt machine gets its history back from Litestream but a new
 # disk, and without this the other repositories' tasks cannot start (作業フォルダ … がこの機械に無い).
-# Each from the GitHub repository it is registered to (#2799, workspaces.backlog_source), never from a name made of
+# Each from the GitHub repository it is registered to (workspaces.backlog_source), never from a name made of
 # its folder (a public repository of the same name was cloned that way); a workspace with none is not cloned. A clone
 # GitHub does not answer for as that repository — or as a public one where a private one was registered — is moved
-# aside to <path>.unverified-<time>; the daemon notes each missing workspace in the Inbox, and no Task starts there.
+# aside to <path>.unverified-<time>; the daemon shows each missing workspace as a notice in 判断待ち, and no Task starts there.
 if [ -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then
   as_user bun -e '
     import { Database } from "bun:sqlite";
@@ -208,7 +208,7 @@ if [ -f "$SB_HOST_HOME/.switchboard/switchboard.db" ]; then
   done || echo "bootstrap: could not list the workspaces; clone them by hand (the daemon starts anyway)"
 fi
 
-# --- the runners' records (#401): Claude's sessions and memory, Codex's sessions, and the Tasks' artifact copies
+# --- the runners' records: Claude's sessions and memory, Codex's sessions, and the Tasks' artifact copies
 # (~/.switchboard/artifacts), as sb-runner-sync last saved them ---
 # (every hour, before an idle stop, before the rescue page's 作り直す). `sb-runner-sync restore` unpacks the newest set
 # as the host user; files already here (the one-time import above) are kept.

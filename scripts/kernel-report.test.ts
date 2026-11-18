@@ -88,6 +88,7 @@ test("kernelReport groups the window's Tasks by process and skills hash, with �
 
 test("reasonKind reads the words the choosers write", () => {
   expect(reasonKind("direct button")).toBe("button");
+  expect(reasonKind("baseline button")).toBe("button");
   expect(reasonKind("backlog stage to-pbi")).toBe("button");
   expect(reasonKind("auto direct: 本文 120 字 ≤ 400")).toBe("auto");
   expect(reasonKind("auto pipeline: 本文が長い")).toBe("auto");
@@ -127,6 +128,7 @@ test("p0-pipeline and p1-direct are separate rows, each with its Tasks counted b
 
 test("reasonGroup keeps the criterion's limit and drops the body's actual size", () => {
   expect(reasonGroup("direct button")).toBe("ボタン");
+  expect(reasonGroup("baseline button")).toBe("ボタン");
   expect(reasonGroup("backlog stage to-tasks")).toBe("ボタン");
   expect(reasonGroup("auto direct: 本文 152 字 ≤ 600")).toBe("自動 direct: 本文 ≤ 600");
   expect(reasonGroup("auto direct: 本文 90 字 ≤ 600")).toBe("自動 direct: 本文 ≤ 600");
@@ -150,9 +152,9 @@ test("the choice scores count chosen, returned and merged per kind of reason, th
   task("a", 100, "w1", 10, "direct", "auto direct: 本文 152 字 ≤ 600"); // sent back by r below, never merged
   task("r", 200, "w1", 10, "to-pbi", "direct returned");
   task("b", 100, "w1", 11, "direct", "auto direct: 本文 90 字 ≤ 600"); // merged in o/one
-  task("c", 100, "w1", 12, "to-tasks", "backlog stage to-tasks"); // #12 merged only in o/two: not this workspace's
+  task("c", 100, "w1", 12, "to-tasks", "backlog stage to-tasks"); // `#12` merged only in o/two: not this workspace's
   task("d", 100, "w1", null, "", "direct button"); // no issue: not counted
-  task("e", 100, "w1", 13, "complete", "backlog stage complete"); // a PBI whose Task #14 merged: merged
+  task("e", 100, "w1", 13, "complete", "backlog stage complete"); // a PBI whose Task `#14` merged: merged
   task("f", 100, "w1", 15, "complete", "backlog stage complete"); // a PBI whose Task is open: not merged
   task("s", 100, "w1", 11, "direct", "direct button"); // a shadow: left out
   db.query("UPDATE tasks SET shadow_of = 'b' WHERE id = 's'").run();
@@ -322,7 +324,7 @@ test("the rework row splits the window's merged PRs into p0-pipeline's and the r
   taskOn("d", "p1-direct", 30);
   taskOn("e", null, 40); // recorded, no candidate named: the rest
   taskOn("f", "p1-direct", 50, false); // no provenance: its PR is in neither group
-  taskOn("g", "p1-direct", 60); // a PBI: its Task's PR closes #61, parent #60
+  taskOn("g", "p1-direct", 60); // a PBI: its Task's PR closes `#61`, parent `#60`
   const prRec = (repo: string, number: number, closes: number[], mergedAt: string | null, files: string[] | null, state = "MERGED") =>
     db.query("INSERT INTO backlog_records VALUES (?, 'pull-request', ?)").run(repo, JSON.stringify({ number, state, closes, mergedAt, files, mergeCommit: `sha${number}` }));
   prRec("o/one", 1, [10], "2026-11-20T00:00:00Z", ["a.ts"]); // p0, reworked

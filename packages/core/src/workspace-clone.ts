@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { BacklogSource, Workspace } from "@switchboard/protocol";
-import { localBacklogSource, type GhRunner } from "./backlog.ts";
+import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
 import type { Db } from "./db.ts";
 
 /**

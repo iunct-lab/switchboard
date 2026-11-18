@@ -2,18 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "./i18n.ts";
 import { app } from "./i18n/app.ts";
 import { home } from "./i18n/home.ts";
-import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TaskStopMark, TaskSummary, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
+import type { DeviceAuthView, EventEnvelope, LedgerSummary, PendingApproval, ServerMessage, Task, TaskListItem, TaskStopMark, TaskSummary, TeleportProgress, TerminalStatus, Workspace } from "@switchboard/protocol";
 import { applyApprovalEvent, mergeFetched } from "./approvals.ts";
 import { mergeEvents, taskReader } from "./catchup.ts";
 import { openTask as openTaskShown, upsertSummary } from "./taskList.ts";
 import { noticesFor, showNotice } from "./notify.ts";
 import { Approvals } from "./components/Approvals.tsx";
-import { api, connectEvents, getToken, setToken, type Health, type TaskDetail, type WorkspaceClone } from "./api.ts";
-import { stopsToRead } from "./attention.ts";
+import { api } from "./api/index.ts";
+import { connectEvents } from "./api/events.ts";
+import { getToken, setToken } from "./api/request.ts";
+import { type Health } from "./api/daemon.ts";
+import { type TaskDetail } from "./api/tasks.ts";
+import { type WorkspaceClone } from "./api/workspaces.ts";
+import { marksFromList, stopsToRead, type StopsSeen } from "./attention.ts";
 import { journeyCancel, journeyEnd, journeyStart } from "./perf.ts";
 import { loginRoute, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_MESSAGE, STUCK_LOGIN, STUCK_RESCUE, withoutFromAuth } from "./login.ts";
-import { newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
+import { drainBanner, newVersionLink, rescueLink, type ReleaseStatus } from "./release.ts";
 import { archiveBanner } from "./archive.ts";
+import { uplinkSkippedBanner } from "./machine.ts";
 import { watchHealth } from "./healthWatch.ts";
 import { Backlog } from "./components/Backlog.tsx";
 import { Brief } from "./components/Brief.tsx";
@@ -27,6 +33,7 @@ import { Rail } from "./components/Rail.tsx";
 import { RunnerLogin } from "./components/RunnerLogin.tsx";
 import { Settings } from "./components/Settings.tsx";
 import { TaskView } from "./components/TaskView.tsx";
+import { Terminal } from "./components/Terminal.tsx";
 import { RecentCheck } from "./components/RecentCheck.tsx";
 import { usePageDropGuard } from "./components/Attachments.tsx";
 import { screenLabel, type View } from "./screen.ts";
@@ -34,19 +41,19 @@ import { pathToWrite, viewFromPath } from "./route.ts";
 import { rememberRunnerLabels } from "./runners.ts";
 import type { FeedbackTarget } from "./feedbackTarget.ts";
 
-/** The screen the URL names (#3355; /approvals is the phone app's start, #26), else Home. */
+/** The screen the URL names (/approvals is the phone app's start), else Home. */
 const screenAt = (): View => viewFromPath(location.pathname) ?? { name: "home" };
 
-/** How often an open page reads /api/health again (#1600). */
+/** How often an open page reads /api/health again. */
 const HEALTH_REFRESH_MS = 5 * 60_000;
 const HEALTH_RETRY_MS = 3_000;
 
 export function App() {
-  usePageDropGuard(); // a file dropped outside a dropzone must not navigate the tab away (#125)
+  usePageDropGuard(); // a file dropped outside a dropzone must not navigate the tab away
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   // the workspace a request is filed for: the backlog's narrowed one when opened there, else the meta workspace
   const [feedbackWorkspace, setFeedbackWorkspace] = useState<FeedbackTarget | undefined>();
-  // 改善要望にする (#1221): the draft the dialog opens with, from a task's evaluations
+  // 改善要望にする: the draft the dialog opens with, from a task's evaluations
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | undefined>();
   const [health, setHealth] = useState<Health | null>(null);
   // a pill anywhere shows a custom runner by its label: read from the last health before the children render
@@ -65,11 +72,11 @@ export function App() {
   const [listed, setListed] = useState(false); // the first task list came back
   const [ledger, setLedger] = useState<LedgerSummary | null>(null);
   const [details, setDetails] = useState<Record<string, TaskDetail>>({});
-  // approval waits by Task (#662): from the WebSocket and the Task's first load, never stored
+  // approval waits by Task: from the WebSocket and the Task's first load, never stored
   const [deviceAuths, setDeviceAuths] = useState<Record<string, DeviceAuthView | null>>({});
-  // "continue locally" by Cloud Task (#1306): from the WebSocket; the open Task's first load brings the current one
+  // "continue locally" by Cloud Task: from the WebSocket; the open Task's first load brings the current one
   const [teleports, setTeleports] = useState<Record<string, TeleportProgress | null>>({});
-  // Claude Code in each Task's terminal tab (#1574): task.terminals after hello replaces them all, task.terminal changes one
+  // Claude Code in each Task's terminal tab: task.terminals after hello replaces them all, task.terminal changes one
   const [terminals, setTerminals] = useState<Record<string, TerminalStatus>>({});
   const [view, setView] = useState<View>(screenAt);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
@@ -77,12 +84,12 @@ export function App() {
   const [briefOpen, setBriefOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [knowledgeRev, setKnowledgeRev] = useState(0);
-  // bumped on each stop record (#4501): Home reads the schedules stuck on a stop again (a record does not move a Task's row)
+  // bumped on each stop record: Home reads the schedules stuck on a stop again (a record does not move a Task's row)
   const [stopRev, setStopRev] = useState(0);
   const [stopMarks, setStopMarks] = useState<Record<string, TaskStopMark> | null>(null);
   const [tokenDraft, setTokenDraft] = useState("");
   const [checksRev, setChecksRev] = useState(0);
-  // Evals (#1219): per task, how many times its judge row changed; the open task's Brief reads its evals again on its own count only
+  // Evals: per task, how many times its judge row changed; the open task's Brief reads its evals again on its own count only
   const [evalsRev, setEvalsRev] = useState<Record<string, number>>({});
   // and how many of them in all, for the Evals screen's re-read
   const [evalsAnyRev, setEvalsAnyRev] = useState(0);
@@ -91,7 +98,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [rescueHref, setRescueHref] = useState<string | null | undefined>(undefined);
   const [release, setRelease] = useState<ReleaseStatus | null>(null);
-  // OS notices for approval waits (#1138): the list as of the last render names the task; `notified` keeps a reconnect quiet
+  // OS notices for approval waits: the list as of the last render names the task; `notified` keeps a reconnect quiet
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const notified = useRef(new Set<string>());
@@ -103,13 +110,13 @@ export function App() {
     setFeedbackOpen(true);
     api.workspaces().then(setWorkspaces).catch(() => undefined);
   };
-  // 要望にする on a throwaway app (#3683): the artifact's row asks for the dialog with its draft and source
+  // 要望にする on a throwaway app: the artifact's row asks for the dialog with its draft and source
   useEffect(() => {
     const onOpen = (e: Event) => openFeedback(undefined, (e as CustomEvent<FeedbackPrefill>).detail);
     addEventListener(OPEN_FEEDBACK_EVENT, onOpen);
     return () => removeEventListener(OPEN_FEEDBACK_EVENT, onOpen);
   }, []);
-  // 改善要望にする (#1221): the daemon drafts the request from the task's evaluations; the dialog opens with it
+  // 改善要望にする: the daemon drafts the request from the task's evaluations; the dialog opens with it
   const improveFromEvals = (taskId: string) => {
     api
       .evalsDraft(taskId)
@@ -124,10 +131,10 @@ export function App() {
       .then((fetched) => setApprovals((prev) => mergeFetched(fetched, prev, since)))
       .catch(() => undefined);
   }, []);
-  // Task details read whole on open and caught up through ?after= on each connect (#1137, taskReader in catchup.ts)
+  // Task details read whole on open and caught up through ?after= on each connect (taskReader in catchup.ts)
   const detailsRef = useRef(details);
   detailsRef.current = details;
-  // Tasks whose read answered 404 (#3427): a Task URL with no Task shows so, instead of 読み込み中… for good
+  // Tasks whose read answered 404: a Task URL with no Task shows so, instead of 読み込み中… for good
   const [missing, setMissing] = useState<ReadonlySet<string>>(new Set());
   const reader = useMemo(
     () =>
@@ -143,12 +150,12 @@ export function App() {
     [],
   );
   const loadTask = reader.load;
-  // After a turn (usage / session.end / a stop record): the rest of the detail only (?limit=0, #1142). The events came
+  // After a turn (usage / session.end / a stop record): the rest of the detail only (?limit=0). The events came
   // over the WebSocket already; reading them again would read the whole conversation each turn.
   const refreshTaskMeta = useCallback((id: string) => {
     api.taskMeta(id).then((d) => setDetails((prev) => (prev[id] ? { ...prev, [id]: { ...d, events: prev[id]!.events } } : prev))).catch(() => undefined);
   }, []);
-  // 「以前の会話を読む」 (#1142): the page before the first event held, merged by seq; resolves with the page
+  // 「以前の会話を読む」: the page before the first event held, merged by seq; resolves with the page
   const loadOlder = useCallback(async (id: string) => {
     const first = detailsRef.current[id]?.events[0]?.seq;
     if (!first || first <= 1) return [];
@@ -156,16 +163,31 @@ export function App() {
     setDetails((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id]!, events: mergeEvents(prev[id]!.events, older) } } : prev));
     return older;
   }, []);
+  // The last stop of each Task (below). The list a read of `GET /api/tasks` brings carries them (`TaskListItem.stop`): they
+  // are taken from it, and what that list covered is kept, so the effect below does not read them a second time. `rev` is
+  // the `stopRev` when the list was asked for: a record that came while it was on its way is read for.
+  const stopSeen = useRef<StopsSeen | null>(null);
+  const stopsSeq = useRef(0);
+  const stopRevNow = useRef(0);
+  const takeStopsFromList = useCallback((list: TaskListItem[], rev: number) => {
+    stopsSeq.current++;
+    setStopMarks(marksFromList(list));
+    stopSeen.current = stopsToRead(null, list.filter((x) => x.archivedAt === null), rev).seen;
+  }, []);
   // and, after a drop, the list again (task.updated sent while away; the first connect follows the launch's own read)
   const dropped = useRef(false);
-  // the archived ones too once the rail has shown them (#1142): archived or brought back while away, from another tab
+  // the archived ones too once the rail has shown them: archived or brought back while away, from another tab
   const archivedShown = useRef(false);
   const catchUp = useCallback(() => {
     if (dropped.current) {
+      const rev = stopRevNow.current;
       Promise.all([api.tasks(), archivedShown.current ? api.tasks({ archived: true }) : []])
-        .then(([list, archived]) => setTasks([...list, ...archived]))
+        .then(([list, archived]) => {
+          setTasks([...list, ...archived]);
+          takeStopsFromList(list, rev);
+        })
         .catch(() => undefined);
-      // workspaces.updated sent while away (#1447)
+      // workspaces.updated sent while away
       api.workspaces().then(setWorkspaces).catch(() => undefined);
       refreshClones();
     }
@@ -183,6 +205,16 @@ export function App() {
   );
 
   const readHealth = useCallback(() => void api.health().then(setHealth).catch(() => undefined), []);
+  // a Task that queues may be the first sign of a promotion holding new turns back, and while that band shows, any Task's
+  // change may be its end: the health is read again then, at most once in 10 seconds
+  const drainRead = useRef(0);
+  const drainShown = useRef(false);
+  drainShown.current = !!health?.promotionDrain;
+  const readDrain = useCallback((queued: boolean) => {
+    if ((!queued && !drainShown.current) || Date.now() - drainRead.current < 10_000) return;
+    drainRead.current = Date.now();
+    readHealth();
+  }, [readHealth]);
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setError(t(home.coreUnreachable, { error: e.message })));
   }, [authRev]);
@@ -193,10 +225,10 @@ export function App() {
     const t = setInterval(() => void api.health().then((h) => { setHealth(h); setError(null); }).catch(() => undefined), HEALTH_RETRY_MS);
     return () => clearInterval(t);
   }, [health]);
-  // the banners (a failed archive, a runner's login) follow the daemon while the page stays open (#1600); a failed read keeps the last
+  // the banners (a failed archive, a runner's login) follow the daemon while the page stays open; a failed read keeps the last
   useEffect(() => watchHealth(document, readHealth, HEALTH_REFRESH_MS), [readHealth]);
 
-  // The cloud login's end (#498): read again when it is reached: it shows the renewed cookie's later time, or the refusal, which sends the page to the passkey login below
+  // The cloud login's end: read again when it is reached: it shows the renewed cookie's later time, or the refusal, which sends the page to the passkey login below
   const sessionEnd = health?.session ? Math.min(health.session.idleUntil, health.session.expiresAt) : undefined;
   useEffect(() => {
     if (sessionEnd === undefined) return;
@@ -207,8 +239,8 @@ export function App() {
   // The daemon answers health with the runner list only to an authorized caller (a token, or the cloud login cookie).
   const login = health?.authRequired ? loginRoute({ authorized: health.runners !== undefined, hasToken: !!getToken(), mode: health.login, path: location.pathname + location.search }) : { kind: "none" as const };
   const needsToken = login.kind === "token";
-  // The rescue page's link (#399) and the new-version mark (#1660) come from one read, asked once the daemon lets us in and
-  // again each time the connection changes (a promotion ends in a restart), but for the first connection, which follows the login's read (#1851). A failed ask keeps the last one: the link is for when the
+  // The rescue page's link and the new-version mark come from one read, asked once the daemon lets us in and
+  // again each time the connection changes (a promotion ends in a restart), but for the first connection, which follows the login's read. A failed ask keeps the last one: the link is for when the
   // daemon is in trouble, so "daemon offline" must not take it away.
   const authorized = health?.runners !== undefined;
   const firstUp = useRef(true);
@@ -220,26 +252,28 @@ export function App() {
     }
     api.release().then((r) => { setRelease(r); setRescueHref(rescueLink(r)); }).catch(() => undefined);
   }, [authorized, connected]);
-  // Nothing but health before the daemon says we are in: each refused read counts toward the failure limit (#1851, #1492)
+  // Nothing but health before the daemon says we are in: each refused read counts toward the failure limit
   useEffect(() => {
     if (!authorized) return;
     api.workspaces().then(setWorkspaces).catch(() => undefined);
+    const rev = stopRevNow.current;
     api
       .tasks()
       .then((t) => {
         setTasks(t);
+        takeStopsFromList(t, rev);
         setListed(true);
       })
       .catch(() => undefined);
     refreshApprovals();
     void refreshLedger();
-  }, [authorized, refreshLedger, refreshApprovals, authRev]);
+  }, [authorized, refreshLedger, refreshApprovals, authRev, takeStopsFromList]);
   // read where it is shown (not at launch: one request more there, perf budget)
   useEffect(() => {
     if (authorized && view.name === "settings") void refreshClones();
   }, [authorized, view.name, refreshClones]);
   // Settings scrolls to one section once it has loaded (the section is not drawn before that): the release one from the
-  // header, the Workspace one from Home (it is no longer the first card, #3356). n tells a second press from the first.
+  // header, the Workspace one from Home (it is no longer the first card). n tells a second press from the first.
   const [settingsFocus, setSettingsFocus] = useState<{ id: string; n: number } | null>(null);
   useEffect(() => {
     if (view.name !== "settings") setSettingsFocus(null); // the next visit by the tab does not scroll
@@ -250,7 +284,7 @@ export function App() {
   };
   const openRelease = () => openSettingsAt("release");
   const newVersion = newVersionLink(release);
-  // in: the passkey page's mark has done its job; a later refusal must go back to the passkey page, not read as stuck (#709)
+  // in: the passkey page's mark has done its job; a later refusal must go back to the passkey page, not read as stuck
   useEffect(() => {
     const clean = authorized && withoutFromAuth(location.pathname + location.search);
     if (clean) history.replaceState(history.state, "", clean + location.hash);
@@ -265,7 +299,7 @@ export function App() {
   }, [passkeyUrl]);
 
   const openTask = useCallback((id: string) => setView({ name: "task", id }), []);
-  // 評価をお願い (#1877): the Task with its Brief open at 自分の評価. The mark is read by the view effect below, which
+  // 評価をお願い: the Task with its Brief open at 自分の評価. The mark is read by the view effect below, which
   // otherwise closes the Brief on every view change.
   const [briefFocus, setBriefFocus] = useState<"human" | null>(null);
   const rateMark = useRef(false);
@@ -273,7 +307,7 @@ export function App() {
     rateMark.current = true;
     setView({ name: "task", id });
   }, []);
-  // The Local Task "ローカルで続ける" just switched to (#1634): its head says so until another screen opens. Memory only.
+  // The Local Task "ローカルで続ける" just switched to: its head says so until another screen opens. Memory only.
   const [switchedTo, setSwitchedTo] = useState<string | null>(null);
   useEffect(() => {
     if (switchedTo !== null && !(view.name === "task" && view.id === switchedTo)) setSwitchedTo(null);
@@ -289,6 +323,7 @@ export function App() {
         });
       // a task's ask can come before the render that lists it: the next notice names it all the same
       if (m.type === "task.updated") tasksRef.current = upsertSummary(tasksRef.current, m.task);
+      if (m.type === "task.updated") readDrain(m.task.queuedAt !== null);
       if (m.type === "event") {
         const env: EventEnvelope = m.env;
         setApprovals((prev) => applyApprovalEvent(prev, env));
@@ -301,7 +336,7 @@ export function App() {
           return events === d.events ? prev : { ...prev, [env.taskId]: { ...d, events } };
         });
         if (env.ev.t === "stop.record") {
-          refreshTaskMeta(env.taskId); // the stop series (#939) is derived from the records
+          refreshTaskMeta(env.taskId); // the stop series is derived from the records
           setStopRev((n) => n + 1);
         }
         if (env.ev.t === "usage" || env.ev.t === "quota" || env.ev.t === "session.end") {
@@ -341,9 +376,10 @@ export function App() {
       setConnected(c);
       if (!c) dropped.current = true;
       if (c) setRestarting(false);
-      // events missed while disconnected (a locked phone) are read again by catchUp through ?after= (#1137); the approvals
+      // events missed while disconnected (a locked phone) are read again by catchUp through ?after=; the approvals
       // list and the approval waits are read again on their own (the open Task's wait is asked again)
       if (c) refreshApprovals();
+      if (c && drainShown.current) readHealth(); // back after the promotion's restart: the band goes
       if (c) setDeviceAuths({});
       if (c) {
         // "continue locally" progress: what was cached may be older than what happened while away. Forget it (a message
@@ -352,9 +388,9 @@ export function App() {
         catchUp();
       }
     });
-  }, [authorized, refreshTaskMeta, refreshLedger, refreshApprovals, openTask, catchUp, reader]);
+  }, [authorized, refreshTaskMeta, refreshLedger, refreshApprovals, openTask, catchUp, reader, readDrain, readHealth]);
 
-  // Each screen has its URL (#3355): a new screen is a history entry, so back / forward walk the screens. The first
+  // Each screen has its URL: a new screen is a history entry, so back / forward walk the screens. The first
   // screen and one popstate brought back only correct the address (a path that is no screen), never add an entry.
   const replaceNext = useRef(true);
   const viewRef = useRef(view);
@@ -379,14 +415,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setRailListOpen(false); // a task picked from the phone's list replaces the list (#359)
-    setBriefOpen(rateMark.current); // and another task does not open with the last one's Brief over it (#369), unless 評価をお願い opened it
+    setRailListOpen(false); // a task picked from the phone's list replaces the list
+    setBriefOpen(rateMark.current); // and another task does not open with the last one's Brief over it, unless 評価をお願い opened it
     setBriefFocus(rateMark.current ? "human" : null);
     rateMark.current = false;
   }, [view]);
 
   useEffect(() => {
-    // not before the page is let in (#3427): a Task URL opened logged out reads it after the login, not into a 401 banner
+    // not before the page is let in: a Task URL opened logged out reads it after the login, not into a 401 banner
     if (authorized && view.name === "task" && !details[view.id] && !missing.has(view.id)) void loadTask(view.id);
   }, [authorized, view, details, missing, loadTask]);
   // A wait exists only while a command of a turn runs: asked once for a running Task (the WebSocket brings the rest),
@@ -411,28 +447,23 @@ export function App() {
     setTasks((prev) => upsertSummary(prev, task));
     setDetails((prev) => (prev[task.id] ? { ...prev, [task.id]: { ...prev[task.id]!, task } } : prev));
   }, [reader]);
-  // Archived Tasks (#1142) are read only when the rail asks to show them; Home leaves them out
+  // Archived Tasks are read only when the rail asks to show them; Home leaves them out
   const live = useMemo(() => tasks.filter((t) => t.archivedAt === null), [tasks]);
   // The last stop of each Task: read again when a stop candidate (a stopped Task not 確認済み) comes or moves status
   // (`stopsToRead`; one going away is not read for), and on each stop record (`stopRev`: a record does not move a Task's
-  // row). A failed read keeps the last value; an answer that comes after a newer read started is dropped, so an older
-  // answer does not put back marks already gone.
-  const stopKeysRef = useRef<ReadonlySet<string> | null>(null);
-  const stopRevRead = useRef<number | null>(null);
-  const stopsSeq = useRef(0);
+  // row), unless the list read just before covered them (`takeStopsFromList`). A failed read keeps the last value; an
+  // answer that comes after a newer read started is dropped, so an older answer does not put back marks already gone.
+  stopRevNow.current = stopRev;
   useEffect(() => {
     if (!authorized) {
       // signed out: an answer on its way is dropped, and the next sign-in reads again
       stopsSeq.current++;
-      stopKeysRef.current = null;
-      stopRevRead.current = null;
+      stopSeen.current = null;
       return;
     }
-    const next = stopsToRead(stopKeysRef.current, live);
-    stopKeysRef.current = next.keys;
-    const newRecord = stopRevRead.current !== stopRev;
-    stopRevRead.current = stopRev;
-    if (next.keys.size === 0 || (!next.read && !newRecord)) return;
+    const next = stopsToRead(stopSeen.current, live, stopRev);
+    stopSeen.current = next.seen;
+    if (!next.read) return;
     const seq = ++stopsSeq.current;
     api.taskStops().then((marks) => seq === stopsSeq.current && setStopMarks(marks)).catch(() => undefined);
   }, [authorized, live, stopRev]);
@@ -467,7 +498,7 @@ export function App() {
   const current = view.name === "task" ? details[view.id] : undefined;
   const shown = useRef<Task | undefined>(undefined);
   // a Task the daemon answered 404 for is gone even while the list still has it (removed from the database meanwhile)
-  // the list holds summaries only (#2834): the open Task is its detail's, kept on screen while a failed catch-up reads it again
+  // the list holds summaries only: the open Task is its detail's, kept on screen while a failed catch-up reads it again
   shown.current = view.name === "task" ? openTaskShown(shown.current, view.id, current?.task) : undefined;
   const currentTask = view.name === "task" && !missing.has(view.id) ? shown.current : undefined;
   const runnerOk = useMemo(() => new Set((health?.runners ?? []).filter((r) => r.available).map((r) => r.id)), [health]);
@@ -504,7 +535,7 @@ export function App() {
           </button>
         </nav>
         <span className={`conn ${connected ? "ok" : "off"}`}>{connected ? t(app.connected) : t(app.offline)}</span>
-        {/* Until the answer comes the slot is held by an invisible copy, so the tabs do not shrink under a tap (#1485). */}
+        {/* Until the answer comes the slot is held by an invisible copy, so the tabs do not shrink under a tap. */}
         {rescueHref === undefined && (
           <span className="rescue-link" aria-hidden="true" style={{ visibility: "hidden" }}>
             {t(app.rescue)}
@@ -565,6 +596,16 @@ export function App() {
           <span>{archiveBanner(health.archive)}</span>
         </div>
       )}
+      {uplinkSkippedBanner(health?.uplinkSkipped) && (
+        <div className="banner error uplink-skipped" role="alert">
+          <span>{uplinkSkippedBanner(health?.uplinkSkipped)}</span>
+        </div>
+      )}
+      {drainBanner(health?.promotionDrain, Date.now()) && (
+        <div className="banner promotion-drain" role="status">
+          <span>{drainBanner(health?.promotionDrain, Date.now())}</span>
+        </div>
+      )}
 
       {health?.runners
         ?.filter((r) => r.login === "expired")
@@ -587,11 +628,11 @@ export function App() {
         </div>
       )}
 
-      {/* the screens read on mount: they wait with the rest (#1851) */}
+      {/* the screens read on mount: they wait with the rest */}
       <div className="body">
         {authorized && (
           <>
-        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} terminals={terminals} stopMarks={stopMarks} />
+        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} onOpenTerminal={health?.features?.pty === false ? undefined : (workspaceId) => setView({ name: "terminal", workspaceId })} terminalWorkspaceId={view.name === "terminal" ? view.workspaceId : undefined} terminals={terminals} stopMarks={stopMarks} />
 
         {view.name === "home" && (
           <Home
@@ -620,6 +661,7 @@ export function App() {
               shadowTask={tasks.find((t) => t.shadowOf === currentTask.id)}
               pty={health?.features?.pty}
               detail={current}
+              stopMark={stopMarks?.[currentTask.id] ?? null}
               deviceAuth={deviceAuths[currentTask.id]}
               teleport={teleports[currentTask.id]}
               onSend={(text, attachmentIds) =>
@@ -658,6 +700,19 @@ export function App() {
             )}
           </main>
         )}
+        {view.name === "terminal" && (() => {
+          // only a registered Workspace has a shell: the daemon reads the path from its own row, never from the page
+          const w = workspaces.find((x) => x.id === view.workspaceId);
+          return (
+            <main className="main workspace-terminal">
+              <h2>{t(home.wsTerminalHead, { name: w?.name ?? view.workspaceId })}</h2>
+              {w && <div className="hint">{w.path}</div>}
+              <div className="terminal-pane">
+                <Terminal key={view.workspaceId} target={{ workspace: view.workspaceId }} closable />
+              </div>
+            </main>
+          );
+        })()}
         {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
         {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onRateTask={rateTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
         {view.name === "backlog" && <Backlog onFeedback={openFeedback} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
@@ -693,7 +748,7 @@ export function App() {
         )}
       </div>
 
-      <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />
+      <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask, view.name === "terminal" ? workspaces.find((w) => w.id === view.workspaceId)?.name : undefined)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />
 
       <footer className="statusbar">
         {health?.session && (

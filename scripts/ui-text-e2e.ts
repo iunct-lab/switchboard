@@ -16,9 +16,10 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { importing, sending } from "../packages/core/fixtures/github-import.ts";
 import type { RunnerAdapter } from "@switchboard/protocol";
+import { SAMPLE_TITLE_PREFIX, SCHEDULE_SAMPLES } from "../packages/core/src/scheduleSamples.ts";
 
 const SCREENS = { home: ["/", "home"], task: ["/task/", "task"], backlog: ["/backlog", "backlog"], settings: ["/settings", "settings"], ledger: ["/ledger", "ledger"], insights: ["/insights", "evals-screen"], schedules: ["/schedules", "schedules"] } as const;
 type Screen = keyof typeof SCREENS;
@@ -37,7 +38,7 @@ const ENDONYMS = new Set(["日本語"]);
  */
 const EXPECTED_JA: Array<[text: string, why: string]> = [
   ["既定。前回このリポジトリで使ったランナーがあればそれを優先する", "routing reason from packages/core/config/routing.yaml (daemon-built, not switched)"],
-  ["床・天井・壁の点検", "the schedule title the daemon seeds (packages/core/src/server.ts)"],
+  ...SCHEDULE_SAMPLES.map((x): [string, string] => [SAMPLE_TITLE_PREFIX + x.title, "a schedule sample's title: the daemon adds it, the row is the person's data (packages/core/src/scheduleSamples.ts)"]),
   ["使用上限がリセットされました。中断した箇所から作業を続けてください。", "the default auto-resume prompt, sent to a Task (packages/core/src/ratelimit.ts)"],
   ["[Switchboard 自動再開]", "the auto-resume marker, compared by the daemon (packages/core/src/evals.ts)"],
 ];

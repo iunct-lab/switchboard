@@ -8,7 +8,7 @@ import { answeredFromRecords, decisionIssueWaits, dependsResumePrompt, dependsWa
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { blockersOf } from "./asks.ts";
 import { lastStopMark, reduceStops, type StopReport } from "./stops.ts";
-import { TaskManager } from "./tasks.ts";
+import { TaskManager } from "./tasks/manager.ts";
 
 // A Task that stopped on another session's work is resumed when that work closes: which stops wait on what.
 
@@ -77,6 +77,13 @@ describe("depends-resume", () => {
     expect(waitsClosed({ numbers: [], after: at }, states, undefined, at)).toBe(true);
     expect(waitsClosed({ numbers: [], after: at }, states, undefined, at + 1)).toBe(true);
     expect(waitsClosed({ numbers: [12], after: at }, () => "open", undefined, at + 1)).toBe(false);
+  });
+
+  test("dependsResumePrompt names the parallel guard only when a PR or an Issue was waited for", () => {
+    expect(dependsResumePrompt([], ["2026-11-20T09:00:00+09:00"])).not.toContain("並列ガード");
+    expect(dependsResumePrompt([], ["2026-11-20T09:00:00+09:00"])).toContain("を過ぎました。中断した箇所から作業を続けてください。");
+    expect(dependsResumePrompt(["pr#12"])).toContain("片づきました。並列ガードの overlap をやり直してから、中断した箇所から作業を続けてください。");
+    expect(dependsResumePrompt(["pr#12"], ["2026-11-20T09:00:00+09:00"])).toContain("並列ガードの overlap をやり直してから");
   });
 
   test("dependsResumePrompt after names the date that passed", () => {
@@ -182,6 +189,52 @@ describe("resumeDepends", () => {
     await tasks.shutdown();
     db.close();
     rmSync(home, { recursive: true, force: true });
+  });
+
+  test("a Task taken in from another machine is never given a turn, a stop, an answer or a stop order here — by the automatic resume or by any caller", async () => {
+    const t = await start();
+    db.sqlite.query("UPDATE tasks SET machine = 'pc1' WHERE id = ?").run(t.id);
+    store([pr(12, "MERGED"), issue(34, "CLOSED"), item(34, "Done")]);
+    const events = () => (db.sqlite.query("SELECT count(*) AS n FROM events WHERE task_id = ?").get(t.id) as { n: number }).n;
+    const before = events();
+    const sent = sends.length;
+    // the automatic resume: its waits all closed, and still nothing is sent or recorded
+    expect(await resume()).toEqual([]);
+    expect(await resumeDueAfters({ db, tasks, now: Date.now() })).toEqual([]);
+    expect(stopOf(t.id).state).toBe("waiting");
+    // and the one check every way of acting on a Task passes
+    const line = "この Task は pc1 で動きました。返信は pc1 の Switchboard から行います。";
+    await expect(tasks.send(t.id, "続けて")).rejects.toThrow(line);
+    await expect(tasks.send(t.id, "続けて", { daemon: true })).rejects.toThrow(line);
+    await expect(tasks.send(t.id, "続けて", { asResume: true })).rejects.toThrow(line);
+    await expect(tasks.abort(t.id)).rejects.toThrow(line);
+    await expect(tasks.setModel(t.id, null)).rejects.toThrow(line);
+    await expect(tasks.setPermissionMode(t.id, "default")).rejects.toThrow(line);
+    await expect(tasks.startDeferred(t.id)).rejects.toThrow();
+    expect(() => tasks.respondPermission(t.id, "p1", "allow")).toThrow(line);
+    expect(() => tasks.recordStop(t.id, WAIT)).toThrow(line);
+    expect(() => tasks.setResumeAt(t.id, Date.now() + 1000)).toThrow(line);
+    expect(() => tasks.forkTask(t.id, 1)).toThrow(line);
+    expect(() => meetJobConditions({ db, tasks, taskId: t.id, jobId: 1 })).not.toThrow();
+    tasks.record(t.id, { t: "status", text: "written here" }); // its events are numbered on its own machine
+    await settle();
+    expect(events()).toBe(before);
+    expect(sends.length).toBe(sent);
+    expect(db.getTask(t.id)).toMatchObject({ status: "done", resumeAt: null, machine: "pc1" });
+    // the lists the daemon acts on by itself leave it out
+    expect([db.listTasksUpdatedSince(0), db.listTasksOnStops(0), db.listTasksWithWaits()].flat().map((x) => x.id)).not.toContain(t.id);
+  });
+
+  test("a work machine gives no Task a turn of its own: the daemon's turn is refused, a person's reply goes", async () => {
+    await tasks.shutdown();
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter(sends, ctl)]]), () => undefined, { idleMs: -1, workMachine: true });
+    const t = await start();
+    const sent = sends.length;
+    await expect(tasks.send(t.id, "自動の続き", { daemon: true })).rejects.toThrow("作業場のマシンでは行いません");
+    expect(sends.length).toBe(sent);
+    await tasks.send(t.id, "人の返信");
+    await settle();
+    expect(sends.at(-1)).toContain("人の返信");
   });
 
   test("resumes the same task when its waits close: the follow-up turn in its session, the stop resolved under the same id", async () => {

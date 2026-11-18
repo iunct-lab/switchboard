@@ -1,4 +1,4 @@
-// test-reads: none
+// test-reads: packages/core/src/db/migrations/
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -8,7 +8,11 @@ import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey, Task } from "@switchboard/protocol";
 import { InvalidTaskOutcomeError } from "./task-status.ts";
 import { abortOrphanedTasks, createdIssuesOf, createdPullsOf, Db, deferredOf, schemaLevel, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { MIGRATIONS } from "./db/migrations/index.ts";
+import { columnsOf } from "./db/migrate.ts";
+import { SCHEMA } from "./db/schema.ts";
 import { delegatedNote, ruleMetrics } from "./evals.ts";
+import { readPolicies } from "./policies.ts";
 import { backlogFieldValue, conflictRevision } from "./backlog-merge.ts";
 
 // The stored backlog: records per repository, kept across a restart and a backup.
@@ -243,7 +247,7 @@ test("migration: a local change stored before reviewedHead existed gains reviewe
 
   const db = new Db(path);
   const byId = Object.fromEntries(db.listBacklogRecords(A).map((r) => [r.externalId, r]));
-  for (const col of ["remote", "base", "local"] as const) expect((byId.I_2![col] as BacklogIssueData).change).toEqual({ head: "sb/2-x", base: "main", mergeCommit: "m", mergedAt: "x", reviewedHead: null });
+  for (const col of ["remote", "base", "local"] as const) expect((byId.I_2![col] as BacklogIssueData).change).toEqual({ head: "sb/2-x", base: "main", mergeCommit: "m", mergedAt: "x", reviewedHead: null, pr: null, reportedAt: null });
   expect((byId.I_3!.remote as BacklogIssueData).change?.reviewedHead).toBe("r");
   expect(byId.I_4!.remote).not.toHaveProperty("change"); // an Issue that is not a change gains nothing
   db.close();
@@ -1016,6 +1020,124 @@ test("statusAt migration: a tasks table without status_at gets each row's update
   check.close();
 });
 
+test("migration: grants and scope stops move under their task's repository as the person's, once; the answers remembered as used become spent sources", () => {
+  const path = join(dir, "switchboard.db");
+  const pre = new Db(path);
+  const a = pre.upsertWorkspace({ name: "a", path: "/w/a", kind: "repo" });
+  const none = pre.upsertWorkspace({ name: "none", path: "/w/none", kind: "repo" });
+  pre.setWorkspaceBacklogSource(a.id, { service: "github", host: "github.com", repository: "O/A", project: { owner: "O", number: 1 } });
+  pre.setSetting("mergeGrantAnswers", ["op_1", "op_2"]);
+  pre.close();
+  const raw = new Database(path);
+  const put = raw.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, outcome, created_at, updated_at, status_at) VALUES (?, ?, 't', 'claude', '/tmp', '[]', 'done', 'unknown', 1, 1, 1)");
+  put.run("t_a", a.id);
+  put.run("t_none", none.id);
+  raw.exec("DELETE FROM task_grants; DELETE FROM task_scope_stops");
+  raw.exec("INSERT INTO merge_grants (task_id, kind, target, at) VALUES ('t_a', 'merge', 12, 100), ('t_a', 'scope', 7, 300), ('t_none', 'merge', 12, 100), ('t_gone', 'merge', 12, 100)");
+  raw.exec("INSERT INTO merge_scope_stops (task_id, issue, pr, at) VALUES ('t_a', 7, 12, 200), ('t_none', 7, 12, 200)");
+  raw.exec("PRAGMA user_version = 7");
+  raw.close();
+  const db = new Db(path);
+  expect(db.sqlite.query("SELECT task_id, repo, kind, target, by, source, at FROM task_grants ORDER BY kind, source, target").all()).toEqual([
+    { task_id: "t_a", repo: "o/a", kind: "merge", target: 12, by: "owner", source: "", at: 100 },
+    { task_id: "t_a", repo: "o/a", kind: "scope", target: 7, by: "owner", source: "", at: 300 },
+    { task_id: "", repo: "", kind: "spent", target: 0, by: "owner", source: "op_1", at: 0 },
+    { task_id: "", repo: "", kind: "spent", target: 0, by: "owner", source: "op_2", at: 0 },
+  ]);
+  // a merge grant from before grants had a head answers for no head (the person is asked again); a scope grant has none to hold to
+  const H = "a".repeat(40);
+  expect([db.hasMergeGrant("t_a", "O/A", "merge", 12, H), db.hasMergeGrant("t_a", "O/A", "merge", 12), db.hasMergeGrant("t_a", "o/b", "merge", 12, H), db.hasMergeGrant("t_none", "o/a", "merge", 12, H)]).toEqual([false, false, false, false]);
+  expect(db.mergeGrantAt("t_a", "O/A", "scope", 7)).toBe(300);
+  // a grant recorded with the head answers for that head of that repository only, whatever case the sha is asked in
+  db.recordMergeGrant({ taskId: "t_a", repo: "O/A", kind: "merge", target: 12, by: "owner", head: H }, 100);
+  expect([db.hasMergeGrant("t_a", "O/A", "merge", 12, H.toUpperCase()), db.hasMergeGrant("t_a", "o/a", "merge", 12, "b".repeat(40)), db.hasMergeGrant("t_a", "o/b", "merge", 12, H)]).toEqual([true, false, false]);
+  expect([db.scopeStopOf("t_a", "o/a", 7), db.scopeStopOf("t_none", "o/a", 7)]).toEqual([{ pr: 12, at: 200 }, null]);
+  expect([db.mergeGrantSourceSpent("op_1"), db.mergeGrantSourceSpent("op_3")]).toEqual([true, false]);
+  // the setting stays where a rolled-back release reads it: that release must still know the answers it already used
+  expect(db.getSetting<unknown>("mergeGrantAnswers", null)).toEqual(["op_1", "op_2"]);
+  // a grant another Task's text left does not answer, and does not hide the person's
+  db.recordMergeGrant({ taskId: "t_a", repo: "o/a", kind: "merge", target: 13, by: "task:t_x", head: H });
+  db.recordMergeGrant({ taskId: "t_a", repo: "o/a", kind: "merge", target: 13, by: "api", head: H });
+  expect(db.hasMergeGrant("t_a", "o/a", "merge", 13, H)).toBe(false);
+  db.recordMergeGrant({ taskId: "t_a", repo: "o/a", kind: "merge", target: 12, by: "task:t_x", head: H }, 999);
+  expect(db.mergeGrantAt("t_a", "o/a", "merge", 12, H)).toBe(100);
+  db.close();
+  // run once: the old rows stay where a rolled-back release reads them, and are not moved again
+  const again = new Database(path);
+  again.exec("DELETE FROM task_grants WHERE kind = 'merge'");
+  again.close();
+  const reopened = new Db(path);
+  expect(reopened.hasMergeGrant("t_a", "o/a", "merge", 12, H)).toBe(false);
+  expect(reopened.sqlite.query("SELECT COUNT(*) AS n FROM merge_grants").get()).toEqual({ n: 4 });
+  reopened.close();
+  // a release rolled back to remembers the answers it used in the setting again: back on this release they are spent too,
+  // although the move above ran long ago
+  const rolledBack = new Database(path);
+  rolledBack.query("UPDATE settings SET json = ? WHERE key = 'mergeGrantAnswers'").run(JSON.stringify(["op_1", "op_2", "op_9"]));
+  rolledBack.close();
+  const back = new Db(path);
+  expect([back.mergeGrantSourceSpent("op_9"), back.mergeGrantSourceSpent("op_1"), back.getSetting<unknown>("mergeGrantAnswers", null)]).toEqual([true, true, ["op_1", "op_2", "op_9"]]);
+  back.close();
+});
+test("start: every answer the grants' table knows as spent is in the list the release before reads, in its form and bound, so a rollback does not give its grants again", () => {
+  const path = join(dir, "switchboard.db");
+  // the release before this one, copied: an answer gives its grants unless the setting's array includes its id; then the id is appended and the newest 200 kept
+  const olderReleaseWouldGrant = (db: Db, answerId: string) => !db.getSetting<string[]>("mergeGrantAnswers", []).includes(answerId);
+  const olderReleaseRecords = (db: Db, answerId: string) => db.setSetting("mergeGrantAnswers", [...db.getSetting<string[]>("mergeGrantAnswers", []), answerId].slice(-200));
+  const list = (db: Db) => db.getSetting<unknown>("mergeGrantAnswers", null);
+  const H = "a".repeat(40);
+  // answers spent while only the table was written (no list at all), in two grants each
+  const pre = new Db(path);
+  expect(list(pre)).toBeNull(); // nothing spent: no list is made
+  for (const [id, at] of [["op_b", 2_000], ["op_a", 1_000]] as const) for (const target of [12, 13]) pre.recordMergeGrant({ taskId: "t1", repo: "o/a", kind: "merge", target, by: "owner", source: id, head: H }, at);
+  pre.recordMergeGrant({ taskId: "t1", repo: "o/a", kind: "scope", target: 7, by: "owner" }, 500); // a grant no answer gave names no id
+  expect(list(pre)).toBeNull();
+  expect(olderReleaseWouldGrant(pre, "op_a")).toBe(true); // the state a rollback would have met
+  pre.close();
+  // a database this release has not carried yet (the mark of the one carrying is absent)
+  const uncarried = (set?: string[]) => {
+    const raw = new Database(path);
+    raw.query("DELETE FROM settings WHERE key = 'mergeGrantAnswersCarried'").run();
+    if (set) raw.query("INSERT INTO settings (key, json) VALUES ('mergeGrantAnswers', ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json").run(JSON.stringify(set));
+    raw.close();
+  };
+  uncarried();
+  const db = new Db(path);
+  expect(list(db)).toEqual(["op_a", "op_b"]); // an array of id strings, in the order they were spent
+  expect([olderReleaseWouldGrant(db, "op_a"), olderReleaseWouldGrant(db, "op_b"), olderReleaseWouldGrant(db, "op_new")]).toEqual([false, false, true]);
+  db.close();
+  // a short list from the release before: what it holds stays in its place, the missing ones follow
+  uncarried(["op_old", "op_b"]);
+  const merged = new Db(path);
+  expect(list(merged)).toEqual(["op_old", "op_b", "op_a"]);
+  expect(merged.mergeGrantSourceSpent("op_old")).toBe(true);
+  // the next start changes nothing, and that release's own write goes on from it
+  const json = () => (merged.sqlite.query("SELECT json FROM settings WHERE key = 'mergeGrantAnswers'").get() as { json: string }).json;
+  const was = json();
+  merged.close();
+  const again = new Db(path);
+  expect((again.sqlite.query("SELECT json FROM settings WHERE key = 'mergeGrantAnswers'").get() as { json: string }).json).toBe(was);
+  olderReleaseRecords(again, "op_new");
+  expect(list(again)).toEqual(["op_old", "op_b", "op_a", "op_new"]);
+  again.close();
+  // a full list at the first carrying: the bound is that release's, and what goes is the list's own oldest, never its
+  // newest — an answer that release spent a moment ago, while rolled back, which this table has no time for
+  uncarried([...Array.from({ length: 199 }, (_, i) => `op_x${i}`), "op_rolled_back"]);
+  const bounded = new Db(path);
+  const kept = list(bounded) as string[];
+  expect(kept).toHaveLength(200);
+  expect(kept.slice(0, 2)).toEqual(["op_x2", "op_x3"]);
+  expect(kept.slice(-3)).toEqual(["op_rolled_back", "op_a", "op_b"]);
+  expect([olderReleaseWouldGrant(bounded, "op_a"), olderReleaseWouldGrant(bounded, "op_b"), olderReleaseWouldGrant(bounded, "op_rolled_back")]).toEqual([false, false, false]);
+  bounded.close();
+  // carried once: start after start the list stays as it is (an id the bound dropped does not come back to push out the
+  // next one), so the answer spent while rolled back is still known after any number of starts
+  for (let i = 0; i < 5; i++) {
+    const next = new Db(path);
+    expect(list(next)).toEqual(kept);
+    next.close();
+  }
+});
 test("migration: the global backlogSweep moves to every workspace once and leaves settings", () => {
   const path = join(dir, "switchboard.db");
   const pre = new Db(path);
@@ -1248,7 +1370,7 @@ test("delegated model note migration: the （試験） tail of the status note i
   expect(ruleMetrics(evs).delegatedModel).toBe("claude-sonnet-5-5");
   expect(JSON.stringify(evs[1]!.ev)).toContain(oldNote);
   expect(evs[2]!.ev).toEqual({ t: "status", text: "Task ごとの実装は  に任せます（試験）" });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
   again.close();
 });
 
@@ -1266,7 +1388,7 @@ test("human answer migration: extra none becomes complexity and detour none, ext
   expect(again.getEval("a", "human")!.json).toEqual({ rating: 1, comment: "c", intent: "wrong", complexity: "none", detour: "none", value: "unused", by: "user", ts: 1 });
   expect(again.getEval("b", "human")!.json).toEqual({ rating: 3, comment: "", by: "user", ts: 2 });
   expect(again.getEval("c", "human")!.json).toEqual({ rating: 4, comment: "", by: "user", ts: 3 });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
   again.close();
 });
 
@@ -1292,7 +1414,7 @@ test("repeated thinking status is folded once at open", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();
@@ -1534,4 +1656,201 @@ test("stored outcome: a waiting or failed Task is never written needs_action / f
   expect(db.evalsList({ limit: 10 }).find((r) => r.taskId === "e")?.outcome).toBe("failed");
   expect(db.evalsList({ limit: 10 }).find((r) => r.taskId === "w")?.outcome).toBe("needs_action");
   db.close();
+});
+
+test("migration fills the policies' totals: a policy saved without them gets the count and the oldest of its kept uses, and stays in the list", () => {
+  const path = join(dir, "switchboard.db");
+  const subject = { kind: "approval", op: "exec", target: "bun test", conditions: [], head: null };
+  const old = (id: string, uses: number[]) => ({
+    id, scope: "repo", workspaceId: "w", pbi: null, askId: null, kind: "approval", op: "exec", target: "bun test*", when: [], answer: { kind: "allow" },
+    expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1, from: subject, uses: uses.map((at) => ({ at, askId: `a${at}`, taskId: null, issue: null, subject })),
+  });
+  const pre = new Db(path);
+  // as stored before the totals existed: two without them (one used, one not), one that has them already, and an entry that is no policy
+  pre.setSetting("answerPolicies", [old("pol_used", [300, 100, 200]), old("pol_unused", []), { ...old("pol_new", [500]), useCount: 42, firstUsedAt: 7 }, "junk"]);
+  expect(readPolicies(pre).map((p) => p.id)).toEqual(["pol_new"]); // without the migration the old ones are dropped from the list
+  pre.close();
+  const db = new Db(path);
+  const list = readPolicies(db);
+  expect(list.map((p) => [p.id, p.useCount, p.firstUsedAt, p.uses.length])).toEqual([["pol_used", 3, 100, 3], ["pol_unused", 0, null, 0], ["pol_new", 42, 7, 1]]);
+  const stored = db.getSetting<unknown[]>("answerPolicies", []);
+  expect(stored[3]).toBe("junk"); // what is not a policy is left as it was
+  db.close();
+  // a second open changes nothing
+  const again = new Db(path);
+  expect(again.getSetting<unknown[]>("answerPolicies", [])).toEqual(stored);
+  again.close();
+});
+
+test("ledger billing migration: rows from before the billing kind get the kind their own figures say; no row and no figure changes", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  raw.exec("ALTER TABLE ledger DROP COLUMN billing");
+  const put = raw.query("INSERT INTO ledger (task_id, runner, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, billed_usd, source, ts) VALUES ('t', ?, ?, 1, 1, 0, 0, ?, ?, 'reported', ?)");
+  const rows: Array<[string, string | null, number, number]> = [
+    ["claude", "claude-opus-5-5", 1.5, 0], // under the plan
+    ["claude", "claude-opus-5-5", 0.5, 0.5], // charged: the same model on another kind
+    ["claude", "global.anthropic.claude-haiku-5-5", 0.25, 0.25], // Amazon Bedrock by its model id
+    ["claude", null, 0.1, 0],
+    ["codex", "gpt-6-luna", 2, 0],
+    ["dak", "gemini-3", 3, 3],
+    ["dak", "gemini-unknown", 0, 0], // cost nothing: follows dak's charged rows
+  ];
+  rows.forEach((r, i) => put.run(r[0], r[1], r[2], r[3], 1000 + i));
+  const before = raw.query("SELECT COUNT(*) AS n, SUM(billed_usd) AS billed, SUM(cost_usd) AS cost FROM ledger").get();
+  raw.close();
+  expect(needsMigration(path)).toBe(true);
+  const db = new Db(path);
+  expect(db.sqlite.query("SELECT COUNT(*) AS n, SUM(billed_usd) AS billed, SUM(cost_usd) AS cost FROM ledger").get()).toEqual(before);
+  expect((db.sqlite.query("SELECT billing FROM ledger ORDER BY ts").all() as Array<{ billing: string }>).map((r) => r.billing)).toEqual(["claude.ai", "console", "bedrock", "claude.ai", "subscription", "api", "api"]);
+  // a row recorded from now on keeps the kind it is given, and one made without a kind gets its figures' kind
+  db.insertLedger({ taskId: "t", runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 1, billing: "console", source: "reported", ts: 2000 });
+  db.insertLedger({ taskId: "t", runner: "codex", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: 2001 });
+  expect((db.sqlite.query("SELECT billing FROM ledger WHERE ts >= 2000 ORDER BY ts").all() as Array<{ billing: string }>).map((r) => r.billing)).toEqual(["console", "subscription"]);
+  db.close();
+  expect(needsMigration(path)).toBe(false);
+});
+
+// Usage limits per runner and account: an account's rows are what its provider last reported, whichever machine heard it.
+const accounts = (map: Record<string, string>) => ({ accountOf: (r: string) => map[r] ?? "" });
+
+test("quota: two accounts of one runner are two rows; quotaFor reads only the account logged in here", () => {
+  const db = new Db(join(dir, "switchboard.db"), accounts({ claude: "aaaaaaaaaaaaaaaa" }));
+  db.upsertQuota("claude", "five_hour", 0.2, 100, 1000);
+  db.upsertQuota("claude", "five_hour", 0.9, 200, 1000, "bbbbbbbbbbbbbbbb"); // a work machine's account, taken in
+  expect(db.quotaAll().map((q) => [q.runner, q.account, q.utilization])).toEqual([["claude", "aaaaaaaaaaaaaaaa", 0.2], ["claude", "bbbbbbbbbbbbbbbb", 0.9]]);
+  // what this daemon holds and resumes by: the other account at 90% does not stop this machine's Tasks
+  expect(db.quotaFor("claude")).toEqual([{ window: "five_hour", utilization: 0.2, resetsAt: 100, ts: 1000 }]);
+  db.close();
+});
+
+test("migrate: the per-runner quota rows move once to the account logged in here, and opening again adds nothing", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  // a database from before the per-account table: per-runner rows, no quota_by_account. (The test builds the old shape; db.ts itself never removes a table.)
+  raw.exec("DROP " + "TABLE quota_by_account");
+  raw.exec("INSERT INTO quota (runner, window, utilization, resets_at, ts) VALUES ('claude', 'five_hour', 0.4, 100, 10), ('claude', 'seven_day', 0.7, 900, 11), ('codex', 'five_hour', 0.1, 50, 12)");
+  raw.close();
+  const opts = accounts({ claude: "aaaaaaaaaaaaaaaa" }); // codex is not logged in: its rows keep the empty name
+  let db = new Db(path, opts);
+  const moved = [
+    { runner: "claude", account: "aaaaaaaaaaaaaaaa", window: "five_hour", utilization: 0.4, resetsAt: 100, ts: 10 },
+    { runner: "claude", account: "aaaaaaaaaaaaaaaa", window: "seven_day", utilization: 0.7, resetsAt: 900, ts: 11 },
+    { runner: "codex", account: "", window: "five_hour", utilization: 0.1, resetsAt: 50, ts: 12 },
+  ];
+  expect(db.quotaAll()).toEqual(moved as never);
+  expect(db.quotaFor("claude").map((q) => q.window)).toEqual(["five_hour", "seven_day"]);
+  db.upsertQuota("claude", "five_hour", 0.5, 100, 20);
+  db.close();
+  // a second start: the old rows are not copied over the newer report, and another login does not re-file them
+  db = new Db(path, accounts({ claude: "bbbbbbbbbbbbbbbb" }));
+  expect(db.quotaAll()).toEqual([{ ...moved[0]!, utilization: 0.5, ts: 20 }, moved[1]!, moved[2]!] as never);
+  db.close();
+});
+
+test("migrate: a start that stopped after making the per-account table still moves the per-runner quota rows on the next start", () => {
+  const path = join(dir, "switchboard.db");
+  new Db(path).close();
+  const raw = new Database(path);
+  // what the stopped start left: the new table exists and is empty, the old rows wait, nothing says the move ran
+  raw.exec("INSERT INTO quota (runner, window, utilization, resets_at, ts) VALUES ('claude', 'five_hour', 0.4, 100, 10)");
+  expect(raw.query("SELECT count(*) AS n FROM quota_by_account").get()).toEqual({ n: 0 });
+  raw.close();
+  let db = new Db(path, accounts({ claude: "aaaaaaaaaaaaaaaa" }));
+  expect(db.quotaAll()).toEqual([{ runner: "claude", account: "aaaaaaaaaaaaaaaa", window: "five_hour", utilization: 0.4, resetsAt: 100, ts: 10 }] as never);
+  db.close();
+  // once: a later start under another login files nothing again
+  db = new Db(path, accounts({ claude: "bbbbbbbbbbbbbbbb" }));
+  expect(db.quotaAll().map((q) => q.account)).toEqual(["aaaaaaaaaaaaaaaa"]);
+  db.close();
+});
+
+test("noteAccount: the account an adapter names on a report is this machine's from then on; rows kept before any was named become its rows", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  // before any account is named: reports wait under the empty name, and are what this machine reads
+  db.upsertQuota("claude", "five_hour", 0.2, 100, 10);
+  db.upsertQuota("claude", "seven_day", 0.3, 900, 10);
+  db.upsertQuota("codex", "five_hour", 0.1, 50, 10);
+  db.upsertQuota("claude", "five_hour", 0.9, 200, 5, "aaaaaaaaaaaaaaaa"); // the same account's older report, taken in from a work machine
+  expect(db.quotaFor("claude").map((q) => q.utilization)).toEqual([0.2, 0.3]);
+  db.noteAccount("claude", "aaaaaaaaaaaaaaaa");
+  expect(db.accountOf("claude")).toBe("aaaaaaaaaaaaaaaa");
+  // the newer of the two reports stays on the account's row; the window it did not have comes over; another runner's rows are untouched
+  expect(db.quotaAll().map((q) => [q.runner, q.account, q.window, q.utilization])).toEqual([
+    ["claude", "aaaaaaaaaaaaaaaa", "five_hour", 0.2],
+    ["claude", "aaaaaaaaaaaaaaaa", "seven_day", 0.3],
+    ["codex", "", "five_hour", 0.1],
+  ]);
+  db.upsertQuota("claude", "five_hour", 0.4, 100, 20);
+  expect(db.quotaFor("claude").map((q) => q.utilization)).toEqual([0.4, 0.3]);
+  // another login: its reports go to its own rows, and the first account's rows stay where they are
+  db.noteAccount("claude", "bbbbbbbbbbbbbbbb");
+  db.upsertQuota("claude", "five_hour", 0.05, 300, 30);
+  expect(db.quotaFor("claude")).toEqual([{ window: "five_hour", utilization: 0.05, resetsAt: 300, ts: 30 }]);
+  expect(db.quotaAll().filter((q) => q.account === "aaaaaaaaaaaaaaaa").map((q) => q.utilization)).toEqual([0.4, 0.3]);
+  db.close();
+  // the name is kept across a restart
+  const again = new Db(join(dir, "switchboard.db"));
+  expect(again.accountOf("claude")).toBe("bbbbbbbbbbbbbbbb");
+  again.close();
+});
+
+test("ledgerSummary: quota rows carry a short account name, never the stored one whole; spend splits by machine and still sums", () => {
+  const db = new Db(join(dir, "switchboard.db"), accounts({ claude: "aaaaaaaaaaaaaaaa" }));
+  const now = Date.parse("2026-11-10T03:00:00Z");
+  db.upsertQuota("claude", "five_hour", 0.2, 100, now);
+  db.upsertQuota("claude", "five_hour", 0.9, 200, now, "bbbbbbbbbbbbbbbb");
+  const row = (taskId: string, ts: number, costUsd: number, billedUsd = 0) => ({ taskId, runner: "claude" as const, model: null, inputTokens: 1, outputTokens: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd, billedUsd, source: "reported", ts });
+  db.insertTask(machineTask("t-here", null) as never);
+  db.insertLedger(row("t-here", now - 1000, 2, 1));
+  // a machine that holds only its own Tasks has the one line
+  expect(db.ledgerSummary(now).byMachine).toEqual([{ machine: null, todayUsd: 2, weekUsd: 2, billedTodayUsd: 1, billedWeekUsd: 1 }]);
+  db.insertTask(machineTask("t-pc", "pc") as never);
+  db.insertLedger(row("t-pc", now - 1000, 3));
+  db.insertLedger(row("t-pc", now - 3 * 24 * 3600 * 1000, 5)); // this week, not today
+  db.insertLedger(row("t-pc", now - 9 * 24 * 3600 * 1000, 100)); // before the week: nowhere
+  const s = db.ledgerSummary(now);
+  expect(s.quota.map((q) => [q.runner, q.account, q.utilization])).toEqual([["claude", "aaaaaaaa", 0.2], ["claude", "bbbbbbbb", 0.9]]);
+  expect(s.byMachine).toEqual([
+    { machine: null, todayUsd: 2, weekUsd: 2, billedTodayUsd: 1, billedWeekUsd: 1 },
+    { machine: "pc", todayUsd: 3, weekUsd: 8, billedTodayUsd: 0, billedWeekUsd: 0 },
+  ]);
+  expect([s.todayUsd, s.weekUsd]).toEqual([5, 10]); // the totals are every machine's
+  expect(JSON.stringify(s)).not.toContain("aaaaaaaaaaaaaaaa");
+  db.close();
+});
+
+test("migration numbers: no two migrations carry the same number or the same user_version, and the list is the directory in order", () => {
+  const numbers = MIGRATIONS.map((m) => m.number);
+  expect(numbers.filter((n, i) => numbers.indexOf(n) !== i), "a number two migrations carry").toEqual([]);
+  const versions = MIGRATIONS.flatMap((m) => (m.version === undefined ? [] : [m.version]));
+  expect(versions.filter((v, i) => versions.indexOf(v) !== i), "a user_version two migrations carry").toEqual([]);
+  // in the order they were written: a later one never runs before an earlier one
+  expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
+  expect(versions).toEqual([...versions].sort((a, b) => a - b));
+  // one file each, named by its number and name, and every file is in the list (one left out would never run)
+  const files = readdirSync(join(import.meta.dir, "db/migrations")).filter((f) => f !== "index.ts").sort();
+  expect(MIGRATIONS.map((m) => `${String(m.number).padStart(4, "0")}-${m.name}.ts`)).toEqual(files);
+  // `version` is what `run` leaves in the file, and a migration without one does not move it
+  const raw = new Database(":memory:");
+  try {
+    raw.exec(SCHEMA);
+    const version = () => (raw.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    // the same reader the daemon's `migrate` gives them: a table is read once in a run, so a migration that only passes when it is read again fails here too
+    const columns = columnsOf(raw);
+    for (const m of MIGRATIONS) {
+      const before = version();
+      m.run(raw, columns);
+      expect(version(), `${m.number} ${m.name}`).toBe(m.version ?? before);
+    }
+    const seen = columnsOf(raw);
+    expect(seen("settings").has("probe")).toBe(false);
+    raw.exec("ALTER TABLE settings ADD COLUMN probe TEXT");
+    expect(seen("settings").has("probe"), "a table is read once per run").toBe(false);
+    expect(columnsOf(raw)("settings").has("probe")).toBe(true);
+  } finally {
+    raw.close();
+  }
 });

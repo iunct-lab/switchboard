@@ -1,5 +1,7 @@
 import type { AgentEvent, PermissionDecision, RunnerId } from "./events.ts";
-import type { ExecutionMode, Attachment, ModelOption, PermissionModeOption, RunnerLogin, LoginKind } from "./model.ts";
+import type { ModelOption, PermissionModeOption, RunnerLogin, LoginKind } from "./model/runner.ts";
+import type { ExecutionMode } from "./model/shared.ts";
+import type { Attachment } from "./model/task.ts";
 
 /** One MCP server as Claude Code's `mcpServers` holds it (stdio: command/args/env; http / sse: url/headers). */
 export interface McpServerConfig {
@@ -33,6 +35,8 @@ export interface StartOptions {
   effort?: string;
   /** Thinking effort of the subagents the runner starts. Unset = same as the task. */
   subagentEffort?: string;
+  /** Model of the subagents the runner starts. Unset = same as the task. */
+  subagentModel?: string;
   /** Resume a previous runner session (runner-native id). */
   resumeSessionId?: string;
   /**

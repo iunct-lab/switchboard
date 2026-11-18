@@ -358,7 +358,7 @@ describe("request building", () => {
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CODEX_EFFORTS, CODEX_LOGIN_HINT, CODEX_MODELS, createCodexAdapter, defaultModelFromConfig, loginStatus } from "./index.ts";
+import { accountOf, CODEX_EFFORTS, CODEX_LOGIN_HINT, CODEX_MODELS, createCodexAdapter, defaultModelFromConfig, loginStatus } from "./index.ts";
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
 
@@ -554,6 +554,24 @@ describe("login", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("account", () => {
+  test("the answer to account/read becomes a hashed name (a pseudonym): the user id first, else the email; no ChatGPT account is the empty name, no answer is none", () => {
+    const RAW = "user-0b9d3c1e-raw";
+    const chatgpt = { type: "chatgpt", email: "a@example.com", planType: "pro", workspaceName: null };
+    const a = accountOf({ account: chatgpt, userId: RAW, requiresOpenaiAuth: true });
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    for (const raw of [RAW, "0b9d3c1e", "a@example.com"]) expect(a).not.toContain(raw);
+    // the same account on another machine, and another account
+    expect(accountOf({ account: { ...chatgpt, email: "other@example.com" }, userId: RAW })).toBe(a);
+    expect(accountOf({ account: chatgpt, userId: "user-another" })).not.toBe(a);
+    const byEmail = accountOf({ account: chatgpt, userId: null });
+    expect(byEmail).toMatch(/^[0-9a-f]{16}$/);
+    expect(byEmail).not.toBe(a);
+    for (const none of [{ account: null, userId: null }, { account: { type: "apiKey" }, userId: null }, { account: { type: "amazonBedrock", usesCodexManagedCredentials: false }, userId: null }]) expect(accountOf(none)).toBe("");
+    for (const unread of [undefined, null, "text"]) expect(accountOf(unread)).toBeUndefined();
   });
 });
 

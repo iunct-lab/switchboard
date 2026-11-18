@@ -4,8 +4,8 @@ import { publicKeyOf, SESSION_IDLE_MS as AWS_IDLE, SESSION_MAX_MS as AWS_MAX, se
 import { SESSION_IDLE_MS as CORE_IDLE, SESSION_MAX_MS as CORE_MAX, sessionOk } from "../packages/core/src/auth.ts";
 import { SESSION_IDLE_MS as RESCUE_IDLE, SESSION_MAX_MS as RESCUE_MAX, recentCookieOk } from "../rescue/src/server.ts";
 
-// The Lambda, the daemon and sb-rescue each judge sb_session on their own (sb-rescue shares no code, #178): this pins
-// that they read the same cookie the same way (#498).
+// The Lambda, the daemon and sb-rescue each judge sb_session on their own (sb-rescue shares no code): this pins
+// that they read the same cookie the same way.
 const SEED = "a".repeat(64);
 const PUB = publicKeyOf(SEED);
 const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(SEED, "hex")]), format: "der", type: "pkcs8" });
@@ -51,7 +51,7 @@ test("the three places agree on every edge of the idle time, the cap and the old
 });
 
 
-test("a cookie the Starter renews passes the daemon and sb-rescue as well, with the cap it had (#498)", () => {
+test("a cookie the Starter renews passes the daemon and sb-rescue as well, with the cap it had", () => {
   const T = 1_800_000_000_000;
   const renewed = sessionValue(SEED, "pk1", T + AWS_IDLE, T + AWS_MAX - 1000); // what /_auth/renew makes late in a login
   const req = new Request("http://127.0.0.1/", { headers: { cookie: `sb_session=${renewed}` } });

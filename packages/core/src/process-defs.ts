@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { findRepoRoot } from "./config.ts";
+import { type Conditions, renderConditions } from "../../../ops-kit/src/conditions.ts";
 
 /** Where the candidates live, relative to the meta repository's root (beside `ops-kit/skills`). */
 export const PROCESS_SOURCE = "ops-kit/processes";
@@ -111,16 +112,21 @@ export function loadProcess(id: string, root?: string): ProcessDef {
 }
 
 /**
- * The text of an entry with every `{{key}}` replaced from `vars`. A key the entry uses but `vars` does not name is an
+ * The text of an entry with only the condition blocks that match `conds` (`ops-kit/src/conditions.ts`; an entry that
+ * uses a condition `conds` does not give is an error) and every `{{key}}` replaced from `vars`. A key the entry uses but `vars` does not name is an
  * error (the Task would read a literal `{{…}}`), and so is an entry the definition does not have.
  */
-export function renderEntry(def: ProcessDef, entry: string, vars: Record<string, string | number>): string {
+export function renderEntry(def: ProcessDef, entry: string, vars: Record<string, string | number>, conds: Conditions = {}): string {
   const text = def.entries[entry];
   if (text === undefined) throw new Error(`${def.path}: no \`## entry ${entry}\``);
-  const out = text.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+  const out = renderConditions(text, conds, def.path).replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
     const v = vars[key];
     if (v === undefined) throw new Error(`${def.path}: entry \`${entry}\` uses {{${key}}}, which was not given`);
     return String(v);
   });
   return out;
 }
+
+/** How a request names the main reviewer under each review setting (the stage prompts and the fix prompt share the words). */
+export const REVIEWER_WORDS = { other: "別のランナー", same: "同じランナーの新しいセッション" } as const;
+export type ReviewSetting = keyof typeof REVIEWER_WORDS;

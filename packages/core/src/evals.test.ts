@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClaudeParser } from "@switchboard/adapter-claude";
-import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSource, EvalsListRow, EventEnvelope, StopRecord, Task } from "@switchboard/protocol";
-import { Db } from "./db.ts";
-import { storedIssueReader } from "./backlog.ts";
-import { AUTO_RESUME_HEAD, delegatedNote, EVAL_CONTEXT_CHARS, EVAL_REQUEST_CHARS, evalContext, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, rulesEvalOf, stageRequestOf, STOP_NOTE, weekStartUtc, weeklyHumanSample } from "./evals.ts";
+import type { AgentEvent, BacklogIssueData, BacklogPullRequestData, BacklogSource, EvalsListRow, EventEnvelope, RequestEval, StopRecord, Task } from "@switchboard/protocol";
+import { Db, tasksOfIssues } from "./db.ts";
+import { storedIssueReader } from "./backlog-stored.ts";
+import { AUTO_RESUME_HEAD, delegatedNote, EVAL_CONTEXT_CHARS, EVAL_REQUEST_CHARS, evalContext, evalRequestDraft, isAutomaticUserText, judgeHumanGap, personMessages, RULES_BY, ruleMetrics, requestSampleRows, rulesEvalOf, stageCounts, stageRequestOf, STOP_NOTE, weekStartUtc, weeklyHumanSample, withRequestOutputs } from "./evals.ts";
 import { decisionsFromOtlp } from "./otel.ts";
 import { RESUME_PROMPT } from "./ratelimit.ts";
 import { STOP_RESUME_PROMPT } from "./interrupted.ts";
@@ -282,6 +282,58 @@ describe("weekly human sample", () => {
   });
 });
 
+describe("weekly human sample: what the person stepped into comes first", () => {
+  const stepped = (row: EvalsListRow, userInstructions: number, decisionStops = 0): EvalsListRow => ({ ...row, rules: { toolCalls: 0, toolFailures: 0, errors: 0, userInstructions, stops: decisionStops, decisionStops, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false } });
+  const request = (number: number, interventions: number, closedAt: number, taskIds: string[] = [], pbiTasks: string[] = []) => ({ kind: "request" as const, workspaceId: "w1", number, closedAt, interventions, taskIds, pbis: [{ taskIds: pbiTasks }] });
+  const id = (u: EvalsListRow | { number: number }) => ("taskId" in u ? u.taskId : `#${u.number}`);
+
+  test("a task with 21 follow-up instructions is asked first even from the high band; one never stepped into is not pulled forward", () => {
+    const rows = ["a", "b", "c", "d", "e", "f", "g", "h", "i"].map((x, i) => listRow(x, 1 + i * 0.5));
+    rows[8] = stepped(rows[8]!, 21); // i: the best average of all
+    rows[4] = stepped(rows[4]!, 1, 2); // e: 3 with its decision stops
+    rows[1] = stepped(rows[1]!, 0); // b: counted, never stepped into
+    const picked = weeklyHumanSample(rows).map((r) => r.taskId);
+    expect(picked.slice(0, 2)).toEqual(["i", "e"]);
+    // the bands go on over the rest: a b c | d f | g h
+    expect(picked).toEqual(["i", "e", "a", "d", "g"]);
+  });
+  test("only the first two slots go by interventions: a third such task waits for its band", () => {
+    const rows = ["a", "b", "c", "d", "e", "f"].map((x, i) => stepped(listRow(x, 1 + i), 6 - i));
+    expect(weeklyHumanSample(rows).map((r) => r.taskId)).toEqual(["a", "b", "c", "e", "f"]); // then the bands of the rest, c d | e | f, one each in turn: d, stepped into 3 times, waits
+  });
+  test("requests: the most stepped-into unit first (a request before a task on a tie), then the other requests as closed, then tasks; a picked request's tasks are not asked again", () => {
+    const rows = [stepped(listRow("t-in", 2), 9), stepped(listRow("t-free", 3), 4), listRow("t-x", 1), listRow("t-y", 5), listRow("t-pbi", 4)];
+    const requests = [request(30, 0, 300), request(10, 4, 200, [], ["t-pbi"]), request(20, 9, 100, ["t-in"])];
+    const picked = weeklyHumanSample(rows, requests).map(id);
+    // issue 20 (9, which is its task t-in's) and issue 10 (4, a tie with t-free: the request wins); issue 30 by its close; then the tasks left
+    expect(picked).toEqual(["#20", "#10", "#30", "t-x", "t-free"]);
+    expect(picked).not.toContain("t-in");
+    expect(picked).not.toContain("t-pbi");
+  });
+  test("more requests than lines: five requests, and no task", () => {
+    const requests = [1, 2, 3, 4, 5, 6].map((n) => request(n, 0, n));
+    expect(weeklyHumanSample([listRow("a", 2)], requests).map(id)).toEqual(["#1", "#2", "#3", "#4", "#5"]);
+  });
+});
+
+describe("stageCounts", () => {
+  const ev = (issue: number, stages: RequestEval["stages"], ts: number) => ({ workspaceId: "w1", issue, eval: { stages, rating: 3, comment: "", by: "user" as const, ts } });
+  test("every stage has a row; an evaluation with several stages counts in each; older than `from` is not counted; examples newest first", () => {
+    const rows = [ev(7, ["request", "pbi"], 500), ev(6, ["request"], 400), ev(5, ["none"], 300), ev(4, ["impl"], 99)];
+    expect(stageCounts(rows, 100)).toEqual({
+      from: 100,
+      rows: [
+        { stage: "none", count: 1, examples: [{ workspaceId: "w1", number: 5 }] },
+        { stage: "request", count: 2, examples: [{ workspaceId: "w1", number: 7 }, { workspaceId: "w1", number: 6 }] },
+        { stage: "pbi", count: 1, examples: [{ workspaceId: "w1", number: 7 }] },
+        { stage: "impl", count: 0, examples: [] },
+        { stage: "report", count: 0, examples: [] },
+      ],
+    });
+    expect(stageCounts(Array.from({ length: 8 }, (_, i) => ev(i + 1, ["report"], 1000 - i)), 0).rows[4]).toMatchObject({ count: 8, examples: [1, 2, 3, 4, 5].map((number) => ({ workspaceId: "w1", number })) });
+  });
+});
+
 describe("judge vs human gap", () => {
   test("only the tasks with both, the mean of human − judge to one decimal, and the count", () => {
     const rows = [listRow("a", 2.6, { rating: 1 }), listRow("b", 3.6, { rating: 1 }), listRow("c", 4, {}), listRow("d", null, { rating: 5 })];
@@ -445,7 +497,7 @@ describe("evalContext", () => {
       call("d", "gh pr view 31", "https://github.com/acme/app/pull/99");
       // a local change: its create is stored first, then read back by localId once it has a number
       const localId = "33333333-3333-4333-8333-333333333333";
-      const draft = { ...issue(0, [], "変更"), number: 0, change: { head: "sb/1", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null } };
+      const draft = { ...issue(0, [], "変更"), number: 0, change: { head: "sb/1", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null, pr: null, reportedAt: null } };
       db.appendEventAt("o1", { t: "tool.call", id: "e", name: "Bash", input: { command: "ops-kit backlog create --head sb/1" }, summary: "create" }, Date.now() - 1);
       const [create] = db.applyBacklogEdit(SRC, { records: [{ objectKind: "issue", externalId: `local:${localId}`, local: draft }], operations: [{ id: localId, issue: `local:${localId}`, targetKind: "issue", target: `local:${localId}`, kind: "create", payload: draft }] });
       db.setBacklogOperationResult(create!, { status: "done", remoteId: "I_21", record: { externalId: "I_21", remote: { ...draft, number: 21, title: "手元の変更", state: "CLOSED", change: { ...draft.change, mergedAt: "2026-10-02T00:00:00Z" } } } });
@@ -474,5 +526,76 @@ describe("evalContext", () => {
       db.applyBacklogEdit(SRC, { records: [], operations: [{ issue: "I_10", targetKind: "project-item", target: "P_10", kind: "set", field: "member", payload: false, base: true }] });
       expect(evalContext(db, t, read(db)).pbiStatus).toBeNull();
     });
+  });
+});
+
+describe("requestSampleRows", () => {
+  const SRC: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
+  const WEEK = Date.UTC(2026, 10, 9); // a Monday
+  const day = (n: number) => new Date(WEEK + n * 86_400_000).toISOString();
+  const issue = (number: number, labels: string[], body: string, o: Partial<BacklogIssueData> = {}): BacklogIssueData => ({ number, title: `題 ${number}`, url: "", state: "CLOSED", stateReason: "COMPLETED", body, labels, milestone: null, parent: null, subIssues: [], createdAt: day(-30), updatedAt: day(-1), closedAt: day(-3), ...o });
+  const rec = (i: BacklogIssueData) => ({ objectKind: "issue" as const, externalId: `I_${i.number}`, remote: i, fetchState: "fetched" as const });
+  const task = (id: string, workspaceId: string, stage: Task["stage"], title = id): Task => ({ id, workspaceId, title, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage, statusAt: 1, createdAt: 1, updatedAt: 1 });
+
+  test("a request closed last week with its PBIs closed: the PBIs in order, their stage Tasks and outputs, the interventions summed; open PBIs, older and duplicate requests stay out", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-evals-req-"));
+    try {
+      const db = new Db(join(dir, "switchboard.db"));
+      const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" }).id;
+      db.setWorkspaceBacklogSource(ws, SRC);
+      db.putBacklogSnapshot(SRC, { records: [
+        // the unit: request 9 → PBI 12 (done, Task Issue 13) and PBI 10 (not planned), written in that order
+        rec(issue(9, ["type:request"], "## 要望\n速くしてほしい\n\n## 原文\n```\n## 派生 PBI\n#99\n```\n\n## 派生 PBI\n- #12 速くする\n- #10 やらない案（acme/other#55 は別）\n- #12")),
+        rec(issue(12, ["type:pbi"], "## 元要望\n#9", { subIssues: [13] })),
+        rec(issue(13, ["type:task"], "x", { parent: 12 })),
+        rec(issue(10, ["type:pbi"], "## 元要望\n#9", { stateReason: "NOT_PLANNED" })),
+        { objectKind: "project-item", externalId: "P_12", remote: { issue: 12, owner: "acme", project: 1, fields: { Status: "Done" } }, fetchState: "fetched" },
+        // not units: a PBI still open, closed before the week, closed as a duplicate, closed this week, not a request
+        rec(issue(20, ["type:request"], "## 要望\nx\n\n## 派生 PBI\n#21")),
+        rec(issue(21, ["type:pbi"], "", { state: "OPEN", stateReason: null, closedAt: null })),
+        rec(issue(30, ["type:request"], "## 要望\nold", { closedAt: day(-8) })),
+        rec(issue(31, ["type:request"], "## 要望\ndup", { stateReason: "DUPLICATE" })),
+        rec(issue(32, ["type:request"], "## 要望\nthis week", { closedAt: day(1) })),
+        rec(issue(33, ["type:pbi"], "## 元要望\nなし")),
+        // a request done directly, with no PBI
+        rec(issue(40, ["type:request"], "## 要望\n3 行の追記", { closedAt: day(-5) })),
+        { objectKind: "pull-request", externalId: "PR_50", remote: { number: 50, state: "MERGED", isDraft: false, labels: [], closes: [13], mergeCommit: null, updatedAt: day(-3), files: [], closedAt: null, mergedAt: day(-3) } satisfies BacklogPullRequestData, fetchState: "fetched" },
+      ], cursor: null, syncedAt: 1 });
+      const counted = (id: string, userInstructions: number, decision: number) => {
+        const evs = [user("go"), ...Array.from({ length: userInstructions }, (_, i) => user(`again ${i}`, `m${i}`)), ...Array.from({ length: decision }, (_, i) => stop(`s${i}`, "decision")), end("ok")];
+        for (const ev of evs) db.appendEvent(id, ev);
+        const t = db.getTask(id)!;
+        const rules = rulesEvalOf(t, db.listEvents(id), db.taskCost(id));
+        db.upsertEval({ taskId: id, source: "rules", by: RULES_BY, rubric: null, json: rules, ts: 1 });
+      };
+      db.insertTask(task("t-topbi", ws, { issue: 9, action: "to-pbi" }));
+      db.insertTask(task("t-impl", ws, { issue: 13, action: "complete" }));
+      db.insertTask(task("t-plan", ws, { issue: 12, action: "to-tasks" }));
+      db.insertTask(task("t-direct", ws, { issue: 40, action: "direct" }));
+      db.insertTask(task("t-other", ws, null));
+      counted("t-topbi", 1, 0);
+      counted("t-impl", 2, 1);
+      counted("t-plan", 0, 0);
+      db.appendEvent("t-impl", assistant("opened https://github.com/acme/app/pull/50"));
+      const reader = storedIssueReader(db);
+      const tasksOf = (numbers: number[]) => tasksOfIssues(db.sqlite, numbers, [ws]).map((t) => t.id);
+      const rows = requestSampleRows(db, ws, WEEK - 7 * 86_400_000, WEEK, reader, tasksOf);
+      expect(rows.map((r) => r.number)).toEqual([40, 9]); // as closed
+      const unit = rows[1]!;
+      expect(unit).toMatchObject({ kind: "request", workspaceId: ws, number: 9, title: "題 9", closedAt: WEEK - 3 * 86_400_000, head: "速くしてほしい", taskIds: ["t-topbi"], interventions: 4, human: null });
+      expect(unit.pbis.map((p) => [p.number, p.status, p.dropped, [...p.taskIds].sort(), p.interventions])).toEqual([[12, "Done", false, ["t-impl", "t-plan"], 3], [10, null, true, [], 0]]);
+      expect(rows[0]).toMatchObject({ number: 40, pbis: [], taskIds: ["t-direct"], interventions: 0 });
+      // outputs are read for the rows picked only
+      expect(unit.pbis[0]!.outputs).toEqual([]);
+      const full = withRequestOutputs(db, unit, reader);
+      expect(full.pbis[0]!.outputs).toEqual(db.createdPullsOf("t-impl").map((p) => ({ kind: "pr", repo: p.repo, number: p.number, title: null, state: "merged" })));
+      // the unit's tasks are not asked again as tasks; a task outside it is
+      const list = ["t-impl", "t-plan", "t-topbi", "t-other"].map((x, i) => listRow(x, 2 + i * 0.5, { workspaceId: ws }));
+      const picked = weeklyHumanSample(list, rows).map((u) => ("kind" in u ? `#${u.number}` : u.taskId));
+      expect(picked).toEqual(["#9", "#40", "t-other"]);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

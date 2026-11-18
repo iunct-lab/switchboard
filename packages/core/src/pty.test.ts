@@ -7,7 +7,9 @@ import { join } from "node:path";
 import type { RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { prepareTeleportWorktree } from "./claude-cloud.ts";
 import { loadConfig } from "./config.ts";
-import { MAX_PTY_SESSIONS, OscStatusReader, PTY_STATUS_REPLY, PtyManager, REPLAY_CHARS, TELEPORT_SESSION_NAME } from "./pty.ts";
+import { HostIdle } from "./hostidle.ts";
+import { idleInput } from "./server/lifecycle.ts";
+import { MAX_PTY_SESSIONS, OscStatusReader, PTY_STATUS_REPLY, PtyManager, REPLAY_CHARS, TELEPORT_SESSION_NAME, WORKSPACE_SHELL_IDLE_MS } from "./pty.ts";
 import { startServer } from "./server.ts";
 
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
@@ -152,6 +154,55 @@ describe("terminal tab", () => {
     next.input("echo fresh-${MARK:-unset}\n");
     await next.until(/fresh-unset/);
     next.ws.close();
+  });
+
+  test("/ws/pty?workspace= opens a shell in the workspace's path without any task; a second connection gets the earlier output; close ends it", async () => {
+    const h = mkdtempSync(join(tmpdir(), "sb-pty-ws-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [idleAdapter()], { port: 0 });
+    try {
+      const dir = join(h, "repo");
+      mkdirSync(dir);
+      const b = `127.0.0.1:${c.server.port}`;
+      const w = c.db.upsertWorkspace({ name: "repo", path: dir, kind: "repo" });
+      const first = await connect(`ws://${b}/ws/pty?workspace=${w.id}`);
+      first.input("echo ws-$((40+2)); pwd\n");
+      await first.until(/ws-42/);
+      await first.until(new RegExp(realpathSync(dir).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      first.ws.close();
+      await Bun.sleep(50);
+      const second = await connect(`ws://${b}/ws/pty?workspace=${w.id}`);
+      await second.until(/ws-42/); // replayed: the shell outlived its socket
+      expect(second.shell).toBe(first.shell);
+      expect(await fetch(`http://${b}/api/tasks`).then(j)).toEqual([]); // no Task was made for it
+      second.ws.send(JSON.stringify({ type: "close" }));
+      for (const t0 = Date.now(); !second.closed && Date.now() - t0 < 5000; ) await Bun.sleep(10);
+      expect(second.closed).toBe(true);
+      expect(c.pty!.has(w.id)).toBe(false);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("/ws/pty?workspace= refuses an unknown workspace id, a path, Teleport, a foreign Origin and (off loopback) a request without the token", async () => {
+    const h = mkdtempSync(join(tmpdir(), "sb-pty-ws-auth-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_HOST: "0.0.0.0" }), [idleAdapter()], { port: 0 });
+    try {
+      const b = `127.0.0.1:${c.server.port}`;
+      const w = c.db.upsertWorkspace({ name: "h", path: h, kind: "repo" });
+      const upgrade = { upgrade: "websocket", connection: "upgrade" };
+      const status = async (q: string, headers: Record<string, string> = {}) => (await fetch(`http://${b}/ws/pty?${q}`, { headers: { ...upgrade, ...headers } })).status;
+      expect(await status(`workspace=${w.id}`)).toBe(401);
+      expect(await status(`workspace=${w.id}&token=wrong`)).toBe(401);
+      expect(await status(`workspace=${w.id}&token=${c.token}`, { origin: "http://evil.example" })).toBe(403);
+      expect(await status(`workspace=ws_nope&token=${c.token}`)).toBe(404);
+      expect(await status(`workspace=${encodeURIComponent(h)}&token=${c.token}`)).toBe(404); // an id, never a path
+      expect(await status(`workspace=${w.id}&teleport=1&token=${c.token}`)).toBe(400);
+      expect(c.pty!.size).toBe(0);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 
   test("a request that does not become a socket starts no shell", async () => {
@@ -958,4 +1009,123 @@ describe("Claude Code's status in the terminal", () => {
     expect(third.got[1]).toEqual({ type: "task.terminals", terminals: {} });
     for (const l of [first, second, third]) l.ws.close();
   }));
+});
+
+describe("a Workspace's shell", () => {
+  const MIN = 60_000;
+  /** A manager on the test's clock, with fake shells: `kill` ends the shell, as the real one's does. */
+  const onClock = async () => {
+    const fake = fakePty();
+    const clock = { now: 1_000_000 };
+    const killed: number[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spawn = (...a: unknown[]) => { const i = fake.spawned.length; const p = (fake.spawn as any)(...a); return { ...p, kill: () => { killed.push(i); fake.spawned[i]!.exit(); } }; };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = (await PtyManager.load(async () => ({ spawn: spawn as any }), undefined, () => clock.now))!;
+    fake.spawned.length = 0; killed.length = 0; // the throwaway spawn of load
+    return { m, clock, fake, killed };
+  };
+  const socket = () => ({ send: () => undefined, close: () => undefined });
+
+  test("with no socket, input or output for the idle bound it stops keeping the host up and is closed; a Task's shell left the same way is not", async () => {
+    const { m, clock, killed } = await onClock();
+    expect(m.idleMs).toBe(WORKSPACE_SHELL_IDLE_MS);
+    expect(WORKSPACE_SHELL_IDLE_MS).toBe(30 * MIN);
+    m.open("tsk_1", "/", "/bin/sh");
+    m.open("ws_1", "/", "/bin/sh", undefined, "workspace");
+    // the phone's tab: attached, then closed without ending the shell
+    const tab = socket();
+    m.attach("ws_1", tab);
+    clock.now += 45 * MIN;
+    expect(m.busy()).toBe(2); // a socket is attached: however quiet, it counts
+    expect(m.closeIdle()).toEqual([]);
+    m.detach("ws_1", tab);
+    clock.now += 30 * MIN - 1;
+    expect(m.busy()).toBe(2);
+    expect(m.closeIdle()).toEqual([]);
+    clock.now += 1;
+    expect(m.busy()).toBe(1); // only the Task's shell: the host's idle count no longer sees the Workspace's
+    expect(m.size).toBe(2); // not closed yet (the sweep has not run): the cap still counts it
+    expect(m.closeIdle()).toEqual(["ws_1"]);
+    expect(killed).toEqual([1]);
+    expect([m.has("ws_1"), m.has("tsk_1")]).toEqual([false, true]);
+    clock.now += 24 * 60 * MIN;
+    expect(m.busy()).toBe(1); // a Task's shell ends with its Task, not by the clock
+    expect(m.closeIdle()).toEqual([]);
+    m.closeAll();
+  });
+
+  test("input and output start the bound again; the setting changes it", async () => {
+    const { m, clock, fake } = await onClock();
+    m.idleMs = 5 * MIN;
+    m.open("ws_1", "/", "/bin/sh", undefined, "workspace");
+    clock.now += 4 * MIN;
+    fake.spawned[0]!.emit("a build still printing"); // output
+    clock.now += 4 * MIN;
+    expect(m.busy()).toBe(1);
+    m.write("ws_1", "ls\n"); // input (the fake echoes it, as a terminal does)
+    clock.now += 5 * MIN - 1;
+    expect(m.closeIdle()).toEqual([]);
+    clock.now += 1;
+    expect(m.busy()).toBe(0);
+    expect(m.closeIdle()).toEqual(["ws_1"]);
+  });
+
+  test("a forgotten one no longer holds the host's idle stop: the stop is asked for once the bound and the idle hold have passed", async () => {
+    const { m, clock } = await onClock();
+    m.open("ws_1", "/", "/bin/sh", undefined, "workspace");
+    const tab = socket();
+    m.attach("ws_1", tab);
+    m.detach("ws_1", tab);
+    let stops = 0;
+    // what the daemon's idle stop reads (idleInput), with nothing else going on
+    const sc = { db: { listTasksByStatus: () => [], listJobs: () => [] }, tasks: { backgroundJobs: () => 0 }, wsCount: 0, pty: m, nextWakeAt: () => null } as never;
+    const idle = new HostIdle(() => idleInput(sc, clock.now), () => void stops++, { now: () => clock.now });
+    for (let i = 0; i < 29; i++) { clock.now += MIN; idle.tick(); }
+    expect(stops).toBe(0); // 29 minutes: the shell still counts
+    for (let i = 0; i < 20; i++) { clock.now += MIN; idle.tick(); }
+    expect(stops).toBe(0); // idle since minute 30, held for 19
+    clock.now += MIN; idle.tick();
+    expect(stops).toBe(1);
+  });
+
+  test("closeAll (the daemon's stop, a restart, a promotion) ends it like a Task's shell", async () => {
+    const { m, killed } = await onClock();
+    m.open("tsk_1", "/", "/bin/sh");
+    m.open("ws_1", "/", "/bin/sh", undefined, "workspace");
+    m.closeAll();
+    expect(killed).toEqual([0, 1]);
+    expect(m.size).toBe(0);
+  });
+
+  test("in the daemon: the idle bound is the setting's, removing the Workspace ends its shell, and stopping the daemon ends the ones left", async () => {
+    const h = mkdtempSync(join(tmpdir(), "sb-pty-ws-end-"));
+    const fake = fakePty();
+    const killed: number[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spawn = (...a: unknown[]) => { const i = fake.spawned.length; const p = (fake.spawn as any)(...a); return { ...p, kill: () => { killed.push(i); fake.spawned[i]!.exit(); } }; };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN: "7" }), [idleAdapter()], { port: 0, loadPty: () => PtyManager.load(async () => ({ spawn: spawn as any })) });
+    try {
+      expect(c.pty!.idleMs).toBe(7 * MIN);
+      expect(loadConfig({ SWITCHBOARD_HOME: h }).workspaceShellIdleMs).toBe(30 * MIN);
+      for (const bad of ["x", "0", "-5"]) expect(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN: bad }).workspaceShellIdleMs).toBe(30 * MIN);
+      const b = `127.0.0.1:${c.server.port}`;
+      const dirs = ["one", "two"].map((n) => { const d = join(h, n); mkdirSync(d); return d; });
+      const [one, two] = dirs.map((d, i) => c.db.upsertWorkspace({ name: `w${i}`, path: d, kind: "repo" }));
+      fake.spawned.length = 0; killed.length = 0;
+      const first = await connect(`ws://${b}/ws/pty?workspace=${one!.id}`);
+      const second = await connect(`ws://${b}/ws/pty?workspace=${two!.id}`);
+      second.ws.close(); // the tab is closed, the shell is left
+      expect((await fetch(`http://${b}/api/workspaces/${one!.id}`, { method: "DELETE" })).status).toBe(200);
+      expect(killed).toEqual([0]);
+      expect(await closedWith(first)).toBe(1000);
+      expect([c.pty!.has(one!.id), c.pty!.has(two!.id)]).toEqual([false, true]);
+      await c.stop();
+      expect(killed).toEqual([0, 1]);
+    } finally {
+      await c.stop().catch(() => undefined);
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
 });

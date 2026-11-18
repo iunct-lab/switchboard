@@ -1,5 +1,5 @@
 /**
- * CI on the release tags (#2953): a tag is made without waiting for CI (scripts/release-tag.ts), and
+ * CI on the release tags: a tag is made without waiting for CI (scripts/release-tag.ts), and
  * `bun scripts/tag-ci.ts [--repo <owner/name>]` runs the same steps as local-ci (ci.yml's `run:` steps, `bun scripts/ci.ts`
  * as that checkout's scripts/ci.ts steps, the same environment) on the newest `vX.Y.Z` tag that has no result yet, and
  * adds the result to the end of that tag's GitHub Release: `[tag-ci] pass|fail <sha>`. A fail walks back to the tag
@@ -7,12 +7,13 @@
  * Releases missing from the newest tags are created (release-tag.ts's repairReleases: a tag whose `gh release create`
  * failed after its push). A tag whose Release still cannot be read is not run and the walk stops there. The perf steps (`bun scripts/perf-bench.ts`, `bun scripts/perf-ratchet.ts`) do not count toward the result: a tag whose only failed steps are perf's is a `[tag-ci] pass`, and the perf-ratchet's lines (`over:` / `raised:` / `grew:` / `improved:`, or a note that it could not judge) stay in the Release's `## CI` as a warning. Only a step that is not perf's turns a tag into a fail.
  * Output: one line of JSON, the tags looked at, newest first. Exit 0 = the newest tag passed (now or before), 1 = it
- * failed, 2 = nothing judged (no tag, no Release, not run, or recordings asked for and missing).
+ * failed, 2 = nothing judged (no tag, no Release, not run, recordings asked for and missing, or the build off the host could
+ * not be started: sb-offload's own failure is not the tag's, so no mark is written and the walk stops there).
  * With SWITCHBOARD_FIXTURES given, a tag whose recordings are missing on this host is not run and gets no result: that
  * says what the host lacks, not how the tag is, and it stops the walk. Before that, Switchboard itself (no --repo) syncs
- * the recordings with their branch (#3532, `bun scripts/fixtures.ts sync`): the new ones go to it and the missing ones
+ * the recordings with their branch (`bun scripts/fixtures.ts sync`): the new ones go to it and the missing ones
  * come back from it; a failed sync is logged and the check above judges. At most MAX_TAG_RUNS tags run in one go.
- * For the newest tag (#2936; a fail before the walk and again after it, anything else after it; Switchboard itself, no --repo): a fail files a request (type:request, from a
+ * For the newest tag (a fail before the walk and again after it, anything else after it; Switchboard itself, no --repo): a fail files a request (type:request, from a
  * scheduled check) unless one with the same title is open, which gets a comment naming the tag instead; a pass comments
  * on the open tag-CI requests (they stay open: the PBI that fixed it closes them). What an open request already says is
  * not said again. With --repo no request is filed: a fail prints the request's text to stderr on every run (the
@@ -30,16 +31,15 @@
  * lines stay in the Release's `## CI` under `所要時間が上限を超えた（結果は変えない）:`, and the result, the exit code and
  * the requests do not change (a budget that cannot be read compares nothing).
  * A red `bun test` also gets a `selection:` line in the Release: of the test files that failed, how many a PR's narrowed
- * local-ci would have run for the change since the tag before (#3297, docs/merge-gate.md).
- * `--latest-pass [--contained-in <commit>]` (#2962) runs nothing: it prints the newest tag whose last result is pass
+ * local-ci would have run for the change since the tag before (docs/merge-gate.md).
+ * `--latest-pass [--contained-in <commit>]` runs nothing: it prints the newest tag whose last result is pass
  * (a fail, no result and no Release are passed over), only from the tags in `<commit>`'s history when given (the
  * public sync gives the running release's commit). Exit 0 = printed, 1 = no tag passed (prints nothing), 2 = bad
  * arguments or an unknown commit.
- * A run waits (exit 0, the log says why, no mark anywhere) while fewer than SWITCHBOARD_TAG_CI_MIN_TAGS (default 8) tags
- * have no result, counted from the newest to the first tag with a result, and the oldest of them is younger than
- * SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS (default 6) by its `creatordate` (#4079): the schedule can run more often than that.
- * After its report, the scheduled run (Switchboard itself, no --repo) looks at the public sync (#3601,
- * scripts/public-stall.ts): a tag newer than the newest pass for more than 24 hours files a request with the reasons
+ * How often the CI runs is the scheduled run's cron alone (the app holds it): a run whose newest tag has no result runs it,
+ * and the script never waits for tags to pile up.
+ * After its report, the scheduled run (Switchboard itself, no --repo) looks at the public sync
+ * (scripts/public-stall.ts): a tag newer than the newest pass for more than 24 hours files a request with the reasons
  * (the tags this run did not judge give theirs, e.g. the missing recordings), or comments on the open one. A failure
  * there is written to stderr and leaves the exit code alone.
  */
@@ -55,7 +55,8 @@ import { BYTES_RECORDS_PATH, COUNTS_RECORDS_PATH, envOf, RECORDS_BRANCH, RECORDS
 import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
-import { BUILD_LOG_KEEP_MS, buildSpoke, durationOver, hostOffload, isPerfStep, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps, type Offload } from "./local-ci.ts";
+import { workspaceSettingsOf } from "./workspace-settings.ts";
+import { BUILD_LOG_KEEP_MS, buildSpoke, durationOver, hostOffload, imageRootFor, isPerfStep, notStartedLines, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps, type Offload } from "./local-ci.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -199,65 +200,16 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   onNewest?: (entries: TagCiEntry[]) => Promise<void>;
   /** Given for Switchboard itself only: called when a run's perf warning has keys that stood in the warning of the two results before it too (PERF_STREAK in a row). `lines` = this run's warning lines; `earlier` = those results, newest first. */
   onPerfStreak?: (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) => Promise<void>;
-  /** Called for a tag not judged because of missing recordings: the public sync's watch names them (#3601). */
+  /** Called for a tag not judged because of missing recordings: the public sync's watch names them. */
   onSkip?: (tag: string, missing: string[]) => void;
   /** With SWITCHBOARD_FIXTURES given, run first: syncs the recordings folder with its branch (Switchboard itself only). Throws on a failure. */
   sync?: () => Promise<void>;
   /** Creates the Releases missing from the newest tags and returns their names (release-tag.ts's repairReleases). */
   repair?: () => Promise<string[]>;
-  /**
-   * Given for Switchboard itself only (no --repo): the run may wait for more tags to pile up (#4079) and calls this
-   * with the reason, as logged, instead of running. Without it the run never waits (the other repositories keep
-   * running on every scheduled run: the PBI leaves their frequency alone).
-   */
-  onWait?: (reason: string) => void;
-  /** The environment the wait's limits are read from (default process.env). */
-  env?: Record<string, string | undefined>;
   /** The current time in ms (default Date.now()). */
   now?: () => number;
-}
-
-/** The tags without a result that pile up before a run (#4079): the number that makes it run, and the hours after which the oldest does. */
-export const DEFAULT_MIN_TAGS = 8;
-export const DEFAULT_MAX_WAIT_HOURS = 6;
-
-/** A non-negative number from an environment value; anything else (empty, text, negative) is `fallback`. */
-export function envNumber(raw: string | undefined, fallback: number, integer = false): number {
-  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
-  return Number.isFinite(n) && n >= 0 && (!integer || Number.isInteger(n)) ? n : fallback;
-}
-
-/**
- * Why this run waits, or null to run: `pending` = the tags without a result, newest first, `at` in ms. It waits while
- * there are fewer than `min` of them and the oldest is younger than `maxWaitMs`. No pending tag is not a wait: the walk
- * reads what the newest tag has.
- */
-export function waitForMore(pending: Array<{ tag: string; at: number }>, now: number, min: number, maxWaitMs: number): string | null {
-  if (pending.length === 0 || pending.length >= min) return null;
-  const oldest = pending.reduce((a, b) => (b.at < a.at ? b : a));
-  const age = now - oldest.at;
-  if (age >= maxWaitMs) return null;
-  const hours = (ms: number) => Math.round((ms / 3_600_000) * 10) / 10;
-  return `結果の無いタグが ${pending.length} 件（${min} 件未満）で、最古の ${oldest.tag} から ${hours(age)} 時間（${hours(maxWaitMs)} 時間未満）。溜まるか時間がたつまで回さない`;
-}
-
-/** The tags of `tags` (newest first) with no result yet, read from the newest until a tag with a result, a Release that cannot be read, or `limit` of them. */
-async function pendingTags(tags: string[], root: string, repo: string, limit: number, d: TagCiDeps): Promise<Array<{ tag: string; at: number }>> {
-  const dates = new Map<string, number>();
-  for (const line of (await d.sh(["git", "-C", root, "for-each-ref", "--format=%(refname:short)\t%(creatordate:unix)", "refs/tags/v*"])).split("\n")) {
-    const [tag, unix] = line.split("\t");
-    if (tag && Number.isFinite(Number(unix)) && unix) dates.set(tag, Number(unix) * 1000);
-  }
-  const out: Array<{ tag: string; at: number }> = [];
-  for (const tag of tags) {
-    if (out.length >= limit) break;
-    const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
-    const body = await d.sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
-    if (body === null || tagResult(body, sha)) break;
-    // a date that cannot be read counts as old: the run goes on rather than waiting for ever
-    out.push({ tag, at: dates.get(tag) ?? 0 });
-  }
-  return out;
+  /** The tree whose container/Dockerfile is the ci image's when the tags are another repository's (local-ci's `imageRootFor`); none = the tag's own checkout. */
+  imageRoot?: string;
 }
 
 /** The tags run in one go: a step of the walk takes minutes, and a run that is cut leaves no result. */
@@ -268,7 +220,7 @@ export interface TagCiEntry { tag: string; sha: string; result: "pass" | "fail";
 
 /**
  * main's bundle and bytes as this tag's run measured them (perf-base.json in `dir`) and the tag's own counts
- * (perf-result.json), pass or fail, on the records branch (#4105; docs/design/perf.md "Bundle history"). A failure is logged and changes nothing; a GitLab target is not recorded.
+ * (perf-result.json), pass or fail, on the records branch (docs/design/perf.md "Bundle history"). A failure is logged and changes nothing; a GitLab target is not recorded.
  */
 export async function recordMeasures(repo: string, root: string, dir: string, tag: string, sha: string, d: Pick<TagCiDeps, "sh" | "log" | "offload">): Promise<void> {
   const at = new Date().toISOString();
@@ -370,10 +322,12 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     // a build of this tag left by a run that is gone: its result is read, no build starts (a tag that moved since is not the one it built)
     const prior = d.offload ? readTagPending(cache, repo, tag) : undefined;
     let run: Awaited<ReturnType<typeof runCheckout>> | undefined;
+    const workspace = d.workspace?.(root);
+    const x = { ...(d.imageRoot ? { imageRoot: d.imageRoot } : {}), ...(workspace ? { workspace } : {}) };
     if (prior && prior.sha === sha) {
       d.log(`${tag}: 始まっているビルド ${prior.build} の結果を待つ（新しくは始めない）`);
       try {
-        run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, { ...d, offload: resumed(d.offload!, prior.build) }, cache, undefined, repo, true, false);
+        run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, { ...d, offload: resumed(d.offload!, prior.build) }, cache, undefined, repo, true, false, undefined, undefined, workspace ? { workspace } : {});
       } catch (e) {
         if (!(e instanceof BuildGone)) throw e;
         // a younger one may be a blip (the read failed, the build still runs): the record stays for the next run, which reads it again (as local-ci's pending records)
@@ -396,15 +350,17 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
       }
       // the host installs sb-offload at its boot and this code comes with a merge: an older one would take --base-tree for the command
       // (and every step would fail), so the tar goes only where sb-offload names the flag; the check stays for the next new flag
-      const knows = d.offload ? (await d.offload.knowsBaseTree?.()) !== false : false;
+      const knows = d.offload ? (await d.offload.knows?.("--base-tree")) !== false : false;
       if (d.offload && !knows) d.log(`${tag}: sb-offload が --base-tree を知らない（ホストの次の起動で入る）。比べるタグを渡さずに回す`);
       const baseTree = knows ? await baseTreeTar(before ?? "origin/main", root, join(tmp, "base.tar"), d.sh) : undefined;
       // the build's id is written down as soon as it has started: a run cut off then leaves its result to the next run
       const started = d.offload ? (build: string) => writeTagPending(cache, { repo, tag, sha, before: before ?? null, build, at: Date.now() }) : undefined;
-      run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache, undefined, repo, true, false, started, baseTree);
+      run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache, undefined, repo, true, false, started, baseTree, x);
     }
+    // sb-offload could not start the build: no step ran, so there is nothing to record or to judge
+    if (run.notStarted) return { notStarted: run.notStarted };
     await recordMeasures(repo, root, dir, tag, sha, d);
-    // every failed step: a perf step's failure does not stop bun test (#2945)
+    // every failed step: a perf step's failure does not stop bun test
     const failed = run.results.filter((x) => x.code !== 0);
     // the perf steps do not count toward the result (runCheckout lets them all keep going): only the others' failures are the tag's, and the perf-ratchet's lines are a warning in the Release
     let counted = failed.filter((f) => !isPerfStep(f));
@@ -472,18 +428,6 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
       }
     }
     const tags = await listTags(root, d.sh);
-    // fewer than MIN tags without a result and the oldest not yet MAX_WAIT old: wait for more (#4079); no mark, the Release is untouched
-    const env = d.env ?? process.env;
-    const min = envNumber(env.SWITCHBOARD_TAG_CI_MIN_TAGS, DEFAULT_MIN_TAGS, true);
-    const maxWaitMs = envNumber(env.SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS, DEFAULT_MAX_WAIT_HOURS) * 3_600_000;
-    if (d.onWait && min > 0) {
-      const reason = waitForMore(await pendingTags(tags, root, repo, min, d), d.now?.() ?? Date.now(), min, maxWaitMs);
-      if (reason !== null) {
-        d.log(reason);
-        d.onWait(reason);
-        return [];
-      }
-    }
     const out: TagCiEntry[] = [];
     for (const [i, tag] of tags.entries()) {
       const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
@@ -507,6 +451,11 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
       }
       // a build of this tag whose result could not be read yet: no mark, the walk stops (the next run reads it)
       if ("held" in r) break;
+      // the build could not be started: what the host lacks, not how the tag is (as the missing recordings): no mark, no request, the walk stops
+      if ("notStarted" in r) {
+        d.log(`${tag}: ${notStartedLines(r.notStarted)}\n${tag}: 判定しない（印は書かない）`);
+        break;
+      }
       await d.sh(["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], undefined, `${body.trimEnd()}${resultSection(r, host)}`.trimStart());
       clearTagPending(cache, repo, tag);
       d.log(`${tag}: ${r.ok ? "pass" : "fail"}${r.warnings.length ? `（perf の警告 ${r.warnings.length} 件）` : ""}`);
@@ -525,8 +474,8 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
 
 /**
  * The warnings of the results of the PERF_STREAK - 1 tags after `tag` that have a mark, newest first; a streak is told to
- * d.onPerfStreak. Only every few tags gets a result (the tag CI waits for SWITCHBOARD_TAG_CI_MIN_TAGS tags and runs the
- * newest), so the tags without a mark are passed over with no count of their own: the read stops at those results or at a
+ * d.onPerfStreak. Only every few tags gets a result (the tag CI runs the newest tag on each
+ * scheduled run), so the tags without a mark are passed over with no count of their own: the read stops at those results or at a
  * Release that cannot be read.
  */
 async function perfStreakOf(d: TagCiDeps, tag: string, sha: string, lines: string[], older: string[], repo: string, root: string): Promise<void> {
@@ -839,8 +788,6 @@ if (import.meta.main) {
     }
   };
   const missingOf: Record<string, string[]> = {};
-  let waited = false;
-  const onWait = () => void (waited = true);
   const onSkip = (tag: string, missing: string[]) => void (missingOf[tag] = missing);
   const repair = async () => {
     const at = (cmd: string[], input?: string) => {
@@ -856,7 +803,7 @@ if (import.meta.main) {
   const onPerfStreak = (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) =>
     perfStreakFollow(tag, sha, keys, lines, { sh, log, file, comment: commentRequest, open: openRequests, text: requestText, print: log }, undefined, earlier);
   const offload = offloadFor(a.local);
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onWait, onPerfStreak } : {}), ...(offload ? { offload } : {}), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onPerfStreak } : {}), ...(offload ? { offload } : {}), ...imageRootFor(t.root, join(import.meta.dir, "..")), workspace: (root) => workspaceSettingsOf(root), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
   await report(entries);
   if (!process.argv.includes("--repo")) {
@@ -869,6 +816,5 @@ if (import.meta.main) {
       console.error(`公開の同期の見張り: 判定か起票ができなかった（${(e as Error).message}）`);
     }
   }
-  // a wait is not "nothing judged": the next run decides
-  process.exit(waited ? 0 : tagCiExit(entries));
+  process.exit(tagCiExit(entries));
 }

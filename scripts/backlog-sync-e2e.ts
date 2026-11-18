@@ -1,6 +1,6 @@
 /**
- * bun scripts/backlog-sync-e2e.ts --api | --browser. `--browser` (#911) drives the Backlog screen in headless Chrome
- * (CDP) against the same fake GitHub and a fake runner: see the block at the end. `--api` (#886): the backlog edits kept while GitHub cannot be reached, through the daemon's
+ * bun scripts/backlog-sync-e2e.ts --api | --browser. `--browser` drives the Backlog screen in headless Chrome
+ * (CDP) against the same fake GitHub and a fake runner: see the block at the end. `--api`: the backlog edits kept while GitHub cannot be reached, through the daemon's
  * HTTP API only — no runner, no browser, no GitHub. One fake GitHub answers the import (GraphQL) and the sends (REST /
  * GraphQL) from one state, which is what someone who uses only GitHub would see.
  *
@@ -9,7 +9,7 @@
  * on the backup → GitHub answers again: everything arrives once, in order. Then a reply lost after GitHub posted (found by
  * its marker, not posted again) and a post whose result is unknown and not found (never posted again).
  * The other fields (labels, state, milestone, parent, membership) are each sent by backlog-send.test.ts.
- * The reads after a write (#1355) are answered with an empty history: the overwrite checks are backlog-send.test.ts's.
+ * The reads after a write are answered with an empty history: the overwrite checks are backlog-send-history.test.ts's.
  * Prints a JSON of pass / fail per case and counts; exit 1 when one fails.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer, type CoreServer } from "../packages/core/src/server.ts";
 import { jstDateTime } from "../apps/web/src/time.ts";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import type { BacklogIssueDetail, RunnerAdapter, Task } from "@switchboard/protocol";
 
 const MODE_API = process.argv.includes("--api");
@@ -54,7 +54,7 @@ const raw = (i: Issue) => ({
 });
 const rest = (i: Issue) => ({ node_id: i.id, number: i.number, html_url: `https://github.com/acme/app/issues/${i.number}`, title: i.title, body: i.body, state: i.state.toLowerCase(), created_at: at, updated_at: at });
 
-/** The second workspace's directory (--browser, #1541): `gh repo view` there says acme/second, and it has no Issues. */
+/** The second workspace's directory (--browser): `gh repo view` there says acme/second, and it has no Issues. */
 let second = "";
 const gh: GhRunner = async (args, cwd) => {
   if (down) return { code: 1, stdout: "", stderr: "error connecting to api.github.com" };
@@ -82,12 +82,12 @@ const gh: GhRunner = async (args, cwd) => {
   const q: string = v.query ?? "";
   const method = args.includes("-X") ? args[args.indexOf("-X") + 1] : "GET";
   if (args[1] === "graphql") {
-    // the import's reads (#885)
+    // the import's reads
     if (q.includes("issues(first:50")) return answer({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...github.values()].map(raw) } } } });
     if (q.includes("issues(first:100")) return answer({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...github.values()].filter((i) => i.state === "OPEN").map((i) => ({ number: i.number, projectItems: raw(i).projectItems })) }, pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
     // the open pull requests the import reads too: none
     if (q.includes("pullRequests(first:50")) return answer({ data: { repository: { pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
-    // the sends' (#886)
+    // the sends'
     if (q.includes("issue(number:$n){ id title")) {
       const i = github.get(v.n)!;
       return answer({ data: { repository: { issue: { id: i.id, title: i.title, body: i.body, state: i.state, milestone: null, parent: i.parent && { id: github.get(i.parent)!.id, number: i.parent }, labels: { nodes: i.labels.map((name) => ({ name })) } } } } });
@@ -95,7 +95,7 @@ const gh: GhRunner = async (args, cwd) => {
     if (q.includes("projectV2(number:$p)")) return answer({ data: { repositoryOwner: { projectV2: { id: "P_1", fields: { nodes: [{ id: "F_s", name: "Status", dataType: "SINGLE_SELECT", options: ["Backlog", "Ready", "In progress"].map((name) => ({ id: name, name })) }] } } } } });
     if (q.includes("fieldValueByName")) {
       const node = { fieldValueByName: byId(v.i).item?.fields[v.f] ? { name: byId(v.i).item!.fields[v.f] } : null };
-      // the read after a write (AFTER_ITEM_Q, #1355) also asks for the history: an empty one
+      // the read after a write (AFTER_ITEM_Q) also asks for the history: an empty one
       const after = q.includes("timelineItems") ? { repository: { issue: { timelineItems: { pageInfo: { hasNextPage: false }, nodes: [] } } } } : {};
       return answer({ data: { viewer: { login: "me" }, node, ...after } });
     }
@@ -144,7 +144,7 @@ const check = (name: string, ok: boolean, detail?: unknown) => {
 };
 async function boot(home: string, adapters: RunnerAdapter[] = []): Promise<{ core: CoreServer; base: string }> {
   const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-  // the meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check (#2799)
+  // the meta workspace is this checkout, whose origin is not the fake gh's acme/app: no origin to check
   const core = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: () => null, gh, backlogAutoImport: true });
   return { core, base: `http://127.0.0.1:${core.server.port}` };
 }
@@ -237,7 +237,7 @@ if (MODE_API) try {
   await core?.stop();
 }
 
-/* ---------- --browser (#911): the Backlog screen against the same fake GitHub ---------- */
+/* ---------- --browser: the Backlog screen against the same fake GitHub ---------- */
 if (MODE_BROWSER) {
   // an Issue only the stale-copy case touches
   github.set(15, { id: "I_15", number: 15, title: "要望: 閉じられる", body: "古い写し", state: "OPEN", labels: ["type:request"], parent: null, comments: [], item: null });
@@ -325,7 +325,7 @@ if (MODE_BROWSER) {
     };
     const issue = (n: number) => `a[href$="/issues/${n}"]`;
     const rowOf = (n: number) => `[...document.querySelectorAll('.backlog-item')].find(r => r.querySelector('${issue(n)}'))`;
-    /** The row's sync line: in what ▶ opened under a list row (#3709), else the element after the row. */
+    /** The row's sync line: in what ▶ opened under a list row, else the element after the row. */
     const lineOf = (n: number) => `(() => { const r = ${rowOf(n)}; return r?.closest('.backlog-listrow')?.querySelector('.backlog-syncline') ?? r?.nextElementSibling; })()`;
     const cardOf = (n: number) => `[...document.querySelectorAll('.decision-card')].find(r => r.querySelector('${issue(n)}'))`;
     const editor = (n: number) => `document.querySelector('.backlog-edit[data-issue$="/issues/${n}"]')`;
@@ -370,10 +370,10 @@ if (MODE_BROWSER) {
       await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
       await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Backlog')`, "Backlog");
       await until(() => evaluate(`document.querySelectorAll('.backlog section[data-stage]').length === 5 && !document.querySelector('.backlog .head .hint')?.textContent.includes('読み込み中')`), "the list");
-      // the new Issue form is drawn once the workspaces' own request is back, which can be after the list (a run failed on it, #4499)
+      // the new Issue form is drawn once the workspaces' own request is back, which can be after the list (a run failed on it)
       await until(() => evaluate(`!!document.querySelector('details.backlog-new')`), "the new Issue form");
     };
-    // #4064: an Issue only on the sync line sits under the folded 同期 line: open it as a person would
+    // an Issue only on the sync line sits under the folded 同期 line: open it as a person would
     const unfold = async (n: number) => {
       const folded = `(() => { const d = [...document.querySelectorAll('details.backlog-editor')].find(d => d.dataset.issue.endsWith('/issues/${n}')); const p = d && d.closest('details.backlog-syncs'); return p && !p.open ? p : null; })()`;
       if (await evaluate(`!!${folded}`)) await press(`${folded}.querySelector('summary')`, "同期の行を開く");
@@ -386,7 +386,7 @@ if (MODE_BROWSER) {
     await call("Runtime.enable");
     await call("Log.enable");
     await call("Page.enable");
-    // a list row is one line, its sync line and 編集 under ▶ (#3709): open every list row as it appears, as a person
+    // a list row is one line, its sync line and 編集 under ▶: open every list row as it appears, as a person
     // reading its sync would
     await call("Page.addScriptToEvaluateOnNewDocument", { source: `new MutationObserver(() => { for (const b of document.querySelectorAll('[data-open-row][aria-expanded="false"]')) b.click(); }).observe(document, { childList: true, subtree: true });` });
     const api = async (method: string, path: string, body?: object) => {
@@ -473,7 +473,7 @@ if (MODE_BROWSER) {
     const titles = [...github.values()].map((i) => i.title);
     check("the title, the comment, the answer and the new Issue arrived once each", github.get(13)!.title === "要望: 画面で直した題" && github.get(13)!.comments.filter((x) => x.body.startsWith("画面からのコメント")).length === 1 && github.get(12)!.comments.filter((x) => x.body.includes("画面から B で")).length === 1 && titles.filter((t) => t === "PBI: 画面で作った").length === 1, { titles, c13: github.get(13)!.comments, c12: github.get(12)!.comments });
 
-    // 4. backlog-next and a start by hand go on the stored data (#2264): GitHub is read first when it answers, an unsent
+    // 4. backlog-next and a start by hand go on the stored data: GitHub is read first when it answers, an unsent
     // or refused edit does not hold a start, a conflict does — each case on its own
     const sched = await api("POST", "/api/schedules", { title: "バックログを進める", cron: "0 */3 * * *", runner: "claude", prompt: "", action: "backlog-next" });
     const run = () => fetch(`${base}/api/schedules/${(sched.body as { id: string }).id}/run`, { method: "POST" });
@@ -481,16 +481,16 @@ if (MODE_BROWSER) {
     const byHand = (n: number) => api("POST", `/api/backlog/${n}/start`, { action: "to-pbi" });
     const errorOf = (r: { body: unknown }) => String((r.body as { error?: string } | null)?.error ?? "");
 
-    // only #13 is a candidate: the Issue made on the screen is closed (it is not what these cases are about)
+    // only `#13` is a candidate: the Issue made on the screen is closed (it is not what these cases are about)
     for (const i of github.values()) if (i.title === "PBI: 画面で作った") i.state = "CLOSED";
     await fetch(`${base}/api/backlog?refresh=1`);
 
-    // 4a. a stale copy: #15 was closed on GitHub and nothing has read it since — the start asks first and finds it gone
+    // 4a. a stale copy: `#15` was closed on GitHub and nothing has read it since — the start asks first and finds it gone
     github.get(15)!.state = "CLOSED";
     const staleHand = await byHand(15);
     check("a stale stored copy is not started on: the start imports first and #15 is gone (404, no Task)", staleHand.status === 404 && tasks() === 0, { staleHand, tasks: tasks() });
-    // 4a'. a stale decision: GitHub put #13 under needs-decision and nothing has read it since — backlog-next imports
-    // before it picks, so #13 (a candidate on the stored copy) is not started
+    // 4a'. a stale decision: GitHub put `#13` under needs-decision and nothing has read it since — backlog-next imports
+    // before it picks, so `#13` (a candidate on the stored copy) is not started
     github.get(13)!.labels.push("needs-decision");
     await run();
     const decided = await detail(13);
@@ -499,8 +499,8 @@ if (MODE_BROWSER) {
     await fetch(`${base}/api/backlog?refresh=1`);
     await until(async () => !(await detail(13)).issue.labels.includes("needs-decision"), "#13 out of needs-decision again");
 
-    // 4b. an edit kept and GitHub reads fine but refuses to be written: pending does not hold the start (#2264). On #16,
-    // whose Task is aborted after, so #13 (its unsent title is 4c's conflict) is not started here
+    // 4b. an edit kept and GitHub reads fine but refuses to be written: pending does not hold the start. On `#16`,
+    // whose Task is aborted after, so `#13` (its unsent title is 4c's conflict) is not started here
     github.set(16, { id: "I_16", number: 16, title: "要望: 未送信のまま始める", body: "元の本文", state: "OPEN", labels: ["type:request"], parent: null, comments: [], item: null });
     await fetch(`${base}/api/backlog?refresh=1`);
     await until(async () => (await api("GET", `/api/backlog/16?workspaceId=${ws()}`)).status === 200, "#16 is read");
@@ -513,7 +513,7 @@ if (MODE_BROWSER) {
     await open();
     check("the row says 送信待ち while it cannot be sent", (await text(lineOf(13))).includes("送信待ち"), await text(lineOf(13)));
     writesFail = null;
-    // #16's edit goes with the next send, not after its backoff (as the restart below does for the repository's wait)
+    // `#16`'s edit goes with the next send, not after its backoff (as the restart below does for the repository's wait)
     for (const o of core!.db.listPendingBacklogOperations()) if (o.issue === "I_16") core!.db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null });
 
     // 4c. GitHub moved the same field: a conflict holds it; chosen on the screen with 「GitHub の値を使う」
@@ -536,7 +536,7 @@ if (MODE_BROWSER) {
     check("no post twice", new Set(posts).size === posts.length || posts.every((p, i) => posts.indexOf(p) === i || p.startsWith("label")), posts);
 
     // 4e. GitHub refuses an edit for good: 同期失敗 on the row, the promise and the workspace's last time shown, and the
-    // start by hand still makes the Task (#2264). On #20, which has no Task, with the slots widened: the Task of 4d does not hold it
+    // start by hand still makes the Task. On `#20`, which has no Task, with the slots widened: the Task of 4d does not hold it
     await fetch(`${base}/api/workspaces/${ws()}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep: { implement: 3, plan: 3 } }) });
     github.set(20, { id: "I_20", number: 20, title: "要望: 拒否される", body: "元の本文", state: "OPEN", labels: ["type:request"], parent: null, comments: [], item: null });
     await fetch(`${base}/api/backlog?refresh=1`);
@@ -551,7 +551,7 @@ if (MODE_BROWSER) {
     check("the guarantee A is explained on the row", promise.includes("送る直前と直後"), promise);
     const wsAt = core!.db.getBacklogRepository(core!.db.getWorkspaceBacklogSource(ws())!)!.lastSuccessfulSync!;
     const shown = await text(`document.querySelector('.backlog-sync')`);
-    // the screen shows JST whatever the browser's zone (#2028)
+    // the screen shows JST whatever the browser's zone
     const expected = jstDateTime(wsAt);
     check("the workspace line shows its last successful time", shown.includes(`最終成功: ${expected}`), { shown, expected });
     await shot("5-failed");
@@ -561,8 +561,8 @@ if (MODE_BROWSER) {
     check("a refused edit does not hold the start: 201 by hand, and backlog-next starts no second Task on #20", failedHand.status === 201 && tasks() === 3, { failedHand, tasks: tasks(), log: log.slice(-5) });
     writesFail = null;
 
-    // 4f-4h (#1541): a second workspace, and the new Issue form's draft per workspace, its lock while saving, an edit
-    // that fails. #21 comes here so it is not a candidate of the cases above
+    // 4f-4h: a second workspace, and the new Issue form's draft per workspace, its lock while saving, an edit
+    // that fails. `#21` comes here so it is not a candidate of the cases above
     github.set(21, { id: "I_21", number: 21, title: "要望: 編集の失敗", body: "元の本文", state: "OPEN", labels: ["type:request"], parent: null, comments: [], item: null });
     second = mkdtempSync(join(tmpdir(), "sb-backlog-sync-e2e-"));
     homes.push(second);
@@ -709,7 +709,7 @@ if (MODE_BROWSER) {
     await until(() => evaluate(`!!${editor(21)}`), "the editor opens after reading again");
     check("after a failed first read the editor can be read again without closing it", (await valueOf(`${editor(21)}.querySelector('input')`)).length > 0);
 
-    // 4l. an edit GitHub refused (failed, #2885): only its row offers 送り直す — not one whose result is unknown;
+    // 4l. an edit GitHub refused (failed): only its row offers 送り直す — not one whose result is unknown;
     // pressed, the row goes and it waits to be sent
     // an earlier case left an operation in its backoff: it would hold the ones behind it back
     for (const o of core!.db.listPendingBacklogOperations()) if (o.status === "pending") core!.db.setBacklogOperationResult(o.id, { status: "pending", retryAt: null });

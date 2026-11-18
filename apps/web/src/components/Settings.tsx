@@ -1,12 +1,16 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
 import type { CustomRunner, AutoStartKind, Backlog, BacklogAllocation, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace, WorkspaceMode } from "@switchboard/protocol";
-import { api, type Health, type SettingsResponse, type WorkspaceClone } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type Health } from "../api/daemon.ts";
+import { type SettingsResponse } from "../api/settings.ts";
+import { type WorkspaceClone } from "../api/workspaces.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
-import { taskModelOptions } from "../modelOptions.ts";
+import { optionText, taskModelOptions } from "../modelOptions.ts";
 import { LoginSettings } from "./LoginSettings.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
+import { ReleaseAutoFields } from "./ReleaseAutoFields.tsx";
 import { PolicySettings } from "./PolicySettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
@@ -20,22 +24,22 @@ import { Knowledge } from "./Knowledge.tsx";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
 import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
+import { RESETTABLE_CARDS, resetCard, type ResettableCard } from "../settingsDefaults.ts";
+import { AUTO_START_KINDS, jobPatchOf, jobRows, runnerDefaultLabel, candidatesOf, kindChoice, kindPick, modelsRowView, resetPatch, runnerRows, type JobRowId } from "../runnerSettings.ts";
 import { allocationCells, parseShare, saveOrder, shareText } from "../allocation.ts";
-
-/** The kinds of Task that start by themselves (#1337), in the order of the 既定 card: the feedback modes, then the backlog stages. */
-const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo], ["adopt-repo", settings.kindAdoptRepo], ["baseline", settings.kindBaseline]];
+import { flowLimitRows, flowNumbers } from "../flowLimit.ts";
 
 const groupTitle = (id: string) => t(settingsGroup(id).title);
 
 /**
- * 設定 (#832): every default the daemon keeps in its settings, in one screen. Each control saves as soon as it
+ * 設定: every default the daemon keeps in its settings, in one screen. Each control saves as soon as it
  * changes (a partial PATCH /api/settings), so a value takes effect on the next use. The per-Task choices (mode, model,
  * budget, shadow for one Task) stay on the Home form; what is saved here is only what they start from.
  */
 export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n: number } | null; health: Health | null; workspaces: Workspace[]; clones: WorkspaceClone[]; onAddWorkspaceFromGithub: (repo: string, backlog: "github" | "switchboard", ownCopy: boolean, ownCopyOwner: string) => Promise<void>; onAddWorkspace: (path: string, backlog: "github" | "switchboard") => Promise<void>; onTaskStarted: (task: Task) => void; knowledgeRev: number; runnerOk: Set<RunnerId>; onRunners: (runners: RunnerInfo[]) => void; onError: (msg: string) => void }) {
   const [s, setS] = useState<SettingsResponse | null>(null);
   const [saving, setSaving] = useState(false);
-  // 端末通知 (#1138): the browser's permission is the only switch; asked for only from the button
+  // 端末通知: the browser's permission is the only switch; asked for only from the button
   const [perm, setPerm] = useState(() => notifyPermission(typeof Notification === "undefined" ? undefined : Notification));
   const runners = props.health?.runners ?? [];
   const info = (id: RunnerId) => runners.find((r) => r.id === id);
@@ -61,14 +65,14 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
   const save = async (patch: Parameters<typeof api.updateSettings>[0]) => {
     await trySave(patch);
   };
-  // after a login or logout: the runners' status commands are asked again now (#2528)
+  // after a login or logout: the runners' status commands are asked again now
   const refresh = () => api.health({ recheck: true }).then((h) => h.runners && props.onRunners(h.runners)).catch(() => undefined);
   // the header's 「新しい版 →」 and Home's 「設定で追加 →」: the section exists only once the settings have loaded
   const loaded = s !== null;
   useEffect(() => {
     if (!loaded || !props.focus) return;
     const el = document.getElementById(props.focus.id);
-    // the cards are folded (#3849): open the one the link points at before showing it
+    // the cards are folded: open the one the link points at before showing it
     const folded = el?.closest("details");
     if (folded) folded.open = true;
     el?.scrollIntoView();
@@ -79,13 +83,17 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
   const runnerOptions = (current: RunnerId, label: string) =>
     listedRunners(props.health?.runners, current).filter((r) => props.runnerOk.has(r) || r === current).map((r) => (
       <option key={r} value={r}>
-        {label}: {r}
+        {optionText(label, r)}
       </option>
     ));
   const llm: LlmRoutingSettings = s.routing.llm;
   const judge: JudgeSettings = s.judge;
   const { quotaAndResume: qr, judgeAndChoice: jc, newDefaults: nd } = s;
   const d = s.defaults;
+  /** One job row's runner / model / effort, as the PATCH of the place that keeps it; a runner change puts the model and effort back to the runner's default (the daemon does that). */
+  const jobPatch = (id: JobRowId, p: { runner?: RunnerId; model?: string; effort?: string }) => save(jobPatchOf(id, p));
+  /** A card's 既定に戻す: the same button on every card that holds a value with a default, sending what RESETTABLE_CARDS names for it. */
+  const reset = Object.fromEntries((Object.keys(RESETTABLE_CARDS) as ResettableCard[]).map((card) => [card, <ResetButton key={card} disabled={saving} onClick={() => save(resetCard(card, d))} />])) as Record<ResettableCard, ReactNode>;
   return (
     <main className="main settings">
       <SettingsToc />
@@ -95,64 +103,120 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         <LoginSettings health={props.health} tasks={props.tasks} bedrock={s.bedrock} onBedrock={(runner, next) => void save({ bedrock: { [runner]: next } })} onChanged={refresh} onError={props.onError} />
       </section>
 
-      <SettingsGroupHeading id="settings-task-start" />
-      <SettingsCard title={t(settings.developSelfCard)}>
-        <DevelopSelfToggle checked={s.developSelf} disabled={saving} onChange={(on) => void save({ developSelf: on })} />
-      </SettingsCard>
-      <SettingsCard title={t(settings.newDefaults)} className="tunables">
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">{t(settings.newTaskRunner)}</span>
-          <select className="mode" value={nd.taskRunner} disabled={saving} aria-label={t(settings.newTaskRunner)} onChange={(e) => void save({ newDefaults: { taskRunner: e.target.value as RunnerId } })}>
-            {runnerOptions(nd.taskRunner, t(settings.runner))}
-          </select>
-          <span className="muted">{t(settings.defaultValue, { value: d.newDefaults.taskRunner })}</span>
-        </div>
-        <TextField label={t(settings.scheduleCron)} value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ newDefaults: null })} />
-      </SettingsCard>
-
+      <SettingsGroupHeading id="settings-runner" />
+      {/* the runner values: one block per runner, the same rows in the same order (runnerRows); the approval mode is a safety setting, so the card is not folded and the block's title keeps the current value when the block is folded */}
       <section className="card">
-        <h5>{t(settings.approvalDefaults)}</h5>
-        <div className="muted">{t(settings.approvalDefaultsHint)}</div>
-        {runners.filter((r) => r.permissionModes.length > 0).map((r) => (
-          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-            <span className="t">{r.id}</span>
-            <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={t(settings.approvalDefaultLabel, { runner: r.id })} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
-              {r.permissionModes.filter((m) => !m.danger || m.value === r.defaultPermissionMode).map((m) => (
-                <option key={m.value} value={m.value} title={m.description}>
-                  {t(settings.approvalOption, { label: m.label })}
-                </option>
-              ))}
-            </select>
-            {s.defaultPermissionMode[r.id] && (
-              <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title={t(settings.clearSavedDefaultTitle)}>
-                {t(settings.clearSavedDefault)}
-              </button>
-            )}
-          </div>
-        ))}
+        <h5>{t(settings.runnerDefaults)}</h5>
+        <div className="muted">{t(settings.runnerDefaultsHint)}</div>
+        {runners.map((r) => {
+          const mode = r.permissionModes.find((m) => m.value === r.defaultPermissionMode);
+          return (
+            <details key={r.id} className="runner-block" open>
+              <summary>
+                <b>{t(settings.runnerDefaultOf, { runner: r.id })}</b>{" "}
+                <span className="muted">— {r.permissionModes.length > 0 ? t(settings.runnerApprovalNow, { mode: mode?.label ?? r.defaultPermissionMode ?? "—" }) : t(settings.runnerApprovalUnset)}</span>
+              </summary>
+              {runnerRows(r).map((row) =>
+                // the row is never dropped (modelsRowView): a list the runner cannot edit says so, and the CLI candidates stay (Bedrock hides them here)
+                row.key === "models" && modelsRowView(r).folded ? (
+                  <details key={row.key} className="runner-models">
+                    <summary>{t(row.label)}</summary>
+                    {modelsRowView(r).list ? <ModelChoices runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} /> : <div className="muted">{t(settings.notChangeable)}</div>}
+                    {modelsRowView(r).candidates && <CliModelCandidates runners={[r]} hidden={(runner) => s.hiddenModels[runner] ?? s.defaults.hiddenModels[runner] ?? []} disabled={saving} save={trySave} onError={props.onError} />}
+                  </details>
+                ) : (
+                  <div key={row.key} className="runner-row">
+                    <span className="runner-row-name">{t(row.label)}</span>
+                    <div className="runner-row-control">
+                      {!row.editable ? (
+                        <span className="muted">{t(settings.notChangeable)}</span>
+                      ) : row.key === "model" ? (
+                        <ModelSelect runner={r} value={s.defaultModel[r.id] ?? ""} onChange={(m) => void save({ defaultModel: { [r.id]: m || null } })} label={t(settings.rowModel)} bare disabled={saving} />
+                      ) : row.key === "effort" ? (
+                        <EffortSelect runner={r} value={s.defaultEffort[r.id] ?? ""} onChange={(e) => void save({ defaultEffort: { [r.id]: e || null } })} label={t(settings.rowEffort)} bare disabled={saving} />
+                      ) : row.key === "permissionMode" ? (
+                        <>
+                          <select className="mode" value={r.defaultPermissionMode ?? ""} disabled={saving} aria-label={t(settings.approvalDefaultLabel, { runner: r.id })} onChange={(e) => void save({ defaultPermissionMode: { [r.id]: e.target.value } })}>
+                            {r.permissionModes.filter((m) => !m.danger || m.value === r.defaultPermissionMode).map((m) => (
+                              <option key={m.value} value={m.value} title={m.description}>
+                                {t(settings.approvalOption, { label: m.label })}
+                              </option>
+                            ))}
+                          </select>
+                          {s.defaultPermissionMode[r.id] && (
+                            <button className="ghost" disabled={saving} onClick={() => void save({ defaultPermissionMode: { [r.id]: null } })} title={t(settings.clearSavedDefaultTitle)}>
+                              {t(settings.clearSavedDefault)}
+                            </button>
+                          )}
+                        </>
+                      ) : row.key === "subagentModel" ? (
+                        <ModelSelect runner={r} value={s.subagentModel[r.id] ?? ""} onChange={(m) => void save({ subagentModel: { [r.id]: m || null } })} label={t(settings.rowSubagentModel)} emptyLabel={t(settings.subagentModelSame)} bare disabled={saving} />
+                      ) : row.key === "subagentEffort" ? (
+                        <EffortSelect runner={r} value={s.subagentEffort[r.id] ?? ""} onChange={(e) => void save({ subagentEffort: { [r.id]: e || null } })} label={t(settings.rowSubagentEffort)} emptyLabel={t(settings.subagentEffortSame)} bare disabled={saving} />
+                      ) : (
+                        <label className="hint toggle" title={t(settings.autoResumeHint)}>
+                          <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
+                          {t(settings.autoResumeOn)}
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                ),
+              )}
+              <ResetButton
+                disabled={saving}
+                onClick={() => save(resetPatch({ runner: r.id }))}
+              />
+            </details>
+          );
+        })}
       </section>
 
-      <SettingsCard title={t(settings.autoStart)}>
+      <SettingsCard title={t(settings.jobsCard)} className="jobs">
+        <div className="muted">{t(settings.jobsHint)}</div>
         <div className="muted">{t(settings.autoStartHint)}</div>
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          {/* a runner change goes back to that runner's CLI default: a model and an effort belong to one runner (the daemon does the same) */}
-          <select className="mode" value={s.autoStart.runner} disabled={saving} aria-label={t(settings.autoStartRunner)} onChange={(e) => void save({ autoStart: { runner: e.target.value as RunnerId } })}>
-            {runnerOptions(s.autoStart.runner, t(settings.runner))}
-          </select>
-          <ModelSelect runner={info(s.autoStart.runner)} value={s.autoStart.model} onChange={(m) => void save({ autoStart: { model: m } })} label={t(settings.model)} disabled={saving} title={t(settings.autoStartModelTitle)} />
-          <EffortSelect runner={info(s.autoStart.runner)} value={s.autoStart.effort} onChange={(effort) => void save({ autoStart: { effort } })} label={t(settings.effort)} disabled={saving} title={t(settings.autoStartEffortTitle)} />
-        </div>
-        {/* one line per kind (#1337): a kind on 共通 is one word, so the card stays short; only a changed kind shows its selects */}
-        {([[t(settings.feedback), AUTO_START_KINDS.slice(0, 2)], [t(settings.backlogStages), AUTO_START_KINDS.slice(2)]] as const).map(([heading, kinds]) => (
-          <div key={heading} className="auto-start-kinds">
-            <div className="hint">{heading}</div>
-            {kinds.map(([kind, label]) => (
-              <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} shadowRunners={listed.filter((r) => props.runnerOk.has(r))} defaultBudget={qr.defaultBudgetUsd} disabled={saving} save={save} />
-            ))}
-          </div>
+        {jobRows(s).filter((j) => !j.id.startsWith("kind:")).map((j) => (
+          <Fragment key={j.id}>
+            <div className="job-row">
+              <span className="job-name">
+                {t(j.label)}
+                {j.id === "judge" && !judge.enabled && s.evals.judge.enabled && <span className="hint"> {t(settings.usedByRubric)}</span>}
+              </span>
+              {j.id === "review" ? (
+                <>
+                  <select className="mode" value={s.reviewRunner} disabled={saving} aria-label={`${t(j.label)}: ${t(settings.runner)}`} onChange={(e) => void save({ reviewRunner: e.target.value as ReviewRunnerChoice })}>
+                    {(Object.entries(REVIEW_RUNNER_LABELS) as [ReviewRunnerChoice, Msg][]).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {t(label)}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="muted">{t(settings.runnerDefault)}</span>
+                  <span className="muted">{t(settings.runnerDefault)}</span>
+                </>
+              ) : (
+                <>
+                  <select className="mode" value={j.runner} disabled={saving} aria-label={`${t(j.label)}: ${t(settings.runner)}`} onChange={(e) => void jobPatch(j.id, { runner: e.target.value as RunnerId })}>
+                    {runnerOptions(j.runner as RunnerId, "")}
+                  </select>
+                  <ModelSelect runner={info(j.runner as RunnerId)} value={j.model} onChange={(model) => void jobPatch(j.id, { model })} label={t(settings.rowModel)} bare emptyLabel={runnerDefaultLabel("model", info(j.runner as RunnerId))} disabled={saving} title={`${t(j.label)}: ${t(settings.rowModel)}`} />
+                  <EffortSelect runner={info(j.runner as RunnerId)} value={j.effort} onChange={(effort) => void jobPatch(j.id, { effort })} label={t(settings.rowEffort)} bare emptyLabel={runnerDefaultLabel("effort", info(j.runner as RunnerId))} disabled={saving} title={`${t(j.label)}: ${t(settings.rowEffort)}`} />
+                </>
+              )}
+            </div>
+            {/* one line per kind: a kind on 共通 is one word, so the card stays short; only a changed kind shows its selects */}
+            {j.id === "autoStart" &&
+              ([[t(settings.feedback), AUTO_START_KINDS.slice(0, 2)], [t(settings.backlogStages), AUTO_START_KINDS.slice(2)]] as const).map(([heading, kinds]) => (
+                <div key={heading} className="auto-start-kinds">
+                  <div className="hint">{heading}</div>
+                  {kinds.map(([kind, label]) => (
+                    <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} shadowRunners={listed.filter((r) => props.runnerOk.has(r))} defaultBudget={qr.defaultBudgetUsd} disabled={saving} save={save} />
+                  ))}
+                </div>
+              ))}
+          </Fragment>
         ))}
-        {/* 上限のときの代わり (#834): the order is replaced whole; × removes one, the select appends a detected one not in it yet */}
+        {/* 上限のときの代わり: the order is replaced whole; × removes one, the select appends a detected one not in it yet */}
         <div className="auto-start-kinds">
           <div className="hint">{t(settings.fallback)}</div>
           <div className="muted">{t(settings.fallbackHint)}</div>
@@ -177,41 +241,12 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
               </select>
             )}
           </div>
-          <NumberField label={t(settings.fallbackAt)} hint={t(settings.fallbackAtHint)} value={s.autoStart.fallbackAt} def={0.9} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
+          <NumberField label={t(settings.fallbackAt)} hint={t(settings.fallbackAtHint)} value={s.autoStart.fallbackAt} def={d.autoStart.fallbackAt} step={0.05} min={0.5} max={1} disabled={saving} onSave={(v) => save({ autoStart: { fallbackAt: v } })} />
         </div>
+        {reset.jobsCard}
       </SettingsCard>
 
-      <SettingsCard title={t(settings.subagentEffort)}>
-        <div className="muted">{t(settings.subagentEffortHint)}</div>
-        {runners.filter((r) => r.id === "claude" && r.efforts.length > 0).map((r) => (
-          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-            <span className="t">{r.id}</span>
-            <select className="mode" value={s.subagentEffort[r.id] ?? ""} disabled={saving} aria-label={t(settings.subagentEffortLabel, { runner: r.id })} onChange={(e) => void save({ subagentEffort: { [r.id]: e.target.value || null } })}>
-              <option value="">{t(settings.subagentEffortSame)}</option>
-              {r.efforts.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        ))}
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.reviewRunner)}>
-        <div className="muted">{t(settings.reviewRunnerHint)}</div>
-        {(Object.entries(REVIEW_RUNNER_LABELS) as [ReviewRunnerChoice, Msg][]).map(([value, label]) => (
-          <label key={value} className="hint toggle">
-            <input type="radio" name="review-runner" value={value} checked={s.reviewRunner === value} disabled={saving} onChange={() => void save({ reviewRunner: value })} />
-            {t(label)}
-          </label>
-        ))}
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.presets)} className="presets">
-        <div className="muted">{t(settings.presetsHint)}</div>
-        <PresetSettings onError={props.onError} />
-      </SettingsCard>
+      <CustomRunnersSection onError={props.onError} />
 
       {(listed.includes("dak") || s.shadowRunner === "dak") && (
       <SettingsCard title={t(settings.dakDefault)}>
@@ -220,22 +255,28 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           {t(settings.dakToggle)}
           {!dakOk && s.shadowRunner === "dak" && <span className="hint">{t(settings.dakMissing)}</span>}
         </label>
+        <DefaultNote on={d.shadowRunner === "dak"} />
+        {reset.dakDefault}
       </SettingsCard>
       )}
 
-      <SettingsGroupHeading id="settings-resume" />
-      {/* The tunables (#835): one card per group, saved on blur / Enter; 既定に戻す puts the whole group back (PATCH null) */}
+      <SettingsGroupHeading id="settings-auto" />
+      <SettingsCard title={t(settings.developSelfCard)}>
+        <DevelopSelfToggle checked={s.developSelf} disabled={saving} onChange={(on) => void save({ developSelf: on })} />
+        <DefaultNote on={d.developSelf} />
+        {reset.developSelfCard}
+      </SettingsCard>
+
+      <SettingsCard title={t(settings.sweep)} className="tunables">
+        <SweepSlots onError={props.onError} />
+        {/* the limit of Tasks running at once: over it a Task waits for a run slot; the daemon starts the waiting ones as soon as it is raised */}
+        <NumberField label={t(settings.maxRunnersLabel)} hint={t(settings.maxRunnersHint)} value={s.maxRunners} def={d.maxRunners} min={1} max={8} disabled={saving} onSave={(v) => save({ maxRunners: v })} />
+        <div className="muted">{t(settings.maxRunnersHint)}</div>
+        {reset.sweep}
+      </SettingsCard>
+
+      {/* the tunables: saved on blur / Enter; 既定に戻す puts back the values this card shows (RESETTABLE_CARDS) */}
       <SettingsCard title={t(settings.usage)} className="tunables">
-        <div className="hint">{t(settings.autoResume)}</div>
-        <div className="muted">{t(settings.autoResumeHint)}</div>
-        {runners.filter((r) => !isAdkRunner(r.id)).map((r) => (
-          <div key={r.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-            <label className="hint toggle">
-              <input type="checkbox" checked={!!r.autoResume} disabled={saving} onChange={(e) => void save({ autoResume: { [r.id]: e.target.checked } })} />
-              {t(settings.autoResumeToggle, { runner: r.id })}
-            </label>
-          </div>
-        ))}
         <div className="hint">{t(settings.usageWait)}</div>
         <div className="muted">{t(settings.usageHint)}</div>
         <NumberField label={t(settings.backlogQuotaLimit)} hint={t(settings.backlogQuotaLimitHint)} value={qr.backlogQuotaLimit} def={d.quotaAndResume.backlogQuotaLimit} step={0.05} disabled={saving} onSave={(v) => save({ quotaAndResume: { backlogQuotaLimit: v } })} />
@@ -244,14 +285,26 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         <NumberField label={t(settings.maxLimitStops)} unit={t(settings.unitTimes)} value={qr.maxLimitStops} def={d.quotaAndResume.maxLimitStops} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxLimitStops: v } })} />
         <TextField label={t(settings.resumePrompt)} hint={t(settings.resumePromptHint)} value={qr.resumePrompt} def={d.quotaAndResume.resumePrompt} multiline disabled={saving} onSave={(v) => save({ quotaAndResume: { resumePrompt: v } })} />
         <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
+        <NumberField label={t(settings.silentAfter)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.silentAfterHint)} value={qr.silentAfterMs} def={d.quotaAndResume.silentAfterMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { silentAfterMs: v } })} />
+        <NumberField label={t(settings.waitLimit)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.waitLimitHint)} value={qr.waitLimitMs} def={d.quotaAndResume.waitLimitMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { waitLimitMs: v } })} />
+        <NumberField label={t(settings.dependsLimit)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.dependsLimitHint)} value={qr.dependsLimitMs} def={d.quotaAndResume.dependsLimitMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { dependsLimitMs: v } })} />
         <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
-        <BudgetField label={t(settings.fableBudget)} hint={t(settings.fableBudgetHint)} value={qr.fableBudgetUsd} def={d.quotaAndResume.fableBudgetUsd} disabled={saving} onSave={(v) => save({ quotaAndResume: { fableBudgetUsd: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ quotaAndResume: null })} />
+        <NumberField label={t(settings.flowLimit)} unit={t(settings.unitItems)} min={0} hint={t(settings.flowLimitHint)} value={qr.flowLimit} def={d.quotaAndResume.flowLimit} disabled={saving} onSave={(v) => save({ quotaAndResume: { flowLimit: v } })} />
+        <FlowLimitState limit={qr.flowLimit} workspaces={props.workspaces} />
+        {reset.usage}
       </SettingsCard>
 
       <PolicySettings onError={props.onError} />
 
-      <CustomRunnersSection onError={props.onError} />
+      <SettingsCard title={t(settings.newSchedule)} className="tunables">
+        <TextField label={t(settings.scheduleCron)} value={nd.scheduleCron} def={d.newDefaults.scheduleCron} mono disabled={saving} onSave={(v) => save({ newDefaults: { scheduleCron: v } })} />
+        {reset.newSchedule}
+      </SettingsCard>
+
+      <SettingsCard title={t(settings.presets)} className="presets">
+        <div className="muted">{t(settings.presetsHint)}</div>
+        <PresetSettings onError={props.onError} />
+      </SettingsCard>
 
       <SettingsGroupHeading id="settings-judge" />
       <SettingsCard title={t(settings.judgeAndChoice)} className="tunables">
@@ -262,16 +315,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
             <input type="checkbox" checked={judge.enabled} disabled={saving} onChange={(e) => void save({ judge: { enabled: e.target.checked } })} />
             {t(settings.turnJudge)}
           </label>
-          {(judge.enabled || s.evals.judge.enabled) && (
-            <>
-              {!judge.enabled && <span className="hint">{t(settings.usedByRubric)}</span>}
-              {/* a model belongs to one runner: the old one would make every judgement fail on the new runner first and fall back to Haiku. Shown while either judge (#493 / #1219) uses them */}
-              <select className="mode" value={judge.runner} disabled={saving} aria-label={t(settings.judgeRunner)} onChange={(e) => void save({ judge: { runner: e.target.value as RunnerId, model: "" } })}>
-                {runnerOptions(judge.runner, t(settings.judgeOption))}
-              </select>
-              <ModelSelect runner={info(judge.runner)} value={judge.model} onChange={(m) => void save({ judge: { model: m } })} label={t(settings.judgeModel)} disabled={saving} title={t(settings.judgeModelTitle)} />
-            </>
-          )}
+          <DefaultNote on={d.judge.enabled} />
         </div>
         <div className="hint">{t(settings.rubric)}</div>
         <div className="muted">{t(settings.rubricHint)}</div>
@@ -279,20 +323,12 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           <input type="checkbox" checked={s.evals.judge.enabled} disabled={saving} onChange={(e) => void save({ evals: { judge: { enabled: e.target.checked } } })} />
           {t(settings.rubricToggle)}
         </label>
+        <DefaultNote on={d.evals.judge.enabled} />
         <div className="hint">{t(settings.judgeFallbackAndTimeout)}</div>
         <div className="muted">{t(settings.judgeAndChoiceHint)}</div>
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <span className="hint">{t(settings.judgeFallback)}</span>
-          {/* a model belongs to one runner: a runner change goes back to that runner's CLI default */}
-          <select className="mode" value={jc.judgeFallbackRunner} disabled={saving} aria-label={t(settings.judgeFallbackRunner)} onChange={(e) => void save({ judgeAndChoice: { judgeFallbackRunner: e.target.value as RunnerId, judgeFallbackModel: "" } })}>
-            {runnerOptions(jc.judgeFallbackRunner, t(settings.judgeFallbackOption))}
-          </select>
-          <ModelSelect runner={info(jc.judgeFallbackRunner)} value={jc.judgeFallbackModel} onChange={(m) => void save({ judgeAndChoice: { judgeFallbackModel: m } })} label={t(settings.judgeFallbackModel)} disabled={saving} title={t(settings.judgeFallbackModelTitle)} />
-          <span className="muted">{t(settings.defaultValue, { value: `${d.judgeAndChoice.judgeFallbackRunner} / ${d.judgeAndChoice.judgeFallbackModel}` })}</span>
-        </div>
         <NumberField label={t(settings.judgeTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.judgeTimeoutHint)} value={jc.judgeTimeoutMs} def={d.judgeAndChoice.judgeTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { judgeTimeoutMs: v } })} />
         <NumberField label={t(settings.workspaceChoiceTimeout)} unit={t(settings.unitSeconds)} scale={1000} hint={t(settings.workspaceChoiceTimeoutHint)} value={jc.workspaceChoiceTimeoutMs} def={d.judgeAndChoice.workspaceChoiceTimeoutMs} disabled={saving} onSave={(v) => save({ judgeAndChoice: { workspaceChoiceTimeoutMs: v } })} />
-        <ResetButton disabled={saving} onClick={() => save({ judgeAndChoice: null })} />
+        {reset.judgeAndChoice}
       </SettingsCard>
 
       <SettingsCard title={t(settings.llm)}>
@@ -303,10 +339,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
             {t(settings.llmToggle)}
             {llm.enabled && props.health?.routing?.llm.available === false && <span className="warn">{t(settings.llmUnavailable, { runner: llm.runner })}</span>}
           </label>
-          <select className="mode" value={llm.runner} disabled={saving} aria-label={t(settings.llmRunner)} onChange={(e) => void save({ routing: { llm: { runner: e.target.value as RunnerId } } })}>
-            {runnerOptions(llm.runner, t(settings.llmOption))}
-          </select>
-          <ModelSelect runner={info(llm.runner)} value={llm.model} onChange={(m) => void save({ routing: { llm: { model: m } } })} label={t(settings.llmModel)} disabled={saving} title={t(settings.llmModelTitle)} />
           <select className="mode" value={llm.timeoutMs} disabled={saving} aria-label={t(settings.llmWait)} title={t(settings.llmWaitTitle)} onChange={(e) => void save({ routing: { llm: { timeoutMs: Number(e.target.value) } } })}>
             {[5000, 10000, 15000, 30000].map((ms) => (
               <option key={ms} value={ms}>
@@ -314,7 +346,9 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
               </option>
             ))}
           </select>
+          <span className="muted">{t(settings.defaultValue, { value: `${t(d.routing.llm.enabled ? settings.defaultOn : settings.defaultOff)} · ${t(settings.llmWaitOption, { seconds: d.routing.llm.timeoutMs / 1000 })}` })}</span>
         </div>
+        {reset.llm}
       </SettingsCard>
 
       <SettingsCard title={t(settings.titles)}>
@@ -323,27 +357,44 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           <input type="checkbox" checked={s.titles.auto} disabled={saving} onChange={(e) => void save({ titles: { auto: e.target.checked } })} />
           {t(settings.titlesToggle)}
         </label>
+        <DefaultNote on={d.titles.auto} />
+        {reset.titles}
       </SettingsCard>
 
       <SettingsGroupHeading id="settings-model" />
-      <SettingsCard title={t(settings.models)}>
-        <div className="muted">{t(settings.modelsHint)}</div>
-        {/* dak has no list of its own; on Bedrock the list is the adapter's Bedrock one, not the saved one (#1400) */}
-        {runners.filter((r) => r.models.length > 0 && r.loginKind !== "bedrock").map((r) => (
-          <ModelChoices key={r.id} runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />
-        ))}
-        <CliModelCandidates runners={runners} hidden={(runner) => s.hiddenModels[runner] ?? s.defaults.hiddenModels[runner] ?? []} disabled={saving} save={trySave} onError={props.onError} />
-      </SettingsCard>
-
       <SettingsCard title={t(settings.prices)}>
         <div className="muted">{t(settings.pricesHint)}</div>
         <ModelPrices prices={s.prices} disabled={saving} save={trySave} />
       </SettingsCard>
 
-      <SettingsGroupHeading id="settings-connect" />
+      <SettingsCard title={t(settings.budgetCard)} className="tunables">
+        <BudgetField label={t(settings.fableBudget)} hint={t(settings.fableBudgetHint)} value={qr.fableBudgetUsd} def={d.quotaAndResume.fableBudgetUsd} disabled={saving} onSave={(v) => save({ quotaAndResume: { fableBudgetUsd: v } })} />
+        {reset.budgetCard}
+      </SettingsCard>
+
+      <SettingsGroupHeading id="settings-workspace" />
       <WorkspaceCard workspaces={props.workspaces} clones={props.clones} onAddWorkspaceFromGithub={props.onAddWorkspaceFromGithub} onAddWorkspace={props.onAddWorkspace} onTaskStarted={props.onTaskStarted} onError={props.onError} />
 
+      <SettingsCard title={t(settings.githubSync)}>
+        <GithubSync />
+      </SettingsCard>
+
       <McpCard tasks={props.tasks} onError={props.onError} />
+
+      <SettingsCard title={t(settings.knowledge)} id="knowledge" lazy>
+        <Knowledge refreshKey={props.knowledgeRev} workspaces={props.workspaces} onError={props.onError} />
+      </SettingsCard>
+
+      <SettingsGroupHeading id="settings-app" />
+      <SettingsCard title={t(settings.language)}>
+        <div className="row" style={{ alignItems: "center", gap: 6 }}>
+          <select className="mode" value={lang} aria-label={t(settings.language)} onChange={(e) => setLang(e.target.value as Lang)}>
+            <option value="ja">{t(settings.japanese)}</option>
+            <option value="en">{t(settings.english)}</option>
+          </select>
+          <span className="hint">{t(settings.languageHint)}</span>
+        </div>
+      </SettingsCard>
 
       <SettingsCard title={t(settings.notifications)}>
         {perm === "default" && (
@@ -361,31 +412,13 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         {perm === "unsupported" && <div className="muted">{t(settings.notifyUnsupported)}</div>}
       </SettingsCard>
 
-      <SettingsCard title={t(settings.language)}>
-        <div className="row" style={{ alignItems: "center", gap: 6 }}>
-          <select className="mode" value={lang} aria-label={t(settings.language)} onChange={(e) => setLang(e.target.value as Lang)}>
-            <option value="ja">{t(settings.japanese)}</option>
-            <option value="en">{t(settings.english)}</option>
-          </select>
-          <span className="hint">{t(settings.languageHint)}</span>
-        </div>
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.release)} id="release">
+      <SettingsCard title={t(settings.release)} id="release" className="tunables">
         <ReleasePanel />
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.sweep)}>
-        <SweepSlots onError={props.onError} />
-        <MaxRunners onError={props.onError} />
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.githubSync)}>
-        <GithubSync />
-      </SettingsCard>
-
-      <SettingsCard title={t(settings.terminalHistory)}>
-        <TerminalHistory onError={props.onError} />
+        {/* how a new version is found and how far it goes by itself: saved like the other tunables, 既定に戻す puts the three back */}
+        <NumberField label={t(settings.releaseCheckMinutes)} unit={t(settings.unitMinutes)} hint={t(settings.releaseCheckMinutesHint)} value={s.release.checkMinutes} def={d.release.checkMinutes} min={1} max={1440} disabled={saving} onSave={(v) => save({ release: { checkMinutes: v } })} />
+        <ReleaseAutoFields release={s.release} defaults={d.release} disabled={saving} onSave={(release) => void save({ release })} />
+        <NumberField label={t(settings.releaseDrainMinutes)} unit={t(settings.unitMinutes)} hint={t(settings.releaseDrainMinutesHint)} value={s.release.drainMinutes} def={d.release.drainMinutes} min={5} max={1440} disabled={saving} onSave={(v) => save({ release: { drainMinutes: v } })} />
+        {reset.release}
       </SettingsCard>
 
       {countriesUrl(props.health?.login) && (
@@ -401,22 +434,25 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           <input type="checkbox" checked={s.outbound.classifierLog} disabled={saving} onChange={(e) => void save({ outbound: { classifierLog: e.target.checked } })} />
           {t(settings.classifierLogToggle)}
         </label>
+        <DefaultNote on={d.outbound.classifierLog} />
         <div className="muted">{t(settings.classifierLogHint)}</div>
         <label className="hint toggle">
           <input type="checkbox" checked={s.outbound.runnerTelemetry} disabled={saving} onChange={(e) => void save({ outbound: { runnerTelemetry: e.target.checked } })} />
           {t(settings.runnerTelemetryToggle)}
         </label>
+        <DefaultNote on={d.outbound.runnerTelemetry} />
         <div className="muted">{t(settings.runnerTelemetryHint)}</div>
+        {reset.outbound}
       </SettingsCard>
 
-      <SettingsCard title={t(settings.knowledge)} id="knowledge" lazy>
-        <Knowledge refreshKey={props.knowledgeRev} workspaces={props.workspaces} onError={props.onError} />
+      <SettingsCard title={t(settings.terminalHistory)}>
+        <TerminalHistory onError={props.onError} />
       </SettingsCard>
     </main>
   );
 }
 
-/** The choices of レビューのランナー (#4025), in the order shown: the default first. */
+/** The choices of レビューのランナー, in the order shown: the default first. */
 const REVIEW_RUNNER_LABELS: Record<ReviewRunnerChoice, Msg> = { other: settings.reviewRunnerOther, same: settings.reviewRunnerSame };
 
 /** The Tasks a Workspace MCP endpoint can be issued for: not ended and not a cloud Task (the cases where `GET /api/tasks/:id/mcp` answers 409 or has no local scope), not archived, newest first. */
@@ -434,7 +470,7 @@ export function mcpSelection(choices: TaskSummary[], picked: string, issued: Mcp
   return { id, shown: issued && issued.id === id ? issued : null };
 }
 
-/** The folded Workspace MCP card of the 接続とアプリ group. */
+/** The folded Workspace MCP card of the 「Workspace と GitHub」 group. */
 export function McpCard(props: { tasks: TaskSummary[]; onError: (msg: string) => void }) {
   return (
     <SettingsCard title="Workspace MCP">
@@ -483,7 +519,7 @@ export function McpEndpoint(props: { tasks: TaskSummary[]; onError: (msg: string
 }
 
 /**
- * A folded card of the Settings screen (#3849): only its title shows until pressed. React is not given `open`, so a save's
+ * A folded card of the Settings screen: only its title shows until pressed. React is not given `open`, so a save's
  * re-render leaves an opened card open. A `lazy` card draws its body from the first time it is opened (a closed
  * <details> body is still rendered by React, and a body that fetches would fetch on every visit to Settings). 承認モードの既定 is not one of these (a safety setting stays unfolded).
  */
@@ -499,7 +535,7 @@ function SettingsCard(props: { title: string; id?: string; className?: string; l
   );
 }
 
-/** The table of contents (#3356): one link per group; a press scrolls to the group's heading and leaves the URL as it is. */
+/** The table of contents: one link per group; a press scrolls to the group's heading and leaves the URL as it is. */
 export function SettingsToc() {
   return (
     <nav className="settings-toc" aria-label={t(settings.tocLabel)}>
@@ -521,7 +557,7 @@ export function SettingsToc() {
   );
 }
 
-/** A group's title above its cards (#3356); the id is where the table of contents moves to. */
+/** A group's title above its cards; the id is where the table of contents moves to. */
 export function SettingsGroupHeading(props: { id: string }) {
   return (
     <h4 className="settings-group" id={props.id} tabIndex={-1}>
@@ -531,7 +567,7 @@ export function SettingsGroupHeading(props: { id: string }) {
 }
 
 /**
- * Each workspace's GitHub sync (#2266): its state and the button that turns it off or on — only by this press. One kept
+ * Each workspace's GitHub sync: its state and the button that turns it off or on — only by this press. One kept
  * here only names the Project it is to read (its stored variable to begin with). A press that failed says why and can be pressed again (it goes on from
  * where it stopped); while Issues are being made on GitHub the state is read again every few seconds.
  */
@@ -569,6 +605,18 @@ export function GithubSync() {
       void load();
     }
   };
+  const attach = async (w: Workspace, on: boolean) => {
+    setBusy(w.id);
+    setErrors((e) => ({ ...e, [w.id]: "" }));
+    try {
+      await api.setWorkspaceIssueArtifacts(w.id, on);
+    } catch (e) {
+      setErrors((x) => ({ ...x, [w.id]: String((e as Error).message ?? e) }));
+    } finally {
+      setBusy(null);
+      void load();
+    }
+  };
   if (!workspaces) return null;
   return (
     <>
@@ -576,7 +624,7 @@ export function GithubSync() {
         const s = syncs.find((x) => x.workspaceId === w.id);
         if (!s) return null;
         const text = githubSyncText(s);
-        // kept here only (#2265): its stored backlog is under its own id, and it reads no Project yet
+        // kept here only: its stored backlog is under its own id, and it reads no Project yet
         const local = s.backlog === "switchboard" && s.repository === w.id;
         const to = s.enabling || s.backlog === "switchboard" ? "github" : "switchboard";
         return (
@@ -589,6 +637,13 @@ export function GithubSync() {
             <button className={to === "github" ? "pri" : "ghost"} disabled={busy !== null} onClick={() => void press(w, to, local)}>
               {s.enabling ? t(settings.syncContinue) : to === "github" ? t(settings.turnOn) : t(settings.turnOff)}
             </button>
+            {/* only where the sync is on: with it off there is no Issue on GitHub to attach to */}
+            {s.backlog === "github" && !s.enabling && (
+              <label className="hint" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <input type="checkbox" checked={w.issueArtifacts} disabled={busy !== null} onChange={(e) => void attach(w, e.target.checked)} />
+                {t(settings.issueArtifacts)}
+              </label>
+            )}
             {errors[w.id] && <span className="warn">{errors[w.id]}</span>}
           </div>
         );
@@ -598,7 +653,7 @@ export function GithubSync() {
   );
 }
 
-/** backlog-next's slots of each workspace (#561, #2656): what each firing reads, so a save applies from the next one. */
+/** backlog-next's slots of each workspace: what each firing reads, so a save applies from the next one. */
 export function SweepSlots(props: { onError: (msg: string) => void }) {
   const [saved, setSaved] = useState<Workspace[] | null>(null);
   const [alloc, setAlloc] = useState<BacklogAllocation | null>(null);
@@ -728,48 +783,8 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
   );
 }
 
-/** The limit of Tasks running at once (#1141): what is over it waits for a run slot (scheduler.md). Saved with the PATCH of the settings, so the daemon starts the waiting ones at once. */
-export function MaxRunners(props: { onError: (msg: string) => void }) {
-  const [saved, setSaved] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const show = (n: number) => {
-    setSaved(n);
-    setDraft(String(n));
-  };
-  useEffect(() => {
-    api.settings().then((r) => show(r.maxRunners)).catch((e) => props.onError(String(e.message ?? e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const save = async () => {
-    // an emptied box would be Number("") = 0: only a typed digit counts
-    if (!/^\s*[1-8]\s*$/.test(draft)) {
-      props.onError(t(settings.maxRunnersInvalid, { value: draft }));
-      return;
-    }
-    setBusy(true);
-    try {
-      show((await api.updateSettings({ maxRunners: Number(draft) })).maxRunners);
-    } catch (e) {
-      props.onError(String((e as Error).message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="row" style={{ gridColumn: "1 / -1", alignItems: "center", gap: 6 }}>
-      <span className="hint">{t(settings.maxRunnersLabel)}</span>
-      <input type="number" min={1} max={8} step={1} aria-label={t(settings.maxRunnersLabel)} value={draft} onChange={(e) => setDraft(e.target.value)} style={{ width: 56 }} />
-      <button className="ghost" disabled={busy || saved === null} onClick={() => void save()}>
-        {t(settings.save)}
-      </button>
-      <span className="hint">{t(settings.maxRunnersHint)}</span>
-    </div>
-  );
-}
-
 /**
- * 定型の指示 (#940): the saved instructions, newest first, each edited or deleted in its row; a new one from the form
+ * 定型の指示: the saved instructions, newest first, each edited or deleted in its row; a new one from the form
  * at the end. Kept by the daemon (/api/presets), so a reload shows the same list.
  */
 export function PresetSettings(props: { onError: (msg: string) => void }) {
@@ -859,7 +874,32 @@ export function PresetSettings(props: { onError: (msg: string) => void }) {
 }
 
 /**
- * One number of the tunables (#835), shown in its unit (`scale` ms per unit) and saved on blur / Enter. What is typed
+ * Under the flow limit's field: what the number limits (shown, not only a tooltip: a phone has none), and which PBIs are
+ * counted against it and which Ready ones it holds back now. Read when the card opens and again when the saved limit
+ * changes, not on a timer; a read that fails leaves the lines out (the field still works).
+ */
+function FlowLimitState(props: { limit: number; workspaces: Workspace[] }) {
+  const [flow, setFlow] = useState<BacklogAllocation["flowLimit"] | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.backlogAllocation().then((a) => live && setFlow(a.flowLimit), () => live && setFlow(null));
+    return () => { live = false; };
+  }, [props.limit]);
+  const rows = flow ? flowLimitRows(flow, new Map(props.workspaces.map((w) => [w.id, w.name]))) : [];
+  return (
+    <>
+      <div className="hint">{t(settings.flowLimitHint)}</div>
+      {flow && (rows.length ? (
+        <ul className="flow-state hint">
+          {rows.map((r) => <li key={`${r.ws}:${r.kind}`}>{t(r.kind === "counted" ? settings.flowCounted : settings.flowHeld, { ws: r.ws, numbers: flowNumbers(r.numbers) })}</li>)}
+        </ul>
+      ) : <div className="flow-state muted">{t(settings.flowNone)}</div>)}
+    </>
+  );
+}
+
+/**
+ * One number of the tunables, shown in its unit (`scale` ms per unit) and saved on blur / Enter. What is typed
  * stays local until then, so a half-typed value is never saved; a value the daemon refuses (400) is shown as an error
  * and the box goes back to the saved one.
  */
@@ -908,7 +948,7 @@ function BudgetField(props: { label: string; unit?: string; hint?: string; value
   );
 }
 
-/** One text of the tunables (#835), saved on blur (Enter too, for one line). */
+/** One text of the tunables, saved on blur (Enter too, for one line). */
 function TextField(props: { label: string; hint?: string; value: string; def: string; multiline?: boolean; mono?: boolean; disabled: boolean; onSave: (v: string) => Promise<void> }) {
   const [text, setText] = useState<string | null>(null);
   const commit = (typed: string) => {
@@ -931,8 +971,8 @@ function TextField(props: { label: string; hint?: string; value: string; def: st
   );
 }
 
-/** モデルの価格 (#1402): the saved rows with 直す / 消す, and a form under them; the daemon refuses a bad row with 400 too. */
-/** One runner's model choices (#1400): every edit saves the whole list at once; the last one cannot be removed (null goes back instead). */
+/** モデルの価格: the saved rows with 直す / 消す, and a form under them; the daemon refuses a bad row with 400 too. */
+/** One runner's model choices: every edit saves the whole list at once; the last one cannot be removed (null goes back instead). */
 function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boolean; disabled: boolean; save: (patch: { models: Record<string, ModelOption[] | null> }) => Promise<boolean> }) {
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
@@ -988,7 +1028,7 @@ function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boo
 }
 
 /**
- * 「CLI の表を読む」 (#1401): the installed CLIs' models that are neither listed nor hidden, each to 足す (at the end of the
+ * 「CLI の表を読む」: the installed CLIs' models that are neither listed nor hidden, each to 足す (at the end of the
  * list) or 載せない; the 載せない list folded below with 取り消し. Read only on the button: the claude table is about 240 MB.
  */
 function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: RunnerId) => string[]; disabled: boolean; save: (patch: { models?: Record<string, ModelOption[]>; hiddenModels?: Record<string, string[]> }) => Promise<boolean>; onError: (msg: string) => void }) {
@@ -997,7 +1037,8 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
   const read = async () => {
     setLoading(true);
     try {
-      setFound(await api.modelCandidates());
+      // a block shows its own runners' candidates only (a runner's block passes just that runner)
+      setFound(candidatesOf(await api.modelCandidates(), props.runners));
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
     } finally {
@@ -1139,7 +1180,7 @@ function ModelPrices(props: { prices: Record<string, SettingsPrice>; disabled: b
 }
 
 /**
- * One kind of the 自動で始まる Task の既定 (#1337). Without its own choice it reads 共通; 変える opens the selects
+ * One kind of the 自動で始まる Task の既定. Without its own choice it reads 共通; 変える opens the selects
  * (opening saves nothing) starting from the common values, and the first change saves the kind's own choice.
  * 共通に戻す removes it (PATCH null).
  */
@@ -1170,7 +1211,7 @@ function KindRow(props: {
         </button>
       </div>
     );
-  const c = own ?? props.auto;
+  const c = kindChoice(own, props.auto); // what the kind starts on, as the daemon decides it
   const cRunner = c.runner ?? props.auto.runner; // a kind without its own runner follows the common one
   const runnerInfo = props.info(cRunner);
   const modes = (runnerInfo?.permissionModes ?? []).filter((m) => !m.danger || m.value === runnerInfo?.defaultPermissionMode);
@@ -1188,8 +1229,8 @@ function KindRow(props: {
         {!c.runner && <option value="">{t(settings.common)}</option>}
         {props.runnerOptions(cRunner, t(settings.runner))}
       </select>
-      <ModelSelect runner={props.info(cRunner)} value={c.model} onChange={(model) => void pick({ model })} label={t(settings.model)} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
-      <EffortSelect runner={props.info(cRunner)} value={c.effort} onChange={(effort) => void pick({ effort })} label={t(settings.effort)} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
+      <ModelSelect runner={props.info(cRunner)} value={c.model} onChange={(model) => void pick(kindPick(own, c, { model }, props.info(cRunner)))} label={t(settings.model)} emptyLabel={runnerDefaultLabel("model", props.info(cRunner))} disabled={props.disabled} title={t(settings.kindModelTitle, { label: props.label })} />
+      <EffortSelect runner={props.info(cRunner)} value={c.effort} onChange={(effort) => void pick(kindPick(own, c, { effort }, props.info(cRunner)))} label={t(settings.effort)} emptyLabel={runnerDefaultLabel("effort", props.info(cRunner))} disabled={props.disabled} title={t(settings.kindEffortTitle, { label: props.label })} />
       {/* Task ごとのモデル: 実装 on claude only */}
       {props.kind === "complete" && cRunner === "claude" && (
         <select className="model-select" value={props.auto.completeTaskModel} disabled={props.disabled} aria-label={t(settings.taskModel)} title={t(settings.taskModelTitle)} onChange={(e) => void props.save({ autoStart: { completeTaskModel: e.target.value } })}>
@@ -1235,6 +1276,11 @@ function KindRow(props: {
   );
 }
 
+/** The default of an on / off value, next to its toggle: the same wording as the number and text boxes' 「既定 …」. */
+function DefaultNote(props: { on: boolean }) {
+  return <span className="muted">{t(settings.defaultValue, { value: t(props.on ? settings.defaultOn : settings.defaultOff) })}</span>;
+}
+
 function ResetButton(props: { disabled: boolean; onClick: () => Promise<void> }) {
   return (
     <div className="row">
@@ -1245,7 +1291,7 @@ function ResetButton(props: { disabled: boolean; onClick: () => Promise<void> })
   );
 }
 
-/** Terminal の履歴 (#91, moved from Home in #3354): what the daemon imported from Claude Code's sessions, and a manual import. */
+/** Terminal の履歴 (moved here from Home): what the daemon imported from Claude Code's sessions, and a manual import. */
 export function TerminalHistory(props: { onError: (msg: string) => void }) {
   // what the daemon imported from ~/.claude/projects
   const [history, setHistory] = useState<HistoryStatus | null>(null);
@@ -1328,7 +1374,7 @@ export function TerminalHistory(props: { onError: (msg: string) => void }) {
 
 const EMPTY_DRAFT: CustomRunnerDraft = { port: "adk", sendWorkspaceMcp: false, name: "", label: "", url: "", app: "", tokenEnv: "" };
 
-/** The ADK servers that run as `custom:<name>` (#3388, docs/design/custom-adapter.md). No edit: remove and add again. */
+/** The ADK servers that run as `custom:<name>` (docs/design/custom-adapter.md). No edit: remove and add again. */
 function CustomRunnersSection(props: { onError: (msg: string) => void }) {
   const [list, setList] = useState<CustomRunner[] | null>(null);
   const [draft, setDraft] = useState<CustomRunnerDraft>(EMPTY_DRAFT);
@@ -1428,7 +1474,7 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
   );
 }
 
-/** 「Switchboard 自体の開発」 (#2459): off = Switchboard's own backlog is not read, no improve / すぐ直す, requests go upstream. */
+/** 「Switchboard 自体の開発」: off = Switchboard's own backlog is not read, no improve / すぐ直す, requests go upstream. */
 export function DevelopSelfToggle({ checked, disabled, onChange }: { checked: boolean; disabled: boolean; onChange: (developSelf: boolean) => void }) {
   return (
     <>

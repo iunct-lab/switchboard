@@ -1,9 +1,9 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, designRulesTouched, judge, loadReversibility, localCiOf, main, mergePr, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, sharedMoved, loadReversibility, localCiOf, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
 import { resultComment } from "./local-ci";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ beforeAll(() => { process.env.GH_REPO = REPO; });
 afterAll(() => { if (savedRepo === undefined) delete process.env.GH_REPO; else process.env.GH_REPO = savedRepo; });
 
 const base = (over: Partial<PrFacts> = {}): PrFacts => ({
-  files: [{ path: "packages/core/src/tasks.ts", additions: 20, deletions: 5 }],
+  files: [{ path: "packages/core/src/tasks/manager.ts", additions: 20, deletions: 5 }],
   headCommittedAt: "2026-09-24T10:00:00Z",
   checks: [{ name: "test", conclusion: "SUCCESS" }],
   unresolvedThreads: 0,
@@ -24,7 +24,7 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
 });
 const off = { allowLarge: false };
 /** The security groups the owner moved from asking to a recheck (docs/design/merge-gate.md). */
-const MOVED: string[] = ["security:docs", "security:lockfile"];
+const MOVED: string[] = ["security:docs", "security:tests", "security:lockfile"];
 const HEAD = "a".repeat(40);
 /** The facts with the user's yes of the head (--allow-large lifts nothing without it). */
 const yes = (kinds: string, over: Partial<PrFacts> = {}) => base({
@@ -75,6 +75,7 @@ describe("merge-gate judge", () => {
     ["rescue/src/server.ts", "[再チェック rescue] rescue"],
     [".github/workflows/ci.yml", "[聞く] セキュリティ（security:github）"],
     ["packages/core/src/db.ts", "[再チェック migration] 保護するパスに触れている"],
+    ["packages/core/src/db/migrations/0001-task-columns.ts", "[再チェック migration] 保護するパスに触れている"],
     ["packages/core/src/schema-baseline.json", "[再チェック migration] 保護するパスに触れている"],
     ["packages/core/src/auth.ts", "[聞く] セキュリティ（security:words）"],
     ["packages/core/src/approval.ts", "[聞く] セキュリティ（security:words）"],
@@ -92,7 +93,7 @@ describe("merge-gate judge", () => {
   });
 
   test("every PROTECTED pattern is covered above", () => {
-    expect(PROTECTED.length).toBe(13);
+    expect(PROTECTED.length).toBe(14);
   });
 
   test("a nested package.json is not protected", () => {
@@ -171,6 +172,12 @@ describe("merge-gate judge", () => {
     expect(judge(other, allow).verdict).toBe("stop");
     const no = base({ files, head: HEAD, reviewComments: [...base().reviewComments, { body: `[merge-answer] no security:words,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }] });
     expect(judge(no, allow).verdict).toBe("stop");
+    // the mark is read in the form the check in front of a Task's post compares (the kit's markText): a yes the store
+    // trimmed, or one with a full-width bracket, is the same yes — and so is the one the check stops
+    for (const spelled of [`  [merge-answer] yes security:words,responsibility ${HEAD}`, `［merge-answer］\u3000YES security:words,responsibility ${HEAD}`, `\uFEFF[merge-answer] yes security:words,responsibility ${HEAD}\nrest`]) {
+      const f = base({ files, head: HEAD, reviewComments: [...base().reviewComments, { body: spelled, createdAt: "2026-09-24T12:00:00Z" }] });
+      expect([spelled, judge(f, allow).verdict]).toEqual([spelled, "merge"]);
+    }
     // a no after the yes takes it back; a yes after the no counts
     const said = (...answers: string[]) => base({ files, head: HEAD, reviewComments: [...base().reviewComments, ...answers.map((a) => ({ body: `[merge-answer] ${a} security:words,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }))] });
     expect(judge(said("yes", "no"), allow).verdict).toBe("stop");
@@ -272,7 +279,7 @@ describe("security", () => {
     ["svc/requirements-dev.txt", "lockfile"],
     ["go.sum", "lockfile"],
     ["crates/x/Cargo.lock", "lockfile"],
-    // the gate and the stand-in for CI decide merges themselves (#751)
+    // the gate and the stand-in for CI decide merges themselves
     ["scripts/merge-gate.ts", "gates"],
     ["scripts/local-ci.ts", "gates"],
   ])("one line in %s stops as セキュリティ（security:%s）", (path, group) => {
@@ -283,10 +290,10 @@ describe("security", () => {
     expect(j.reasons).toEqual([`${moved ? `[再チェック ${kind}]` : "[聞く]"} セキュリティ（${kind}）: ${path}`]);
   });
 
-  test("a security reason for aws/host/** points at #852; other security reasons do not change (#852)", () => {
+  test("a security reason for aws/host/** points at the review of main's protection; other security reasons do not change", () => {
     const host = judge(base({ files: [{ path: "aws/host/sb-env.sh", additions: 1, deletions: 0 }] }), off);
     expect(host).toMatchObject({ verdict: "stop", impact: "large", ask: ["security:host"] });
-    expect(host.reasons).toEqual([expect.stringMatching(/^\[聞く\] セキュリティ（security:host）: aws\/host\/sb-env\.sh（aws\/host は.*root が main から.*#852.*docs\/design\/cloud-hosting\.md §6\.5）$/)]);
+    expect(host.reasons).toEqual([expect.stringMatching(/^\[聞く\] セキュリティ（security:host）: aws\/host\/sb-env\.sh（aws\/host は.*root が main から.*main の保護の見直しの契機.*docs\/design\/cloud-hosting\.md §6\.5）$/)]);
     const ci = judge(base({ files: [{ path: ".github/workflows/ci.yml", additions: 1, deletions: 0 }] }), off);
     expect(ci.reasons).toEqual(["[聞く] セキュリティ（security:github）: .github/workflows/ci.yml"]);
   });
@@ -306,7 +313,7 @@ describe("security", () => {
 });
 
 describe("security sub-kinds", () => {
-  const one = (path: string) => judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
+  const one = (path: string) => judge(base({ files: [{ path, additions: 1, deletions: 0, status: "modified" }] }), off);
   const groups = (j: ReturnType<typeof judge>) => [...j.ask, ...j.recheck];
 
   test.each([
@@ -331,6 +338,177 @@ describe("security sub-kinds", () => {
     expect(j).toMatchObject({ verdict: "stop", impact: "large", ask: [kind], recheck: [] });
     expect(j.reasons).toHaveLength(1);
     expect(j.reasons[0]).toStartWith(`[聞く] セキュリティ（${kind}）: ${path}`);
+  });
+
+  test("security:tests: a word or a host path met only by tests, fixtures or comment-only host files is rechecked; anything else is asked as before", () => {
+    const of = (...files: { path: string; commentOnly?: boolean }[]) => judge(base({ files: files.map((x) => ({ additions: 1, deletions: 0, status: "modified" as const, ...x })) }), off);
+    const tests = of({ path: "packages/core/src/approval.test.ts" }, { path: "packages/core/src/auth.test.ts" });
+    expect(tests).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: ["security:tests"] });
+    expect(tests.reasons).toEqual(["[再チェック security:tests] セキュリティ（security:tests）: packages/core/src/approval.test.ts, packages/core/src/auth.test.ts"]);
+    // the mark of the head lifts it
+    expect(judge(base({ files: [{ path: "packages/core/src/auth.test.ts", additions: 1, deletions: 0, status: "modified" }], rechecks: ["security:tests"] }), off)).toMatchObject({ verdict: "merge", reasons: [] });
+    // one path that is not a test keeps its own ask; the tests stay a recheck
+    const mixed = of({ path: "packages/core/src/approval.test.ts" }, { path: "packages/core/src/approval.ts" });
+    expect(mixed).toMatchObject({ ask: ["security:words"], recheck: ["security:tests"] });
+    expect(mixed.reasons).toContain("[聞く] セキュリティ（security:words）: packages/core/src/approval.ts");
+    expect(of({ path: "aws/host/host.test.ts" })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    expect(of({ path: "packages/adapters/claude/fixtures/permission-denied.jsonl" })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    expect(of({ path: "scripts/auth-e2e.ts" })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    // a host file: only with a diff read as comments only, and only where # is a comment
+    expect(of({ path: "aws/host/offload.sh", commentOnly: true })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    expect(of({ path: "aws/host/offload.sh" })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    expect(of({ path: "aws/host/cloudwatch-agent.json", commentOnly: true })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    // comment-only is the host's alone: a word path that is not a test is asked whatever its diff
+    expect(of({ path: "packages/core/src/auth.ts", commentOnly: true })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    // CI settings, the gates and secrets files keep their groups even as tests or fixtures
+    expect(of({ path: ".github/scripts/auth.test.ts" })).toMatchObject({ ask: ["security:words", "security:github"], recheck: [] });
+    expect(of({ path: "packages/core/fixtures/.env.sample" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    // a test with no word and no host path is no security reason at all
+    expect(of({ path: "packages/core/src/tasks.test.ts" })).toMatchObject({ verdict: "merge", impact: "small" });
+  });
+
+  // A host script like aws/host/bootstrap.sh: a sudoers file written by a here-document, and a command continued by `\`.
+  const SCRIPT = [
+    "#!/usr/bin/env bash",
+    "# installs the host",
+    "set -euo pipefail",
+    "",
+    "curl -fsSL \"$URL\" \\",
+    "  --output /tmp/x \\",
+    "  --checksum \"$SUM\"",
+    "cat > /etc/sudoers.d/switchboard <<SUDO",
+    "$HOST_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart switchboard",
+    "SUDO",
+    "chmod 440 /etc/sudoers.d/switchboard",
+    "",
+  ];
+  /** The script with `add` put in before line `at` (0-based), as the two whole files. */
+  const put = (at: number, ...add: string[]) => [SCRIPT.join("\n"), [...SCRIPT.slice(0, at), ...add, ...SCRIPT.slice(at)].join("\n")] as const;
+  const sh = (base: string, head: string) => commentOnlyChange("aws/host/bootstrap.sh", base, head);
+
+  test("commentOnlyChange: a comment or a blank line where it does nothing, added, removed or reworded, is comment-only", () => {
+    expect(sh(...put(3, "# why the checksum is read", "   ", "\t# indented"))).toBe(true);
+    expect(sh(...put(11, "# after the here-document"))).toBe(true);
+    const [base, head] = put(3, "# gone");
+    expect(sh(head, base)).toBe(true); // removed
+    expect(sh(SCRIPT.join("\n"), SCRIPT.join("\n").replace("# installs the host", "# sets the host up"))).toBe(true);
+    // a comment with a quote or a here-document mark in it opens nothing
+    expect(sh(...put(3, "# don't read <<EOF here \\"))).toBe(true);
+    // systemd units and YAML
+    expect(commentOnlyChange("aws/host/x.service", "[Unit]\nDescription=x\n", "[Unit]\n# why\nDescription=x\n")).toBe(true);
+    expect(commentOnlyChange("aws/host/litestream.yml", "dbs:\n  - path: /a\n    replicas:\n      - url: s3://b\n", "dbs:\n  - path: /a\n    # where\n    replicas:\n      - url: s3://b\n")).toBe(true);
+  });
+
+  test("commentOnlyChange: a # line inside a here-document is content (#includedir in a sudoers file the script writes)", () => {
+    expect(sh(...put(8, "#includedir /home/host/x"))).toBe(false);
+    expect(sh(...put(9, "#includedir /home/host/x"))).toBe(false);
+    expect(sh(...put(7, "#includedir /home/host/x"))).toBe(true); // the same line above the here-document is a comment
+    expect(sh(...put(9, ""))).toBe(false); // a blank line there is in the file written
+    // the tab-stripping and the quoted forms, and one that never ends
+    for (const open of ["cat <<-EOF", "cat <<'EOF'", "cat << \"EOF\" > /etc/x", "cat <<\\EOF"]) {
+      const body = [open, "a", "EOF", "true"];
+      expect(sh(["#!/bin/sh", ...body].join("\n"), ["#!/bin/sh", open, "#include x", "a", "EOF", "true"].join("\n"))).toBe(false);
+      expect(sh(["#!/bin/sh", ...body].join("\n"), ["#!/bin/sh", ...body, "# after"].join("\n"))).toBe(true);
+    }
+    expect(sh("#!/bin/sh\ncat <<EOF\na\n", "#!/bin/sh\n# c\ncat <<EOF\na\n")).toBe(false);
+  });
+
+  test("commentOnlyChange: in a here-document with an unquoted word, a line ending in a backslash joins the next one, so the end word after it is not the end", () => {
+    const file = (open: string, joined: string, hash: string) => ["#!/bin/sh", open, joined, "EOF", hash, "EOF", "true", ""].join("\n");
+    // the shell reads `a EOF`, then the # line, then the end: the # line is in the file written
+    expect(sh(file("cat <<EOF", "a \\", "#includedir x"), file("cat <<EOF", "a \\", "#includedir y"))).toBe(false);
+    expect(sh(file("cat <<-EOF", "a \\", "#includedir x"), file("cat <<-EOF", "a \\", "#includedir y"))).toBe(false);
+    // a quoted word takes the backslash as it is, and two backslashes are one backslash, not a continuation: the first EOF ends it
+    for (const [open, joined] of [["cat <<'EOF'", "a \\"], ["cat <<\\EOF", "a \\"], ["cat <<EOF", "a \\\\"]] as const) expect(sh(file(open, joined, "# x"), file(open, joined, "# y"))).toBe(true);
+  });
+
+  test("commentOnlyChange: a # line or a blank line between lines joined by a trailing backslash cuts the command", () => {
+    expect(sh(...put(5, "# note"))).toBe(false);
+    expect(sh(...put(6, "# note"))).toBe(false);
+    expect(sh(...put(6, ""))).toBe(false);
+    expect(sh(...put(4, "# before the command"))).toBe(true);
+    expect(sh(...put(7, "# after its last line"))).toBe(true);
+    expect(commentOnlyChange("aws/host/x.service", "[Service]\nExecStart=/bin/a \\\n  b\n", "[Service]\nExecStart=/bin/a \\\n# c\n  b\n")).toBe(false);
+  });
+
+  test("commentOnlyChange: inside a quoted string or a YAML block scalar, on the first line, or in a file the scanner cannot follow, nothing is a comment", () => {
+    const quoted = (...mid: string[]) => ["#!/bin/sh", "python3 -c \"", ...mid, "print(1)", "\"", "jq '", ...mid, ".a'", ""].join("\n");
+    expect(sh(quoted(), quoted("# in the string"))).toBe(false);
+    expect(sh("#!/bin/sh\nx=\"$(echo \"a\"\n)\"\n", "#!/bin/sh\nx=\"$(echo \"a\"\n# c\n)\"\n")).toBe(false);
+    // the interpreter line: a comment put above it, or the line itself reworded
+    expect(sh("#!/bin/sh\ntrue\n", "# first\n#!/bin/sh\ntrue\n")).toBe(false);
+    expect(sh("#!/bin/sh\ntrue\n", "#!/usr/bin/env python3\ntrue\n")).toBe(false);
+    // a code line, a trailing comment, a comment turned into code
+    expect(sh("#!/bin/sh\ntrue\n", "#!/bin/sh\ntrue\nrm -rf /var/x\n")).toBe(false);
+    expect(sh("#!/bin/sh\ntrue # a\n", "#!/bin/sh\ntrue # b\n")).toBe(false);
+    expect(sh("#!/bin/sh\n# rm -rf /var/x\n", "#!/bin/sh\nrm -rf /var/x\n")).toBe(false);
+    // a no-break space is no blank to the shell: the line is a command
+    expect(sh("#!/bin/sh\ntrue\n", "#!/bin/sh\n # x\ntrue\n")).toBe(false);
+    // not followed with certainty: backticks, an open string at the end, a here-document inside a string, CRLF
+    for (const odd of ["x=`date`", "echo \"open", "x=\"$(cat <<EOF\na\nEOF\n)\"", "true\r", "y=$((1 +\n2))", "echo a;# b"]) {
+      expect(sh(`#!/bin/sh\n${odd}\ntrue\n`, `#!/bin/sh\n${odd}\n# c\ntrue\n`)).toBe(false);
+    }
+    // YAML: a block scalar's lines, and a scalar continued over lines
+    const yml = (...mid: string[]) => ["write_files:", "  - content: |", "      Defaults x", ...mid, "      root ALL", "    path: /etc/sudoers.d/x", ""].join("\n");
+    expect(commentOnlyChange("aws/host/x.yml", yml(), yml("      #includedir /home/host/x"))).toBe(false);
+    expect(commentOnlyChange("aws/host/x.yml", yml(), yml("#includedir /home/host/x"))).toBe(false);
+    expect(commentOnlyChange("aws/host/x.yml", yml(), yml() + "# after\n")).toBe(true);
+    expect(commentOnlyChange("aws/host/x.yml", "a: one\n  two\n", "a: one\n# c\n  two\n")).toBe(false);
+    // no file on a side, no difference, or a kind of file where # is no comment
+    expect(sh(undefined as unknown as string, "#!/bin/sh\n")).toBe(false);
+    expect(commentOnlyChange("aws/host/x.sh", "#!/bin/sh\n", undefined)).toBe(false);
+    expect(sh("#!/bin/sh\n", "#!/bin/sh\n")).toBe(false);
+    expect(commentOnlyChange("aws/host/x.json", "{}\n", "{}\n# c\n")).toBe(false);
+  });
+
+  test("plainDiffHeader: a mode change, a rename, a new or removed file, a symlink or no section of the file is not a plain content change", () => {
+    const git = (...head: string[]) => ["diff --git a/aws/host/x.sh b/aws/host/x.sh", ...head, "@@ -1 +1 @@", "-# a", "+# b", ""].join("\n");
+    const names = ["--- a/aws/host/x.sh", "+++ b/aws/host/x.sh"];
+    expect(plainDiffHeader(git("index 1111111..2222222 100644", ...names), "aws/host/x.sh")).toBe(true);
+    expect(plainDiffHeader(`diff --git a/a.ts b/a.ts\nindex 1..2 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n${git("index 1111111..2222222 100755", ...names)}`, "aws/host/x.sh")).toBe(true);
+    expect(plainDiffHeader(git("old mode 100644", "new mode 100755", "index 1111111..2222222", ...names), "aws/host/x.sh")).toBe(false);
+    expect(plainDiffHeader(git("index 1111111..2222222 120000", ...names), "aws/host/x.sh")).toBe(false);
+    expect(plainDiffHeader(git("new file mode 100644", "index 0000000..2222222", "--- /dev/null", names[1]!), "aws/host/x.sh")).toBe(false);
+    expect(plainDiffHeader("diff --git a/aws/host/w.sh b/aws/host/x.sh\nsimilarity index 90%\nrename from aws/host/w.sh\nrename to aws/host/x.sh\nindex 1..2 100644\n--- a/aws/host/w.sh\n+++ b/aws/host/x.sh\n@@ -1 +1 @@\n-# a\n+# b\n", "aws/host/x.sh")).toBe(false);
+    expect(plainDiffHeader(git("index 1111111..2222222 100644", ...names), "aws/host/y.sh")).toBe(false);
+    expect(plainDiffHeader("", "aws/host/x.sh")).toBe(false);
+  });
+
+  test("a file is judged by its path before a rename too: product code moved into a test or fixture path is still asked", () => {
+    const of = (x: Partial<PrFacts["files"][number]> & { path: string }) => judge(base({ files: [{ additions: 1, deletions: 0, ...x }] }), off);
+    const moved = of({ path: "aws/fixtures/auth.ts", status: "renamed", previous: "aws/auth.ts" });
+    expect(moved).toMatchObject({ ask: ["security:words"], recheck: [] });
+    expect(moved.reasons).toEqual(["[聞く] セキュリティ（security:words）: aws/fixtures/auth.ts（改名前: aws/auth.ts）"]);
+    expect(of({ path: "packages/core/src/approval.test.ts", status: "renamed", previous: "packages/core/src/approval.ts" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    expect(of({ path: "aws/host/fixtures/sb-env.sh", status: "copied", previous: "aws/host/sb-env.sh" })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    // moved out of a guarded path to one no word meets: the old path is named
+    const away = of({ path: "packages/core/src/login.test.ts", status: "renamed", previous: "packages/core/src/auth.ts" });
+    expect(away.reasons).toEqual(["[聞く] セキュリティ（security:words）: packages/core/src/login.test.ts（改名前: packages/core/src/auth.ts）"]);
+    expect(of({ path: "docs/design/auth.md", status: "renamed", previous: "packages/core/src/auth.ts" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    // a test renamed to a test is still a test, on either path
+    expect(of({ path: "packages/core/src/login.test.ts", status: "renamed", previous: "packages/core/src/auth.test.ts" })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    expect(of({ path: "packages/core/src/auth.test.ts", status: "added" })).toMatchObject({ ask: [], recheck: ["security:tests"] });
+    expect(fileSecurityKinds({ path: "a/fixtures/token.json", additions: 0, deletions: 1, status: "removed" })).toEqual(["security:tests"]);
+  });
+
+  test("how the file changed is not known (no status, a type change, a rename with no old path): a test, a fixture or a document is asked", () => {
+    const of = (x: Partial<PrFacts["files"][number]> & { path: string }) => judge(base({ files: [{ additions: 1, deletions: 0, ...x }] }), off);
+    expect(of({ path: "packages/core/src/auth.test.ts" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    expect(of({ path: "packages/core/src/auth.test.ts", status: "changed" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    expect(of({ path: "aws/fixtures/auth.ts", status: "renamed" })).toMatchObject({ ask: ["security:words"], recheck: [] });
+    expect(of({ path: "aws/host/README.md" })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    // comment-only is a modified file's alone
+    expect(of({ path: "aws/host/offload.sh", commentOnly: true })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    expect(of({ path: "aws/host/offload.sh", commentOnly: true, status: "added" })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    expect(of({ path: "aws/host/offload.sh", commentOnly: true, status: "renamed", previous: "aws/host/off.sh" })).toMatchObject({ ask: ["security:host"], recheck: [] });
+    // a path no group meets stays no reason
+    expect(of({ path: "packages/core/src/tasks.test.ts" })).toMatchObject({ verdict: "merge", impact: "small" });
+  });
+
+  test("a rescue test a path word meets keeps the rescue recheck beside security:tests", () => {
+    const j = judge(base({ files: [{ path: "rescue/src/auth.test.ts", additions: 1, deletions: 0, status: "modified" }] }), off);
+    expect(j).toMatchObject({ ask: [], recheck: ["security:tests", "rescue"] });
+    expect(judge(base({ files: [{ path: "rescue/src/auth.ts", additions: 1, deletions: 0, status: "modified" }] }), off)).toMatchObject({ ask: ["security:words"], recheck: [] });
   });
 
   test("a path in two groups is in both", () => {
@@ -364,7 +542,7 @@ describe("security sub-kinds", () => {
 });
 
 describe("approved security sub-kind rechecks", () => {
-  const files = (...paths: string[]) => paths.map((path) => ({ path, additions: 1, deletions: 0 }));
+  const files = (...paths: string[]) => paths.map((path) => ({ path, additions: 1, deletions: 0, status: "modified" as const }));
   const marked = (paths: string[], rechecks: RecheckKind[]) => judge(base({ files: files(...paths), rechecks }), off);
 
   test.each([
@@ -413,7 +591,7 @@ describe("responsibility", () => {
     expect(j.reasons).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
   });
 
-  test("docs/design alone is not a responsibility file (the scope is the main review's, #4078)", () => {
+  test("docs/design alone is not a responsibility file (the scope is the main review's)", () => {
     const design = { path: "docs/design/x.md", additions: 1, deletions: 0 };
     expect(judge(base({ files: [design] }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
     const j = judge(base({ files: [design, { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 }] }), off);
@@ -555,11 +733,11 @@ describe("task scope", () => {
   const task = (named: string[], siblings: { number: number; paths: string[] }[] = []) => ({ numbers: [2346], named, siblings });
 
   test("outside the task: stops and lists every outside path in the PR's order; a directory covers what is under it", () => {
-    const files = ["z.ts", "ops-kit/src/x.ts", "scripts/a.ts", "b.ts", "scripts/a.test.ts"].map(file);
+    const files = ["z.ts", "ops-kit/src/x.ts", "scripts/a.ts", "b.ts", "scripts/c.test.ts"].map(file);
     const j = judge(base({ files, task: task(["ops-kit/", "scripts/a.ts"]) }), off);
     expect(j.verdict).toBe("stop");
     expect(j.impact).toBe("small");
-    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: z.ts, b.ts, scripts/a.test.ts"]);
+    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: z.ts, b.ts, scripts/c.test.ts"]);
   });
 
   test("outside the task: nothing outside adds no reason; two Tasks are both named", () => {
@@ -587,6 +765,126 @@ describe("task scope", () => {
   test("no task: a PR without one judges as before; a Task with no path does not stop and says so in notes", () => {
     expect(judge(base(), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
     expect(judge(base({ task: task([]) }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], notes: ["Task #2346 の本文からパスが読めない（範囲の検査をしていない）"] });
+  });
+});
+
+describe("task scope: companion files", () => {
+  const file = (path: string, more: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, ...more });
+  const task = (named: string[]) => ({ numbers: [2346], named, siblings: [] });
+  const named = task(["packages/core/src/x.ts"]);
+  const STOP = "Task #2346 の本文に名指しの無いファイル: ";
+  const scope = (r: string[]) => r.filter((x) => x.includes("名指しの無いファイル"));
+
+  test("the test next to a named file and a design document pass without being named, and the notes list them", () => {
+    const j = judge(base({ files: ["packages/core/src/x.ts", "packages/core/src/x.test.ts", "docs/design/y.md"].map((p) => file(p)), task: named }), off);
+    expect(j).toMatchObject({ verdict: "merge", reasons: [], notes: ["付いてくるファイル: packages/core/src/x.test.ts, docs/design/y.md"] });
+    expect(judge(base({ files: [file("apps/web/src/V.test.tsx")], task: task(["apps/web/src/V.tsx"]) }), off).reasons).toEqual([]);
+  });
+
+  test("code elsewhere, a test of a file not named, scripts, workflows and rescue stop as before, next to the companions' note", () => {
+    const outside = ["packages/core/src/z.ts", "packages/core/src/z.test.ts", "scripts/w.ts", ".github/workflows/ci.yml", "rescue/x.ts", "docs/other.md", "scripts/perf-budget.json", "ops.config.json"];
+    const j = judge(base({ files: ["packages/core/src/x.test.ts", ...outside].map((p) => file(p)), task: named }), off);
+    expect(scope(j.reasons)).toEqual([STOP + outside.join(", ")]);
+    expect(j.notes).toEqual(["付いてくるファイル: packages/core/src/x.test.ts"]);
+  });
+
+  test("ops.config.json passes only when it lists the PR's own files for the public copy and changes nothing else", () => {
+    const run = (configScope: PrFacts["configScope"], files = [file("docs/design/y.md", { status: "added" }), file("ops.config.json", { status: "modified" })]) => scope(judge(base({ files, task: named, configScope }), off).reasons);
+    expect(run({ added: ["docs/design/y.md"], removed: [], other: false })).toEqual([]);
+    // another line of the file (the merge gate's own setting), a path the PR does not add, a path it does not remove
+    expect(run({ added: ["docs/design/y.md"], removed: [], other: true })).toEqual([STOP + "ops.config.json"]);
+    expect(run({ added: ["private/"], removed: [], other: false })).toEqual([STOP + "ops.config.json"]);
+    expect(run({ added: [], removed: ["private/"], other: false })).toEqual([STOP + "ops.config.json"]);
+    // the change was not read: it stops
+    expect(run(undefined)).toEqual([STOP + "ops.config.json"]);
+    // a file the PR only modifies is not one it adds
+    expect(run({ added: ["docs/design/y.md"], removed: [], other: false }, [file("docs/design/y.md", { status: "modified" }), file("ops.config.json")])).toEqual([STOP + "ops.config.json"]);
+    // a rename: the new path comes in, the old one goes out; a removed file's line goes out
+    const moved = [file("docs/design/new.md", { status: "renamed", previous: "docs/design/old.md" }), file("docs/design/gone.md", { status: "removed" }), file("ops.config.json", { status: "modified" })];
+    expect(run({ added: ["docs/design/new.md"], removed: ["docs/design/old.md", "docs/design/gone.md"], other: false }, moved)).toEqual([]);
+  });
+
+  test("configScopeOf reads the two lists' paths and tells any other change apart", () => {
+    const cfg = (over: object = {}, sync: object = {}) => JSON.stringify({ mergeGate: "scripts/merge-gate.ts", publicSync: { target: "o/public", include: ["a.md"], exclude: ["private/"], ...sync }, ...over });
+    expect(configScopeOf(cfg(), cfg({}, { include: ["a.md", "docs/design/y.md"] }))).toEqual({ added: ["docs/design/y.md"], removed: [], other: false });
+    expect(configScopeOf(cfg(), cfg({}, { include: [], exclude: ["private/", "b.md"] }))).toEqual({ added: ["b.md"], removed: ["a.md"], other: false });
+    expect(configScopeOf(cfg(), cfg({}, { exclude: [] }))).toEqual({ added: [], removed: ["private/"], other: false });
+    expect(configScopeOf(cfg(), cfg({ mergeGate: "x.ts" })).other).toBe(true);
+    expect(configScopeOf(cfg(), cfg({}, { target: "o/other" })).other).toBe(true);
+    expect(configScopeOf(cfg(), cfg({ sharedFiles: ["a.ts"] })).other).toBe(true);
+    // a version that is not there or does not parse cannot be told: other
+    expect(configScopeOf("", cfg()).other).toBe(true);
+    expect(configScopeOf(cfg(), "{").other).toBe(true);
+  });
+
+  test("a companion's large reason stays: ops.config.json still asks for its recheck", () => {
+    const files = [file("packages/core/src/x.ts"), file("docs/design/y.md", { status: "added" }), file("ops.config.json", { status: "modified" })];
+    const j = judge(base({ files, task: named, configScope: { added: ["docs/design/y.md"], removed: [], other: false } }), off);
+    expect(j).toMatchObject({ verdict: "stop", impact: "large", recheck: ["responsibility"], notes: ["付いてくるファイル: docs/design/y.md, ops.config.json"] });
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
+  });
+});
+
+describe("shared files: a pass counts only while the base has not moved on a shared file the PR touches", () => {
+  /** main0 ← pr (touches server.ts and own.ts). After the pass on main0, main moves: `other` on another file, `server` on server.ts, `merged` = the PR's own commit landed (a rebase merge). */
+  let dir = "";
+  let url = "";
+  let clone = "";
+  const S: Record<string, string> = {};
+  const SHARED = ["src/server.ts"];
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "merge-gate-shared."));
+    url = join(dir, "gh.git");
+    clone = join(dir, "clone");
+    const a = join(dir, "author");
+    execFileSync("git", ["init", "-q", "--bare", url]);
+    execFileSync("git", ["init", "-q", "-b", "main", a]);
+    execFileSync("git", ["init", "-q", clone]);
+    for (const [k, v] of [["user.name", "t"], ["user.email", "t@example.com"], ["commit.gpgsign", "false"]]) git(a, "config", k!, v!);
+    mkdirSync(join(a, "src"));
+    const commit = (file: string, text: string) => {
+      writeFileSync(join(a, file), text);
+      git(a, "add", file);
+      git(a, "commit", "-q", "-m", `${file}: ${text}`);
+      return git(a, "rev-parse", "HEAD");
+    };
+    const at = (sha: string) => git(a, "checkout", "-q", "--detach", sha);
+    S.main0 = commit("src/server.ts", "a\nb\nc\nd\ne\n");
+    S.pr = commit("src/server.ts", "a\nb\nc\nd\ne mine\n");
+    S.quiet = (at(S.main0), commit("src/own.ts", "x\n"));
+    S.other = (at(S.main0), commit("src/other.ts", "o\n"));
+    S.server = commit("src/server.ts", "a theirs\nb\nc\nd\ne\n");
+    at(S.other);
+    git(a, "cherry-pick", S.pr);
+    S.merged = git(a, "rev-parse", "HEAD");
+    for (const [name, sha] of Object.entries(S)) git(a, "push", "-q", url, `${sha}:refs/heads/${name}`);
+  });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const verdict = async (head: string, baseTip: string, shared = SHARED) => {
+    const mark = { body: `[local-ci] pass ${head} base=${S.main0}`, createdAt: "2026-09-24T11:30:00Z" };
+    const local = await localCiOf(1, 1, [mark], async () => "", "o/r", async () => true, (passHead, passBase) => sharedMoved({ root: clone, url }, shared, passHead, passBase, baseTip));
+    return { local, j: judge(base({ checks: local.pass ? [{ name: "local-ci", conclusion: "SUCCESS" }] : [], ...(local.note ? { localCiNote: local.note } : {}), ...(local.pass ? { localCi: true } : {}) }), off) };
+  };
+
+  test("the base moved on a shared file the PR touches: the pass does not count and the reason names the file", async () => {
+    const { local, j } = await verdict(S.pr!, S.server!);
+    expect(local.pass).toBe(false);
+    expect(local.note).toContain("合流ファイルが base で進んだ: src/server.ts");
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons.some((r) => r.includes("合流ファイル"))).toBe(true);
+  });
+
+  test("the base moved on other files only, the PR touches no shared file, or there is no list: the pass counts as before", async () => {
+    expect((await verdict(S.pr!, S.other!)).j.verdict).toBe("merge");
+    expect((await verdict(S.quiet!, S.server!)).j.verdict).toBe("merge");
+    expect((await verdict(S.pr!, S.server!, [])).j.verdict).toBe("merge");
+    expect((await verdict(S.pr!, S.main0!)).j.verdict).toBe("merge");
+  });
+
+  test("the PR's own commit landing on the base (the rebase after a merge below it) is not the base moving", async () => {
+    expect(await sharedMoved({ root: clone, url }, SHARED, S.pr!, S.main0!, S.merged!)).toEqual([]);
   });
 });
 
@@ -640,6 +938,99 @@ describe("merge-gate readPr", () => {
     expect(calls.find((a) => a[0] === "api" && a[1]!.includes("/actions/runs"))![1]).toBe(`repos/${REPO}/actions/runs?head_sha=abc123&per_page=100`);
   });
 
+  /**
+   * A PR of host files as GitHub answers: the REST list (`rows`), the PR's whole diff (a section per file of `modes`:
+   * the header lines after `diff --git`) and each file whole at the merge base `mb1`, the base's tip `base1` and the head.
+   */
+  const hostPr = (rows: { filename: string; status: string; previous_filename?: string }[], texts: Record<string, Partial<Record<"mb1" | "base1" | "abc123", string>>>, modes: Record<string, string[]> = {}, mergeBase = "base1") => {
+    const asked: string[][] = [];
+    const run = async (args: string[]) => {
+      asked.push(args);
+      if (args.some((x) => x.includes("/pulls/1/files"))) return rows.map((x) => JSON.stringify(x)).join("\n");
+      if (args.includes("Accept: application/vnd.github.diff")) {
+        return rows.map((x) => [`diff --git a/${x.filename} b/${x.filename}`, ...(modes[x.filename] ?? ["index 1111111..2222222 100644"]), `--- a/${x.filename}`, `+++ b/${x.filename}`, "@@ -1 +1 @@", "-x", "+y", ""].join("\n")).join("");
+      }
+      if (args.some((x) => x.includes("/compare/"))) return `${mergeBase}\n`;
+      const at = args.find((x) => x.includes("/contents/"));
+      if (at) {
+        const m = /\/contents\/(.+)\?ref=(.+)$/.exec(at)!;
+        const text = texts[m[1]!]?.[m[2] as "mb1"];
+        if (text === undefined) throw new Error("404");
+        return text;
+      }
+      return JSON.stringify(args[0] === "pr" ? { ...view, baseRefOid: "base1", files: rows.map((x) => ({ path: x.filename, additions: 1, deletions: 1 })) } : args[1]?.includes("/actions/runs") ? runs : threads([]));
+    };
+    return { asked, facts: readPr(1, run) };
+  };
+  const security = (f: PrFacts) => judge(f, off).reasons.filter((r) => r.includes("セキュリティ"));
+  const BOOT = ["#!/bin/sh", "set -eu", "cat > /etc/sudoers.d/x <<SUDO", "host ALL=(root) NOPASSWD: /usr/bin/true", "SUDO", "curl \"$U\" \\", "  --checksum \"$S\"", ""];
+  const boot = (at: number, ...add: string[]) => [...BOOT.slice(0, at), ...add, ...BOOT.slice(at)].join("\n");
+
+  test("host files: each is read whole at the merge base and the head; a true comment edit is rechecked, a code line, an added file or a file not read is asked", async () => {
+    const host = ["aws/host/a.sh", "aws/host/b.sh", "aws/host/c.sh", "aws/host/d.sh"];
+    const x = hostPr(
+      [{ filename: host[0]!, status: "modified" }, { filename: host[1]!, status: "modified" }, { filename: host[2]!, status: "modified" }, { filename: host[3]!, status: "added" }],
+      {
+        [host[0]!]: { base1: BOOT.join("\n"), abc123: boot(2, "# why the file is written") },
+        [host[1]!]: { base1: BOOT.join("\n"), abc123: boot(2, "# words", "rm -rf /var/x") },
+        [host[2]!]: { base1: BOOT.join("\n") }, // the head's file is not read
+        [host[3]!]: { abc123: "# new\n" },
+      },
+    );
+    const f = await x.facts;
+    expect(f.files.map((y) => [y.status, y.commentOnly])).toEqual([["modified", true], ["modified", undefined], ["modified", undefined], ["added", undefined]]);
+    expect(security(f)).toEqual([
+      "[再チェック security:tests] セキュリティ（security:tests）: aws/host/a.sh",
+      expect.stringMatching(/^\[聞く\] セキュリティ（security:host）: aws\/host\/b\.sh, aws\/host\/c\.sh, aws\/host\/d\.sh/),
+    ]);
+    // a PR with no host file reads no diff and no file
+    calls.length = 0;
+    await readPr(1, fake(threads([])));
+    expect(calls.some((a) => a.some((s) => s.includes("vnd.github.diff") || s.includes("/contents/")))).toBe(false);
+  });
+
+  test("host files: a # line in the sudoers here-document, a # or blank line between continued lines, and a mode change are asked", async () => {
+    const asked = [expect.stringMatching(/^\[聞く\] セキュリティ（security:host）: aws\/host\/bootstrap\.sh/)];
+    const pr = (head: string, modes?: string[]) => hostPr([{ filename: "aws/host/bootstrap.sh", status: "modified" }], { "aws/host/bootstrap.sh": { base1: BOOT.join("\n"), abc123: head } }, modes ? { "aws/host/bootstrap.sh": modes } : {});
+    expect(security(await pr(boot(4, "#includedir /home/host/x")).facts)).toEqual(asked);
+    expect(security(await pr(boot(6, "# note")).facts)).toEqual(asked);
+    expect(security(await pr(boot(6, "")).facts)).toEqual(asked);
+    const comment = boot(5, "# where the download comes from");
+    expect(security(await pr(comment, ["old mode 100644", "new mode 100755", "index 1111111..2222222"]).facts)).toEqual(asked);
+    // the same comment edit with no mode change is the recheck
+    expect(security(await pr(comment).facts)).toEqual(["[再チェック security:tests] セキュリティ（security:tests）: aws/host/bootstrap.sh"]);
+  });
+
+  test("host files: the base moved on the file since the fork, or the PR's diff is not read: asked", async () => {
+    const path = "aws/host/bootstrap.sh";
+    const head = boot(5, "# where the download comes from");
+    const asked = [expect.stringMatching(/^\[聞く\] セキュリティ（security:host）: aws\/host\/bootstrap\.sh/)];
+    // the base's tip opened a here-document above the PR's line: the merged file is not the head's
+    const moved = hostPr([{ filename: path, status: "modified" }], { [path]: { mb1: BOOT.join("\n"), base1: "cat <<X\n" + BOOT.join("\n"), abc123: head } }, {}, "mb1");
+    expect(security(await moved.facts)).toEqual(asked);
+    const same = hostPr([{ filename: path, status: "modified" }], { [path]: { mb1: BOOT.join("\n"), base1: BOOT.join("\n"), abc123: head } }, {}, "mb1");
+    expect(security(await same.facts)).toEqual(["[再チェック security:tests] セキュリティ（security:tests）: aws/host/bootstrap.sh"]);
+    // no section of the file in the diff (GitHub cut it, or the path is quoted)
+    const cut = hostPr([{ filename: path, status: "modified" }], { [path]: { base1: BOOT.join("\n"), abc123: head } }, { [path]: ["index 1111111..2222222 100644", "--- a/other"] });
+    expect(security(await cut.facts)).toEqual(asked);
+  });
+
+  test("a rename is read with its old path (GitHub's REST list): product code moved into a fixture path, or out of a guarded path, is asked; an unknown status takes a test for no test", async () => {
+    const pr = (rows: { filename: string; status: string; previous_filename?: string }[]) => hostPr(rows, {}).facts;
+    const f = await pr([{ filename: "aws/fixtures/auth.ts", status: "renamed", previous_filename: "aws/auth.ts" }, { filename: "src/login.ts", status: "renamed", previous_filename: "src/auth.ts" }, { filename: "src/token.test.ts", status: "modified" }]);
+    expect(f.files.map((x) => [x.status, x.previous])).toEqual([["renamed", "aws/auth.ts"], ["renamed", "src/auth.ts"], ["modified", undefined]]);
+    expect(security(f)).toEqual([
+      "[再チェック security:tests] セキュリティ（security:tests）: src/token.test.ts",
+      "[聞く] セキュリティ（security:words）: aws/fixtures/auth.ts（改名前: aws/auth.ts）, src/login.ts（改名前: src/auth.ts）",
+    ]);
+    // a rename with no old path, a status GitHub does not document, and a file the list does not have
+    const odd = await pr([{ filename: "a/fixtures/auth.ts", status: "renamed" }, { filename: "b/auth.test.ts", status: "unknown" }]);
+    expect(odd.files.map((x) => x.status)).toEqual([undefined, undefined]);
+    expect(security(odd)).toEqual(["[聞く] セキュリティ（security:words）: a/fixtures/auth.ts, b/auth.test.ts"]);
+    const view2 = await readPr(1, async (args) => (args[0] === "pr" ? JSON.stringify({ ...view, files: [{ path: "b/auth.test.ts", additions: 1, deletions: 0 }] }) : args.some((s) => s.includes("/pulls/1/files")) ? "" : args[1]?.includes("/actions/runs") ? JSON.stringify(runs) : JSON.stringify(threads([]))));
+    expect(security(view2)).toEqual(["[聞く] セキュリティ（security:words）: b/auth.test.ts"]);
+  });
+
   test("another repository (--repo): the PR, its runs and its review threads are read there", async () => {
     calls.length = 0;
     await readPr(7, fake(threads([])), "acme/lib");
@@ -651,7 +1042,7 @@ describe("merge-gate readPr", () => {
     expect(calls.flat().join(" ")).not.toContain("switchboard");
   });
 
-  describe("the Tasks a PR closes (#2498)", () => {
+  describe("the Tasks a PR closes", () => {
     const labels = (...names: string[]) => ({ nodes: names.map((name) => ({ name })) });
     const issues: Record<number, unknown> = {
       5: {
@@ -674,6 +1065,28 @@ describe("merge-gate readPr", () => {
       if (args[1] === "graphql" && args.some((a) => a.includes("issue(number"))) return JSON.stringify({ data: { repository: { issue: issues[Number(n!.slice(2))] } } });
       return JSON.stringify(threads([]));
     };
+
+    test("a Task's PR that touches ops.config.json: each file's change and the file's two versions are read, and listing its own new document passes", async () => {
+      const cfg = (include: string[]) => JSON.stringify({ publicSync: { target: "o/p", include } });
+      const seen: string[][] = [];
+      const withConfig = (headInclude: string[]) => async (args: string[]) => {
+        seen.push(args);
+        if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ ...view, body: "Closes #5", headRefName: "x", baseRefOid: "base1", files: [{ path: "scripts/a.ts", additions: 1, deletions: 0 }, { path: "docs/design/y.md", additions: 1, deletions: 0 }, { path: "ops.config.json", additions: 1, deletions: 0 }] });
+        if (args.some((x) => x.includes("/pulls/1/files"))) return ['{"filename":"scripts/a.ts","status":"modified"}', '{"filename":"docs/design/y.md","status":"added"}', '{"filename":"ops.config.json","status":"modified"}'].join("\n");
+        if (args[1]?.includes("/compare/")) return "mb1\n";
+        if (args.some((x) => x.includes("contents/ops.config.json?ref=mb1"))) return cfg([]);
+        if (args.some((x) => x.includes("contents/ops.config.json?ref=abc123"))) return cfg(headInclude);
+        return gate({ body: "", headRefName: "" })(args);
+      };
+      const f = await readPr(1, withConfig(["docs/design/y.md"]));
+      expect(f.configScope).toEqual({ added: ["docs/design/y.md"], removed: [], other: false });
+      expect(f.files.map((x) => x.status)).toEqual(["modified", "added", "modified"]);
+      expect(judge(f, off).reasons.filter((r) => r.includes("名指しの無いファイル"))).toEqual([]);
+      expect(judge(f, off).notes).toEqual(["付いてくるファイル: docs/design/y.md, ops.config.json"]);
+      // a directory listed for the public copy is not a file the PR adds
+      const wide = await readPr(1, withConfig(["docs/"]));
+      expect(judge(wide, off).reasons.filter((r) => r.includes("名指しの無いファイル"))).toEqual(["Task #5 の本文に名指しの無いファイル: ops.config.json"]);
+    });
 
     test("Closes #N and the branch sb/<n>- name the same Task once; the PR's new top directory starts a path", async () => {
       const seen: string[][] = [];
@@ -707,7 +1120,7 @@ describe("merge-gate readPr", () => {
       const outside = await stop("zzz/other.ts", env);
       expect(outside.code).toBe(1);
       expect(outside.out).toContain("の本文に名指しの無いファイル: zzz/other.ts");
-      expect(posts).toEqual([{ url: "http://127.0.0.1:1/api/merge-grants/scope-stop", body: { taskId: "t1", issue: 5, pr: 12 } }]);
+      expect(posts).toEqual([{ url: "http://127.0.0.1:1/api/merge-grants/scope-stop", body: { taskId: "t1", repo: REPO, issue: 5, pr: 12 } }]);
       // the app failing or absent leaves the output as it is
       const failing = await stop("zzz/other.ts", env, () => { throw new Error("down"); });
       expect(failing).toEqual(outside);
@@ -738,13 +1151,13 @@ describe("merge-gate readPr", () => {
     expect(checksFromRuns([])).toEqual([]);
   });
 
-  describe("local CI in place of an Actions CI that never started or never ran (#387, #914, #2940, #3118)", () => {
+  describe("local CI in place of an Actions CI that never started or never ran", () => {
     const BASE = "3333333333333333333333333333333333333333";
     /**
-     * A real repository (#3118): `url` is "GitHub" (a bare one), `clone` the worktree merge-gate runs in (empty: it fetches
-     * what it judges by). `S`: named commits. main0 ← b1 ← b2 ← b3 is the stack (#1, #2, #3: one commit each, its own file);
-     * main1 is main after another commit and #1's rebase merge, b2r #2 rebased onto it by GitHub (another sha, the same
-     * diff); b2fix #2 with a fix commit on it, b2changed #2's commit made again with another diff, b2merge #2 with a merge
+     * A real repository: `url` is "GitHub" (a bare one), `clone` the worktree merge-gate runs in (empty: it fetches
+     * what it judges by). `S`: named commits. main0 ← b1 ← b2 ← b3 is the stack (`#1`, `#2`, `#3`: one commit each, its own file);
+     * main1 is main after another commit and `#1`'s rebase merge, b2r `#2` rebased onto it by GitHub (another sha, the same
+     * diff); b2fix `#2` with a fix commit on it, b2changed `#2`'s commit made again with another diff, b2merge `#2` with a merge
      * commit that changes a file; s1 a single PR on main0.
      */
     let dir = "";
@@ -776,7 +1189,7 @@ describe("merge-gate readPr", () => {
       S.b3 = commit("three", "3\n");
       S.b2fix = (at(S.b2), commit("two", "2 fixed\n"));
       S.b2changed = (at(S.b1), commit("two", "2 other\n"));
-      // #2 with #3's commit merged in, and a change made in the merge commit (as a conflict resolved there)
+      // `#2` with `#3`'s commit merged in, and a change made in the merge commit (as a conflict resolved there)
       at(S.b2);
       git(a, "merge", "-q", "--no-ff", "--no-commit", S.b3);
       writeFileSync(join(a, "two"), "2 resolved\n");
@@ -800,7 +1213,7 @@ describe("merge-gate readPr", () => {
     const owner = (bodies: string[]) => bodies.map((body, i) => ({ body, createdAt: `2026-09-24T11:3${i}:00Z`, authorAssociation: "OWNER" }));
     /**
      * PR `n` (head branch `b<n>`, head `head` and base tip `baseTip`, by default the stack's) and its stack: `above` = the
-     * open PRs per base branch (`b1: [2]` → #2 is on #1), the top's comments `top`. `comment` / `comments`: PR n's, by the
+     * open PRs per base branch (`b1: [2]` → `#2` is on `#1`), the top's comments `top`. `comment` / `comments`: PR n's, by the
      * owner, a minute apart. `runs: false` = no Actions run at all; `conclusion`: the one run's (default failure).
      * `root` / `from`: where merge-gate fetches to and from (default the clone and "GitHub").
      */
@@ -832,7 +1245,7 @@ describe("merge-gate readPr", () => {
         if (args[1]?.includes("/actions/runs")) return JSON.stringify(r);
         return JSON.stringify(threads([]));
       };
-      return { asked, run, read: (repo?: string) => readPr(n, run, repo, { root: opts.root ?? clone, url: opts.from ?? url }) };
+      return { asked, run, read: (repo?: string, held?: Parameters<typeof readPr>[4]) => readPr(n, run, repo, { root: opts.root ?? clone, url: opts.from ?? url }, held) };
     };
     const reasons = (f: PrFacts) => judge({ ...f, unresolvedThreads: 0 }, { allowLarge: false }).reasons;
     const SUCCESS = [{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }];
@@ -849,7 +1262,7 @@ describe("merge-gate readPr", () => {
       expect(reasons({ ...f, mergeState: "UNSTABLE", localCi: undefined })).toEqual(["mergeStateStatus が CLEAN でない: UNSTABLE"]);
     });
 
-    test("a narrowed pass counts as any pass: the comment's added lines change nothing (#3297)", async () => {
+    test("a narrowed pass counts as any pass: the comment's added lines change nothing", async () => {
       const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [], selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
       expect(await localCiOf(1, 1, [{ body, createdAt: "2026-11-01T00:00:00Z" }], async () => "", "o/r", async (h) => h === S.b1)).toEqual({ pass: true });
     });
@@ -857,7 +1270,7 @@ describe("merge-gate readPr", () => {
     test("an incremental pass of the head after a fix commit counts as any pass: the 増分 line changes nothing", async () => {
       const incremental = resultComment({ sha: S.b2fix!, base: BASE, ok: true, results: [], incremental: { pass: S.b2!, commits: 1, files: 1 }, selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
       expect(incremental).toContain(`増分: ${S.b2!.slice(0, 7)} の pass の後の 1 コミット（変更 1 ファイル）`);
-      // #2 is the top here: the fix commit is in the pass's head, with the same diff
+      // `#2` is the top here: the fix commit is in the pass's head, with the same diff
       const f = await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), incremental], steps: 0 }).read();
       expect(f.checks).toEqual(SUCCESS);
       expect(f.localCi).toBe(true);
@@ -895,6 +1308,23 @@ describe("merge-gate readPr", () => {
       expect(reasons(f)).toEqual([]);
     });
 
+    test("a pass whose steps came from the settings Switchboard keeps for the workspace (nothing in the repository, no Actions run) merges like any pass when those steps are the ones the person confirmed; with other steps, or none confirmed, it is no CI check", async () => {
+      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [{ name: "check", run: "make check", code: 0, seconds: 1, tail: "" }], source: { workspace: "lib", hash: "0123456789ab" } });
+      expect(body.split("\n")[0]).toBe(`[local-ci] pass ${S.b1} base=${BASE}`);
+      expect(body).toContain("手順の出どころ: Switchboard の側の設定（workspace `lib`、手順のハッシュ `0123456789ab`）");
+      const held = { workspace: "lib", version: "aaaaaaaaaaaa", ciHash: "0123456789ab", pending: null };
+      const f = await facts({ comment: body, steps: 0, runs: false }).read(undefined, held);
+      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
+      expect(reasons(f)).toEqual([]);
+      expect(f.held).toEqual(held);
+      // the same comment against other confirmed steps, or with nothing confirmed for the clone: the pass does not count
+      for (const other of [{ ...held, ciHash: "ffffffffffff" }, undefined]) {
+        const g = await facts({ comment: body, steps: 0, runs: false }).read(undefined, other);
+        expect(g.checks).toEqual([]);
+        expect(reasons(g)).toEqual(["CI のチェックが 1 つも無い", expect.stringContaining("利用者の確かめた設定の手順")]);
+      }
+    });
+
     test("no Actions run at all + the pass → one local-ci SUCCESS check; without it, no check", async () => {
       const f = await facts({ comment: pass(S.b1!), steps: 0, runs: false }).read();
       expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
@@ -910,7 +1340,7 @@ describe("merge-gate readPr", () => {
       expect(reasons(f)).toEqual([]);
     });
 
-    test("--repo: another repository's pass → SUCCESS, read from that repository (#1203)", async () => {
+    test("--repo: another repository's pass → SUCCESS, read from that repository", async () => {
       const x = facts({ steps: 0, above: { b1: [2] }, top: [pass(S.b2!)] });
       const f = await x.read("o/r");
       expect(f.checks).toEqual(SUCCESS);
@@ -961,7 +1391,7 @@ describe("merge-gate readPr", () => {
     });
 
     test("stack: a first-line-only pass on the top counts for the bottom and the middle; the top's newest fail does not", async () => {
-      // #1 ← #2 ← #3; only #3 has a result, by the owner (an outsider's newer pass on #3 does not count)
+      // `#1` ← `#2` ← `#3`; only `#3` has a result, by the owner (an outsider's newer pass on `#3` does not count)
       const x = facts({ steps: 0, above: STACK, top: [pass(S.b3!)] });
       const f = await x.read();
       expect(f.checks).toEqual(SUCCESS);
@@ -973,7 +1403,7 @@ describe("merge-gate readPr", () => {
     });
 
     test("stack: GitHub's rebase after the bottom merges still counts", async () => {
-      // #1 merged into main by rebase (after another commit); #2 is on main now: another sha, its commit's diff the same
+      // `#1` merged into main by rebase (after another commit); `#2` is on main now: another sha, its commit's diff the same
       const f = await facts({ n: 2, head: S.b2r, baseTip: S.main1, steps: 0, above: { b2: [3] }, top: [pass(S.b3!)] }).read();
       expect(f.checks).toEqual(SUCCESS);
       expect(reasons(f)).toEqual([]);
@@ -1111,16 +1541,16 @@ describe("merge-gate readPr", () => {
       expect((await read({ filename: "README.md" }).facts).designRulesTouched).toBe(true);
       const x = read({ filename: "README.md" }, "MODIFIED", "# T\nno rules here\n");
       expect((await x.facts).designRulesTouched).toBeUndefined();
-      expect(x.asked.some((a) => a.some((s) => s.includes("/pulls/1/files")))).toBe(false);
+      expect(x.asked.some((a) => a.some((s) => s.includes("select(.filename")))).toBe(false);
     });
 
     test("a new README, or none in the PR, reads nothing more", async () => {
       const x = read(null, "ADDED");
       expect((await x.facts).designRulesTouched).toBeUndefined();
-      expect(x.asked.some((a) => a.some((s) => s.includes("/pulls/1/files") || s.includes("/contents/")))).toBe(false);
+      expect(x.asked.some((a) => a.some((s) => s.includes("select(.filename") || s.includes("/contents/")))).toBe(false);
       calls.length = 0;
       await readPr(1, fake(threads([])));
-      expect(calls.some((a) => a.some((s) => s.includes("/pulls/1/files")))).toBe(false);
+      expect(calls.some((a) => a.some((s) => s.includes("select(.filename") || s.includes("/contents/")))).toBe(false);
     });
   });
 
@@ -1233,7 +1663,7 @@ describe("record marks", () => {
   test("[merge-ask] reads the kinds and the head sha on the first line", () => {
     expect(MERGE_ASK.exec(`[merge-ask] security,size ${SHA}`)?.slice(1)).toEqual(["security,size", SHA]);
     expect(MERGE_ASK.exec(`[merge-ask] design-rules ${SHA}\n\nPR #1 をマージしてよいか`)?.slice(1)).toEqual(["design-rules", SHA]);
-    // the security groups (PBI #1873)
+    // the security groups
     expect(MERGE_ASK.exec(`[merge-ask] security:lockfile,rescue ${SHA}`)?.slice(1)).toEqual(["security:lockfile,rescue", SHA]);
   });
 
@@ -1254,11 +1684,11 @@ describe("record marks", () => {
   });
 });
 
-describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
+describe("merge-gate reads GitHub, not the stored backlog", () => {
   test("it does not import the daemon's database or the stored backlog: a PR's head, reviews, checks and protection are read from gh each time", async () => {
     const src = await Bun.file(new URL("./merge-gate.ts", import.meta.url)).text();
     const imports = [...src.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
-    // a local change (--change, #2487) has no other place than the app: its view, through the kit's client, never a PR's
+    // a local change (--change) has no other place than the app: its view, through the kit's client, never a PR's
     expect(imports.filter((i) => /packages\/core|db|backlog|sqlite|parallel-guard/.test(i))).toEqual(["../ops-kit/src/backlog-client.ts"]);
     // readPr (a PR) never reads it
     expect(src.slice(src.indexOf("export async function readPr("), src.indexOf("/** A local change as")).includes("Backlog")).toBe(false);
@@ -1266,7 +1696,7 @@ describe("merge-gate reads GitHub, not the stored backlog (#909)", () => {
   });
 });
 
-describe("GitLab MR (#924)", () => {
+describe("GitLab MR", () => {
   const HEAD = "1".repeat(40);
   const BASE = "2".repeat(40);
   const lab = { service: "gitlab", host: "gitlab.example.com", repository: "group/app" };
@@ -1364,7 +1794,7 @@ describe("GitLab MR (#924)", () => {
   });
 });
 
-describe("local change (#2487)", () => {
+describe("local change", () => {
   const BACKLOG = "http://app/api/backlog";
   /** A repository with no remote: main, and a branch sb/5-x of `lines` added lines in one commit dated 2026-01-01. */
   function repo(lines = 3) {
@@ -1384,29 +1814,40 @@ describe("local change (#2487)", () => {
   }
   type Repo = ReturnType<typeof repo>;
   const REVIEW = { body: "[claude] review\n\n### Intent and design", createdAt: "2026-01-02T00:00:00Z" };
-  /** The app's answers: the workspace list, and change #7 with these comments and the tips of `r` now. */
-  function app(r: Repo, comments: { body: string; createdAt: string }[], state = "OPEN") {
+  /** The app's answers: the workspace list, and change `#7` with these comments and the tips of `r` now. */
+  type Stored = { number: number; labels: string[]; body: string; parent: number | null };
+  /** `github`: the workspace's Issues are GitHub's (`issues`, as last imported) and the change is numbered apart from them; `pr`: the PR it stands in for. */
+  type World = { github?: boolean; issues?: Stored[]; pr?: number; body?: string };
+  function app(r: Repo, comments: { body: string; createdAt: string }[], state = "OPEN", w: World = {}) {
     const calls: string[] = [];
-    const fetch = async (url: string) => {
-      const path = url.replace(BACKLOG, "");
+    const posts: Array<{ path: string; body: unknown }> = [];
+    const service = w.github ? "github" : "switchboard";
+    const fetch = async (url: string, init?: RequestInit) => {
+      const path = url.replace(BACKLOG, "").replace("http://app", "");
+      if (init?.method === "POST") {
+        posts.push({ path, body: JSON.parse(String(init.body)) });
+        return new Response("{}");
+      }
       calls.push(path);
       const body = path === "/syncs"
-        ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }
-        : { issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+        ? { syncs: [{ workspaceId: "ws_local", backlog: service, repository: w.github ? "acme/app" : "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }
+        : path.startsWith("/records")
+          ? { workspaceId: "ws_local", service, repository: w.github ? "acme/app" : "ws_local", project: { owner: "o", number: 0 }, fetchedAt: 1, top: [{ name: "src", dir: true }, { name: "a.ts", dir: false }], unread: [], pulls: [], comments: [], issues: (w.issues ?? []).map((i) => ({ title: "t", url: "", state: "OPEN", stateReason: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null, ...i })) }
+          : { workspaceId: "ws_local", issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: w.body ?? "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null, pr: w.pr ?? null, reportedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
       return new Response(JSON.stringify(body));
     };
-    return { fetch, calls };
+    return { fetch, calls, posts };
   }
   /** main --change 7 in `r` with gh failing the test if called. */
-  async function gate(r: Repo, comments: { body: string; createdAt: string }[], extra: string[] = [], state = "OPEN") {
-    const a = app(r, comments, state);
+  async function gate(r: Repo, comments: { body: string; createdAt: string }[], extra: string[] = [], state = "OPEN", w: World = {}) {
+    const a = app(r, comments, state, w);
     const out: string[] = [];
     const err: string[] = [];
     const ghCalls: string[][] = [];
     const run = async (args: string[]) => { ghCalls.push(args); throw new Error("gh called"); };
-    const code = await main(["--change", "7", ...extra], run, (s) => out.push(s), (s) => err.push(s), () => undefined, async () => { throw new Error("glab called"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: a.fetch });
+    const code = await main(["--change", "7", ...extra], run, (s) => out.push(s), (s) => err.push(s), () => undefined, async () => { throw new Error("glab called"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local", OPS_KIT_TASK_ID: "task_1" }, fetch: a.fetch });
     expect(ghCalls).toEqual([]);
-    return { code, j: out.length ? JSON.parse(out.join("\n")) : null, err: err.join("\n"), calls: a.calls };
+    return { code, j: out.length ? JSON.parse(out.join("\n")) : null, err: err.join("\n"), calls: a.calls, posts: a.posts };
   }
   const mark = (result: "pass" | "fail", r: Repo) => `[local-ci] ${result} ${r.tip("sb/5-x")} base=${r.tip("main")}\n\n結果`;
   const pass = (r: Repo, at = "2026-01-03T00:00:00Z") => ({ body: mark("pass", r), createdAt: at });
@@ -1423,7 +1864,8 @@ describe("local change (#2487)", () => {
     const g = await gate(r, [REVIEW, pass(r)]);
     expect(g.code).toBe(0);
     expect(g.j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
-    expect(g.calls).toEqual(["/syncs", "/7?workspaceId=ws_local"]);
+    // read as a change (never the Issue of the same number), and the workspace's stored Issues for the Task-scope check
+    expect(g.calls).toEqual(["/syncs", "/7?workspaceId=ws_local&change=1", "/records?workspaceId=ws_local"]);
   });
 
   test("(b) a commit after the review: no newer main review stops", async () => {
@@ -1484,6 +1926,132 @@ describe("local change (#2487)", () => {
     expect(marked.code).toBe(0);
   });
 
+  describe("host files and renames, from git alone", () => {
+    const HOST = ["#!/bin/sh", "set -eu", "cat > /etc/sudoers.d/x <<SUDO", "host ALL=(root) NOPASSWD: /usr/bin/true", "SUDO", "curl \"$U\" \\", "  --checksum \"$S\"", ""];
+    const host = (at: number, ...add: string[]) => [...HOST.slice(0, at), ...add, ...HOST.slice(at)].join("\n");
+    /** main has aws/host/bootstrap.sh and aws/auth.ts; the branch then does `change` in one commit. */
+    async function changed(change: (dir: string, git: Repo["git"]) => void) {
+      const r = fresh();
+      mkdirSync(join(r.dir, "aws", "host"), { recursive: true });
+      writeFileSync(join(r.dir, "aws", "host", "bootstrap.sh"), HOST.join("\n"));
+      writeFileSync(join(r.dir, "aws", "auth.ts"), "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n");
+      r.git("add", "-A");
+      r.git("commit", "-q", "-m", "host");
+      r.git("checkout", "-q", "sb/5-x");
+      r.git("merge", "-q", "--no-edit", "main");
+      change(r.dir, r.git);
+      r.git("add", "-A");
+      r.git("commit", "-q", "-m", "change");
+      r.git("checkout", "-q", "main");
+      const g = await gate(r, [REVIEW, pass(r)]);
+      return { ask: g.j.ask as string[], recheck: g.j.recheck as string[] };
+    }
+    const boot = (text: string) => (dir: string) => writeFileSync(join(dir, "aws", "host", "bootstrap.sh"), text);
+
+    test("a true comment edit of a host script is the recheck; a # line in its here-document or between continued lines is asked", async () => {
+      expect(await changed(boot(host(2, "# why the file is written", "")))).toEqual({ ask: [], recheck: ["security:tests"] });
+      expect(await changed(boot(host(4, "#includedir /home/host/x")))).toEqual({ ask: ["security:host"], recheck: [] });
+      expect(await changed(boot(host(6, "# note")))).toEqual({ ask: ["security:host"], recheck: [] });
+      expect(await changed(boot(host(6, "")))).toEqual({ ask: ["security:host"], recheck: [] });
+    });
+
+    test("a mode change with a comment edit is asked", async () => {
+      expect(await changed((dir) => {
+        boot(host(2, "# why the file is written"))(dir);
+        chmodSync(join(dir, "aws", "host", "bootstrap.sh"), 0o755);
+      })).toEqual({ ask: ["security:host"], recheck: [] });
+    });
+
+    test("product code renamed into a fixture path is asked by its old path (a rename is a file removed and a file added)", async () => {
+      expect(await changed((dir, git) => {
+        mkdirSync(join(dir, "aws", "fixtures"));
+        git("mv", "aws/auth.ts", "aws/fixtures/auth.ts");
+      })).toEqual({ ask: ["security:words"], recheck: ["security:tests"] });
+      // a test alone is the recheck
+      expect(await changed((dir) => writeFileSync(join(dir, "aws", "auth.test.ts"), "x\n"))).toEqual({ ask: [], recheck: ["security:tests"] });
+    });
+  });
+
+  // A change of a GitHub workspace made while GitHub could not be used: every stop a PR gets, it gets — from the app's stored
+  // Issues and git alone.
+  const TASK = (body: string): Stored[] => [{ number: 4, labels: ["type:pbi"], body: "", parent: null }, { number: 5, labels: ["type:task"], body, parent: 4 }, { number: 6, labels: ["type:task"], body: "触る場所: `a.ts`", parent: 4 }];
+  const CLOSES = "Closes #5";
+
+  test("github workspace (a): reviewed, a local-ci pass, the Task names the files: merge", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
+    expect([g.code, g.j.verdict, g.j.reasons]).toEqual([0, "merge", []]);
+  });
+
+  test("github workspace (b): a file the Task does not name stops, as a PR's does, and the stop is kept for the Task", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    writeFileSync(join(r.dir, "a.ts"), "a\nmore\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "outside");
+    r.git("checkout", "-q", "main");
+    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
+    expect(g.code).toBe(1);
+    expect(g.j.reasons).toEqual(["Task #5 の本文に名指しの無いファイル: a.ts（Task #6 が名指し）"]);
+    expect(g.posts).toEqual([{ path: "/api/merge-grants/scope-stop", body: { taskId: "task_1", repo: "acme/app", issue: 5, pr: 7 } }]);
+  });
+
+  test("github workspace (c): no review, no local-ci, a pass of an older head, a conflict — each stops", async () => {
+    const r = fresh();
+    const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/`") };
+    expect((await gate(r, [pass(r)], [], "OPEN", w)).j.reasons).toEqual([expect.stringContaining("より新しい主レビュー")]);
+    expect((await gate(r, [REVIEW], [], "OPEN", w)).j.reasons).toEqual(["CI のチェックが 1 つも無い"]);
+    const old = { body: `[local-ci] pass ${"a".repeat(40)} base=${r.tip("main")}`, createdAt: "2026-01-03T00:00:00Z" };
+    expect((await gate(r, [REVIEW, old], [], "OPEN", w)).j.reasons).toEqual(["CI のチェックが 1 つも無い", expect.stringContaining("今の head")]);
+    expect((await gate(r, [REVIEW, { body: mark("fail", r), createdAt: "2026-01-03T00:00:00Z" }], [], "OPEN", w)).code).toBe(1);
+    writeFileSync(join(r.dir, "src-conflict"), "x");
+    mkdirSync(join(r.dir, "src"), { recursive: true });
+    writeFileSync(join(r.dir, "src", "b.ts"), "other\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "main moved");
+    const dirty = await gate(r, [REVIEW, pass(r)], [], "OPEN", w);
+    expect(dirty.code).toBe(1);
+    expect(dirty.j.reasons).toContain("mergeStateStatus が CLEAN でない: DIRTY");
+  });
+
+  test("github workspace (d): a gate file asks the person, and --allow-large without the person's yes does not lift it", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    mkdirSync(join(r.dir, "scripts"));
+    writeFileSync(join(r.dir, "scripts", "merge-gate.ts"), "x\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "gate");
+    r.git("checkout", "-q", "main");
+    const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/merge-gate.ts`") };
+    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", w);
+    expect(g.code).toBe(1);
+    expect(g.j).toMatchObject({ impact: "large", ask: ["security:gates"], reasons: [expect.stringMatching(/^\[聞く\] セキュリティ（security:gates）: scripts\/merge-gate\.ts/)] });
+    const forced = await gate(r, [REVIEW, pass(r)], ["--allow-large"], "OPEN", w);
+    expect(forced.code).toBe(1);
+    expect(forced.j.reasons.join("\n")).toContain("[merge-answer] yes が無い: security:gates");
+  });
+
+  test("github workspace (e): a change that stands in for a PR is not merged here — its review threads cannot be read", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", { github: true, pr: 77, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
+    expect(g.code).toBe(1);
+    expect(g.j.reasons).toEqual([expect.stringContaining("PR #77 のレビュースレッドを読めない")]);
+    // and --allow-large does not lift it: it is no large reason
+    expect((await gate(r, [REVIEW, pass(r)], ["--allow-large"], "OPEN", { github: true, pr: 77, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") })).code).toBe(1);
+  });
+
+  test("github workspace (f): the Issue the change closes is not stored, or the app's records cannot be read: not judged, never a pass", async () => {
+    const r = fresh();
+    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", { github: true, body: "Closes #99", issues: TASK("x") });
+    expect([g.code, g.j]).toEqual([2, null]);
+    expect(g.err).toContain("#99 が保存されていない");
+    const a = app(r, [REVIEW, pass(r)], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
+    const down = async (url: string, init?: RequestInit) => (url.includes("/records") ? new Response("{}", { status: 500 }) : a.fetch(url, init));
+    const err: string[] = [];
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: down })).toBe(2);
+    expect(err.join("")).toContain("判定できなかった");
+  });
+
   test("not judged (2): not a change, a branch gone, a PR number or --repo or a merge mode with it", async () => {
     const r = fresh();
     for (const extra of [["12"], ["--repo", "a/b"], ["--merge"]]) expect((await gate(r, [REVIEW], extra)).code).toBe(2);
@@ -1509,9 +2077,9 @@ describe("reversibility table", () => {
   const table = () => JSON.parse(require("node:fs").readFileSync(REVERSIBILITY_PATH, "utf8"));
   const write = (name: string, t: unknown) => { const p = join(W, name); writeFileSync(p, JSON.stringify(t)); return p; };
 
-  test("derives the ask and recheck kinds from the table (the owner moved security:docs and security:lockfile to a recheck)", () => {
+  test("derives the ask and recheck kinds from the table (the owner moved security:docs, security:tests and security:lockfile to a recheck)", () => {
     expect(ASK_KINDS).toEqual(SECURITY_KINDS.filter((k) => !MOVED.includes(k)));
-    expect(RECHECK_KINDS).toEqual(["security:docs", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
+    expect(RECHECK_KINDS).toEqual(["security:docs", "security:tests", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
     expect(RECHECK_PASS.test(`[recheck] design-rules pass ${"a".repeat(40)}`)).toBe(true);
     expect(RECHECK_PASS.test(`[recheck] security:gates pass ${"a".repeat(40)}`)).toBe(false);
   });

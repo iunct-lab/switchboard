@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BacklogEditInput, type BacklogIssueData, type BacklogSource } from "@switchboard/protocol";
-import { BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue, isUnblocked, overlapIn, pickNext, readStoredBacklog, readStoredIssue, heldIn, workspaceSyncOf } from "./backlog.ts";
+import { PROCEED_CONFIRMED, PROCEED_OVERTURNED, proceedAnswerLine, proceedingAnswer } from "./backlog-comments.ts";
+import { storedEnds } from "./backlog-stored.ts";
+import { answerStoredDecision, BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue } from "./backlog-edit.ts";
+import { askWithdrawnPrereqs, mergePrereqs } from "./backlog-waits.ts";
+import { isUnblocked, overlapIn, pickNext, heldIn } from "./backlog-pick.ts";
+import { readStoredBacklog, readStoredIssue, workspaceSyncOf } from "./backlog-stored.ts";
+import { asksFromBacklog } from "./asks.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
 // The backlog read from what the last import stored: no GitHub involved — readStoredBacklog takes no gh at all.
@@ -160,7 +166,7 @@ describe("pickNext prerequisite", () => {
 
   test("A waits on B: B goes first, then A once B is done; B withdrawn holds A as stuck while C goes on", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #2"), ...pbi(2, "P1"), ...pbi(3, "P2")]);
-    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null, confirming: false }]);
+    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: [], confirming: false }]);
     expect(pick(ws)).toBe(2);
     expect(heldIn(readStoredBacklog(db, ws).items, "implement")).toMatchObject([{ item: { number: 1 }, pending: [{ number: 2 }], stuck: [] }]);
     db.putBacklogSnapshot(SOURCE, { records: [closed(2, "COMPLETED")], cursor: null, syncedAt: 6000 });
@@ -177,8 +183,8 @@ describe("pickNext prerequisite", () => {
       { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" },
     ]);
     expect(byNumber(ws)[1]!.prereqs).toEqual([
-      { number: 2, kind: "issue", need: "done", state: "pending", via: 10, confirming: false },
-      { number: 40, kind: "pr", need: "release", state: "unknown", via: 11, confirming: false },
+      { number: 2, kind: "issue", need: "done", state: "pending", via: [10], confirming: false },
+      { number: 40, kind: "pr", need: "release", state: "unknown", via: [11], confirming: false },
     ]);
     expect(pick(ws)).toBe(2);
     // released: Issue 11 is free to go, so the PBI goes on
@@ -187,23 +193,86 @@ describe("pickNext prerequisite", () => {
     expect(pickNext(released, "implement")?.item.number).toBe(1);
   });
 
+  test("a prerequisite named by several Tasks is listed once", () => {
+    const ws = imported([
+      ...pbi(1, "P0", "**前提**: #2", { subIssues: [12, 10, 11] }),
+      issue(10, ["type:task"], { body: "**前提**: #2" }), issue(11, ["type:task"], { body: "**前提**: #2, #3" }), issue(12, ["type:task"], { body: "**前提**: #2" }),
+      ...pbi(2, "P1"), ...pbi(3, "P1"),
+    ]);
+    // `#2` once, with the Tasks that name it in order; `#3` after it, named by one Task
+    expect(byNumber(ws)[1]!.prereqs).toEqual([
+      { number: 2, kind: "issue", need: "done", state: "pending", via: [10, 11, 12], confirming: false },
+      { number: 3, kind: "issue", need: "done", state: "pending", via: [11], confirming: false },
+    ]);
+    // so the firing's log and the row name it once
+    expect(heldIn(readStoredBacklog(db, ws).items, "implement").find((h) => h.item.number === 1)!.pending.map((p) => p.number)).toEqual([2, 3]);
+  });
+
+  test("mergePrereqs: the entry kept is the one that holds the PBI most (a cycle, else one not met), with every naming Task", () => {
+    const p = (state: "met" | "pending" | "cycle", via: number[], need: "done" | "release" = "done") => ({ number: 7, kind: "pr" as const, need, state, via, confirming: false });
+    expect(mergePrereqs([p("met", []), p("pending", [11], "release"), p("met", [10])])).toEqual([p("pending", [10, 11], "release")]);
+    expect(mergePrereqs([p("pending", [12]), p("cycle", [11]), p("pending", [11])])).toEqual([p("cycle", [11, 12])]);
+    expect(mergePrereqs([p("met", [])])).toEqual([p("met", [])]);
+  });
+
+  test("a withdrawn prerequisite asks once", () => {
+    const NOW = Date.parse("2026-11-01T00:00:00Z");
+    const ws = imported([
+      ...pbi(1, "P0", "**前提**: #2"), closed(2, "NOT_PLANNED"),
+      // in progress, the withdrawn one named by its open Task
+      issue(4, ["type:pbi"], { subIssues: [40] }), item(4, { Status: "In progress" }), issue(40, ["type:task"], { body: "**前提**: #2" }),
+      // on hold: left; pending or missing: not withdrawn
+      issue(5, ["type:pbi", "on-hold"], { body: "**前提**: #2" }), item(5, { Status: "Ready" }),
+      ...pbi(6, "P1", "**前提**: #7, #99"), ...pbi(7, "P1"),
+    ]);
+    const read = () => readStoredBacklog(db, ws).items;
+    const ops = () => db.listPendingBacklogOperations(SOURCE).map((o) => [o.kind, o.field, typeof (o.payload as { body?: unknown } | null)?.body === "string" ? (o.payload as { body: string }).body : o.payload]);
+    expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW)).toEqual([4, 1]);
+    const written = ops();
+    expect(written.map((o) => [o[0], o[1]])).toEqual([["comment", null], ["set", "label:needs-decision"], ["comment", null], ["set", "label:needs-decision"]]);
+    const text = written[2]![2] as string;
+    expect(text.startsWith("## 判断待ち\n**問い**: 前提 #2 は取り下げられた")).toBe(true);
+    expect(text).toContain("**進め方**: 止めて待つ");
+    expect(text).toContain("- A: 前提の行から #2 を外して進める");
+    expect(text).toContain("<!-- prereq-withdrawn:2 -->");
+    expect(written[0]![2]).toContain("前提 #2（Task #40 の前提） は取り下げられた");
+    // from this read on they are the person's questions, not 進められない
+    const items = read();
+    expect(items.filter((i) => i.stage === "needs-decision").map((i) => i.number).sort()).toEqual([1, 4]);
+    expect(heldIn(items, "implement").flatMap((h) => h.stuck.map((x) => `${h.item.number}:${x.number}`)).sort()).toEqual(["5:2", "6:99"]);
+    expect(asksFromBacklog(items, NOW).filter((a) => a.kind === "decision" && a.state === "open").map((a) => a.pbi!.number).sort()).toEqual([1, 4]);
+    // the next firing writes nothing more
+    expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW + 1000)).toEqual([]);
+    expect(ops()).toHaveLength(4);
+    // answered with the line left as it is: Ready again and held as before, but not asked a second time
+    answerStoredDecision(db, SOURCE, 1, "A", NOW + 2000);
+    expect(read().find((i) => i.number === 1)).toMatchObject({ stage: "ready", prereqs: [{ number: 2, state: "withdrawn" }] });
+    expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW + 3000)).toEqual([]);
+    // another prerequisite withdrawn later is a new question, about that one only
+    db.putBacklogSnapshot(SOURCE, { records: [issue(1, ["type:pbi"], { body: "**前提**: #2, #7" }), closed(7, "DUPLICATE")], cursor: null, syncedAt: 6000 });
+    expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW + 4000)).toEqual([6, 1]);
+    const last = ops().filter((o) => o[0] === "comment").map((o) => o[2] as string);
+    expect(last.at(-1)).toContain("**問い**: 前提 #7 は取り下げられた");
+    expect(last.at(-1)).not.toContain("prereq-withdrawn:2");
+  });
+
   test("A and D wait on each other: both are a cycle, and the independent C goes on", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #4"), ...pbi(4, "P0", "", { subIssues: [40] }), issue(40, ["type:task"], { body: "**前提**: #1" }), ...pbi(3, "P2")]);
     const items = byNumber(ws);
-    expect(items[1]!.prereqs).toEqual([{ number: 4, kind: "issue", need: "done", state: "cycle", via: null, confirming: false }]);
-    expect(items[4]!.prereqs).toEqual([{ number: 1, kind: "issue", need: "done", state: "cycle", via: 40, confirming: false }]);
+    expect(items[1]!.prereqs).toEqual([{ number: 4, kind: "issue", need: "done", state: "cycle", via: [], confirming: false }]);
+    expect(items[4]!.prereqs).toEqual([{ number: 1, kind: "issue", need: "done", state: "cycle", via: [40], confirming: false }]);
     expect(pick(ws)).toBe(3);
   });
 
   test("a closed PBI's open Tasks lead nowhere: A → B → closed C (whose open Task names A) is pending, not a cycle", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #2"), ...pbi(2, "P1", "**前提**: #3"), issue(3, ["type:pbi"], { state: "CLOSED", stateReason: "COMPLETED", subIssues: [30] }), issue(30, ["type:task"], { body: "**前提**: #1" })]);
-    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: null, confirming: false }]);
+    expect(byNumber(ws)[1]!.prereqs).toEqual([{ number: 2, kind: "issue", need: "done", state: "pending", via: [], confirming: false }]);
   });
 
   test("a prerequisite not stored is missing and holds; the fenced and the free-text ones are not read", () => {
     const ws = imported([...pbi(1, "P0", "**前提**: #99\n前提: #3 が Done"), ...pbi(3, "P2", "```\n**前提**: #1\n```")]);
     const items = byNumber(ws);
-    expect(items[1]!.prereqs).toEqual([{ number: 99, kind: null, need: "done", state: "missing", via: null, confirming: false }]);
+    expect(items[1]!.prereqs).toEqual([{ number: 99, kind: null, need: "done", state: "missing", via: [], confirming: false }]);
     expect(items[3]!.prereqs).toEqual([]);
     expect(pick(ws)).toBe(3);
   });
@@ -256,7 +325,7 @@ describe("pickNext overlap", () => {
 
   test("a PBI whose Task names a file an open PR changes is skipped; the next one that does not overlap is picked, and all overlapping picks nothing", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/b.ts"), pr(50, ["src/a.ts"], { closes: [9] })]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
     expect(byNumber(ws)[2]!.overlap).toBeNull();
     expect(pick(ws)).toBe(2);
     db.putBacklogSnapshot(SOURCE, { records: [pr(51, ["src/b.ts"])], cursor: null, syncedAt: 6000 });
@@ -265,9 +334,14 @@ describe("pickNext overlap", () => {
   });
 
   test("a Draft or needs-decision PR, and the PBI's own PR, are not the other work; a closed PR is gone from the next pick", () => {
-    const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, ["src/a.ts"], { isDraft: true }), pr(51, ["src/a.ts"], { labels: ["needs-decision"] }), pr(52, ["src/a.ts"], { closes: [10] }), pr(53, ["src/a.ts"], { closes: [1] })]);
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, ["src/a.ts"], { isDraft: true }), pr(51, ["src/a.ts"], { labels: ["needs-decision"] }), pr(53, ["src/a.ts"], { closes: [1] })]);
     expect(pick(ws)).toBe(1);
     db.putBacklogSnapshot(SOURCE, { records: [pr(54, ["src/a.ts"])], cursor: null, syncedAt: 6000 });
+    expect(pick(ws)).toBeNull();
+    // its only Task has an open PR of its own: the review and the merge are left, which no overlap holds
+    db.putBacklogSnapshot(SOURCE, { records: [pr(52, ["src/a.ts"], { closes: [10] })], cursor: null, syncedAt: 6500 });
+    expect(pick(ws)).toBe(1);
+    db.putBacklogSnapshot(SOURCE, { records: [pr(52, ["src/a.ts"], { closes: [10], state: "CLOSED" })], cursor: null, syncedAt: 6600 });
     expect(pick(ws)).toBeNull();
     db.putBacklogSnapshot(SOURCE, { records: [pr(54, ["src/a.ts"], { state: "MERGED" })], cursor: null, syncedAt: 7000 });
     expect(pick(ws)).toBe(1);
@@ -275,7 +349,7 @@ describe("pickNext overlap", () => {
 
   test("an In progress Task of another PBI is the other work unless it asks (needs-decision); a PR untouched for 72 hours does not hold", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts" }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task", "needs-decision"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
     expect(pick(ws)).toBe(1);
     db.putBacklogSnapshot(SOURCE, { records: [pr(61, ["src/a.ts"], { updatedAt: "2026-01-01T00:00:00Z" })], cursor: null, syncedAt: 7000 });
@@ -295,25 +369,25 @@ describe("pickNext overlap", () => {
     // both overlap: skipped, the hits of both
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/c.ts")), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }, { ref: "PR #50", path: "src/c.ts" }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }, { ref: "PR #50", path: "src/c.ts", working: true }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // the free one names the overlapping one: only that one can start, and the hit is its alone
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // the free one waits on another PBI: only the overlapping one can start
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // none can start: all the open Tasks as one, as before
     {
       const ws = imported([...two(task(10, 1, "src/a.ts", "\n\n**前提**: #70"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
     }
     // a Task naming no path is not judged, so it counts as free
     {
@@ -338,7 +412,7 @@ describe("pickNext overlap", () => {
     const read = (active?: (n: number) => boolean) => readStoredBacklog(db, ws, { active }).items;
     const at = (items: ReturnType<typeof read>, n: number) => items.find((i) => i.number === n)!;
     const on = read((n) => n === 1);
-    expect(at(on, 2).overlap).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts" }], unknown: null });
+    expect(at(on, 2).overlap).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true }], unknown: null });
     expect(at(on, 1).overlap).toBeNull();
     expect(at(on, 3).overlap).toBeNull();
     expect(pickNext(on.filter((i) => i.number !== 1), "implement")?.item.number).toBe(3);
@@ -371,11 +445,11 @@ describe("pickNext overlap", () => {
       stage("t_resume", 2, { status: "error", resumeAt: Date.now() + 3_600_000, resumeReason: "usage-limit" });
       expect(overlapOf(ws, 1)).toBeNull();
       db.updateTask("t_resume", { status: "running", resumeAt: null, resumeReason: null });
-      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "Task #20", path: "src/a.ts" }], unknown: null });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "Task #20", path: "src/a.ts", working: true }], unknown: null });
     });
 
     test("a running stage Task keeps its unstarted Tasks as other work", () => {
-      const hit = { hits: [{ ref: "Task #20", path: "src/a.ts" }], unknown: null };
+      const hit = { hits: [{ ref: "Task #20", path: "src/a.ts", working: true }], unknown: null };
       const ws = two();
       stage("t_run", 2);
       expect(overlapOf(ws, 1)).toEqual(hit);
@@ -410,7 +484,7 @@ describe("pickNext overlap", () => {
       const ws = imported([...pbi(1, "P0", "src/a.ts"), ...checking, prOf(61, [60], "MERGED", ["src/a.ts"])]);
       expect(overlapOf(ws, 1)).toBeNull();
       db.putBacklogSnapshot(SOURCE, { records: [prOf(62, [60], "OPEN", ["src/a.ts"])], cursor: null, syncedAt: 6000 });
-      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "PR #62", path: "src/a.ts" }], unknown: null });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "PR #62", path: "src/a.ts", working: true }], unknown: null });
     });
   });
 
@@ -427,12 +501,12 @@ describe("pickNext overlap", () => {
       issue(60, ["type:task"], { body: "fresh/component/ に足す", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }),
       pr(50, ["fresh/component/a.ts"], { isDraft: true }),
     ]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "fresh/component/" }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "fresh/component/", working: false }], unknown: null });
   });
 
   test("a PR that overlaps and one whose files are not all stored are both told: hits and the reason it cannot be judged", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, ["src/a.ts"]), pr(51, null)]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts" }], unknown: "PR #51 の変更ファイルが記録に無い" });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: "PR #51 の変更ファイルが記録に無い" });
   });
 
   test("a PBI whose Tasks name no path is not judged", () => {
@@ -698,5 +772,120 @@ describe("close with a reason", () => {
     expect(ok({ stateReason: "NOT_PLANNED" })).toBe(false);
     expect(ok({ state: "OPEN", stateReason: "NOT_PLANNED" })).toBe(false);
     expect(ok({ state: "CLOSED", stateReason: "DUPLICATE" })).toBe(false);
+  });
+});
+
+describe("questions the work goes on from with their recommendation", () => {
+  // a PBI's own question about its Tasks (the kind a PBI's Issue can carry; the kind is checked against where the question stands)
+  const GO = "## 判断待ち\n\n**問い**: どちらか\n**選択肢**:\n- A: 置き換える\n- B: 足す\n**推奨**: A — 戻せる\n**進め方**: 推奨で進める（種類: task-order） — 戻せる変更";
+  const WAIT = "## 判断待ち\n\n**問い**: 公開するか\n**進め方**: 止めて待つ — 公開";
+  const NOW = Date.parse("2026-10-06T00:00:00Z");
+  // the workspace's checkout: its top level is what a question's paths are read against (none: nothing goes on)
+  const checkout = () => { mkdirSync(join(dir, "checkout", "src"), { recursive: true }); return join(dir, "checkout"); };
+  const read = (ws: { id: string; name: string; path: string }) => readStoredBacklog(db, { ...ws, path: checkout() }, { now: NOW });
+
+  test("the declared kind is checked against where the question stands: a question on a Task that names a path outside that Task's, one on a PBI said to be an implementation choice, and any question without a checkout all wait", () => {
+    const impl = (more: string) => `${GO.replace("task-order", "implementation-choice")}\n${more}`;
+    const ws = imported([
+      issue(1, ["type:pbi"], { subIssues: [10, 11, 12] }), item(1, { Status: "In progress", Priority: "P0" }),
+      issue(10, ["type:task"], { parent: 1, body: "1. `src/a.ts`: 直す" }), comment(10, "c1", impl("`src/a.ts` の中の書き方"), "2026-10-05T00:00:00Z"),
+      issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress", Priority: "P0" }),
+      issue(20, ["type:task"], { parent: 2, body: "1. `src/a.ts`: 直す" }), comment(20, "c2", impl("```\nsed -i s/x/y/ src/b.ts\n```"), "2026-10-05T00:00:00Z"),
+      issue(3, ["type:pbi"]), item(3, { Status: "Ready", Priority: "P0" }), comment(3, "c3", impl(""), "2026-10-05T00:00:00Z"),
+    ]);
+    const b = read(ws);
+    expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toEqual({ 1: "in-progress", 2: "needs-decision", 3: "needs-decision" });
+    expect(b.items.find((i) => i.number === 2)!.decision).toMatchObject({ issue: 20 });
+    expect(b.proceeding!.map((q) => [q.issue.number, q.stopped])).toEqual([[10, null]]);
+    // the same records read without a checkout: the paths cannot be checked, so every one of them waits
+    expect(Object.fromEntries(readStoredBacklog(db, ws, { now: NOW }).items.map((i) => [i.number, i.stage]))).toEqual({ 1: "needs-decision", 2: "needs-decision", 3: "needs-decision" });
+  });
+
+  test("pickNext: an item with only a proceeding question (no label) is a candidate and is not asked as a waiting decision; one with a question that waits (labelled) is not picked", () => {
+    const ws = imported([
+      issue(1, ["type:pbi"]), item(1, { Status: "Ready", Priority: "P1" }), comment(1, "c1", GO, "2026-10-05T00:00:00Z"),
+      issue(2, ["type:pbi", "needs-decision"]), item(2, { Status: "Ready", Priority: "P0" }), comment(2, "c2", WAIT, "2026-10-05T00:00:00Z"),
+    ]);
+    const b = read(ws);
+    expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toEqual({ 1: "ready", 2: "needs-decision" });
+    expect(pickNext(b.items, "implement")?.item.number).toBe(1);
+    expect(b.proceeding).toEqual([{ workspaceId: ws.id, workspaceName: "app", issue: { number: 1, url: "https://github.com/acme/app/issues/1" }, pbi: { number: 1, title: "#1", url: "https://github.com/acme/app/issues/1", open: true }, body: GO, at: "2026-10-05T00:00:00Z", answer: null, closedAt: null, stopped: null }]);
+  });
+
+  test("a question that says 推奨で進める but that the reversibility table does not let go on (no kind, a kind not in the table, a safety word) holds its PBI like the label: not picked, asked as a waiting decision, not among the proceeding ones — until its ## 回答", () => {
+    const noKind = GO.replace(/（種類: [^）]+）/, "");
+    const unknown = GO.replace(/種類: [^）]+/, "種類: publish-release");
+    const safety = `${GO}\n- C: 古い表を削除する — 影響: 戻せない`;
+    expect(noKind).not.toBe(GO);
+    const ws = imported([
+      issue(1, ["type:pbi"]), item(1, { Status: "Ready", Priority: "P0" }), comment(1, "c1", noKind, "2026-10-05T00:00:00Z"),
+      issue(2, ["type:pbi"]), item(2, { Status: "Ready", Priority: "P0" }), comment(2, "c2", unknown, "2026-10-05T00:00:00Z"),
+      issue(3, ["type:pbi"]), item(3, { Status: "Ready", Priority: "P0" }), comment(3, "c3", safety, "2026-10-05T00:00:00Z"),
+      // a Task's question holds its in-progress PBI the same way
+      issue(4, ["type:pbi"], { subIssues: [40] }), item(4, { Status: "In progress", Priority: "P0" }), issue(40, ["type:task"], { parent: 4 }), comment(40, "c4", noKind, "2026-10-05T00:00:00Z"),
+      // answered: it no longer holds
+      issue(5, ["type:pbi"]), item(5, { Status: "Ready", Priority: "P3" }), comment(5, "c5", noKind, "2026-10-05T00:00:00Z"), comment(5, "c6", "## 回答\n\nA", "2026-10-05T01:00:00Z"),
+      // the table lets this one go on
+      issue(6, ["type:pbi"]), item(6, { Status: "Ready", Priority: "P2" }), comment(6, "c7", GO, "2026-10-05T00:00:00Z"),
+    ]);
+    const b = read(ws);
+    expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toMatchObject({ 1: "needs-decision", 2: "needs-decision", 3: "needs-decision", 5: "ready", 6: "ready" });
+    for (const n of [1, 2, 3]) expect(b.items.find((i) => i.number === n)!.decision).toMatchObject({ at: "2026-10-05T00:00:00Z", issue: n });
+    expect(b.items.find((i) => i.number === 4)!.decision).toMatchObject({ issue: 40 });
+    expect(pickNext(b.items, "implement")?.item.number).toBe(6);
+    expect(b.proceeding!.map((q) => [q.issue.number, q.stopped === null, q.answer === null]).sort()).toEqual([[5, false, false], [6, true, true]]);
+  });
+
+  test("a Task's question belongs to its parent PBI, closed Tasks too; a PBI closed within the day is listed as closed, one closed earlier is not; the newest question of a labelled Issue is the waiting one", () => {
+    const ws = imported([
+      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "In progress" }), issue(30, ["type:task"], { parent: 3, state: "CLOSED" }), comment(30, "c1", GO, "2026-10-04T00:00:00Z"),
+      issue(4, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-05T12:00:00Z" }), comment(4, "c2", GO, "2026-10-04T00:00:00Z"),
+      issue(5, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-01T00:00:00Z" }), comment(5, "c3", GO, "2026-09-30T00:00:00Z"),
+      // labelled by mistake with a proceeding line: the label says it waits, so it is the item's waiting decision only
+      issue(6, ["type:pbi", "needs-decision"]), comment(6, "c4", GO, "2026-10-03T00:00:00Z"), comment(6, "c5", GO.replace("どちらか", "次の問い"), "2026-10-04T00:00:00Z"),
+    ]);
+    const b = read(ws);
+    expect(b.proceeding!.map((q) => [q.issue.number, q.pbi.number, q.pbi.open, q.closedAt, q.at])).toEqual([
+      [30, 3, true, null, "2026-10-04T00:00:00Z"],
+      [4, 4, false, "2026-10-05T12:00:00Z", "2026-10-04T00:00:00Z"],
+      [6, 6, true, null, "2026-10-03T00:00:00Z"],
+    ]);
+    expect(b.items.find((i) => i.number === 6)).toMatchObject({ stage: "needs-decision", decision: { at: "2026-10-04T00:00:00Z" } });
+  });
+
+  test("answers: one that names its question answers that one only; one written by hand answers the newest question before it; a confirmation is not the answer a stage waits for", () => {
+    const q1 = "2026-10-03T00:00:00Z";
+    const q2 = "2026-10-04T00:00:00Z";
+    const confirm = `## 回答\n\n${proceedAnswerLine({ at: "2026-10-03T00:00:00.000Z", recommended: "A" }, { same: true, batch: true })}`;
+    expect(confirm).toBe(`## 回答\n\n${PROCEED_CONFIRMED} A（まとめて） — 問い 2026-10-03T00:00:00.000Z`);
+    expect(proceedAnswerLine({ at: q2, recommended: "A" }, { same: false, choice: "B" })).toBe(`${PROCEED_OVERTURNED} A → B — 問い ${q2}`);
+    expect(proceedAnswerLine({ at: q2, recommended: "A" }, { same: false, choice: null })).toBe(`${PROCEED_OVERTURNED} A → 自由文 — 問い ${q2}`);
+    const nodes = [{ body: GO, createdAt: q1 }, { body: GO, createdAt: q2 }, { body: confirm, createdAt: "2026-10-05T00:00:00Z" }];
+    expect(proceedingAnswer(nodes, { at: q1 })?.at).toBe("2026-10-05T00:00:00Z");
+    expect(proceedingAnswer(nodes, { at: q2 })).toBeNull();
+    const hand = [...nodes.slice(0, 2), { body: "## 回答\nB で", createdAt: "2026-10-05T00:00:00Z" }];
+    expect(proceedingAnswer(hand, { at: q1 })).toBeNull();
+    expect(proceedingAnswer(hand, { at: q2 })?.body).toBe("## 回答\nB で");
+
+    const ws = imported([issue(7, ["type:pbi"]), item(7, { Status: "Ready" }), comment(7, "c1", GO, q1), comment(7, "c2", confirm, "2026-10-05T12:00:00Z")]);
+    const b = read(ws);
+    expect(b.items[0]).toMatchObject({ number: 7, answeredAt: null });
+    expect(b.proceeding).toMatchObject([{ issue: { number: 7 }, answer: { at: "2026-10-05T12:00:00Z" } }]);
+    // answered more than a day ago: no longer listed
+    expect(readStoredBacklog(db, ws, { now: NOW + 2 * 86_400_000 }).proceeding).toEqual([]);
+  });
+
+  test("answerStoredDecision takes the label off only where it is on", () => {
+    imported([issue(8, ["type:pbi"]), issue(9, ["type:pbi", "needs-decision"])]);
+    answerStoredDecision(db, SOURCE, 8, "A");
+    answerStoredDecision(db, SOURCE, 9, "A");
+    expect(db.listPendingBacklogOperations(SOURCE).map((o) => [o.issue, o.kind, o.field])).toEqual([["I_8", "comment", null], ["I_9", "comment", null], ["I_9", "set", "label:needs-decision"]]);
+  });
+
+  test("storedEnds: a closed Issue, a merged and a closed PR have ended, with when; an open one and a number not stored have not", () => {
+    const pr = (n: number, state: "OPEN" | "CLOSED" | "MERGED", over: object = {}): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched", remote: { number: n, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-02T00:00:00Z", files: [], closedAt: null, mergedAt: null, ...over } });
+    const ws = imported([issue(1, ["type:pbi"]), issue(2, ["type:task"], { state: "CLOSED", closedAt: "2026-10-03T00:00:00Z" }), pr(11, "OPEN"), pr(12, "MERGED", { mergedAt: "2026-10-04T00:00:00Z" }), pr(13, "CLOSED", { closedAt: "2026-10-05T00:00:00Z" })]);
+    const end = storedEnds(db, ws);
+    expect([1, 2, 11, 12, 13, 99].map(end)).toEqual([null, { kind: "issue", state: "CLOSED", at: Date.parse("2026-10-03T00:00:00Z") }, null, { kind: "pr", state: "MERGED", at: Date.parse("2026-10-04T00:00:00Z") }, { kind: "pr", state: "CLOSED", at: Date.parse("2026-10-05T00:00:00Z") }, null]);
   });
 });

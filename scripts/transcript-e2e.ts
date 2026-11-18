@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/transcript-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * A long Task's transcript (#1142): a fake runner streams 1,000 events; the Task opens on its last 200 (the rows match
+ * A long Task's transcript: a fake runner streams 1,000 events; the Task opens on its last 200 (the rows match
  * foldTranscript of the daemon's tail), 「以前の会話を読む」 adds the pages before it (GET /api/tasks/:id?before=) without
  * moving the view, until the whole conversation is there and the button goes. A failed catch-up after a reconnect (its
  * ?after= read failed over CDP) drops the detail; it is read from its tail again and the button is back. A reply's end reads the rest only

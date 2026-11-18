@@ -7,9 +7,10 @@ import { join } from "node:path";
 import type { Attachment, Task, RunnerAdapter, RunnerId, StartOptions } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
-import { buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, FIX_SCOPE, fixTitle } from "./feedback.ts";
+import { buildBaselinePrompt, buildFeedbackPrompt, buildFixPrompt, buildNewRepoPrompt, feedbackTitle, fixScope, fixTitle } from "./feedback.ts";
+import { loadProcess } from "./process-defs.ts";
 import { workspaceBrief } from "./brief.ts";
-import { LOCAL_BACKLOG_RULES } from "./backlog.ts";
+import { LOCAL_BACKLOG_RULES, LOCAL_ISSUE_RULES } from "./backlog-prompt.ts";
 
 let core: CoreServer;
 let home: string;
@@ -142,28 +143,28 @@ test("fix: すぐ直す starts a 「直す: …」 Task with the brief, the text
   expect(prompt).toMatch(/## 出典\nフィードバックボタン「すぐ直す」、\d{4}-\d\d-\d\dT[^\n]+\n画面: Ledger/);
   expect(prompt).toContain(join(home, "attachments", task.id, "here.png"));
   expect(prompt).not.toContain("request-to-backlog");
-  expect(prompt).toContain(`画面: Ledger\n\n${FIX_SCOPE}`);
+  expect(prompt).toContain(`画面: Ledger\n\n${fixScope("other")}`);
 });
 
 test("fix: buildFixPrompt is the brief once, the text right after it, a blank line, the 出典, then how to carry it to main; fixTitle cuts at 40", () => {
   const when = new Date("2026-09-19T00:00:00Z");
   const brief = "あなたは X のリポジトリで作業しています。\nやってほしいこと:\n\n";
   expect(buildFixPrompt({ brief, text: "直して", when, screen: "Task「a\nb」(task_1)" })).toBe(
-    `あなたは X のリポジトリで作業しています。\nやってほしいこと:\n直して\n\n## 出典\nフィードバックボタン「すぐ直す」、2026-09-19T00:00:00.000Z\n画面: Task「a b」(task_1)\n\n${FIX_SCOPE}`,
+    `あなたは X のリポジトリで作業しています。\nやってほしいこと:\n直して\n\n## 出典\nフィードバックボタン「すぐ直す」、2026-09-19T00:00:00.000Z\n画面: Task「a b」(task_1)\n\n${fixScope("other")}`,
   );
-  expect(buildFixPrompt({ brief: "b\nやってほしいこと:", text: "t", when })).toBe(`b\nやってほしいこと:\nt\n\n## 出典\nフィードバックボタン「すぐ直す」、2026-09-19T00:00:00.000Z\n\n${FIX_SCOPE}`);
+  expect(buildFixPrompt({ brief: "b\nやってほしいこと:", text: "t", when })).toBe(`b\nやってほしいこと:\nt\n\n## 出典\nフィードバックボタン「すぐ直す」、2026-09-19T00:00:00.000Z\n\n${fixScope("other")}`);
   expect(fixTitle("あ".repeat(50))).toBe(`直す: ${"あ".repeat(40)}`);
 });
 
 test("fix scope names review sharing", () => {
-  expect(FIX_SCOPE).toContain("レビューの材料");
-  expect(FIX_SCOPE).toContain("追加のレビュアー");
+  expect(fixScope("other")).toContain("レビューの材料");
+  expect(fixScope("other")).toContain("追加のレビュアー");
 });
 
 test("fix scope leaves promotion to the repository's CLAUDE.md", () => {
-  expect(FIX_SCOPE).toContain("昇格はリポジトリの CLAUDE.md の決まりに従い");
-  expect(FIX_SCOPE).toContain("デーモンを再起動する pull、認証は Task の会話で聞く");
-  expect(FIX_SCOPE).not.toContain("昇格・デーモンの再起動");
+  expect(fixScope("other")).toContain("昇格はリポジトリの CLAUDE.md の決まりに従い");
+  expect(fixScope("other")).toContain("デーモンを再起動する pull、認証は Task の会話で聞く");
+  expect(fixScope("other")).not.toContain("昇格・デーモンの再起動");
 });
 
 test("fix: without a mode the request path is unchanged", async () => {
@@ -371,26 +372,65 @@ test("new-repo: packages/core has no repository-creation steps", () => {
 test("a request for a workspace without GitHub is filed in Switchboard, not in the GitHub repository", async () => {
   const when = new Date("2026-09-19T00:00:00Z");
   const local = buildFeedbackPrompt({ text: "x", when, local: true });
-  expect(local).toContain(LOCAL_BACKLOG_RULES);
+  expect(local).toContain(LOCAL_ISSUE_RULES);
+  expect(local).not.toContain(LOCAL_BACKLOG_RULES); // the request Task makes no PR: the PR half is not handed to it
   expect(local).toContain("GitHub には作らない");
   expect(local).not.toContain("gh repo view");
-  expect(buildFeedbackPrompt({ text: "x", when })).not.toContain(LOCAL_BACKLOG_RULES);
+  expect(buildFeedbackPrompt({ text: "x", when })).not.toContain(LOCAL_ISSUE_RULES);
   // through the API: the Task started for a workspace registered without GitHub carries the same rules
   const base = await boot();
   const dir = mkdtempSync(join(home, "local-"));
   const ws = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "local", backlog: "switchboard" }) })).json()) as { id: string };
   expect((await post(base, { text: "ローカルの要望", workspaceId: ws.id })).status).toBe(201);
   for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
-  expect(starts[0]!.prompt).toContain(LOCAL_BACKLOG_RULES);
+  expect(starts[0]!.prompt).toContain(LOCAL_ISSUE_RULES);
+  expect(starts[0]!.prompt).not.toContain("リポジトリの PR で行う");
   expect(starts[0]!.prompt).not.toContain("gh repo view");
 });
 
 test("a local request for a registered repository's workspace gets the local rules, not the GitHub ones", () => {
   const other = { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: ["triage_issue.sh"], copies: [] } };
   const p = buildFeedbackPrompt({ text: "x", when: new Date("2026-09-19T00:00:00Z"), other, local: true });
-  expect(p).toContain(LOCAL_BACKLOG_RULES);
+  expect(p).toContain(LOCAL_ISSUE_RULES);
+  expect(p).not.toContain(LOCAL_BACKLOG_RULES);
   expect(p).not.toContain("gh repo view");
   expect(p).not.toContain("gh variable get");
+});
+
+test("request and fix prompts by workspace kind: the PR rules of GitHub go only to the Task that makes a PR there", () => {
+  const when = new Date("2026-09-19T00:00:00Z");
+  const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
+  // a request Task files Issues and merges nothing: no PR, merge gate, local CI, release tag or rollback on any kind of workspace
+  for (const p of [buildFeedbackPrompt({ text: "x", when }), buildFeedbackPrompt({ text: "x", when, other }), buildFeedbackPrompt({ text: "x", when, local: true }), buildFeedbackPrompt({ text: "x", when, other, local: true })]) {
+    for (const w of ["リポジトリの PR で行う", "merge-gate", "local-ci", "release-tag", "rollback-pr", "ローカルの「変更」"]) expect(p).not.toContain(w);
+  }
+  // a fix carries its change to main: by a PR on GitHub, by the app's local change on a checkout without a remote
+  const fix = (o: { localForge?: boolean; localBacklog?: boolean }) => buildFixPrompt({ brief: "やってほしいこと:\n", text: "直して", when, ...o });
+  expect(fix({})).toContain("- PR の本文に上の利用者の言葉を引用し");
+  expect(fix({})).toContain("CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」");
+  expect(fix({})).not.toContain("ローカルの「変更」");
+  expect(fix({})).not.toContain("ops-kit backlog");
+  const local = fix({ localForge: true, localBacklog: true });
+  expect(local).toContain("PR の代わりにローカルの「変更」で");
+  expect(local).toContain("この依頼は、直した 変更 を main にマージするところまでを含みます。");
+  expect(local).toContain(LOCAL_ISSUE_RULES);
+  for (const w of ["リポジトリの PR で行う", "PR の本文", "PR の番号", "CLAUDE.md の「マージ判定とローカル CI」"]) expect(local).not.toContain(w);
+  // a backlog kept in the app on a checkout with a remote: the PR flow stays, the Issues go to the app
+  expect(fix({ localBacklog: true })).toContain(LOCAL_ISSUE_RULES);
+  expect(fix({ localBacklog: true })).toContain("- PR の本文に上の利用者の言葉を引用し");
+});
+
+test("request, fix and baseline prompts name the kit's skills where the Task's runner reads them", () => {
+  const when = new Date("2026-09-19T00:00:00Z");
+  const request = (runner: "claude" | "codex") => buildFeedbackPrompt({ text: "`.claude/skills/request-to-backlog/SKILL.md` を直して", when, runner });
+  expect(request("claude")).toContain("\n.claude/skills/request-to-backlog/SKILL.md に従って");
+  expect(request("codex")).toContain("\n.agents/skills/request-to-backlog/SKILL.md に従って");
+  expect(request("codex")).toContain(".agents/skills/pbi-to-tasks/SKILL.md で PBI を Ready にせよ");
+  // the person's words are not rewritten
+  expect(request("codex")).toContain("`.claude/skills/request-to-backlog/SKILL.md` を直して");
+  const fix = buildFixPrompt({ brief: "やってほしいこと:\n", text: ".claude/skills/task-to-pr/SKILL.md が古い", when, runner: "codex" });
+  expect(fix).toContain(".agents/skills/cross-runner-review/SKILL.md で");
+  expect(fix).toContain(".claude/skills/task-to-pr/SKILL.md が古い");
 });
 
 // developSelf off: this instance does not develop Switchboard itself
@@ -443,4 +483,15 @@ test("developSelf off: a request for another workspace still starts a Task", asy
   const r = await post(base, { text: "lib の要望", workspaceId: lib.id });
   expect(r.status).toBe(201);
   expect(await r.json() as Task).toMatchObject({ workspaceId: lib.id });
+});
+
+test("fix and baseline prompts name the reviewer by the review setting", () => {
+  const when = new Date("2026-09-19T00:00:00Z");
+  const other = { meta: "/work/switchboard", setup: { config: true, kit: [], copies: [] } };
+  for (const [review, has, lacks] of [["same", "同じランナーの新しいセッション", "別のランナー"], ["other", "別のランナー", "同じランナーの新しいセッション"]] as const) {
+    const fix = buildFixPrompt({ brief: "b\nやってほしいこと:", text: "t", when, review });
+    const baseline = buildBaselinePrompt("旅行の予定を共有する", { other, local: false, localForge: false, review }, loadProcess("p2-baseline"));
+    for (const prompt of [fix, baseline]) expect({ review, has: prompt.includes(`${has}にレビューさせ`), lacks: prompt.includes(lacks) }).toEqual({ review, has: true, lacks: false });
+    expect(fix).toContain(`を${has}と CLAUDE.md の追加のレビュアーに渡す`);
+  }
 });

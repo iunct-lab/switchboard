@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isMachineName } from "./machine.ts";
 
 export interface CoreConfig {
   /** Data directory: sqlite db, logs. Override with SWITCHBOARD_HOME. */
@@ -35,8 +36,13 @@ export interface CoreConfig {
   candidate: boolean;
   /** sb-rescue's address when it started this daemon from a release (SWITCHBOARD_RESCUE_URL): promotion goes through it. */
   rescueUrl?: string;
-  /** 人が開く救援画面の URL。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、Mac は rescueUrl。 */
+  /** 人が開く救援画面の URL。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、Mac は rescueUrl。コンテナの中（rescueInContainer）では無い。 */
   rescuePageUrl?: string;
+  /**
+   * sb-rescue answers on the container's own loopback only (SWITCHBOARD_RESCUE_IN_CONTAINER=1, set by container/entrypoint.sh):
+   * no address of it opens in a browser outside the container, so no page is named and the screen shows the commands that reach it.
+   */
+  rescueInContainer: boolean;
   /** Optional built web UI to serve when present. */
   webDist: string;
   /** How long a finished runner process is kept alive for follow-ups before it is released (then `--resume` is used). */
@@ -46,9 +52,15 @@ export interface CoreConfig {
   /** How long sb-dockerd may run with no container and no docker client before the daemon stops it (ms). */
   dockerdIdleMs: number;
   /**
+   * How long a Workspace's shell (the terminal opened without a Task) may stay with no socket attached and no input or
+   * output before it is closed and stops keeping the host from its idle stop (SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN,
+   * minutes; 30). A Task's shell ends with its Task instead.
+   */
+  workspaceShellIdleMs: number;
+  /**
    * The Markdown folder that is the source of truth for rules / commands / notes. Override with SWITCHBOARD_KNOWLEDGE.
    * Default ~/Knowledge, or <home>/Knowledge when the data folder is temporary (a test or a fake-runner daemon must not
-   * write into the user's Inbox).
+   * write into the user's notes).
    */
   knowledgeDir: string;
   /** Local API token file. Required on /api and /ws when `host` is not loopback. */
@@ -92,6 +104,96 @@ export interface CoreConfig {
   sessionPublicKey?: string;
   /** The cloud host's Starter (SWITCHBOARD_STARTER_URL): asked whether a login cookie's passkey is still registered. */
   starterUrl?: string;
+  /** Whether this daemon is one of two that share work through the uplink bucket, and as which (`loadUplink`). */
+  uplink: UplinkConfig;
+}
+
+/**
+ * How this daemon shares work with another machine's (SWITCHBOARD_UPLINK, and in this version only together with
+ * `UPLINK_PREVIEW`: see `loadUplink`). Unset, or set without that second variable = it is alone: nothing below is used
+ * and S3 is never asked.
+ *  - `send`: a work machine. It holds no record of its own for long and never writes to the backlog's service: its
+ *    Tasks' records and its backlog edits go to the uplink bucket, its backlog is a copy of the instance's.
+ *  - `receive`: the instance. It takes in what work machines put there.
+ * Both take a lease on a PBI before they start it (lease.ts).
+ */
+export interface UplinkConfig {
+  mode: "send" | "receive" | null;
+  /** This machine's name in what it sends and in its leases (SWITCHBOARD_MACHINE); the instance's default is `instance`. */
+  machine: string;
+  /**
+   * The instance only: the work machines it takes anything from, each with the repositories it is registered for
+   * (SWITCHBOARD_UPLINK_MACHINES, `parseMachines`). Empty = nothing is taken in from anyone and the bucket's `uplink/`
+   * and `backlog/` are never read. What a key or an object says about its machine is checked against this, never trusted.
+   */
+  machines: Record<string, string[]>;
+  /** SWITCHBOARD_UPLINK_BUCKET; empty on the instance = read from the parameter the template wrote. */
+  bucket: string;
+  /** How often a work machine sends and the instance takes in (SWITCHBOARD_UPLINK_INTERVAL_S; 5 and 10 minutes). */
+  intervalMs: number;
+  /** The most one delta holds before it is cut (SWITCHBOARD_UPLINK_MAX_BYTES); unset = uplink.ts's own. */
+  maxBytes?: number;
+  /** How long a lease lasts without being renewed, and how often it is renewed (SWITCHBOARD_LEASE_TTL_S 900, SWITCHBOARD_LEASE_RENEW_S 60). */
+  leaseTtlMs: number;
+  leaseRenewMs: number;
+  /** A work machine's copy of the instance's database: the Litestream replica's URL (SWITCHBOARD_REPLICA_URL) and how often it is taken (SWITCHBOARD_REPLICA_INTERVAL_S, 60 minutes). */
+  replicaUrl: string;
+  replicaIntervalMs: number;
+}
+
+/**
+ * `SWITCHBOARD_UPLINK_MACHINES`: `pc1=acme/app+acme/tools,pc2=acme/app` — each work machine the instance takes
+ * anything from, with the repositories (`owner/name`, compared without case) it may send backlog edits and Tasks for.
+ * A value that cannot be read stops the start: a registry read half would take in from a machine nobody named.
+ */
+export function parseMachines(raw: string, own: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const part of raw.split(",").map((p) => p.trim()).filter(Boolean)) {
+    const [name, repos = ""] = part.split("=");
+    const list = repos.split("+").map((r) => r.trim().toLowerCase());
+    if (!isMachineName(name) || name === own || name! in out || part.split("=").length !== 2 || list.length === 0 || list.some((r) => !/^[a-z0-9][a-z0-9._-]*\/[a-z0-9._-]+$/.test(r) || r.includes("..")))
+      throw new Error(`SWITCHBOARD_UPLINK_MACHINES: "${part}" is not <machine>=<owner/name>[+<owner/name>…] (a machine is named once and is not this one, "${own}")`);
+    out[name] = list;
+  }
+  return out;
+}
+
+/**
+ * The second variable sharing work needs in this version, with the one value it takes. `SWITCHBOARD_UPLINK` alone
+ * switches nothing on: the feature has not been tried against real AWS, and its conditions for deployment
+ * (docs/design/work-machine.md, "Before deployment") are not met — it is not for use until they are. Whoever sets this
+ * says they are running it before that, on purpose (the tests of the feature do).
+ */
+export const UPLINK_PREVIEW = { SWITCHBOARD_UPLINK_PREVIEW: "not-for-use" } as const;
+
+export function loadUplink(env: NodeJS.ProcessEnv = process.env, warn: (line: string) => void = (line) => console.warn(line)): UplinkConfig {
+  const asked = env.SWITCHBOARD_UPLINK ?? "";
+  if (asked !== "" && asked !== "send" && asked !== "receive") throw new Error(`SWITCHBOARD_UPLINK is "${asked}": it is "send" (a work machine), "receive" (the instance) or unset`);
+  // The one entrance of the feature. Without the second variable the mode is none, and everything that reads the mode
+  // (the bucket, the leases, the timers, the work machine's role) stays as on a daemon that runs alone.
+  const preview = env.SWITCHBOARD_UPLINK_PREVIEW === UPLINK_PREVIEW.SWITCHBOARD_UPLINK_PREVIEW;
+  // A work machine must not start as an instance of its own instead (it would write to the forge and decide by itself): it does not start.
+  if (asked === "send" && !preview) throw new Error(`SWITCHBOARD_UPLINK=send is not available in this version: a work machine is not for use until the conditions of docs/design/work-machine.md ("Before deployment") are met. This daemon does not start as a work machine, and it does not start alone in its place.`);
+  if (asked === "receive" && !preview) warn(`[uplink] SWITCHBOARD_UPLINK=receive is set, and sharing work with another machine is not available in this version (docs/design/work-machine.md, "Before deployment"): this daemon runs alone — nothing is read from or written to the uplink bucket, and no lease is taken`);
+  const raw = preview ? asked : "";
+  const mode = raw === "" ? null : raw;
+  const machine = env.SWITCHBOARD_MACHINE ?? (mode === "receive" ? "instance" : "");
+  if (mode && !isMachineName(machine)) throw new Error(`SWITCHBOARD_UPLINK=${mode} needs SWITCHBOARD_MACHINE: a name that starts with a letter or a digit and holds letters, digits, "_" and "-" (it is "${machine}")`);
+  if (mode === "send" && !env.SWITCHBOARD_UPLINK_BUCKET) throw new Error("SWITCHBOARD_UPLINK=send needs SWITCHBOARD_UPLINK_BUCKET");
+  const machines = mode === "receive" ? parseMachines(env.SWITCHBOARD_UPLINK_MACHINES ?? "", machine) : {};
+  const maxBytes = positiveOr(env.SWITCHBOARD_UPLINK_MAX_BYTES, 0);
+  return {
+    mode,
+    machine,
+    machines,
+    bucket: env.SWITCHBOARD_UPLINK_BUCKET ?? "",
+    intervalMs: positiveOr(env.SWITCHBOARD_UPLINK_INTERVAL_S, mode === "receive" ? 600 : 300) * 1000,
+    ...(maxBytes > 0 ? { maxBytes } : {}),
+    leaseTtlMs: positiveOr(env.SWITCHBOARD_LEASE_TTL_S, 900) * 1000,
+    leaseRenewMs: positiveOr(env.SWITCHBOARD_LEASE_RENEW_S, 60) * 1000,
+    replicaUrl: env.SWITCHBOARD_REPLICA_URL ?? "",
+    replicaIntervalMs: positiveOr(env.SWITCHBOARD_REPLICA_INTERVAL_S, 3600) * 1000,
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
@@ -113,7 +215,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     codeRoot,
     candidate: env.SWITCHBOARD_CANDIDATE === "1",
     rescueUrl: env.SWITCHBOARD_RESCUE_URL || undefined,
-    rescuePageUrl: env.SWITCHBOARD_RESCUE_URL ? (env.SWITCHBOARD_WEB_URL ? `${env.SWITCHBOARD_WEB_URL.replace(/\/+$/, "")}/rescue/` : env.SWITCHBOARD_RESCUE_URL) : undefined,
+    rescueInContainer: env.SWITCHBOARD_RESCUE_IN_CONTAINER === "1",
+    rescuePageUrl: env.SWITCHBOARD_RESCUE_URL && env.SWITCHBOARD_RESCUE_IN_CONTAINER !== "1" ? (env.SWITCHBOARD_WEB_URL ? `${env.SWITCHBOARD_WEB_URL.replace(/\/+$/, "")}/rescue/` : env.SWITCHBOARD_RESCUE_URL) : undefined,
     idleStopCmd: env.SWITCHBOARD_IDLE_STOP_CMD || undefined,
     edgeHeaderValue: env.SWITCHBOARD_EDGE_HEADER_VALUE || undefined,
     githubWebhook: env.SWITCHBOARD_GITHUB_WEBHOOK === "1",
@@ -125,6 +228,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     runnerIdleMs: numberOr(env.SWITCHBOARD_RUNNER_IDLE_MS, 10 * 60 * 1000),
     jobReviewIdleS: numberOr(env.SWITCHBOARD_JOB_REVIEW_IDLE_S, 900),
     dockerdIdleMs: positiveOr(env.SWITCHBOARD_DOCKERD_IDLE_MIN, 10) * 60_000,
+    workspaceShellIdleMs: positiveOr(env.SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN, 30) * 60_000,
     knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homeIsTemp ? home : homedir(), "Knowledge"),
     tokenPath: env.SWITCHBOARD_TOKEN_FILE ?? join(home, "token"),
     publicUrl: env.SWITCHBOARD_PUBLIC_URL,
@@ -134,6 +238,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     attachmentsDir: join(home, "attachments"),
     artifactsDir: join(home, "artifacts"),
     historyPollMs: numberOr(env.SWITCHBOARD_HISTORY_POLL_MS, 30_000),
+    uplink: loadUplink(env),
   };
 }
 

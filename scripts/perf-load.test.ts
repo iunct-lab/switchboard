@@ -18,7 +18,7 @@ afterEach(() => {
 const count = (db: Db, table: string) => (db.sqlite.query(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n;
 const SIZE = { tasks: 30, backlogRecords: 600, operations: 90 }; // 60 Issues: more than a page of the import's 50
 
-test("seedLoad makes the counts asked for (#2822)", async () => {
+test("seedLoad makes the counts asked for", async () => {
   const dir = home();
   const { taskIds } = await seedLoad(dir, SIZE);
   const db = new Db(join(dir, "switchboard.db"));
@@ -30,7 +30,7 @@ test("seedLoad makes the counts asked for (#2822)", async () => {
   db.close();
 });
 
-test("seedLoad: fewer Issues than the edits it keeps still makes the count asked for (#2822)", async () => {
+test("seedLoad: fewer Issues than the edits it keeps still makes the count asked for", async () => {
   const dir = home();
   await seedLoad(dir, { tasks: 2, backlogRecords: 50, operations: 40 });
   const db = new Db(join(dir, "switchboard.db"));
@@ -38,11 +38,11 @@ test("seedLoad: fewer Issues than the edits it keeps still makes the count asked
   db.close();
 });
 
-test("seedLoad refuses a count no number of Issues makes (#2822)", async () => {
+test("seedLoad refuses a count no number of Issues makes", async () => {
   await expect(seedLoad(home(), { tasks: 1, backlogRecords: 205, operations: 1 })).rejects.toThrow("tens");
 });
 
-test("loadGh: a new generation rewrites every Issue (#2822)", async () => {
+test("loadGh: a new generation rewrites every Issue", async () => {
   const dir = home();
   const { workspaceId } = await seedLoad(dir, SIZE);
   const db = new Db(join(dir, "switchboard.db"));
@@ -62,7 +62,7 @@ function lab(sync: () => Response) {
   return { server, sockets, d: { base: `http://127.0.0.1:${server.port}`, port: server.port!, home: home(), github: { generation: 0 }, workspaceId: "ws" } };
 }
 
-test("overlap: a stall of this process counts, from when /api/health was due (#2822)", async () => {
+test("overlap: a stall of this process counts, from when /api/health was due", async () => {
   const { server, sockets, d } = lab(() => Response.json({}));
   const ms = await overlap(d, async () => {
     await Bun.sleep(120);
@@ -75,13 +75,13 @@ test("overlap: a stall of this process counts, from when /api/health was due (#2
   expect(sockets.opened).toBeGreaterThan(0); // the rescue page's check ran: it is the one that opens /ws
 });
 
-test("overlap: an import that fails fails the run (#2822)", async () => {
+test("overlap: an import that fails fails the run", async () => {
   const { server, d } = lab(() => new Response("no GitHub", { status: 502 }));
   await expect(overlap(d, () => Bun.sleep(10))).rejects.toThrow("the import failed: 502");
   server.stop(true);
 });
 
-test("overlap: the window lasts until the import answers (#2822)", async () => {
+test("overlap: the window lasts until the import answers", async () => {
   let answered = false;
   const { server, d } = lab(() => Bun.sleep(150).then(() => ((answered = true), Response.json({}))) as unknown as Response);
   await overlap(d, async () => {});

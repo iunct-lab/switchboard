@@ -77,7 +77,7 @@ export function parseBridgeRequest(data: unknown): ParsedRequest {
   if (path.length > MAX_PATH) return bad("パスが長すぎます");
   if (!path.startsWith("/api/")) return bad("/api/ の下だけを読めます");
   // The checks below must see the path fetch will call. The URL parser drops a fragment, tabs and newlines and trims
-  // trailing spaces and controls (#3880): refuse those characters, and anything else it would rewrite (the check after decoding).
+  // trailing spaces and controls: refuse those characters, and anything else it would rewrite (the check after decoding).
   if (/[\u0000-\u0020\u007f#]/.test(path)) return bad("パスに空白・制御文字・# は使えません");
   // the checks are on the path part; the query only has to keep off `refresh`, which makes a read import from GitHub
   const q = path.indexOf("?");
@@ -99,7 +99,7 @@ export function parseBridgeRequest(data: unknown): ParsedRequest {
   if (q >= 0 && new URLSearchParams(path.slice(q + 1)).has("refresh")) return bad("取り次ぎでは refresh（GitHub からの取り込み）を使えません");
   if (method === "GET") return { ok: true, req: { type: "switchboard-api", id: d.id, method, path }, confirm: false };
   if (BRIDGE_REFUSED.some((r) => r.test(decoded))) return { ok: false, status: 403, why: "この操作は使い捨ての画面からはできません" };
-  // postMessage carries what JSON cannot (a cycle, a BigInt): refuse it here, before the confirm shows it (#3880)
+  // postMessage carries what JSON cannot (a cycle, a BigInt): refuse it here, before the confirm shows it
   try {
     JSON.stringify(d.body);
   } catch {

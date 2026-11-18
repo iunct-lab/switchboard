@@ -1,7 +1,15 @@
+// test-reads: apps/ packages/ scripts/ ops-kit/ rescue/ aws/
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { z } from "zod";
 import { AgentEvent, StopRecord } from "./events.ts";
-import { BacklogHeldEdit, BacklogSyncConflict, CloudSessionRef, CreateTaskInput, FlowPbi, PendingApproval, Settings } from "./model.ts";
+import { PendingApproval } from "./model/ask.ts";
+import { BacklogHeldEdit } from "./model/backlog-records.ts";
+import { BacklogSyncConflict } from "./model/backlog.ts";
+import { FlowPbi } from "./model/flow.ts";
+import { Settings } from "./model/settings.ts";
+import { CloudSessionRef, CreateTaskInput } from "./model/task.ts";
 
 test("creation defaults Local and preserves explicit Cloud", () => {
   expect(CreateTaskInput.parse({ title: "task", prompt: "explain" }).executionMode).toBe("local");
@@ -51,4 +59,23 @@ describe("what zod 4 changed, kept as zod 3 had it", () => {
     expect(StopRecord.parse(stop)).toMatchObject({ reason: "unknown", safety: "unknown", state: "waiting" });
     expect(StopRecord.parse({ ...stop, reason: "nope", safety: null, state: 1 })).toMatchObject({ reason: "unknown", safety: "unknown", state: "waiting" });
   });
+});
+
+test("the files under model/ are read through the package's entry point: nothing outside the package imports one of them by its path", () => {
+  const root = join(import.meta.dir, "..", "..", "..");
+  const sources = (dir: string, out: string[] = []): string[] => {
+    for (const name of readdirSync(dir)) {
+      if (name === "node_modules" || name === "dist" || name.startsWith(".")) continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) sources(p, out);
+      else if (/\.(ts|tsx)$/.test(name)) out.push(p);
+    }
+    return out;
+  };
+  const deep = /(?:from|import)\s*\(?\s*["'][^"']*protocol\/src\/model\//;
+  const found = ["apps", "packages", "scripts", "ops-kit", "rescue", "aws"]
+    .flatMap((d) => sources(join(root, d)))
+    .map((p) => relative(root, p))
+    .filter((p) => !p.startsWith("packages/protocol/") && readFileSync(join(root, p), "utf8").split("\n").some((l) => deep.test(l)));
+  expect(found).toEqual([]);
 });

@@ -3,7 +3,7 @@ import { claudeOnlyAction } from "./scheduleActions.ts";
 import { t } from "./i18n.ts";
 import { backlog as m } from "./i18n/backlog.ts";
 
-/** The edit form's values for one schedule row (#1480). Strings throughout: they are input values. */
+/** The edit form's values for one schedule row. Strings throughout: they are input values. */
 export type ScheduleDraft = { title: string; cron: string; workspaceId: string; runner: RunnerId; model: string; effort: string; budget: string; prompt: string };
 
 export const scheduleDraft = (s: Schedule): ScheduleDraft => ({
@@ -46,8 +46,8 @@ export function scheduleEditPatch(cur: Schedule, d: ScheduleDraft): { patch: Par
 }
 
 /**
- * The create form's body (#1924): the kinds that run on the meta workspace (backlog-next, secret-scan, insights) take the
- * meta workspace and no prompt; insights and ui-layers (#3353) run on claude whatever runner the form held (its select is locked, but the
+ * The create form's body: the kinds that run on the meta workspace (backlog-next, secret-scan, insights) take the
+ * meta workspace and no prompt; insights runs on claude whatever runner the form held (its select is locked, but the
  * saved defaults can land late) and keeps the model and effort the form shows — those are claude's, the form resets them
  * when the kind is chosen. A prompt schedule keeps its workspace and its trimmed prompt.
  */

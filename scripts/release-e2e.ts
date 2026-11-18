@@ -1,12 +1,12 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/release-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * Promoting from the settings screen (#1660): a fake sb-rescue runs the commit before HEAD, a fake runner keeps a Task
+ * Promoting from the settings screen: a fake sb-rescue runs the commit before HEAD, a fake runner keeps a Task
  * running, and the header's 「新しい版 →」, the 「動いている版」 section, the two-step confirmation and the Brief are
- * driven in headless Chrome. The daily promotion notice (#2148): with the Task running, a tag on HEAD is held by a
+ * driven in headless Chrome. The daily promotion notice: with the Task running, a tag on HEAD is held by a
  * backlog-next firing, and an approval-window firing shows 「昇格待ち: <tag>」 in 判断待ち, from where 「新しい版 →」 and
  * 「待たずに昇格する」 promote HEAD. SCREENSHOT=<file.png> also saves what the settings screen looked like, and
  * <file>-asks.png the 判断待ち with the notice.
- * A public copy's clone (#4569): the fixture's origin is a bare copy named like `publicSync.target`, the fake runner answers
+ * A public copy's clone: the fixture's origin is a bare copy named like `publicSync.target`, the fake runner answers
  * the check Task with the `switchboard-release-review` fence (v1.0.0: ok, v1.1.0: one concern), the first tag is promoted
  * by itself after the check and the second only through 「懸念を見たうえで更新する」 and its dialog. <file>-public.png is the
  * settings section at 390 px (phone width).
@@ -35,7 +35,7 @@ const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
   return new Response("no", { status: 404 });
 } });
 // Stays running until it is stopped, waiting on an approval: the Task counts as busy.
-// The public copy's check (#4569) is a read-only (`plan`) Task: it answers at once with the fence the prompt asks for.
+// The public copy's check is a read-only (`plan`) Task: it answers at once with the fence the prompt asks for.
 const checks: Array<{ cwd: string; permissionMode?: string; prompt: string }> = [];
 // A check answers once the gate is open, so a tag can be seen with its check still running.
 let openGate = () => {};
@@ -125,7 +125,7 @@ try {
   assert(mark === `新しい版 ${short} →`, `header mark: ${mark}`);
   await press(`document.querySelector('.new-version')`, "新しい版 →");
   await until(() => evaluate(`!!document.querySelector('#release')`), "the 動いている版 section");
-  // the cards are folded (#3849): the link opens the one it points at
+  // the cards are folded: the link opens the one it points at
   assert(await until(() => evaluate(`document.querySelector('#release').open`), "the 動いている版 section open"), "the section is folded");
   const ahead = await until(async () => { const t = await panelText(); return t.includes("1 コミット先") ? t : null; }, "1 コミット先");
   assert(ahead.includes("動いている版") && ahead.includes(`HEAD: ${short} feat: the newer version — 1 コミット先`), `section: ${ahead}`);
@@ -146,7 +146,7 @@ try {
   await until(() => core.db.listTasksByStatus("waiting").length + core.db.listTasksByStatus("running").length > 0, "the Task runs");
   await until(async () => (await panelText()).includes("動いている Task 1 件: 昇格するとデーモンが再起動します"), "the busy-task line");
 
-  // (c') the newest tag waits for the running Task; the daily firing (approval-window) tells it in 判断待ち (#2148)
+  // (c') the newest tag waits for the running Task; the daily firing (approval-window) tells it in 判断待ち
   git("tag", "v0.0.1", head);
   const post = (path: string, body: object) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const fire = async (title: string, action: string) => {
@@ -196,7 +196,7 @@ try {
   await until(async () => (await panelText()).includes("最新の版が動いています"), "最新の版が動いています");
   assert(await evaluate(`${byText("この版を昇格", "#release button")}.disabled`), "ahead 0 must disable the button");
 
-  // (f) a public copy's clone (#4569): origin is a bare copy named like publicSync.target; the new tags are checked first
+  // (f) a public copy's clone: origin is a bare copy named like publicSync.target; the new tags are checked first
   const bare = join(home, "fake-org", "pub-copy.git");
   mkdirSync(bare, { recursive: true });
   Bun.spawnSync(["git", "init", "-q", "--bare", bare]);

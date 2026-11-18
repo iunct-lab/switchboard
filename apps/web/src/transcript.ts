@@ -10,14 +10,14 @@ export type ToolResult = Extract<AgentEvent, { t: "tool.result" }>;
 /** What the `attachment` event carries; the bytes are at /api/attachments/:id. */
 export type AttachmentRef = { id: string; name: string; mime: string; size: number };
 
-/** `at` = the daemon's `ts` of the row's first event (#2254). A tool row's `endAt` is its result's; an end row's `durationMs` runs from the turn's first event. */
+/** `at` = the daemon's `ts` of the row's first event. A tool row's `endAt` is its result's; an end row's `durationMs` runs from the turn's first event. */
 export type Item = (
   | { kind: "user"; key: string; text: string; attachments?: AttachmentRef[] }
   | { kind: "assistant"; key: string; text: string; messageId?: string; attachments?: AttachmentRef[] }
   | { kind: "tool"; key: string; call?: ToolCall; result?: ToolResult; ask?: PermissionAsk; decision?: "allow" | "deny"; decidedBy?: "user" | "rule" | "timeout"; endAt?: number }
   | { kind: "end"; key: string; status: "ok" | "error" | "aborted"; summary?: string; durationMs: number; /** The `session.end` event's seq and the runner's pointer to the turn: where a fork can start. */ seq: number; turn?: string }
   | { kind: "note"; key: string; text: string; tone: "info" | "error" }
-  /** An artifact the agent registered with its fence (#1778): the row opens it on the 成果物 tab. */
+  /** An artifact the agent registered with its fence: the row opens it on the 成果物 tab. */
   | { kind: "artifact"; key: string; id: string; title: string }
 ) & { at?: number };
 
@@ -27,7 +27,7 @@ export interface Transcript {
   lastStatus?: string;
 }
 
-/** The instruction the task was started with (#1314): the first YOU row with text — a row of files alone is passed over. */
+/** The instruction the task was started with: the first YOU row with text — a row of files alone is passed over. */
 export function firstInstruction(items: Item[]): Extract<Item, { kind: "user" }> | undefined {
   return items.find((it): it is Extract<Item, { kind: "user" }> => it.kind === "user" && it.text !== "");
 }
@@ -39,7 +39,7 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
   const asksById = new Map<string, Extract<Item, { kind: "tool" }>>();
   const pending = new Map<string, PermissionAsk>();
   let lastStatus: string | undefined;
-  // Attachments (#125) are recorded just before the user message they went with; they fold into that row. Only a
+  // Attachments are recorded just before the user message they went with; they fold into that row. Only a
   // `status` (the daemon's scope note) or a `session.start` (a --resume restart) may sit between them; anything
   // else means the runner never echoed that turn (it failed at start), so the files get a row of their own.
   let attachments: AttachmentRef[] = [];
@@ -79,7 +79,7 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
       }
       case "message.delta": {
         // the reply to go on with: the last item — past the artifact rows a fence put there while the reply still streams
-        // (#1778: core records artifact.saved as soon as the closing line arrives), the reply that carried the fence
+        // (core records artifact.saved as soon as the closing line arrives), the reply that carried the fence
         let at = items.length - 1;
         while (at >= 0 && items[at]!.kind === "artifact") at--;
         const last = items[at];
@@ -148,7 +148,7 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
       case "status":
         lastStatus = ev.text;
         // compared with the daemon's status line
-        // and a reply put in the queue (#4595): the log says where it waits and what it said, until the runner echoes it
+        // and a reply put in the queue: the log says where it waits and what it said, until the runner echoes it
         if (ev.text.startsWith("Codex 自動審査: ") || ev.text.startsWith(REPLY_QUEUED)) items.push({ kind: "note", key, at: ts, tone: "info", text: ev.text });
         break;
       case "artifact.saved":
@@ -163,12 +163,12 @@ export function foldTranscript(events: EventEnvelope[]): Transcript {
   return { items, pending: [...pending.values()], lastStatus };
 }
 
-/** A span as the transcript shows it (#2254): under a second is `<1 秒`, the rest as the Brief's 所要時間. */
+/** A span as the transcript shows it: under a second is `<1 秒`, the rest as the Brief's 所要時間. */
 export function spanText(ms: number): string {
   return ms < 1000 ? t(m.underSecond) : fmtDuration(ms);
 }
 
-// What the copy buttons put on the clipboard (#695): the raw text, as the runner wrote it, never reformatted.
+// What the copy buttons put on the clipboard: the raw text, as the runner wrote it, never reformatted.
 
 /** A user or assistant row's text as it is (newlines and leading spaces kept); empty for the other rows. */
 export function itemText(it: Item): string {

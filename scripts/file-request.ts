@@ -69,7 +69,7 @@ export async function openRequests(deps: FileDeps = FILE_DEPS): Promise<OpenRequ
   });
 }
 
-/** What filing did (#1272): the new Issue's number (null when request_issue.sh printed none), or the open request with the same title (`#N` or a localId). */
+/** What filing did: the new Issue's number (null when request_issue.sh printed none), or the open request with the same title (`#N` or a localId). */
 export type Filed = { filed: number | null } | { open: string };
 
 /** The number in request_issue.sh's `要望を作成: #N` line, or null. */
@@ -80,7 +80,7 @@ export function filedNumber(out: string): number | null {
 
 export async function fileRequest(req: { title: string; body: string }, deps: FileDeps = FILE_DEPS): Promise<Filed> {
   const existing = alreadyFiled(req.title, await openRequests(deps));
-  if (existing !== null) return { open: existing }; // the caller says so (its own wording; #1272)
+  if (existing !== null) return { open: existing }; // the caller says so (its own wording)
   const dir = mkdtempSync(join(tmpdir(), "switchboard.file-request."));
   try {
     writeFileSync(join(dir, "body.md"), req.body);

@@ -9,11 +9,12 @@
  */
 import type { BacklogIssueData, BacklogPullRequestData, BacklogRecord, BacklogSource, Job, StopRecord } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
-import { ANSWER_HEADING } from "./backlog.ts";
+import { ANSWER_HEADING } from "./backlog-comments.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
 import { issueAnsweredAction, issueOf, JOB_KEY, openStops, type StopReport } from "./stops.ts";
-import { ResumeSupersededError, type TaskManager } from "./tasks.ts";
+import { ResumeSupersededError } from "./tasks/state.ts";
+import type { TaskManager } from "./tasks/manager.ts";
 import { isWorking } from "./task-status.ts";
 
 /** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
@@ -130,9 +131,13 @@ export function decisionIssueWaits(records: StopRecord[]): { stop: StopRecord; n
   });
 }
 
-/** The follow-up turn of a Task whose waits closed: it says what closed, and to look at the overlap again before going on. */
+/**
+ * The follow-up turn of a Task whose waits closed: it says what closed, and — when it waited for a PR or an Issue —
+ * to look at the overlap again before going on. A Task that waited for a date only held nothing another work could
+ * have taken meanwhile, so it is not told about the guard.
+ */
 export const dependsResumePrompt = (keys: string[], afters: string[] = []) =>
-  `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。並列ガードの overlap をやり直してから、中断した箇所から作業を続けてください。`;
+  `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。${keys.length ? "並列ガードの overlap をやり直してから、" : ""}中断した箇所から作業を続けてください。`;
 
 /**
  * The follow-up turn of a Task whose waited-for jobs ended: each job's result and summary (status, exit code, the

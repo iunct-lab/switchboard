@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "The cloud host's Starter Lambda (start / 作り直す) and its start page (#181). Not part of the daemon.",
+  "description": "The cloud host's Starter Lambda (start / 作り直す) and its start page. Not part of the daemon.",
   "scripts": {
     "build": "bun build starter.ts --target node --format esm --outfile ../dist/starter/index.mjs",
     "typecheck": "bun check -p tsconfig.json"

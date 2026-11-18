@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, AnswerPolicy, AskList, AskQuestion, Backlog, RunnerAdapter, RunnerId, RunnerSession } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 

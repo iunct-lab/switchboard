@@ -31,7 +31,7 @@ const refused = (i: PolicyInput, c: PolicyContext) => {
 const make = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => {
   const r = checkPolicy(input(), ctx());
   if (!r.ok) throw new Error(r.error);
-  return { ...r.policy, id: "p1", uses: [], ...over };
+  return { ...r.policy, id: "p1", uses: [], useCount: 0, firstUsedAt: null, ...over };
 };
 const ask = (over: Partial<Parameters<typeof matchPolicies>[1]> = {}) => ({ id: "a2", subject: exec, workspaceId: "w1", pbi: 938, pbiOpen: true, choices: [], ...over });
 
@@ -125,5 +125,17 @@ describe("answer policies", () => {
     for (let i = 0; i < 25; i++) list = recordUse(list, "p1", { at: i, askId: `a${i}`, taskId: null, issue: null, subject: exec });
     expect(list[0]!.uses).toHaveLength(20);
     expect(list[0]!.uses[0]!.at).toBe(24);
+  });
+
+  test("recordUse keeps the total and the first use past the newest 20", () => {
+    let list = [make(), make({ id: "p2" })];
+    expect(list[0]).toMatchObject({ useCount: 0, firstUsedAt: null });
+    for (let i = 1; i <= 21; i++) list = recordUse(list, "p1", { at: 1000 + i, askId: `a${i}`, taskId: null, issue: null, subject: exec });
+    expect(list[0]!.useCount).toBe(21);
+    expect(list[0]!.firstUsedAt).toBe(1001); // the first use, which the history no longer holds
+    expect(list[0]!.uses).toHaveLength(20);
+    expect(list[0]!.uses.at(-1)!.at).toBe(1002);
+    // the other policy is not counted
+    expect(list[1]).toMatchObject({ useCount: 0, firstUsedAt: null, uses: [] });
   });
 });

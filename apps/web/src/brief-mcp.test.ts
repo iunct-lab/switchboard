@@ -2,12 +2,12 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Task } from "@switchboard/protocol";
-import type { TaskDetail } from "./api.ts";
+import type { TaskDetail } from "./api/tasks.ts";
 import { Brief } from "./components/Brief.tsx";
 import { t } from "./i18n.ts";
 import { brief as m } from "./i18n/brief.ts";
 
-// The Brief names the MCP servers handed to the task's Claude (#2090): the user-wide ones are not.
+// The Brief names the MCP servers handed to the task's Claude: the user-wide ones are not.
 
 const noop = () => undefined;
 const task: Task = { id: "task_mcp", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, workspaceId: null, title: "t", runner: "claude", cwd: "/fixture", scope: ["/fixture"], status: "done", runnerSessionId: "sess-1", model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "finished", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 };
@@ -15,7 +15,7 @@ const detail = (t: Task, mcpServers: string[]): TaskDetail => ({ task: t, events
 const brief = (t: Task, mcpServers: string[]) => renderToStaticMarkup(createElement(Brief, { task: t, detail: detail(t, mcpServers), ledger: null, onAbort: noop, open: true, onClose: noop }));
 
 test("Brief: 渡す MCP lists the handed servers, なし when none, and no row for a Codex task", () => {
-  expect(brief(task, ["playwright", "docs"])).toContain("<span>渡す MCP</span><span title=\"mcp.yaml の servers から。ユーザー全体の ~/.claude.json の MCP は Task に渡さない（#2090）\">playwright、docs</span>");
+  expect(brief(task, ["playwright", "docs"])).toContain("<span>渡す MCP</span><span title=\"mcp.yaml の servers から。ユーザー全体の ~/.claude.json の MCP は Task に渡さない\">playwright、docs</span>");
   expect(brief(task, [])).toContain("なし（ユーザー全体の MCP は渡さない）");
   expect(brief({ ...task, runner: "codex" }, [])).not.toContain("渡す MCP");
 });
@@ -32,7 +32,7 @@ test("Brief: a Codex task has no Workspace MCP heading at all", () => {
   expect(brief({ ...task, runner: "codex" }, [])).not.toContain("Workspace MCP");
 });
 
-test("Brief: 操作 の欄は差分タブを指すだけで、Phase の予告を出さない (#3667)", () => {
+test("Brief: 操作 の欄は差分タブを指すだけで、Phase の予告を出さない", () => {
   const html = brief(task, []);
   expect(html).toContain("変更したファイルは「差分」タブに。</div>");
   expect(html).not.toMatch(/Phase ?\d/);

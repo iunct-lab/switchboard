@@ -24,7 +24,7 @@ test("a reply that waits for a run slot shows its queue line (reason, place, the
   expect(t.items.at(-1)).toMatchObject({ kind: "note", tone: "info", text: queued });
 });
 
-describe("foldTranscript attachments (#125)", () => {
+describe("foldTranscript attachments", () => {
   test("attachment rows fold into the user message that follows, across the daemon's status note and a --resume session.start", () => {
     const t = foldTranscript(env([att("a"), { t: "status", text: "scope widened" }, att("b"), { t: "session.start", runner: "claude", cwd: "/x" }, user("look")]));
     expect(t.items).toEqual([{ kind: "user", key: "5", at: 0, text: "look", attachments: [expect.objectContaining({ id: "a" }), expect.objectContaining({ id: "b" })] }]);
@@ -48,7 +48,7 @@ describe("foldTranscript attachments (#125)", () => {
   });
 });
 
-describe("firstInstruction (#1314)", () => {
+describe("firstInstruction", () => {
   test("the first YOU row is the instruction, not a later reply", () => {
     const t = foldTranscript(env([{ t: "session.start", runner: "claude", cwd: "/x" }, user("最初の指示\n二行目"), { t: "message.delta", role: "assistant", text: "ok" }, user("返信")]));
     expect(firstInstruction(t.items)).toEqual({ kind: "user", key: "2", at: 1, text: "最初の指示\n二行目" });
@@ -124,7 +124,7 @@ describe("copy text", () => {
   });
 });
 
-describe("assistant generated attachments (#124)", () => {
+describe("assistant generated attachments", () => {
   const said = (text: string): AgentEvent => ({ t: "message.delta", role: "assistant", text });
   // what core records for a runner file it registers: the absolute path, then an attachment named after it
   const file = (id: string): AgentEvent => ({ t: "artifact", kind: "file", path: `/generated/${id}.png` });
@@ -175,7 +175,7 @@ describe("assistant generated attachments (#124)", () => {
   });
 });
 
-describe("artifact.saved (#1778)", () => {
+describe("artifact.saved", () => {
   test("becomes an artifact row after the reply that carried the fence, with the id to open and the title", () => {
     const t = foldTranscript(env([user("作って"), { t: "message.delta", role: "assistant", text: "できました。\n```switchboard-artifact\n{\"path\":\"report.html\"}\n```\n" }, { t: "artifact.saved", id: "art_1", title: "週報" }, { t: "session.end", status: "ok" }]));
     expect(t.items.map((it) => it.kind)).toEqual(["user", "assistant", "artifact", "end"]);
@@ -201,7 +201,7 @@ describe("artifact.saved (#1778)", () => {
   });
 });
 
-describe("times (#2254)", () => {
+describe("times", () => {
   const at = (pairs: [number, AgentEvent][]): EventEnvelope[] => pairs.map(([ts, ev], i) => ({ taskId: "t", seq: i + 1, ts, ev }));
   const call: AgentEvent = { t: "tool.call", id: "c1", name: "Bash", input: {}, summary: "ls" };
   const result: AgentEvent = { t: "tool.result", id: "c1", ok: true, summary: "" };

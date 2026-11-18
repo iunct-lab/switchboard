@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bumpType, latestSemver, nextVersion, releaseNotes, repairReleases, run, withReleaseLock, type Sh } from "./release-tag";
+import { bumpType, latestSemver, mergedCommitOf, nextVersion, parseTarget, releaseNotes, repairReleases, run, targetSha, withReleaseLock, type Sh } from "./release-tag";
 
 describe("release-tag bumpType", () => {
   test("feat only → minor", () => expect(bumpType(["feat(web): a"])).toBe("minor"));
@@ -357,5 +357,60 @@ describe("release-tag repairReleases", () => {
     const f = fake([]);
     const sh: Sh = (cmd, input) => (cmd.join(" ").startsWith("gh release create") ? { ok: false, out: "" } : f.sh(cmd, input));
     expect(() => repairReleases(sh)).toThrow("failed: gh release create v1.3.0");
+  });
+});
+
+describe("release-tag --pr", () => {
+  function fake(answers: Record<string, { ok?: boolean; out?: string }>) {
+    const calls: string[] = [];
+    const sh: Sh = (cmd) => {
+      const c = cmd.join(" ");
+      calls.push(c);
+      const key = Object.keys(answers).find((k) => c.startsWith(k));
+      const a = key ? answers[key]! : {};
+      return { ok: a.ok ?? true, out: a.out ?? "" };
+    };
+    return { sh, calls };
+  }
+  const writes = (calls: string[]) => calls.filter((c) => c.startsWith("git tag v") || c.startsWith("git push") || c.startsWith("gh release create"));
+
+  test("--pr tags the merge commit of a merged PR", () => {
+    // origin/main has moved on to c2; the PR's merge commit is c1
+    const f = fake({
+      "gh pr view 7": { out: "MERGED c1" },
+      "git rev-parse origin/main": { out: "c2" },
+      "git tag -l": { out: "v0.3.0" },
+      "git tag --points-at": { out: "" },
+      "git merge-base --is-ancestor c1 origin/main": { ok: true },
+      "git merge-base": { ok: false },
+      "git log": { out: "c1\tfix: y" },
+    });
+    const t = parseTarget(["--pr", "7", "--repo", "o/r"])!;
+    expect(t).toEqual({ pr: 7, repo: "o/r" });
+    const sha = targetSha(t, f.sh);
+    expect(sha).toBe("c1");
+    expect(f.calls[0]).toBe('gh pr view 7 --json state,mergeCommit -q .state + " " + (.mergeCommit.oid // "") -R o/r');
+    expect(run(sha, f.sh)).toBe("tagged c1 as v0.3.1");
+    expect(writes(f.calls)).toEqual(["git tag v0.3.1 c1", "git push origin v0.3.1", expect.stringMatching(/^gh release create v0\.3\.1 /)]);
+    expect(f.calls.some((c) => / c2\b/.test(c))).toBe(false);
+  });
+
+  test("--pr does nothing for a PR that is not merged", () => {
+    for (const out of ["OPEN ", "CLOSED ", "MERGED ", ""]) {
+      const f = fake({ "gh pr view": { out } });
+      expect(() => targetSha({ pr: 7 }, f.sh)).toThrow("not merged: no tag");
+      expect(f.calls).toHaveLength(1);
+      expect(writes(f.calls)).toEqual([]);
+    }
+    const f = fake({ "gh pr view": { ok: false } });
+    expect(() => mergedCommitOf(f.sh, 7)).toThrow("could not be read");
+    expect(writes(f.calls)).toEqual([]);
+  });
+
+  test("the command takes exactly one of a sha and --pr", () => {
+    expect(parseTarget(["abc"])).toEqual({ sha: "abc", repo: undefined });
+    expect(parseTarget(["abc", "--repo", "o/r"])).toEqual({ sha: "abc", repo: "o/r" });
+    expect(parseTarget(["--repo", "o/r", "--pr", "12"])).toEqual({ pr: 12, repo: "o/r" });
+    for (const bad of [[], ["--repo", "o/r"], ["abc", "--pr", "1"], ["--pr"], ["--pr", "0"], ["--pr", "x"], ["--pr", "1", "--pr", "2"], ["abc", "def"], ["abc", "--repo", "nope"], ["--other"]]) expect(parseTarget(bad)).toBeNull();
   });
 });

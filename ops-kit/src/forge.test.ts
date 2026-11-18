@@ -137,7 +137,8 @@ describe("forge", () => {
     const target = { service: LOCAL_SERVICE, host: "local", repository: "ws_l" };
     const env = { BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l" };
     await runForgeOperation({ kind: "verification", target, texts: ["[local-ci] pass"], payload: { pr: 7, body: "[local-ci] pass" } }, { [LOCAL_SERVICE]: appForge(env, fetch) });
-    expect(calls.at(-1)).toEqual({ method: "POST", path: "/7/comment", body: { workspaceId: "ws_l", text: "[local-ci] pass" } });
+    // as a change: where a workspace's Issues are GitHub's, 7 without the mark is an Issue or a PR
+    expect(calls.at(-1)).toEqual({ method: "POST", path: "/7/comment?change=1", body: { workspaceId: "ws_l", text: "[local-ci] pass" } });
     calls.length = 0;
     await expect(runForgeOperation({ kind: "verification", target, payload: { pr: 7, body: "x" } }, { [LOCAL_SERVICE]: appForge({}, fetch) })).rejects.toThrow("BACKLOG_URL と BACKLOG_WORKSPACE");
     expect(calls).toEqual([]);

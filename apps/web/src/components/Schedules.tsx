@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { Queue, RunnerId, RunnerInfo, Schedule, Workspace } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { fmtUsd, RunnerPill } from "./ui.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
@@ -13,29 +13,29 @@ import { listedRunners } from "../runners.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
 
-/** Scheduler screen (#20): DAK-style nightly jobs, and the morning queue of what needs a person. */
+/** Scheduler screen: DAK-style nightly jobs, and the morning queue of what needs a person. */
 export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[]; runnerOk: Set<RunnerId>; onOpenTask: (id: string) => void; onOpenSettings: () => void; onError: (msg: string) => void }) {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [queue, setQueue] = useState<Queue | null>(null);
   const [log, setLog] = useState<string[]>([]);
-  const [notice, setNotice] = useState<string | null>(null); // a manual backlog-next that only asked for a promotion (#2479)
+  const [notice, setNotice] = useState<string | null>(null); // a manual backlog-next that only asked for a promotion
   const [showNew, setShowNew] = useState(false);
   const [title, setTitle] = useState("");
   const [cron, setCron] = useState("0 3 * * *");
-  // #4058: the newest nightly results first, the rest on a press (a phone showed 20 before the schedules)
+  // the newest nightly results first, the rest on a press (a phone showed 20 before the schedules)
   const [showAllNightly, setShowAllNightly] = useState(false);
   const savedCron = useRef("0 3 * * *");
   const [wsId, setWsId] = useState("");
-  // A new schedule starts from 自動で始まる Task の既定 (設定, #832); empty model = the runner's CLI default
+  // A new schedule starts from 自動で始まる Task の既定 (設定); empty model = the runner's CLI default
   const [runner, setRunner] = useState<RunnerId>("claude");
   const [model, setModel] = useState("");
-  const [effort, setEffort] = useState(""); // #833, the same two levels as the model
+  const [effort, setEffort] = useState(""); // the thinking effort, the same two levels as the model
   const [prompt, setPrompt] = useState("");
   const [action, setAction] = useState<Schedule["action"]>("prompt");
   const meta = props.workspaces.find((w) => w.kind === "meta");
-  // backlog-next, secret-scan, insights, approval-window and ui-layers work on the meta workspace and take no prompt (#267, #775, #1838, #2046, #3353)
+  // backlog-next, secret-scan, insights and approval-window work on the meta workspace and take no prompt
   const metaOnly = action !== "prompt";
-  // insights runs Claude Code's own command, ui-layers a fixed instruction: the runner is claude whatever the form shows elsewhere (#1838, #3353)
+  // insights runs Claude Code's own command: the runner is claude whatever the form shows elsewhere
   const insights = action === "insights";
   const onClaude = claudeOnlyAction(action);
   const actionRef = useRef(action); // read when the saved defaults arrive: a kind chosen meanwhile must not be overwritten
@@ -43,7 +43,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const savedDefaults = useRef<{ runner: RunnerId; model: string; effort: string } | null>(null); // put back when the kind leaves insights
   const [budget, setBudget] = useState("");
   const [busy, setBusy] = useState(false);
-  // The row being edited (#1480): its own state, apart from the create form's
+  // The row being edited: its own state, apart from the create form's
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
 
@@ -66,20 +66,20 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
     api
       .settings()
       .then((st) => {
-        // the defaults may land after the kind was chosen: insights keeps claude and the CLI defaults (#1838)
+        // the defaults may land after the kind was chosen: insights keeps claude and the CLI defaults
         const bare = claudeOnlyAction(actionRef.current);
         savedDefaults.current = { runner: st.autoStart.runner, model: st.autoStart.model, effort: st.autoStart.effort };
         setRunner(bare ? "claude" : st.autoStart.runner);
         setModel(bare ? "" : st.autoStart.model);
         setEffort(bare ? "" : st.autoStart.effort);
-        savedCron.current = st.newDefaults.scheduleCron; // 新規作成の既定 (#835)
+        savedCron.current = st.newDefaults.scheduleCron; // 新規作成の既定
         setCron(st.newDefaults.scheduleCron);
         setDefaultsReady(true);
       })
       .catch((e) => props.onError(t(m.defaultsReadFailed, { error: String(e.message ?? e) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNew, defaultsReady]);
-  // Every new schedule starts from the saved cron (#835), not from the one the last form was left with
+  // Every new schedule starts from the saved cron, not from the one the last form was left with
   useEffect(() => {
     if (showNew && defaultsReady) setCron(savedCron.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -104,7 +104,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
     }
     setBusy(true);
     try {
-      // backlog-next works on the meta workspace (the stage skills live in .claude/skills, #265), secret-scan and insights too
+      // backlog-next works on the meta workspace (the stage skills live in .claude/skills), secret-scan and insights too
       await api.createSchedule(scheduleCreateInput({ title, cron, wsId, metaId: meta?.id, runner, model, effort, prompt, action, budgetUsd }));
       setTitle("");
       setPrompt("");
@@ -288,10 +288,6 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 <code>/insights</code>
                 {t(m.insightsAfter)}
               </div>
-            ) : action === "ui-layers" ? (
-              <div className="muted" style={{ gridColumn: "1 / -1" }}>
-                {t(m.uiLayersHint)}
-              </div>
             ) : action === "secret-scan" ? (
               <div className="muted" style={{ gridColumn: "1 / -1" }}>
                 {t(m.secretScanHint)}
@@ -329,7 +325,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                 {scheduleResultLine(s) && <span>{scheduleResultLine(s)}</span>}
               </span>
             </span>
-            {/* #4058: the same buttons in the same order on every row; 削除 looks like what it does */}
+            {/* the same buttons in the same order on every row; 削除 looks like what it does */}
             <span className="schedule-actions">
               <button className="small" onClick={() => void runNow(s)}>
                 {t(m.runNow)}

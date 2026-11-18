@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { AgentEvent, BacklogIssueData, BacklogSource, BalanceRow, RunnerId, Task } from "@switchboard/protocol";
 import { balanceRows, balanceView, capacityOf, issuesByNumber, kindOf, perDelivered } from "./balance.ts";
 import { Db, type BacklogSnapshotEntry, type QuotaWindowRow } from "./db.ts";
-import { readStoredRecords } from "./backlog.ts";
+import { readStoredRecords } from "./backlog-stored.ts";
 
 let dir: string;
 let db: Db;
