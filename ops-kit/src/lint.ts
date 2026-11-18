@@ -35,6 +35,44 @@ export function lintQuery(withProject: boolean, projectOwner = ""): string {
   return `query($ro:String!,$rn:String!,$after:String${vars}){ ${project}repository(owner:$ro,name:$rn){ issues(states:OPEN, labels:["type:pbi","type:task","type:request"], first:100, after:$after, orderBy:{field:CREATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ number body labels(first:50){ nodes{ name } } parent{ number labels(first:20){ nodes{ name } } } subIssues(first:1){ totalCount } comments(last:10){ nodes{ body createdAt } } ${withProject ? PROJECT_FIELDS : ""} } } } }`;
 }
 
+/** The kinds of a `（マージの後: <種類> …）` mark. Core keeps the same four for the app's reading. */
+export const POST_MERGE_KINDS = ["画面", "E2E", "実ランナー", "観測"] as const;
+const POST_MERGE_MARK = "（マージの後:";
+/** A code span of any number of backticks (the same rule core reads criteria with). */
+const CODE_SPAN = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
+const OBSERVE_DUE = /期日\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\s*以降/;
+
+/**
+ * What is wrong with the 「マージの後」 marks in a PBI's 受け入れ条件 (checkbox lines outside fences; a mark inside inline
+ * code is not read): a kind other than the four, an 観測 without `期日 <ISO 8601 with a time zone> 以降`, and a line that
+ * also carries `（利用者確認:` (the one answer would be read two ways).
+ */
+export function postMergeProblems(body: string): string[] {
+  const problems: string[] = [];
+  let level = 0;
+  for (const line of unfenced(body)) {
+    const heading = /^(#+) +(.*)$/.exec(line);
+    if (heading) {
+      if (level === 0 && /^到達点 \/ 受け入れ条件/.test(heading[2]!)) level = heading[1]!.length;
+      else if (level > 0 && heading[1]!.length <= level) level = 0;
+      continue;
+    }
+    if (level === 0 || !/^- \[[ x]\]/.test(line)) continue;
+    const text = line.replace(CODE_SPAN, "");
+    const marks = text.split(POST_MERGE_MARK).slice(1);
+    if (marks.length === 0) continue;
+    const shown = [...line.trim()].slice(0, 40).join("");
+    for (const rest of marks) {
+      const mark = rest.split("）")[0]!.trim();
+      const kind = mark.split(/[\s、,]/)[0]!;
+      if (!(POST_MERGE_KINDS as readonly string[]).includes(kind)) problems.push(`受け入れ条件の「マージの後」の種類は ${POST_MERGE_KINDS.join(" / ")} のどれか（今: ${kind}。行: ${shown}）`);
+      else if (kind === "観測" && !OBSERVE_DUE.test(mark)) problems.push(`受け入れ条件の「マージの後: 観測」に「期日 <ISO 8601 のタイムゾーンつき> 以降」が無い（行: ${shown}）`);
+    }
+    if (text.includes("（利用者確認:")) problems.push(`受け入れ条件の「マージの後」と「利用者確認」が同じ行にある。行を分ける（行: ${shown}）`);
+  }
+  return problems;
+}
+
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export const hasSection = (body: string, name: string) => new RegExp(`^##+ *${escape(name)}`, "m").test(body);
 /** Whose words a request is (request-to-backlog's 「誰の言葉」): fixed in the kit, not configurable. */
@@ -249,6 +287,7 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const body = row.body.replace(/\r\n/g, "\n");
     for (const s of cfg.sections.pbi) if (sectionName(s) !== origin?.name && !hasSection(body, sectionName(s))) bad(n, missing("PBI ", s));
     if (!/^- \[[ x]\]/m.test(body)) bad(n, "PBI の受け入れ条件にチェックボックス行が無い");
+    for (const message of postMergeProblems(body)) bad(n, message);
     if (origin && !hasSection(body, origin.name)) {
       bad(n, missing("PBI ", cfg.sections.pbi.find((s) => sectionName(s) === origin.name) ?? origin.name));
     } else if (origin) {

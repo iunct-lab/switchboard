@@ -1,5 +1,5 @@
 import type { AgentEvent, PermissionDecision, RunnerId } from "./events.ts";
-import type { ModelOption, PermissionModeOption, RunnerLogin, LoginKind } from "./model/runner.ts";
+import type { ModelOption, PermissionModeOption, RunnerCommand, RunnerLogin, LoginKind } from "./model/runner.ts";
 import type { ExecutionMode } from "./model/shared.ts";
 import type { Attachment } from "./model/task.ts";
 
@@ -174,6 +174,12 @@ export interface RunnerAdapter {
    * the runner keeps its sessions elsewhere (DAK).
    */
   hasSession?(sessionId: string): boolean;
+  /**
+   * The commands and skills this runner offers in `cwd`, for the "/" list. Reading them does not call the model.
+   * Omit when the runner has no such list (ADK, AG-UI). A failure (it does not start, not logged in, no answer in
+   * time) rejects; the caller shows the reason and does not keep it.
+   */
+  listCommands?(cwd: string): Promise<RunnerCommand[]>;
   /**
    * The runner's own login command, after its executable: the daemon runs it and relays the URL / device code
    * it prints to the screen, so nobody opens a terminal. Omit when the runner has no login of its own (DAK).

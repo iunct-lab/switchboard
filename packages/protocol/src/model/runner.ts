@@ -101,3 +101,15 @@ export const RunnerInfo = z.object({
   forks: z.boolean().default(false),
 });
 export type RunnerInfo = z.infer<typeof RunnerInfo>;
+
+/**
+ * One command or skill a runner offers after "/" in a request or reply box. `insert` is what goes into the box
+ * (Claude `/<name>`, Codex `$<name>`): the screen types it as it is and has no runner-specific branch.
+ */
+export const RunnerCommand = z.object({
+  name: z.string(),
+  description: z.string(),
+  argumentHint: z.string().optional(),
+  insert: z.string(),
+});
+export type RunnerCommand = z.infer<typeof RunnerCommand>;
