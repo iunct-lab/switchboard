@@ -7,7 +7,7 @@ const area: AskQuestion = { header: "Area", question: "どこを直すか", opti
 const extras: AskQuestion = { header: null, question: "何を足すか", options: [{ label: "テスト", description: null }, { label: "文書", description: null }], multiSelect: true };
 const note: AskQuestion = { header: null, question: "ほかに", options: [], multiSelect: false };
 
-describe("question tool answers (#3058)", () => {
+describe("question tool answers", () => {
   test("one question answered of three is not an answer; every one answered is one questions answer, in order", () => {
     const qs = [area, extras, note];
     expect(answersOf(qs, [{ labels: ["core"], text: "" }])).toBeUndefined();

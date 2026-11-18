@@ -6,7 +6,7 @@ import { fmtClock, ResumeTag } from "./components/ui.tsx";
 import { Brief } from "./components/Brief.tsx";
 import { resumeBlock } from "./resumeTag.ts";
 
-// A task waiting on GitHub's API limit (#550) reads differently from one stopped on the runner's usage limit (#102).
+// A task waiting on GitHub's API limit reads differently from one stopped on the runner's usage limit.
 
 const noop = () => undefined;
 const at = Date.UTC(2026, 9, 13, 1, 0, 0);
@@ -41,7 +41,7 @@ test("Brief: the resume block is headed GitHub の API 上限 and opens with the
   }
 });
 
-test("probe: a wait with a planned time shows when it tries and the fallback (#2237)", () => {
+test("probe: a wait with a planned time shows when it tries and the fallback", () => {
   const planned = at + 4 * 24 * 3600_000;
   const tag = renderToStaticMarkup(createElement(ResumeTag, { resumeAt: at, reason: "limit", plannedAt: planned }));
   expect(tag).toContain(`>再開待ち ${fmtClock(at)} に試す<`);

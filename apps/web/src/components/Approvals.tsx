@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingApproval, PolicyInput } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
 import { summarize } from "../approvals.ts";
@@ -8,9 +8,9 @@ import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, unblocksLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
+import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitersLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
 
-/** The 「次回も使う」 form of a card (#938): the range, target, conditions and expiry, and what would be saved. */
+/** The 「次回も使う」 form of a card: the range, target, conditions and expiry, and what would be saved. */
 function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setForm: Dispatch<SetStateAction<PolicyForm | null>>; policy: PolicyInput | undefined; answerText: string }) {
   const { ask: x, busy, form, setForm, policy, answerText } = props;
   return (
@@ -52,7 +52,7 @@ function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setFo
 }
 
 /**
- * A question tool's questions on a card (#3058): a fieldset per question — its options (checkboxes for multiSelect), or a
+ * A question tool's questions on a card: a fieldset per question — its options (checkboxes for multiSelect), or a
  * free-text field for a question without options — and one 回答する once every question has an answer. The first
  * question's text is the card's own question above, so its fieldset does not say it again.
  */
@@ -100,10 +100,10 @@ function QuestionFields(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswe
 }
 
 /**
- * A card's answers (#936): what an answer does not take away, then one button per answer with what it sends and where,
+ * A card's answers: what an answer does not take away, then one button per answer with what it sends and where,
  * and free text when the question takes it (a confirmation's 違う with its reason). Every button is off while one is
- * being sent, so a second tap sends nothing. A grant (#2745) is on a line of its own. Also the Task screen's (TaskView).
- * A question tool's questions (#3058) are answered together by QuestionFields, with no free-text box of the card's own.
+ * being sent, so a second tap sends nothing. A grant is on a line of its own. Also the Task screen's (TaskView).
+ * A question tool's questions are answered together by QuestionFields, with no free-text box of the card's own.
  */
 export function AnswerArea(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void }) {
   const { ask: x, busy } = props;
@@ -141,7 +141,7 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
         </div>
       ))}
       {(buttons.length > 0 || takesText) && form && <PolicyDetails ask={x} busy={busy} form={form} setForm={setForm} policy={policy} answerText={buttons[0]?.send ?? t(m.typedText)} />}
-      {/* a grant's note (not saved as a policy, #2745) is the API's refusal only: the card is as its mockup */}
+      {/* a grant's note (not saved as a policy) is the API's refusal only: the card is as its mockup */}
       {x.policy.note && !form && !x.grant && !x.grants.some(Boolean) && <div className="hint ask-policy-note">{x.policy.note}</div>}
       {buttons.length > 0 && (
         <div className="ask-buttons">
@@ -194,11 +194,11 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
         <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
         <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
         {isQuick(x) && <span className="badge ask-quick">{t(m.quick)}</span>}
-        {unblocksLine(x) && <span className="badge ask-unblocks">{unblocksLine(x)}</span>}
+        {waitersLine(x) && <span className="badge ask-unblocks">{waitersLine(x)}</span>}
       </div>
-      {x.unblocks.length > 0 && (
+      {x.unblocks.length + x.waiting.length > 0 && (
         <div className="hint ask-unblocks-list">
-          {unblockLinks(x.unblocks).map((u) =>
+          {unblockLinks([...x.unblocks, ...x.waiting]).map((u) =>
             u.href ? (
               <a key={u.number} href={u.href} target="_blank" rel="noreferrer">
                 #{u.number} {u.title}
@@ -259,6 +259,13 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
           )}
         </div>
       )}
+      {/* what a confirmation is of — what confirming does (the warning) and every changed value, whole — is read above its button, never folded; a long value scrolls in place */}
+      {parts.confirm.map((f, i) => (
+        <div key={f.label} className={`ask-confirm-part${i === 0 ? " warn" : ""}`}>
+          <div className="ask-confirm-label">{f.label}</div>
+          <pre className="ask-confirm-value">{f.value}</pre>
+        </div>
+      ))}
       {/* seen before the answer buttons, to compare and then choose */}
       <Mockups list={x.mockups} />
       {/* before the facts: on a phone the buttons stay in the first screenful */}
@@ -341,6 +348,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // the questions answered here, each with the ids the list already had answered for it then: the answer's result stays in
   // its row when the list has it (a decision under a new id); one answered elsewhere goes where the list has it
   const [answeredRows, setAnsweredRows] = useState<AnsweredHere[]>([]);
+  // the Workspace whose questions going on by their recommendation are being confirmed together
+  const [confirming, setConfirming] = useState<string | null>(null);
   const { onError } = props;
   const seq = useRef(0);
   const load = useCallback(() => {
@@ -408,6 +417,19 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
       })
       .finally(() => setSending(null));
   };
+  // `shown`: the questions listed under the button as the person pressed it — the ones they saw are the ones confirmed
+  const confirmAll = (workspaceId: string, shown: Ask[]) => {
+    if (sending || confirming) return;
+    setConfirming(workspaceId);
+    api
+      .confirmProceeding(workspaceId, shown.map((a) => a.id))
+      .catch((e) => props.onError(t(m.confirmAllFailed, { error: String(e.message ?? e) })))
+      // read again either way: a failure part way leaves the ones already confirmed out of the group
+      .finally(() => {
+        setConfirming(null);
+        load();
+      });
+  };
   const live = (x: Ask) => (x.kind === "approval" && x.state === "open" ? props.approvals.find((a) => x.id === askId(a)) : undefined);
   // the live approvals the list does not have yet (it is loading, failed, or older): still answered with one tap
   const unlisted = props.approvals.filter((a) => !list?.asks.some((x) => x.id === askId(a)));
@@ -443,7 +465,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // the cards' badge is on the question as answered here (a kept answer is not the person's any more)
   const cardOf = (shown: Ask) => { const was = answered.get(shown.id); return was && !was.changed ? was.ask : shown; };
   // a question answered here stays in the person's row, with what the answer did, until the screen is opened again (a tool approval is a card of its own: it goes where the list has it)
-  const stays = (a: Ask) => { const was = answered.get(a.id); return a.kind !== "approval" && (!!was && !was.changed || answeredInRow(a, answeredRows)); };
+  // one that went on by its recommendation was never the person's: answered here, it goes where the list has it
+  const stays = (a: Ask) => { const was = answered.get(a.id); return a.kind !== "approval" && !a.proceeding && (!!was && !was.changed || answeredInRow(a, answeredRows)); };
   const others = groupAsks(visible.filter((a) => !stays(a)));
   const personBase = others.find((g) => g.key === "person");
   const personAsks = visible.filter((a) => stays(a) || personBase?.asks.includes(a)).map(cardOf);
@@ -463,7 +486,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const toggle = (key: string) => setExpanded((s) => { const n = new Set(s); if (!n.delete(key)) n.add(key); return n; });
   const card = (x: Ask, standalone: boolean) => {
     const a = live(x);
-    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={sending !== null} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
+    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={sending !== null || confirming !== null} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
   };
   const rowView = (r: AskRow) => {
     const isOpen = expanded.has(r.key);
@@ -477,7 +500,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
               <span key={k} className={`badge ask-kind ask-kind-${k}`}>{KIND_LABEL[k]}</span>
             ))}
             {r.quick && <span className="badge ask-quick">{t(m.quick)}</span>}
-            {unblocksLine({ unblocks: r.unblocks }) && <span className="badge ask-unblocks">{unblocksLine({ unblocks: r.unblocks })}</span>}
+            {waitersLine(r) && <span className="badge ask-unblocks">{waitersLine(r)}</span>}
           </span>
         </button>
         {isOpen && (
@@ -561,11 +584,18 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         ) : (
           <>
             {g.key === "auto" && <div className="hint">{t(m.autoHint)}</div>}
+            {g.key === "proceeding" && <div className="hint">{t(m.proceedingHint)}</div>}
             {workspaceSections(g.asks).map((ws) => (
               <div key={ws.key} className="ask-workspace" data-workspace={ws.key}>
                 <h6 className="ask-workspace-head">
                   {ws.name} <span className="hint">{ws.asks.length}</span>
                 </h6>
+                {/* one press for the Workspace: the work already went on with these, so confirming them lets nothing new through */}
+                {g.key === "proceeding" && ws.key !== "" && confirmable(ws.asks) > 0 && (
+                  <button className="ask-confirm-all" disabled={sending !== null || confirming !== null} onClick={() => confirmAll(ws.key, ws.asks)}>
+                    {t(m.confirmAllProceeding)}
+                  </button>
+                )}
                 {ws.asks.map((shown) => {
                   const x = cardOf(shown);
                   return (
@@ -585,6 +615,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
             <details key={g.key} className={`ask-group ask-fold ask-group-${g.key}`}>
               <summary className="ask-fold-head">
                 {g.label} <span className="hint">{g.asks.length}</span>
+                {g.key === "done" && settledCount(g.asks) > 0 && <span className="hint ask-settled">{t(m.settledCount, { count: settledCount(g.asks) })}</span>}
               </summary>
               {body}
             </details>
@@ -613,7 +644,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
 }
 
 /**
- * The Tasks stopped on the same wait, across Workspaces (#2046): sso = one 「ログインする」 sends the oldest Task on to log
+ * The Tasks stopped on the same wait, across Workspaces: sso = one 「ログインする」 sends the oldest Task on to log
  * in (its device code shows here), the rest go on after it; deploy = the chosen Tasks (all at first) get the approval.
  */
 export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => void; onError: (m: string) => void; onDone: () => void }) {
@@ -667,7 +698,7 @@ export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => 
 }
 
 /**
- * A question's screen mockups (#2221): a button per title, and the one pressed opened below in the artifact view of the
+ * A question's screen mockups: a button per title, and the one pressed opened below in the artifact view of the
  * Task screen. Pressing it again closes it. Nothing when there are none.
  */
 export function Mockups(props: { list: Artifact[] }) {
@@ -689,7 +720,7 @@ export function Mockups(props: { list: Artifact[] }) {
   );
 }
 
-/** A question card's question (#4068): whole when short; the first lines and 全文 when long. */
+/** A question card's question: whole when short; the first lines and 全文 when long. */
 function AskQuestion(props: { text: string }) {
   const q = questionHead(props.text);
   if (!q.more) return <div className="ask-question">{props.text}</div>;

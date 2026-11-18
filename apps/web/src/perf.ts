@@ -1,10 +1,10 @@
 import type { Journey, PerfSample, PerfSummaryRow, SizeClass } from "@switchboard/protocol";
-import { api } from "./api.ts";
+import { api } from "./api/index.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
-// Journey timing (#637): the start is a mark at the person's action, the end a measure `sb:<journey>` left after the
-// result is painted; perf-bench reads the measures from the page. Each measure is also sent to this daemon (#639),
+// Journey timing: the start is a mark at the person's action, the end a measure `sb:<journey>` left after the
+// result is painted; perf-bench reads the measures from the page. Each measure is also sent to this daemon,
 // which keeps it 30 days for the ledger's 速さ table — and nowhere else.
 
 /** Started journeys and their start time. `launch` starts with the navigation itself (performance.timeOrigin = 0). */
@@ -21,7 +21,7 @@ export function journeyCancel(name: Journey): void {
 
 /**
  * Ends a started journey after the next paint. An end without a start, and a second end, do nothing. `size` = the Task
- * the journey drew (#2100; `open-task` / `send`), kept with the sample so a slow open can be told from a big Task.
+ * the journey drew (`open-task` / `send`), kept with the sample so a slow open can be told from a big Task.
  */
 export function journeyEnd(name: Journey, size?: { taskId: string; events: number }): void {
   const start = started.get(name);
@@ -38,8 +38,8 @@ export function journeyEnd(name: Journey, size?: { taskId: string; events: numbe
 }
 
 /**
- * The decoded size of the Task's last whole `GET /api/tasks/<id>` response (#2100), from Resource Timing. A read with
- * a query — the catch-up (`?after=`, #1137), the rest after a turn (`?limit=0`) or an older page (`?before=`, #1142) — is
+ * The decoded size of the Task's last whole `GET /api/tasks/<id>` response, from Resource Timing. A read with
+ * a query — the catch-up (`?after=`), the rest after a turn (`?limit=0`) or an older page (`?before=`) — is
  * a slice, not the Task's size, so it is skipped. Null when there is none or it reads 0 (a
  * cross-origin response without Timing-Allow-Origin).
  */
@@ -57,14 +57,14 @@ export function detailBytes(taskId: string, entries: PerformanceEntryList = perf
   return null;
 }
 
-/** The running build (#639): the hash in the loaded module script's name (`/assets/index-<hash>.js`); `dev` under the dev server. */
+/** The running build: the hash in the loaded module script's name (`/assets/index-<hash>.js`); `dev` under the dev server. */
 export function buildId(): string {
   const src = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/"]')?.getAttribute("src");
   const file = src?.split("/").pop()?.replace(/\.js$/, "");
   return file ? (file.split(/-(.*)/)[1] || file).slice(0, 64) : "dev";
 }
 
-/** `mobile` below 700 px wide (PBI #639; a phone-sized window — the layout itself switches at 767 px, styles.css). */
+/** `mobile` below 700 px wide (a phone-sized window — the layout itself switches at 767 px, styles.css). */
 export function deviceKind(): PerfSample["device"] {
   return innerWidth < 700 ? "mobile" : "desktop";
 }
@@ -96,7 +96,7 @@ export async function flushSamples(send: (rows: PerfSample[]) => Promise<unknown
 }
 
 /**
- * One row of the 速さ table (#2103): journey × device × size, the last 7 days against the 7 before them. `slower` = the
+ * One row of the 速さ table: journey × device × size, the last 7 days against the 7 before them. `slower` = the
  * last 7 days' median is 20% or more above the 7 days before.
  */
 export interface PerfRow {

@@ -333,6 +333,23 @@ export function mergeWrite(argv: string[], texts: string[] = []): { pr: number |
 }
 
 /**
+ * The head a merge is held to on the command line: `--match-head-commit <sha>` of `gh pr merge` (GitHub then merges only
+ * that head), null when it names none. `at`: where the flag can be added — right after `merge` of `gh pr merge`, the one
+ * form that takes it; null for `gh stack merge`, `gh api` and graphql.
+ */
+export function mergeHeadOf(argv: string[]): { head: string | null; at: number | null } {
+  let head: string | null = null;
+  for (let i = 0; i < argv.length && argv[i] !== "--"; i++) {
+    if (argv[i] === "--match-head-commit") head = argv[i + 1]?.toLowerCase() ?? null;
+    else if (argv[i]!.startsWith("--match-head-commit=")) head = argv[i]!.slice("--match-head-commit=".length).toLowerCase();
+  }
+  const [group, sub] = wordsOf(argv);
+  const pr = argv.indexOf("pr");
+  const merge = argv.indexOf("merge", pr + 1);
+  return { head, at: group === "pr" && sub === "merge" && pr >= 0 && merge > pr ? merge + 1 : null };
+}
+
+/**
  * The environment variable `public-sync` sets on the one `gh` that merges its own sync PR: `<owner/name>#<n>` of the public copy
  * and the PR. The public copy takes no PR but the sync's, and the merge gate judges this repository's PRs only, so that merge
  * does not go through the gate.
@@ -355,18 +372,56 @@ export function publicSyncMerge(argv: string[], env: Record<string, string | und
   return env[PUBLIC_SYNC_MARK]?.trim().toLowerCase() === `${copy}#${pr}`;
 }
 
-/** The mark of the person's answer that lets a merge go past the gate's large reason: a line that begins `[merge-answer] yes`. */
-export const MERGE_ANSWER_YES = /^\[merge-answer\] yes\b/m;
+/**
+ * A text as the readers of its marks take it: the one form both the check that stops a `[merge-answer] yes` and the gate's
+ * reader of that mark compare, so that a text the check lets through cannot read as a yes later. Compatibility forms are
+ * folded (NFKC: full-width letters, brackets and spaces), characters that show nothing (zero-width, joiners, direction
+ * marks, variation selectors, a byte order mark) are dropped, every run of white space in a line is one space, each line
+ * and the whole are trimmed (what the app's store does to a comment), and letters are lower case.
+ */
+export function markText(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g, "")
+    .split(/\r\n?|[\n\v\f\u0085\u2028\u2029]/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .join("\n")
+    .trim()
+    .toLowerCase();
+}
+
+const MERGE_ANSWER_FULL = /^\[merge-answer\] (yes|no) ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
 
 /**
- * A write that posts the person's `[merge-answer] yes` mark (a line of a text in `texts` that begins with it): `gh pr comment <n|url>`,
+ * The `[merge-answer]` mark a comment is, as the merge gate counts it: the comment's text in `markText`'s form begins with
+ * `[merge-answer] <yes|no> <kinds> <head sha>`. Null = the comment is no such mark.
+ */
+export function mergeAnswerOf(body: string): { answer: "yes" | "no"; kinds: string[]; sha: string } | null {
+  const m = MERGE_ANSWER_FULL.exec(markText(body));
+  return m ? { answer: m[1] as "yes" | "no", kinds: m[2]!.split(","), sha: m[3]! } : null;
+}
+
+/**
+ * The yes marks a text would post: for every line that begins `[merge-answer] yes` in `markText`'s form (wider than what
+ * `mergeAnswerOf` reads: any line, with or without the space), the head sha it names, null when the line names none.
+ * Empty = the text posts no yes.
+ */
+export function mergeAnswerYesHeads(text: string): Array<string | null> {
+  return markText(text).split("\n").filter((l) => /^\[merge-answer\] ?yes(?![a-z0-9_-])/.test(l)).map((l) => MERGE_ANSWER_FULL.exec(l)?.[3] ?? null);
+}
+
+/** Whether a text would post the person's yes: the mark that lets a merge go past the gate's large reason. */
+export const mergeAnswerYes = (text: string): boolean => mergeAnswerYesHeads(text).length > 0;
+
+/**
+ * A write that posts the person's `[merge-answer] yes` mark (a line of a text in `texts` that begins with it, read as `mergeAnswerYes` reads it): `gh pr comment <n|url>`,
  * `gh issue comment <n|url>`, `gh api` with a method other than GET / HEAD on `repos/<o>/<r>/issues/<n>/comments` or on an existing
  * comment (`repos/<o>/<r>/issues/comments/<id>`, which names no PR), and a graphql mutation that names `addComment` or
  * `updateIssueComment`. `pr` is the PR it names (null when none: an edit, graphql, the current branch). Null for anything else, a `no`
  * answer and a text without the mark included.
  */
 export function mergeAnswerPost(argv: string[], texts: string[]): { pr: number | null } | null {
-  if (!texts.some((t) => MERGE_ANSWER_YES.test(t))) return null;
+  if (!texts.some(mergeAnswerYes)) return null;
   const words = wordsOf(argv);
   const [group, sub, ref] = words;
   if (group === "api") {

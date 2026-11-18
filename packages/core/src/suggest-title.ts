@@ -1,15 +1,6 @@
 import type { AgentEvent, RunnerAdapter, RunnerId } from "@switchboard/protocol";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { oneLine, readOnlyMode, runSuggestionTurn } from "./suggest-llm.ts";
-
-/**
- * Who names a task after its first turn, in this order: the person chose codex `gpt-6-luna`, and Haiku when it
- * cannot answer (2026-09-28, the same answer as the judge's). Not a setting: only `Settings.titles.auto` is.
- */
-export const TITLE_RUNNERS: Array<{ runner: RunnerId; model: string }> = [
-  { runner: "codex", model: "gpt-6-luna" },
-  { runner: "claude", model: "claude-haiku-4-5" },
-];
 
 /** How long one turn may take: a real Haiku turn measured 6.6 s, and nothing waits on it. */
 export const TITLE_TIMEOUT_MS = 60_000;
@@ -33,6 +24,8 @@ export interface TitleOptions {
   /** Gives up at once (the daemon is stopping). */
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Who is asked, in this order: `Settings.titles`' runner, then the judge's fallback (the caller resolves the empty model / effort). */
+  tries: Array<{ runner: RunnerId; model: string; effort?: string }>;
 }
 
 /** The prompt: the request and the last reply, both capped and not trusted. */
@@ -62,12 +55,12 @@ export function parseTitle(text: string): string {
   return title;
 }
 
-/** One title: each of `TITLE_RUNNERS` is asked in turn, and a runner that cannot answer (any reason) hands over to the next. Throws the last error when none does. */
+/** One title: each of `opts.tries` is asked in turn, and a runner that cannot answer (any reason) hands over to the next. Throws the last error when none does. */
 export async function suggestTitle(input: TitleInput, opts: TitleOptions): Promise<{ title: string; runner: RunnerId; model: string }> {
   const prompt = buildTitlePrompt(input);
   const timeoutMs = opts.timeoutMs ?? TITLE_TIMEOUT_MS;
   let last: unknown;
-  for (const t of TITLE_RUNNERS) {
+  for (const t of opts.tries) {
     if (opts.signal?.aborted) break;
     try {
       const adapter = opts.adapters.get(t.runner);
@@ -76,8 +69,8 @@ export async function suggestTitle(input: TitleInput, opts: TitleOptions): Promi
       const ro = readOnlyMode(adapter);
       if (ro.unconstrained && adapter.permissionModes?.length) throw new Error(`${t.runner} has no read-only permission mode`);
       const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-      const text = await runSuggestionTurn({ adapter, cwd: opts.cwd, model: t.model, permissionMode: ro.mode, onUsage: (ev) => opts.onUsage?.(t.runner, ev), log: opts.log }, prompt, signal);
-      return { title: parseTitle(text), ...t };
+      const text = await runSuggestionTurn({ adapter, cwd: opts.cwd, model: t.model, effort: t.effort, permissionMode: ro.mode, onUsage: (ev) => opts.onUsage?.(t.runner, ev), log: opts.log }, prompt, signal);
+      return { title: parseTitle(text), runner: t.runner, model: t.model };
     } catch (e) {
       last = e;
       opts.log?.(`title: ${t.runner}:${t.model} could not name the task (${String((e as Error).message ?? e)})`);

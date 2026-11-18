@@ -6,7 +6,7 @@ import { FeedbackDialog, FeedbackUpstreamBox } from "./components/Feedback.tsx";
 import { ImproveButtons } from "./components/Home.tsx";
 import { DevelopSelfToggle } from "./components/Settings.tsx";
 
-// 「Switchboard 自体を開発する」 (#2459): what each screen draws for the setting
+// 「Switchboard 自体を開発する」: what each screen draws for the setting
 const ws = (id: string, kind: Workspace["kind"] = "repo") => ({ id, name: id, path: `/${id}`, kind }) as Workspace;
 const noop = () => undefined;
 

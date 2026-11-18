@@ -22,6 +22,11 @@ export const task = msgs({
   budgetCut: { ja: "新しい Task に切る", en: "Cut a new Task" },
   budgetCutTitle: { ja: "同じ Workspace・同じランナーで、この Task を名指す新しい Task を開きます。この Task はそのまま残ります", en: "Opens a new Task in the same Workspace and runner that names this one. This Task stays as it is" },
 
+  // PresetReplies.tsx: one-press replies under a stop
+  presetRepliesLabel: { ja: "前に返した定型の返事", en: "Replies sent to this kind of stop before" },
+  presetReplySending: { ja: "「{text}」を送ります…", en: "Sending \"{text}\"…" },
+  presetReplyUndo: { ja: "取り消す", en: "Cancel" },
+
   // Fork: a Task branched from a finished turn
   forkHere: { ja: "ここから分岐", en: "Fork from here" },
   forkTitle: { ja: "このターンまでの会話を引き継いだ新しい Task を作ります。この Task は変わりません。ファイルは同じ作業ツリーです", en: "Makes a new Task that continues the conversation up to this turn. This Task does not change. The files are the same working tree" },
@@ -42,6 +47,11 @@ export const task = msgs({
   groupPerson: { ja: "あなたの判断待ち", en: "Awaiting your decision" },
   groupDone: { ja: "済んだもの", en: "Done" },
   groupAuto: { ja: "自動で待っている（操作不要）", en: "Waiting on its own (nothing to do)" },
+  groupProceeding: { ja: "推奨で進行中（あとで確かめる）", en: "Going on with the recommendation (check later)" },
+  btnKeep: { ja: "{choice} のまま", en: "Keep {choice}" },
+  btnSwitch: { ja: "{choice} にする", en: "Switch to {choice}" },
+  keepNext: { ja: "推奨のままで確定します（新しく始まる作業はありません）", en: "Confirms the recommendation (no new work starts)" },
+  switchNext: { ja: "推奨を覆します。この答えで直す工程 Task が始まります", en: "Overturns the recommendation. A stage Task starts to redo it by this answer" },
   unknownWorkspace: { ja: "Workspace 不明", en: "Workspace unknown" },
 
   // asks.ts: a question card's facts
@@ -77,6 +87,7 @@ export const task = msgs({
   resumeFailed: { ja: "再開失敗", en: "Resume failed" },
   resumeFailedWhy: { ja: "再開失敗: {reason}", en: "Resume failed: {reason}" },
   unblocks: { ja: "答えると {count} 件が進められる", en: "Answering lets {count} more go on" },
+  waitingForPbi: { ja: "この PBI が済むのを待っている {count} 件", en: "{count} waiting for this PBI to be done" },
   blocker: { ja: "回答だけでは解除されません: {detail}", en: "An answer alone does not clear this: {detail}" },
 
   // asks.ts: answer policies and batches
@@ -136,6 +147,7 @@ export const task = msgs({
   waitCycle: { ja: "循環", en: "cycle" },
   waitUnknown: { ja: "判定できない", en: "cannot tell" },
   condOverlap: { ja: "相手が閉じてファイルの重なりが解けたら", en: "once the other side closes and the file overlap clears" },
+  overlapTurn: { ja: "順番待ち #{pbi}", en: "Its turn comes after #{pbi}" },
   condPrereq: { ja: "前提が完了したら", en: "once the prerequisites are done" },
   condUntil: { ja: "期日（{at}）を過ぎたら", en: "once the date ({at}) has passed" },
   condMissing: { ja: "未取得の相手は状態が分からない", en: "the state of one not read is unknown" },
@@ -201,6 +213,8 @@ export const task = msgs({
   termLost: { ja: "ターミナルとの接続が切れました。", en: "The connection to the terminal was lost." },
   reconnecting: { ja: "再接続しています…", en: "Reconnecting…" },
   reopen: { ja: "開き直す", en: "Open again" },
+  termKeepsHost: { ja: "このシェルは画面を離れても続きます。画面を離れて入力も出力も無いまま一定の時間（既定 30 分）がたつと閉じます。それまではホストの自動停止を止めます。", en: "This shell keeps running after you leave. Once you have left and nothing is typed or printed for a while (30 minutes by default) it is closed; until then the host does not stop on idle." },
+  termEnd: { ja: "シェルを終える", en: "End the shell" },
 
   // transcript.ts
   cloudCreated: { ja: "Cloudセッションを作成: {id}。Cloud側の状態は未確認です。", en: "Created a Cloud session: {id}. The Cloud side's status is not checked." },
@@ -219,6 +233,16 @@ export const task = msgs({
   githubBudget: { ja: "{remaining} / {limit} · {time} に戻る", en: "{remaining} / {limit} · back at {time}" },
   background: { ja: "裏で実行中 {n} 件 {min} 分", en: "{n} running in the background, {min} min" },
   contentsUnknown: { ja: "内容不明", en: "Contents unknown" },
+  wait: { ja: "待ち: {label} {waited} {unit} / 上限 {limit} {unit}", en: "Waiting: {label} {waited} {unit} / limit {limit} {unit}" },
+  waitCompact: { ja: "待ち {waited}/{limit} {unit}", en: "Wait {waited}/{limit} {unit}" },
+  waitOver: { ja: "待ち超過: {label} {waited} {unit} / 上限 {limit} {unit}", en: "Wait over its limit: {label} {waited} {unit} / limit {limit} {unit}" },
+  waitOverCompact: { ja: "待ち超過 {waited}/{limit} {unit}", en: "Over {waited}/{limit} {unit}" },
+  waitStalled: { ja: "（無進捗 {min} 分）", en: " (no progress for {min} min)" },
+  waitMinutes: { ja: "分", en: "min" },
+  waitHours: { ja: "時間", en: "h" },
+  waitDays: { ja: "日", en: "d" },
+  silent: { ja: "応答なし {min} 分", en: "No response for {min} min" },
+  silentTitle: { ja: "応答なし: 最後のイベントは {when}（ターン中か裏の処理があるのに、ランナーから何も届いていません。止めてはいません）", en: "No response: the last event was at {when} (a turn or background work is under way, but nothing has come from the runner. Nothing was stopped)" },
   resumeGithubTitle: { ja: "GitHub の API 上限（1 時間の枠）で待機。{when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）", en: "Waiting on GitHub's API limit (the hourly quota). The quota should be back at {when} (auto-resume is set per runner. Resume now or cancel from the Task's Brief)" },
   resumeGithubCompact: { ja: "GitHub 待ち", en: "Waiting for GitHub" },
   resumeGithub: { ja: "GitHub の上限待ち（{when} に再開）", en: "Waiting for GitHub's limit (resumes at {when})" },
@@ -325,7 +349,7 @@ export const task = msgs({
   permNetwork: { ja: "ネットワークアクセスの許可", en: "Permission for network access" },
   permOther: { ja: "ツール実行の許可", en: "Permission to run a tool" },
 
-  // Approvals.tsx: a question tool's questions on a card (#3058)
+  // Approvals.tsx: a question tool's questions on a card
   multiSelect: { ja: "（複数選択可）", en: " (choose any)" },
   writeAnswer: { ja: "回答を書く", en: "Write an answer" },
   answerAllTitle: { ja: "すべての質問に答えると送れます", en: "Answer every question to send" },
@@ -338,4 +362,8 @@ export const task = msgs({
   deviceCode: { ja: "コード ", en: "Code " },
   commandBefore: { ja: "コマンド ", en: "Command " },
   commandAfter: { ja: "。承認すると Task が続きを進め、このカードは消えます", en: ". Once approved, the Task goes on and this card goes away" },
+  machineReadOnly: { ja: "この Task は {machine} で動きました。返信は {machine} の Switchboard から行います。", en: "This Task ran on {machine}. Reply to it from the Switchboard on {machine}." },
+  machineTagTitle: { ja: "{machine} で動いた Task（ここでは読むだけ）", en: "A Task that ran on {machine} (read only here)" },
+  placeholderMachine: { ja: "{machine} で動いた Task です（ここでは読むだけ）", en: "A Task that ran on {machine} (read only here)" },
+  uplinkSkipped: { ja: "{machine} の記録を取り込めていません: {machine} の DB の版 {theirs} が、このインスタンスの版 {ours} より新しいためです。このインスタンスを更新すると取り込みます", en: "Records from {machine} are not taken in: the database of {machine} (level {theirs}) is newer than this instance's ({ours}). Updating this instance takes them in" },
 });

@@ -2,13 +2,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { type AgentEvent, REPLY_QUEUED, type RunnerAdapter, type RunnerSession, type StartOptions, type Task } from "@switchboard/protocol";
+import { type AgentEvent, REPLY_QUEUED, type RunnerAdapter, type RunnerId, type RunnerSession, type StartOptions, StopRecord, type Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { isFableModel, kitPath, taskAllowRules, TaskManager, type TurnEnd, versionAtLeast } from "./tasks.ts";
+import { isFableModel, type TurnEnd, versionAtLeast, stopArmedQueues } from "./tasks/state.ts";
+import { kitPath, taskAllowRules } from "./tasks/sessions.ts";
+import { TaskManager } from "./tasks/manager.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -63,6 +65,8 @@ beforeEach(() => {
   tasks.onTurnEnd((_id, task, turn) => ends.push({ task, turn }));
 });
 afterEach(() => {
+  // a manager a test made and did not shut down would tick on this test's closed database
+  stopArmedQueues();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -606,25 +610,43 @@ describe("background jobs of a task whose turn ended", () => {
   });
 });
 
-describe("OPS_KIT_REVIEW_RUNNER", () => {
-  /** The env the runner was started with, under a TaskManager given `reviewRunner` (or none). */
-  async function startedEnv(reviewRunner?: () => "other" | "same"): Promise<Record<string, string> | undefined> {
-    let seen: Record<string, string> | undefined;
-    const inner = fakeAdapter([]);
-    const adapter: RunnerAdapter = { ...inner, start: (opts, emit) => ((seen = opts.env), inner.start(opts, emit)) };
-    const m = new TaskManager(db, new Map([["claude", adapter]]), () => undefined, { idleMs: IDLE_MS, ...(reviewRunner ? { reviewRunner } : {}) });
-    const wsId = db.upsertWorkspace({ name: "w", path: home, kind: "repo" }).id;
-    m.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+describe("skills by runner and review setting", () => {
+  test("a Task's start renders the skills for its runner and the setting now, into its runner's place only", async () => {
+    const meta = join(home, "meta");
+    const repo = join(home, "repo");
+    for (const d of [meta, repo]) {
+      mkdirSync(d, { recursive: true });
+      spawnSync("git", ["init", "-q"], { cwd: d });
+    }
+    mkdirSync(join(meta, "ops-kit/skills/demo"), { recursive: true });
+    writeFileSync(join(meta, "ops-kit/skills/demo/SKILL.md"), ["# demo", "<!-- when review=other -->", "別のランナーに頼む", "<!-- end when -->", "<!-- when review=same -->", "同じランナーの新しいセッションに頼む", "<!-- end when -->", ""].join("\n"));
+    db.upsertWorkspace({ name: "meta", path: meta, kind: "meta" });
+    const wsId = db.upsertWorkspace({ name: "w", path: repo, kind: "repo" }).id;
+    let review: "other" | "same" = "other";
+    let env: Record<string, string> | undefined;
+    const claude = fakeAdapter([]);
+    const m = new TaskManager(db, new Map<RunnerId, RunnerAdapter>([["claude", { ...claude, start: (opts, emit) => ((env = opts.env), claude.start(opts, emit)) }], ["codex", { ...fakeAdapter([]), id: "codex" }]]), () => undefined, { idleMs: IDLE_MS, reviewRunner: () => review });
+    const read = (target: string) => readFileSync(join(repo, target, "demo/SKILL.md"), "utf8");
+
+    const first = m.create({ workspaceId: wsId, cwd: repo, title: "t", prompt: "p", runner: "claude" });
     await sleep(0);
-    return seen;
-  }
+    expect(read(".claude/skills")).toContain("別のランナーに頼む");
+    expect(read(".claude/skills")).not.toContain("同じランナー");
+    expect(existsSync(join(repo, ".agents/skills"))).toBe(false);
+    // the setting reaches a Task through the rendered text; the variable goes too, for a skill folder an earlier release left
+    expect(env?.OPS_KIT_REVIEW_RUNNER).toBe("other");
 
-  test("OPS_KIT_REVIEW_RUNNER carries the setting's value at the start", async () => {
-    expect((await startedEnv(() => "same"))?.OPS_KIT_REVIEW_RUNNER).toBe("same");
-  });
+    review = "same";
+    m.create({ workspaceId: wsId, cwd: repo, title: "t", prompt: "p", runner: "codex" });
+    await sleep(0);
+    expect(read(".agents/skills")).toContain("同じランナーの新しいセッションに頼む");
+    expect(read(".agents/skills")).not.toContain("別のランナー");
+    expect(read(".claude/skills")).toContain("別のランナーに頼む"); // the Codex Task's start left the Claude copy alone
 
-  test("OPS_KIT_REVIEW_RUNNER is other without the setting", async () => {
-    expect((await startedEnv())?.OPS_KIT_REVIEW_RUNNER).toBe("other");
+    await sleep(IDLE_MS * 3);
+    await m.send(first.id, "続き");
+    await sleep(0);
+    expect(read(".claude/skills")).toContain("同じランナーの新しいセッションに頼む");
   });
 });
 
@@ -799,5 +821,124 @@ describe("fork", () => {
     expect(versionAtLeast(undefined, "2.1.314")).toBe(false);
     expect(versionAtLeast("fake", "2.1.314")).toBe(false);
     expect(versionAtLeast("2.1.314", undefined)).toBe(false);
+  });
+});
+
+describe("preamble", () => {
+  /** Every start is recorded with what the adapter was given; each ends its turn at once, in the session `sess`. */
+  function recording(id: "claude" | "codex", starts: StartOptions[], hasSession: (sid: string) => boolean = () => true): RunnerAdapter {
+    return {
+      id,
+      hasSession,
+      async detect() {
+        return { available: true };
+      },
+      start(opts, emit) {
+        starts.push(opts);
+        queueMicrotask(() => {
+          emit({ t: "session.start", runner: id, runnerSessionId: "sess", cwd: "/" });
+          emit({ t: "message.delta", role: "assistant", text: "はい" });
+          emit({ t: "session.end", status: "ok" });
+        });
+        return { send: () => undefined, respondPermission: () => undefined, abort: async () => undefined, close: async () => undefined, exited: Promise.resolve(0) };
+      },
+    };
+  }
+  const HEAD = "[Switchboard: 止まったときの報告]";
+  const ARTIFACT = "[Switchboard: 成果物の登録]";
+
+  test("preamble goes into a session once: a process started again on the same session is told only the stops still open", async () => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts)]]), () => undefined, { idleMs: 0 });
+    const t = m.create({ cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(5);
+    expect(starts[0]!.preamble).toContain(HEAD);
+    expect(starts[0]!.preamble).toContain(ARTIFACT);
+    // nothing open: the second process gets the reply alone
+    await m.send(t.id, "続き");
+    await sleep(5);
+    expect(starts[1]).toMatchObject({ resumeSessionId: "sess", prompt: "続き" });
+    expect(starts[1]!.preamble).toBeUndefined();
+    // a stop of the Task's work still open: its line, and nothing of the report's instructions
+    db.appendEvent(t.id, { t: "stop.record", stop: StopRecord.parse({ id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI が終わっていない", at: Date.now(), work: { workspaceId: null, issue: null, taskId: t.id } }) });
+    await m.send(t.id, "もう一度");
+    await sleep(5);
+    expect(starts[2]!.preamble).toBe("この作業でまだ解けていない停止:\n- gh pr merge PR #12: depends（止まったのは 1 回、waiting）");
+    m.shutdown();
+  });
+
+  test("preamble by conditions: a plain Task is told nothing of the Workspace MCP, a stage or plan mode; each is told where it holds", async () => {
+    const starts: StartOptions[] = [];
+    const adapter = { ...recording("claude", starts), permissionModes: [{ value: "plan", label: "計画のみ", description: "" }, { value: "default", label: "既定", description: "" }] };
+    const plain = new TaskManager(db, new Map([["claude", adapter]]), () => undefined, { idleMs: 0 });
+    plain.create({ cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(5);
+    for (const w of ["Workspace MCP", "task.note", "exec.run", "占有の解放", "並列ガード", "計画モード"]) expect(starts[0]!.preamble).not.toContain(w);
+    expect(starts[0]!.preamble).toContain("```switchboard-stop");
+    plain.shutdown();
+
+    const withAll = new TaskManager(db, new Map([["claude", adapter]]), () => undefined, { idleMs: 0, mcpServers: () => ({ workspace: { type: "http", url: "http://127.0.0.1:1/mcp" } }) });
+    withAll.create({ cwd: home, title: "t", prompt: "p", runner: "claude", permissionMode: "plan", stage: { issue: 7, action: "complete" } });
+    await sleep(5);
+    const all = starts[1]!.preamble!;
+    expect(all).toContain("Workspace MCP の task.note の引数 stop に書きます");
+    expect(all).not.toContain("```switchboard-stop");
+    expect(all).toContain("占有の解放の --after");
+    expect(all).toContain("計画モードでの commit・push・マージ");
+    withAll.shutdown();
+  });
+
+  test("preamble of a session whose record is not on this machine: the recap comes last and ends with the heading of the person's message", async () => {
+    const starts: StartOptions[] = [];
+    let here = true;
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts, () => here)]]), () => undefined, { idleMs: 0 });
+    const t = m.create({ cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(5);
+    here = false;
+    await m.send(t.id, "続けて");
+    await sleep(5);
+    const s = starts[1]!;
+    expect(s.resumeSessionId).toBeUndefined();
+    // a new session: the whole preamble again, then the recap, then the person's words
+    expect(s.preamble!.startsWith(HEAD)).toBe(true);
+    expect(s.preamble!.indexOf(ARTIFACT)).toBeLessThan(s.preamble!.indexOf("【Switchboard からの引き継ぎ】"));
+    expect(s.preamble!.endsWith("利用者の今回のメッセージ:")).toBe(true);
+    expect(s.prompt).toBe("続けて");
+    m.shutdown();
+  });
+
+  test("preamble of the insights schedule's Task: /insights is the whole input, without the workspace's rules after it", async () => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts)]]), () => undefined, { idleMs: 0 });
+    const ws = db.upsertWorkspace({ name: "w", path: home, kind: "repo" });
+    db.setWorkspaceRules(ws.id, "枝は main から切る");
+    db.insertSchedule({ id: "sch_ins", title: "Insights", cron: "0 19 * * 0", workspaceId: ws.id, runner: "claude", model: "", effort: "", prompt: "", action: "insights", budgetUsd: null, enabled: true, lastRunAt: null, lastTaskId: null, nextRunAt: null, lastResult: null, stuck: null, createdAt: Date.now() });
+    m.create({ workspaceId: ws.id, cwd: home, title: "Insights", prompt: "/insights", runner: "claude", scheduleId: "sch_ins" });
+    m.create({ workspaceId: ws.id, cwd: home, title: "t", prompt: "p", runner: "claude" });
+    await sleep(5);
+    expect(starts[0]).toMatchObject({ prompt: "/insights" });
+    expect(starts[0]!.preamble).toBeUndefined();
+    // any other Task of the workspace still gets them
+    expect(starts[1]!.prompt).toContain("枝は main から切る");
+    m.shutdown();
+  });
+
+  test("shadow of a Task the app wrote the prompt for gets the text written for its own runner; a person's prompt is copied as it is", async () => {
+    const claude: StartOptions[] = [];
+    const codex: StartOptions[] = [];
+    const m = new TaskManager(db, new Map<RunnerId, RunnerAdapter>([["claude", recording("claude", claude)], ["codex", recording("codex", codex)]]), () => undefined, { idleMs: 0 });
+    const ws = db.upsertWorkspace({ name: "w", path: home, kind: "repo" });
+    db.setWorkspaceRules(ws.id, "枝は main から切る");
+    const promptFor = (runner: string) => (runner === "claude" ? "/pbi-complete 9\n\nAgent ツールの model に `sonnet`" : ".agents/skills/pbi-complete/SKILL.md に従い、PBI #9 を完了させてください。");
+    m.create({ workspaceId: ws.id, cwd: home, title: "t", prompt: promptFor("claude"), promptFor, runner: "claude", shadowRunner: "codex" });
+    await sleep(5);
+    expect(claude[0]!.prompt).toContain("/pbi-complete 9");
+    expect(codex[0]!.prompt).toContain(".agents/skills/pbi-complete/SKILL.md に従い");
+    for (const w of ["/pbi-complete 9", "Agent ツール"]) expect(codex[0]!.prompt).not.toContain(w);
+    expect(codex[0]!.prompt).toContain("枝は main から切る"); // the workspace's rules follow it as they follow the primary's
+    m.create({ cwd: home, title: "t", prompt: "/pbi-complete 9 を見て", runner: "claude", shadowRunner: "codex" });
+    await sleep(5);
+    expect(codex[1]!.prompt).toBe("/pbi-complete 9 を見て");
+    m.shutdown();
   });
 });

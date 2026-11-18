@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import type { OpsResources } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { atLabel, consumerRows, jobRow, latestAnswer, memoryLine, runOwner, since, slotsSummary, taskWaitLine, typicalLabel, verdictLabel, waitLine, watchResources } from "../resources.ts";
 import { t } from "../i18n.ts";
 import { common as m } from "../i18n/common.ts";
 
 /**
- * Resources (#3333, docs/design/ops-metrics.md): now — the free memory against the floor, the machine's heavy-process
- * slots, who waits for what, what runs (against the usual time of its kind, #3336), when all of it would be done, and
+ * Resources (docs/design/ops-metrics.md): now — the free memory against the floor, the machine's heavy-process
+ * slots, who waits for what, what runs (against the usual time of its kind), when all of it would be done, and
  * what used the memory at the sampler's last minute. Read every 5 s only
  * while this screen is open and in front. Only what goes through `ops-kit heavy` is a run here.
  */

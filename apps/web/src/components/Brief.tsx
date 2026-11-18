@@ -2,11 +2,13 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { isWorkingStatus, type CheckRun, Footprint, LedgerSummary, OpsLoad, RunnerInfo, StagedChange, Task, TaskEvals, TaskSummary, Workspace } from "@switchboard/protocol";
 import { outcomeLabel } from "../attention.ts";
 import { taskLoadLine } from "../ops.ts";
-import { api, type TaskDetail } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type TaskDetail } from "../api/tasks.ts";
 import type { ReleaseStatus } from "../release.ts";
 import { ReleasePanel } from "./ReleasePanel.tsx";
+import { ForkCompare } from "./ForkCompare.tsx";
 import { fmtClock, fmtUsd, githubBudgetLabel, githubBudgetLow, pct, RunnerPill } from "./ui.tsx";
-import { windowLabel } from "../quota.ts";
+import { accountMark, windowLabel } from "../quota.ts";
 import { resumeBlock } from "../resumeTag.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
@@ -50,15 +52,20 @@ export function freshSide(r: Partial<SideReads>, at: Record<"evals" | "checks" |
   return out;
 }
 
-export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする (#1221): opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: TaskSummary[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void; /** 評価をお願い (#1877): scroll to 自分の評価 once the evals are read, then onFocused */ focus?: "human"; onFocused?: () => void }) {
-  // Shadow run (#99): the linked task, whichever side this one is. Derived from the task list so no extra fetch is needed.
+export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSummary | null; onAbort: () => void; checksRev?: number; evalsRev?: number; /** 改善要望にする: opens the feedback dialog with a draft from this task's evaluations. */ onImprove?: (taskId: string) => void; onRestarting?: () => void; runners?: RunnerInfo[]; noTerminal?: boolean; onTask?: (t: Task) => void; tasks?: TaskSummary[]; onOpenTask?: (id: string) => void; workspaces?: Workspace[]; open: boolean; onClose: () => void; /** 評価をお願い: scroll to 自分の評価 once the evals are read, then onFocused */ focus?: "human"; onFocused?: () => void }) {
+  // Shadow run: the linked task, whichever side this one is. Derived from the task list so no extra fetch is needed.
   const shadowTask = props.task.shadowOf ? undefined : props.tasks?.find((t) => t.shadowOf === props.task.id);
   const primaryTask = props.task.shadowOf ? props.tasks?.find((t) => t.id === props.task.shadowOf) : undefined;
   // Fork: the Task this one was split from, and the Tasks split from this one, from the Task list.
   const forkParent = props.task.forkOf ? props.tasks?.find((t) => t.id === props.task.forkOf) : undefined;
-  const forkChildren = (props.tasks?.filter((t) => t.forkOf === props.task.id) ?? []).sort((a, b) => a.createdAt - b.createdAt); // numbered in the order made, not the list's recency order
+  const forksOf = (id: string) => (props.tasks?.filter((t) => t.forkOf === id) ?? []).sort((a, b) => a.createdAt - b.createdAt); // numbered in the order made, not the list's recency order
+  const forkChildren = forksOf(props.task.id);
+  // 並べて見る: the parent and the fork to show on the right first; closed when another Task opens
+  const [compare, setCompare] = useState<{ parentId: string; childId: string } | null>(null);
+  const compareParent = compare ? props.tasks?.find((t) => t.id === compare.parentId) : undefined; // from the live list: its status decides what can be archived
+  useEffect(() => setCompare(null), [props.task.id]);
   const [fp, setFp] = useState<Footprint | null>(null);
-  // Permission mode (#58): the daemon's list for this runner; a change applies live (Claude) or from the next turn (Codex).
+  // Permission mode: the daemon's list for this runner; a change applies live (Claude) or from the next turn (Codex).
   const runnerInfo = props.runners?.find((r) => r.id === props.task.runner);
   const modes = runnerInfo?.permissionModes ?? [];
   const [modeErr, setModeErr] = useState<string | null>(null);
@@ -74,7 +81,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
     return undefined;
   }, [events]);
   useEffect(() => setModeErr(null), [props.task.id]);
-  // Model (#155): stored now, used from the next turn (the daemon resumes the session with it).
+  // Model: stored now, used from the next turn (the daemon resumes the session with it).
   const [modelErr, setModelErr] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   useEffect(() => setModelErr(null), [props.task.id]);
@@ -89,7 +96,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       .catch((e) => setModelErr(String(e.message ?? e)))
       .finally(() => setModelBusy(false));
   };
-  // Thinking effort (#1802): same as the model — stored now, used from the next turn.
+  // Thinking effort: same as the model — stored now, used from the next turn.
   const [effortErr, setEffortErr] = useState<string | null>(null);
   const [effortBusy, setEffortBusy] = useState(false);
   useEffect(() => setEffortErr(null), [props.task.id]);
@@ -115,7 +122,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       .catch((e) => setModeErr(String(e.message ?? e)))
       .finally(() => setModeBusy(false));
   };
-  // the host's load this task caused (#2086): one line under the footprint
+  // the host's load this task caused: one line under the footprint
   const [load, setLoad] = useState<OpsLoad | null>(null);
   const loadLine = load ? (load.available ? taskLoadLine(load.groups) : t(m.loadUnavailable)) : null;
 
@@ -123,7 +130,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   const [staged, setStaged] = useState<Array<Omit<StagedChange, "before" | "after">>>([]);
   const [stagedErr, setStagedErr] = useState<string | null>(null);
   const [budgetErr, setBudgetErr] = useState<string | null>(null);
-  // Usage-limit resume (#102): the plan is on the task; whether the daemon acts on it is the runner's setting.
+  // Usage-limit resume: the plan is on the task; whether the daemon acts on it is the runner's setting.
   const autoResumeOn = props.runners?.find((r) => r.id === props.task.runner)?.autoResume;
   const [resumeBusy, setResumeBusy] = useState(false);
   const [resumeErr, setResumeErr] = useState<string | null>(null);
@@ -144,18 +151,18 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   const stagingSeq = useRef(0);
   // artifact = something was staged or applied; the reject status note also bumps this counter
   const artifacts = props.detail?.events.filter((e) => e.ev.t === "artifact" || (e.ev.t === "status" && e.ev.text.startsWith("staged change rejected"))).length ?? 0;
-  // Self-dev (#18): checks of this repository after a task on the meta workspace
+  // Self-dev: checks of this repository after a task on the meta workspace
   const [checks, setChecks] = useState<{ run: CheckRun | null; running: boolean; meta: boolean; current: boolean } | null>(null);
   const checksSeq = useRef(0);
   const [checkOpen, setCheckOpen] = useState<string | null>(null);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   const ended = props.detail?.events.filter((e) => e.ev.t === "session.end").length ?? 0;
-  // Evals (#1218): the rule counts, read again when a turn ends (the daemon counts them then); the previous ones stay up while a turn runs.
+  // Evals: the rule counts, read again when a turn ends (the daemon counts them then); the previous ones stay up while a turn runs.
   // Another task's counts never show under this one: cleared on a task change, and a response for an earlier request is dropped.
   const [evals, setEvals] = useState<TaskEvals | null>(null);
   const answerMark = humanAnswerMark(evals?.human);
   const evalsSeq = useRef(0);
-  // 再評価 (#1219): asked in the background; this task's evals.updated (→ evalsRev) brings the new row — also after a
+  // 再評価: asked in the background; this task's evals.updated (→ evalsRev) brings the new row — also after a
   // failed scoring, which the daemon announces the same way. The timer is the way out if that message never comes.
   const [judging, setJudging] = useState(false);
   const [judgeErr, setJudgeErr] = useState<string | null>(null);
@@ -240,7 +247,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
       })
       .catch(() => undefined);
   }, [props.task.id, props.checksRev, ended]);
-  // Releases (#178): under sb-rescue new code arrives by promoting a commit (ReleasePanel); sb-rescue checks it and goes back by itself.
+  // Releases: under sb-rescue new code arrives by promoting a commit (ReleasePanel); sb-rescue checks it and goes back by itself.
   const [release, setRelease] = useState<ReleaseStatus | null>(null);
   const managed = release?.managed === true;
   const isMeta = checks?.meta === true;
@@ -290,13 +297,13 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
 
   return (
     <aside className={`side ${props.open ? "open" : ""}`}>
-      {/* Phones only (#369): the Brief is laid over the chat there. */}
+      {/* Phones only: the Brief is laid over the chat there. */}
       <button className="ghost brief-close" onClick={props.onClose}>
         {t(m.close)}
       </button>
       <div className="blk">
         <h5>{t(m.overviewHeading)}</h5>
-        {/* The instruction the task was started with (#1314): read here, beside the end of a long conversation. */}
+        {/* The instruction the task was started with: read here, beside the end of a long conversation. */}
         {instruction && (
           <div className="blk brief-instruction">
             <h5>{t(m.instructionHeading)}</h5>
@@ -333,7 +340,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             ) : (
               <span className="hint">{t(m.manualChoice)}</span>
             )}
-            {/* LLM の提案（#25）は作成後に届く助言で、ランナーは決めない。提案と実際を並べるだけで、どちらが良かったかは言わない */}
+            {/* LLM の提案は作成後に届く助言で、ランナーは決めない。提案と実際を並べるだけで、どちらが良かったかは言わない */}
             {props.task.routing?.llm && (
               <span className="hint llm-suggest" title={t(m.llmTitle)}>
                 {" · "}{t(m.llmSuggest, { runner: props.task.routing.llm.runner, reason: props.task.routing.llm.reason, actual: props.task.runner, outcome: outcomeLabel(props.task.outcome) })}
@@ -401,6 +408,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
               <span>{t(m.forkOf)}</span>
               <span>
                 <button className="ghost" onClick={() => props.onOpenTask?.(props.task.forkOf!)} title={forkParent?.title}>{t(m.openForkParent)}</button>
+                {forkParent && <button className="ghost" onClick={() => setCompare({ parentId: forkParent.id, childId: props.task.id })}>{t(m.forkCompare)}</button>}
                 <div className="hint">{t(m.forkOfHint)}</div>
               </span>
             </>
@@ -414,6 +422,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
                     <button className="ghost" onClick={() => props.onOpenTask?.(c.id)} title={c.title}>
                       {t(m.openForkBefore, { n: i + 1 })}<RunnerPill runner={c.runner} />{t(m.openForkAfter)}
                     </button>
+                    <button className="ghost" onClick={() => setCompare({ parentId: props.task.id, childId: c.id })}>{t(m.forkCompare)}</button>
                   </div>
                 ))}
               </span>
@@ -589,9 +598,9 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
             )}
           </span>
           {quota.map((q) => (
-            <QuotaKv key={q.window} window={q.window} utilization={q.utilization} />
+            <QuotaKv key={`${q.account}-${q.window}`} window={[accountMark(quota, q), windowLabel(q.window)].filter(Boolean).join(" · ")} utilization={q.utilization} />
           ))}
-          {/* not shown while it cannot be read: unknown is not 0 (#549) */}
+          {/* not shown while it cannot be read: unknown is not 0 */}
           {props.ledger?.github && (
             <>
               <span>{t(m.githubBudget)}</span>
@@ -722,14 +731,16 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
           </div>
         </div>
       )}
+      {compare && compareParent && <ForkCompare parent={compareParent} forks={forksOf(compareParent.id)} childId={compare.childId} onOpenTask={(id) => props.onOpenTask?.(id)} onTask={(x) => props.onTask?.(x)} onClose={() => setCompare(null)} />}
     </aside>
   );
 }
 
+/** `window`: the window in words, after the account's mark when the runner has two accounts. */
 function QuotaKv(props: { window: string; utilization: number }) {
   return (
     <>
-      <span>{t(m.quotaWindow, { window: windowLabel(props.window) })}</span>
+      <span>{t(m.quotaWindow, { window: props.window })}</span>
       <span className="num">{pct(props.utilization)}</span>
     </>
   );

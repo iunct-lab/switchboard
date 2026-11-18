@@ -58,7 +58,7 @@ describe("interventions screen", () => {
   });
 });
 
-describe("in English (#2445)", () => {
+describe("in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   test("the interventions' rows and lines, the flow's times and the artifacts tab read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);

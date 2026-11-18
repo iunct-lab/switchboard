@@ -3,7 +3,7 @@ import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 import { titleToSend } from "./taskTitle.ts";
 
-/** What the 詳細 of Home's compose form holds (#3354): the values a request rarely sets. */
+/** What the 詳細 of Home's compose form holds: the values a request rarely sets. */
 export type ComposeDetails = { title: string; executionMode: ExecutionMode; model: string; effort: string; budget: string; shadow: boolean };
 
 const TITLE_CHARS = 20;

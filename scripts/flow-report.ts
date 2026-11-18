@@ -1,6 +1,6 @@
 /**
  * bun scripts/flow-report.ts [--days 30] [--repo <owner/name>] [--json <file>] — how long each PBI closed in the period took,
- * stage by stage (PBI #650, docs/design/flow-metrics.md), and the backlog's growth week by week (#1878). Reads the app's
+ * stage by stage (docs/design/flow-metrics.md), and the backlog's growth week by week. Reads the app's
  * stored values (the Issues, comments and Story Points, through BACKLOG_URL as `ops-kit lint` does; a PBI kept in the app
  * only counts too) and GitHub's merged PRs (one GraphQL query per 50 PRs, 100 points at most; it reads nothing when the
  * budget is under 500; none when no GitHub repository is known: the PR stages are unknown), and the Switchboard DB (SWITCHBOARD_HOME, read-only) for each PBI's Tasks.
@@ -14,7 +14,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowStage } from "../packages/protocol/src/index.ts";
-import { runGh } from "../packages/core/src/backlog.ts";
+import { runGh } from "../packages/core/src/backlog-gh.ts";
 import { actualsByStoryPoints, backlogGrowth, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
 import { deferredTasksSince } from "../packages/core/src/db.ts";
 import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
@@ -74,7 +74,7 @@ async function main(): Promise<number> {
     const share = launchShare(pbis);
     console.log(`\n実装を 3 回以上起動した PBI: ${share.known ? `${share.repeated}/${share.known}（${Math.round((share.repeated / share.known) * 100)}%）` : "不明"}`);
     console.log(`段 wait の中央値: ${dur(sum.stages.wait.p50)}`);
-    // the backlog's growth (#1878): without the DB the deferred columns are not known
+    // the backlog's growth: without the DB the deferred columns are not known
     const known = !!db;
     const now = Date.now();
     const weeks = backlogGrowth(growth, known ? deferredTasksSince(db!, workspaces, weekStartOf(now - days * 86_400_000)) : [], records.repository, days, now);

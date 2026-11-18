@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { EventEnvelope, PermissionDecision } from "./events.ts";
-import { DeviceAuthView, Task, TeleportProgress, TerminalStatus } from "./model.ts";
+import { DeviceAuthView, Task, TeleportProgress, TerminalStatus } from "./model/task.ts";
 
 /** Client → daemon over WebSocket. REST covers the rest (see core/server.ts). */
 export const ClientMessage = z.discriminatedUnion("type", [

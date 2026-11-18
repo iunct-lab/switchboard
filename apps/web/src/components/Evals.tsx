@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { EvalsListRow, EvalsSummary, RunnerId, RunnerInfo, Workspace } from "@switchboard/protocol";
-import { api } from "../api.ts";
-import { contextLines, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, judgedDiffers, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
+import { api } from "../api/index.ts";
+import { contextLines, requestRowLines, stageTableRows, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, judgedDiffers, firstSortDir, gapLabel, sortEvalRows, type EvalsSortKey } from "../evals.ts";
 import { fmtClock, fmtUsd, RunnerPill } from "./ui.tsx";
 import { outcomeLabel } from "../attention.ts";
 import { HumanEvalForm, humanEvalKey } from "./HumanEvalForm.tsx";
+import { RequestEvalForm, requestEvalKey } from "./RequestEvalForm.tsx";
 import { Reports } from "./Reports.tsx";
 import { Ops } from "./Ops.tsx";
 import { Balance } from "./Balance.tsx";
@@ -34,16 +35,16 @@ const COLUMNS: Array<{ key: EvalsSortKey | null; label: string; title?: string }
 ];
 
 /**
- * The Insights screen: the reports across Tasks on top (#1835), then every task's evaluations side by side (#1221) — the
+ * The Insights screen: the reports across Tasks on top, then every task's evaluations side by side — the
  * daemon filters, the screen sorts; a row opens the Task.
  */
-export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; onOpenTask: (id: string) => void; /** 評価をお願い (#1877): the Task with its Brief open at 自分の評価 */ onRateTask: (id: string) => void; onError: (msg: string) => void; /** bumped on every evals.updated: a judge or a rating that finished while the screen is open */ rev?: number; /** 改善要望にする (#1221) */ onImprove?: (taskId: string) => void; /** the report to open first (Home's line, #1835) */ openReport?: string; /** the レポート section's list: the HTML ones or every artifact (#1833) */ scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; /** a report's Task, with that artifact selected on its 成果物 tab (#1835) */ onOpenArtifact: (taskId: string, artifactId: string) => void }) {
+export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; onOpenTask: (id: string) => void; /** 評価をお願い: the Task with its Brief open at 自分の評価 */ onRateTask: (id: string) => void; onError: (msg: string) => void; /** bumped on every evals.updated: a judge or a rating that finished while the screen is open */ rev?: number; /** 改善要望にする */ onImprove?: (taskId: string) => void; /** the report to open first (Home's line) */ openReport?: string; /** the レポート section's list: the HTML ones or every artifact */ scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; /** a report's Task, with that artifact selected on its 成果物 tab */ onOpenArtifact: (taskId: string, artifactId: string) => void }) {
   const [rows, setRows] = useState<EvalsListRow[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [workspaceId, setWorkspaceId] = useState("");
   const [runner, setRunner] = useState("");
   const [limit, setLimit] = useState(100);
-  // the model and effort are filtered on the rows read, not by the daemon (#1801)
+  // the model and effort are filtered on the rows read, not by the daemon
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [subagentEffort, setSubagentEffort] = useState("");
@@ -68,9 +69,11 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- onError is App's stable setter; rev re-reads after a judge or a rating lands
   }, [workspaceId, runner, limit, props.rev]);
-  // 評価をお願い (#1877): read with the list's workspace and again on evals.updated; a failure shows in the section only
+  // 評価をお願い: read with the list's workspace and again on evals.updated; a failure shows in the section only
   const [summary, setSummary] = useState<EvalsSummary | null>(null);
   const [summaryFailed, setSummaryFailed] = useState(false);
+  /** Counted up after a rating is saved here: the summary is read again by the effect below, with its guard. */
+  const [summaryRev, setSummaryRev] = useState(0);
   useEffect(() => {
     let live = true;
     api
@@ -86,7 +89,7 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
     return () => {
       live = false;
     };
-  }, [workspaceId, props.rev]);
+  }, [workspaceId, props.rev, summaryRev]);
   const sorted = useMemo(() => (rows ? sortEvalRows(filterEvalRows(rows, { model, effort, subagentEffort }), sort.key, sort.dir) : []), [rows, sort, model, effort, subagentEffort]);
   const options = useMemo(() => evalFilterOptions(rows ?? []), [rows]);
   const withCurrent = (values: string[], current: string) => (current && !values.includes(current) ? [...values, current] : values);
@@ -111,7 +114,43 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
               <div className="muted">{t(m.noneJudgedLastWeek)}</div>
             ) : (
               <div className="evals-ask">
-                {summary.sample.map((r) => (
+                {summary.sample.map((r) => {
+                  const lines = (list: ReturnType<typeof contextLines>) => (
+                    <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 8px", margin: "6px 0" }}>
+                      {list.map((l, i) => (
+                        <Fragment key={`${i}:${l.label}`}>
+                          <dt className="muted">{l.label}</dt>
+                          <dd className={l.warn ? "warn" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>
+                            {l.text}
+                          </dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  );
+                  // a closed request with its PBIs, rated as one unit: where it went wrong, not how one Task did
+                  if (r.kind === "request")
+                    return (
+                      <div key={`${r.workspaceId}#${r.number}`} data-testid="evals-ask-request" style={{ borderTop: "1px solid var(--line)", padding: "8px 0" }}>
+                        <div style={{ overflowWrap: "anywhere" }}>
+                          <span className="tag">{t(m.reqTag)}</span> #{r.number} {r.title}
+                          {!workspaceId && <span className="muted"> · {wsName(r.workspaceId)}</span>}
+                        </div>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <span>{t(m.colHuman)} {r.human ? `${r.human.rating} / 5` : t(m.notYet)}</span>
+                        </div>
+                        {lines(requestRowLines(r))}
+                        <RequestEvalForm
+                          key={requestEvalKey(r.workspaceId, r.number, r.human)}
+                          workspaceId={r.workspaceId}
+                          number={r.number}
+                          human={r.human}
+                          // the stage counts below change with it: the summary is read again — by the effect, so an
+                          // answer that comes back after the workspace was switched is dropped, not shown under the new one
+                          onSaved={() => setSummaryRev((n) => n + 1)}
+                        />
+                      </div>
+                    );
+                  return (
                   <div key={r.taskId} style={{ borderTop: "1px solid var(--line)", padding: "8px 0" }}>
                     <div>
                       <button className="ghost open" onClick={() => props.onRateTask(r.taskId)} title={r.taskId} style={{ textAlign: "left", whiteSpace: "normal", overflowWrap: "anywhere" }}>
@@ -123,27 +162,41 @@ export function Evals(props: { workspaces: Workspace[]; runners?: RunnerInfo[]; 
                       <span>{t(m.colRubric)} {r.judge ? r.judge.average.toFixed(1) : "-"}</span>
                       <span>{t(m.colHuman)} {r.human ? `${r.human.rating} / 5` : t(m.notYet)}</span>
                     </div>
-                    <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 8px", margin: "6px 0" }}>
-                      {contextLines(r.context).map((l) => (
-                        <Fragment key={l.label}>
-                          <dt className="muted">{l.label}</dt>
-                          <dd className={l.warn ? "warn" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>
-                            {l.text}
-                          </dd>
-                        </Fragment>
-                      ))}
-                    </dl>
+                    {lines(contextLines(r.context))}
                     <HumanEvalForm
                       key={humanEvalKey(r.taskId, r.human)}
                       taskId={r.taskId}
                       human={r.human}
-                      onSaved={(e) => setSummary((s) => (s ? { ...s, sample: s.sample.map((x) => (x.taskId === r.taskId ? { ...x, human: e.human } : x)) } : s))}
+                      onSaved={(e) => setSummary((s) => (s ? { ...s, sample: s.sample.map((x) => (x.kind === "task" && x.taskId === r.taskId ? { ...x, human: e.human } : x)) } : s))}
                     />
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             <div className="hint">{t(m.gapLine, { gap: gapLabel(summary.gap) })}</div>
+            {/* how often each stage was chosen: every stage has a row, 0 too, so an empty month still reads as counted */}
+            <h5 style={{ marginTop: 14 }}>{t(m.stagesHeading)}</h5>
+            <div className="table-scroll">
+              <table className="pricing" data-testid="evals-stages">
+                <thead>
+                  <tr>
+                    <th>{t(m.stagesStage)}</th>
+                    <th className="num">{t(m.stagesCount)}</th>
+                    <th>{t(m.stagesExamples)}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stageTableRows(summary.stages).map((r) => (
+                    <tr key={r.stage}>
+                      <td>{r.label}</td>
+                      <td className="num">{r.count}</td>
+                      <td style={{ overflowWrap: "anywhere" }}>{r.examples}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
       </section>

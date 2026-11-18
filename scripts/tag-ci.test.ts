@@ -1,13 +1,13 @@
 // test-reads: .github/workflows/ci.yml scripts/ci.ts
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
-import { stepWithIdle, type Offload } from "./local-ci";
-import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, waitForMore, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
+import { OffloadStartError, stepWithIdle, type Offload } from "./local-ci";
+import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -76,78 +76,23 @@ function fake(tags: Array<{ tag: string; body: string | null; at?: number; fail?
     },
     log: () => undefined,
     slot: (_name, fn) => fn(),
-    // no waiting for tags to pile up unless a test asks for it (#4079)
-    env: { SWITCHBOARD_TAG_CI_MIN_TAGS: "0" },
   };
   return { d, ran, viewed, worktrees, edits, bodies, diffs };
 }
 
 const testFail = { at: "bun test", output: "(fail) a > b\n1 fail" };
 
-describe("tag-ci: waits for tags to pile up (#4079)", () => {
-  const NOW = 1_800_000_000_000;
-  const H = 3_600_000;
-  const unix = (msAgo: number) => (NOW - msAgo) / 1000;
-  // three tags without a result, then one with: the newest at v3.0.0
-  const piled = (ago: number[]) => fake([
-    ...ago.map((a, i) => ({ tag: `v${ago.length - i}.0.0`, body: "- #1 x", at: unix(a) })),
-    { tag: "v0.9.0", body: `x\n[tag-ci] pass ${shaOf("v0.9.0")}`, at: unix(100 * H) },
-  ]);
-  const withEnv = (f: ReturnType<typeof fake>, env: Record<string, string>, waits: string[] = []): TagCiDeps => ({ ...f.d, env, now: () => NOW, log: (l) => void waits.push(l), onWait: (r) => void waits.push(`wait: ${r}`) });
-
-  test("waitForMore: fewer than min and young waits, the rest runs", () => {
-    const p = (n: number, ago: number) => Array.from({ length: n }, (_, i) => ({ tag: `v${n - i}.0.0`, at: NOW - (i === n - 1 ? ago : 0) }));
-    expect(waitForMore(p(3, H), NOW, 8, 6 * H)).toContain("3 件");
-    expect(waitForMore(p(8, H), NOW, 8, 6 * H)).toBeNull();
-    expect(waitForMore(p(3, 6 * H), NOW, 8, 6 * H)).toBeNull();
-    expect(waitForMore([], NOW, 8, 6 * H)).toBeNull();
-  });
-
-  test("fewer than min and new: nothing runs, the Release is untouched, onWait hears why", async () => {
-    const f = piled([2 * H, H, H / 2]);
-    const waits: string[] = [];
-    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "4" }, waits), "o/r", "/repo", CACHE);
-    expect(r).toEqual([]);
-    expect(f.worktrees).toEqual([]);
-    expect(f.edits).toEqual([]);
-    expect(waits.filter((w) => w.startsWith("wait: "))).toHaveLength(1);
-    // the count reads down to the tag with a result and no further
-    expect(f.viewed).toEqual(["v3.0.0", "v2.0.0", "v1.0.0", "v0.9.0"]);
-  });
-
-  test("min or more pile up: it runs", async () => {
-    const f = piled([2 * H, H, H / 2]);
-    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "3" }), "o/r", "/repo", CACHE);
-    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
-  });
-
-  test("fewer than min but the oldest is MAX_WAIT old: it runs", async () => {
-    const f = piled([7 * H, H, H / 2]);
-    const r = await tagCi(withEnv(f, { SWITCHBOARD_TAG_CI_MIN_TAGS: "8" }), "o/r", "/repo", CACHE);
-    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
-  });
-
-  test("the environment overrides the hours, and a bad value is the default (8 tags, 6 hours)", async () => {
-    const run = async (env: Record<string, string>) => (await tagCi(withEnv(piled([7 * H, H, H / 2]), env), "o/r", "/repo", CACHE)).length;
-    expect(await run({ SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "8" })).toBe(0);
-    expect(await run({ SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "7" })).toBe(1);
-    // bad: 8 tags / 6 hours, so the 7-hour-old oldest runs and a 5-hour-old one waits
-    expect(await run({ SWITCHBOARD_TAG_CI_MIN_TAGS: "abc", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "-1" })).toBe(1);
-    expect(await run({ SWITCHBOARD_TAG_CI_MIN_TAGS: "2.5", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "" })).toBe(1);
-    const young = piled([5 * H, H, H / 2]);
-    expect((await tagCi(withEnv(young, { SWITCHBOARD_TAG_CI_MIN_TAGS: "x", SWITCHBOARD_TAG_CI_MAX_WAIT_HOURS: "x" }), "o/r", "/repo", CACHE))).toEqual([]);
-  });
-
-  test("without onWait (another repository, --repo) it never waits", async () => {
-    const f = piled([2 * H, H, H / 2]);
-    const r = await tagCi({ ...f.d, env: { SWITCHBOARD_TAG_CI_MIN_TAGS: "8" }, now: () => NOW }, "o/r", "/repo", CACHE);
-    expect(r.map((e) => e.tag)).toEqual(["v3.0.0"]);
-  });
-
-  test("a newest tag that already has a result is not a wait", async () => {
-    const f = fake([{ tag: "v1.0.0", body: `x\n[tag-ci] pass ${shaOf("v1.0.0")}`, at: unix(H) }]);
-    const r = await tagCi(withEnv(f, {}), "o/r", "/repo", CACHE);
-    expect(r.map((e) => `${e.tag} ${e.result} ${e.ran}`)).toEqual(["v1.0.0 pass false"]);
+describe("tag-ci: no wait before the walk", () => {
+  test("a single tag without a result, made a minute ago, runs", async () => {
+    const NOW = 1_800_000_000_000;
+    const f = fake([
+      { tag: "v1.0.0", body: "- #1 x", at: (NOW - 60_000) / 1000 },
+      { tag: "v0.9.0", body: `x\n[tag-ci] pass ${shaOf("v0.9.0")}`, at: (NOW - 100 * 3_600_000) / 1000 },
+    ]);
+    // the deps Switchboard's own run gets (sync and onPerfStreak): one young tag is enough, whatever the environment says
+    const r = await tagCi({ ...f.d, now: () => NOW, sync: async () => undefined, onPerfStreak: async () => undefined }, "o/r", "/repo", CACHE);
+    expect(f.ran.some((x) => x.tag === "v1.0.0")).toBe(true);
+    expect(r[0]).toMatchObject({ tag: "v1.0.0", result: "pass", ran: true });
   });
 });
 
@@ -188,7 +133,7 @@ describe("tag-ci", () => {
     expect(f.ran.some((x) => x.script === "bun test")).toBe(true);
   });
 
-  test("main's bundle and bytes are recorded once each from the tag's worktree, pass or fail; a failed record changes nothing (#4105)", async () => {
+  test("main's bundle and bytes are recorded once each from the tag's worktree, pass or fail; a failed record changes nothing", async () => {
     for (const [fail, recordFails] of [[undefined, false], [testFail, false], [undefined, true]] as const) {
       const f = fake([{ tag: "v1.0.0", body: "- #1 x", fail }]);
       const puts: string[] = [];
@@ -231,7 +176,7 @@ describe("tag-ci", () => {
     }
   });
 
-  test("every test runs: the tag's bun test is never narrowed, even with the selection in the checkout (#3297)", async () => {
+  test("every test runs: the tag's bun test is never narrowed, even with the selection in the checkout", async () => {
     const f = fake([{ tag: "v1.0.0", body: "- #1 x" }]);
     const sh = f.d.sh;
     const d: TagCiDeps = {
@@ -320,7 +265,7 @@ describe("tag-ci", () => {
     expect(tagCiExit(r)).toBe(0);
   });
 
-  test("previous tag: the steps' env names the tag before as PERF_BASE_REF; the first tag gets none (#4219)", async () => {
+  test("previous tag: the steps' env names the tag before as PERF_BASE_REF; the first tag gets none", async () => {
     const f = fake([{ tag: "v3.0.0", body: "" }, { tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
     const seen = new Map<string, string | undefined>();
     const d: TagCiDeps = { ...f.d, step: (script, cwd, env) => (seen.set(/switchboard\.tag-ci-(v\d+\.\d+\.\d+)\./.exec(cwd)?.[1] ?? "?", env?.PERF_BASE_REF), f.d.step(script, cwd, env)) };
@@ -332,7 +277,7 @@ describe("tag-ci", () => {
     expect([...first]).toEqual([["v1.0.0", undefined]]);
   });
 
-  describe("the perf steps are a warning in the Release, not part of the result (#4690)", () => {
+  describe("the perf steps are a warning in the Release, not part of the result", () => {
     const WARNING = "perf の警告（合否には数えない）:";
     const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
     const only = async (output: string) => {
@@ -401,7 +346,7 @@ describe("tag-ci", () => {
     });
   });
 
-  test("a perf check that is over runs in the tag CI (a PR's local CI no longer runs it, #4076) and is a pass with the line as a warning", async () => {
+  test("a perf check that is over runs in the tag CI (a PR's local CI no longer runs it) and is a pass with the line as a warning", async () => {
     const over = { at: CHECK, output: "ceilings: local\nover: launch.ms = 900 > 800\n" };
     const f = fake([{ tag: "v1.0.0", body: "", fail: over }]);
     const r = await tagCi(f.d, "o/r", "/repo", CACHE, NO_HOST);
@@ -552,7 +497,7 @@ function requests(f: ReturnType<typeof fake>) {
   return { d, open, comments, printed, bodies };
 }
 
-describe("tag-ci: recordings and the walk (#3534)", () => {
+describe("tag-ci: recordings and the walk", () => {
   const saved = process.env.SWITCHBOARD_FIXTURES;
   afterEach(() => {
     if (saved === undefined) delete process.env.SWITCHBOARD_FIXTURES;
@@ -616,7 +561,7 @@ describe("tag-ci: recordings and the walk (#3534)", () => {
     expect(f.edits).toEqual([]);
   });
 
-  test("recordings asked for: the folder is synced with its branch before the list is read (#3532)", async () => {
+  test("recordings asked for: the folder is synced with its branch before the list is read", async () => {
     process.env.SWITCHBOARD_FIXTURES = "/vault";
     const f = fake([{ tag: "v1.0.0", body: "- a" }]);
     const { d, lists } = listing(f, "present packages/a.jsonl\n");
@@ -626,7 +571,7 @@ describe("tag-ci: recordings and the walk (#3534)", () => {
     expect(lists.indexOf("synced")).toBeLessThan(lists.indexOf("listed"));
   });
 
-  test("a failed sync is logged and the list still judges (#3532)", async () => {
+  test("a failed sync is logged and the list still judges", async () => {
     process.env.SWITCHBOARD_FIXTURES = "/vault";
     const f = fake([{ tag: "v1.0.0", body: "- a" }]);
     const { d, lists } = listing(f, "missing packages/b.jsonl\n");
@@ -680,7 +625,7 @@ describe("tag-ci: recordings and the walk (#3534)", () => {
   });
 });
 
-describe("tag-ci: a miss of the narrowed tests (#3297)", () => {
+describe("tag-ci: a miss of the narrowed tests", () => {
   // as bun prints it: the heading, the test's error, the (fail) line
   const red = { at: "bun test", output: "bun test v1.4.4\na.test.ts:\nerror: x\n(fail) one [1ms]\nb.test.ts:\n(pass) two\n(fail) three [1ms]\n\n 1 pass\n 2 fail\n" };
   const sectionOf = async (select: string | Error | undefined, tags = [{ tag: "v2.0.0", body: "x", fail: red }, { tag: "v1.0.0", body: "- #1 x\n\n## CI\n[tag-ci] pass " + shaOf("v1.0.0") }]) => {
@@ -770,7 +715,7 @@ describe("tag-ci --latest-pass", () => {
 });
 
 describe("tag-ci requests", () => {
-  test("a run cut after the walk wrote the pass: the next run tells the open request (#3534)", async () => {
+  test("a run cut after the walk wrote the pass: the next run tells the open request", async () => {
     const f = fake([{ tag: "v3.0.0", body: "- c\n\n## CI\n[tag-ci] fail " + shaOf("v3.0.0") + "\n\n`bun test` が落ちた:\n    (fail) a > b\n" }, { tag: "v2.0.0", body: "- b\n\n[tag-ci] pass " + shaOf("v2.0.0") }]);
     const q = requests(f);
     q.open.push({ ref: "#100", title: failureRequest({ tag: "v3.0.0", sha: shaOf("v3.0.0"), step: "bun test", fails: ["(fail) a > b"], lastPass: "v1.0.0", commits: [] }, "2026-10-30", NO_HOST).title });
@@ -780,7 +725,7 @@ describe("tag-ci requests", () => {
     expect(q.comments[0]!.body).toContain("戻す先の候補: v2.0.0（間のマージ 2 件。戻すなら bun scripts/rollback-pr.ts v2.0.0 --repo o/r）");
   });
 
-  test("filed before the walk, then the walk finds a pass: the open request is told once (#3534)", async () => {
+  test("filed before the walk, then the walk finds a pass: the open request is told once", async () => {
     const f = fake([{ tag: "v3.0.0", body: "- c", fail: testFail }, { tag: "v2.0.0", body: "- b" }, { tag: "v1.0.0", body: "- a\n\n[tag-ci] pass " + shaOf("v1.0.0") }]);
     const q = requests(f);
     const entries = await tagCi({ ...f.d, onNewest: (e) => followUp(e, "o/r", "/repo", true, q.d, "2026-10-30", NO_HOST) }, "o/r", "/repo", CACHE, NO_HOST);
@@ -1081,10 +1026,10 @@ describe("tag-ci: the build off the host", () => {
 
   /** A build that runs nothing: the log it would leave, with `fail`'s step failing (a step that stops the build ends the log) and `files` as the log's `sb-file:` lines. */
   function fakeOffload(fail?: { at: string; output: string }, files: Record<string, string> = {}) {
-    const started: Array<{ script: string; cwd: string; baseTree?: string; size: string }> = [];
+    const started: Array<{ script: string; cwd: string; baseTree?: string; imageRoot?: string; size: string }> = [];
     const offload: Offload = {
       start: async (script, cwd, o) => {
-        started.push({ script, cwd, size: o.size, ...(o.baseTree ? { baseTree: o.baseTree } : {}) });
+        started.push({ script, cwd, size: o.size, ...(o.baseTree ? { baseTree: o.baseTree } : {}), ...(o.imageRoot ? { imageRoot: o.imageRoot } : {}) });
         return { build: `b${started.length}` };
       },
       collect: async (build) => {
@@ -1185,7 +1130,7 @@ describe("tag-ci: the build off the host", () => {
   test("an sb-offload that does not know --base-tree gets no tar: the build runs without the compared tag, and the tag's result is the other steps'", async () => {
     const o = fakeOffload();
     let asked = 0;
-    o.offload.knowsBaseTree = async () => (asked++, false);
+    o.offload.knows = async (flag) => (asked++, flag !== "--base-tree");
     const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], o);
     const logs: string[] = [];
     h.d.log = (l) => void logs.push(l);
@@ -1197,9 +1142,59 @@ describe("tag-ci: the build off the host", () => {
     expect(asked).toBe(1);
     expect(logs.filter((l) => l.includes("--base-tree を知らない"))).toHaveLength(1);
     const known = fakeOffload();
-    known.offload.knowsBaseTree = async () => true;
+    known.offload.knows = async () => true;
     await tagCi(offloaded([{ tag: "v1.0.0", body: "" }], known).d, "o/r", "/repo", CACHE, NO_HOST);
     expect(known.started[0]!.baseTree).toMatch(/base\.tar$/);
+  });
+
+  test("the ci image's source: the tag's own checkout for this clone, the named tree (Switchboard's) for another repository's tags", async () => {
+    const own = fakeOffload();
+    await tagCi(offloaded([{ tag: "v1.0.0", body: "" }], own).d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(own.started[0]!.imageRoot).toBeUndefined();
+    const other = fakeOffload();
+    await tagCi({ ...offloaded([{ tag: "v1.0.0", body: "" }], other).d, imageRoot: "/switchboard" }, "o/other", "/other", CACHE, NO_HOST);
+    expect(other.started[0]!.imageRoot).toBe("/switchboard");
+    // a build left by a run that is gone starts nothing, so it names no image either: only its result is read
+  });
+
+  test("a build that sb-offload could not start is not the tag's fail: no mark, no request's material, the walk stops and nothing is judged (exit 2)", async () => {
+    const o = fakeOffload();
+    o.offload.start = async () => {
+      throw new OffloadStartError(1, "sha256sum: /w/container/Dockerfile: No such file or directory\n");
+    };
+    const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], o);
+    const logs: string[] = [];
+    h.d.log = (l) => void logs.push(l);
+    let newest = 0;
+    h.d.onNewest = async () => void newest++;
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r).toEqual([]);
+    expect(tagCiExit(r)).toBe(2);
+    // no `gh release edit`: the Release keeps no [tag-ci] line, and the older tag is not run in its place
+    expect(h.f.edits).toEqual([]);
+    expect(h.f.worktrees).toEqual(["v2.0.0"]);
+    expect(newest).toBe(0);
+    expect(logs.join("\n")).toContain("v2.0.0: 外のビルドを始められなかった（exit 1）\nsha256sum: /w/container/Dockerfile: No such file or directory\nv2.0.0: 判定しない（印は書かない）");
+    expect(existsSync(tagPendingDirOf(CACHE)) ? readdirSync(tagPendingDirOf(CACHE)) : []).toEqual([]);
+    // an sb-offload from before --image-root, asked to run another repository's tag, starts nothing either
+    const old = fakeOffload();
+    old.offload.knows = async (flag) => flag !== "--image-root";
+    const g = offloaded([{ tag: "v1.0.0", body: "" }], old);
+    expect(await tagCi({ ...g.d, imageRoot: "/switchboard" }, "o/other", "/other", CACHE, NO_HOST)).toEqual([]);
+    expect(old.started).toEqual([]);
+    expect(g.f.edits).toEqual([]);
+  });
+
+  test("the steps Switchboard keeps for the workspace run for a tag whose checkout has no ops.config.json", async () => {
+    const dir = mkdtempSync(join(CACHE, "ws-"));
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ run: "make check" }] } }));
+    const o = fakeOffload();
+    const h = offloaded([{ tag: "v1.0.0", body: "" }], o);
+    const asked: string[] = [];
+    const r = await tagCi({ ...h.d, workspace: (root) => (asked.push(root), { name: "lib", file: join(dir, "ops.config.json") }) }, "o/other", "/other", CACHE, NO_HOST);
+    expect(asked).toEqual(["/other"]);
+    expect(lines(o.started[0]!.script).map((l) => l.run)).toEqual(["make check"]);
+    expect(r.map((x) => x.result)).toEqual(["pass"]);
   });
 
   test("baseTreeTar: the tar of the commit, then .sb-sha added from a folder it removes", async () => {

@@ -6,7 +6,7 @@ import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf } from "./priceForm.ts";
 
 const form = (f: Partial<typeof EMPTY_PRICE_FORM>) => ({ ...EMPTY_PRICE_FORM, ...f });
 
-test("parsePriceForm (#1402): a full row, the model name trimmed", () => {
+test("parsePriceForm: a full row, the model name trimmed", () => {
   expect(parsePriceForm(form({ model: " claude-x ", input: "3", output: "15", cacheRead: "0.3", cacheWrite: "3.75", cacheWrite1h: "6" }))).toEqual({ model: "claude-x", price: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite1h: 6 } });
 });
 

@@ -37,12 +37,47 @@ function run(argv: string[], responses: Parameters<typeof fakeGh>[0] = []) {
 }
 
 describe("cli", () => {
+  test("a command run in a directory with no ops.config.json reads the settings file OPS_KIT_CONFIG names (the sections of a request, in the app's Task); with neither, the error names both ways to give one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit.cli-kept."));
+    try {
+      const work = join(dir, "repo");
+      mkdirSync(work);
+      // a body that lacks the request's required sections: the check that reads `sections.request` refuses it before anything is sent
+      writeFileSync(join(work, "body.md"), "本文だけ\n");
+      const kept = join(dir, "kept.json");
+      writeFileSync(kept, readFileSync(config, "utf8"));
+      const cli = join(import.meta.dir, "cli.ts");
+      const call = (env: Record<string, string>) => {
+        const p = Bun.spawnSync([process.execPath, cli, "request", "題", "body.md"], { cwd: work, env: { PATH: "/usr/bin:/bin", HOME: dir, BACKLOG_URL: "http://127.0.0.1:9/api/backlog", ...env }, stdout: "pipe", stderr: "pipe" });
+        return { code: p.exitCode, err: p.stderr.toString() };
+      };
+      const none = call({});
+      expect(none.code).toBe(1);
+      expect(none.err).toContain("ops.config.json が");
+      expect(none.err).toContain("--config か環境変数 OPS_KIT_CONFIG でファイルを指定できます");
+      const withKept = call({ OPS_KIT_CONFIG: kept });
+      expect(withKept.code).toBe(1);
+      expect(withKept.err).toContain("が無いので作りません");
+      expect(withKept.err).not.toContain("見つかりません");
+      // the directory's own file wins as a whole: one that is broken is not replaced by the other
+      writeFileSync(join(work, "ops.config.json"), "{}");
+      const own = call({ OPS_KIT_CONFIG: kept });
+      expect(own.code).toBe(1);
+      expect(own.err).toContain(`${join(work, "ops.config.json")} が不正です`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("--help lists the commands and shows a config example", async () => {
     const r = await run(["--help"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("set <issue> <field> <value>");
     expect(r.out).toContain("triage <issue> <priority>");
     expect(r.out).toContain('"projectUrl"');
+    // the way to use settings kept outside the repository: the file's place, nothing about who keeps it
+    expect(r.out).toContain("環境変数 OPS_KIT_CONFIG が指すファイル（同じ形）を使う");
+    expect(r.out).toContain("2 つをキーごとに混ぜない");
     expect((await run([])).code).toBe(1);
   });
 
@@ -250,6 +285,8 @@ describe("cli", () => {
     expect((await run(["scan-issues", "o/r", "--since", "yesterday"])).code).toBe(2);
     expect((await run(["scan-issues", "o/r", "--since"])).code).toBe(2);
     expect((await run(["scan-issues", "o/r", "--recheck", "https://github.com/x/y/issues/3"])).code).toBe(2);
+    // the same repository written in another case is not another repository
+    expect(await run(["scan-issues", "O/R", "--recheck", "https://github.com/o/r/issues/3"], [() => [], () => [], () => [], () => ({ title: "題", body: "直した" })])).toMatchObject({ code: 0, out: "hits: 0 / scanned: 1" });
   });
 
   test("ops-kit on PATH runs scan-issues from a repository without entries", () => {

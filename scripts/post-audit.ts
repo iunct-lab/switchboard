@@ -1,6 +1,6 @@
 /**
  * bun scripts/post-audit.ts select [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] — which merged PRs
- * the weekly post-merge audit reads again (PBI #4838). Prints `{ repo, period, selected: [{ pr, route, auditor, mergeSha }],
+ * the weekly post-merge audit reads again. Prints `{ repo, period, selected: [{ pr, route, auditor, mergeSha }],
  * overflow }`; exit 0 / 2 when it could not read. Keeps nothing (the `[post-audit]` marks on the PRs are the record).
  *
  * A merged PR has one of three routes, decided from the marks that exist today: `recheck` (a recheck lifted the large PR),

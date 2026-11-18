@@ -1,12 +1,12 @@
 /**
- * The rescue agent (#178): `claude -p` started from the rescue page in a fresh git worktree, with the daemon log, the
+ * The rescue agent: `claude -p` started from the rescue page in a fresh git worktree, with the daemon log, the
  * promotion history and the diff between the last two releases in its prompt. It may fix and open a pull request; it
  * is never given a way to promote or restart — a person does that after reviewing the PR.
  * Approvals are not switched off: edits are accepted and the shell is limited to the commands listed here. None of
  * them runs code from the repository — no `bun test`, no `bun install` — because code the agent can write and then
  * run could call sb-rescue on loopback, or write under ~/.switchboard, as the same OS user. CI on the pull request
  * runs the checks instead. This is Claude Code's permission system, not an OS sandbox — so sb-rescue's own secrets
- * (the token for 作り直す, the CDN's shared header value) are not in the agent's environment either (#2077).
+ * (the token for 作り直す, the CDN's shared header value) are not in the agent's environment either.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -107,7 +107,7 @@ export class RescueAgent {
     this.exitCode = null;
     this.worktree = worktree;
     // The same OS user, so what the agent must not have is not in its environment either: sb-rescue's secret for 作り直す
-    // and the CDN's shared header value, which only sb-rescue and the daemon use (#2077). Everything else stays.
+    // and the CDN's shared header value, which only sb-rescue and the daemon use. Everything else stays.
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     delete env.SWITCHBOARD_STARTER_TOKEN;

@@ -6,6 +6,8 @@ type Release = { version: string; source: string; tag: string; tree: string; tag
 type State = { completed?: Release & { commit: string }; pending?: Release };
 export type Publication = { version: string; prepare: (tree: string) => void };
 const semver = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+/** A strict `vX.Y.Z` name: what an independent sync takes as --source. */
+export const isVersion = (name: string | undefined): name is string => name !== undefined && semver.test(name);
 const numbers = (v: string) => {
   const m = semver.exec(v);
   if (!m) throw new Error(`not a strict version tag: ${v}`);
@@ -25,7 +27,7 @@ export function independentSync(opts: Options, run: Run, publish: (publication: 
       throw new Error(`independent version: ${(e as Error).message}`);
     }
   };
-  if (!opts.source || !semver.test(opts.source)) throw new Error("independent version requires --source <vX.Y.Z tag>");
+  if (!isVersion(opts.source)) throw new Error("independent version requires --source <vX.Y.Z tag> (a non-tag source works only with --dry-run)");
   const source = git(["rev-parse", "--verify", `refs/tags/${opts.source}^{commit}`]);
   const url = opts.targetUrl ?? `https://github.com/${opts.target}.git`;
   const key = createHash("sha256").update(url.toLowerCase()).digest("hex");

@@ -169,7 +169,7 @@ describe("daemon shutdown", () => {
   });
 });
 
-// The daemon takes the idle stop command out of its own environment (server.ts); a replacement it starts itself (not
+// The daemon takes the idle stop command out of its own environment (server/lifecycle.ts); a replacement it starts itself (not
 // under sb-rescue) gets it back, or the restarted daemon would never stop the host.
 test("spawnDetached puts back what the daemon kept out of its environment", async () => {
   const home = mkdtempSync(join(tmpdir(), "sb-detached-"));

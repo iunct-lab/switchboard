@@ -7,7 +7,7 @@ const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
 const queue = (over: Partial<BacklogQueue> = {}): BacklogQueue => ({ enabled: false, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, ...over });
 const e = (number: number, workspaceId = "w1") => ({ workspaceId, number });
 
-describe("queueSections (#3957)", () => {
+describe("queueSections", () => {
   test("running = queued with a stage Task, waiting = the rest in the queue's order, an entry not read stays with no row", () => {
     const items = [item(1), item(2, { activeTaskId: "tsk" }), item(3), item(3, { workspaceId: "w2" })];
     const s = queueSections(queue({ items: [e(3), e(9), e(2), e(1)] }), items);
@@ -36,7 +36,7 @@ describe("queueSections (#3957)", () => {
   });
 });
 
-describe("withAdded / withRemoved (#3957)", () => {
+describe("withAdded / withRemoved", () => {
   test("adds at the end once, the same number of another workspace is another entry; removes only the one named", () => {
     const q = queue({ items: [e(1), e(2)] });
     expect(withAdded(q, e(3))).toEqual([e(1), e(2), e(3)]);
@@ -51,7 +51,7 @@ describe("withAdded / withRemoved (#3957)", () => {
   });
 });
 
-describe("queueSaver (#3957)", () => {
+describe("queueSaver", () => {
   type Q = { items: number[] };
   /** A daemon whose answers the test gives one by one; what the screen shows. */
   function rig() {
@@ -144,7 +144,7 @@ describe("queueSaver (#3957)", () => {
   });
 });
 
-describe("moveEntry / dropIndex / withWaiting (#3958)", () => {
+describe("moveEntry / dropIndex / withWaiting", () => {
   test("moveEntry: up, down, the same place, out of range", () => {
     const xs = ["a", "b", "c", "d"];
     expect(moveEntry(xs, 2, 0)).toEqual(["c", "a", "b", "d"]);
@@ -171,7 +171,7 @@ describe("moveEntry / dropIndex / withWaiting (#3958)", () => {
   });
 });
 
-describe("pickTop (#3959)", () => {
+describe("pickTop", () => {
   const items = [
     item(1, { priority: "P2", storyPoints: 5, tasks: { total: 4, done: 1, doneAt: null }, createdAt: "2026-10-03T00:00:00Z" }),
     item(2, { stage: "needs-tasks", priority: "P0", storyPoints: null, tasks: null, createdAt: "2026-10-05T00:00:00Z" }),
@@ -201,14 +201,14 @@ describe("pickTop (#3959)", () => {
     const waiting = items.map((i) => (i.number === 1 ? ({ ...i, waits: [{ number: 9, kind: "pr", open: true, state: "pending", reason: "overlap", pbi: null }], waitsAt: "2026-10-04T00:00:00Z" } as BacklogItem) : i));
     expect(nums(pickTop(waiting, q, "priority", 12, false))).toEqual([2, 3]);
     // a prerequisite not done yet (前提) and one a person has to look at (進められない) leave it out too
-    const prereq = (state: "pending" | "withdrawn") => [{ number: 77, kind: "issue" as const, need: "done" as const, state, via: null, confirming: false }];
+    const prereq = (state: "pending" | "withdrawn") => [{ number: 77, kind: "issue" as const, need: "done" as const, state, via: [], confirming: false }];
     const held = items.map((i) => (i.number === 3 ? ({ ...i, prereqs: prereq("pending") } as BacklogItem) : i.number === 1 ? ({ ...i, prereqs: prereq("withdrawn") } as BacklogItem) : i));
     expect(nums(pickTop(held, q, "priority", 12, false))).toEqual([2]);
     expect(nums(pickTop(held, q, "priority", 12, true))).toEqual([2, 4, 1, 3]);
   });
 });
 
-describe("queueFacts / noteSummary (#4055)", () => {
+describe("queueFacts / noteSummary", () => {
   test("queueFacts: workspace · Task n/m · SP · P · stage, the values it has only", () => {
     expect(queueFacts(item(1, { tasks: { total: 4, done: 1, doneAt: null }, storyPoints: 5, priority: "P2" }))).toBe("one · Task 1/4 · SP 5 · P2 · Ready");
     expect(queueFacts(item(2, { stage: "needs-tasks", tasks: null }))).toMatch(/^one · \S/);

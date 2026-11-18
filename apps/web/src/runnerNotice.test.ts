@@ -17,7 +17,7 @@ test("unavailableNotice: without a note (or without the daemon's list), what is 
   expect(unavailableNotice(undefined, "claude")).toContain("claude が PATH にありません");
   expect(unavailableNotice(undefined, "codex")).toContain("curl -fsSL https://chatgpt.com/codex/install.sh | sh");
   expect(unavailableNotice(undefined, "dak")).toContain("docker compose up");
-  // an ADK server added in Settings (#3384): its label, else its id
+  // an ADK server added in Settings: its label, else its id
   expect(unavailableNotice({ ...info("custom:sample", false), label: "Sample" }, "custom:sample")).toBe("Sample に到達できません");
   expect(unavailableNotice(undefined, "custom:sample")).toBe("custom:sample に到達できません");
 });

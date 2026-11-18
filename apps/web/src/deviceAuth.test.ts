@@ -3,7 +3,7 @@ import { hostOf, remaining, visible } from "./deviceAuth.ts";
 
 const auth = { url: "https://device.login.example/activate?x=1", code: ["ABCD", "EFGH"].join("-"), command: "cloud login", expiresAt: 100_000 };
 
-describe("device auth card (#676)", () => {
+describe("device auth card", () => {
   test("time left as m:ss, rounded up; nothing once it has passed", () => {
     expect(remaining(100_000, 100_000 - 600_000)).toBe("10:00");
     expect(remaining(100_000, 100_000 - 61_500)).toBe("1:02");

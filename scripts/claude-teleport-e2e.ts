@@ -1,4 +1,4 @@
-/** #1132 / #1306: isolated Git/history/config, real daemon + PTY + headless Chrome + fake CLI.
+/** isolated Git/history/config, real daemon + PTY + headless Chrome + fake CLI.
  * Build web first. No live Cloud, credentials or production daemon. Debug output contains assertion labels only. */
 import { scriptRecording } from "./recordings.ts";
 const recordingPath = scriptRecording("packages/adapters/claude/fixtures/teleport-session.jsonl");
@@ -128,7 +128,7 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
     await call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
     await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   };
-  // The progress the Cloud screen shows (#1306); the status events count how many Teleports have finished for a Task.
+  // The progress the Cloud screen shows; the status events count how many Teleports have finished for a Task.
   const progressText = (): Promise<string> => evaluate(`document.querySelector('.cloud-session [data-testid="teleport-progress"]')?.textContent??''`);
   const statusCount = (id: string) => core!.db.listEvents(id).filter(e => e.ev.t === "status" && !e.ev.text.startsWith("作業コピー ")).length; // the start notice is not an end
   const inputs = () => entries().filter(e => e.answer !== undefined || e.stdin !== undefined).length;
@@ -167,7 +167,7 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
     await evaluate(`[...document.querySelectorAll('.task-head button')].find(e=>e.textContent.trim()==='元Cloud Taskを開く').click()`);
     await until(() => evaluate(`!!document.querySelector('.cloud-session') && !document.querySelector('.composer textarea')`), "back to the Cloud Task from the head");
   };
-  // #1634: right after the automatic switch, the head's switch line names the Cloud Task and is in the viewport without scrolling.
+  // right after the automatic switch, the head's switch line names the Cloud Task and is in the viewport without scrolling.
   const switchedVisible = () => evaluate(`(() => { const e = document.querySelector('.task-head .switched-from-cloud'); if (!e) return false; const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth && e.textContent.includes(${JSON.stringify(cloudTitle)}); })()`);
   await call("Network.enable");
   await call("Runtime.enable");
@@ -177,7 +177,7 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   await set(".compose textarea", "cloud fixture"); await until(() => evaluate(`!!document.querySelector(".compose button.pri") && !document.querySelector(".compose button.pri").disabled`), "Cloud preparation"); await click(".compose button.pri");
   const cloud = await until(() => core!.db.listTasks().find(t => t.executionMode === "cloud" && t.status === "idle" && t.cloudSession), "Cloud launcher ended");
   cloudTitle = cloud.title; cloudTaskId = cloud.id;
-  // #1395: the continuation runs in its own worktree; the fake CLI's history is written with that cwd.
+  // the continuation runs in its own worktree; the fake CLI's history is written with that cwd.
   const wc = join(realpathSync(repo), ".claude", "worktrees", `teleport-${cloud.id}`);
   writeFileSync(fixtureFile, fixture.replaceAll(repo, wc));
   await until(() => evaluate(`!!document.querySelector('.cloud-session a')`), "Cloud reference");
@@ -237,7 +237,7 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   assert(teleportEntries().length === askCount + 1 && entries().filter(e => e.args?.includes("--resume")).length === resumptionCount && core.db.listLocalTasksForCloud(cloud.id).length === 1, "cancel cannot resume/import"); cases++;
   // The same question answered in the terminal: Switchboard then ends the CLI and opens the Local Task by itself.
   await start("prompt"); await answerInTerminal("y");
-  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }); // a phone's width (#1634)
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }); // a phone's width
   try { await localScreen(); await until(switchedVisible, "switch line visible without scrolling at 390px"); }
   finally { await call("Emulation.clearDeviceMetricsOverride"); }
   cases++; await ended(false);
@@ -254,7 +254,7 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
     assert(core.db.listLocalTasksForCloud(cloud.id).length === 1 && core.db.listEvents(cloud.id).at(-1)?.ev.t === "status", "unconfirmed result records status, no extra link");
     assert((await progressText()).includes("未確認"), "unconfirmed shown on the Cloud screen"); cases++;
   }
-  // #1395: a Local Task at work in the clone is not stopped, refused or touched; the continuation runs in the worktree.
+  // a Local Task at work in the clone is not stopped, refused or touched; the continuation runs in the worktree.
   const releaseFile = join(home, "release");
   const busy = core.tasks.create({ runner: "claude", workspaceId: workspace.id, cwd: repo, title: "busy fixture", prompt: "HOLD busy" });
   await until(() => entries().some(e => JSON.stringify(e.prompt ?? "").includes("HOLD busy")) && core!.tasks.isLive(busy.id), "busy Local Task at work in the clone");

@@ -2,7 +2,7 @@
  * A fake GitHub for the backlog's send and import tests: its Issues, Project items and every write; `fail`
  * answers a call instead of it (after carrying it out when `after`). `now` = the time its answers are dated.
  */
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 
 export type Issue = { node_id: string; number: number; title: string; body: string; state: string; stateReason?: string | null; labels: string[]; parent: number | null; milestone?: number | null; closedAt?: string | null; comments: Array<{ node_id: string; body: string; created_at: string }> };
 
@@ -22,7 +22,11 @@ export function fakeGithub(now: () => number) {
   const history: Array<{ issue: number; by: string; at: string; field: string; value?: unknown; deleted?: boolean }> = [];
   // autoAdd: the Project's own auto-add puts a new Issue in it, and an add of one already there is refused as GitHub does
   // next: the number GitHub gives the next Issue made (0 = 100 + how many it has)
-  const state = { viewer: "me", historyNext: false, editsNext: false, lastWrite: "", autoAdd: false, next: 0 };
+  // private: what `repos/acme/app` answers as the repository's visibility
+  const state = { viewer: "me", historyNext: false, editsNext: false, lastWrite: "", autoAdd: false, next: 0, private: true };
+  // Issue artifacts by Issue number: the name, and what `gh issue artifact create` was given (a file path or a URL)
+  const artifacts = new Map<number, Array<{ name: string; from: string }>>();
+  const artifactCalls: string[][] = [];
   const ok = (body: unknown) => ({ code: 0, stdout: `HTTP/2.0 200 OK\ncontent-type: application/json\ndate: ${new Date(now()).toUTCString()}\n\n${JSON.stringify(body)}`, stderr: "" });
   const byId = (id: string) => [...issues.values()].find((i) => i.node_id === id)!;
   const gh: GhRunner = async (args) => {
@@ -37,8 +41,23 @@ export function fakeGithub(now: () => number) {
     const f = fail.findIndex((x) => x.match(args));
     const failure = f >= 0 ? fail.splice(f, 1)[0]! : null;
     const answer = (body: unknown) => (failure ? { code: 1, stdout: `HTTP/2.0 ${failure.status} X\ncontent-type: application/json\n${failure.headers ?? ""}\n{}`, stderr: failure.stderr ?? `HTTP ${failure.status}` } : ok(body));
+    // `gh issue artifact list|create <n> -R <repo> …` (gh's own subcommand, no HTTP headers in its output)
+    if (args[0] === "issue" && args[1] === "artifact") {
+      artifactCalls.push(args);
+      const lost = () => ({ code: 1, stdout: "", stderr: failure!.stderr ?? `HTTP ${failure!.status}: X (https://api.github.com/graphql)` });
+      if (failure && !failure.after) return lost();
+      const n = Number(args[3]);
+      if (args[2] === "list") return failure ? lost() : { code: 0, stdout: JSON.stringify((artifacts.get(n) ?? []).map((a) => ({ name: a.name }))), stderr: "" };
+      const rest = args.slice(6);
+      const named = rest.indexOf("--name");
+      const [from, name] = named >= 0 ? [rest[0]!, rest[named + 1]!] : [rest[0]!.slice(0, rest[0]!.lastIndexOf("#")), rest[0]!.slice(rest[0]!.lastIndexOf("#") + 1)];
+      artifacts.set(n, [...(artifacts.get(n) ?? []), { name, from }]);
+      writes.push(`artifact create ${n} ${name}`);
+      return failure ? lost() : { code: 0, stdout: "", stderr: "" };
+    }
     if (failure && !failure.after) return answer(null);
     const path = args[1]!;
+    if (path === "repos/acme/app") return answer({ full_name: "acme/app", private: state.private });
     const q: string = v.query ?? "";
     if (method !== "GET" || q.startsWith("mutation")) writes.push(q ? q.slice(10, q.indexOf("(input")) : `${method} ${path}`);
     if (method === "PATCH") state.lastWrite = Object.keys(v)[0] ?? "";
@@ -115,6 +134,6 @@ export function fakeGithub(now: () => number) {
     if (method === "PATCH") Object.assign(issues.get(n)!, v.state ? { state: v.state.toUpperCase(), stateReason: v.state === "closed" ? String(v.state_reason ?? "completed").toUpperCase() : "REOPENED" } : "milestone" in v ? { milestone: v.milestone === "null" ? null : v.milestone } : v);
     return answer({});
   };
-  return { gh, issues, items, writes, fail, history, state };
+  return { gh, issues, items, writes, fail, history, state, artifacts, artifactCalls };
 }
 

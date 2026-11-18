@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: CHROME_BIN=/usr/local/bin/chromium bun scripts/schedules-e2e.ts.
- * Editing a schedule from its row (#1480) in the real screen: the form opens with the registered values (the kind is
+ * Editing a schedule from its row in the real screen: the form opens with the registered values (the kind is
  * shown, not an input), 「やめる」 sends nothing, a bad cron shows the error and leaves the row, a save changes only the
  * row's fields (same id, the nightly result's scheduleTitle follows), and a backlog-next row keeps its Workspace on meta.
  */

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Task, Workspace } from "@switchboard/protocol";
-import { api, type FeedbackSource, type FeedbackUpstream } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type FeedbackSource, type FeedbackUpstream } from "../api/feedback.ts";
 import { developSelfPerOpening, feedbackModes, feedbackTargets, sentMode, type FeedbackTarget } from "../feedbackTarget.ts";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { copyText } from "../clipboard.ts";
@@ -51,8 +52,8 @@ async function captureTab(): Promise<File> {
 }
 
 /**
- * 改善要望にする (#1221): the text the dialog opens with and the task it was drafted from. `artifact`: 要望にする on a
- * throwaway app (#3683) — its title and its Task (the title when the screen around the artifact knows it), shown in 送信元.
+ * 改善要望にする: the text the dialog opens with and the task it was drafted from. `artifact`: 要望にする on a
+ * throwaway app — its title and its Task (the title when the screen around the artifact knows it), shown in 送信元.
  */
 export interface FeedbackPrefill {
   text: string;
@@ -60,13 +61,13 @@ export interface FeedbackPrefill {
   artifact?: { title: string; taskId: string; taskTitle?: string };
 }
 
-/** 送信元 of 要望にする (#3683): the artifact's title, and its Task unless the screen already names that Task (the Task screen). */
+/** 送信元 of 要望にする: the artifact's title, and its Task unless the screen already names that Task (the Task screen). */
 export function sentFromArtifact(screen: string, a: NonNullable<FeedbackPrefill["artifact"]>): string {
   return screen.endsWith(`(${a.taskId})`) ? t(m.sentFromArtifact, { screen: shownScreen(screen), title: a.title }) : t(m.sentFromTaskArtifact, { screen: shownScreen(screen), task: a.taskTitle ?? a.taskId, title: a.title });
 }
 
 /**
- * 要望にする on a throwaway app (#3683): the artifact sits several components below App (Task screen, Insights,
+ * 要望にする on a throwaway app: the artifact sits several components below App (Task screen, Insights,
  * 判断待ち), so it asks App to open the dialog with this event instead of a callback through each of them.
  */
 export const OPEN_FEEDBACK_EVENT = "switchboard:open-feedback";
@@ -88,7 +89,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   const [message, setMessage] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [capturing, setCapturing] = useState(false);
-  // Not remembered: every dialog starts on 要望として登録 (#263).
+  // Not remembered: every dialog starts on 要望として登録.
   const [mode, setMode] = useState<"request" | "fix">("request");
   const [target, setTarget] = useState("");
   // opened before the list was read: the meta workspace, where the daemon files a request that names none
@@ -102,7 +103,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   const submitting = useRef(false);
   // made once: each opening resets the setting to off and keeps only its own answer
   const [readDevelopSelf] = useState(() => developSelfPerOpening(() => api.settings().then((s) => s.developSelf), setDevelopSelf));
-  // whether the text came from a prefill (#1221), so a close without sending clears it
+  // whether the text came from a prefill, so a close without sending clears it
   const prefilled = useRef(false);
   const attach = useAttachments(setMessage);
   const drop = useDropZone(attach.add, setMessage);
@@ -113,7 +114,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
       setTarget(targets.initial);
       setUpstream(null);
       readDevelopSelf().catch((e) => onError(String((e as Error).message ?? e)));
-      // a draft from a task's evaluations (#1221) goes in once, when the dialog opens, over whatever was kept from a closed dialog; the
+      // a draft from a task's evaluations goes in once, when the dialog opens, over whatever was kept from a closed dialog; the
       // person edits it from there, and closing unsent drops it (the next plain open must not send it without its 出典)
       if (prefill) {
         setText(prefill.text);
@@ -132,7 +133,7 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
   async function capture() {
     setCapturing(true);
     setMessage(null);
-    // Out of the way while the tab is captured, or the dialog and its backdrop are what the picture shows (#262).
+    // Out of the way while the tab is captured, or the dialog and its backdrop are what the picture shows.
     // close() fires no `cancel`, so App's feedbackOpen stays true and the text and attachments are kept.
     dialog.current?.close();
     try {
@@ -223,7 +224,7 @@ export function formRepo(url: string): string {
   return new URL(url).pathname.split("/").slice(1, 3).join("/");
 }
 
-/** Where a request for Switchboard itself goes when this instance does not develop it (#2459): the form link, else the text to copy. */
+/** Where a request for Switchboard itself goes when this instance does not develop it: the form link, else the text to copy. */
 export function FeedbackUpstreamBox({ upstream, onCopyError }: { upstream: FeedbackUpstream["upstream"]; onCopyError: (message: string) => void }) {
   return (
     <div className="feedback-upstream" role="status">

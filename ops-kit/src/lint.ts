@@ -3,6 +3,7 @@ import { GhError, repoOf, type GhClient } from "./gh.ts";
 import { projectFragment, selectProject } from "./set.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 import { KNOWN_FAILURES_FILE, type KnownFailure } from "./known-failures.ts";
+import { proceedLine, proceedRefusal, tableRefusal, unfenced, type AskPlace } from "./reversibility.ts";
 
 export interface Violation {
   issue: number;
@@ -87,17 +88,6 @@ export function bodyLoss(before: string, after: string, isPbi: boolean, pbiSecti
   return lost.length ? `PBI の必須の節が無くなる: ${lost.join("、")}` : null;
 }
 
-/** Each line outside fences (``` / ~~~): the same reading as core's prereqsOf. */
-function* unfenced(body: string): Generator<string> {
-  let fence: string | null = null;
-  for (const line of body.replace(/\r\n/g, "\n").split("\n")) {
-    const before = fence;
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
-    fence = fence ? (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker ? null : fence) : (marker ?? null);
-    if (!before && !fence) yield line;
-  }
-}
-
 /** The numbers on the first `**前提**:` line outside fences: all the schedule and the parallel guard read. */
 export function declaredPrereqs(body: string): number[] {
   for (const line of unfenced(body)) if (line.startsWith("**前提**:")) return [...line.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
@@ -131,17 +121,23 @@ export const freeTextPrereq = (named: number[]) => `本文の自由文に先行�
 /** How a `## 判断待ち` says the work goes on: `recommended` = on with the recommended option, `wait` = stopped until the answer. */
 export type AskProceed = "recommended" | "wait";
 
+/** From this time on, a `## 判断待ち` that says 推奨で進める without the table's leave is a violation (older ones are read as `wait` and not reported: a comment cannot be edited). */
+export const PROCEED_KIND_SINCE = "2026-11-18T00:00:00+09:00";
+
 /** From this time on, a `## 判断待ち` comment without the 進め方 line is a violation; an older one is read as `wait`. */
 export const PROCEED_LINE_SINCE = "2026-11-14T00:00:00+09:00";
 
-/** The 進め方 line of a `## 判断待ち` body (outside fences): `**進め方**: 推奨で進める` or `**進め方**: 止めて待つ`, either
- * followed by `— <理由>` or nothing; null when there is none. Both choices are read the same way (leading spaces, CR). */
-export function askProceed(body: string): AskProceed | null {
-  for (const line of unfenced(body)) {
-    const m = /^\*\*進め方\*\*:\s*(推奨で進める|止めて待つ)(?:\s|$)/.exec(line.trim());
-    if (m) return m[1] === "推奨で進める" ? "recommended" : "wait";
-  }
-  return null;
+/**
+ * How the work goes on after a `## 判断待ち`, or null when it has no 進め方 line. `recommended` only when the line says
+ * 推奨で進める AND the reversibility table lets a question of its kind go on (`proceedRefusal`: the kind named, listed as
+ * compensable, no stop word in the question, and the question's `place` agreeing with the kind — without a place it
+ * cannot be checked and is `wait`). A line that says 推奨で進める without that is `wait`: what its writer wrote
+ * does not by itself let the work go on. Every reader (the lint, the app's questions, the counts) reads it here.
+ */
+export function askProceed(body: string, place: AskPlace | null = null): AskProceed | null {
+  const line = proceedLine(body);
+  if (!line) return null;
+  return line.said === "recommended" && proceedRefusal(body, undefined, place) === null ? "recommended" : "wait";
 }
 
 async function fetchAll(gh: GhClient, owner: string, name: string, project: { owner: string; number: number } | null, sleep: (ms: number) => Promise<void>): Promise<Row[]> {
@@ -209,7 +205,7 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
  * Priority, or an open request with such a PBI (no extra API calls: an Issue not among the open rows is read as closed).
  * Without the Project (`withProject: false`) the Priority is not checked, only that the Issue and a PBI are open.
  */
-export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords; knownFailures?: KnownFailure[] } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
+export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords; knownFailures?: KnownFailure[]; /** The names at the top of the linted repository's checkout (`repoTop`); absent = no checkout of it here, and a question's kind is not checked against its paths. */ top?: { name: string; dir: boolean }[] } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
   const withProject = opts.withProject ?? true;
   const project = !withProject ? null : opts.records ? opts.records.project : projectOf(cfg);
   const projectNumber = project?.number ?? 0;
@@ -297,13 +293,23 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     noteReleased(row, body);
   }
 
+  // the top of the linted repository: this checkout's when it is that repository's (`opts.top`), else what the app's records carry of the workspace's
+  const top = opts.top?.length ? opts.top : (opts.records?.top ?? []);
+  // where a question stands, for the check of its kind: its Issue, and its PBI's Tasks (the rows whose parent is that PBI)
+  const placeOf = (row: Row): AskPlace => {
+    const pbi = labelsOf(row).includes("type:pbi") ? row.number : row.parent && labelsOf(row.parent).includes("type:pbi") ? row.parent.number : null;
+    return { issue: { number: row.number, body: row.body, labels: labelsOf(row) }, pbi: pbi === null ? null : { number: pbi, tasks: rows.filter((r) => r.parent?.number === pbi).map((r) => r.number) }, top };
+  };
   for (const row of rows.filter((r) => labelsOf(r).some((l) => l === "type:pbi" || l === "type:task"))) {
     const asks = row.comments.filter((c) => c.body.trimStart().startsWith("## 判断待ち"));
     // an ask re-posted with the line replaces the older ones without it (a comment cannot be edited)
     const lastWithLine = Math.max(-Infinity, ...asks.filter((c) => askProceed(c.body) !== null).map((c) => Date.parse(c.createdAt)));
     for (const c of asks) {
+      // the newest ask says 推奨で進める and the table does not let its kind go on: the work must stop and ask
+      const refusal = Date.parse(c.createdAt) >= Date.parse(PROCEED_KIND_SINCE) && Date.parse(c.createdAt) >= lastWithLine ? (top.length ? proceedRefusal(c.body, undefined, placeOf(row)) : tableRefusal(c.body)) : null;
+      if (refusal) bad(row.number, `## 判断待ち（${c.createdAt}）は「推奨で進める」では進められない: ${refusal}。「**進め方**: 止めて待つ — 理由」で書き直してラベル needs-decision を付け、回答を待つ`);
       if (Date.parse(c.createdAt) < Date.parse(PROCEED_LINE_SINCE) || askProceed(c.body) !== null || Date.parse(c.createdAt) < lastWithLine) continue;
-      bad(row.number, `## 判断待ち（${c.createdAt}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`);
+      bad(row.number, `## 判断待ち（${c.createdAt}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`);
     }
   }
 

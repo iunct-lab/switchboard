@@ -1,9 +1,9 @@
 import type { Preset, PresetList, PresetScene, PresetUse } from "@switchboard/protocol";
-import { api } from "./api.ts";
+import { api } from "./api/index.ts";
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
-/* 定型の指示 (#940): what the settings list and the pickers show of a saved instruction. */
+/* 定型の指示: what the settings list and the pickers show of a saved instruction. */
 
 /** The text has the slot the chosen Issue / PR goes in (the daemon's `{{target}}`, written exactly so). */
 export const usesTarget = (p: Pick<Preset, "text">) => p.text.includes("{{target}}");

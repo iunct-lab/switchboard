@@ -7,9 +7,10 @@ import { join } from "node:path";
 import type { RunnerAdapter, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { originMismatch, parseGithubRepo, type WorkspaceClone, unusableWorkspaces } from "./workspace-clone.ts";
 import { Db } from "./db.ts";
+import { stopArmedQueues } from "./tasks/state.ts";
 
 // Adding a GitHub repository by name: cloned next to the checkout; one the owner cannot push to writes nothing back.
 
@@ -17,6 +18,8 @@ let core: CoreServer | undefined;
 let root: string | undefined;
 afterEach(async () => {
   if (core) await core.stop();
+  // a test that boots twice leaves its first server's manager: its queue timer would tick on the removed root
+  stopArmedQueues();
   if (root) rmSync(root, { recursive: true, force: true });
   core = root = undefined;
 }, 30_000);
@@ -520,7 +523,7 @@ test("unusableWorkspaces lists a missing folder and a wrong origin of a GitHub r
   }
 });
 
-test("GET /api/asks: a workspace that cannot be used is a notice until it is fixed, never an Inbox note", async () => {
+test("GET /api/asks: a workspace that cannot be used is a notice until it is fixed", async () => {
   const { base } = await boot();
   const gone = core!.db.upsertWorkspace({ name: "gone", path: join(root!, "gone"), kind: "repo" });
   core!.db.setWorkspaceBacklogSource(gone.id, { service: "github", host: "github.com", repository: "acme/gone", project: { owner: "acme", number: 1 } });
@@ -529,7 +532,6 @@ test("GET /api/asks: a workspace that cannot be used is a notice until it is fix
   expect(await notices()).toMatchObject([{ id: `notice:workspace:${gone.id}`, state: "open", question: "workspace gone を使えません" }]);
   // read again: still one, the same first sight kept in the setting
   expect(await notices()).toHaveLength(1);
-  expect(await (await fetch(`${base}/api/inbox`)).json()).toEqual([]);
   // put back as its own clone: resolved on the next read, no restart
   mkdirSync(gone.path);
   spawnSync("git", ["init", "-q", gone.path]);

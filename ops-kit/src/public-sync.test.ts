@@ -524,10 +524,16 @@ describe("public-sync", () => {
       expect(await main(["public-sync", "--config", cfg, "--source", "main", "--dry-run"], gh, (s) => lines.push(s), (s) => errs.push(s))).toBe(0);
       expect(lines.join("\n")).toContain("excluded .github/workflows/host.yml");
       expect(lines.join("\n")).toContain("included README.md, SECURITY.md, .github/: 4 of 5 files");
-      writeFileSync(cfg, JSON.stringify({ publicSync: { target: TARGET, versioning: "independent" } }));
+      writeFileSync(cfg, JSON.stringify({ publicSync: { target: TARGET, versioning: "independent", include: ["README.md", "SECURITY.md", ".github/"], exclude: [".github/workflows/host.yml"], rewrite: ["SECURITY.md"] } }));
       commit("chore: independent config");
-      expect(await main(["public-sync", "--config", cfg, "--source", "main", "--dry-run"], gh, () => {}, (s) => errs.push(s))).toBe(1);
-      expect(errs.join("\n")).toContain("independent version requires --source");
+      // independent: a dry run takes a source that is no tag and calls the version provisional; a real sync still needs the tag
+      const dry: string[] = [];
+      expect(await main(["public-sync", "--config", cfg, "--source", "main", "--dry-run"], gh, (s) => dry.push(s), (s) => errs.push(s))).toBe(0);
+      expect(dry.join("\n")).toContain("version: 仮");
+      expect(dry.join("\n")).toContain("included README.md, SECURITY.md, .github/: 4 of 5 files");
+      expect(dry.join("\n")).toContain("dry-run: would push a root commit to main");
+      expect(await main(["public-sync", "--config", cfg, "--source", "main"], gh, () => {}, (s) => errs.push(s))).toBe(1);
+      expect(errs.join("\n")).toContain("independent version requires --source <vX.Y.Z tag> (a non-tag source works only with --dry-run)");
       writeFileSync(cfg, "{}");
       commit("chore: empty config");
       expect(await main(["public-sync", "--config", cfg, "--source", "main", "--dry-run"], gh, () => {}, (s) => errs.push(s))).toBe(1);

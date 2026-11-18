@@ -1,11 +1,12 @@
-// test-reads: none
+// test-reads: ops-kit/bin/ops-kit ops-kit/src/cli.ts ops-kit/src/heavy.ts
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
-import { appendHistory, buildRelease, currentOf, previousOf, readHistory, restartNeeded, run, switchTo } from "./releases.ts";
+import { appendHistory, buildRelease, currentOf, previousOf, readHistory, releasesDir, restartNeeded, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -102,7 +103,7 @@ test("restoring the oldest snapshot at the retention limit keeps that snapshot a
 }, 30_000);
 
 test("snapshots keep only the newest KEEP_SNAPSHOTS and the one being restored", async () => {
-  expect(KEEP_SNAPSHOTS).toBe(3); // the decided value (#1429)
+  expect(KEEP_SNAPSHOTS).toBe(3); // the decided value
   for (let i = 0; i < KEEP_SNAPSHOTS + 1; i++) {
     await snapshotDb(f.home, `n${i}`);
     await Bun.sleep(5);
@@ -211,7 +212,7 @@ test("SWITCHBOARD_DB moves the database sb-rescue snapshots, like it does for th
   }
 });
 
-test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes nothing; the candidate boots on the unpacked database, without sb-rescue's starter token (#2077)", async () => {
+test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes nothing; the candidate boots on the unpacked database, without sb-rescue's starter token", async () => {
   const fakes = Array.from({ length: 8 }, (_, i) => (i + 1).toString(16).repeat(40));
   for (const sha of fakes) {
     mkdirSync(join(f.home, "releases", sha), { recursive: true });
@@ -240,7 +241,7 @@ test("a promotion removes releases beyond KEEP_RELEASES; a rejected one removes 
   expect([currentOf(f.home), previousOf(f.home)]).toEqual([good, cur]);
 }, 60_000);
 
-test("checkDaemon says why the daemon is unhealthy, in the same words (#2814)", async () => {
+test("checkDaemon says why the daemon is unhealthy, in the same words", async () => {
   const asked: string[] = [];
   const fake = (health: () => Response, upgrade = true) =>
     Bun.serve({
@@ -579,6 +580,71 @@ test("ifNoRestart on a Web UI only release is taken: 202, the running daemon rea
     rmSync(join(g.home, "busy"), { force: true });
   }
 });
+
+test("ifNoRestart builds only inside one of the machine's heavy-process slots: while another heavy job holds the slot it is refused (409) before anything is built, and once the slot is free it is taken, built in it, and the slot given back", async () => {
+  const g = await webFixture();
+  const pid = (await health(g.ctx.port))!.pid;
+  // the kit's own wrapper, with a home of its own: one slot, no memory floor (this test is not about the host's memory)
+  const hh = mkdtempSync(join(tmpdir(), "sb-rescue-heavy-"));
+  mkdirSync(join(hh, ".config", "ops-kit"), { recursive: true });
+  writeFileSync(join(hh, ".config", "ops-kit", "heavy.json"), JSON.stringify({ max: 1, minFreeMb: 0 }));
+  const kit = ["env", `HOME=${hh}`, join(import.meta.dir, "..", "..", "ops-kit", "bin", "ops-kit"), "heavy"];
+  const slots = () => { try { return readdirSync(join(hh, ".local", "state", "ops-kit", "heavy")).filter((f) => f.startsWith("slot-")); } catch { return []; } };
+  writeFileSync(join(g.home, "busy"), "");
+  const rescue = startRescue({ ...g.ctx, heavy: [...kit, "--name", "sb-rescue promote", "--"] }, { port: 0, heavyWaitMs: 1500 });
+  const other = Bun.spawn([...kit, "--name", "local-ci 123", "--", "sleep", "60"], { stdout: "ignore", stderr: "ignore" });
+  try {
+    await until(async () => (slots().length === 1 ? true : null), "the other job holds the slot");
+    const ui = await g.web("UI under a heavy job");
+    const history = readHistory(g.home).length;
+    const ask = (commit: string) => fetch(`http://127.0.0.1:${rescue.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commit, ifNoRestart: true }) });
+    const refused = await ask(ui);
+    expect(refused.status).toBe(409);
+    const body = (await refused.json()) as { error: string; heavy?: boolean; restart?: boolean };
+    expect(body).toMatchObject({ heavy: true });
+    expect(body.restart).toBeUndefined();
+    expect(body.error).toContain("local-ci 123"); // the wrapper's own line: what holds the slot
+    // nothing was built, nothing recorded, the daemon untouched
+    expect([existsSync(join(releasesDir(g.home), ui)), readHistory(g.home).length, (await health(g.ctx.port))!.pid, currentOf(g.home) === ui]).toEqual([false, history, pid, false]);
+    // the same by a direct call (no caller took a slot): it throws before the build
+    await expect(promote({ ...g.ctx, heavy: [...kit, "--name", "sb-rescue promote", "--"] }, ui, { ...webTimes, heavyWaitMs: 1000 }, undefined, true)).rejects.toThrow("no heavy-process slot");
+    expect(existsSync(join(releasesDir(g.home), ui))).toBe(false);
+    // the other job ends: the slot is free, the promotion takes it and gives it back
+    other.kill();
+    await other.exited;
+    const taken = await ask(ui);
+    expect(taken.status).toBe(202);
+    const done = await until(() => readHistory(g.home).find((e) => e.to === ui), "promoted", 30_000);
+    expect(done).toMatchObject({ action: "promote-web", ok: true });
+    expect((await health(g.ctx.port))!.pid).toBe(pid);
+    await until(async () => (slots().length === 0 ? true : null), "the slot is given back");
+  } finally {
+    other.kill();
+    await rescue.stop();
+    rmSync(join(g.home, "busy"), { force: true });
+    rmSync(hh, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("ifNoRestart never ends in a restart: a reload that is not confirmed is put back with the same process, and the release is rejected with the reason", async () => {
+  const g = await webFixture();
+  const was = currentOf(g.home);
+  const pid = (await health(g.ctx.port))!.pid;
+  const page = await rootPage(g.ctx.port);
+  writeFileSync(join(g.home, "no-reload"), ""); // SIGHUP changes nothing: the daemon never reports the new release
+  try {
+    const stuck = await g.web("UI stuck quietly");
+    const r = await promote(g.ctx, stuck, webTimes, undefined, true);
+    expect(r).toMatchObject({ action: "rejected", ok: false, from: was, to: stuck });
+    expect(r.reason).toContain("the daemon was not restarted");
+    expect(r.reason).toContain("did not report");
+    // the tasks' process is the one that was there, on the older release; nothing says auto-rollback (a restart)
+    expect([currentOf(g.home), (await health(g.ctx.port))!.pid, g.ctx.sup.pid, await rootPage(g.ctx.port)]).toEqual([was, pid, pid, page]);
+    expect(readHistory(g.home).some((e) => e.action === "auto-rollback" && e.from === stuck)).toBe(false);
+  } finally {
+    rmSync(join(g.home, "no-reload"), { force: true });
+  }
+}, 60_000);
 
 test("a daemon that dies on SIGHUP and is started again by the supervisor is not a switch without a restart: it goes back, and says why", async () => {
   const g = await webFixture();

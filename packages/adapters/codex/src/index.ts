@@ -31,6 +31,8 @@ export interface CodexAdapterOptions {
   config?: string[];
   /** Where to look for the user's config.toml (model default). Default ~/.codex. */
   codexHome?: string;
+  /** How old a session's last question about the account may be before it asks again at a usage-limit report. Default `ACCOUNT_REREAD_MS`. */
+  accountRereadMs?: number;
 }
 
 /** The task's own temp directory is the runner's TMPDIR. */
@@ -196,6 +198,26 @@ function resolveBin(options: CodexAdapterOptions): { exe?: string; fallback: boo
   return existsSync(CHATGPT_APP_CODEX) ? { exe: CHATGPT_APP_CODEX, fallback: true } : { exe: undefined, fallback: false };
 }
 
+/**
+ * The name an account's usage-limit reports are kept under, from app-server's answer to `account/read`: the first 16
+ * hex characters of sha256("codex:<the ChatGPT user id, or the email when there is none>"). The same account gives the
+ * same name on every machine; the answer itself is not kept, returned or logged. The name is a pseudonym, not an
+ * anonymous value: the hash has no salt, so whoever can guess the input can confirm the guess with one hash. A user id
+ * cannot be guessed in practice; when only the email is there, anyone holding a candidate email can check it, and the 8
+ * characters the ledger shows are enough to pick one out of a small set. `docs/design/ledger.md` lists what would
+ * change that.
+ * "" = no such account (an API key, Bedrock, not logged in); undefined = no answer to read.
+ */
+export function accountOf(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const r = result as { account?: { type?: unknown; email?: unknown } | null; userId?: unknown };
+  const id = [r.userId, r.account?.type === "chatgpt" ? r.account.email : null].find((v): v is string => typeof v === "string" && v !== "");
+  return id ? new Bun.CryptoHasher("sha256").update(`codex:${id}`).digest("hex").slice(0, 16) : "";
+}
+
+/** A session asks app-server for the account again when its last answer is older than this (at a usage-limit report). */
+export const ACCOUNT_REREAD_MS = 60_000;
+
 /** What to type in a terminal tab when the login has run out. Device flow: works on a machine without a browser. */
 export const CODEX_LOGIN_HINT = "codex login --device-auth";
 
@@ -342,6 +364,9 @@ class CodexSession implements RunnerSession {
   private closing = false;
   private stderrTail = "";
   private threadId?: string;
+  /** The logged-in account as `accountOf` names it, once app-server has answered: the account as last read, see `readAccount`. */
+  private account?: string;
+  private accountAskedAt = 0;
   private ready: Promise<void>;
   /** Turns are serialized: the next turn/start or turn/steer is decided only after the previous request answered. */
   private turnChain: Promise<void> = Promise.resolve();
@@ -380,10 +405,25 @@ class CodexSession implements RunnerSession {
     });
   }
 
+  /**
+   * Asks app-server which account the usage-limit reports of this session are about. Not waited for; no answer keeps
+   * the last name (none yet = the reports go unnamed). Asked at the start and again at a report when the last question
+   * is older than `accountRereadMs`: a session can outlive a login. What is left: a report that arrives before the
+   * answer, or within that time of the last question, still carries the earlier account's name.
+   */
+  private readAccount() {
+    this.accountAskedAt = Date.now();
+    void this.request("account/read", { refreshToken: false }).then((r) => {
+      const account = accountOf(r.result);
+      if (account !== undefined) this.account = account;
+    });
+  }
+
   private async handshake() {
     const init = await this.request("initialize", { clientInfo: CLIENT_INFO, capabilities: null });
     if (init.error) throw new Error(init.error.message ?? "initialize failed");
     this.write(jsonRpcNotification("initialized"));
+    this.readAccount();
     const resume = this.opts.resumeSessionId;
     const res = resume
       ? await this.request("thread/resume", buildThreadResumeParams(this.opts, resume, this.o))
@@ -592,7 +632,10 @@ class CodexSession implements RunnerSession {
       for (const ev of events) this.emit(ev);
       return;
     }
-    for (const ev of this.parser.feed(line)) this.emit(ev);
+    for (const ev of this.parser.feed(line)) {
+      this.emit(ev.t === "quota" && this.account !== undefined ? { ...ev, account: this.account } : ev);
+      if (ev.t === "quota" && !this.closed && Date.now() - this.accountAskedAt >= (this.o.accountRereadMs ?? ACCOUNT_REREAD_MS)) this.readAccount();
+    }
   }
 
   private async pumpStderr(): Promise<void> {

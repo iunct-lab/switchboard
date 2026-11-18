@@ -15,7 +15,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join, posix } from "node:path";
 import { ownerName } from "./config.ts";
 import { PUBLIC_SYNC_MARK } from "./gh-guard.ts";
-import { independentSync, type Publication } from "./public-version.ts";
+import { independentSync, isVersion, type Publication } from "./public-version.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
 /** The user names fixtures and docs write in home paths: placeholders, not a person's. */
@@ -470,8 +470,20 @@ export function check(opts: Pick<Options, "host" | "privateRepo" | "target" | "i
   return `public check: ok (${g.git(["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean).length} files)`;
 }
 
-export function sync(opts: Options, run: Run, publication?: Publication): string {
-  if (opts.versioning && !publication) return independentSync(opts, run, (p, dryRun) => sync({ ...opts, dryRun: dryRun ?? opts.dryRun }, run, p));
+/**
+ * With `versioning: "independent"` the public version comes from the version record on private origin, which only a
+ * `vX.Y.Z` tag can move. A dry run of anything else (HEAD, a branch, a sha) does not go near that record or its lock: it
+ * builds and checks the tree as a sync without versions does, and says that the version is provisional. So nobody makes
+ * a throwaway tag to see what would go public.
+ */
+export function sync(opts: Options, run: Run): string {
+  if (!opts.versioning) return send(opts, run);
+  if (opts.dryRun && !opts.adoptBaseline && !isVersion(opts.source))
+    return `version: 仮 (provisional: --source ${opts.source ?? "origin/main"} is not a vX.Y.Z tag; the public version is decided by the tag of the real sync)\n${send(opts, run)}`;
+  return independentSync(opts, run, (p, dryRun) => send({ ...opts, dryRun: dryRun ?? opts.dryRun }, run, p));
+}
+
+function send(opts: Options, run: Run, publication?: Publication): string {
   if (opts.target.toLowerCase() === opts.privateRepo.toLowerCase()) throw new Error(`the public repository is the private one (${opts.target}): set publicSync.target to another repository`);
   const source = opts.source ?? "origin/main";
   const url = opts.targetUrl ?? `https://github.com/${opts.target}.git`;

@@ -1,7 +1,7 @@
 import type { DeviceAuthView } from "@switchboard/protocol";
 
 /**
- * A Task's wait for an approval elsewhere (#662, docs/design/device-auth.md): the card's time left and whether it is
+ * A Task's wait for an approval elsewhere (docs/design/device-auth.md): the card's time left and whether it is
  * still shown. The screen hides it at `expiresAt` itself, without waiting for the daemon's message.
  */
 

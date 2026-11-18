@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { api } from "../api.ts";
-import { pendingForce, promoteTarget, releasePanel, rescueLink, shortSha, type PromoteTarget, type ReleaseStatus } from "../release.ts";
+import { api } from "../api/index.ts";
+import { pendingForce, promoteTarget, releasePanel, rescueCommands, rescueLink, shortSha, type PromoteTarget, type ReleaseStatus } from "../release.ts";
 import { t } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
 
-/** Which version runs, whether HEAD is newer, and the button that promotes it (#1660). Under sb-rescue only; elsewhere one line. */
+/** Which version runs, whether HEAD is newer, and the button that promotes it. Under sb-rescue only; elsewhere one line. */
 export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => void }) {
   const [release, setRelease] = useState<ReleaseStatus | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -19,7 +19,7 @@ export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => voi
   const view = releasePanel(release);
   if (!view) return null;
   const target = view.release;
-  // The commit on the button is the commit that is sent: HEAD may have moved since the last poll. A public copy's clone sends the tag (#4569).
+  // The commit on the button is the commit that is sent: HEAD may have moved since the last poll. A public copy's clone sends the tag.
   const current = promoteTarget(release, view);
   const forcing = pendingForce(confirming, current);
   const send = (commit: string, force: boolean) => {
@@ -63,7 +63,7 @@ export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => voi
                 {t(label, { tag: target.tag })}
               </button>
               {target.canReview && (
-                <button className="ghost" disabled={props.disabled || !!release.busy} onClick={recheck}>{t(settings.recheck)}</button>
+                <button className="ghost" disabled={props.disabled || !!release.busy} onClick={recheck}>{t(target.state === null ? settings.checkNow : settings.recheck)}</button>
               )}
             </>
           ) : (
@@ -84,6 +84,16 @@ export function ReleasePanel(props: { disabled?: boolean; onPromoted?: () => voi
       {rescueLink(release) && (
         <div className="hint">
           <a href={rescueLink(release)!}>{t(settings.rescuePage)}</a>
+        </div>
+      )}
+      {rescueCommands(release) && (
+        <div className="hint">
+          {t(settings.rescueInContainer)}
+          {rescueCommands(release)!.map((c) => (
+            <pre key={c} style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0 0" }}>
+              <code>{c}</code>
+            </pre>
+          ))}
         </div>
       )}
     </div>

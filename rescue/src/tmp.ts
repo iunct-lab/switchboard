@@ -1,6 +1,6 @@
 /**
- * What fills /tmp (#797), for the rescue page: the usage, the biggest entries right under it, and which of them are old
- * working directories that can go. Only `node:` here: sb-rescue shares no code with Switchboard (#178).
+ * What fills /tmp, for the rescue page: the usage, the biggest entries right under it, and which of them are old
+ * working directories that can go. Only `node:` here: sb-rescue shares no code with Switchboard.
  * Nothing takes a path from a request: a name is one level under the root, and it is judged again right before it goes.
  */
 import { chmodSync, lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, statfsSync } from "node:fs";

@@ -1,5 +1,5 @@
 /**
- * Temporary extra countries for the distribution's geo restriction (#1639). One allowance at a time, kept as
+ * Temporary extra countries for the distribution's geo restriction. One allowance at a time, kept as
  * `auth/countries.json` in the data bucket (like auth/passkeys.json). `reconcile` makes CloudFront's whitelist
  * `base ∪ (allowance while it is in force)`; the Starter runs it every 5 minutes (the expiry and a redeploy that put the
  * whitelist back are both fixed by that one path) and after every set / clear. `base` (the stack's AllowedCountries) is

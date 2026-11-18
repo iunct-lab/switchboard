@@ -7,7 +7,7 @@ import { extraRows, frameCount, judge, parseArgs, removeIfEmpty, screens, staleB
 
 const box = (over: Partial<Box>): Box => ({ left: 0, right: 100, width: 100, contentWidth: 100, height: 20, textLines: 1, fontSize: 13, text: "", inHeaderTabs: false, hidden: false, inSideScroller: false, ...over });
 
-describe("screens-audit (#4030)", () => {
+describe("screens-audit", () => {
   test("judge counts what reaches past the right edge, but not the header's tabs", () => {
     expect(judge([box({ right: 392 }), box({ right: 500, inHeaderTabs: true }), box({ right: 390 }), box({ right: 450, width: 0 })], 390)).toEqual({ overflow: 1, squeezed: 0 });
   });
@@ -35,15 +35,15 @@ describe("screens-audit (#4030)", () => {
   test("staleBuild names what the build reads changed after it, not the tests", () => {
     const root = mkdtempSync(join(tmpdir(), "screens-audit."));
     try {
-      for (const d of ["apps/web/dist", "apps/web/src/components", "packages/protocol/src"]) mkdirSync(join(root, d), { recursive: true });
+      for (const d of ["apps/web/dist", "apps/web/src/components", "packages/protocol/src/model"]) mkdirSync(join(root, d), { recursive: true });
       const at = (f: string, t: number) => { writeFileSync(join(root, f), ""); utimesSync(join(root, f), t, t); };
       at("apps/web/dist/index.html", 2000);
       at("apps/web/src/a.ts", 1000);
       at("apps/web/src/components/B.tsx", 3000);
       at("apps/web/src/c.test.ts", 3000);
       at("apps/web/index.html", 3000);
-      at("packages/protocol/src/model.ts", 3000);
-      expect(staleBuild(root).sort()).toEqual(["apps/web/index.html", "apps/web/src/components/B.tsx", "packages/protocol/src/model.ts"].map((f) => join(root, f)));
+      at("packages/protocol/src/model/task.ts", 3000);
+      expect(staleBuild(root).sort()).toEqual(["apps/web/index.html", "apps/web/src/components/B.tsx", "packages/protocol/src/model/task.ts"].map((f) => join(root, f)));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

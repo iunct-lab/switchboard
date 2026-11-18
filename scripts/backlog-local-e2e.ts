@@ -1,12 +1,12 @@
 /**
- * bun scripts/backlog-local-e2e.ts (#2265): a workspace without GitHub, from its registration to the 実装 stage Task, in
+ * bun scripts/backlog-local-e2e.ts: a workspace without GitHub, from its registration to the 実装 stage Task, in
  * headless Chrome (CDP) against the daemon with a gh that throws (every call recorded) and a fake runner that stays
  * running. The daemon gets no test hook. Build the screen first: `bun run --cwd apps/web build`.
  *
- * (1) 設定: 「Workspace」 → ホストにあるディレクトリを追加 with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request #1 → the
- * Backlog screen lists it under 要望のまま → (3) 「PBI にする」 → a to-pbi Task → (4) as that Task would: PBI #2
- * (`--field Status=Backlog`) and #1's `## 派生 PBI` → #2 under 分解待ち → (5) 「Task に分解」 → a to-tasks Task →
- * (6) Task #3 under #2 and `ops-kit backlog set 2 Status Ready` → #2 under Ready → (7) 「実装する」 → a complete Task.
+ * (1) 設定: 「Workspace」 → ホストにあるディレクトリを追加 with 「GitHub と連携しない」 checked → (2) `ops-kit backlog create` a request `#1` → the
+ * Backlog screen lists it under 要望のまま → (3) 「PBI にする」 → a to-pbi Task → (4) as that Task would: PBI `#2`
+ * (`--field Status=Backlog`) and `#1`'s `## 派生 PBI` → `#2` under 分解待ち → (5) 「Task に分解」 → a to-tasks Task →
+ * (6) Task `#3` under `#2` and `ops-kit backlog set 2 Status Ready` → `#2` under Ready → (7) 「実装する」 → a complete Task.
  * The Tasks' work is done here with `ops-kit backlog` (BACKLOG_URL / BACKLOG_WORKSPACE, as the daemon gives them), the
  * runner being a fake. Then the Home form at 390px. Screenshots and result.json stay in the directory it prints; a JSON
  * of pass / fail per case on stdout; exit 1 when one fails.
@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer, type CoreServer } from "../packages/core/src/server.ts";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import type { RunnerAdapter, StartOptions, Workspace } from "@switchboard/protocol";
 import { runBacklog } from "../ops-kit/src/backlog-client.ts";
 
@@ -118,7 +118,7 @@ try {
     if (r.exceptionDetails) throw new Error(`${r.exceptionDetails.exception?.description ?? JSON.stringify(r.exceptionDetails)} in: ${expression.slice(0, 160)}`);
     return r.result.value;
   };
-  /** Opens the folded Settings card with this title (#3849), once Settings has drawn it: a card shows only its title until opened. */
+  /** Opens the folded Settings card with this title, once Settings has drawn it: a card shows only its title until opened. */
   const openSettingsCard = (title: string) => until(() => evaluate(`(() => { const d = [...document.querySelectorAll('.settings details.card')].find((d) => d.querySelector('summary').textContent.trim() === ${JSON.stringify(title)}); if (d) d.open = true; return !!d; })()`), `the ${title} card`);
   /** Presses what `find` returns once it has stayed still (rows move while the list reads). */
   const press = async (find: string, label: string) => {
@@ -197,7 +197,7 @@ try {
   check("the to-pbi Task gets BACKLOG_WORKSPACE", s1.env?.BACKLOG_WORKSPACE === ws.id, s1.env?.BACKLOG_WORKSPACE);
   await shot("3-to-pbi");
 
-  // (4) as the to-pbi Task: PBI #2 and #1's ## 派生 PBI → #2 under 分解待ち
+  // (4) as the to-pbi Task: PBI `#2` and `#1`'s ## 派生 PBI → `#2` under 分解待ち
   const pbi = await kit("create", "--title", "PBI: ローカルで回せる", "--label", "type:pbi", "--field", "Status=Backlog", "--body-file", bodyFile("pbi.md", "## ユーザーストーリー\nx\n\n## 到達点 / 受け入れ条件\n- [ ] 1. x（検証: y）\n\n## スコープ外\nなし\n\n## 元要望\n#1"));
   check("the PBI is #2", pbi.startsWith("#2 を作りました"), pbi);
   await kit("edit", "1", "--body-file", bodyFile("req2.md", "## 要望\nGitHub 無しで回したい\n\n## 出典\nE2E\n\n## 派生 PBI\n- #2 ローカルで回せる — P2"));
@@ -206,7 +206,7 @@ try {
   await until(() => listed("needs-tasks", 2), "#2 under 分解待ち");
   check("#2 is listed under 分解待ち and #1 left 要望のまま", !(await listed("request", 1)));
   await shot("4-needs-tasks");
-  // (#2343) the numbers are not links to nowhere, and with only this workspace in view the heading has no GitHub in it
+  // the numbers are not links to nowhere, and with only this workspace in view the heading has no GitHub in it
   check("no link with an empty href on the backlog screen", (await evaluate(`document.querySelectorAll('.backlog a[href=""]').length`)) === 0);
   const onlyLocal = `[...document.querySelectorAll('.backlog-ws button')].find(b => b.textContent.trim().startsWith('repo'))`;
   if (await evaluate(`!!(${onlyLocal})`)) await press(onlyLocal, "the local workspace's tab");
@@ -222,7 +222,7 @@ try {
   const toTasks = await startPressed("needs-tasks", 2, "Task に分解", "to-tasks");
   check("the to-tasks Task's prompt says ops-kit backlog", (await promptOf(toTasks.id)).prompt.includes("ops-kit backlog"));
 
-  // (6) as the to-tasks Task: Task #3 under #2, then #2 Ready
+  // (6) as the to-tasks Task: Task `#3` under `#2`, then `#2` Ready
   const task = await kit("create", "--title", "Task: 実装する", "--label", "type:task", "--parent", "2", "--field", "Status=Backlog", "--body-file", bodyFile("task.md", "## 親 PBI\n#2\n\n## やること\n`src/index.ts`"));
   check("the Task is #3", task.startsWith("#3 を作りました"), task);
   await kit("set", "2", "Status", "Ready");

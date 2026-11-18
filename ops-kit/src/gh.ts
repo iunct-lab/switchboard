@@ -75,6 +75,29 @@ export function retryAtFromResponse(r: GithubResponse, now: number): { kind: Git
   return null;
 }
 
+/** gh's and git's own words for a network that did not answer: there is no HTTP status to classify. */
+const NETWORK_DOWN = /could not resolve host|no such host|temporary failure in name resolution|dial tcp|error connecting to|network is unreachable|connection (refused|reset|timed out)|operation timed out|i\/o timeout|failed to connect|early eof|remote end hung up/i;
+
+/** Why GitHub cannot be used for now, as `outageOf` reads a failed answer. */
+export type GithubOutage = { kind: "network" | "transient" | "primary" | "secondary"; until: number | null };
+
+/**
+ * Whether a failed answer says GitHub cannot be used *for now* — the only failures work may leave GitHub's flow for
+ * (docs/design/forge-integration.md, "While GitHub cannot be used"): the network did not answer or timed out, GitHub
+ * answered 5xx, or a rate limit GitHub gave an end for (`until`, epoch ms). Null for everything else, and always for a
+ * failure that waiting does not mend: 401 / 403 / 404 and a missing permission are the token's or the configuration's
+ * (stop and report), a limit with no end cannot be waited for, a 4xx is the request's own fault.
+ */
+export function outageOf(r: GithubResponse, now: number): GithubOutage | null {
+  const c = retryAtFromResponse(r, now);
+  if (c?.kind === "auth") return null;
+  if (c?.kind === "primary" || c?.kind === "secondary") return c.at !== null && c.at > now ? { kind: c.kind, until: c.at } : null;
+  const status = r.status ?? 0;
+  if (status >= 400 && status < 500) return null;
+  if (c?.kind === "transient") return { kind: "transient", until: c.at };
+  return status === 0 && NETWORK_DOWN.test(r.message ?? "") ? { kind: "network", until: null } : null;
+}
+
 /**
  * When the next call to GitHub may go, per key (a host): after a limit or an outage nothing is asked until the time
  * GitHub gave, else 60 s doubling per failure up to 15 min. An auth failure is not waited for — it is reported, and

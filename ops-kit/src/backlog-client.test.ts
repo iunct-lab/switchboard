@@ -1,12 +1,12 @@
 // test-reads: ops-kit/fixtures/
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appSync, BACKLOG_USAGE, BacklogUnknown, readRecords, runBacklog, syncedRepositories, triageUsage } from "./backlog-client.ts";
 
 // `ops-kit backlog` against a fake app: what it sends, and the exit it gives for each answer. The real app's
-// routes are checked in packages/core/src/backlog.test.ts ("ops-kit backlog …").
+// routes are checked in packages/core/src/backlog-read.api.test.ts ("ops-kit backlog …").
 
 const SYNC = { workspaceId: "ws1", repository: "acme/app", syncedAt: 1_760_000_000_000, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } };
 const LIST = { syncs: [SYNC, { ...SYNC, workspaceId: "ws2", repository: "acme/other" }], items: [{ number: 3, workspaceId: "ws1", type: "pbi", stage: "ready", projectStatus: "Ready", title: "PBI 3" }, { number: 9, workspaceId: "ws2", type: "pbi", stage: "ready", projectStatus: "Ready", title: "other" }] };
@@ -235,6 +235,28 @@ test("triage without a Phase: an empty Phase position is skipped and parent / st
   const phased = await run(["triage", "3", "P2", "", "891", "Ready"], ok);
   expect(phased.code).toBe(1);
   expect(phased.err).toContain(triageUsage(true));
+});
+
+test("a comment goes as its Task's with the proof read from the app for this call (the app stops only the Task that proves the question is its own); outside a Task, or when the proof cannot be read, it goes as nobody's", async () => {
+  const sent = async (env: Record<string, string | undefined>, proof: () => Response | Promise<Response>) => {
+    const calls: Array<{ url: string; task: string | null; token: string | null; body: unknown }> = [];
+    const fake = app(routes(() => ({ status: 202, body: { operation: "o" } })));
+    const fetch = async (url: string, init: RequestInit = {}) => {
+      if (!url.startsWith("http://app/api/backlog")) return (calls.push({ url, task: null, token: null, body: undefined }), proof());
+      const h = new Headers(init.headers);
+      if (init.method === "POST") calls.push({ url, task: h.get("x-task-id"), token: h.get("x-task-token"), body: JSON.parse(String(init.body)) });
+      return fake.fetch(url, init);
+    };
+    await run(["comment", "3", "--body-file", "-"], { fetch, calls: fake.calls }, env);
+    return calls;
+  };
+  const body = { workspaceId: "ws1", text: "from stdin" };
+  // the id is never put in the body: a statement there proves nothing
+  expect(await sent({ OPS_KIT_TASK_ID: "t_1" }, () => Response.json({ url: "u", token: "mcp_x" }))).toEqual([{ url: "http://app/api/tasks/t_1/mcp", task: null, token: null, body: undefined }, { url: "http://app/api/backlog/3/comment", task: "t_1", token: "mcp_x", body }]);
+  // the Task's endpoint is gone, or the app does not answer the proof: the comment is still stored, as nobody's
+  expect((await sent({ OPS_KIT_TASK_ID: "t_1" }, () => Response.json({ error: "ended" }, { status: 409 }))).at(-1)).toEqual({ url: "http://app/api/backlog/3/comment", task: null, token: null, body });
+  expect((await sent({ OPS_KIT_TASK_ID: "t_1" }, () => { throw new Error("down"); })).at(-1)).toEqual({ url: "http://app/api/backlog/3/comment", task: null, token: null, body });
+  expect(await sent({}, () => Response.json({ token: "mcp_x" }))).toEqual([{ url: "http://app/api/backlog/3/comment", task: null, token: null, body }]);
 });
 
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
@@ -543,6 +565,46 @@ test("create --head --base makes a local change; one without the other is refuse
   }
 });
 
+test("change: --pr goes with a new change, --change reads and writes the change of that number, and is refused elsewhere", async () => {
+  const detail = { localId: "u1", number: 1, issue: { number: 7, title: "変更", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "b", url: "" }, comments: [], fields: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+  const fake = () => app(routes(() => ({ body: detail })));
+  const made = await run(["create", "--title", "変更", "--head", "sb/5-x", "--base", "main", "--pr", "77"], fake());
+  expect(made.code).toBe(0);
+  expect(made.calls.find((c) => c.method === "POST")!.body).toMatchObject({ change: { head: "sb/5-x", base: "main", pr: 77 } });
+  // --pr without the branches is no change
+  const alone = await run(["create", "--title", "x", "--pr", "77"], fake());
+  expect([alone.code, alone.calls.filter((c) => c.method === "POST")]).toEqual([1, []]);
+  const paths = async (argv: string[]) => {
+    const r = await run(argv, fake());
+    expect(r.code).toBe(0);
+    return r.calls.filter((c) => c.path.startsWith("/7")).map((c) => `${c.method} ${c.path}`);
+  };
+  expect(await paths(["view", "7", "--change"])).toEqual(["GET /7?workspaceId=ws1&change=1"]);
+  expect(await paths(["view", "7"])).toEqual(["GET /7?workspaceId=ws1"]);
+  expect(await paths(["edit", "7", "--change", "--state", "closed"])).toEqual(["PATCH /7?change=1"]);
+  expect(await paths(["edit", "7", "--state", "closed"])).toEqual(["PATCH /7"]);
+  expect(await paths(["comment", "7", "--change", "--body-file", "-"])).toEqual(["POST /7/comment?change=1"]);
+  expect(await paths(["comment", "7", "--body-file", "-"])).toEqual(["POST /7/comment"]);
+  // the person's yes names a PR: it is not written on a change of a GitHub workspace
+  const dir = mkdtempSync(join(tmpdir(), "ops-kit-change-"));
+  writeFileSync(join(dir, "yes"), `[merge-answer] yes size ${"a".repeat(40)}\n`);
+  const yes = await run(["comment", "7", "--change", "--body-file", join(dir, "yes")], fake());
+  rmSync(dir, { recursive: true, force: true });
+  expect([yes.code, yes.calls.filter((c) => c.method === "POST")]).toEqual([1, []]);
+  expect(yes.err).toContain("GitHub が戻ってから");
+  // the reviewer's case: the same mark behind a space, a tab or a byte order mark (the app trims it, the gate then reads a yes)
+  const again = mkdtempSync(join(tmpdir(), "ops-kit-change-"));
+  for (const lead of [" ", "\t", "\uFEFF", "\n\n ", "\u3000"]) {
+    writeFileSync(join(again, "yes"), `${lead}[merge-answer] yes security:gates ${"a".repeat(40)}`);
+    const hidden = await run(["comment", "7", "--change", "--body-file", join(again, "yes")], fake());
+    expect([lead, hidden.code, hidden.calls.filter((c) => c.method === "POST")]).toEqual([lead, 1, []]);
+  }
+  rmSync(again, { recursive: true, force: true });
+  // only where a number can name either
+  const set = await run(["set", "7", "Status", "Done", "--change"], fake());
+  expect([set.code, set.calls.filter((c) => c.method !== "GET")]).toEqual([1, []]);
+});
+
 test("view of a local change: its branches and tips on the second line, the merge commit once merged", async () => {
   const detail = (mergeCommit: string | null, refs: object | null, reviewedHead: string | null = null) => ({ issue: { number: 7, title: "変更", state: mergeCommit ? "CLOSED" : "OPEN", stateReason: null, labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit, mergedAt: mergeCommit ? "2026-11-04T00:00:00Z" : null, reviewedHead } }, changeRefs: refs, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } });
   const second = async (d: object) => (await run(["view", "7"], app(routes((m, p) => (p.startsWith("/7?") ? { body: d } : { status: 404, body: {} }))))).out.split("\n")[1];
@@ -594,9 +656,12 @@ test("outside the app: a choice in another case is written as the choice; one no
 });
 
 test("merge-answer: backlog comment posts a [merge-answer] yes only when the grant of the PR stands, in a repository with a merge gate", async () => {
+  // the head PR 12 had when the person gave the grant
+  const HEAD = "a".repeat(40);
+  const YES = `[merge-answer] yes large ${HEAD}`;
   const dir = mkdtempSync(join(tmpdir(), "backlog-client-gate-"));
   const bare = mkdtempSync(join(tmpdir(), "backlog-client-nogate-"));
-  const grants = (path: string) => (path.startsWith("http://app/api/merge-grants") ? { body: { granted: new URL(path).searchParams.get("target") === "12" && new URL(path).searchParams.get("kind") === "answer" } } : null);
+  const grants = (path: string) => (path.startsWith("http://app/api/merge-grants") ? { body: { granted: new URL(path).searchParams.get("target") === "12" && new URL(path).searchParams.get("kind") === "answer" && new URL(path).searchParams.get("repo") === "acme/app" && new URL(path).searchParams.get("head") === HEAD } } : null);
   const fake = () => app((m, p, b) => grants(p) ?? routes()(m, p, b));
   const comment = async (text: string, issue: string, cwd: string, f = fake(), env: Record<string, string | undefined> = {}) => {
     const err: string[] = [];
@@ -606,16 +671,31 @@ test("merge-answer: backlog comment posts a [merge-answer] yes only when the gra
   try {
     writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
     writeFileSync(join(bare, "ops.config.json"), "{}");
-    const stopped = await comment("[merge-answer] yes large abc", "13", dir);
-    expect([stopped.code, stopped.err, stopped.calls]).toEqual([1, expect.stringContaining("許可文の記録がありません"), ["GET http://app/api/merge-grants?taskId=t1&kind=answer&target=13"]]);
-    const allowed = await comment("[merge-answer] yes large abc", "12", dir);
+    const stopped = await comment(YES, "13", dir);
+    expect([stopped.code, stopped.err, stopped.calls.filter((c) => c.includes("merge-grants"))]).toEqual([1, expect.stringContaining("許可文の記録がありません"), [`GET http://app/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=answer&target=13&head=${HEAD}`]]);
+    expect(stopped.calls.some((c) => c.startsWith("POST"))).toBe(false);
+    // the grant is asked for the repository the comment goes to: PR 12 of another workspace's repository has none
+    const elsewhere = await comment(YES, "12", dir, fake(), { GH_REPO: "acme/other" });
+    expect([elsewhere.code, elsewhere.calls.filter((c) => c.includes("merge-grants")), elsewhere.calls.some((c) => c.startsWith("POST"))]).toEqual([1, [`GET http://app/api/merge-grants?taskId=t1&repo=acme%2Fother&kind=answer&target=12&head=${HEAD}`], false]);
+    const allowed = await comment(YES, "12", dir);
     expect([allowed.code, allowed.calls.some((c) => c.startsWith("POST /12/comment"))]).toEqual([0, true]);
     // a no, a text without the mark, no gate in the config and outside the app's Task never ask the app for the grant
-    for (const r of [await comment("[merge-answer] no large abc", "13", dir), await comment("メモ [merge-answer] yes", "13", dir), await comment("[merge-answer] yes large abc", "13", bare)]) {
+    for (const r of [await comment("[merge-answer] no large abc", "13", dir), await comment("メモ [merge-answer] yes", "13", dir), await comment(YES, "13", bare)]) {
       expect([r.code, r.calls.some((c) => c.includes("merge-grants"))]).toEqual([0, false]);
     }
+    // the grant holds for the head it was given for: a yes of a head pushed after it, or one that names no head, is not posted
+    const moved = await comment(`[merge-answer] yes large ${"b".repeat(40)}`, "12", dir);
+    expect([moved.code, moved.err, moved.calls.some((c) => c.startsWith("POST"))]).toEqual([1, expect.stringContaining("新しいコミットの後は聞き直します"), false]);
+    const headless = await comment("[merge-answer] yes large abc", "12", dir);
+    expect([headless.code, headless.err, headless.calls.some((c) => c.startsWith("POST"))]).toEqual([1, expect.stringContaining("head の sha"), false]);
+    // the mark is found in the form the app stores and the gate reads: a leading space, a tab, a byte order mark, full-width
+    // letters, capitals or a zero-width character do not let it past the check (PR 13 has no grant)
+    for (const text of [` ${YES}`, `\t${YES}`, `\uFEFF${YES}`, `\n ${YES}`, YES.replace("[merge-answer]", "［ｍｅｒｇｅ－ａｎｓｗｅｒ］"), YES.replace("yes", "YES"), YES.replace("[merge", "[mer\u200Bge"), YES.replace("] yes", "]\u3000yes")]) {
+      const r = await comment(text, "13", dir);
+      expect([text, r.code, r.calls.some((c) => c.startsWith("POST"))]).toEqual([text, 1, false]);
+    }
     // the app cannot be reached: the mark is not posted
-    const down = await comment("[merge-answer] yes large abc", "12", dir, app((m, p, b) => (p.includes("merge-grants") ? "down" : routes()(m, p, b))));
+    const down = await comment(YES, "12", dir, app((m, p, b) => (p.includes("merge-grants") ? "down" : routes()(m, p, b))));
     expect([down.code, down.err]).toEqual([1, expect.stringContaining("アプリに届かず")]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -643,10 +723,22 @@ test("scope: a Task body that names more paths is saved only when the gate's sto
       Bun.spawnSync(["git", "init", "-q"], { cwd: d });
       Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], { cwd: d });
     }
+    // the clone's HEAD has a top-level directory, so a path under it in plain text or in a command span is a named path
+    mkdirSync(join(dir, "ops-kit"));
+    writeFileSync(join(dir, "ops-kit", "x.ts"), "");
+    Bun.spawnSync(["git", "add", "."], { cwd: dir });
+    Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init"], { cwd: dir });
     const more = `${STORED}\`c/d.ts\` も直す\n`;
     // the gate stopped and no scope sentence stands: refused, and nothing is sent
     const stopped = await edit(more, { scope: { stopped: true, granted: false } });
-    expect([stopped.code, stopped.patched, stopped.asked, stopped.err]).toEqual([1, false, ["http://app/api/merge-grants/scope-stop?taskId=t1&issue=3"], expect.stringContaining("Task #3 の本文に名指しのパスを足してよい")]);
+    expect([stopped.code, stopped.patched, stopped.asked, stopped.err]).toEqual([1, false, ["http://app/api/merge-grants/scope-stop?taskId=t1&repo=acme%2Fapp&issue=3"], expect.stringContaining("Task #3 の本文に名指しのパスを足してよい")]);
+    for (const plain of [`${STORED}ops-kit/src/foo.ts も直す\n`, `${STORED}\`bun test ops-kit/src/x.test.ts\` で確かめる\n`]) {
+      const r = await edit(plain, { scope: { stopped: true, granted: false } });
+      expect([r.code, r.patched]).toEqual([1, false]);
+      // run from a subdirectory of the clone: the top is still the clone's top
+      const sub = await edit(plain, { scope: { stopped: true, granted: false }, cwd: join(dir, "ops-kit") });
+      expect([sub.code, sub.patched]).toEqual([1, false]);
+    }
     // the sentence stands: saved
     expect((await edit(more, { scope: { stopped: true, granted: true } })).patched).toBe(true);
     // the gate has not stopped, or the app cannot be reached: the edit is not held up

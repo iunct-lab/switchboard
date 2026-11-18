@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { CLAUDE_BEDROCK_MODELS, createClaudeHistoryParser } from "@switchboard/adapter-claude";
 import { CODEX_BEDROCK_MODELS } from "@switchboard/adapter-codex";
 import type { AgentEvent } from "@switchboard/protocol";
-import { billedUsd, isBedrockModel, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
+import { billedUsd, billingFromRow, billingOf, isBedrockModel, isCharged, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
 
 const { table, source } = loadPricing([join(import.meta.dir, "..", "config", "pricing.json")]);
 
@@ -67,6 +67,34 @@ describe("pricing", () => {
     expect(billedUsd(table, "claude", 1.23)).toBe(0);
     expect(billedUsd(table, "codex", 1.23)).toBe(0);
     expect(billedUsd(table, "dak", 1.23)).toBe(1.23);
+  });
+
+  test("billing kind: a claude usage follows the login it was made on — the Claude account pays 0, the Anthropic Console the API price", () => {
+    const ev = { t: "usage" as const, source: "reported" as const, model: "claude-opus-5-5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1.23 };
+    const task = { id: "t", runner: "claude" as const, model: null };
+    expect(ledgerRowFor(table, task, ev, 0, "claude.ai")).toMatchObject({ billing: "claude.ai", costUsd: 1.23, billedUsd: 0 });
+    expect(ledgerRowFor(table, task, ev, 0, "console")).toMatchObject({ billing: "console", costUsd: 1.23, billedUsd: 1.23 });
+    expect(ledgerRowFor(table, task, ev, 0, "bedrock")).toMatchObject({ billing: "bedrock", billedUsd: 1.23 });
+    // a Bedrock model id is Bedrock's whatever the login says now (the Task was started there)
+    expect(ledgerRowFor(table, task, { ...ev, model: "global.anthropic.claude-haiku-5-5" }, 0, "claude.ai")).toMatchObject({ billing: "bedrock", billedUsd: 1.23 });
+    expect(billedUsd(table, "claude", 1.23, "claude-opus-5-5", "console")).toBe(1.23);
+    expect(billedUsd(table, "claude", 1.23, "claude-opus-5-5", "claude.ai")).toBe(0);
+  });
+
+  test("billing kind: without a known login the price table's billing decides, as before; another runner keeps the table's word", () => {
+    const ev = { t: "usage" as const, source: "reported" as const, model: "m", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2 };
+    // claude is `subscription` in the table: read as the Claude account
+    expect(ledgerRowFor(table, { id: "t", runner: "claude", model: null }, ev, 0)).toMatchObject({ billing: "claude.ai", billedUsd: 0 });
+    expect(ledgerRowFor(table, { id: "t", runner: "codex", model: null }, ev, 0)).toMatchObject({ billing: "subscription", billedUsd: 0 });
+    expect(ledgerRowFor(table, { id: "t", runner: "dak", model: null }, ev, 0)).toMatchObject({ billing: "api", billedUsd: 2 });
+    // a table that says claude is pay-as-you-go: read as the Anthropic Console
+    expect(billingOf({ ...table, billing: { claude: "api" } }, "claude", "m")).toBe("console");
+    // a runner missing from the table counts as pay-as-you-go, and so does everything without a table
+    expect(billingOf({ ...table, billing: {} }, "codex", "m")).toBe("api");
+    expect(ledgerRowFor(undefined, { id: "t", runner: "codex", model: null }, ev, 0)).toMatchObject({ billing: "api", billedUsd: 2 });
+    expect(ledgerRowFor(undefined, { id: "t", runner: "claude", model: null }, ev, 0, "claude.ai")).toMatchObject({ billing: "claude.ai", billedUsd: 0 });
+    expect((["claude.ai", "console", "bedrock", "subscription", "api"] as const).map(isCharged)).toEqual([false, true, true, false, true]);
+    expect([billingFromRow("claude", "m", false), billingFromRow("claude", "m", true), billingFromRow("codex", "m", false), billingFromRow("codex", "openai.gpt-6-luna", false)]).toEqual(["claude.ai", "console", "subscription", "bedrock"]);
   });
 
   test("billedUsd: a Bedrock model id is billed at the API price under a subscription runner", () => {

@@ -13,7 +13,7 @@ export function feedbackTargets(workspaces: Workspace[], opened?: FeedbackTarget
 }
 
 /**
- * What the feedback dialog offers (#2459). `developSelf` off: no 「すぐ直す」, and a request for Switchboard itself (the meta
+ * What the feedback dialog offers. `developSelf` off: no 「すぐ直す」, and a request for Switchboard itself (the meta
  * workspace, which is also where a dialog opened for no workspace files it) goes upstream instead of making a Task.
  * One place for the decision, so the render does not branch on the setting.
  */
@@ -23,7 +23,7 @@ export function feedbackModes(developSelf: boolean, target: FeedbackTarget | und
 }
 
 /**
- * The feedback dialog's developSelf for each opening (#2459): off until that opening's answer, and a late answer for an
+ * The feedback dialog's developSelf for each opening: off until that opening's answer, and a late answer for an
  * earlier opening is dropped, so すぐ直す is never offered on a value from before the setting changed. The returned
  * call is made at each opening; its promise rejects when the read fails.
  */

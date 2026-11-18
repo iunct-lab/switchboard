@@ -8,26 +8,36 @@ import { currentRepo } from "./repo.ts";
  *             paths named by other In progress Tasks. Work left untouched for STALE_HOURS is reported but does not block.
  *             After setting In progress, `--claimed` leaves a claim comment on the Task; of two In progress Tasks on the
  *             same file the one whose claim came first (smaller comment order) goes on. It also judges the
- *             prerequisites the Task and its PBI name (`**前提**:`, #937) as the daemon does (prereqState): one of
+ *             prerequisites the Task and its PBI name (`**前提**:`) as the daemon does (prereqState): one of
  *             another PBI not done yet waits (`wait`), one withdrawn / not found / not judged stops (`stop`). A merged
  *             （リリース） one goes: whether it runs is the daemon's to judge before it starts the PBI.
+ *   shared  — the files many PBIs touch (`sharedFiles` of ops.config.json) hold no one back: an overlap only on them is
+ *             reported (`shared`) and goes on; the merge gate asks for a local CI on the base once one moved there.
+ *   turn    — a PBI that yielded on an overlap keeps its place on the paths it yielded on (`Turn`, kept by the app): a
+ *             Task of a PBI that came later yields to it even after claiming, so the one that waited starts first.
+ * The app judges what it starts with the same functions (`othersOf`, `turnsAhead`, `judge`), so a Task it started as
+ * free of overlaps is not deferred here.
  * Claims are ordered by a number that only grows, so they need no trusted clock.
- * With BACKLOG_URL, on a repository the app syncs, GitHub-synced or kept in the app only (#3069), the comments are the
+ * With BACKLOG_URL, on a repository the app syncs, GitHub-synced or kept in the app only, the comments are the
  * app's stored ones (`appBoard`, the same API as `ops-kit backlog`), in the order the app stored them (`comments[].seq`),
  * and gh is never called. They cannot be deleted, so a session takes its claim back with a withdraw mark naming its token.
  * On a repository the app does not know, and without BACKLOG_URL, they are GitHub's (`ghBoard`), ordered by comment id,
  * which grows across a repository's issues.
  */
 
-import { onlyConfirmationsLeft, prereqsOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog.ts";
+import { pbiFactsOf, prereqsOf } from "../packages/core/src/backlog-item.ts";
+import { prereqOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog-waits.ts";
+import { pbiProgress } from "../packages/core/src/pbi-progress.ts";
 import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
-import { linkedIssues, overlaps, pathsIn } from "./task-paths.ts";
+import { linkedIssues } from "./task-paths.ts";
+import { overlaps, pathsIn } from "../ops-kit/src/task-paths.ts";
+import { sharedFilesOf } from "../ops-kit/src/config.ts";
 
 export const STALE_HOURS = 72;
 const MARKER = /<!-- pbi-complete:(claim|takeover|release)(?: (\S+))?(?: (after=\S+))? -->/;
 const TASK_CLAIM = /^<!-- parallel-guard:task-claim(?: (\S+))? -->/;
 const WITHDRAW = /<!-- parallel-guard:withdraw (\S+) -->/;
-/** The tokens taken back (#2265): a claim with one of them does not count. */
+/** The tokens taken back: a claim with one of them does not count. */
 const withdrawn = (comments: Comment[]) => new Set(comments.flatMap((c) => WITHDRAW.exec(c.body)?.[1] ?? []));
 export interface Comment { id: number; body: string }
 export interface Holder { id: number; token: string }
@@ -67,12 +77,29 @@ export function waitsOnlyForCheck(task: number, pulls: { state: string; linked: 
   return mine.some((p) => p.state === "MERGED") && !mine.some((p) => p.state === "OPEN");
 }
 
-export interface Work { ref: string; task?: number; paths: string[]; updatedAt: string; claimId?: number }
-export interface Hit { ref: string; path: string; updatedAt: string }
-export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[] }
-/** A prerequisite (#937): `sibling` = a Task of the same PBI (its order is the stack's, so it does not wait). */
+/** `turn`: not work under way but the place of a PBI that yielded (its number): see `Turn`. */
+export interface Work { ref: string; task?: number; paths: string[]; updatedAt: string; claimId?: number; turn?: number }
+export interface Hit { ref: string; path: string; updatedAt: string; turn?: number }
+/** `shared`: the overlaps on shared files only, which do not hold the Task back; absent = none. */
+export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[]; shared?: Hit[] }
+
+/**
+ * The place of a PBI that yielded on an overlap: `paths` of its Task `task` are kept for it since `since` (when it first
+ * yielded), ahead of every PBI that has no place or a later one. The app reads them from the occupancy marks and leaves
+ * out a PBI that cannot move now (packages/core/src/backlog-overlap.ts `turnWorks`); the guard reads the app's list.
+ */
+export type Turn = NonNullable<StoredRecords["turns"]>[number];
+
+/** The places ahead of `pbi`'s own, as other work: every other PBI's when it has none, else the ones taken earlier (the same time: the smaller number). */
+export function turnsAhead(turns: Turn[], pbi: number | null): Work[] {
+  const mine = turns.find((t) => t.pbi === pbi);
+  return turns
+    .filter((t) => t.pbi !== pbi && (!mine || t.since < mine.since || (t.since === mine.since && t.pbi < mine.pbi)))
+    .map((t) => ({ ref: `Task #${t.task}`, task: t.task, paths: t.paths, updatedAt: t.since, turn: t.pbi }));
+}
+/** A prerequisite: `sibling` = a Task of the same PBI (its order is the stack's, so it does not wait). */
 export interface Prereq { ref: string; state: ReturnType<typeof prereqState>; sibling: boolean; fix?: string;
-  /** `met` because only the person's own checks are left (`onlyConfirmationsLeft`, as the app counts it). */ confirming?: boolean }
+  /** `met` because only the person's own checks are left (`prereqOf`, the app's own rule). */ confirming?: boolean }
 
 /** The prerequisites' verdict: `stop` (a person has to fix the body), `wait` (another PBI's, not done yet) or null. */
 export function prereqVerdict(prereqs: Prereq[]): "wait" | "stop" | null {
@@ -80,7 +107,7 @@ export function prereqVerdict(prereqs: Prereq[]): "wait" | "stop" | null {
   return prereqs.some((p) => p.state === "pending" && !p.sibling) ? "wait" : null;
 }
 
-/** A wait key of a stop record (`conditions`, #2045): the daemon reads `pr#N` / `issue#N` and resumes the Task once all are closed. */
+/** A wait key of a stop record (`conditions`): the daemon reads `pr#N` / `issue#N` and resumes the Task once all are closed. */
 export interface WaitCondition { key: string; value: string; met: false }
 
 /**
@@ -104,19 +131,32 @@ export function waitConditions(v: { verdict: string; blocking: Hit[]; prereqs?: 
 /**
  * Before claiming (`claimId` undefined) every overlapping PR or In progress Task blocks. After claiming, an In progress
  * Task blocks only if it claimed first; one without a claim comment yet will claim after this one and yield itself.
+ * A place ahead (`turn`) blocks whatever the claims and its age: the app already left out the ones too old.
+ * An overlap where the file both sides touch is one of `sharedFiles` does not block (`shared`).
  */
-export function judge(mine: { paths: string[]; claimId?: number }, others: Work[], now: Date): Verdict {
+export function judge(mine: { paths: string[]; claimId?: number }, others: Work[], now: Date, sharedFiles: string[] = []): Verdict {
   const blocking: Hit[] = [];
   const stale: Hit[] = [];
+  const shared: Hit[] = [];
   for (const w of others) {
-    if (mine.claimId !== undefined && w.task !== undefined && !(w.claimId !== undefined && w.claimId < mine.claimId)) continue;
-    const old = now.getTime() - Date.parse(w.updatedAt) > STALE_HOURS * 3600_000;
+    if (mine.claimId !== undefined && w.task !== undefined && w.turn === undefined && !(w.claimId !== undefined && w.claimId < mine.claimId)) continue;
+    const old = w.turn === undefined && now.getTime() - Date.parse(w.updatedAt) > STALE_HOURS * 3600_000;
+    // every path of the other side that meets one of mine is sorted on its own: a shared file named first must not hide
+    // the next file under the same directory. One hit per path of the other side and list it falls in.
+    const seen = new Set<string>();
     for (const p of mine.paths) {
-      const q = w.paths.find((x) => overlaps(p, x));
-      if (q) (old ? stale : blocking).push({ ref: w.ref, path: q, updatedAt: w.updatedAt });
+      for (const q of w.paths.filter((x) => overlaps(p, x))) {
+        // what both touch is the narrower of the two (a directory named on one side meets the file named on the other)
+        const both = p.length >= q.length ? p : q;
+        const into = sharedFiles.includes(both) ? shared : old ? stale : blocking;
+        const key = `${into === shared ? "s" : into === stale ? "o" : "b"}\0${q}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        into.push({ ref: w.ref, path: q, updatedAt: w.updatedAt, ...(w.turn !== undefined ? { turn: w.turn } : {}) });
+      }
     }
   }
-  return { verdict: blocking.length > 0 ? "defer" : "go", blocking, stale };
+  return { verdict: blocking.length > 0 ? "defer" : "go", blocking, stale, ...(shared.length ? { shared } : {}) };
 }
 
 type Run = (args: string[]) => Promise<string>;
@@ -142,24 +182,33 @@ const remove = (repo: string, id: number, run: Run) => run(["api", "-X", "DELETE
 
 /**
  * Where the claims are written and read, and the overlap check's material: GitHub's comments (`ghBoard`) or the app's
- * stored ones (`appBoard`, #2265). `remove` takes back a comment this session wrote (`token`: the one in its mark).
+ * stored ones (`appBoard`). `remove` takes back a comment this session wrote (`token`: the one in its mark).
  */
 export interface Board {
   comments(n: number): Promise<Comment[]>;
   post(n: number, body: string): Promise<number>;
   remove(n: number, id: number, token: string): Promise<void>;
   material(task: number): Promise<Material>;
+  /**
+   * The PBI's lease, where the app shares work with another machine: taken and given back through the app, which holds
+   * and renews it (the script never asks S3). `enabled: false` = the app runs alone, nothing was asked. Absent on
+   * GitHub's comments: without the app there is no lease.
+   */
+  lease?(pbi: number, action: "acquire" | "release"): Promise<Lease>;
 }
 
-export const ghBoard = (repo: string, run: Run = gh): Board => ({
+export type Lease = { enabled: false } | { enabled: true; ok: true } | { enabled: true; ok: false; holder: string; until: number; error: string };
+
+/** `sharedFiles`: the checkout's (`sharedFilesOf`); GitHub's comments carry no places, so none are read here. */
+export const ghBoard = (repo: string, run: Run = gh, sharedFiles: string[] = []): Board => ({
   comments: (n) => comments(repo, n, run),
   post: (n, body) => post(repo, n, body, run),
   remove: async (_n, id) => void (await remove(repo, id, run)),
-  material: (task) => ghMaterial(repo, task, run),
+  material: async (task) => ({ ...(await ghMaterial(repo, task, run)), shared: sharedFiles }),
 });
 
 /**
- * The app's stored comments (#2265, #3069), through the API `ops-kit backlog` uses (BACKLOG_URL / BACKLOG_TOKEN_FILE /
+ * The app's stored comments, through the API `ops-kit backlog` uses (BACKLOG_URL / BACKLOG_TOKEN_FILE /
  * BACKLOG_WORKSPACE, or `repo`): read from GET /api/backlog/:n, written with POST /api/backlog/:n/comment. A stored comment cannot be
  * deleted: one taken back gets a withdraw mark. What a post made is found again by its token, as the newest comment
  * carrying it. Comments are ordered by `seq`, which sending to GitHub does not change (the id and the time do); one only
@@ -195,6 +244,7 @@ export function appBoard(env: Record<string, string | undefined>, f: typeof fetc
       return Math.max(...mine.map((c) => c.id));
     },
     remove: (n, _id, token) => write(n, `<!-- parallel-guard:withdraw ${token} -->\n取り下げ（parallel-guard）`),
+    lease: async (n, action) => (await api("POST", `/${n}/lease`, { workspaceId: await ws(), action })) as Lease,
     material: async (task) => {
       const r = await records();
       if (r.service === "switchboard") return storedMaterial(r, task);
@@ -205,32 +255,49 @@ export function appBoard(env: Record<string, string | undefined>, f: typeof fetc
   };
 }
 
-export async function claim(board: Board, pbi: number, takeover: boolean): Promise<{ held: boolean; holder: Holder | null }> {
+/**
+ * `leased`: the claim was won here but another machine holds the PBI's lease (its line says who, until when); the claim
+ * comment is taken back. A lease that cannot be asked for throws after the comment is taken back: not judged.
+ */
+export async function claim(board: Board, pbi: number, takeover: boolean): Promise<{ held: boolean; holder: Holder | null; leased?: string }> {
   const before = holder(await board.comments(pbi));
   if (before && !takeover) return { held: false, holder: before };
   const token = crypto.randomUUID();
   const kind = takeover ? "takeover" : "claim";
   const id = await board.post(pbi, `<!-- pbi-complete:${kind} ${token} -->\n/pbi-complete ${takeover ? "再開（前のセッションから引き継ぐ）" : "開始"}。worktree: ../switchboard-pbi${pbi}`);
   const after = holder(await board.comments(pbi));
-  if (after?.token === token) return { held: true, holder: after };
-  await board.remove(pbi, id, token);
-  return { held: false, holder: after };
+  if (after?.token !== token) {
+    await board.remove(pbi, id, token);
+    return { held: false, holder: after };
+  }
+  let lease: Lease | undefined;
+  try {
+    lease = await board.lease?.(pbi, "acquire");
+  } catch (e) {
+    await board.remove(pbi, id, token);
+    throw e;
+  }
+  if (lease?.enabled && !lease.ok) {
+    await board.remove(pbi, id, token);
+    return { held: false, holder: null, leased: lease.error };
+  }
+  return { held: true, holder: after };
 }
 
 /**
  * A release, with the PRs / Issues the PBI waits for when it stopped on an overlap or an unfinished prerequisite
- * (`waits=603,778`, read back by the backlog, #817). `holder()` skips the list; a later release without it clears the wait.
+ * (`waits=603, 778`, read back by the backlog). `holder()` skips the list; a later release without it clears the wait.
  */
 export function releaseBody(reason: string, waits: number[] = [], overlap = false, after?: string): string {
   const list = [...new Set(waits)].sort((a, b) => a - b);
   return `<!-- pbi-complete:release${list.length ? ` ${overlap ? "overlap" : "waits"}=${list.join(",")}` : ""}${after ? ` after=${after}` : ""} -->\n/pbi-complete 終了: ${reason}`;
 }
 
-/** A time with a zone (ISO 8601, `Z` or `±hh:mm`) in ms; NaN when it is not one: a time with no zone is not read as local time (#4616). */
+/** A time with a zone (ISO 8601, `Z` or `±hh:mm`) in ms; NaN when it is not one: a time with no zone is not read as local time. */
 export const afterTime = (value: string): number =>
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(value.trim()) ? Date.parse(value) : NaN;
 
-/** A PBI whose last release waits for a date still ahead (#4616, `after=`): its In progress Tasks are no one's overlap until then. */
+/** A PBI whose last release waits for a date still ahead (`after=`): its In progress Tasks are no one's overlap until then. */
 export const waitsForDate = (comments: { body: string; createdAt: string }[], now: number): boolean => {
   const after = waitsOf(comments)?.after;
   return !!after && afterTime(after) > now;
@@ -255,6 +322,8 @@ export function releaseArgs(words: string[]): { reason: string; waits: number[];
 
 export async function release(board: Board, pbi: number, reason: string, waits: number[] = [], overlap = false, after?: string): Promise<void> {
   await board.post(pbi, releaseBody(reason, waits, overlap, after));
+  // the session is done with the PBI for now: the other machine may take it
+  await board.lease?.(pbi, "release");
 }
 
 /** Project owner and number from SWITCHBOARD_PROJECT_URL (the variable, as scripts/setup/*.sh read it). */
@@ -266,7 +335,7 @@ async function project(repo: string, run: Run): Promise<{ owner: string; number:
 }
 
 /**
- * What the overlap check reads (#919): the top level of the repository, the Task with its PBI, the open PRs, the other
+ * What the overlap check reads: the top level of the repository, the Task with its PBI, the open PRs, the other
  * In progress Tasks (in the Project, not `needs-decision`, not under a PBI that waits for a date still ahead) and each prerequisite's state — from GitHub (`ghMaterial`)
  * or from the records the app stored (`storedMaterial`), judged the same way (`readOthers`).
  */
@@ -278,6 +347,10 @@ export interface Material {
   working: { number: number; body: string; updatedAt: string }[];
   /** A prerequisite's state; undefined = not found. */
   target: (n: number) => Promise<WaitTarget | undefined>;
+  /** The files that hold no one back (`sharedFiles`): the app's reading of the checkout, or the caller's. */
+  shared: string[];
+  /** The places of the PBIs that yielded, as the app keeps them; none when read from GitHub. */
+  turns: Turn[];
 }
 
 /**
@@ -324,12 +397,12 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
       "-q", ".data.repository.issues.nodes[] | {number, body, updatedAt, parent, labels, projectItems}",
     ]),
   ) as { number: number; body: string; updatedAt: string; parent?: { number: number } | null; labels: { nodes: { name: string }[] }; projectItems: { nodes: { project: { number: number; owner: { login?: string } }; fieldValueByName: { name?: string } | null }[] } }[];
-  // A Project is numbered within its owner: another owner's Project #2 is not this one
+  // A Project is numbered within its owner: another owner's Project `#2` is not this one
   const inProgress = tasks.filter((t) => {
     const item = t.projectItems.nodes.find((i) => String(i.project.number) === p.number && i.project.owner.login?.toLowerCase() === p.owner.toLowerCase());
     return item?.fieldValueByName?.name === "In progress" && !t.labels.nodes.some((l) => l.name === "needs-decision");
   });
-  // a PBI whose last release waits for a date still ahead (#4616) holds its Tasks' files no more: every comment of it is
+  // a PBI whose last release waits for a date still ahead holds its Tasks' files no more: every comment of it is
   // read, as holder() reads them, for each parent of an In progress Task (a few)
   const dateWaiting = new Set<number>();
   for (const n of new Set(inProgress.flatMap((t) => (t.parent ? [t.parent.number] : [])))) {
@@ -342,11 +415,13 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
     issue: { body: issue.body, parent: issue.parent && { number: issue.parent.number, body: issue.parent.body, subIssues: issue.parent.subIssues.nodes.map((n: { number: number }) => n.number) } },
     prs: prs.map((pr) => ({ number: pr.number, linked: linkedIssues(pr), updatedAt: pr.updatedAt, files: pr.files.map((f) => f.path), isDraft: pr.isDraft, labels: pr.labels.map((l) => l.name) })),
     working: inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !checking.has(t.number)),
+    shared: [],
+    turns: [],
     target: async (n) => {
       try {
         const r = JSON.parse(await run(["api", `repos/${repo}/issues/${n}`, "-q", "{state, state_reason, merged: (.pull_request.merged_at != null), pr: (.pull_request != null), body, labels: [.labels[].name], sub: .sub_issues_summary}"])) as { state: string; state_reason: string | null; merged: boolean; pr: boolean; body: string | null; labels: string[]; sub: { total: number; completed: number } | null };
         const state = r.pr && r.merged ? "MERGED" : r.state.toUpperCase();
-        const confirmOnly = !r.pr && onlyConfirmationsLeft({ labels: r.labels, body: r.body ?? "", subIssues: { total: r.sub?.total ?? 0, closed: r.sub?.completed ?? 0 } });
+        const confirmOnly = !r.pr && pbiProgress(pbiFactsOf({ labels: r.labels, body: r.body ?? "", status: null, tasks: { total: r.sub?.total ?? 0, done: r.sub?.completed ?? 0 } })).prereqMet;
         return { kind: r.pr ? "pr" : "issue", state, isDraft: false, labels: r.labels, closes: [], stateReason: r.state_reason?.toUpperCase() ?? null, mergeCommit: null, confirmOnly };
       } catch (e) {
         if (!/HTTP 404|HTTP 410|Not Found|Gone/.test((e as Error).message)) throw e;
@@ -357,7 +432,7 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
 }
 
 /**
- * The same material from the app's stored records (#919), read after the app sent and imported (`--fresh`): no GitHub
+ * The same material from the app's stored records, read after the app sent and imported (`--fresh`): no GitHub
  * call. A Task not stored cannot be judged (an error, exit 2); a PR stored without all its files, only where it counts (`readOthers`).
  */
 export function storedMaterial(r: StoredRecords, task: number, now = Date.now()): Material {
@@ -373,8 +448,10 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     top: r.top.map((t) => ({ ...t })),
     issue: { body: mine.body, parent: parent ? { number: parent.number, body: parent.body, subIssues: parent.subIssues } : null },
     prs,
-    // a Task whose PBI waits for a date still ahead (#4616) holds no file until then
+    // a Task whose PBI waits for a date still ahead holds no file until then
     working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && !waitsOnlyForCheck(t.number, linked)),
+    shared: r.shared ?? [],
+    turns: r.turns ?? [],
     target: async (n) => {
       const p = pulls.get(n);
       if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null, confirmOnly: false };
@@ -382,58 +459,76 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
       if (!i || r.unread.includes(n)) return undefined;
       // a child not stored or not read counts as open
       const closed = i.subIssues.filter((m) => issues.get(m)?.state === "CLOSED" && !r.unread.includes(m)).length;
-      return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly: onlyConfirmationsLeft({ labels: i.labels, body: i.body, subIssues: { total: i.subIssues.length, closed } }) };
+      return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly: pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length, done: closed } })).prereqMet };
     },
   };
 }
 
-/** The Task's paths and active work: ready PRs and non-decision In progress Tasks, minus its own PBI.
- * A Draft reserves nothing by itself; an In progress Task working on that Draft is still protected. */
-export async function readOthers(task: number, m: Material): Promise<{ paths: string[]; others: Work[]; prereqs: Prereq[] }> {
-  const top = [...m.top];
-  const { issue } = m;
-  const own = new Set<number>([task, ...(issue.parent?.subIssues ?? [])]);
-  if (issue.parent) own.add(issue.parent.number);
-
-  const others: Work[] = [];
-  for (const f of m.prs.flatMap((pr) => pr.files ?? [])) {
+/** The top level a body's paths are read against: the checkout's, and what the open PRs' files add to it (a Draft's new directory too). */
+export function topWith(top: { name: string; dir: boolean }[], prs: { files: string[] | null }[]): { name: string; dir: boolean }[] {
+  const out = new Map(top.map((t) => [t.name, t.dir]));
+  for (const f of prs.flatMap((pr) => pr.files ?? [])) {
     const [head, ...more] = f.split("/");
-    if (!top.some((t) => t.name === head)) top.push({ name: head!, dir: more.length > 0 });
+    if (head && (more.length > 0 || !out.has(head))) out.set(head, more.length > 0 || out.get(head) === true);
   }
-  // A Task with a ready PR is judged by that PR's files (pushed below), not by the plan its body named
-  const inPr = new Set(m.prs.filter((pr) => !pr.isDraft && !pr.labels.includes("needs-decision")).flatMap((pr) => pr.linked));
+  return [...out].map(([name, dir]) => ({ name, dir }));
+}
+
+/**
+ * The other work a PBI's Task is compared with (`own`: the PBI, its Tasks), the one reading the app's judgement before a
+ * start and the guard in the Task share: each ready PR (not a Draft, not `needs-decision`, not the PBI's own) with its
+ * files, and each Task at work (`working`) of another PBI with the paths its body names. A Task with a ready PR and no
+ * other is judged by that PR's files, not by its plan; a Draft or `needs-decision` PR reserves nothing by itself, but its
+ * files belong to the Task at work on it (with that Task's claim order). `top`: `topWith`. `unknown`: the PRs that count
+ * but whose files are not all stored — they cannot be judged.
+ */
+export function othersOf(own: Set<number>, m: Pick<Material, "prs" | "working">, top: { name: string; dir: boolean }[]): { others: Work[]; unknown: number[] } {
+  const others: Work[] = [];
+  const unknown: number[] = [];
+  const parked = (pr: Material["prs"][number]) => pr.isDraft || pr.labels.includes("needs-decision");
+  const kept = new Set(m.prs.filter(parked).flatMap((pr) => pr.linked));
+  const inPr = new Set(m.prs.filter((pr) => !parked(pr)).flatMap((pr) => pr.linked).filter((n) => !kept.has(n)));
   for (const t of m.working) {
     if (own.has(t.number)) continue;
     others.push({ ref: `Task #${t.number}`, task: t.number, paths: inPr.has(t.number) ? [] : pathsIn(t.body, top), updatedAt: t.updatedAt });
   }
-
-  const paths = pathsIn(issue.body, top);
   for (const pr of m.prs) {
-    const files = () => {
-      if (pr.files === null) throw new Error(`PR #${pr.number} の変更ファイルが記録に無い（101 件以上）`);
-      return pr.files;
-    };
-    if (pr.linked.includes(task)) paths.push(...files());
     if (pr.linked.some((n) => own.has(n))) continue;
     const active = others.filter((w) => w.ref.startsWith("Task #") && w.task !== undefined && pr.linked.includes(w.task));
-    const deferred = pr.isDraft || pr.labels.includes("needs-decision");
-    if (deferred && !active.length) continue;
-    if (deferred) {
-      // Draft files belong to the live Task: keep its claim ordering when both Tasks resume together.
-      for (const task of active) others.push({ ref: `PR #${pr.number}`, task: task.task, paths: files(), updatedAt: pr.updatedAt });
-    } else {
-      others.push({ ref: `PR #${pr.number}`, paths: files(), updatedAt: pr.updatedAt });
-    }
+    if (parked(pr) && !active.length) continue;
+    if (pr.files === null) unknown.push(pr.number);
+    // Draft files belong to the live Task: keep its claim ordering when both Tasks resume together.
+    else if (parked(pr)) for (const task of active) others.push({ ref: `PR #${pr.number}`, task: task.task, paths: pr.files, updatedAt: pr.updatedAt });
+    else others.push({ ref: `PR #${pr.number}`, paths: pr.files, updatedAt: pr.updatedAt });
   }
-
   // Keep PRs before Tasks in the diagnostic, as before.
   others.sort((a, b) => Number(!a.ref.startsWith("PR #")) - Number(!b.ref.startsWith("PR #")));
+  return { others, unknown };
+}
+
+const NO_FILES = (pr: number) => `PR #${pr} の変更ファイルが記録に無い（101 件以上）`;
+
+/** The Task's paths (its body's, and its own PRs' files), the other work (`othersOf`) with the places ahead of its PBI's (`turnsAhead`), and its prerequisites. */
+export async function readOthers(task: number, m: Material): Promise<{ paths: string[]; others: Work[]; prereqs: Prereq[]; shared: string[] }> {
+  const { issue } = m;
+  const own = new Set<number>([task, ...(issue.parent?.subIssues ?? [])]);
+  if (issue.parent) own.add(issue.parent.number);
+  const top = topWith(m.top, m.prs);
+  const paths = pathsIn(issue.body, top);
+  for (const pr of m.prs) {
+    if (!pr.linked.includes(task)) continue;
+    if (pr.files === null) throw new Error(NO_FILES(pr.number));
+    paths.push(...pr.files);
+  }
+  const { others, unknown } = othersOf(own, m, top);
+  if (unknown.length) throw new Error(NO_FILES(unknown[0]!));
+  others.push(...turnsAhead(m.turns, issue.parent?.number ?? null).filter((w) => !own.has(w.task!)));
   const siblings = new Set<number>(issue.parent?.subIssues ?? []);
-  return { paths: [...new Set(paths)], others, prereqs: await readPrereqs([issue.body, issue.parent?.body ?? ""], siblings, m.target) };
+  return { paths: [...new Set(paths)], others, prereqs: await readPrereqs([issue.body, issue.parent?.body ?? ""], siblings, m.target), shared: m.shared };
 }
 
 /**
- * The prerequisites the Task's and its PBI's bodies name (#937), each read by `target` (from GitHub: a 404 / 410 = not
+ * The prerequisites the Task's and its PBI's bodies name, each read by `target` (from GitHub: a 404 / 410 = not
  * found). A release is not judged here: the daemon knows what runs and starts the PBI only once it is in, so a merged
  * PR is met (stopping on it would stop what the daemon just started, every firing); an Issue named as a release stays unknown.
  */
@@ -444,10 +539,7 @@ async function readPrereqs(bodies: string[], siblings: Set<number>, target: Mate
   for (const [n, release] of named) {
     const t = await target(n);
     // a PR's （リリース） is judged as merged here (see above)
-    const read = prereqState(t, t?.kind === "pr" ? "merged" : release ? "release" : "done", () => null);
-    // left with only the person's checks: met, as the app counts it
-    const confirming = read === "pending" && t?.kind === "issue" && t.confirmOnly;
-    const state = confirming ? "met" : read;
+    const { state, confirming } = prereqOf(t, t?.kind === "pr" ? "merged" : release ? "release" : "done", () => null);
     const fix = t?.kind === "issue" && release && state === "unknown" ? "Issue に（リリース）が付いている。この Issue を閉じた PR の番号に書き直す" : undefined;
     out.push({ ref: `${t?.kind === "pr" ? "PR " : ""}#${n}`, state, sibling: siblings.has(n), ...(fix ? { fix } : {}), ...(confirming ? { confirming } : {}) });
   }
@@ -470,19 +562,19 @@ export async function overlap(board: Board, task: number, claimed: boolean, now 
     await back();
     throw e;
   }
-  const { paths, others, prereqs } = found;
+  const { paths, others, prereqs, shared } = found;
   if (paths.length === 0) {
     await back();
     throw new Error(`Task #${task} の本文に触るファイルのパスが無い（pbi-to-tasks で名指しする）`);
   }
   if (claimId !== undefined) {
     for (const w of others) {
-      if (w.task !== undefined && paths.some((a) => w.paths.some((b) => overlaps(a, b)))) {
+      if (w.task !== undefined && w.turn === undefined && paths.some((a) => w.paths.some((b) => overlaps(a, b)))) {
         w.claimId = lastClaim(await board.comments(w.task));
       }
     }
   }
-  const v = judge({ paths, claimId }, others, now);
+  const v = judge({ paths, claimId }, others, now, shared);
   const verdict = prereqVerdict(prereqs) ?? v.verdict;
   if (verdict !== "go") await back();
   const conditions = waitConditions({ verdict, blocking: v.blocking, prereqs });
@@ -505,7 +597,7 @@ if (import.meta.main) {
   const named = repoAt >= 0 ? args[repoAt + 1] : undefined;
   const repoName = /^[\w.-]+\/[\w.-]+$/;
   if (!/^\d+$/.test(num ?? "") || (repoAt >= 0 && !repoName.test(named ?? ""))) usage();
-  // with BACKLOG_URL, a repository the app syncs has its claims and records there (#3069), whether or not GitHub is
+  // with BACKLOG_URL, a repository the app syncs has its claims and records there, whether or not GitHub is
   // behind it, and gh is not called. An app that cannot be asked cannot judge: it never falls back to GitHub (exit 2).
   // Only a repository it does not know goes on with GitHub's comments, as without BACKLOG_URL
   let board: Board | undefined;
@@ -526,13 +618,13 @@ if (import.meta.main) {
       usage();
     }
     if (!repo || !repoName.test(repo)) usage();
-    board = ghBoard(repo!);
+    board = ghBoard(repo!, gh, sharedFilesOf());
   }
   try {
     if (cmd === "claim") {
       const r = await claim(board, n!, more.includes("--takeover"));
       console.log(JSON.stringify(r, null, 2));
-      if (!r.held) console.log(`PBI #${n} は別のセッションが実行中（コメント ${r.holder?.id}）`);
+      if (!r.held) console.log(r.leased ?? `PBI #${n} は別のセッションが実行中（コメント ${r.holder?.id}）`);
       process.exit(r.held ? 0 : 1);
     } else if (cmd === "release") {
       const r = releaseArgs(more);

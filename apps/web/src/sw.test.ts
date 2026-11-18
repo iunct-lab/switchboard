@@ -1,7 +1,7 @@
 // test-reads: apps/web/public/sw.js
 import { expect, test } from "bun:test";
 
-// The service worker (#26) on the cloud host (#211): the login and the "stopped" page are not the app, and a page the
+// The service worker on the cloud host: the login and the "stopped" page are not the app, and a page the
 // server sends with an error status (CloudFront's stopped page, 503) is shown rather than hidden behind the cached shell.
 const sw = await Bun.file(new URL("../public/sw.js", import.meta.url)).text();
 

@@ -105,7 +105,7 @@ describe("layout", () => {
     expect(loadView(s)).toEqual(view({ layout: "board" }));
     saveView(s, view({ layout: "board", priorities: ["P1"] }));
     expect(loadView(s)).toEqual(view({ layout: "board", priorities: ["P1"] }));
-    // the queue (#3957) is kept and read back the same way
+    // the queue is kept and read back the same way
     saveView(s, view({ layout: "queue" }));
     expect(loadView(s)).toEqual(view({ layout: "queue" }));
   });
@@ -132,7 +132,7 @@ describe("itemMarks", () => {
   const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
     item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, confirmations: [], overlap: null, prereqs: [], stopSummary: [], ...over });
   const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
-  const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: null, confirming: false }) as BacklogItem["prereqs"][number];
+  const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: [], confirming: false }) as BacklogItem["prereqs"][number];
   const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>
     ({ key: `k${next}${state}${count}`, op: "op", target: "", reason: "depends", evidence: "", count, state, lastAt: 1, lastAnswer: null, changes: [], actions: [], next }) as unknown as BacklogItem["stopSummary"][number];
   const keys = (i: BacklogItem, auto = false) => itemMarks(i, auto).map((x) => x.key);
@@ -167,9 +167,8 @@ describe("itemMarks", () => {
     expect(marks(row({ confirmations: conf(null), tasks: tasks(null) }))).toEqual([]);
     expect(marks(row({ confirmations: conf(ahead(5)), tasks: tasks(days(9)) }))).toEqual([]);
     expect(marks(row({ confirmations: [], tasks: tasks(days(9)) }))).toEqual([]);
-    // a Task still open: not answerable yet, whatever closed before it; no Tasks at all: the 期日 alone
-    expect(marks(row({ confirmations: conf(null), tasks: { total: 3, done: 1, doneAt: days(9) } }))).toEqual([]);
-    expect(marks(row({ confirmations: conf(days(3)), tasks: { total: 3, done: 2, doneAt: days(1) } }))).toEqual([]);
+    // a Task still open: the daemon gives the row no confirmation (not answerable yet), so nothing is counted here; no Tasks at all: the 期日 alone
+    expect(marks(row({ confirmations: [], tasks: { total: 3, done: 1, doneAt: days(9) } }))).toEqual([]);
     expect(marks(row({ confirmations: conf(days(3)), tasks: { total: 0, done: 0, doneAt: null } }))[0]!.label).toBe("確認待ち 3 日");
   });
   test("確認待ち warns from 7 days, not at 6", () => {

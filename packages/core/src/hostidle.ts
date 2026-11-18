@@ -12,7 +12,7 @@ export interface IdleInput {
   background: number;
   /** Open UI WebSockets (/ws). */
   ws: number;
-  /** Terminal-tab shells (/ws/pty sessions). */
+  /** Terminal shells that count as activity (`PtyManager.busy`): every Task's shell, and a Workspace's shell until it has had no socket, input or output for its idle bound. */
   pty: number;
   /** The earliest planned resume or schedule firing (ms), or null. */
   nextWakeAt: number | null;

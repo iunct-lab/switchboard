@@ -1,9 +1,9 @@
-import type { Health } from "./api.ts";
+import type { Health } from "./api/daemon.ts";
 import { jstStamp } from "./time.ts";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
-/** The top banner for a problem with the daily history archive (#1201). */
+/** The top banner for a problem with the daily history archive. */
 export function archiveBanner(p: NonNullable<Health["archive"]>): string {
   const at = jstStamp(p.at);
   if (p.kind === "failed") return t(m.archiveFailed, { at, code: p.detail ?? t(m.unknown) });

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import { afterGithubLogin, GITHUB_LOGIN_ARGS, GITHUB_LOGOUT_ARGS, githubStatus } from "./github-login.ts";
 import { startServer } from "./server.ts";

@@ -1,5 +1,5 @@
 /**
- * Starts the Switchboard daemon from `releases/current` and keeps it running (#178). The daemon's cwd and entry are
+ * Starts the Switchboard daemon from `releases/current` and keeps it running. The daemon's cwd and entry are
  * the *resolved* release directory, so switching `current` affects only the next start.
  * Exit 75 is the daemon asking for a restart; any other exit is a crash: retried with backoff, then `failed` — the
  * version is not changed here (only a promotion rolls back on its own; otherwise the person decides on the page).
@@ -65,7 +65,7 @@ export class Supervisor {
     this.running = dir.split("/").pop() ?? null;
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-    // sb-rescue's own secret for 作り直す (#181): the daemon and the runners it starts have no use for it
+    // sb-rescue's own secret for 作り直す: the daemon and the runners it starts have no use for it
     delete env.SWITCHBOARD_STARTER_TOKEN;
     Object.assign(env, { SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOME: this.o.home, SWITCHBOARD_PORT: String(this.o.port), SWITCHBOARD_REPO_ROOT: this.o.source ? dir : this.o.repo });
     if (this.o.rescueUrl) env.SWITCHBOARD_RESCUE_URL = this.o.rescueUrl;

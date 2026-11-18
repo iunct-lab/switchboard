@@ -202,7 +202,7 @@ describe("updateClis", () => {
     expect(body).not.toContain(home);
   });
 
-  test("the request body has the request's sections (要望の節, #2068)", () => {
+  test("the request body has the request's sections (要望の節)", () => {
     const f = { runner: "claude" as const, from: "1.0.0", to: "1.1.0", reason: "x", restored: true };
     const body = requestFor([f], "2026-10-16", ["claude rolled back: 1.1.0 → 1.0.0（確認 失敗: x）"])!.body;
     expect(body).toContain("## 要望\n");

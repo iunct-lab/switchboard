@@ -1,26 +1,50 @@
 # Running Switchboard as a container on your own machine
 
-One image runs the stand-alone mode: a single Switchboard daemon with the same tools, versions and paths as the EC2 setup, on any machine where containers run. The supported CPUs are arm64 and x86-64: the same Dockerfile and the same procedure on both. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
+One image runs the stand-alone mode: a single Switchboard daemon under `sb-rescue`, with the same tools, versions and paths as the EC2 setup, on any machine where containers run. As there, the daemon runs from an immutable release, takes new versions by itself and can be rolled back from the rescue page (`docs/design/releases-and-rescue.md`). The supported CPUs are arm64 and x86-64: the same Dockerfile and the same procedure on both. The machine needs only that, a container engine with `docker compose`. There is no per-operating-system procedure, service unit or script; if something differs between machines, the difference belongs to the engine and not to this repository.
 
-Files: `container/Dockerfile` (the image), `container/compose.yaml` (the one service and its volumes), `container/entrypoint.sh` and `container/relay.ts` (start-up and the relay below), `container/up.sh` (the start), `container/e2e.sh` (the check with a fake runner).
+Files: `container/Dockerfile` (the image), `container/compose.yaml` (the one service and its volumes), `container/entrypoint.sh` and `container/relay.ts` (start-up and the relays below), `container/up.sh` (the start), `container/e2e.sh` and `container/e2e-release.sh` (the checks with a fake runner).
 
 ## 1. Start
 
-From a clone of this repository, on a machine where `docker compose` works:
+The image holds the tools; the version of Switchboard that runs is not in the image but in the `sb-home` volume (`~/.switchboard/releases`), built there by `sb-rescue`. Where its releases come from is the one choice, and it is sb-rescue's own (`rescue/src/main.ts`), not a setting of the container: a clone named by `SWITCHBOARD_REPO_ROOT`, or without one the public repository's Releases.
+
+### To use it (no git needed)
+
+Two commands on a machine where `docker compose` works, with `curl` and `tar`:
 
 ```bash
-bash container/up.sh
+# 1. Fetch and unpack the source tarball of any Release (the container fetches the newest one itself)
+mkdir switchboard-src && curl -fsSL https://github.com/iunct-lab/switchboard/archive/refs/tags/<tag>.tar.gz | tar -xz -C switchboard-src --strip-components=1
+# 2. Build the image and start the container
+cd switchboard-src && bash container/up.sh
 ```
 
-This builds the image `sb-local` (arm64 or x86-64) and starts the container in the background with `restart: unless-stopped`. Open `http://127.0.0.1:47831/`. The first build downloads the tools and builds the web UI, so it takes a while; later starts reuse the layers.
+This builds the image `sb-local` (arm64 or x86-64) and starts the container in the background with `restart: unless-stopped`. On its first start the container downloads the newest Release of the public repository (the one `publicSync.target` in the tree's `ops.config.json` names), checks the tarball as the install without git does, builds it under `~/.switchboard/releases` (`bun install --frozen-lockfile` and the web build) and starts it under sb-rescue. That takes a few minutes after the image is built; then open `http://127.0.0.1:47831/`. The rescue page is not opened to the machine (section 4 says why and how to reach it). No `.git` is made anywhere.
 
-No AWS setting is needed or read. The daemon starts as a stand-alone instance: no starter, no EC2 instance, no automatic stop.
+The first start needs GitHub: if it cannot be reached, no release can be built, the container stops with that reason (`docker compose -f container/compose.yaml logs`) and the restart policy tries again until it works. Later starts do not need it: they run the release already in the volume.
+
+Later versions arrive by themselves, as for an install from a Release: the daemon looks for a newer Release every few minutes (`設定` → `動いている版`), a model reads its diff first, and a version with no concern goes up while no Task runs; one with a concern, or one that could not be checked, waits for your button. The tree you unpacked is only what the image was built from; running `up.sh` from another tree (a clone of the development repository included) starts the same way and runs the public Release, not that tree's code. To try a tree's own code, use `bun run dev` or `container/e2e.sh`.
+
+### To develop Switchboard (releases from your clone's tags)
+
+Put a clone in the `sb-repos` volume and name it with `SWITCHBOARD_REPO_ROOT` (its path inside the container). sb-rescue then builds the clone's `HEAD` as the first release and follows the clone's `origin` tags, with no review of the diff, as the EC2 setup does. Two commands, from the tree you build the image from, for a volume that has no release yet:
+
+```bash
+# 1. Log in to GitHub and clone into the volume (the login is not kept; log in again on the screen afterwards)
+docker compose -f container/compose.yaml run --rm --entrypoint bash switchboard -c 'gh auth login && gh repo clone <owner>/<name> ~/repos/<name>'
+# 2. Start with the clone as the source of releases
+SWITCHBOARD_REPO_ROOT=/home/switchboard/repos/<name> bash container/up.sh
+```
+
+Pass the variable on every `up.sh`. The two sources are not mixed in one `sb-home`: a start without the variable, on a volume whose releases were built from a clone, stops and says so, and nothing is replaced.
+
+No AWS setting is needed or read in either case. The daemon starts as a stand-alone instance: no starter, no EC2 instance, no automatic stop.
 
 ## 2. Log in and bring your repositories
 
 Nothing is logged in inside a new container, and Switchboard holds no credentials of its own. Every login is done on the screen; the daemon runs the tool's own login command and shows the page to open and the one-time code:
 
-- Claude and Codex: the login warning on Home and its login button (`claude auth login`, `codex login --device-auth`; the browser login's callback to localhost cannot reach the container, as only port 47831 is published, so Codex uses the device login)
+- Claude and Codex: the login warning on Home and its login button (`claude auth login`, `codex login --device-auth`; the browser login's callback to localhost cannot reach the container, as only the daemon's port is published, so Codex uses the device login)
 - GitHub: `Log in to GitHub` above the Workspace's add form on the Settings screen (and on the Backlog screen when a backlog cannot be read for want of it). It runs `gh auth login --web`; approve the code on `github.com/login/device`. Afterwards git's https fetch and push use the same login, and if git has no commit name and email yet, they are set from the GitHub account (its noreply address)
 
 Then add repositories on the Settings screen with `From GitHub`: they are cloned into `~/repos` (that is `/home/switchboard/repos`) and registered as Workspaces. The development clone of Switchboard itself is yours to add too; nothing is cloned for you.
@@ -31,31 +55,42 @@ Four named volumes are mounted, and they are the only state that survives recrea
 
 | Volume | Mounted at | Holds |
 |---|---|---|
-| `sb-home` | `~/.switchboard` | the database (Tasks, ledger, backlog), settings, attachments |
+| `sb-home` | `~/.switchboard` | the database (Tasks, ledger, backlog), settings, attachments; the built releases (`releases/`, with `current` naming the one that runs), their history, and where they come from (`update-source.json`) |
 | `sb-claude` | `~/.claude` | Claude Code's login and the session files that `--resume` reads |
 | `sb-codex` | `~/.codex` | Codex's login and sessions |
 | `sb-repos` | `~/repos` | the repositories and their worktrees |
 
 Compose prefixes the volume names with the project name, which `container/compose.yaml` fixes as `switchboard` (so `switchboard_sb-home` and so on; `docker volume ls` shows them).
 
-Everything else in the container's HOME is part of the container and is gone after it is recreated (for example after `up.sh` rebuilds the image with a new version, or after `docker compose down` followed by `up`). That includes `~/.config/gh` (your GitHub login), `~/.gitconfig`, and `~/.claude.json` (Claude Code's first-run setup and folder trust). After a recreate, log in and set these again (section 2). Only `docker compose stop` / `start` and a restart of the engine keep the container itself.
+The running version is therefore the volume's: after `up.sh` is run again, after a rebuilt image, or after `docker compose down` followed by `up`, the container starts the release `current` names, with its history, and does not go back to the code the image was built from. A start only bundles sb-rescue again from the image (`~/.switchboard/rescue/sb-rescue.js`), so a change to sb-rescue itself arrives with a rebuilt image, not with a release.
+
+Everything else in the container's HOME is part of the container and is gone after it is recreated (for example after `up.sh` rebuilds the image with new tools, or after `docker compose down` followed by `up`). That includes `~/.config/gh` (your GitHub login), `~/.gitconfig`, and `~/.claude.json` (Claude Code's first-run setup and folder trust). After a recreate, log in and set these again (section 2). Only `docker compose stop` / `start` and a restart of the engine keep the container itself.
+
+A container made before this (it ran the code in the image directly, with no sb-rescue) is moved by starting it again from a current tree with the steps of section 1: the image is rebuilt, the container recreated, and the first release built into `sb-home` beside the database, which is used as it is (the new version migrates it, taking a snapshot first). Nothing moves by itself; until then the old container keeps running the old image.
 
 To remove the data on purpose:
 
 ```bash
 docker compose -f container/compose.yaml down        # remove the container, keep the volumes
-docker compose -f container/compose.yaml down -v     # also delete the four volumes: Tasks, logins, repositories
+docker compose -f container/compose.yaml down -v     # also delete the four volumes: Tasks, logins, repositories, releases
 ```
 
 `down -v` is not undoable.
 
 ## 4. What can reach the screen and the API
 
-The container publishes `127.0.0.1:47831` of the machine, nothing else. The screen and the API are therefore reachable from processes on the machine itself, and not from another computer on the network. The port is not published on the machine's other addresses.
+The container publishes `127.0.0.1:47831` (the daemon) of the machine, nothing else. It is therefore reachable from processes on the machine itself, and not from another computer on the network. The port is not published on the machine's other addresses; `container/compose.test.ts` fails if a published port does not start with `127.0.0.1:`, or if sb-rescue's port is published or relayed.
 
-The daemon trusts only loopback connections (it has no login on loopback; `docs/design/workspace-mcp.md`, "Local API token"). A published port arrives from the bridge's address, not from loopback, so the daemon listens on `127.0.0.1:47832` inside the container and a small relay (`container/relay.ts`) listens on `0.0.0.0:47831` and passes the bytes through. To the daemon every connection comes from its own loopback.
+The daemon and sb-rescue trust only loopback connections (no login on loopback; `docs/design/workspace-mcp.md`, "Local API token"), and both listen on the container's `127.0.0.1` only. A published port arrives from the bridge's address, not from loopback, so a small relay (`container/relay.ts`) stands in front of the daemon and passes the bytes through; to the daemon every connection comes from its own loopback. The daemon listens on `127.0.0.1:47832` behind the relay on `0.0.0.0:47831`.
 
-The relay has to listen on all addresses of the container to receive the published port. On a Linux machine this means a process on the machine can also reach the container's own address (the bridge network) on port 47831. That is the same set of callers who can reach the machine's `127.0.0.1:47831` anyway: processes running on the same machine. It is not a wider exposure to the network, and, as before, a person on the same machine as the daemon is the daemon's owner. Do not change the published address in `compose.yaml` to anything but `127.0.0.1`.
+The relay listens on the container's address to receive the published port. A process on a Linux machine can also reach the container's own address (the bridge network) on that port, and so can another container attached to the same bridge network: to the daemon each of them is a loopback caller, the daemon's owner. Do not attach containers you do not trust with the daemon to this compose project's network, and do not change the published address in `compose.yaml` to anything but `127.0.0.1`.
+
+**sb-rescue is not relayed and its port is not published.** It listens on the container's `127.0.0.1:47841`, and a loopback caller may promote, roll back and restart without a login. A relay on the container's address would make every peer on the bridge such a caller, so there is none (2026-11-18; an earlier form of this container relayed the rescue page to the machine). The daemon reaches sb-rescue inside the container, so updates, the check of a release's diff and the roll back offered on the screen work as on any host. The rescue page's address (`http://127.0.0.1:47841`) is the container's own and does not open in the machine's browser, so the screen does not link to it here: the entrypoint sets `SWITCHBOARD_RESCUE_IN_CONTAINER=1`, the daemon then names no rescue page, and the release panel in Settings shows the two commands below in the link's place (a failed promotion's report names the first one). When the daemon does not answer, use sb-rescue from inside the container:
+
+```bash
+docker compose -f container/compose.yaml exec switchboard curl -s http://127.0.0.1:47841/api/status
+docker compose -f container/compose.yaml exec switchboard curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:47841/api/rollback
+```
 
 ## 5. The Docker socket
 
@@ -69,16 +104,28 @@ The EC2 setup installs its tools with `aws/host/devtools.sh` and `aws/host/node.
 
 ## 7. What it does not do
 
-- Only the stand-alone mode. The mode where a machine is a work site of another instance (the cloud one keeps the record and the GitHub write path) is not here.
+- The stand-alone mode by default. To run the container as a work machine of another instance (the cloud one keeps the record and the only write path to the backlog's service), pass the variables of [work-machine.md](work-machine.md) section 1 in the service's environment: `SWITCHBOARD_UPLINK=send`, `SWITCHBOARD_MACHINE`, `SWITCHBOARD_UPLINK_BUCKET`, `SWITCHBOARD_REPLICA_URL`, with AWS credentials limited as that section says. That mode is closed in this version: those variables alone start nothing (a daemon with `SWITCHBOARD_UPLINK=send` does not start), and the second variable that document names is not for use until the checks of its section 8 ("Before deployment") are done. The image does not carry `litestream` yet; without it the backlog copy cannot be taken and says so.
 - No service unit or auto-start of the engine itself. `restart: unless-stopped` brings the container back whenever the engine runs.
-- The tools are not updated inside the container; update by changing a version and running `bash container/up.sh` again (which recreates the container; mind section 3).
+- The tools (the `ARG` versions) and sb-rescue's own bundle are not updated inside the container; update by changing a version, or taking a newer tree, and running `bash container/up.sh` again (which recreates the container; mind section 3). Only Switchboard's version updates itself, through the releases.
+- No setting chooses the role. It follows from `SWITCHBOARD_REPO_ROOT` being passed or not (section 1), as everywhere sb-rescue runs.
+- No built image is published; the image is built on your machine from the tree.
 
 ## 8. Check it with a fake runner
 
-`container/e2e.sh` builds the image, runs a Task with a fake runner to its end, recreates the container, and checks that the same Task id is listed and the session file is still there. It runs no real runner and needs no login:
+`container/e2e.sh` builds the image, starts a fake daemon from the image's tree in place of the entrypoint, runs a Task with a fake runner to its end, recreates the container, and checks that the same Task id is listed and the session file is still there. It runs no real runner and needs no login:
 
 ```bash
 bash container/e2e.sh
 ```
 
-It uses compose's project name `sb-e2e`, so its volumes (`sb-e2e_sb-home` and so on) are separate from your own, and its `down -v` at the end cannot touch them. It refuses to start when `127.0.0.1:47831` is already in use, so stop a real start first (`docker compose -f container/compose.yaml stop`). The image build is heavy, so it is not in CI; run it by hand, through `sb-offload` if you have it.
+`container/e2e-release.sh` checks the start of section 1 in both roles, with the real entrypoint, sb-rescue and core, a fake runner, and a fake Releases API (`container/fake-releases.ts`) in place of GitHub:
+
+```bash
+bash container/e2e-release.sh
+```
+
+To use: the first release is built into the volume with no `.git`, the daemon answers on the machine's `127.0.0.1` and the rescue page inside the container only (not on the machine's `127.0.0.1`, not on the container's own address), a second release whose review says `concern` is not promoted, a third whose review says `ok` is, and that version still runs after `down` / `up` and after a rebuilt image. To develop: a clone in the volume is built at its `HEAD`, a new tag is promoted with no review, and it still runs after a recreate. It makes its releases from `HEAD` of the clone it is run in, so it needs git on the machine, and it takes a while: the daemon keeps what it learned about the newest Release for ten minutes.
+
+They use compose's project names `sb-e2e`, `sb-e2e-release` and `sb-e2e-clone`, so their volumes (`sb-e2e_sb-home` and so on) are separate from your own, and their `down -v` at the end cannot touch them. They refuse to start when `127.0.0.1:47831` is already in use, so stop a real start first (`docker compose -f container/compose.yaml stop`). The image and the release builds are heavy, so neither is in CI; run them by hand, through `sb-offload` if you have it.
+
+The same install outside a container, against a real Release: `bun scripts/release-smoke.ts <owner/name>` unpacks the newest Release into a temporary HOME, installs it with a PATH that has no git, starts it under sb-rescue on two free ports and checks `/api/health` and the rescue page, then removes everything; its last line is `[release-smoke] pass|fail <tag> <sha>`. It is run by hand after a Release is published; the public sync does not call it.

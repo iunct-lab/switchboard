@@ -13,6 +13,8 @@ export interface LlmSuggesterOptions {
   /** Recent decisions with their outcome (`Db.routingLog()`), newest first. */
   examples: () => RoutingLogRow[];
   model?: string;
+  /** Thinking effort of the turn. Empty / unset = the CLI's own. */
+  effort?: string;
   exampleCount?: number;
   /** Read-only mode for the runner (Claude `plan`); adapters without modes ignore it. */
   permissionMode?: string;
@@ -45,7 +47,7 @@ export class LlmSuggester implements Suggester {
 }
 
 /** What one suggestion turn needs: shared by the runner suggester here and the Workspace suggester. */
-export type SuggestionTurnOptions = Pick<LlmSuggesterOptions, "adapter" | "cwd" | "model" | "permissionMode" | "onUsage" | "log">;
+export type SuggestionTurnOptions = Pick<LlmSuggesterOptions, "adapter" | "cwd" | "model" | "effort" | "permissionMode" | "onUsage" | "log">;
 
 /** One turn of the runner, collected as text. The session is always closed, including when the caller gives up. */
 export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: string, signal: AbortSignal): Promise<string> {
@@ -55,7 +57,7 @@ export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: str
   const finished = new Promise<void>((r) => (done = r));
   // not saved: these turns run hundreds of times a day and would fill the 200 sessions `/insights` reads and
   // ~/.claude/projects; nothing resumes them
-  const session = opts.adapter.start({ cwd: opts.cwd, scope: [opts.cwd], prompt, model: opts.model || undefined, permissionMode: opts.permissionMode, persistSession: false, env: { [DAEMON_JOB_MARK]: "judge" } }, (ev) => {
+  const session = opts.adapter.start({ cwd: opts.cwd, scope: [opts.cwd], prompt, model: opts.model || undefined, effort: opts.effort || undefined, permissionMode: opts.permissionMode, persistSession: false, env: { [DAEMON_JOB_MARK]: "judge" } }, (ev) => {
     if (ev.t === "message.delta" && ev.role === "assistant") out += ev.text;
     else if (ev.t === "usage" && ev.source === "reported") opts.onUsage?.(ev);
     // A suggestion turn must not ask for anything: it has no tools and nothing to approve. If the runner asks
@@ -101,7 +103,7 @@ export function readOnlyMode(adapter: RunnerAdapter): { mode?: string; unconstra
  */
 export function buildPrompt(ctx: RoutingContext, examples: RoutingLogRow[]): string {
   const candidates = [...ctx.available];
-  // Titles are one line and capped: they come from Inbox notes and imported sessions, so they are neither short
+  // Titles are one line and capped: they come from requests and imported sessions, so they are neither short
   // nor trusted, and a table row that runs for a page buys nothing.
   const rows = examples.map((e) => `| ${e.suggestedBy} | ${e.suggested} | ${e.chosen} | ${e.status} | ${e.outcome} | ${e.costUsd.toFixed(4)} | ${Math.round(e.durationMs / 1000)}s | ${oneLine(e.title).slice(0, 120).replace(/\|/g, "／")} |`);
   return [

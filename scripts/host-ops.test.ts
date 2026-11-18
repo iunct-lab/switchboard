@@ -99,20 +99,20 @@ describe("host-ops run", () => {
     expect(f.calls).toHaveLength(0);
   });
 
-  test("a failed deploy is a failure, not 'no changes' (#759)", async () => {
+  test("a failed deploy is a failure, not 'no changes'", async () => {
     const f = fake([["aws cloudformation deploy", { ok: false, err: "An error occurred (AccessDenied): is not authorized to perform: cloudformation:CreateChangeSet" }]]);
     await expect(runHostOperation("deploy", e, f.d)).rejects.toThrow("failed: aws cloudformation deploy");
     expect(f.logs.join("\n")).toContain("is not authorized to perform");
     expect(f.calls.some((c) => c.includes("execute-change-set"))).toBe(false);
   });
 
-  test("an empty change set ends with 'no changes' (#759)", async () => {
+  test("an empty change set ends with 'no changes'", async () => {
     const f = fake([["aws cloudformation deploy", { out: "Waiting for changeset to be created..\n\nNo changes to deploy. Stack switchboard-host is up to date\n" }]]);
     expect(await runHostOperation("deploy", e, f.d)).toBe("no changes");
     expect(f.calls.some((c) => c.includes("describe-change-set"))).toBe(false);
   });
 
-  test("a change set that touches the Instance or the LaunchTemplate is not executed, and says why (#465)", async () => {
+  test("a change set that touches the Instance or the LaunchTemplate is not executed, and says why", async () => {
     const vpc = (id: string, Action: string) => ({ ResourceChange: { Action, LogicalResourceId: id, ResourceType: "AWS::CloudFront::VpcOrigin" } });
     const instance = { ResourceChange: { Action: "Modify", LogicalResourceId: "Instance", ResourceType: "AWS::EC2::Instance", Replacement: "True" } };
     const cases = [
@@ -147,7 +147,7 @@ describe("host-ops run", () => {
     expect(f.logs.join("\n")).toContain("EdgeHeaderValue=***");
   });
 
-  test("deploy packages with the AWS CLI, not sam (sam cannot read Fn::ForEach, #465), and allows the LanguageExtensions transform", async () => {
+  test("deploy packages with the AWS CLI, not sam (sam cannot read Fn::ForEach), and allows the LanguageExtensions transform", async () => {
     const f = fake();
     await runHostOperation("deploy", e, f.d);
     expect(f.calls.some((c) => c.startsWith("sam "))).toBe(false);

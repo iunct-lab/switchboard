@@ -21,7 +21,7 @@ test("Cloud notice only links canonical official references and always explains 
 
 test("Cloud Task view and Brief direct unsupported Local operations to official Web", () => {
   const html = renderToStaticMarkup(createElement(TaskView, { task, onSend: async () => {}, onPermission: noop, onError: noop, onBrief: noop, pty: true }));
-  expect(html).toContain("開始 1/1 09:00 · 1/1 09:00 から状態未確認"); // a Cloud Task's head says when too, in JST (#2030)
+  expect(html).toContain("開始 1/1 09:00 · 1/1 09:00 から状態未確認"); // a Cloud Task's head says when too, in JST
   expect(html).toContain("公式Cloudで続ける"); expect(html).not.toContain('class="composer"'); expect(html).toContain("ローカルで続ける"); expect(html).not.toContain("差分</button>");
   const brief = renderToStaticMarkup(createElement(Brief, { task, ledger: null, onAbort: noop, open: true, onClose: noop }));
   expect(brief).toContain("公式 Web"); expect(brief).not.toContain("未設定 — 再開時"); expect(brief).not.toContain("エンドポイントを発行");
@@ -52,7 +52,7 @@ test("Cloud creation is informational while a real failure remains red in the re
   expect(markdown).not.toContain("— 完了 —");
 });
 
-// #1131: render the real notice and TaskView; invalid IDs must not create an enabled entry.
+// render the real notice and TaskView; invalid IDs must not create an enabled entry.
 test("Teleport entry requires a canonical stopped Cloud reference and PTY", () => {
   const render = (t: Task, pty = true) => renderToStaticMarkup(createElement(TaskView, { task: t, onSend: async () => {}, onPermission: noop, onError: noop, onBrief: noop, pty }));
   expect(render(task)).toContain('<button class="btn">ローカルで続ける</button>');
@@ -65,7 +65,7 @@ test("Teleport entry requires a canonical stopped Cloud reference and PTY", () =
   expect(render({ ...task, status: "running" })).toContain("開始プロセスの終了後");
 });
 
-// #1306: "continue locally" shows its progress on the Cloud Task screen; the words live in one function.
+// "continue locally" shows its progress on the Cloud Task screen; the words live in one function.
 test("teleportView words each phase and only needs-input sends the person to the terminal", () => {
   expect(teleportView(null)).toBeNull();
   expect(teleportView({ phase: "teleporting" })).toMatchObject({ text: "公式CLIでTeleport中…", active: true, answerInTerminal: false });
@@ -83,7 +83,7 @@ test("a running Teleport disables the button and a question offers the terminal"
   expect(render({ phase: "teleporting" })).not.toContain("ターミナルで答える");
 });
 
-// #1395: the continuation runs in its own worktree, so the screen says where.
+// the continuation runs in its own worktree, so the screen says where.
 test("Cloud Task and Local Task screens show the work copy the continuation runs in", () => {
   const wc = "/fixture/.claude/worktrees/teleport-task_cloud";
   const local: Task = { ...task, id: "task_local", executionMode: "local", cloudSession: null, sourceCloudTaskId: task.id, cwd: wc, title: "続き" };
@@ -96,7 +96,7 @@ test("Cloud Task and Local Task screens show the work copy the continuation runs
   expect(localBrief).toContain(`作業コピー: ${wc}`);
 });
 
-// #1634: the imported Local Task says where it came from in the sticky head, and the switch line only right after the switch.
+// the imported Local Task says where it came from in the sticky head, and the switch line only right after the switch.
 test("an imported Local Task shows its Cloud source in the sticky head, and the switch line only when switched", () => {
   const local: Task = { ...task, id: "task_local", executionMode: "local", cloudSession: null, sourceCloudTaskId: task.id, title: "Cloud" };
   const detail = (sourceCloudTask: Task | null) => ({ task: local, events: [], cost: { costUsd: 0, tokens: 0 }, history: null, attachments: [], sourceCloudTask, localContinuations: [] }) as never;

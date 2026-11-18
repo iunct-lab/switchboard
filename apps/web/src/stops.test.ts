@@ -46,7 +46,7 @@ describe("shownStops", () => {
   });
 });
 
-describe("in English (#2444)", () => {
+describe("in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   test("a stop, a question's badge, a backlog row's wait and the terminal's end read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);

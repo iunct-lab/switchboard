@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { Preset, PresetList, PresetScene } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { loadPresets, markMatch, presetRow, suggestPresets, usesTarget } from "../presets.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
@@ -19,8 +19,8 @@ function Marked(props: { text: string; query: string }) {
  * approval mode stays the box's choice. The list is read once, when the box first takes the cursor (opening Home or a Task
  * costs no request) and reused until Settings changes a preset. No "/": that belongs to the runner's commands and skills.
  */
-export function PresetPicker(props: { scene: PresetScene; workspaceId: string | null; text: string; onText: (text: string, title: string) => void; onError: (msg: string) => void; children: ReactNode }) {
-  const { scene, workspaceId, text, onText, onError } = props;
+export function PresetPicker(props: { scene: PresetScene; taskId?: string; workspaceId: string | null; text: string; onText: (text: string, title: string) => void; onError: (msg: string) => void; children: ReactNode }) {
+  const { scene, taskId, workspaceId, text, onText, onError } = props;
   const [data, setData] = useState<PresetList | null>(null);
   const [focused, setFocused] = useState(false);
   const [hidden, setHidden] = useState(false); // closed by Esc or by putting a text in, until the box is emptied
@@ -62,7 +62,7 @@ export function PresetPicker(props: { scene: PresetScene; workspaceId: string | 
   const expand = async (p: Preset, to: string | undefined) => {
     setError(null);
     try {
-      const r = await api.expandPreset(p.id, { workspaceId: workspaceId ?? undefined, target: to, scene });
+      const r = await api.expandPreset(p.id, { workspaceId: workspaceId ?? undefined, target: to, scene, taskId });
       textarea()?.focus(); // before the target field goes, so the focus stays inside
       close();
       put.current = r.text;

@@ -1,13 +1,13 @@
 /**
- * The rescue page (#178): one screen that works while Switchboard is down. Everything that changes state is a POST
+ * The rescue page: one screen that works while Switchboard is down. Everything that changes state is a POST
  * that answers 202 and runs in the background, one at a time; the page polls /api/status to follow it.
  * Same defences as the daemon: a request with an Origin must come from this page, and off loopback every request
- * needs the token in `<home>/token` — on the cloud host the login cookie (#211) instead, since there the token counts only
- * from this machine (#748). With the cookie, a state-changing POST also needs a passkey check within 5 minutes (the
- * Starter's sb_recent, #497); the token and loopback do not.
- * /tmp (#797) is read only on request (GET /api/tmp, not in /api/status) and its clean answers 200 at once, outside `operate`.
- * Every 30 minutes sb-rescue also cleans it by itself (#1720), with the same judgement as the button, and with it local CI's leftovers
- * under ~/.cache and, on a machine of Switchboard's own, uv's and bun's caches and docker's unused images (#2549). GET /api/tmp
+ * needs the token in `<home>/token` — on the cloud host the login cookie instead, since there the token counts only
+ * from this machine. With the cookie, a state-changing POST also needs a passkey check within 5 minutes (the
+ * Starter's sb_recent); the token and loopback do not.
+ * /tmp is read only on request (GET /api/tmp, not in /api/status) and its clean answers 200 at once, outside `operate`.
+ * Every 30 minutes sb-rescue also cleans it by itself, with the same judgement as the button, and with it local CI's leftovers
+ * under ~/.cache and, on a machine of Switchboard's own, uv's and bun's caches and docker's unused images. GET /api/tmp
  * says how full the root disk is (`disk`) and when each kind was last cleaned (`sweeps`).
  */
 import { createPublicKey, verify } from "node:crypto";
@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
 import { diffTrees, extractTarball, fetchTarball, latestRelease, shaOfTag } from "./github-release.ts";
-import { checkDaemon, listSnapshots, promote, restoreDb, rollback, switchesWithoutRestart, tasksThatStop, type Ctx } from "./promote.ts";
+import { checkDaemon, holdHeavy, listSnapshots, promote, restoreDb, rollback, switchesWithoutRestart, tasksThatStop, type Ctx, type HeavyHold } from "./promote.ts";
 import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
 import { cleanTmp, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
 import { appendHistory, currentOf, listReleases, previousOf, readHistory, releasesDir, resolveCommit, run } from "./releases.ts";
@@ -88,52 +88,54 @@ async function releaseTree(source: string, tag: string, home: string, from: stri
 export interface RescueOptions {
   port: number;
   host?: string;
+  /** How long `POST /api/promote` with `ifNoRestart` waits for a heavy-process slot before it answers 409 (3 s). */
+  heavyWaitMs?: number;
   /** The rescue agent's command line (tests and the E2E pass a fake; the default is `claude -p` with an allowlist). */
   agentArgv?: string[];
   /**
-   * The cloud host's Starter (#181, aws/starter.ts): 作り直す replaces the instance through it. Unset (a Mac) = no
+   * The cloud host's Starter (aws/starter.ts): 作り直す replaces the instance through it. Unset (a Mac) = no
    * such button; the route answers 404.
    */
   starter?: { url: string; token: string };
   /**
-   * What the environment saves before 作り直す replaces the disk (#403, SWITCHBOARD_REBUILD_SAVE_CMD; the cloud host's
+   * What the environment saves before 作り直す replaces the disk (SWITCHBOARD_REBUILD_SAVE_CMD; the cloud host's
    * sb-runner-sync puts the runners' records in S3). A failure stops the rebuild. Unset = nothing to save.
    */
   beforeRebuild?: string[];
   /** How long the save may take (default 10 s: with the Starter's 15 s it stays under CloudFront's 30 s origin timeout). */
   beforeRebuildLimitMs?: number;
   /**
-   * The cloud host's login (#211, #701): the starter Lambda signs an `sb_session` cookie after a passkey check with a
+   * The cloud host's login: the starter Lambda signs an `sb_session` cookie after a passkey check with a
    * seed only it reads, and this public key (SWITCHBOARD_SESSION_PUBLIC_KEY, raw 32 bytes in base64url) verifies it here
    * as it does in the daemon. Unset (a Mac) = the token only.
    */
   sessionPublicKey?: string;
-  /** CloudFront's shared header value (SWITCHBOARD_EDGE_HEADER_VALUE), sent when the Starter is asked about a cookie (#708). */
+  /** CloudFront's shared header value (SWITCHBOARD_EDGE_HEADER_VALUE), sent when the Starter is asked about a cookie. */
   edge?: string;
-  /** How long a Starter answer about a cookie is kept (#708); tests shorten it. Unset = SESSION_RECHECK_MS. */
+  /** How long a Starter answer about a cookie is kept; tests shorten it. Unset = SESSION_RECHECK_MS. */
   sessionKeepMs?: number;
-  /** Overrides where a request came from (#748); a test makes 127.0.0.1 look like another machine. Unset = the socket's peer. */
+  /** Overrides where a request came from; a test makes 127.0.0.1 look like another machine. Unset = the socket's peer. */
   peerAddress?: (req: Request) => string | undefined;
   /**
-   * 再起動 ends sb-rescue itself rather than the daemon alone (#435): the cloud host's systemd (Restart=always) starts it
+   * 再起動 ends sb-rescue itself rather than the daemon alone: the cloud host's systemd (Restart=always) starts it
    * again after its ExecStartPre, so the environment (Parameter Store, through sb-env) and the host scripts are read
    * again. Set by SWITCHBOARD_RESCUE_RESTART_BY_EXIT. Unset (a Mac) = the daemon alone, with the environment it has.
    */
   exitToRestart?: () => void;
-  /** The /tmp the page shows and cleans (#797); tests pass a fake. Default "/tmp" (not os.tmpdir(), which follows TMPDIR). */
+  /** The /tmp the page shows and cleans; tests pass a fake. Default "/tmp" (not os.tmpdir(), which follows TMPDIR). */
   tmpDir?: string;
   /**
    * The machine is Switchboard's alone (SWITCHBOARD_RESCUE_OWNS_TMP=1, the cloud host): /tmp's clean also takes any mktemp directory
-   * and cache, and the automatic clean also takes uv's and bun's caches and the images no docker container uses (#2549).
+   * and cache, and the automatic clean also takes uv's and bun's caches and the images no docker container uses.
    */
   tmpOwned?: boolean;
-  /** Where local CI leaves its working directories and logs, swept with /tmp (#2549); tests pass a fake. Default ~/.cache. */
+  /** Where local CI leaves its working directories and logs, swept with /tmp; tests pass a fake. Default ~/.cache. */
   cacheDir?: string;
-  /** Whose uv and bun caches the automatic clean takes on a machine of Switchboard's own (#2549); tests pass a fake. Default homedir(). */
+  /** Whose uv and bun caches the automatic clean takes on a machine of Switchboard's own; tests pass a fake. Default homedir(). */
   home?: string;
-  /** Runs the docker prune of the automatic clean (#2549); tests pass a fake. Default: the real docker. */
+  /** Runs the docker prune of the automatic clean; tests pass a fake. Default: the real docker. */
   dockerSh?: (argv: string[]) => Promise<string>;
-  /** The interval of the automatic /tmp clean (#1720); tests shorten it. Default SWEEP_MS. */
+  /** The interval of the automatic /tmp clean; tests shorten it. Default SWEEP_MS. */
   tmpSweepMs?: number;
 }
 
@@ -143,7 +145,7 @@ const isLoopback = (host: string) => host === "127.0.0.1" || host === "localhost
 const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
- * DNS rebinding defence (#1135): on loopback no token is asked, and a page on a name that now resolves to 127.0.0.1
+ * DNS rebinding defence: on loopback no token is asked, and a page on a name that now resolves to 127.0.0.1
  * sends that name as both Origin and Host. The Host's name must be a loopback name; the port is not compared. No Host
  * header = the request URL's host. Unparsable = refused. The same rule as the daemon's hostAllowed
  * (packages/core/src/auth.ts): change both together.
@@ -173,7 +175,7 @@ function tokenEquals(a: string | null, b: string): boolean {
   return diff === 0;
 }
 
-/** The login's limits (#498): 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
+/** The login's limits: 7 days from the sign-in, 24 hours from the last action. The same values as aws/auth.ts and
  *  packages/core/src/auth.ts (aws/session-contract.test.ts pins them). */
 export const SESSION_MAX_MS = 7 * 24 * 3600_000;
 export const SESSION_IDLE_MS = 24 * 3600_000;
@@ -182,7 +184,7 @@ export const SESSION_IDLE_MS = 24 * 3600_000;
  * `<body>.<sig>`: body = base64url of the UTF-8 text `<passkeyId>.<idleUntilMs>.<expiresMs>` (a session) or `<passkeyId>.<expiresMs>` (a recent check), sig = base64url of the Ed25519 signature
  * over prefix + the base64url text of body (as aws/auth.ts signs it with a seed only the Starter reads), checked with the
  * public key. The passkey id when it verifies, no time has passed and idle-until is not past the cap, else undefined. Written again here rather than
- * imported: sb-rescue shares no code with Switchboard (#178).
+ * imported: sb-rescue shares no code with Switchboard.
  */
 function signedId(raw: string, publicKey: string, prefix: string, now: number): string | undefined {
   if (!raw || raw.length > 512) return;
@@ -207,18 +209,18 @@ function signedIds(req: Request, name: string, publicKey: string, prefix: string
   const pairs = (req.headers.get("cookie") ?? "").split(";").map((v) => v.trim()).filter((v) => v.startsWith(`${name}=`));
   return pairs.map((pair) => signedId(pair.slice(name.length + 1), publicKey, prefix, now)).filter((id): id is string => id !== undefined);
 }
-/** A passkey check within 5 minutes (#497): an `sb_recent` (signed over "recent:" + body) by a valid session's passkey. */
+/** A passkey check within 5 minutes: an `sb_recent` (signed over "recent:" + body) by a valid session's passkey. */
 export function recentCookieOk(req: Request, publicKey: string | undefined, now = Date.now()): boolean {
   if (!publicKey) return false;
   const sessions = signedIds(req, "sb_session", publicKey, "", now);
   return signedIds(req, "sb_recent", publicKey, "recent:", now).some((id) => sessions.includes(id));
 }
 
-/** How long a Starter answer about a login cookie is trusted (#708): a removed passkey is shut out within this. */
+/** How long a Starter answer about a login cookie is trusted: a removed passkey is shut out within this. */
 export const SESSION_RECHECK_MS = 5 * 60_000;
 
 /**
- * The cookie check with revocation (#708), as the daemon does it (written again: no shared code, #178): a verified
+ * The cookie check with revocation, as the daemon does it (written again: no shared code): a verified
  * `sb_session` is asked about at the Starter's `GET /_auth/status`, whose `loggedIn` is true only while its passkey is
  * registered; the answer is kept per cookie. No answer refuses and is not kept. No Starter = no cookie is valid.
  */
@@ -301,8 +303,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
   const agent = new RescueAgent(ctx, o.agentArgv);
 
   const sessionCheck = makeSessionCheck(o);
-  /** How the request is let in: loopback, the token, the login cookie (its passkey still registered, #708), or not at all. */
-  // With the passkey login on (a cloud host), the token counts only from this machine (#748): CloudFront's VPC origin is
+  /** How the request is let in: loopback, the token, the login cookie (its passkey still registered), or not at all. */
+  // With the passkey login on (a cloud host), the token counts only from this machine: CloudFront's VPC origin is
   // not loopback, so from outside only the cookie. Judged by the connection's peer, never a header.
   const tokenCounts = (req: Request) => {
     if (!o.sessionPublicKey) return true;
@@ -331,7 +333,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
   };
 
   /**
-   * Release tags (#282): one `for-each-ref` per status read, commit → its highest `v*` tag. Not cached: CI tags a
+   * Release tags: one `for-each-ref` per status read, commit → its highest `v*` tag. Not cached: CI tags a
    * commit after its merge and a tag can be moved by hand, and this stays one process however many releases there are.
    */
   const releaseTags = async (): Promise<Map<string, string>> => {
@@ -369,7 +371,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       running: ctx.sup.running,
       /** null = the daemon answers; otherwise why it does not. */
       unhealthy,
-      /** The running and waiting tasks, and those with background jobs left, that 再起動 and the release switches stop (#435). */
+      /** The running and waiting tasks, and those with background jobs left, that 再起動 and the release switches stop. */
       stopping,
       port: ctx.port,
       busy,
@@ -381,10 +383,12 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       rebuild: !!o.starter,
       /** 停止する posts the Starter's own /_auth/stop from the page: nothing goes through this service. */
       stop: !!o.starter,
-      /** 再起動 reads the environment and the host scripts again (#435). */
+      /** 再起動 reads the environment and the host scripts again. */
       restartReloads: !!o.exitToRestart,
       /** /api/promote understands `ifNoRestart` (a release that needs a restart is refused with 409 before any build). */
       promoteWithoutRestart: true,
+      /** An `ifNoRestart` promotion never restarts a daemon that still runs: a reload that is not confirmed is taken back by a second reload. The daemon asks that way under running tasks only when it reads this. */
+      promoteKeepsTasks: true,
     };
   };
 
@@ -458,7 +462,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
             const exit = o.exitToRestart;
             return operate("restart", async () => {
               await ctx.sup.stop();
-              appendHistory(ctx.home, { action: "restart", from: currentOf(ctx.home), to: currentOf(ctx.home), ok: true, reason: "restarted sb-rescue from the rescue page: the environment and the host scripts are read again (#435)" });
+              appendHistory(ctx.home, { action: "restart", from: currentOf(ctx.home), to: currentOf(ctx.home), ok: true, reason: "restarted sb-rescue from the rescue page: the environment and the host scripts are read again" });
               exit();
             });
           }
@@ -478,8 +482,16 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
             // The caller (the daemon's automatic promotion) wants a switch that does not stop its tasks: say no before any build when this one would restart.
             const sha = typeof body.expectSha === "string" ? body.expectSha : await resolveCommit(ctx.repo, commit).catch(() => null);
             if (!sha || !(await switchesWithoutRestart(ctx, sha))) return Response.json({ error: "this release needs a restart", restart: true }, { status: 409 });
+            // Tasks run while this builds and checks its candidate: only inside one of the machine's heavy-process slots.
+            // None free (another heavy job runs, or the free memory is under the floor): said now, before anything is built
+            if (busy) return Response.json({ error: `busy: ${busy}` }, { status: 409 });
+            const slot = await holdHeavy(ctx.heavy, o.heavyWaitMs ?? 3000);
+            if ("busy" in slot) return Response.json({ error: `no heavy-process slot for a build under running tasks: ${slot.busy}`, heavy: true }, { status: 409 });
+            const started = operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined, true, slot as HeavyHold));
+            if (started.status !== 202) await slot.release();
+            return started;
           }
-          return operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined, body.ifNoRestart === true));
+          return operate("promote", () => promote(ctx, commit, {}, body.expectSha as string | undefined, false));
         case "/api/restore-db":
           if (typeof body.snapshot !== "string" || !listSnapshots(ctx.home).includes(body.snapshot)) return Response.json({ error: "no such snapshot" }, { status: 400 });
           return operate("restore-db", () => restoreDb(ctx, body.snapshot as string));
@@ -494,14 +506,14 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
         // Not under `operate` either: the Starter replaces this whole machine, including this process.
         case "/api/rebuild": {
           if (!o.starter) return Response.json({ error: "not a cloud host (SWITCHBOARD_STARTER_URL is unset)" }, { status: 404 });
-          // a press after a refusal starts clean: the page must not show the last reason while this save runs (review #405)
+          // a press after a refusal starts clean: the page must not show the last reason while this save runs
           lastError = null;
           // a refusal stays in the status (lastError), which the page re-renders every 2 s, not only in this answer
           const refuse = (error: string) => ((lastError = `作り直す: ${error}`), Response.json({ error }, { status: 424 }));
           if (o.beforeRebuild?.length) {
             // Bounded: past CloudFront's 30 s the page would show a failure while this went on to rebuild anyway.
             const limit = o.beforeRebuildLimitMs ?? 10_000;
-            // 424, not 502: CloudFront answers an origin 502 / 504 with the start page, and the reason would not reach the page (#364)
+            // 424, not 502: CloudFront answers an origin 502 / 504 with the start page, and the reason would not reach the page
             const notSaved = (why: string) => refuse(`the runners' records were not saved (${o.beforeRebuild!.join(" ")}: ${why}); not rebuilding`);
             let save: ReturnType<typeof Bun.spawn<"ignore", "ignore", "pipe">>;
             try {
@@ -517,7 +529,7 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
             try {
               result = await Promise.race([Promise.all([save.exited, new Response(save.stderr).text()]), late]);
             } catch (e) {
-              save.kill(); // the 424 goes out now; the save must not run on without its time limit (review #405)
+              save.kill(); // the 424 goes out now; the save must not run on without its time limit
               return notSaved(String((e as Error).message ?? e));
             } finally {
               clearTimeout(timer);

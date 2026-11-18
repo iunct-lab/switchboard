@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Backlog, BacklogIssueDetail, BacklogSource, RunnerAdapter, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { fakeGithub, type Issue } from "./backlog-fake-github.ts";
 import { renumberRefs } from "./backlog-enable.ts";
 

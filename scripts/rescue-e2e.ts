@@ -1,5 +1,5 @@
 /**
- * bun scripts/rescue-e2e.ts — the rescue page in a real browser at phone width, with Switchboard down (#178).
+ * bun scripts/rescue-e2e.ts — the rescue page in a real browser at phone width, with Switchboard down.
  * Uses the installed bundle (rescue/install.ts) and a tiny fixture repository; needs Chrome (CHROME_BIN overrides).
  * Run from a Switchboard Task or the host's shell too: the host sb-rescue's variables (SWITCHBOARD_*) are not inherited.
  */
@@ -11,7 +11,7 @@ import { commitFile, daemonSource, freePort, health, makeRepo, until } from "../
 const f = await makeRepo();
 const crashFlag = join(f.root, "crash");
 const v2 = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v2", `if (require("node:fs").existsSync(${JSON.stringify(crashFlag)})) { console.error("v2: cannot start"); process.exit(1); }`), `v2: crashes once the flag exists ${"x".repeat(120)}`);
-Bun.spawnSync(["git", "-C", f.repo, "tag", "v0.2.0", v2]); // a release tag (#282): shown before the sha
+Bun.spawnSync(["git", "-C", f.repo, "tag", "v0.2.0", v2]); // a release tag: shown before the sha
 const v3 = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v3", `tasks = "500";`), "v3: the task list answers 500");
 const [port, rescuePort] = [await freePort(), await freePort()];
 // A stand-in for `claude` on PATH: the bundle starts its real default command line, and no quota is spent.
@@ -109,7 +109,7 @@ try {
   await until(() => evaluate(`document.getElementById("state").textContent.includes("動いています") && document.getElementById("history").textContent.includes("戻した")`), "page shows the rollback");
   say(`clicked 前の版に戻す (confirm: "${dialogs.at(-1)}") → v1 answers; page: "${await evaluate(`document.getElementById("state").textContent`)}" / history: "${await evaluate(`document.querySelector("#history li").textContent`)}"`);
 
-  // a release whose task list is broken boots and answers health, but is turned down (#3721): the page lists it as rejected
+  // a release whose task list is broken boots and answers health, but is turned down: the page lists it as rejected
   await fetch(`${base}/api/promote`, { method: "POST", body: JSON.stringify({ commit: v3 }) });
   await until(async () => (await status()).history[0]?.action === "rejected", "v3 rejected", 60_000);
   assert((await status()).history[0]!.reason.includes("/api/tasks answered 500"), `the rejection does not name the task list: ${(await status()).history[0]!.reason}`);
@@ -145,7 +145,7 @@ try {
   assert(!interceptionError, `status interception failed: ${interceptionError}`);
   say("rebuild: true (intercepted status) shows the row and enables the button");
   await call("Fetch.disable");
-  // a hidden tab stops asking for the status; back to visible it asks at once, then every 2 s (#2814)
+  // a hidden tab stops asking for the status; back to visible it asks at once, then every 2 s
   await call("Network.enable");
   const visibility = (state: "hidden" | "visible") => evaluate(`Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "${state}" }); Object.defineProperty(document, "hidden", { configurable: true, get: () => ${state === "hidden"} }); document.dispatchEvent(new Event("visibilitychange"))`);
   await visibility("hidden");

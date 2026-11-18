@@ -6,7 +6,8 @@ import { join } from "node:path";
 import type { RunnerAdapter, StartOptions, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { runnerConfigOf } from "./runner-config.ts";
-import { startServer, upstreamSyncPrompt, type CoreServer } from "./server.ts";
+import { startServer, type CoreServer } from "./server.ts";
+import { upstreamSyncPrompt } from "./routes/workspaces.ts";
 
 // 元の更新を取り込む: one Task in the workspace; the steps are in its prompt, not in the daemon.
 

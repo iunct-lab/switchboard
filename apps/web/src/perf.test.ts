@@ -125,7 +125,7 @@ test("detail bytes come from the Task's last detail response", () => {
     entry("http://localhost:5173/api/tasks/t1", 2048),
     entry("http://localhost:5173/api/tasks/t1/artifacts", 5),
     entry("http://localhost:5173/api/tasks/t1?after=900", 300), // a catch-up read is not the Task's size
-    entry("http://localhost:5173/api/tasks/t1?limit=0", 200), // nor the read of the rest after a turn (#1142)
+    entry("http://localhost:5173/api/tasks/t1?limit=0", 200), // nor the read of the rest after a turn
     entry("http://localhost:5173/api/tasks/t1?before=101&limit=200", 900), // nor an older page
   ];
   expect(detailBytes("t1", entries)).toBe(2048);

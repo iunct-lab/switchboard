@@ -3,7 +3,7 @@ import { RECENT_MESSAGE, confirmPasskey, onRecentCheck } from "../recent.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 
-/** The question behind a 401 `recent` (#1491): the button is the click Safari needs to open the passkey sheet. */
+/** The question behind a 401 `recent`: the button is the click Safari needs to open the passkey sheet. */
 export function RecentCheck() {
   const [ask, setAsk] = useState<{ resolve: (ok: boolean) => void } | null>(null);
   const [error, setError] = useState<string | null>(null);

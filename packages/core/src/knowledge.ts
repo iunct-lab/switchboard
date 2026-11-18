@@ -19,7 +19,7 @@ Switchboard の正本フォルダ。Markdown + frontmatter だけを置く。sql
 
 - rules/     エージェント向けの規約。frontmatter の targets で CLAUDE.md / AGENTS.md / .claude/commands に書き出す先を決める
 - commands/  スラッシュコマンド（.claude/commands/*.md に書き出される）
-- notes/     Inbox。リポジトリに紐づかないメモ。後から Task に昇格できる
+- notes/     リポジトリに紐づかないメモ
 - docs/      まだリポジトリに置いていないドキュメント
 
 frontmatter 例:

@@ -1,5 +1,5 @@
 /**
- * The cloud host's status / start / rebuild / deploy (#917), the same from a terminal and from `.github/workflows/host.yml`:
+ * The cloud host's status / start / rebuild / deploy, the same from a terminal and from `.github/workflows/host.yml`:
  * the workflow reaches AWS through OIDC and then runs this; a person runs it with their own AWS CLI login (`aws sso login`,
  * a profile in AWS_PROFILE). Nothing here stores or asks for AWS credentials, and nothing goes to Switchboard.
  * start / rebuild ask the stack's Starter with the start token and the edge header (read from SSM, never printed);
@@ -246,7 +246,7 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
    * stops there, so the person reads it first and runs `person-deploy --execute=<arn>` (as with the manual steps before).
    */
   const deploy = (role: string, overrides: string[], allowReplace: boolean, run: boolean): string => {
-    // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach (#465). The SAM transform
+    // the AWS CLI, not sam: sam deploy / sam package cannot read the template's Fn::ForEach. The SAM transform
     // still runs in CloudFormation; package only uploads the Starter's build and points CodeUri at it
     const packaged = "dist/template.packaged.yaml";
     aws(["cloudformation", "package", "--template-file", "aws/template.yaml", "--s3-bucket", bucket, "--s3-prefix", "releases/sam", "--output-template-file", packaged]);
@@ -257,7 +257,7 @@ export async function runHostOperation(action: HostAction, e: HostEnv, d: Deps):
     ]);
     // the edge header must not reach a log, whatever the CLI prints
     d.log(hide(`${r.out}\n${r.err}`.trim(), secrets));
-    // a failed deploy is a failure, never "no changes" (#759)
+    // a failed deploy is a failure, never "no changes"
     if (!r.ok) throw new Error("failed: aws cloudformation deploy");
     const cs = [...`${r.out}\n${r.err}`.matchAll(/arn:aws:cloudformation:[^\s]+:changeSet\/[^\s]+/g)].at(-1)?.[0];
     if (!cs) return "no changes";

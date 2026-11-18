@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { CONFIG_FILE, ForgeConfig } from "./config.ts";
+import { readFileSync } from "node:fs";
+import { configFileOf, ForgeConfig } from "./config.ts";
 import { githubHost } from "./gh.ts";
 import { findSecrets, NO_HOST, type HostAws } from "./secrets.ts";
 
@@ -31,17 +30,17 @@ export const LOCAL_SERVICE = "app";
  * checkout has no `origin` (its changes, their review and CI live in the app), else DEFAULT_SERVICE. Throws on a
  * malformed `forge`. forgeTargetOf keeps GitHub for a checkout without `forge` (the backlog's import reads it so).
  */
-export function forgeOf(dir: string): string {
-  const file = join(dir, CONFIG_FILE);
+export function forgeOf(dir: string, fallback?: string): string {
+  const file = configFileOf(dir, fallback);
   // a config that cannot be read is forgeConfigOf's to refuse
-  const named = existsSync(file) && (() => {
+  const named = file !== null && (() => {
     try {
       return (JSON.parse(readFileSync(file, "utf8")) as { forge?: unknown }).forge !== undefined;
     } catch {
       return true;
     }
   })();
-  return named || originOf(dir) !== null ? forgeConfigOf(dir).service : LOCAL_SERVICE;
+  return named || originOf(dir) !== null ? forgeConfigOf(dir, fallback).service : LOCAL_SERVICE;
 }
 
 /**
@@ -49,8 +48,8 @@ export function forgeOf(dir: string): string {
  * checkout's `origin` is another host or project: nothing is sent to a host the checkout does not come from, and the
  * remote is never changed here. Any other service finds its host and repository itself (`repository` null).
  */
-export function forgeTargetOf(dir: string, origin: string | null): ForgeTarget {
-  const f = forgeConfigOf(dir);
+export function forgeTargetOf(dir: string, origin: string | null, fallback?: string): ForgeTarget {
+  const f = forgeConfigOf(dir, fallback);
   if (f.service !== "gitlab") return { service: f.service, host: githubHost(), repository: null };
   const at = origin ? remoteOf(origin) : null;
   const named = `${f.host}/${f.project}`;
@@ -71,9 +70,10 @@ export function remoteOf(url: string): { host: string; path: string } | null {
   return m ? { host: m[1]!, path: m[2]! } : null;
 }
 
-function forgeConfigOf(dir: string): ForgeConfig {
-  const file = join(dir, CONFIG_FILE);
-  if (!existsSync(file)) return { service: DEFAULT_SERVICE };
+function forgeConfigOf(dir: string, fallback?: string): ForgeConfig {
+  // the checkout's own settings, else the ones kept outside it (`configFileOf`: one rule for every reader; `fallback` not given = `OPS_KIT_CONFIG`)
+  const file = configFileOf(dir, fallback);
+  if (file === null) return { service: DEFAULT_SERVICE };
   let forge: unknown;
   try {
     forge = (JSON.parse(readFileSync(file, "utf8")) as { forge?: unknown }).forge;
@@ -89,9 +89,9 @@ function forgeConfigOf(dir: string): ForgeConfig {
 /**
  * read = import what the service has; write = set a field of an Issue (title, body, state, a label, the milestone, the
  * parent); create = a new Issue; comment = a comment; project = a Project item and its fields; verification = report a
- * check's result (the local CI's pass).
+ * check's result (the local CI's pass); artifact = attach a document or a link to an Issue (GitHub's Issue artifacts).
  */
-export const FORGE_KINDS = ["read", "write", "create", "comment", "project", "verification"] as const;
+export const FORGE_KINDS = ["read", "write", "create", "comment", "project", "verification", "artifact"] as const;
 export type ForgeKind = (typeof FORGE_KINDS)[number];
 
 export interface ForgeOperation<P = unknown> {

@@ -1,4 +1,4 @@
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 
 /**
  * GitHub's own login from the screen, for a machine where nothing logged `gh` in beforehand (a container on a PC; the

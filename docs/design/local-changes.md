@@ -11,7 +11,7 @@ Rebase and merge does. Nothing calls GitHub, fetches or pushes.
 - the kit's `forgeOf` (`ops-kit/src/forge.ts`) names the app's own service, `app` (`LOCAL_SERVICE`): the checkout has
   neither a `forge` in `ops.config.json` nor an `origin`, or its `forge` says `{ "service": "app" }`.
 
-The stage prompts of such a workspace (`buildStartPrompt`'s `localForge`, `packages/core/src/backlog.ts`) tell the Task
+The stage prompts of such a workspace (`buildStartPrompt`'s `localForge`, `packages/core/src/backlog-prompt.ts`) tell the Task
 to use changes instead of PRs, and each delivery skill has a `ローカルの変更では` paragraph next to the step it replaces.
 A workspace with a remote keeps its PRs.
 

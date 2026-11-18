@@ -1,5 +1,5 @@
 /**
- * The CI's steps, one list for both runs (#912): Actions runs `bun scripts/ci.ts` after checkout and setup-bun, and
+ * The CI's steps, one list for both runs: Actions runs `bun scripts/ci.ts` after checkout and setup-bun, and
  * local-ci expands that step of ci.yml into `ciSteps` of the PR's own checkout, so the two run the same commands in the
  * same order and stop at the same failing step (a `keepGoing` step's failure does not stop them: the perf steps, so that
  * `bun test` still runs and both results are known in one run). Only node builtins at the top (the kit's idle-run, which imports nothing, in Actions' branch): it runs before `bun install`.
@@ -15,7 +15,7 @@ export const STEP_IDLE_SECONDS = 900;
 export interface Step { name: string; run: string; keepGoing?: boolean }
 
 export const ciSteps: Step[] = [
-  // Personal data (#24): a home path other than the placeholders fixtures and docs use (/Users/dev, /Users/example, …) fails.
+  // Personal data: a home path other than the placeholders fixtures and docs use (/Users/dev, /Users/example, …) fails.
   // 0 = a match (a real home path), 1 = none, anything else = git grep itself failed: only 1 passes. `\/` so that this line is not a match itself.
   {
     name: "no personal home paths",
@@ -26,6 +26,12 @@ export const ciSteps: Step[] = [
   // 公開に出すツリーの検査（Private のリポジトリ名・ホームパス・個人のメール）。公開の同期と同じ判定を、タグの後の同期より前（マージの前）に走らせる。
   // 公開側の写しでは origin が publicSync.target なので飛ぶ
   { name: "public tree check", run: "bun ops-kit/src/cli.ts public-sync --check" },
+  // An issue number in a comment or a test's name of the code that goes public (the publicSync range) fails: the public
+  // side cannot open it, so the reason is written in words. A number as a value (a string, a code span) is not a hit.
+  { name: "no issue numbers in code comments", run: "bun ops-kit/src/cli.ts issue-refs" },
+  // A file of the product's code (packages/core/src, packages/protocol/src, apps/web/src) over 1,000 lines, or a test
+  // file there over 2,000, fails: one feature's change stays in that feature's file. The files still over are listed in the script.
+  { name: "file sizes", run: "bun scripts/file-size.ts" },
   { name: "bun run licenses:check", run: "bun run licenses:check" },
   // typecheck は Codex から型を生成する（scripts/codex_types.ts）ので CI を回す環境にも Codex CLI が要る。入っていれば飛ばし（Codex のあるホストのローカル CI）、無ければ入れる（公開側の Actions。ログインは要らない）
   { name: "Codex CLI for typecheck", run: "if command -v codex >/dev/null; then exit 0; fi\nnpm install -g @openai/codex" },
@@ -34,8 +40,8 @@ export const ciSteps: Step[] = [
   { name: "public docs: English, no issue numbers", run: "bun scripts/public-docs.ts check" },
   // perf-bench measures this build; bun test does not depend on it
   { name: "bun run --cwd apps/web build", run: "bun run --cwd apps/web build" },
-  // perf ratchet (#638): the counts of the four journeys against scripts/perf-budget.json, and the bundle against main's
-  // tip built in a worktree next to the checkout (#3167). check also compares the ceilings with main's, so main is fetched. 5 runs: the medians move by the bands perf-ratchet allows, a single
+  // perf ratchet: the counts of the four journeys against scripts/perf-budget.json, and the bundle against main's
+  // tip built in a worktree next to the checkout. check also compares the ceilings with main's, so main is fetched. 5 runs: the medians move by the bands perf-ratchet allows, a single
   // run by more. Chrome is on ubuntu-latest; perf-bench finds it.
   // --depth=1 only in Actions' shallow checkout: in local-ci's worktree it would make the developer's clone shallow
   {
@@ -58,10 +64,10 @@ sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-core fonts-not
   },
   // main's tip, built and measured for the bundle check: compared with origin/main's tip, not the PR's base branch, so a
   // stack's top compares the whole stack. The tag CI records it (perf-records/bundle.tsv) and compares with the tag before:
-  // it passes PERF_BASE_REF (#4219), so the growth and raised ceilings are the tag's own
+  // it passes PERF_BASE_REF, so the growth and raised ceilings are the tag's own
   { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'if [ -n "${PERF_BASE_TREE:-}" ]; then bun scripts/perf-ratchet.ts base --tree "$PERF_BASE_TREE" perf-base.json; else bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json; fi', keepGoing: true },
   // the perf steps run before bun test (their result does not wait 5 minutes for it) and keep going: a perf red still
-  // runs bun test, so a run says both (#2945). Not in parallel: perf-bench is not measured next to another load.
+  // runs bun test, so a run says both. Not in parallel: perf-bench is not measured next to another load.
   { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", keepGoing: true },
   // the ceilings for Actions are `github` (GITHUB_ACTIONS=true); on a red the result JSON is printed for `update --env github`
   { name: "bun scripts/perf-ratchet.ts check perf-result.json", run: "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }", keepGoing: true },
@@ -85,7 +91,7 @@ export async function runCi<R extends { code: number }>(steps: Step[], run: (s: 
 export const ciExit = (results: Array<{ code: number }>): number => (results.some((r) => r.code !== 0) ? 1 : 0);
 
 if (import.meta.main && process.argv[2] === "--list") {
-  // local-ci reads a checkout's steps this way: in its own process, with only local-ci's environment (#912)
+  // local-ci reads a checkout's steps this way: in its own process, with only local-ci's environment
   console.log(JSON.stringify(ciSteps));
 } else if (import.meta.main) {
   // Actions: this environment as the runner gives it (GITHUB_ACTIONS picks perf-ratchet's ceilings), the output as it comes

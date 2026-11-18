@@ -28,7 +28,7 @@ const NOT_WAITING = new Set<Task["status"]>([...IN_FLIGHT, "aborted"]);
 /**
  * The Task's newest stop (by when it stopped) when it waits on the person: open (waiting / exhausted — not one retrying
  * by itself) and not answered since it stopped. Only an answer the daemon saw counts (`seq:`, as `reduceStops`: a reply of
- * the person's answers every open stop of its Task, tasks.ts `send`); a runner's pointer to a comment does not, and a stop
+ * the person's answers every open stop of its Task, tasks/sending.ts `send`); a runner's pointer to a comment does not, and a stop
  * again at the same place carries the earlier answer (`recordStop`), older than the stop. A newer stop of any kind, even
  * resolved, means the Task went on past it.
  */
@@ -56,13 +56,14 @@ function eachStop(records: StopRecord[]): { stop: StopRecord; at: number; stoppe
 
 /**
  * The batches of these Tasks' stop records (each Task's own): per Task its newest stop, when it waits on the person and is
- * sso / deploy; per kind one batch, oldest Task first, none for a kind with no Task. A shadow waits on nothing either.
+ * sso / deploy and its outcome is `needs_action`; per kind one batch, oldest Task first, none for a kind with no Task. A shadow waits on nothing either.
  * `asks` = the questions as listed, for the one each Task shows as (its stop, or the check it folded into).
  */
 export function approvalBatches(entries: { task: Task; records: StopRecord[] }[], asks: Ask[]): AskBatch[] {
   const lists: Record<BatchKind, AskBatch["asks"]> = { sso: [], deploy: [] };
   for (const { task, records } of [...entries].sort((a, b) => a.task.createdAt - b.task.createdAt)) {
-    if (NOT_WAITING.has(task.status) || task.shadowOf) continue;
+    // the person is wanted when the Task's outcome says so (written from its stop records); the stop only says which batch
+    if (NOT_WAITING.has(task.status) || task.shadowOf || task.outcome !== "needs_action") continue;
     const newest = waitingStop(records);
     const kind = newest ? batchKindOf(newest.stop) : null;
     if (!newest || !kind) continue;
@@ -181,13 +182,31 @@ const loginStopSince = (records: StopRecord[], since: number) => eachStop(record
 const KIND_TITLE: Record<BatchKind, string> = { sso: "SSO のログイン待ち", deploy: "配備の承認待ち" };
 
 /**
- * The once-a-day note of the batches still waiting (approval-window): its title has the count, its body a line per
- * Task under its batch. null = nothing waits (no note).
+ * The questions the work went on from with their recommendation that the person has not looked at yet, counted per
+ * Workspace on one line (the most first, then by name): `推奨で進行中: switchboard 4 / other-repo 3`. A Workspace with
+ * none is left out; null = none at all. Counted from the list 判断待ち shows, never read again.
  */
-export function approvalWindowNote(batches: AskBatch[]): { title: string; body: string } | null {
+export function proceedingLine(asks: Ask[]): string | null {
+  const by = new Map<string, number>();
+  for (const a of asks) if (a.proceeding && a.state === "open") by.set(a.workspace?.name ?? "不明", (by.get(a.workspace?.name ?? "不明") ?? 0) + 1);
+  if (by.size === 0) return null;
+  return `推奨で進行中: ${[...by].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).map(([name, n]) => `${name} ${n}`).join(" / ")}`;
+}
+
+/**
+ * The once-a-day note of the batches still waiting (approval-window): its title has the count, its body a line per
+ * Task under its batch, after the line of the questions going on by their recommendation when there are some. null =
+ * no batch waits (no note: those questions wait on no one, so they alone make no notice for the person).
+ */
+export function approvalWindowNote(batches: AskBatch[], asks: Ask[] = []): { title: string; body: string } | null {
   const shown = batches.filter((b) => b.asks.length > 0);
   const n = shown.reduce((k, b) => k + b.asks.length, 0);
   if (n === 0) return null;
-  const body = shown.map((b) => [`${KIND_TITLE[b.kind]}（${b.asks.length} 件）`, ...b.asks.map((a) => `- ${a.title} — ${a.op}`)].join("\n")).join("\n\n");
+  const body = [...[proceedingLine(asks)].filter((l) => l !== null), ...shown.map((b) => [`${KIND_TITLE[b.kind]}（${b.asks.length} 件）`, ...b.asks.map((a) => `- ${a.title} — ${a.op}`)].join("\n"))].join("\n\n");
   return { title: `SSO・配備の承認待ち: ${n}`, body };
+}
+
+/** The line of an approval-window firing: the note's title and the proceeding line, `待ちなし` only when there is neither. */
+export function approvalWindowLine(batches: AskBatch[], asks: Ask[]): string {
+  return [approvalWindowNote(batches)?.title, proceedingLine(asks)].filter((l) => !!l).join(" / ") || "待ちなし";
 }

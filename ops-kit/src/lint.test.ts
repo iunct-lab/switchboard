@@ -334,8 +334,8 @@ describe("lint", () => {
     const r = recordsOf("ok");
     const ask = (line: string) => `## 判断待ち\n**問い**: どちらか\n${line}\n**推奨**: A — 理由`;
     const after = "2026-11-14T00:00:00+09:00";
-    r.comments = [{ issue: 11, body: ask(""), createdAt: after }, { issue: 11, body: ask("**進め方**: 推奨で進める"), createdAt: after }, { issue: 11, body: "## 回答\nA", createdAt: after }];
-    expect(formatLint((await lint(fakeGh([]), cfg, { records: r })).violations)).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+    r.comments = [{ issue: 11, body: ask(""), createdAt: after }, { issue: 11, body: ask("**進め方**: 推奨で進める（種類: implementation-choice）"), createdAt: after }, { issue: 11, body: "## 回答\nA", createdAt: after }];
+    expect(formatLint((await lint(fakeGh([]), cfg, { records: r })).violations)).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
   });
 });
 
@@ -343,34 +343,53 @@ describe("判断待ちの進め方の行", () => {
   const ask = (line: string) => `## 判断待ち\n**問い**: どちらか\n${line}\n**推奨**: A — 理由`;
   const after = "2026-11-14T00:00:00+09:00";
   const before = "2026-11-13T23:59:59+09:00";
-  const run = async (comments: Array<{ body: string; createdAt: string }>) => {
+  const run = async (comments: Array<{ body: string; createdAt: string }>, top?: Array<{ name: string; dir: boolean }>) => {
     const d = page("ok")();
     d.repository.issues.nodes.find((n: any) => n.number === 11).comments = { nodes: comments };
-    return formatLint((await lint(fakeGh([() => d]), cfg, { sleep: noSleep })).violations);
+    return formatLint((await lint(fakeGh([() => d]), cfg, { sleep: noSleep, ...(top ? { top } : {}) })).violations);
   };
 
   test("askProceed reads 推奨で進める / 止めて待つ outside fences, and null when there is no line", () => {
-    expect(askProceed(ask("**進め方**: 推奨で進める"))).toBe("recommended");
+    // (where the question stands — a Task that names a file, in a checkout whose top is known — is what lets its kind be checked)
+    const place = { issue: { number: 11, body: "1. `src/a.ts`: 直す", labels: ["type:task"] }, pbi: { number: 10, tasks: [11] }, top: [{ name: "src", dir: true }] };
+    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice）"), place)).toBe("recommended");
+    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice）"))).toBe("wait");
     expect(askProceed(ask("**進め方**: 止めて待つ — お金が動く"))).toBe("wait");
     expect(askProceed(ask(""))).toBeNull();
-    expect(askProceed(ask("```\n**進め方**: 推奨で進める\n```"))).toBeNull();
-    expect(askProceed(ask("**進め方**: 推奨で進める — 戻せる変更"))).toBe("recommended");
+    expect(askProceed(ask("```\n**進め方**: 推奨で進める（種類: implementation-choice）\n```"))).toBeNull();
+    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice） — 戻せる変更"), place)).toBe("recommended");
     expect(askProceed(ask("  **進め方**: 止めて待つ — 公開\r"))).toBe("wait");
     expect(askProceed(ask("**進め方**: 推奨で進めるかは未定"))).toBeNull();
   });
 
   test("a new 判断待ち with either line passes; one without a line is a violation; an old one without a line is not; a line only inside a fence does not count", async () => {
-    expect(await run([{ body: ask("**進め方**: 推奨で進める"), createdAt: after }, { body: ask("**進め方**: 止めて待つ — 公開する"), createdAt: after }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
-    expect(await run([{ body: ask(""), createdAt: after }])).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask("**進め方**: 推奨で進める（種類: implementation-choice）"), createdAt: after }, { body: ask("**進め方**: 止めて待つ — 公開する"), createdAt: after }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask(""), createdAt: after }])).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
     expect(await run([{ body: ask(""), createdAt: before }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
-    expect((await run([{ body: ask("```\n**進め方**: 推奨で進める\n```"), createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
+    expect((await run([{ body: ask("```\n**進め方**: 推奨で進める（種類: implementation-choice）\n```"), createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
+  });
+
+  test("a new 判断待ち that says 推奨で進める without the table's leave (no kind, a kind not in the table, a safety word) is a violation that says to stop and wait; one from before the rule, or replaced by a newer ask, is not reported", async () => {
+    const since = "2026-11-18T00:00:00+09:00";
+    const later = "2026-11-18T01:00:00+09:00";
+    const stop = (why: string) => [expect.stringContaining(`#11: ## 判断待ち（${since}）は「推奨で進める」では進められない: ${why}`), "violations: 1  warnings: 0  (api errors: 0)"];
+    expect(await run([{ body: ask("**進め方**: 推奨で進める — 戻せる"), createdAt: since }])).toEqual(stop("種類が書かれていない"));
+    expect(await run([{ body: ask("**進め方**: 推奨で進める（種類: publish-now）"), createdAt: since }])).toEqual(stop("種類 publish-now が戻せるかの表に無い"));
+    expect(await run([{ body: ask("**進め方**: 推奨で進める（種類: wording）\n公開の文言をどうするか"), createdAt: since }])).toEqual(stop("問いに安全の確認に当たる語（公開）がある"));
+    expect(await run([{ body: ask("**進め方**: 推奨で進める — 戻せる"), createdAt: after }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask("**進め方**: 推奨で進める — 戻せる"), createdAt: since }, { body: ask("**進め方**: 止めて待つ — 表に種類が無い"), createdAt: later }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    // with the repository's top level known, the kind is checked against where the question stands: a path the Issue does not name is a violation
+    const out = (await run([{ body: ask("**進め方**: 推奨で進める（種類: implementation-choice）\n`zz-other/x.ts` も直す"), createdAt: since }], [{ name: "zz-other", dir: true }]))[0]!;
+    expect(out).toContain("は「推奨で進める」では進められない");
+    // a stop word inside a code fence counts
+    expect(await run([{ body: ask("**進め方**: 推奨で進める（種類: wording）\n```\ngit push --force\n```"), createdAt: since }])).toEqual(stop("問いに安全の確認に当たる語（--force）がある"));
   });
 
   test("an ask re-posted with the line makes the older ones without it not count; a lineless ask after one with a line is a violation", async () => {
     const t1 = "2026-11-14T01:00:00+09:00";
     const t2 = "2026-11-14T02:00:00+09:00";
-    expect(await run([{ body: ask(""), createdAt: t1 }, { body: ask("**進め方**: 推奨で進める"), createdAt: t2 }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
-    expect(await run([{ body: ask("**進め方**: 推奨で進める"), createdAt: t1 }, { body: ask(""), createdAt: t2 }])).toEqual([`#11: ## 判断待ち（${t2}）に「**進め方**: 推奨で進める / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask(""), createdAt: t1 }, { body: ask("**進め方**: 推奨で進める（種類: implementation-choice）"), createdAt: t2 }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([{ body: ask("**進め方**: 推奨で進める（種類: implementation-choice）"), createdAt: t1 }, { body: ask(""), createdAt: t2 }])).toEqual([`#11: ## 判断待ち（${t2}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
   });
 });
 

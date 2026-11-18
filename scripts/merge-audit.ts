@@ -1,21 +1,21 @@
 import { currentRepo } from "./repo.ts";
 /**
- * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] — who lifted which kind of a large PR, per kind
- * (PBI #752). Reads the record marks on the PRs (docs/merge-gate.md の「Record marks」: `[merge-ask]`, `[merge-answer]`,
+ * bun scripts/merge-audit.ts [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] — who lifted which kind of a large PR, per kind.
+ * Reads the record marks on the PRs (docs/merge-gate.md の「Record marks」: `[merge-ask]`, `[merge-answer]`,
  * `[recheck]`) and main's commits; keeps nothing (the marks are the record). REST only (the GraphQL budget is shared).
  *
  * One line per kind with anything to count (the default period is the last 7 days, until inclusive); security is one line
- * per group (`security:<group>`, PBI #1873), and the single `security` of older marks is not counted:
+ * per group (`security:<group>`), and the single `security` of older marks is not counted:
  *   <kind> 聞いた N / 認めた N / 認めなかった N / 返事まで 中央値 Nh / 再チェックで自動マージ N / 戻された N（#a, #b）
  * After the table, one line `印の欠け: 聞かずに返事 #a / 返事なしでマージ #b` when a PR in the period was answered with no
- * recorded `[merge-ask]`, or merged with an ask and no recorded answer (#1069); nothing when there are none.
- * Then one line per route of the weekly post-merge audit (PBI #4838; the `[post-audit]` marks, scripts/post-audit.ts), a route with
+ * recorded `[merge-ask]`, or merged with an ask and no recorded answer; nothing when there are none.
+ * Then one line per route of the weekly post-merge audit (the `[post-audit]` marks, scripts/post-audit.ts), a route with
  * nothing sampled as 0: `監査 <owner/name> <recheck|direct|review> 抜き取り N / finding N / 率 N%`. A recheck-merged PR the
  * audit found something in counts as evidence for the proposals like a revert (`戻された / 監査の指摘`).
  * `--repo` reads another repository (default: this one); its reverts come from the API, not from this clone's git.
- * Each table line ends its wait with the sum: `返事まで 中央値 Nh（合計 Nh）` (#1272) — how long the person was waited for in all.
+ * Each table line ends its wait with the sum: `返事まで 中央値 Nh（合計 Nh）` — how long the person was waited for in all.
  * Then the proposals to change merge-gate's split, one `案: …` line each, or `案なし`; with
- * --file-request, one `要望: …` line: 起票した #N / 同じ題の開いた要望 #N があるので起票しない / 案が無いので起票しない (#1272).
+ * --file-request, one `要望: …` line: 起票した #N / 同じ題の開いた要望 #N があるので起票しない / 案が無いので起票しない.
  * Exit 0 = no proposal / 1 = a proposal / 2 = could not read (gh or git failed).
  *
  * --file-request (the weekly schedule): on exit 1 also file a request Issue (type:request) through scripts/file-request.ts,
@@ -37,12 +37,12 @@ export interface Row {
   kind: MergeKind;
   /** `[merge-ask]` marks in the period with this kind (one per head asked). */
   asked: number;
-  /** PRs whose latest answer in the period for this kind is yes / no (a PR answered twice — a new head — is one; #1069). */
+  /** PRs whose latest answer in the period for this kind is yes / no (a PR answered twice — a new head — is one). */
   yes: number;
   no: number;
   /** Median hours from a PR's ask to its answer for this kind; null when no answer had an ask before it. */
   waitHours: number | null;
-  /** The same waits summed (#1272): how long the person was waited for in all, for the kinds that ask. 0 when none. */
+  /** The same waits summed: how long the person was waited for in all, for the kinds that ask. 0 when none. */
   waitTotalHours: number;
   /** Merged in the period with this kind's `[recheck] pass` of the merged head and no `[merge-answer] yes` for it. */
   recheckMerged: number[];
@@ -132,7 +132,7 @@ export function tally(prs: PrRecord[], reverts: Revert[], period: { since: strin
       const marks = pr.marks.filter((m) => m.kinds.includes(kind));
       const answers = marks.filter((m) => inPeriod(m.at) && (m.kind === "yes" || m.kind === "no"));
       row.asked += marks.filter((m) => inPeriod(m.at) && m.kind === "ask").length;
-      // yes / no count PRs by their latest answer (#1069); the waits stay per answer (each head asked and answered)
+      // yes / no count PRs by their latest answer; the waits stay per answer (each head asked and answered)
       const last = answers.at(-1);
       if (last) row[last.kind as "yes" | "no"]++;
       for (const m of answers) {
@@ -150,7 +150,7 @@ export function tally(prs: PrRecord[], reverts: Revert[], period: { since: strin
   });
 }
 
-/** Marks missing on PRs in the period (#1069): the table's counts cannot be trusted without them, so they are named. */
+/** Marks missing on PRs in the period: the table's counts cannot be trusted without them, so they are named. */
 export interface Gaps {
   /** A yes / no in the period with no `[merge-ask]` at or before it (any kinds): answered without a recorded ask. */
   answeredWithoutAsk: number[];
@@ -180,7 +180,7 @@ export function formatGaps(g: Gaps): string[] {
   return parts.length ? [`印の欠け: ${parts.join(" / ")}`] : [];
 }
 
-/** One route's line of the audit (PBI #4838): the PRs the audit read in the period, how many it found something in, and the rate. */
+/** One route's line of the audit: the PRs the audit read in the period, how many it found something in, and the rate. */
 export interface AuditRow { route: Route; sampled: number; findings: number; rate: number }
 
 export const ROUTES: Route[] = ["review", "direct", "recheck"];
@@ -236,14 +236,14 @@ export function proposals(prs: PrRecord[], reverts: Revert[], window: { since: s
   return out.sort((a, b) => MERGE_KINDS.indexOf(a.kind) - MERGE_KINDS.indexOf(b.kind));
 }
 
-/** The `要望:` line of --file-request (#1272): filed (its number), the open request with the same title, or nothing to file. */
+/** The `要望:` line of --file-request: filed (its number), the open request with the same title, or nothing to file. */
 export function filingLine(outcome: Filed | null): string {
   if (outcome === null) return "要望: 案が無いので起票しない";
   if ("open" in outcome) return `要望: 同じ題の開いた要望 ${outcome.open} があるので起票しない`;
   return outcome.filed === null ? "要望: 起票した（番号は上の出力）" : `要望: 起票した #${outcome.filed}`;
 }
 
-/** The lines after the table (#1272): one per proposal, or `案なし` — a table alone could not tell "none" from "not judged". */
+/** The lines after the table: one per proposal, or `案なし` — a table alone could not tell "none" from "not judged". */
 export function formatProposals(ps: Proposal[]): string[] {
   return ps.length ? ps.map((x) => `案: ${proposalText(x)}`) : ["案なし"];
 }
@@ -303,7 +303,7 @@ const ANY_MARK = [MERGE_ASK, MERGE_ANSWER, RECHECK_PASS, POST_AUDIT];
 /**
  * The PRs merged on or after `from` (a UTC day). Search answers 1,000 results at most and may say a page is incomplete. So
  * each range is first counted with a one-item page, and only a range that fits is read in full; one over it is counted again
- * as its two halves (`merged:<a>..<b>`, both days included) until each fits (#3595: 90 days held 1,137). Counting first keeps
+ * as its two halves (`merged:<a>..<b>`, both days included) until each fits (90 days held 1, 137). Counting first keeps
  * the search calls under the search limit (30 a minute), which reading every page of a range over 1,000 would use up. A
  * single day over it, or an incomplete page, would leave the counts short, so it is an error.
  */

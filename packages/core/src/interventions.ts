@@ -1,6 +1,7 @@
 import type { BacklogIssueData, EventEnvelope, BacklogRepositoryKey, Intervention, InterventionReason, InterventionUnknown, InterventionView, InterventionWindow, StopRecord, Workspace } from "@switchboard/protocol";
 import { askProceed } from "../../../ops-kit/src/lint.ts";
-import { ANSWER_HEADING, DECISION_HEADING, waitsOf } from "./backlog.ts";
+import { ANSWER_HEADING, DECISION_HEADING, PROCEED_OVERTURNED, askPlaceOf, checkoutTop } from "./backlog-comments.ts";
+import { waitsOf } from "./backlog-waits.ts";
 import { withoutMarker } from "./backlog-merge.ts";
 import type { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
@@ -53,9 +54,6 @@ export function warmInterventions(db: Db, workspaces: Workspace[]): void {
   for (const ws of workspaces) readRepository(db, ws);
 }
 
-/** A `## 回答` that overturns a recommendation starts a line with this (`**覆す**: 推奨 X → Y`). */
-export const PROCEED_OVERTURNED = "**覆す**:";
-
 /**
  * The `## 判断待ち` asked in `[from, to)` on the Issues of one repository: stopped (waited for the person; an ask with no 進め方 line
  * counts here) and proceeded (went on with the recommendation). An ask the daemon sent again (same body without the op marker within
@@ -63,9 +61,10 @@ export const PROCEED_OVERTURNED = "**覆す**:";
  * `userWait` in flow.ts reads it: it adds one time (from the earliest of those asks in the window) to the median, and one to
  * overturned when it has a `PROCEED_OVERTURNED` line and one of those asks proceeded. null median = none answered.
  */
-export function questionCounts(issues: Map<number, IssueInfo>, from: number, to: number): { stopped: number; proceeded: number; overturned: number; medianAnswerMs: number | null } {
+export function questionCounts(issues: Map<number, IssueInfo>, from: number, to: number, top: { name: string; dir: boolean }[] = []): { stopped: number; proceeded: number; overturned: number; medianAnswerMs: number | null } {
   let stopped = 0, proceeded = 0, overturned = 0;
   const waits: number[] = [];
+  const data = new Map([...issues].map(([n, i]) => [n, i.data]));
   for (const info of issues.values()) {
     const said = new Map<string, number>(); // body without the op marker → when it was last counted
     let pending: Array<{ at: number; proceeded: boolean }> = []; // asks in the window since the last answer
@@ -78,7 +77,7 @@ export function questionCounts(issues: Map<number, IssueInfo>, from: number, to:
         if (before !== undefined && at - before <= ANSWER_DUPLICATE_MS) continue;
         said.set(body, at);
         if (!(at >= from && at < to)) continue;
-        const go = askProceed(c.body) === "recommended";
+        const go = askProceed(c.body, askPlaceOf(info.data, data, top)) === "recommended";
         if (go) proceeded++;
         else stopped++;
         pending.push({ at, proceeded: go });
@@ -222,7 +221,7 @@ export type InterventionLookup = {
   /** Every stored PBI, once per repository. `closedAt` null with `open` false = closed, time not kept. */
   pbis: Array<{ repository: string; number: number; open: boolean; closedAt: number | null; subIssues: number[]; workspaceId: string }>;
   /** The stored Issues of every imported repository, once per repository (under its first workspace). */
-  repositories: Array<{ workspaceId: string; issues: Map<number, IssueInfo> }>;
+  repositories: Array<{ workspaceId: string; issues: Map<number, IssueInfo>; /** The top of the workspace's checkout (`checkoutTop`). */ top: { name: string; dir: boolean }[] }>;
 };
 
 function lookupOf(workspaces: Workspace[], repoOf: (wsId: string) => Repository | null): InterventionLookup {
@@ -233,7 +232,7 @@ function lookupOf(workspaces: Workspace[], repoOf: (wsId: string) => Repository 
     const repo = repoOf(ws.id);
     if (!repo || seen.has(repo.key.repository)) continue;
     seen.add(repo.key.repository);
-    repositories.push({ workspaceId: ws.id, issues: repo.issues });
+    repositories.push({ workspaceId: ws.id, issues: repo.issues, top: checkoutTop(ws.path) });
     for (const [number, info] of repo.issues)
       if (info.data.labels.includes("type:pbi")) pbis.push({ repository: repo.key.repository, number, open: info.data.state === "OPEN", closedAt: info.data.closedAt ? Date.parse(info.data.closedAt) : null, subIssues: info.data.subIssues, workspaceId: ws.id });
   }
@@ -352,7 +351,7 @@ export function summarizeInterventions(items: Intervention[], unknown: Intervent
           }),
         };
       }).sort((a, b) => b.count - a.count),
-      questions: lookup.repositories.map((r) => ({ workspaceId: r.workspaceId, ...questionCounts(r.issues, from, to) })),
+      questions: lookup.repositories.map((r) => ({ workspaceId: r.workspaceId, ...questionCounts(r.issues, from, to, r.top) })),
     };
   };
   return { now, windows: ([7, 30] as const).map((days) => ({ current: window(days, now - days * DAY, now), previous: window(days, now - 2 * days * DAY, now - days * DAY) })) };

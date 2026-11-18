@@ -2,7 +2,7 @@ import { jstDay } from "./time.ts";
 import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
-/** Where a finished task's conversation went (#1431): S3 keys one per line (oldest first), when, and how many events. */
+/** Where a finished task's conversation went: S3 keys one per line (oldest first), when, and how many events. */
 export interface EventsArchive {
   key: string;
   at: number;

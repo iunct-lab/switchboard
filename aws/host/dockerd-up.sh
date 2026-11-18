@@ -1,5 +1,5 @@
 #!/bin/sh
-# dockerd-up (#371) — makes sure the host user's rootless dockerd answers. It runs as sb-dockerd.service (its own cgroup
+# dockerd-up — makes sure the host user's rootless dockerd answers. It runs as sb-dockerd.service (its own cgroup
 # and memory ceiling, 2026-09-29), which the user may start through sudoers and nothing else; /usr/local/bin/docker calls
 # this before every command, so nothing has to start it after a reboot.
 D="${SB_DOCKER_BIN:-/usr/local/lib/docker-rootless/bin}"

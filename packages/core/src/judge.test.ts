@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent, JudgeSettings, RunnerAdapter, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
-import { buildJudgePrompt, JUDGE_FALLBACK, judgeTurn, parseJudgement, type JudgeInput } from "./judge.ts";
+import { buildJudgePrompt, JUDGE_CHARS, JUDGE_FALLBACK, judgeTurn, parseJudgement, type JudgeInput } from "./judge.ts";
 
 const INPUT: JudgeInput = { title: "README の誤字を直す", prompt: "README のインストール手順の誤字を直してください。", lastReply: "直しました。コミットは abc123 です。" };
-const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 };
+const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", effort: "", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800, skillChars: 20_000 };
 
 /** Replays `events` for every turn of `id`; same shape as the replay adapter in suggest-workspace.test.ts. */
 function replayAdapter(id: RunnerId, events: AgentEvent[], opts: { starts?: StartOptions[]; modes?: string[] } = {}): RunnerAdapter {
@@ -94,14 +94,14 @@ describe("judgeTurn", () => {
 
   test("configured as the fallback itself: one turn, no second try", async () => {
     const starts: StartOptions[] = [];
-    const { out } = run([replayAdapter("claude", limited("claude"), { starts })], { enabled: true, ...JUDGE_FALLBACK, recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 });
+    const { out } = run([replayAdapter("claude", limited("claude"), { starts })], { enabled: true, ...JUDGE_FALLBACK, effort: "", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800, skillChars: 20_000 });
     await expect(out).rejects.toThrow(/rate_limit_error/);
     expect(starts).toHaveLength(1);
   });
 });
 
 describe("judgeTurn settings tunables", () => {
-  const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800 };
+  const CLAUDE_JUDGE: JudgeSettings = { enabled: true, runner: "claude", model: "claude-sonnet", effort: "", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800, skillChars: 20_000 };
   test("the fallback from the settings: the configured runner fails, the given runner and model judge once", async () => {
     const codexStarts: StartOptions[] = [];
     const adapters = new Map<RunnerId, RunnerAdapter>([["claude", replayAdapter("claude", limited("claude"))], ["codex", replayAdapter("codex", answer('{"result": "finished", "reason": "終わっている"}', "m"), { starts: codexStarts })]]);
@@ -143,5 +143,46 @@ describe("buildJudgePrompt", () => {
     expect(p.match(/ゑ+/)![0].length).toBe(1200);
     expect(p.match(/ゐ+/)![0].length).toBe(2000);
     expect(p).toContain('{"result": "finished|needs_action"');
+  });
+
+  test("multi-turn: the last turn's request and the reply before it are in the prompt", () => {
+    const p = buildJudgePrompt({ title: "t", prompt: "README を直して", previousReply: "A と B のどちらにしますか", lastRequest: "A で", lastReply: "A で直しました" });
+    const lines = p.split("\n");
+    // the order a reader follows: the first request, the reply before, what the person then sent, the reply being judged
+    expect(["## 依頼", "## 前のターンの返答", "## 最後のターンの依頼", "## 最後の返答"].map((h) => lines.indexOf(h))).toEqual([...["## 依頼", "## 前のターンの返答", "## 最後のターンの依頼", "## 最後の返答"].map((h) => lines.indexOf(h))].sort((a, b) => a - b));
+    expect(lines[lines.indexOf("## 前のターンの返答") + 1]).toBe("A と B のどちらにしますか");
+    expect(lines[lines.indexOf("## 最後のターンの依頼") + 1]).toBe("A で");
+    expect(lines[lines.indexOf("## 最後の返答") + 1]).toBe("A で直しました");
+    // the instruction says which request decides
+    const rule = lines.slice(0, lines.indexOf("## 依頼")).find((l) => l.includes("最後のターンの依頼"))!;
+    expect(rule).toContain("最後の返答が「最後のターンの依頼」に応えたかで決める");
+    expect(rule).toContain("文脈");
+    // each part is capped
+    const long = buildJudgePrompt({ title: "t", prompt: "ゑ".repeat(5000), previousReply: "ゆ".repeat(5000), lastRequest: "ヰ".repeat(5000), lastReply: "ゐ".repeat(5000) });
+    expect([/ゑ+/, /ゆ+/, /ヰ+/, /ゐ+/].map((re) => long.match(re)![0].length)).toEqual([JUDGE_CHARS.prompt, JUDGE_CHARS.previousReply, JUDGE_CHARS.lastRequest, JUDGE_CHARS.lastReply]);
+    expect([JUDGE_CHARS.prompt, JUDGE_CHARS.previousReply, JUDGE_CHARS.lastRequest, JUDGE_CHARS.lastReply]).toEqual([1200, 1000, 1200, 2000]);
+    // a last request with no reply before it (the turn before ended without one) still decides
+    const bare = buildJudgePrompt({ title: "t", prompt: "README を直して", lastRequest: "やっぱり CHANGELOG も", lastReply: "直しました" });
+    expect([bare.includes("## 最後のターンの依頼"), bare.includes("## 前のターンの返答")]).toEqual([true, false]);
+  });
+
+  test("single turn: no extra sections", () => {
+    const one = buildJudgePrompt({ title: "t", prompt: "README を直して", lastReply: "直しました" });
+    expect(one).toBe([
+      "あなたはエージェントのタスクが「完了」か「要対応」かを、最後の返答から判定します。JSON だけを返してください。",
+      'ほかの文章・コードブロック・前置きは書かないこと。形式: {"result": "finished|needs_action", "reason": "<日本語で 60 字以内の理由>"}',
+      "- finished（完了）: 依頼された作業を終えて、その結果を報告している",
+      "- needs_action（要対応）: 利用者に質問・選択・確認・作業を求めて止まっている",
+      "",
+      "## 依頼",
+      "title: t",
+      "prompt: README を直して",
+      "",
+      "## 最後の返答",
+      "直しました",
+    ].join("\n"));
+    // the last request being the first one (one turn so far), or a reply before with no later request, adds nothing
+    expect(buildJudgePrompt({ title: "t", prompt: "README を直して", lastRequest: " README を直して\n", previousReply: "x", lastReply: "直しました" })).toBe(one);
+    expect(buildJudgePrompt({ title: "t", prompt: "README を直して", previousReply: "x", lastReply: "直しました" })).toBe(one);
   });
 });

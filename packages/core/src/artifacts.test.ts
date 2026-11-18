@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Artifact, RunnerAdapter, Task } from "@switchboard/protocol";
-import { ArtifactStore, artifactPrompt, checkViewKey, SCRATCH_APPS_DOC, MAX_ARTIFACT_DIR_FILES, MAX_ARTIFACT_FILE_BYTES, viewKey } from "./artifacts.ts";
+import { ArtifactStore, artifactPrompt, checkViewKey, localDate, SCRATCH_APPS_DOC, MAX_ARTIFACT_DIR_FILES, MAX_ARTIFACT_FILE_BYTES, viewKey } from "./artifacts.ts";
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 
@@ -43,6 +43,10 @@ afterAll(async () => {
 });
 
 describe("artifacts", () => {
+  test("localDate is the local calendar day, not the UTC one", () => {
+    expect(localDate(new Date(2026, 8, 5, 8, 0, 0))).toBe("2026-09-05"); // local 08:00 is still the 5th even where UTC says the 4th
+  });
+
   test("register copies the file; deleting the original keeps it listed, and refresh then says 410 with the old copy intact", async () => {
     const f = join(work, "report.html");
     writeFileSync(f, "<h1>one</h1>");

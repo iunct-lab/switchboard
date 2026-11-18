@@ -107,8 +107,8 @@ let subjects = {};
 let tags = {};
 /** Why this page's last action failed: shown over the 2 s refresh, before the service's (older) lastError, until the next action. */
 let refused = "";
-let restartReloads = false; // 再起動 restarts sb-rescue too and reads the environment again (#435)
-let stopping = []; // the running and waiting tasks, and those with background jobs left, that a restart or a release switch stops (#435)
+let restartReloads = false; // 再起動 restarts sb-rescue too and reads the environment again
+let stopping = []; // the running and waiting tasks, and those with background jobs left, that a restart or a release switch stops
 const STATUS = { running: "実行中", waiting: "承認待ち", background: "裏で実行中" };
 const taskName = (t) => t.title + "（" + (STATUS[t.status] || t.status) + "）";
 /** The confirm text's tail: up to 5 titles, then how many more. */
@@ -190,7 +190,7 @@ async function refresh() {
 
 const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-/** The cloud host's passkey check (#497), on this origin's login (aws/auth-page.html's login()); throws why it failed. */
+/** The cloud host's passkey check, on this origin's login (aws/auth-page.html's login()); throws why it failed. */
 async function confirmPasskey() {
   const post = async (path, body) => {
     const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -207,7 +207,7 @@ async function confirmPasskey() {
   renewedAt = Date.now(); // the login just set a new cookie
 }
 
-/** After an action that changed something, the login's idle time is moved on (#498): only the Starter can sign the cookie again, so ask it; at most every 10 minutes, off this machine only (the token login has no cookie), and a failure is nothing to show. */
+/** After an action that changed something, the login's idle time is moved on: only the Starter can sign the cookie again, so ask it; at most every 10 minutes, off this machine only (the token login has no cookie), and a failure is nothing to show. */
 var renewedAt = 0;
 function renewLogin() {
   if (["127.0.0.1", "localhost", "[::1]"].includes(location.hostname) || Date.now() - renewedAt < 600000) return;
@@ -223,7 +223,7 @@ async function act(path, body, question) {
   const send = () => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
   let r = await send();
   let data = r.ok ? {} : await r.json().catch(() => ({}));
-  // with the login cookie, a change needs a passkey check within 5 minutes (#497): check, then send once more
+  // with the login cookie, a change needs a passkey check within 5 minutes: check, then send once more
   if (r.status === 401 && data.reason === "recent") {
     try {
       await confirmPasskey();
@@ -256,7 +256,7 @@ $("rebuild").onclick = async () => {
   // cancelled, or refused (the reason stays on the page through the status' lastError): the button is usable again
   if (sent !== true) { rebuilding = false; $("rebuild").disabled = false; }
 };
-// the Starter's own stop (#1394) on this origin; act's Bearer token, if any, means nothing there. Once it went through the machine is going down: a second answers 409
+// the Starter's own stop on this origin; act's Bearer token, if any, means nothing there. Once it went through the machine is going down: a second answers 409
 var stopPressed = false; // var: render() reads it before this line runs
 $("stop").onclick = async () => {
   if (stopPressed) return;
@@ -270,7 +270,7 @@ $("stop").onclick = async () => {
 $("agent-start").onclick = () => act("api/agent/start", {}, "救援エージェントを起動します。Claude の定額枠を使います。");
 $("agent-stop").onclick = () => act("api/agent/stop", {}, "救援エージェントを止めます。");
 
-// the disk and /tmp (#797, #2549): read on opening, 再読込 and after a clean only — walking the tree is not for the 2 s refresh
+// the disk and /tmp: read on opening, 再読込 and after a clean only — walking the tree is not for the 2 s refresh
 const size = (n) => { const u = ["B", "KB", "MB", "GB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
 // the host's clock, not the browser's: never "-3 分前"
 const ago = (ms) => { const m = Math.max(0, Math.floor((Date.now() - ms) / 60000)); return m < 60 ? m + " 分前" : Math.floor(m / 60) + " 時間前"; };
@@ -340,7 +340,7 @@ $("tmp-force").onclick = async () => {
   await act("api/tmp/clean", { force: true }, "強制クリア: /tmp にあるこの機械のユーザーのもの " + forcible.count + " 件（合計 " + size(forcible.bytes) + "）を、経過時間も使用中かも見ずに全部消します。\n\n" + tasks);
   await loadTmp();
 };
-// Every 2 s while the tab is visible; a hidden tab asks nothing, and coming back asks at once (#2814).
+// Every 2 s while the tab is visible; a hidden tab asks nothing, and coming back asks at once.
 let pollTimer = null;
 function poll() {
   clearInterval(pollTimer);

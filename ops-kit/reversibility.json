@@ -21,6 +21,14 @@
       "why": "Only documents change (the instructions Tasks follow are other kinds), so a recheck by another runner reads that the diff is documents and inside the PBI before the merge, and a revert restores them."
     },
     {
+      "op": "merge: security tests",
+      "gateKind": "security:tests",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "Only test files, fixtures and comment lines of the host scripts change (none of it runs in production nor as root on the host), so a recheck by another runner reads that the diff is tests or comments only and does not weaken a check that guards auth, approval or the sandbox before the merge, and a revert restores them."
+    },
+    {
       "op": "merge: security words",
       "gateKind": "security:words",
       "effect": "repository",
@@ -131,6 +139,37 @@
       "beforeObserved": false,
       "answer": "irreversible",
       "why": "They run as root from main on every start, so a bad script has run before it can be stopped."
+    },
+    {
+      "op": "decide: how to implement inside the Task's files",
+      "gateKind": null,
+      "askKind": "implementation-choice",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "The choice only changes code in the files the Task names; it reaches main through the PR, where the review and the merge gate read it, and a follow-up PR redoes it."
+    },
+    {
+      "op": "decide: the wording of a text inside the Task's files",
+      "gateKind": null,
+      "askKind": "wording",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "A label, message or document sentence in the Task's files; it reaches main through the PR and a follow-up PR rewords it."
+    },
+    {
+      "op": "decide: the order or split of the Tasks of one PBI",
+      "gateKind": null,
+      "askKind": "task-order",
+      "effect": "state",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "Issues of one PBI are edited back; nothing leaves the backlog and no code is merged by the choice itself."
     }
+  ],
+  "askStops": [
+    "マージ", "昇格", "[聞く]", "公開", "削除", "消す", "権限", "課金", "料金", "鍵", "秘密", "認証", "トークン", "本番", "デプロイ", "配備", "移行", "ロールバック", "安全", "セキュリティ", "捨て", "外へ出す",
+    "merge", "promot", "publish", "delete", "permission", "billing", "secret", "token", "credential", "password", "deploy", "migrat", "rollback", "security", "irreversible", "--force", "force push", "force-push", "drop table", "visibility", "s3 rb", "rm -rf"
   ]
 }

@@ -15,6 +15,12 @@ export const APP_REQUEST_DAYS = 3;
 /** A removed artifact stays this long so "undo" works; the boot sweep deletes it after. */
 export const ARTIFACT_UNDO_MS = 24 * 60 * 60 * 1000;
 
+/** Local calendar date: a use at 08:00 JST belongs to that day, not to yesterday UTC (the day `markAppUse` counts by). */
+export function localDate(now: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+
 /** How long a view key opens a report. The page asks for a new one each time it opens one. */
 export const VIEW_KEY_MS = 60 * 60 * 1000;
 /** Lives in this process only: a key does not survive a restart (the page asks again), and nothing on disk can mint one. */
@@ -240,7 +246,13 @@ export class ArtifactStore {
   sweep(now = Date.now()): number {
     let n = 0;
     for (const a of this.db.listArtifactsRemovedBefore(now - ARTIFACT_UNDO_MS)) {
-      rmSync(this.folderOf(a), { recursive: true, force: true });
+      let folder: string;
+      try {
+        folder = this.folderOf(a);
+      } catch {
+        continue; // a row whose ids are not folder names has no folder here: it is passed over, and the start goes on
+      }
+      rmSync(folder, { recursive: true, force: true });
       this.db.deleteArtifact(a.id);
       n++;
     }

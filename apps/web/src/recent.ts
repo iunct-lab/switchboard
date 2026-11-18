@@ -1,7 +1,7 @@
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
-/** The cloud host's "passkey checked in the last 5 minutes" (#1491): what the Web UI does when a strong operation answers 401 `recent`. */
+/** The cloud host's "passkey checked in the last 5 minutes": what the Web UI does when a strong operation answers 401 `recent`. */
 export const RECENT_MESSAGE = t(home.recentMessage);
 
 export function isRecentRefusal(status: number, body: unknown): boolean {
@@ -11,7 +11,7 @@ export function isRecentRefusal(status: number, body: unknown): boolean {
 const b64 = (b: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64 = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 
-/** The passkey check on this origin's login (the same flow as sb-rescue's page, #497); throws why it failed. Call it from a click. */
+/** The passkey check on this origin's login (the same flow as sb-rescue's page); throws why it failed. Call it from a click. */
 export async function confirmPasskey(): Promise<void> {
   const post = async (path: string, body: unknown) => {
     const r = await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

@@ -1,7 +1,7 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/depends-resume-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * A Task started by hand stops on another session's PR (#2045): its runner reports a depends stop with `pr#12`, and,
- * asked how it stands, checks the overlap again and stops a second time. The fake GitHub then has PR #12 merged; the
+ * A Task started by hand stops on another session's PR: its runner reports a depends stop with `pr#12`, and,
+ * asked how it stands, checks the overlap again and stops a second time. The fake GitHub then has PR `#12` merged; the
  * next backlog import reads it again, and the same Task gets one follow-up turn in its runner session and its stops are
  * resolved. The Task's screen shows the series waiting before and resolved after (a series that stopped once and was
  * resolved is not listed, apps/web/src/stops.ts `shownStops`: twice is).
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter } from "@switchboard/protocol";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { dependsResumePrompt } from "../packages/core/src/depends-resume.ts";
 import { importing } from "../packages/core/fixtures/github-import.ts";
 
@@ -25,7 +25,7 @@ const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.na
 git("init", "-q");
 git("commit", "-q", "--allow-empty", "-m", "first");
 
-// the fake GitHub: no Issues; PR #12 open until `merged`, then gone from the open list and answered as merged by number
+// the fake GitHub: no Issues; PR `#12` open until `merged`, then gone from the open list and answered as merged by number
 let merged = false;
 const legacy: GhRunner = async (args) => {
   if (args[0] === "repo") return { code: 0, stdout: "acme/app true\n", stderr: "" };
@@ -38,7 +38,7 @@ const legacy: GhRunner = async (args) => {
 const gh = importing(legacy, () => (merged ? [] : [{ number: 12, headRefName: "sb/40-other", files: ["packages/core/src/a.ts"] }]));
 delete process.env.SWITCHBOARD_PROJECT_URL;
 
-// the runner: its first turn stops on PR #12 (the fence the stop prompt asks for); asked how it stands, it stops again on
+// the runner: its first turn stops on PR `#12` (the fence the stop prompt asks for); asked how it stands, it stops again on
 // it; every later turn is recorded and ends ok
 const STOP = { id: "overlap", op: "parallel-guard overlap", target: "Task #52", reason: "depends", safety: "read-only", evidence: "PR #12 と packages/core/src/a.ts が重なる", state: "waiting", conditions: [{ key: "pr#12", value: "open", met: false }], actions: [] };
 const sent: string[] = [];
@@ -82,7 +82,7 @@ const profile = join(home, "chrome");
 const chrome = Bun.spawn([process.env.CHROME_BIN ?? "chromium", "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--no-sandbox", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1200,1400", "about:blank"], { stdout: "ignore", stderr: "ignore" });
 let ws: WebSocket | undefined;
 try {
-  // 1. the meta workspace's backlog is imported with PR #12 open; a Task started by hand stops on it
+  // 1. the meta workspace's backlog is imported with PR `#12` open; a Task started by hand stops on it
   await fetch(`${base}/api/backlog?refresh=1`);
   const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
   const task = core.tasks.create({ cwd: repo, workspaceId: meta.id, title: "重なりで止まる Task", prompt: "Task #52 に着手", runner: "claude" });
@@ -126,7 +126,7 @@ try {
   console.log(`screen before: ${JSON.stringify(before)}`);
   await shot("before");
 
-  // 2. PR #12 is merged on GitHub; the next import reads it again and continues the same Task
+  // 2. PR `#12` is merged on GitHub; the next import reads it again and continues the same Task
   merged = true;
   await fetch(`${base}/api/backlog?refresh=1`);
   await until(() => sent.length > 0, "the follow-up turn");

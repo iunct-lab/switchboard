@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/login-refusals-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * What a browser with no cookie gets counted against the daemon's failure limit (#1851, the limit is #1492): (a) opening `/`
+ * What a browser with no cookie gets counted against the daemon's failure limit: (a) opening `/`
  * until the page moves to /_auth/; (b) `/?from=auth`, the page that stays put when the login did not take, for 30 seconds, with Settings opened.
  * The daemon is the real one behind a stand-in for the edge: the shared header and the Viewer-Address come from CDP, and
  * /_auth/* is answered by CDP (the real one is the Starter's Lambda). Counted: the access log's 401 / 403 for the viewer.

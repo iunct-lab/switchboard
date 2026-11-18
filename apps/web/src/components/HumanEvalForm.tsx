@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { HumanAnswers, HumanEval, TaskEvals } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { HUMAN_QUESTIONS } from "../evals.ts";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";

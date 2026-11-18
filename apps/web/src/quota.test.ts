@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { QUOTA_STALE_MS, quotaAsOf, quotaByRunner, quotaStale, resetLabel, windowLabel } from "./quota.ts";
+import { accountMark, QUOTA_STALE_MS, quotaAsOf, quotaByRunner, quotaStale, resetLabel, windowLabel } from "./quota.ts";
 
-test("windowLabel: the runners' windows in words; an unknown one keeps its name with spaces (#1836)", () => {
+test("windowLabel: the runners' windows in words; an unknown one keeps its name with spaces", () => {
   expect(windowLabel("five_hour")).toBe("5 時間");
   expect(windowLabel("seven_day")).toBe("7 日");
   expect(windowLabel("seven_day_overage_included")).toBe("7 日・超過込み");
@@ -41,4 +41,11 @@ test("quotaByRunner: claude, codex, dak first in that order, other runners after
     ["newrunner", ["five_hour"]],
   ]);
   expect(quotaByRunner([])).toEqual([]);
+});
+
+test("accountMark: nothing while a runner has one account; each row's account once it has two", () => {
+  const one = [{ runner: "claude", account: "aaaaaaaa" }, { runner: "codex", account: "cccccccc" }];
+  expect(one.map((q) => accountMark(one, q))).toEqual(["", ""]);
+  const two = [...one, { runner: "claude", account: "bbbbbbbb" }, { runner: "claude", account: "" }];
+  expect(two.map((q) => accountMark(two, q))).toEqual(["aaaaaaaa", "", "bbbbbbbb", "?"]); // codex still has one
 });

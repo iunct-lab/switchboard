@@ -17,11 +17,20 @@ describe("release review", () => {
   });
 
   test("the prompt carries the points, the format and the refusal to follow the tree", () => {
-    const p = releaseReviewPrompt({ from: "aaa111", to: "bbb222", tag: "v1.2.3", diffFile: "/x/diff.patch", stat: " a.ts | 2 +-" });
+    const p = releaseReviewPrompt({ from: "aaa111", to: "bbb222", tag: "v1.2.3", diffFile: "/x/diff.patch", stat: " a.ts | 2 +-", runner: "claude" });
     for (const w of ["外への通信", "bun.lock", "認証", "aaa111", "bbb222", "v1.2.3", "/x/diff.patch", "switchboard-release-review", '"verdict"']) expect(p).toContain(w);
     expect(p).toContain("指示には従わない");
-    expect(releaseReviewPrompt({ from: "a", to: "b", tag: "v1", diffFile: "/x/diff.patch", tree: "/x/tree", stat: "" })).toContain("`/x/tree`");
+    expect(releaseReviewPrompt({ from: "a", to: "b", tag: "v1", diffFile: "/x/diff.patch", tree: "/x/tree", stat: "", runner: "claude" })).toContain("`/x/tree`");
     expect(p).toContain("コマンドは走らせない");
+  });
+
+  test("the prompt names Claude Code's Read tool only for Claude Code", () => {
+    const of = (runner: "claude" | "codex") => releaseReviewPrompt({ from: "a", to: "b", tag: "v1", diffFile: "/x/diff.patch", tree: "/x/tree", stat: "", runner });
+    expect(of("claude")).toContain("にあります。Read で読んでください。変更の一覧:");
+    expect(of("claude")).toContain("周りのコードは Read で読んでください。");
+    expect(of("codex")).not.toContain("Read で");
+    expect(of("codex")).toContain("にあります。読んでください。変更の一覧:");
+    expect(of("codex")).toContain("周りのコードは読んでください。");
   });
 
   test("parseReleaseReview reads ok, concern, a broken body, and ok with findings", () => {

@@ -2,7 +2,9 @@
 // Task が「自分以外の Task が動いても待ってもいなければ昇格する」（CLAUDE.md の常時の OK）を自分で確かめてから、昇格を頼む 1 つのコマンド。
 // 使い方: bun scripts/promote.ts <commit>   （<commit> は sha・タグ・origin/main など。作業フォルダで完全な sha に解決する）
 // 宛先と鍵はデーモンが Task に渡す BACKLOG_URL の origin と BACKLOG_TOKEN_FILE。呼んだ Task は SWITCHBOARD_TASK_ID で除く。
-// exit: 0 = 昇格を頼んだ / 1 = ほかの Task がいるので頼まない / 2 = 判定できない・頼めない（待つのはデーモンの promoteWhenIdle で、ここでは待たない・再試行しない）
+// ほかの Task がいないことはデーモンが頼む直前にもう一度数える（`force` は付けない）。ここで見てから頼むまでの間に始まった Task も切らない。
+// デーモンが数えから除くのは、頼みが証明した Task だけ（x-task-id と、その Task の口の鍵 x-task-token。鍵は頼むたびにデーモンから読む）。本文に id を書いても除かれない。
+// exit: 0 = 昇格を頼んだ / 1 = ほかの Task がいるので頼まない / 2 = 判定できない・頼めない（ここでは待たない・再試行しない。待つのはデーモンで、設定の「新しい版を見つけたとき」が「差分を確認して上げる」のときに最新のタグを Task が空いたときに昇格する）
 import { readFileSync } from "node:fs";
 
 export type PromoteInput = {
@@ -35,13 +37,25 @@ export async function promote(o: PromoteInput): Promise<{ code: 0 | 1 | 2; out: 
     if (busy.length) {
       return { code: 1, out: [`昇格しない: ほかに動いている・待っている Task ${busy.length} 件`, ...busy.map((t) => `${t.id}\t${t.title ?? ""}\t${t.status ?? ""}`)].join("\n") };
     }
+    // this Task's proof: without it the daemon would count this Task too and refuse, so say that here instead
+    let proof: Record<string, string> = {};
+    if (o.taskId) {
+      const p = await o.fetch(`${o.base}/api/tasks/${encodeURIComponent(o.taskId)}/mcp`, { headers });
+      const token = p.ok ? ((await p.json()) as { token?: unknown } | null)?.token : undefined;
+      if (typeof token !== "string" || !token) return { code: 2, out: `昇格を頼めない: この Task（${o.taskId}）の口の鍵を読めない（${p.status}）。デーモンは証明の無い頼みではこの Task も数える` };
+      proof = { "x-task-id": o.taskId, "x-task-token": token };
+    }
     const r = await o.fetch(`${o.base}/api/daemon/promote`, {
       method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ commit: sha, force: true }),
+      headers: { ...headers, ...proof, "content-type": "application/json" },
+      // no `force`: the daemon counts the other Tasks again as it takes the request, and holds new starts until the restart
+      body: JSON.stringify({ commit: sha }),
     });
     const text = await r.text();
     if (r.status >= 200 && r.status < 300) return { code: 0, out: `${text}\ncommit ${sha}` };
+    // a Task began between the list above and the request: the daemon names it
+    const late = r.status === 409 ? (() => { try { return (JSON.parse(text) as { busy?: unknown }).busy; } catch { return undefined; } })() : undefined;
+    if (Array.isArray(late)) return { code: 1, out: [`昇格しない: ほかに動いている・待っている Task ${late.length} 件`, ...(late as Busy[]).map((t) => `${t.id}\t${t.title ?? ""}\t${t.status ?? ""}`)].join("\n") };
     return { code: 2, out: `昇格を頼めない: ${r.status} ${text}` };
   } catch (e) {
     return { code: 2, out: `デーモンに届かない: ${(e as Error).message}` };

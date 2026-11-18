@@ -20,9 +20,9 @@ description: Switchboard の変更を「動く」と言う前に、実際に動�
    curl -s -o /dev/null -w '%{http_code}\n' -H 'Origin: http://evil.example' http://localhost:5173/api/tasks   # 403 であること
    ```
 3. Chrome（claude-in-chrome。Playwright MCP の `browser_*` が同じ役、`docs/design/cloud-hosting.md` §2.1）: `navigate` → `find` で要素 ref を取り **ref でクリック**（座標クリックは textarea を外す）→ `type`
-   → ⌘↵（Inbox 保存。ランナーを起動しない安全な POST）→ `read_network_requests`（`/api/` の status）、
-   `read_console_messages`（`error|403|CORS|refused`）、スクリーンショット、デーモン側 `curl /api/inbox` で反映確認。
-4. 後始末: 作ったメモを消す（`~/Knowledge/notes/<date>-<title>.md`）、タブを閉じる、立てたプロセスを止める。
+   → `read_network_requests`（`/api/` の status）、
+   `read_console_messages`（`error|403|CORS|refused`）、スクリーンショット。入力欄は「開始」だけで、押すとランナーが起動する（書き込みの経路は偽ランナーのデーモンで確かめる）。
+4. 後始末: タブを閉じる、立てたプロセスを止める。
 
 ## 画面を撮って見る（画面の変更は必ず）
 
@@ -54,10 +54,10 @@ ops-kit heavy --name "screens-audit" -- bun scripts/screens-audit.ts --screens b
 
 ## 隔離した偽ランナーのデーモン
 
-`packages/core/src/devproxy.test.ts` と同じく、ランナー未登録の `[]` を使う。実ランナーは起動しない。応答の合成が要る場合は `packages/core/src/core.test.ts` の偽アダプタを使う。
+`packages/core/src/devproxy.test.ts` と同じく、ランナー未登録の `[]` を使う。実ランナーは起動しない。応答の合成が要る場合は `packages/core/src/api-test-harness.ts` の偽アダプタ（`fakeAdapter`）を使う。
 
 ```bash
-W=$(mktemp -d /tmp/switchboard.e2e.XXXXXX)
+W=$(mktemp -d "${TMPDIR:-/tmp}/switchboard.e2e.XXXXXX")
 PORT=47911
 while lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; do
   PORT=$((PORT + 1))

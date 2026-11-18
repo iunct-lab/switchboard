@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { switchboardRowView } from "./loginRow.ts";
 import { countriesUrl, hasTypedText, logoutPath, hostStopped, loginRoute, RUNNER_LOGIN_WARN_MS, runnerLoginLabel, sessionLabel, sessionRefreshDelay, STUCK_RESCUE, stoppedRoute, withoutFromAuth } from "./login.ts";
 
-describe("login route (#211)", () => {
+describe("login route", () => {
   test("the daemon's login mode decides: passkey goes to /_auth/ with the way back, token asks for the token", () => {
     expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: "/approvals?x=1" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2Fapprovals%3Fx%3D1" });
     expect(loginRoute({ authorized: false, hasToken: true, mode: "passkey", path: "/" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2F" }); // a stale token does not help there
@@ -20,7 +20,7 @@ describe("login route (#211)", () => {
     expect(loginRoute({ authorized: true, hasToken: false, mode: "passkey", path: "/?from=auth" })).toEqual({ kind: "none" });
   });
 
-  test("once in, the passkey page's mark is dropped, so a later refusal goes back to the passkey page (#709)", () => {
+  test("once in, the passkey page's mark is dropped, so a later refusal goes back to the passkey page", () => {
     expect(withoutFromAuth("/?from=auth")).toBe("/");
     expect(withoutFromAuth("/approvals?x=1&from=auth")).toBe("/approvals?x=1");
     expect(withoutFromAuth("/approvals?x=1")).toBeNull();
@@ -29,7 +29,7 @@ describe("login route (#211)", () => {
     expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: withoutFromAuth("/?from=auth")! })).toEqual({ kind: "passkey", url: "/_auth/?next=%2F" });
   });
 
-  test("a Task's URL comes back after the login (#3355)", () => {
+  test("a Task's URL comes back after the login", () => {
     expect(loginRoute({ authorized: false, hasToken: false, mode: "passkey", path: "/task/abc?x=1" })).toEqual({ kind: "passkey", url: "/_auth/?next=%2Ftask%2Fabc%3Fx%3D1" });
     expect(withoutFromAuth("/task/abc?from=auth")).toBe("/task/abc");
   });
@@ -45,24 +45,24 @@ test("stoppedRoute: CloudFront's HTML 503 means the cloud host is off → the lo
   expect(stoppedRoute({ status: 503, contentType: "application/json", path: "/" })).toBeNull();
   expect(stoppedRoute({ status: 500, contentType: "text/html", path: "/" })).toBeNull();
   expect(stoppedRoute({ status: 401, contentType: "application/json", path: "/" })).toBeNull();
-  expect(stoppedRoute({ status: 424, contentType: "application/json", path: "/" })).toBeNull(); // the daemon's "GitHub / sb-rescue failed" (#364)
+  expect(stoppedRoute({ status: 424, contentType: "application/json", path: "/" })).toBeNull(); // the daemon's "GitHub / sb-rescue failed"
 });
 
-test("stuck links to the same origin's rescue page (#399), which the service worker leaves to the server", async () => {
+test("stuck links to the same origin's rescue page, which the service worker leaves to the server", async () => {
   expect(STUCK_RESCUE).toBe("/rescue/");
   const sw = await Bun.file(new URL("../public/sw.js", import.meta.url)).text();
   expect(new RegExp(sw.match(/const LIVE = \/(.+)\/;/)![1]!).test(STUCK_RESCUE)).toBe(true);
 });
 
-describe("countries entry (#1639)", () => {
-  test("countriesUrl is only for the passkey login (#1639)", () => {
+describe("countries entry", () => {
+  test("countriesUrl is only for the passkey login", () => {
     expect(countriesUrl("passkey")).toBe("/_auth/#countries");
     expect(countriesUrl("token")).toBeNull();
     expect(countriesUrl(undefined)).toBeNull();
   });
 });
 
-describe("logout entry (#1850)", () => {
+describe("logout entry", () => {
   test("logoutPath is only for the passkey login, and the service worker leaves it to the server", async () => {
     expect(logoutPath("passkey")).toBe("/_auth/logout");
     expect(logoutPath("token")).toBeNull();
@@ -124,7 +124,7 @@ test("hasTypedText: a non-blank text field is typed text; empty and blank ones a
   expect(hasTypedText(doc("", "draft"))).toBe(true);
 });
 
-describe("sessionLabel (#498)", () => {
+describe("sessionLabel", () => {
   const at = (h: number, d = 27) => new Date(2026, 9, d, h, 0).getTime();
   test("the earlier of the idle time and the cap, the cap in the hover text, expired at the idle time or the cap", () => {
     const now = at(10, 26);
@@ -136,7 +136,7 @@ describe("sessionLabel (#498)", () => {
   });
 });
 
-describe("runnerLoginLabel (#3864)", () => {
+describe("runnerLoginLabel", () => {
   const end = new Date(2026, 10, 20, 9, 15).getTime();
   const info = { loginExpiresAt: end, loginHint: "claude auth login" };
   test("no expiry → null; the title names the end and the command; the bar only under 72 hours", () => {
@@ -152,7 +152,7 @@ describe("runnerLoginLabel (#3864)", () => {
   });
 });
 
-test("sessionRefreshDelay: the health read at the login's end comes a second after it, at once (+1 s) when it has passed (#498)", () => {
+test("sessionRefreshDelay: the health read at the login's end comes a second after it, at once (+1 s) when it has passed", () => {
   expect(sessionRefreshDelay(10_000, 4_000)).toBe(7_000);
   expect(sessionRefreshDelay(10_000, 10_000)).toBe(1_000);
   expect(sessionRefreshDelay(10_000, 99_000)).toBe(1_000);

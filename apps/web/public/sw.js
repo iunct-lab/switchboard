@@ -1,8 +1,8 @@
-// Switchboard's service worker (#26): only the app shell is cached, so the PWA opens without the network. The API,
+// Switchboard's service worker: only the app shell is cached, so the PWA opens without the network. The API,
 // the event socket and MCP are never touched — approvals must always be live, and an answer must reach the daemon.
 const CACHE = "switchboard-shell-v1";
 // /_auth (the login on the Starter Lambda), /_start (the page CloudFront shows while the machine is stopped) and
-// /rescue are not the app: never answered from here (#211). /artifacts is a registered report (#1777): a page of it opened in a tab
+// /rescue are not the app: never answered from here. /artifacts is a registered report: a page of it opened in a tab
 // must not be kept as the app shell.
 const LIVE = /^\/(api|ws|mcp|artifacts|_auth|_start|rescue)(\/|$)/;
 
@@ -28,7 +28,7 @@ self.addEventListener("fetch", (event) => {
   if (event.request.mode === "navigate") {
     // Network first: a new build shows at once. Only a real page becomes the shell. A page the server sent with an
     // error status is shown as it is and not kept: on the cloud host that is the "stopped" page that leads to the login
-    // and 起動する (#211), which the cached shell must not hide. Offline (no answer at all), the cached shell.
+    // and 起動する, which the cached shell must not hide. Offline (no answer at all), the cached shell.
     const shell = (r) => caches.match("/").then((hit) => hit ?? r);
     event.respondWith(
       fetch(event.request)

@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: env -u SWITCHBOARD_SUPERVISED bun scripts/stuck-schedules-e2e.ts. Requires
- * Chrome (CHROME_BIN overrides; default /usr/local/bin/chromium). No GitHub, no real runner (#4479, #4501).
+ * Chrome (CHROME_BIN overrides; default /usr/local/bin/chromium). No GitHub, no real runner.
  *
  * The daemon is the real one (startServer, a throwaway SWITCHBOARD_HOME); the fake runner reports a stop the way a real
  * one does (a `switchboard-stop` fence) for the first two runs of a schedule and ends without one from the third. Checked

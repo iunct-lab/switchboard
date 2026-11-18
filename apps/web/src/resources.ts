@@ -123,7 +123,7 @@ export function consumerRows(c: NonNullable<OpsResources["consumers"]>): Array<{
 }
 
 /**
- * A job's row on the resources screen (#3995): its kind (with the review's runner), its status in words (not by color
+ * A job's row on the resources screen: its kind (with the review's runner), its status in words (not by color
  * alone; a failure with its exit code), and how long it has run or ran.
  */
 export function jobRow(job: OpsJob, now: number): { kind: string; status: string; elapsed: string } {

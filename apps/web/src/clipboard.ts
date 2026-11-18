@@ -2,7 +2,7 @@ import { t } from "./i18n.ts";
 import { task as m } from "./i18n/task.ts";
 
 /**
- * Copy text for the copy buttons (#695). `navigator.clipboard` exists only on HTTPS and localhost; opened over plain
+ * Copy text for the copy buttons. `navigator.clipboard` exists only on HTTPS and localhost; opened over plain
  * HTTP (a phone on the LAN, docs/design/mobile-approval.md) the old `execCommand("copy")` still works. When neither
  * does, the caller gets an error to show instead of a button that silently does nothing.
  */

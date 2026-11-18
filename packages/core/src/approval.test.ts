@@ -82,7 +82,7 @@ describe("approval rules and saved policies", () => {
   const NOW = 1_800_000_000_000;
   const policy = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => ({
     id: "pol_1", scope: "repo", workspaceId: "ws", pbi: null, askId: null, kind: "approval", op: "exec", target: "git status*", when: [], answer: { kind: "allow" }, expiresAt: NOW + 1000, revokedAt: null, createdAt: NOW, updatedAt: NOW,
-    from: { kind: "approval", op: "exec", target: "git status", conditions: [], head: null }, uses: [], ...over,
+    from: { kind: "approval", op: "exec", target: "git status", conditions: [], head: null }, uses: [], useCount: 0, firstUsedAt: null, ...over,
   });
   const view = (list: AnswerPolicy[]) => ({ list, pbiOpen: () => true, now: NOW });
 

@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
-import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Deps, type LocalCiResult, type Offload } from "./local-ci";
+import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Deps, type LocalCiResult, type Offload, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash } from "./local-ci";
 import type { OffloadLog, OffloadRecord } from "./offload-record";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
@@ -16,7 +16,7 @@ const passOf = (body: string) => {
   const m = LOCAL_CI_RESULT.exec(body);
   return m?.[1] === "pass" ? [m[2], m[3]] : undefined;
 };
-/** The steps a PR's local CI runs: Actions' without the perf ones (the tag CI measures them, #4076). */
+/** The steps a PR's local CI runs: Actions' without the perf ones (the tag CI measures them). */
 const prSteps = withoutPerf(ciSteps);
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const BASE = "3333333333333333333333333333333333333333";
@@ -25,14 +25,14 @@ const CACHE = mkdtempSync(join(tmpdir(), "sb-local-ci-test-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
 
 describe("local-ci", () => {
-  test("the steps are what Actions runs: ci.yml's one run: step is scripts/ci.ts, expanded into its steps in order (#912)", async () => {
+  test("the steps are what Actions runs: ci.yml's one run: step is scripts/ci.ts, expanded into its steps in order", async () => {
     expect([...ciYml.matchAll(/^\s+- (?:name: .*\n\s+)?run: (.*)$/gm)].map((m) => m[1])).toEqual(["bun scripts/ci.ts"]);
     expect(await checkoutSteps(join(import.meta.dir, ".."), { PATH: process.env.PATH ?? "" })).toEqual(ciSteps);
     const runs = ciSteps.map((s) => s.run.trim());
     expect(runs).toContain("bun test");
     expect(runs).toContain("bun run typecheck");
     expect(runs).toContain("bun run --cwd apps/web build");
-    // the perf ratchet (#638) runs on the build, then bun test last (#2945)
+    // the perf ratchet runs on the build, then bun test last
     expect(runs.slice(-3)).toEqual(["bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json --base perf-base.json || { cat perf-result.json; exit 1; }", "bun test"]);
   });
 
@@ -88,7 +88,7 @@ describe("local-ci", () => {
     return { d, calls, ran, envs, logged };
   };
 
-  describe("known failures (#4841)", () => {
+  describe("known failures", () => {
     const KNOWN = (rows: Array<{ test: string; issue: number; until: string }>) => JSON.stringify(rows);
     const A = { test: "a.test.ts > flaky one", issue: 4826, until: "2026-11-20" };
     const B = { test: "b.test.ts > flaky two", issue: 4827, until: "2026-11-20" };
@@ -229,7 +229,8 @@ describe("local-ci", () => {
       return f;
     };
     const names = (ran: string[]) => ran.map((r) => (r.startsWith("bun test") ? "bun test" : r));
-    const INCREMENTAL_RUNS = ["bun install --frozen-lockfile", "bun run typecheck", "bun test './a.test.ts'"];
+    // the CI's order: the tree checks an added commit can break (issue numbers in comments, file sizes, the public docs) stay in
+    const INCREMENTAL_RUNS = ["bun install --frozen-lockfile", "bun ops-kit/src/cli.ts issue-refs", "bun scripts/file-size.ts", "bun run typecheck", "bun scripts/public-docs.ts check", "bun test './a.test.ts'"];
 
     test("a commit added after the pass: the tests are chosen from its files only, and only install, type check and that bun test run", async () => {
       const { d, ran, calls } = incDeps("selected: 1\na.test.ts  a.ts → a.test.ts");
@@ -325,7 +326,7 @@ describe("local-ci", () => {
           f.d.sh = async (cmd, cwd) => {
             if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
             // existingPass reads the head with the comments: the pass is of an earlier head
-            if (cmd[0] === "gh" && cmd.includes("headRefOid,comments")) return JSON.stringify({ headRefOid: SHA, comments: [] });
+            if (cmd[0] === "gh" && cmd.includes("headRefOid,baseRefOid,comments")) return JSON.stringify({ headRefOid: SHA, baseRefOid: BASE, comments: [] });
             if (cmd.includes("defaultBranchRef")) return "main\n";
             if (cmd.includes("rev-parse") && cmd.includes("refs/local-ci/42/default")) return `${TIP}\n`;
             return inner(cmd, cwd);
@@ -364,12 +365,15 @@ describe("local-ci", () => {
     });
 
     test("incrementalSteps keeps the install, type check and the narrowed test; a CI lacking one gives none", () => {
-      expect(incrementalSteps(ciSteps, ["a.test.ts"])!.map((s) => s.run)).toEqual(["bun install --frozen-lockfile", "bun run typecheck", "bun test './a.test.ts'"]);
+      expect(incrementalSteps(ciSteps, ["a.test.ts"])!.map((s) => s.run)).toEqual(INCREMENTAL_RUNS);
+      // a CI without the tree checks (another repository's steps) is still incremental, on the three alone
+      const plain = ciSteps.filter((s) => !INCREMENTAL_ALSO.includes(s.run.trim()));
+      expect(incrementalSteps(plain, ["a.test.ts"])!.map((s) => s.run)).toEqual(["bun install --frozen-lockfile", "bun run typecheck", "bun test './a.test.ts'"]);
       expect(incrementalSteps(ciSteps.filter((s) => s.run.trim() !== "bun run typecheck"), [])).toBeUndefined();
     });
   });
 
-  describe("the narrowed bun test (#3297)", () => {
+  describe("the narrowed bun test", () => {
     const opts = (select: string) => [undefined, undefined, "1 fail", {}, false, { select }] as const;
     const tests = (ran: string[]) => ran.filter((r) => r.startsWith("bun test") || r.startsWith('echo "no test'));
 
@@ -467,21 +471,21 @@ describe("local-ci", () => {
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     expect(r).toMatchObject({ ok: true, sha: SHA });
     expect(ran).toEqual(prSteps.map((s) => s.run.trim()));
-    // what Actions' pull_request run tests: the latest head merged here into the base branch's latest tip (#913)
+    // what Actions' pull_request run tests: the latest head merged here into the base branch's latest tip
     expect(calls.filter((c) => c.includes("fetch")).map((c) => c.slice(1).join(" "))).toEqual(["-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/base", "-C /repo fetch -q origin +refs/pull/42/head:refs/local-ci/42/head", "-C /repo fetch -q origin +refs/heads/main:refs/local-ci/42/default"]);
     const add = calls.find((c) => c.includes("worktree") && c.includes("add"))!;
     expect(add.at(-1)).toBe(BASE);
     expect(calls.find((c) => c.includes("merge"))!.slice(-4)).toEqual(["-q", "--no-ff", "--no-edit", SHA]);
     expect(calls.find((c) => c.includes("merge"))![2]).toBe(add[add.indexOf("--detach") + 1]);
     expect(Object.keys(envs[0]!).sort()).toEqual(["CI", "HOME", "PATH", "TMPDIR", ...(process.env.SWITCHBOARD_FIXTURES === undefined ? [] : ["SWITCHBOARD_FIXTURES"])].sort());
-    // TMPDIR is under the OS temp dir the `local` perf ceilings were measured with, not ~/.cache (#1056)
+    // TMPDIR is under the OS temp dir the `local` perf ceilings were measured with, not ~/.cache
     expect(envs[0]!.TMPDIR).toStartWith(join(tmpdir(), "switchboard.local-ci-42-tmp."));
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
     const body = resultComment(r);
     expect(passOf(body)).toEqual([SHA, BASE]);
   });
 
-  test("a PR's steps have no perf: no web build, fetch main, fonts, base, perf-bench or perf-ratchet; the install, typecheck and bun test stay (#4076)", async () => {
+  test("a PR's steps have no perf: no web build, fetch main, fonts, base, perf-bench or perf-ratchet; the install, typecheck and bun test stay", async () => {
     const { d, ran } = deps();
     await localCi(42, "/repo", d, "example/development", CACHE);
     expect(ran.some((r) => r.includes("perf-bench") || r.includes("perf-ratchet") || r.includes("apps/web build") || r.includes("git fetch") || r.includes("fc-list"))).toBe(false);
@@ -514,7 +518,7 @@ describe("local-ci", () => {
     }
   });
 
-  test("step seconds in pass marker: a checkout without scripts/ci.ts (--repo) passes without the seconds, not with an error (#1886)", async () => {
+  test("step seconds in pass marker: a checkout without scripts/ci.ts (--repo) passes without the seconds, not with an error", async () => {
     const { d } = deps(undefined, undefined, "1 fail", {}, false, { noCiTs: true });
     const r = await localCi(42, "/repo", d, "example/other", CACHE);
     expect(r.ok).toBe(true);
@@ -522,7 +526,7 @@ describe("local-ci", () => {
     expect(markerSeconds(resultComment(r))).toBeUndefined();
   });
 
-  test("step seconds in pass marker: the type check's and bun test's seconds on the line after the first, read back by markerSeconds (#1886)", async () => {
+  test("step seconds in pass marker: the type check's and bun test's seconds on the line after the first, read back by markerSeconds", async () => {
     const { d } = deps();
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     // the checkout has scripts/ci.ts: a pass carries the seconds of both steps
@@ -541,7 +545,7 @@ describe("local-ci", () => {
     expect(() => stepSeconds(results.filter((x) => x.name !== "bun test"))).toThrow("`bun test`");
   });
 
-  test("test duration ceiling: seconds over the checkout's `local` ceiling still pass, with an over: line as a warning in the comment and an exit 0 (#1887)", async () => {
+  test("test duration ceiling: seconds over the checkout's `local` ceiling still pass, with an over: line as a warning in the comment and an exit 0", async () => {
     const { d, logged } = deps(undefined, undefined, "1 fail", {}, false, { budget: { local: { durations: { typecheck: 60, test: -1 } } } });
     const r = await localCi(42, "/repo", d, "example/development", CACHE);
     expect(r.ok).toBe(true);
@@ -557,7 +561,7 @@ describe("local-ci", () => {
     expect(body).not.toContain("結果: ");
   });
 
-  test("test duration ceiling: within the ceilings, or a budget without them, passes with the seconds (#1887)", async () => {
+  test("test duration ceiling: within the ceilings, or a budget without them, passes with the seconds", async () => {
     for (const budget of [{ local: { durations: { typecheck: 60, test: 50 } } }, { local: {} }, { github: {} }]) {
       const r = await localCi(42, "/repo", deps(undefined, undefined, "1 fail", {}, false, { budget }).d, "example/development", CACHE);
       expect(r.ok).toBe(true);
@@ -566,7 +570,7 @@ describe("local-ci", () => {
     }
   });
 
-  test("test duration ceiling: a narrowed run is not compared on bun test, a full fall-back and the type check are (#3297)", async () => {
+  test("test duration ceiling: a narrowed run is not compared on bun test, a full fall-back and the type check are", async () => {
     const run = (select: string, durations: object) => {
       const { d } = deps(undefined, undefined, "1 fail", {}, false, { budget: { local: { durations } }, select });
       const step: Deps["step"] = async (script, cwd, env) => {
@@ -581,7 +585,7 @@ describe("local-ci", () => {
     expect((await run("full: x", { typecheck: 60, test: 0.1 })).warnings?.[0]).toContain("durations.test");
   });
 
-  test("the comment says what bun test covered; the mark stays (#3297)", () => {
+  test("the comment says what bun test covered; the mark stays", () => {
     const r: LocalCiResult = { sha: SHA, base: BASE, ok: true, seconds: { typecheck: 1, test: 2 }, results: [{ name: "bun test", run: "bun test", code: 0, seconds: 2, tail: "" }] };
     const narrowed = resultComment({ ...r, selection: { files: ["a.test.ts", "b.test.ts"], total: 200, reason: "x" } });
     const full = resultComment({ ...r, selection: { files: null, total: 200, reason: "bun.lock: 依存の定義や設定" } });
@@ -592,7 +596,7 @@ describe("local-ci", () => {
     expect(testsOf(narrowed)).toEqual({ ran: 2, total: 200 });
     expect(testsOf(full)).toEqual({ ran: null, total: 200 });
     expect(testsOf(all)).toBeUndefined();
-    // a checkout with no test file says so, not that it fell back to every test (#3932)
+    // a checkout with no test file says so, not that it fell back to every test
     const none = resultComment({ ...r, selection: { files: null, total: 0, reason: "scripts/test-select.ts が無い", unjudged: true } });
     expect(none).toContain("テスト: なし（`*.test.ts` / `*.test.tsx` のファイルが 1 つも無い）");
     expect(none).not.toContain("全テストに倒した");
@@ -645,7 +649,7 @@ describe("local-ci", () => {
     expect(sent).toBe(true);
     expect(posted).toHaveLength(1);
     expect(passOf(posted[0]!)).toEqual([SHA, BASE]);
-    // the first line only (#3118): what merge-gate reads; the seconds line is hidden in GitHub's view
+    // the first line only: what merge-gate reads; the seconds line is hidden in GitHub's view
     expect(posted[0]!.split("\n")[1]).toStartWith("<!-- local-ci-seconds ");
     expect(posted[0]).toContain(`対象: head \`${SHA}\` を base \`${BASE}\` にマージ`);
     expect(posted[0]!.split("\n").filter((l) => l.startsWith("| `")).length).toBe(prSteps.length);
@@ -742,6 +746,11 @@ describe("local-ci", () => {
   test("stepEnv preserves only explicitly supplied recordings and excludes other SWITCHBOARD_* values", () => {
     const env = stepEnv("/home/x/.cache/t", { PATH: "/bin", SWITCHBOARD_FIXTURES: "/caller/recordings", SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOST: "0.0.0.0", TMPDIR: "/tmp" });
     expect(env).toEqual({ PATH: "/bin", HOME: expect.any(String), SWITCHBOARD_FIXTURES: "/caller/recordings", CI: "true", TMPDIR: "/home/x/.cache/t" });
+  });
+
+  test("stepEnv: a step gets no token, key or place of the app's files from the caller's environment, whether its script came from the checkout or from the settings Switchboard keeps", () => {
+    const from = { PATH: "/bin", GH_TOKEN: "x", GITHUB_TOKEN: "x", AWS_ACCESS_KEY_ID: "x", AWS_SECRET_ACCESS_KEY: "x", AWS_SESSION_TOKEN: "x", AWS_PROFILE: "x", SWITCHBOARD_TOKEN_PATH: "/h/token", SWITCHBOARD_HOME: "/h", BACKLOG_URL: "http://127.0.0.1:1", OPS_KIT_CONFIG: "/h/c.json", OPS_KIT_TASK_ID: "t", ANTHROPIC_API_KEY: "x", OPENAI_API_KEY: "x" };
+    expect(Object.keys(stepEnv("/t", from)).sort()).toEqual(["CI", "HOME", "PATH", "TMPDIR"]);
   });
 
   test("stepEnv: missing recordings skip when unset and fail when explicitly supplied", async () => {
@@ -851,7 +860,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(run.results.find((x) => x.run === CHECK)!.fails).toEqual([over]);
   });
 
-  test("a GitLab project in a subgroup keeps its failure log too: every slash of its path goes (#892)", async () => {
+  test("a GitLab project in a subgroup keeps its failure log too: every slash of its path goes", async () => {
     const { d } = deps("bun test", SHA, "(fail) x");
     const r = await localCi(42, "/repo", d, "group/sub/app", CACHE);
     const log = r.results.at(-1)!.log!;
@@ -907,7 +916,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(run.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], unknown: true });
   });
 
-  test("perf and bun test both failing: the comment names both steps with their raised: and (fail) lines (#2945)", async () => {
+  test("perf and bun test both failing: the comment names both steps with their raised: and (fail) lines", async () => {
     const raised = "raised: local.journeys.launch.requests ceiling 14 > main's 13 (raising a ceiling is merged by hand)";
     const { r, failed, ran, logged, logDir } = await perfRun(CHECK, `ceilings: local\n${raised}\n{\n${JSON_DUMP}\n}`, (d, ran) => ({ ...d, step: async (script, cwd, env) => (script.trim() === "bun test" ? (ran.push("bun test"), { code: 1, output: "(fail) a > b\n1 fail" }) : d.step(script, cwd, env)) }));
     try {
@@ -977,7 +986,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(failLines("all good")).toEqual([]);
   });
 
-  test("localCi writes no record of main's bundle or bytes (the tag CI does, #4105), even with a perf-base.json in the worktree", async () => {
+  test("localCi writes no record of main's bundle or bytes (the tag CI does), even with a perf-base.json in the worktree", async () => {
     const { d, calls } = deps();
     const withBase: Deps = {
       ...d,
@@ -1009,7 +1018,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const OTHER = "9999999999999999999999999999999999999999";
     const pass = (sha: string) => `[local-ci] pass ${sha} base=${BASE}\n`;
     const c = (body: string, createdAt: string, url = "https://x/7#issuecomment-1", authorAssociation = "MEMBER") => ({ body, createdAt, url, authorAssociation });
-    const fake = (comments: unknown[]) => async (cmd: string[]) => JSON.stringify({ headRefOid: SHA, comments });
+    const fake = (comments: unknown[]) => async (cmd: string[]) => JSON.stringify({ headRefOid: SHA, baseRefOid: BASE, comments });
     const found = (comments: unknown[]) => {
       return existingPass(7, "o/r", fake(comments));
     };
@@ -1019,7 +1028,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(await found([c(`note\n${pass(SHA)}`, "2026-11-01T00:00:00Z")])).toBeUndefined();
     expect(await found([c(pass(SHA), "2026-11-01T00:00:00Z", "u", "NONE")])).toBeUndefined();
     expect(await found([])).toBeUndefined();
-    // as merge-gate counts it: the newest result rules; the first line alone is a pass (#3118)
+    // as merge-gate counts it: the newest result rules; the first line alone is a pass
     expect(await found([c(pass(SHA), "2026-11-01T00:00:00Z"), c(`[local-ci] fail ${SHA} base=${BASE}\n`, "2026-11-01T01:00:00Z")])).toBeUndefined();
     expect(await found([c(`[local-ci] fail ${SHA} base=${BASE}\n`, "2026-11-01T00:00:00Z"), c(pass(SHA), "2026-11-01T01:00:00Z", "new")])).toBe("new");
     expect(await found([c(`[local-ci] pass ${SHA} base=${BASE}\n`, "2026-11-01T00:00:00Z")])).toBe("https://x/7#issuecomment-1");
@@ -1086,7 +1095,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     expect(e).toBeInstanceOf(TargetError);
     expect(e.message).not.toContain("SECRET");
     expect(remoteRepo("https://gitlab.com/o/r.git")).toBeUndefined();
-    // a forge naming the app (#2488): no PR to run, whatever the origin
+    // a forge naming the app: no PR to run, whatever the origin
     const appTree = mkdtempSync(join(CACHE, "app-forge-"));
     writeFileSync(join(appTree, "ops.config.json"), JSON.stringify({ forge: { service: "app" } }));
     for (const args of [["7"], ["7", "--repo", "o/r"]]) {
@@ -1098,14 +1107,14 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     writeFileSync(join(appTree, "ops.config.json"), "{");
     expect(await resolveTarget(["7", "--repo", "o/r"], appTree, appTree, run("https://github.com/o/r.git", appTree).sh).catch((err) => err)).toBeInstanceOf(TargetError);
   });
-  describe("off the host: sb-offload (#2305)", () => {
+  describe("off the host: sb-offload", () => {
     // a started build's record stays until its result is posted (`main`): one test's is not the next one's
     const forget = () => rmSync(pendingDirOf(CACHE), { recursive: true, force: true });
     afterEach(forget);
     /** The fake deps with a fake build: each call's script, options and cwd; `answer` gives the code and log from the steps (names read from the script). The host's `step` and `slot` fail the test when the CI's steps use them. */
     const withOffload = (answer?: (steps: string[], script: string) => { code: number; output: string } | undefined, o: Parameters<typeof deps>[5] = {}, fixtures?: { dir: string; required: boolean }) => {
       const x = deps(undefined, undefined, "1 fail", {}, false, o);
-      const builds: Array<{ script: string; o: { size: string; fixtures?: string; names?: string }; cwd: string; names?: string }> = [];
+      const builds: Array<{ script: string; o: { size: string; fixtures?: string; names?: string; imageRoot?: string }; cwd: string; names?: string }> = [];
       const slots: string[] = [];
       x.d.slot = async (name, fn) => (slots.push(name), fn());
       const answers = new Map<string, Promise<{ code: number; output: string }>>();
@@ -1127,6 +1136,139 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       return { ...x, builds, slots };
     };
     const sentOf = (script: string) => [...script.matchAll(/^bash -e -c '([\s\S]*?)'; c=/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
+
+    /** `main` on the clone `root` of `url`, run by the script of the clone `scriptRoot`. */
+    const mainOn = async (x: ReturnType<typeof withOffload>, args: string[], root: string, scriptRoot: string, url: string, post: (body: string) => Promise<void> = async () => undefined) => {
+      const fake = x.d.sh;
+      x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? `${url}\n` : cmd.includes("--show-toplevel") ? `${root}\n` : fake(cmd, cwd));
+      return main(args, root, x.d, async (_t, body) => post(body), scriptRoot, CACHE);
+    };
+    const clone = (name: string, url: string) => {
+      const root = mkdtempSync(join(CACHE, name));
+      Bun.spawnSync(["git", "init", "-q", root]);
+      Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", url]);
+      return root;
+    };
+
+    test("the ci image's source is this clone's own checkout for its PR, and Switchboard's clone for another repository's; an sb-offload without --image-root starts nothing", async () => {
+      const self = clone("image-self-", "https://github.com/example/development.git");
+      const other = clone("image-other-", "https://github.com/example/other.git");
+      // a file of the same path in the other repository changes nothing: the caller names the source
+      mkdirSync(join(other, "container"));
+      writeFileSync(join(other, "container", "Dockerfile"), "FROM another\n");
+      expect(imageRootFor(self, self)).toEqual({});
+      expect(imageRootFor(other, self)).toEqual({ imageRoot: self });
+      // a worktree of this clone is this clone (a Task's worktree, the daemon's release): its own Dockerfile
+      Bun.spawnSync(["git", "-C", self, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgSign=false", "commit", "-q", "--allow-empty", "-m", "x"]);
+      const wt = join(CACHE, `image-wt-${Date.now()}`);
+      Bun.spawnSync(["git", "-C", self, "worktree", "add", "-q", "--detach", wt]);
+      expect(imageRootFor(wt, self)).toEqual({});
+
+      const own = withOffload();
+      expect(await mainOn(own, ["42"], self, self, "https://github.com/example/development.git")).toBe(0);
+      expect(own.builds).toHaveLength(1);
+      expect(own.builds[0]!.o.imageRoot).toBeUndefined();
+      forget();
+      const foreign = withOffload();
+      expect(await mainOn(foreign, ["42", "--repo", "example/other"], other, self, "https://github.com/example/other.git")).toBe(0);
+      expect(foreign.builds[0]!.o.imageRoot).toBe(self);
+      forget();
+      // the installed sb-offload is from before the flag: it would take it for the command, so no build starts and nothing is posted
+      const old = withOffload();
+      old.d.offload!.knows = async (flag) => flag !== "--image-root";
+      const posted: string[] = [];
+      const errors: string[] = [];
+      const orig = console.error;
+      console.error = (...m: unknown[]) => void errors.push(m.join(" "));
+      try {
+        expect(await mainOn(old, ["42", "--repo", "example/other"], other, self, "https://github.com/example/other.git", async (b) => void posted.push(b))).toBe(2);
+      } finally {
+        console.error = orig;
+      }
+      expect(old.builds).toEqual([]);
+      expect(posted).toEqual([]);
+      expect(errors.join("\n")).toContain("外のビルドを始められなかった（exit 2）\nsb-offload が --image-root を知らない（ホストの次の起動で入る）");
+      // the real sb-offload gets the flag only when a source is named
+      const bin = mkdtempSync(join(CACHE, "bin-ir-"));
+      writeFileSync(join(bin, "sb-offload"), '#!/bin/sh\necho "$*" > "$0.args"\necho "sb-offload: started b9"\n', { mode: 0o755 });
+      const saved = process.env.PATH;
+      process.env.PATH = `${bin}:${saved}`;
+      try {
+        await hostOffload()!.start("true", bin, { size: "small", imageRoot: self });
+        expect(readFileSync(join(bin, "sb-offload.args"), "utf8").trim()).toBe(`--ci --detach --image-root ${self} --size small true`);
+        await hostOffload()!.start("true", bin, { size: "small" });
+        expect(readFileSync(join(bin, "sb-offload.args"), "utf8").trim()).toBe("--ci --detach --size small true");
+      } finally {
+        process.env.PATH = saved;
+      }
+    });
+
+    test("a build that sb-offload could not start is no result of the PR: nothing posted, no pending record, exit 2 with what sb-offload printed", async () => {
+      const root = clone("not-started-", "https://github.com/example/development.git");
+      const x = withOffload();
+      x.d.offload!.start = async () => {
+        throw new OffloadStartError(1, "sha256sum: /w/container/Dockerfile: No such file or directory\n");
+      };
+      const posted: string[] = [];
+      const errors: string[] = [];
+      const orig = console.error;
+      console.error = (...m: unknown[]) => void errors.push(m.join(" "));
+      try {
+        expect(await mainOn(x, ["42"], root, root, "https://github.com/example/development.git", async (b) => void posted.push(b))).toBe(2);
+      } finally {
+        console.error = orig;
+      }
+      expect(posted).toEqual([]);
+      expect(errors).toEqual(["外のビルドを始められなかった（exit 1）\nsha256sum: /w/container/Dockerfile: No such file or directory\n結果は付けない"]);
+      expect(existsSync(pendingDirOf(CACHE)) ? readdirSync(pendingDirOf(CACHE)) : []).toEqual([]);
+      // runCheckout itself: no step is given sb-offload's exit as its own
+      const dir = mkdtempSync(join(CACHE, "not-started-co-"));
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ run: "bun install --frozen-lockfile" }] } }));
+      const r = await runCheckout(dir, {}, "not-started", x.d, CACHE);
+      expect(r).toMatchObject({ results: [], ok: false, notStarted: { code: 1 } });
+    });
+
+    test("reuse: a build of the same input key within the window is collected and none starts; another input, a width of 0, an older record and a build that did not reach its command's end start a new one", async () => {
+      const rows: OffloadRecord[] = [];
+      const log: OffloadLog = { append: (r) => void rows.push(r), read: (since) => rows.filter((r) => Date.parse(r.at) >= since) };
+      const repo = mkdtempSync(join(CACHE, "reuse-"));
+      await Bun.$`git init -q ${repo} && echo a > ${repo}/a.txt`.quiet();
+      const DONE = "sb-step: 0 begin 1\nok\nsb-step: 0 exit 3 2\nsb-offload: exit 3\n";
+      const logs = new Map<string, { code: number; output: string }>();
+      const started: string[] = [];
+      const collected: string[] = [];
+      const offload: Offload = {
+        log,
+        start: async () => (started.push(`b${started.length + 1}`), logs.set(started.at(-1)!, { code: 3, output: DONE }), { build: started.at(-1)! }),
+        collect: async (b) => (collected.push(b), logs.get(b)!),
+      };
+      const host = { names: [], accountIds: [] };
+      const steps = [{ name: "x", run: "x" }];
+      const build = (o: { hours?: number; now?: number; steps?: typeof steps } = {}) => runBuild(offload, o.steps ?? steps, repo, { caller: "typecheck", host, ...(o.hours === undefined ? {} : { reuse: { hours: o.hours, ...(o.now ? { now: o.now } : {}) } }) });
+      const first = await build({ hours: 24 });
+      expect([first.code, first.reused, started]).toEqual([3, undefined, ["b1"]]);
+      // the same work tree and script again: the earlier build's result, its code too, and no start
+      const again = await build({ hours: 24 });
+      expect(again).toEqual({ code: 3, output: DONE, reused: { build: "b1", at: rows[0]!.at } });
+      expect(started).toEqual(["b1"]);
+      expect(collected).toEqual(["b1", "b1"]);
+      // without `reuse` (--force), with a width of 0, and past the window: a new build each time
+      await build();
+      await build({ hours: 0 });
+      await build({ hours: 24, now: Date.now() + 25 * 3_600_000 });
+      expect(started).toEqual(["b1", "b2", "b3", "b4"]);
+      // another script or a changed file is another key
+      await build({ hours: 24, steps: [{ name: "y", run: "y" }] });
+      writeFileSync(join(repo, "a.txt"), "changed\n");
+      await build({ hours: 24 });
+      expect(started).toHaveLength(6);
+      // the newest build of this key was stopped before its command ended (no exit line, 130): not a result to hand back
+      logs.set("b6", { code: 130, output: "sb-offload: proj:6 ended STOPPED without the command's exit code\n" });
+      const after = await build({ hours: 24 });
+      expect(started).toHaveLength(7);
+      expect(after.reused).toBeUndefined();
+      expect(collected.slice(-2)).toEqual(["b6", "b7"]);
+    });
 
     test("every step of the CI goes to one build, in order; no step runs here and no slot is taken", async () => {
       const { d, ran, builds, slots } = withOffload();
@@ -1298,14 +1440,18 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         const usage = (flags: string) => writeFileSync(join(bin, "sb-offload"), `#!/bin/sh\necho x >> '${calls}'\necho "usage: sb-offload [--ci [--fixtures <dir>] [--names <file>]${flags}] <command…>" >&2\nexit 2\n`, { mode: 0o755 });
         usage(" [--base-tree <tar>]");
         const knows = hostOffload()!;
-        expect([await knows.knowsBaseTree!(), await knows.knowsBaseTree!()]).toEqual([true, true]);
+        expect([await knows.knows!("--base-tree"), await knows.knows!("--base-tree")]).toEqual([true, true]);
+        // the same one read answers for every flag: this usage does not name --image-root
+        expect(await knows.knows!("--image-root")).toBe(false);
         expect(readFileSync(calls, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+        usage(" [--base-tree <tar>] [--image-root <dir>]");
+        expect(await hostOffload()!.knows!("--image-root")).toBe(true);
         usage("");
-        expect(await hostOffload()!.knowsBaseTree!()).toBe(false);
+        expect(await hostOffload()!.knows!("--base-tree")).toBe(false);
         // one that cannot be run says it does not know (the start then says why), not a thrown read
         writeFileSync(join(bin, "sb-offload"), "\x7fELF not really");
         chmodSync(join(bin, "sb-offload"), 0o755);
-        expect(await hostOffload()!.knowsBaseTree!()).toBe(false);
+        expect(await hostOffload()!.knows!("--base-tree")).toBe(false);
         // not given: the usual directory, only when it exists, and not required
         delete process.env.SWITCHBOARD_FIXTURES;
         const home = mkdtempSync(join(CACHE, "home-"));
@@ -1631,13 +1777,13 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(existsSync(FILE)).toBe(true);
       });
 
-      test("pending: a build that cannot be started is the first step's failure, with sb-offload's code and output", async () => {
+      test("pending: a build that cannot be started is nobody's failed step: no result, sb-offload's code and output handed back", async () => {
         const x = withOffload();
         x.d.offload!.start = async () => Promise.reject(new OffloadStartError(2, "sb-offload: no free build in 15 minutes\n"));
         const r = await localCi(42, "/repo", x.d, "example/development", CACHE);
         expect(r.ok).toBe(false);
-        expect(r.results[0]!.code).toBe(2);
-        expect(r.results[0]!.fails).toContain("sb-offload: exit 2（ビルドの失敗）");
+        expect(r.results).toEqual([]);
+        expect(r.notStarted).toEqual({ code: 2, output: "sb-offload: no free build in 15 minutes\n" });
         // nothing started: no record
         expect(existsSync(FILE)).toBe(false);
       });
@@ -1684,7 +1830,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
           const fy = y.d.sh;
           y.d.sh = async (cmd, cwd) => {
             if (cmd.includes("get-url")) return "https://github.com/example/development.git\n";
-            if (cmd[0] === "gh" && cmd.includes("headRefOid,comments")) return JSON.stringify({ headRefOid: SHA, comments: [{ body: `[local-ci] pass ${SHA} base=${BASE}\n`, createdAt: "2026-11-01T00:00:00Z", url: "https://x/42#c", authorAssociation: "MEMBER" }] });
+            if (cmd[0] === "gh" && cmd.includes("headRefOid,baseRefOid,comments")) return JSON.stringify({ headRefOid: SHA, baseRefOid: BASE, comments: [{ body: `[local-ci] pass ${SHA} base=${BASE}\n`, createdAt: "2026-11-01T00:00:00Z", url: "https://x/42#c", authorAssociation: "MEMBER" }] });
             return fy(cmd, cwd);
           };
           expect(existsSync(FILE)).toBe(true);
@@ -2061,7 +2207,7 @@ test("recordCounts: appends the tag's counts to perf-records/counts.tsv; without
   }
 });
 
-test("the result is reported as the repository's forge verification (#920): GitHub's is the PR comment; another service is said, nothing posted", async () => {
+test("the result is reported as the repository's forge verification: GitHub's is the PR comment; another service is said, nothing posted", async () => {
   const root = mkdtempSync(join(tmpdir(), "local-ci-forge-"));
   try {
     // a checkout of GitHub (one without a remote is the app's: the "local change" tests)
@@ -2074,7 +2220,7 @@ test("the result is reported as the repository's forge verification (#920): GitH
     require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitea" } }));
     await expect(reportResult({ pr: 7, repo: "group/app", root }, "[local-ci] pass abc", run)).rejects.toThrow("サービス gitea には対応していません");
     expect(calls).toHaveLength(1);
-    // GitLab's (#924): a note on the MR through glab, on the project its forge names (checked against the origin)
+    // GitLab's: a note on the MR through glab, on the project its forge names (checked against the origin)
     Bun.spawnSync(["git", "-C", root, "remote", "set-url", "origin", "git@gitlab.example.com:group/app.git"]);
     require("node:fs").writeFileSync(join(root, "ops.config.json"), JSON.stringify({ forge: { service: "gitlab", host: "gitlab.example.com", project: "group/app" } }));
     const lab: string[][] = [];
@@ -2086,7 +2232,7 @@ test("the result is reported as the repository's forge verification (#920): GitH
   }
 });
 
-test("a GitLab checkout runs on the MR (#892): its head from refs/merge-requests/<iid>/head, its target branch's tip, the project from the forge", async () => {
+test("a GitLab checkout runs on the MR: its head from refs/merge-requests/<iid>/head, its target branch's tip, the project from the forge", async () => {
   const root = mkdtempSync(join(tmpdir(), "local-ci-gitlab-"));
   try {
     Bun.spawnSync(["git", "init", "-q", root]);
@@ -2117,7 +2263,7 @@ test("a GitLab checkout runs on the MR (#892): its head from refs/merge-requests
   }
 });
 
-test("a result holding an account id of the host's AWS config, written bare, is not posted (#2346)", async () => {
+test("a result holding an account id of the host's AWS config, written bare, is not posted", async () => {
   const root = mkdtempSync(join(tmpdir(), "local-ci-aws-"));
   const id = ["8642", "9753", "1086"].join("");
   require("node:fs").writeFileSync(join(root, "aws-config"), `[profile x-admin]\nsso_account_id = ${id}\n`);
@@ -2176,11 +2322,11 @@ test("two local-ci runs do not overlap: each takes one heavy slot for its whole 
   expect(Math.max(...first.map((s) => s.end))).toBeLessThanOrEqual(Math.min(...second.map((s) => s.start)));
 });
 
-describe("local change (#2488)", () => {
+describe("local change", () => {
   const BACKLOG = "http://app/api/backlog";
   /**
    * A repository with no remote: main with a CI whose one step is `run`, and sb/5-x one commit ahead. `place`: where the
-   * step is — ci.yml, `ops.config.json`'s `ci.steps` with no `.github/` (#3932), or nowhere.
+   * step is — ci.yml, `ops.config.json`'s `ci.steps` with no `.github/`, or nowhere.
    */
   function repo(run: string, place: "yml" | "config" | "none" = "yml") {
     const dir = mkdtempSync(join(tmpdir(), "local-ci-change-"));
@@ -2203,23 +2349,26 @@ describe("local change (#2488)", () => {
     git("checkout", "-q", "main");
     return { dir, git, tip: (b: string) => git("rev-parse", b) };
   }
-  /** The app: change #7 of `r`'s branches, its comments, and the comments posted. `onRead` runs at each read of the change. */
+  /** The app: change `#7` of `r`'s branches, its comments, and the comments posted. `onRead` runs at each read of the change. */
   function app(r: ReturnType<typeof repo>, comments: { body: string; createdAt: string }[] = [], onRead = () => {}) {
     const posted: unknown[] = [];
     const fetch = async (url: string, init: RequestInit = {}) => {
       const path = url.replace(BACKLOG, "");
       if (path === "/syncs") return new Response(JSON.stringify({ syncs: [{ workspaceId: "ws_l", backlog: "switchboard", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }));
-      if (path === "/7/comment") return posted.push(JSON.parse(String(init.body))), new Response("{}", { status: 202 });
+      // on the change, never the Issue or PR of the same number
+      if (path === "/7/comment?change=1") return posted.push(JSON.parse(String(init.body))), new Response("{}", { status: 202 });
+      if (!path.endsWith("&change=1")) return new Response(JSON.stringify({ error: `unexpected ${path}` }), { status: 404 });
       onRead();
       return new Response(JSON.stringify({ workspaceId: "ws_l", issue: { number: 7, title: "変更", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
     };
     return { fetch, posted };
   }
   const env = { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_l" };
-  async function run(r: ReturnType<typeof repo>, a: ReturnType<typeof app>, args: string[] = []) {
+  async function run(r: ReturnType<typeof repo>, a: ReturnType<typeof app>, args: string[] = [], workspace?: { name: string; file: string }) {
     const gh: string[][] = [];
     const logs: string[] = [];
     const d: Deps = {
+      ...(workspace ? { workspace: () => workspace } : {}),
       sh: async (cmd, cwd) => {
         if (cmd[0] === "gh") gh.push(cmd);
         return realSh(cmd, cwd);
@@ -2268,7 +2417,7 @@ describe("local change (#2488)", () => {
     expect(readdirSync(CACHE).some((f) => f.startsWith("switchboard.local-ci-change-ws_l-7-log."))).toBe(true);
   });
 
-  test("ops.config.json's ci.steps with no .github/: pass and fail are run and posted; no test file says so (#3932)", async () => {
+  test("ops.config.json's ci.steps with no .github/: pass and fail are run and posted; no test file says so", async () => {
     const ok = fresh("test -f b.txt", "config");
     expect(existsSync(join(ok.dir, ".github"))).toBe(false);
     const a = app(ok);
@@ -2283,7 +2432,7 @@ describe("local change (#2488)", () => {
     expect(LOCAL_CI_RESULT.exec((b.posted[0] as { text: string }).text)?.[1]).toBe("fail");
   });
 
-  test("checkoutSteps: ci.steps wins over ci.yml, and a step's name is its own or its run's first line (#3932)", async () => {
+  test("checkoutSteps: ci.steps wins over ci.yml, and a step's name is its own or its run's first line", async () => {
     const r = fresh("echo yml");
     writeFileSync(join(r.dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ name: "lint", run: "echo a" }, { run: "echo b\necho c" }] } }));
     expect(await checkoutSteps(r.dir, {})).toEqual([{ name: "lint", run: "echo a" }, { name: "echo b", run: "echo b\necho c" }]);
@@ -2292,7 +2441,62 @@ describe("local change (#2488)", () => {
     expect(await checkoutSteps(r.dir, {})).toEqual([{ name: "echo yml", run: "echo yml" }]);
   });
 
-  test("no CI steps anywhere: exit 2 with one line naming where they go, nothing posted (#3932)", async () => {
+  /** The settings Switchboard keeps for a workspace, as the daemon writes them: a file outside the repository. */
+  const kept = (config: unknown) => {
+    const dir = mkdtempSync(join(tmpdir(), "local-ci-ws-"));
+    dirs.push(dir);
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify(config));
+    return { name: "lib", file: join(dir, "ops.config.json") };
+  };
+
+  test("a repository with neither file runs the ci.steps Switchboard keeps for its workspace: pass and fail are posted, and the comment names the workspace and the steps' hash under an unchanged first line", async () => {
+    const ok = fresh("", "none");
+    expect([existsSync(join(ok.dir, "ops.config.json")), existsSync(join(ok.dir, ".github"))]).toEqual([false, false]);
+    const a = app(ok);
+    expect((await run(ok, a, [], kept({ ci: { steps: [{ name: "check", run: "test -f b.txt" }] } }))).code).toBe(0);
+    const text = (a.posted[0] as { text: string }).text;
+    expect(text.split("\n")[0]).toBe(`[local-ci] pass ${ok.tip("sb/5-x")} base=${ok.tip("main")}`);
+    expect(text).toContain("| `check` | pass |");
+    expect(text).toContain(`手順の出どころ: Switchboard の側の設定（workspace \`lib\`、手順のハッシュ \`${stepsHash([{ name: "check", run: "test -f b.txt" }])}\`）。リポジトリには置いていない`);
+    // nothing was written to the repository
+    expect(ok.git("status", "--porcelain")).toBe("");
+    const bad = fresh("", "none");
+    const b = app(bad);
+    expect((await run(bad, b, [], kept({ ci: { steps: [{ run: "exit 3" }] } }))).code).toBe(1);
+    expect(LOCAL_CI_RESULT.exec((b.posted[0] as { text: string }).text)?.[1]).toBe("fail");
+    // the steps from the checkout carry no such line
+    const own = fresh("test -f b.txt", "config");
+    const c = app(own);
+    expect((await run(own, c, [], kept({ ci: { steps: [{ run: "exit 3" }] } }))).code).toBe(0);
+    expect((c.posted[0] as { text: string }).text).not.toContain("手順の出どころ");
+  });
+
+  test("which settings apply is one rule, a file as a whole: the checkout's ops.config.json when it has one, else the workspace's; so the order is the repository's ci.steps, the workspace's, ci.yml", async () => {
+    const ws = kept({ ci: { steps: [{ run: "echo workspace" }] } });
+    const names = async (dir: string, w?: typeof ws) => (await checkoutCi(dir, {}, w)).steps.map((s) => s.run);
+    // 1. the repository's ci.steps win over both
+    const all = fresh("echo yml");
+    writeFileSync(join(all.dir, "ops.config.json"), JSON.stringify({ ci: { steps: [{ run: "echo repo" }] } }));
+    expect(await names(all.dir, ws)).toEqual(["echo repo"]);
+    expect((await checkoutCi(all.dir, {}, ws)).source).toBeUndefined();
+    // 2. no file in the checkout: the workspace's win over ci.yml
+    const yml = fresh("echo yml");
+    expect(await names(yml.dir, ws)).toEqual(["echo workspace"]);
+    expect((await checkoutCi(yml.dir, {}, ws)).source).toEqual({ workspace: "lib", hash: stepsHash([{ name: "echo workspace", run: "echo workspace" }]) });
+    // 3. neither: ci.yml
+    expect(await names(yml.dir)).toEqual(["echo yml"]);
+    expect(await names(yml.dir, kept({ envPrefix: "X" }))).toEqual(["echo yml"]);
+    // never mixed key by key: a checkout whose file has no `ci` does not take the workspace's steps
+    writeFileSync(join(yml.dir, "ops.config.json"), JSON.stringify({ envPrefix: "X" }));
+    expect(await names(yml.dir, ws)).toEqual(["echo yml"]);
+    const none = fresh("", "none");
+    writeFileSync(join(none.dir, "ops.config.json"), JSON.stringify({ envPrefix: "X" }));
+    await expect(checkoutCi(none.dir, {}, ws)).rejects.toThrow("CI の手順が無い");
+    // a workspace's ci that is not in its shape is refused naming the workspace, not the repository's file
+    await expect(checkoutCi(fresh("", "none").dir, {}, kept({ ci: { steps: [] } }))).rejects.toThrow("workspace lib の設定（Switchboard の側） の ci が不正: ci.steps:");
+  });
+
+  test("no CI steps anywhere: exit 2 with one line naming where they go, nothing posted", async () => {
     const r = fresh("", "none");
     const a = app(r);
     const errors: string[] = [];
@@ -2304,7 +2508,11 @@ describe("local change (#2488)", () => {
       console.error = orig;
     }
     expect(a.posted).toEqual([]);
-    expect(errors).toEqual(["CI の手順が無い。`ops.config.json` の `ci.steps`（GitHub と連携するなら `.github/workflows/ci.yml`）に置く"]);
+    // the places named: the repository's file, the settings Switchboard keeps for the workspace, ci.yml
+    expect(errors).toEqual([`CI の手順が無い。${CI_STEPS_PLACES}に置く`]);
+    expect(CI_STEPS_PLACES).toContain("`ops.config.json` の `ci.steps`");
+    expect(CI_STEPS_PLACES).toContain("Switchboard の側の workspace の設定");
+    expect(CI_STEPS_PLACES).toContain("`.github/workflows/ci.yml`");
     // a ci that is not in its shape is refused the same way, naming the key
     const w = fresh("", "none");
     writeFileSync(join(w.dir, "ops.config.json"), JSON.stringify({ ci: { steps: [] } }));
@@ -2339,9 +2547,17 @@ describe("local change (#2488)", () => {
   test("not run (2): a PR number or --repo with it; not a change", async () => {
     const r = fresh("echo ok");
     for (const extra of [["12"], ["--repo", "a/b"]]) expect((await run(r, app(r), extra)).code).toBe(2);
-    // a checkout with an origin keeps its PRs on its service: nothing is run or posted on a PR of that number
+    // a number the app has no change for (it answers 404): nothing is run or posted
+    const none = { posted: [] as unknown[], fetch: async (url: string) => (url.endsWith("/syncs") ? app(r).fetch(url) : new Response(JSON.stringify({ error: "変更 #7 は保存されていません" }), { status: 404 })) };
+    expect([(await run(r, none)).code, none.posted.length]).toEqual([2, 0]);
+  });
+
+  test("a checkout with an origin (a GitHub workspace while GitHub cannot be used): the change is run and its result goes on the change, gh never called", async () => {
+    const r = fresh("test -f b.txt");
     r.git("remote", "add", "origin", "https://github.com/example/app.git");
     const a = app(r);
-    expect([(await run(r, a)).code, a.posted.length]).toEqual([2, 0]);
+    // `app` answers the comment only at /7/comment?change=1: a result posted on the Issue or PR 7 would be a 404 here
+    expect([(await run(r, a)).code, a.posted.length]).toEqual([0, 1]);
+    expect(passOf((a.posted[0] as { text: string }).text)).toEqual([r.tip("sb/5-x"), r.tip("main")]);
   });
 });

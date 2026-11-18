@@ -2,7 +2,7 @@ import { jstClock, jstStamp } from "./time.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
-/** The runners' usage windows (`quota` events) in words (#1836). An unknown window keeps its name, `_` as spaces. */
+/** The runners' usage windows (`quota` events) in words. An unknown window keeps its name, `_` as spaces. */
 const WINDOW_LABELS: Record<string, string> = { five_hour: t(m.window5h), seven_day: t(m.window7d), seven_day_overage_included: t(m.window7dOverage), seven_day_opus: t(m.window7dOpus), seven_day_sonnet: t(m.window7dSonnet) };
 export const windowLabel = (window: string): string => (Object.hasOwn(WINDOW_LABELS, window) ? WINDOW_LABELS[window]! : window.replace(/_/g, " "));
 
@@ -23,4 +23,13 @@ export function quotaByRunner<T extends { runner: string }>(rows: T[]): Array<{ 
   const order = ["claude", "codex", "dak"];
   const runners = [...order.filter((r) => rows.some((q) => q.runner === r)), ...rows.map((q) => q.runner).filter((r, i, all) => !order.includes(r) && all.indexOf(r) === i)];
   return runners.map((runner) => ({ runner, rows: rows.filter((q) => q.runner === runner) }));
+}
+
+/**
+ * The mark that tells a runner's accounts apart on a quota row: the account's short name when the rows hold two or
+ * more accounts of that runner, "" when there is one (a single account looks as it always did). An account that could
+ * not be read is `?`.
+ */
+export function accountMark(rows: Array<{ runner: string; account: string }>, row: { runner: string; account: string }): string {
+  return new Set(rows.filter((q) => q.runner === row.runner).map((q) => q.account)).size > 1 ? row.account || "?" : "";
 }

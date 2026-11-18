@@ -1,0 +1,83 @@
+// test-reads: apps/web/src/components/Settings.tsx
+import { describe, expect, test } from "bun:test";
+import { Settings } from "@switchboard/protocol";
+import { RESETTABLE_CARDS, resetCard, type ResettableCard } from "./settingsDefaults.ts";
+import { SETTINGS_GROUPS } from "./settingsGroups.ts";
+import { settings } from "./i18n/settings.ts";
+
+const source = await Bun.file(new URL("./components/Settings.tsx", import.meta.url)).text();
+const defaults = Settings.parse({});
+const cards = Object.keys(RESETTABLE_CARDS) as ResettableCard[];
+
+/** The folded cards of the screen by the key of their title: the source from the opening tag to the closing one. */
+function drawnCards(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of source.matchAll(/<SettingsCard title=\{t\(settings\.(\w+)\)\}/g)) out[m[1]!] = source.slice(m.index, source.indexOf("</SettingsCard>", m.index));
+  return out;
+}
+
+describe("RESETTABLE_CARDS", () => {
+  test("every card that saves a setting has 既定に戻す, drawn the one way, and no other card has it", () => {
+    const drawn = drawnCards();
+    const saving = Object.entries(drawn).filter(([, src]) => /\bsave\(\{ ?\w+:|\bjobPatch\(/.test(src)).map(([key]) => key);
+    // モデルの価格 is a list of rows the user added (each row has its own 消す), not a value with a default
+    expect(saving.filter((k) => k !== "prices").sort()).toEqual([...cards].sort());
+    for (const card of cards) expect({ card, reset: drawn[card]!.includes(`{reset.${card}}`) }).toEqual({ card, reset: true });
+    // the button is drawn by `reset` (and by the block of one runner): no card builds its own patch
+    expect([...source.matchAll(/<ResetButton\b/g)]).toHaveLength(2);
+    expect(source).toContain("[card, <ResetButton key={card} disabled={saving} onClick={() => save(resetCard(card, d))} />]");
+  });
+
+  test("a card resets the keys it saves, a value is reset by one card only, and every card is one of the screen's list", () => {
+    const drawn = drawnCards();
+    for (const card of cards) {
+      const saved = new Set([...drawn[card]!.matchAll(/\bsave\(\{ ?(\w+):/g)].map((m) => m[1]!));
+      const reset = new Set(RESETTABLE_CARDS[card].map((p) => p.split(".")[0]!));
+      for (const key of saved) expect({ card, key, reset: reset.has(key) }).toEqual({ card, key, reset: true });
+    }
+    const all = cards.flatMap((c) => RESETTABLE_CARDS[c]);
+    expect(new Set(all).size).toBe(all.length);
+    // a whole key and a value inside it are never both listed (the whole key would put the other card's value back too)
+    for (const p of all.filter((x) => !x.includes("."))) expect(all.filter((x) => x.startsWith(`${p}.`))).toEqual([]);
+    const titles = SETTINGS_GROUPS.flatMap((g) => g.sections);
+    for (const card of cards) expect(titles).toContain(settings[card].ja);
+  });
+
+  test("every value listed has a default in the settings", () => {
+    for (const path of cards.flatMap((c) => RESETTABLE_CARDS[c])) {
+      const v = path.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown> | undefined)?.[k], defaults);
+      expect({ path, has: v !== undefined }).toEqual({ path, has: true });
+    }
+  });
+});
+
+describe("resetCard", () => {
+  test("a whole key goes back by null", () => {
+    expect(resetCard("release", defaults)).toEqual({ release: null });
+    expect(resetCard("outbound", defaults)).toEqual({ outbound: null });
+    expect(resetCard("sweep", defaults)).toEqual({ maxRunners: null });
+  });
+  test("a value inside a key goes back by its default, and the key's other values are not sent", () => {
+    expect(resetCard("newSchedule", defaults)).toEqual({ newDefaults: { scheduleCron: defaults.newDefaults.scheduleCron } });
+    expect(resetCard("budgetCard", defaults)).toEqual({ quotaAndResume: { fableBudgetUsd: defaults.quotaAndResume.fableBudgetUsd } });
+    expect(resetCard("judgeAndChoice", defaults)).toEqual({
+      judge: { enabled: defaults.judge.enabled },
+      evals: { judge: { enabled: defaults.evals.judge.enabled } },
+      judgeAndChoice: { judgeTimeoutMs: defaults.judgeAndChoice.judgeTimeoutMs, workspaceChoiceTimeoutMs: defaults.judgeAndChoice.workspaceChoiceTimeoutMs },
+    });
+    expect(resetCard("llm", defaults)).toEqual({ routing: { llm: { enabled: defaults.routing.llm.enabled, timeoutMs: defaults.routing.llm.timeoutMs } } });
+    // 使用量と自動再開 leaves the budget and the flow limits of the same key alone
+    const usage = resetCard("usage", defaults).quotaAndResume!;
+    expect(Object.keys(usage)).not.toContain("fableBudgetUsd");
+    expect(Object.keys(usage)).not.toContain("flowShareLimit");
+    // every value the card shows with a default goes back, the three limits of a silent runner and of a wait too
+    expect(usage).toMatchObject({ silentAfterMs: defaults.quotaAndResume.silentAfterMs, waitLimitMs: defaults.quotaAndResume.waitLimitMs, dependsLimitMs: defaults.quotaAndResume.dependsLimitMs });
+  });
+  test("the jobs card puts back every row's runner, model and effort", () => {
+    const p = resetCard("jobsCard", defaults);
+    expect(p.autoStart).toBeNull();
+    expect(p.reviewRunner).toBeNull();
+    expect(p.judge).toEqual({ runner: defaults.judge.runner, model: defaults.judge.model, effort: defaults.judge.effort });
+    expect(p.newDefaults).toEqual({ taskRunner: defaults.newDefaults.taskRunner, taskModel: defaults.newDefaults.taskModel, taskEffort: defaults.newDefaults.taskEffort });
+  });
+});

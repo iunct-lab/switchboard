@@ -8,7 +8,7 @@ import { makeHandler, type Sender, type UrlEvent } from "./starter.ts";
 /** An AWS SDK error as the clients throw it: `name` is the service's error code. */
 const awsError = (name: string, message: string) => Object.assign(new Error(message), { name });
 
-/** aws/starter.ts (#231) with fake SDK clients: what each route sends, and the start token. */
+/** aws/starter.ts with fake SDK clients: what each route sends, and the start token. */
 const EDGE = "edge-secret-value";
 function setup(state = "stopped", o: { start?: () => unknown; tasks?: string[]; tokens?: string[] } = {}) {
   let now = 1_800_000_000_000;
@@ -34,7 +34,7 @@ function setup(state = "stopped", o: { start?: () => unknown; tasks?: string[]; 
   return { sent, call, advance: (ms: number) => (now += ms) };
 }
 
-/** The start page's own start() (aws/auth-page.html), run with a fake clock, api, sleep and button (review #456). */
+/** The start page's own start() (aws/auth-page.html), run with a fake clock, api, sleep and button. */
 async function runStart(answers: Array<() => unknown>, o: { sleepFor?: (ms: number) => number } = {}) {
   const page = await Bun.file(new URL("./auth-page.html", import.meta.url)).text();
   const src = page.slice(page.indexOf("const START_WAIT_MS"), page.indexOf("async function rebuild"));
@@ -45,7 +45,7 @@ async function runStart(answers: Array<() => unknown>, o: { sleepFor?: (ms: numb
   let daemon = false;
   const api = async () => (calls.push(now), answers[Math.min(calls.length, answers.length) - 1]!());
   const sleep = async (ms: number) => void (now += o.sleepFor ? o.sleepFor(ms) : ms);
-  // withRecent (the passkey check, #497) passes through: auth.test.ts covers it
+  // withRecent (the passkey check) passes through: auth.test.ts covers it
   const start = new Function("api", "sleep", "say", "$", "waitForDaemon", "Date", "withRecent", `${src}\nreturn start;`)(
     api, sleep, (text: string, bad?: boolean) => said.push({ text, bad }), () => button, async () => void (daemon = true), { now: () => now }, (send: () => unknown) => send(),
   ) as () => Promise<void>;
@@ -54,8 +54,8 @@ async function runStart(answers: Array<() => unknown>, o: { sleepFor?: (ms: numb
 }
 const refused = (reason?: string) => () => { throw Object.assign(new Error("AWS に今この型の Spot の空きがありません"), { status: 409, reason }); };
 
-describe("aws/starter.ts (#231)", () => {
-  test("GET /status answers the instance's state without a token; stopping stays stopping (review #344)", async () => {
+describe("aws/starter.ts", () => {
+  test("GET /status answers the instance's state without a token; stopping stays stopping", async () => {
     const { call } = setup("running");
     const r = await call("GET", "/status");
     expect(r.statusCode).toBe(200);
@@ -74,7 +74,7 @@ describe("aws/starter.ts (#231)", () => {
     expect(read.input).toEqual({ Name: "/switchboard/start-token", WithDecryption: true });
   });
 
-  test("a start right after a stop, before the Spot request is startable again, is 409 so the page waits and retries (#211)", async () => {
+  test("a start right after a stop, before the Spot request is startable again, is 409 so the page waits and retries", async () => {
     const { call } = setup("stopped", { start: () => { throw awsError("IncorrectSpotRequestState", "You can't start the Spot Instance because the associated Spot Instance request is not in an appropriate state to support start."); } });
     const r = await call("POST", "/start", "tok-123");
     expect(r.statusCode).toBe(409);
@@ -82,7 +82,7 @@ describe("aws/starter.ts (#231)", () => {
     // the page waits and retries it: "the other 409s keep their 5 s wait" below runs the page's own start()
   });
 
-  test("a start while the machine is still stopping is 409 with a message, not a bare 502 (review #344)", async () => {
+  test("a start while the machine is still stopping is 409 with a message, not a bare 502", async () => {
     const { call } = setup("stopping", { start: () => { throw awsError("IncorrectInstanceState", "The instance is not in a state from which it can be started."); } });
     const r = await call("POST", "/start", "tok-123");
     expect(r.statusCode).toBe(409);
@@ -92,7 +92,7 @@ describe("aws/starter.ts (#231)", () => {
     await expect(other.call("POST", "/start", "tok-123")).rejects.toThrow("no");
   });
 
-  test("a start refused for Spot capacity is 409 with reason capacity, not a Lambda error (#443)", async () => {
+  test("a start refused for Spot capacity is 409 with reason capacity, not a Lambda error", async () => {
     const { call } = setup("stopped", { start: () => { throw awsError("InsufficientInstanceCapacity", "You can't start the Spot Instance 'i-0abc' because there is no available Spot capacity."); } });
     const r = await call("POST", "/start", "tok-123");
     expect(r.statusCode).toBe(409);
@@ -101,11 +101,11 @@ describe("aws/starter.ts (#231)", () => {
     expect(body.error).toContain("Spot の空きがありません");
     const page = await Bun.file(new URL("./auth-page.html", import.meta.url)).text();
     expect(page).toContain("{ status: r.status, reason: data.reason }"); // the page keeps the reason
-    expect(page).toContain('e?.name === "NotAllowedError"'); // closing the passkey sheet is a cancel, not the browser's "timed out" (#863)
+    expect(page).toContain('e?.name === "NotAllowedError"'); // closing the passkey sheet is a cancel, not the browser's "timed out"
     expect(page.match(/\.catch\(cancelled\)/g)).toHaveLength(2); // both ceremonies: register and the passkey check
   });
 
-  test("the page tries again every 15 s while capacity is short, and stops at 3 minutes with the button back (#443, review #456)", async () => {
+  test("the page tries again every 15 s while capacity is short, and stops at 3 minutes with the button back", async () => {
     const r = await runStart([refused("capacity")]);
     expect(r.calls).toEqual([0, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 120_000, 135_000, 150_000, 165_000]); // none at 180 s
     expect(r.said[0]!.text).toContain("Spot の空き待ち… 0 秒（3 分まで待ちます）");
@@ -114,7 +114,7 @@ describe("aws/starter.ts (#231)", () => {
     expect(r.daemon).toBe(false);
   });
 
-  test("the page goes on when capacity comes back, and a tab suspended past the deadline does not try again (review #456)", async () => {
+  test("the page goes on when capacity comes back, and a tab suspended past the deadline does not try again", async () => {
     const back = await runStart([refused("capacity"), refused("capacity"), () => ({ started: true })]);
     expect(back.calls).toEqual([0, 15_000, 30_000]);
     expect(back.daemon).toBe(true);
@@ -130,7 +130,7 @@ describe("aws/starter.ts (#231)", () => {
     expect(other.last).toEqual({ text: "HTTP 500", bad: true });
   });
 
-  test("POST /rebuild on a running instance replaces its root volume in place: no stack update, no Spot cancel (re-review #338)", async () => {
+  test("POST /rebuild on a running instance replaces its root volume in place: no stack update, no Spot cancel", async () => {
     const { sent, call } = setup("running");
     const r = await call("POST", "/rebuild", "tok-123");
     expect(r.statusCode).toBe(202);
@@ -140,7 +140,7 @@ describe("aws/starter.ts (#231)", () => {
     expect(sent.map((c) => c.constructor.name).filter((n) => /Stack|Spot/.test(n))).toEqual([]);
   });
 
-  test("a rebuild of a stopped machine, or during a replacement, is 409 and replaces nothing (re-review #338)", async () => {
+  test("a rebuild of a stopped machine, or during a replacement, is 409 and replaces nothing", async () => {
     for (const [state, tasks, words] of [["stopped", [], "先に起動"], ["running", ["in-progress"], "作り直しの途中"]] as const) {
       const { sent, call } = setup(state, { tasks: [...tasks] });
       const r = await call("POST", "/rebuild", "tok-123");
@@ -152,7 +152,7 @@ describe("aws/starter.ts (#231)", () => {
     expect((await setup("running", { tasks: ["succeeded", "failed"] }).call("POST", "/rebuild", "tok-123")).statusCode).toBe(202);
   });
 
-  test("a rotated token works at once: a mismatch reads the parameter again (review #344)", async () => {
+  test("a rotated token works at once: a mismatch reads the parameter again", async () => {
     const { call, advance } = setup("stopped", { tokens: ["old-tok", "new-tok"] });
     expect((await call("POST", "/start", "old-tok")).statusCode).toBe(202);
     advance(FORCED_REREAD_MS);
@@ -189,7 +189,7 @@ describe("aws/starter.ts (#231)", () => {
   });
 });
 
-describe("scheduled event (#1639)", () => {
+describe("scheduled event", () => {
   test("a scheduled event runs reconcile", async () => {
     let reconciled = 0;
     const h = makeHandler({

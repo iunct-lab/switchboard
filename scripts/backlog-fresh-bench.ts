@@ -1,5 +1,5 @@
 /**
- * bun scripts/backlog-fresh-bench.ts --issue N [--runs 20] [--set-runs N] [--set-value V]   (#3436, PBI #3362)
+ * bun scripts/backlog-fresh-bench.ts --issue N [--runs 20] [--set-runs N] [--set-value V]
  *
  * Measures the running daemon (BACKLOG_URL / BACKLOG_TOKEN_FILE, as `ops-kit backlog` finds it; outside a Task,
  * BACKLOG_URL=http://127.0.0.1:<port>/api/backlog and BACKLOG_TOKEN_FILE=<token file>, and GH_REPO or BACKLOG_WORKSPACE

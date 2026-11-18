@@ -128,7 +128,7 @@ test("resources: eta line", () => {
   expect(etaLine({ etaMs: null, unknown: 0 }, 0)).toEqual({ value: "待ちはありません", note: null }); // nothing running or waiting
 });
 
-test("resources: a job's row — its kind with the review's runner, its status in words, how long it ran or has run (#3995)", () => {
+test("resources: a job's row — its kind with the review's runner, its status in words, how long it ran or has run", () => {
   const t0 = Date.parse("2026-11-06T10:00:00Z");
   const job = (o: Partial<OpsJob>): OpsJob => ({ id: 7, kind: "local-ci", taskId: "t1", taskTitle: "仕事の口", pr: 12, runner: null, status: "running", exitCode: null, startedAt: t0, endedAt: null, ...o });
   expect(jobRow(job({}), t0 + 125_000)).toEqual({ kind: "local-ci", status: "実行中", elapsed: "2 分" });

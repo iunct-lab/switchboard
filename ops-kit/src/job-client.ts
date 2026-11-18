@@ -12,8 +12,11 @@ export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures 
       アプリにローカル CI（scripts/local-ci.ts <PR>）を仕事として頼む。仕事はアプリの子として重い処理の枠を取って走り、Task のセッションの子にならない
       --local は外のビルドを使えるホストでも全手順をこのマシンで回す（既定は外。外のビルドが無ければ指定せずにここで回る）
       --fixtures は録画庫（絶対パス）。仕事の環境に録画庫として渡り（変数の名前はアプリが決める）、録画の不足を失敗にする
-  job request review <PR> --runner codex|claude --prompt <file> --out <file> [--cwd <dir>]
+  job request review <PR> [--runner codex|claude [--as fallback|recheck|audit]] --prompt <file> --out <file> [--cwd <dir>]
       アプリにレビュー（cross-runner-review の codex exec / claude -p）を仕事として頼む。--prompt を読み --out に書く（どちらも --cwd の中）
+      --runner を省くとアプリが設定と Task のランナーから主レビュアーを決める。主レビュアーでないランナーの名指しは断られる。
+      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査）
+      アプリは --prompt の指示の後ろに、レビューするランナーの動き方（読み取り専用のサンドボックス / plan モード）の文を足して渡す
       request は仕事の id を job#<id> の 1 行で出し、続けて止まりの記録（アプリが Task に渡す止まりの報告の書式）に書く JSON の例を出す。待たずにそれを書いてターンを終えると、
       仕事が終わったときにアプリが結果の要約を添えて Task を再開する。--cwd の既定は今の作業フォルダ（Task のリポジトリの checkout）
   job list [--json]
@@ -60,6 +63,7 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       const prompt = take("--prompt");
       const outFile = take("--out");
       const fixtures = take("--fixtures");
+      const why = take("--as");
       const local = args.includes("--local");
       if (local) args.splice(args.indexOf("--local"), 1);
       const [kind, prArg, ...extra] = args;
@@ -68,13 +72,15 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       if (!env.OPS_KIT_TASK_ID) throw new BacklogUnknown("job: Task の id がありません（OPS_KIT_TASK_ID。アプリの Task の中で実行してください）");
       let body: Record<string, unknown>;
       if (kind === "local-ci") {
-        if (runner || prompt || outFile) throw new Usage("local-ci は --runner / --prompt / --out を取りません");
+        if (runner || prompt || outFile || why) throw new Usage("local-ci は --runner / --as / --prompt / --out を取りません");
         if (fixtures !== undefined && !isAbsolute(fixtures)) throw new Usage(`--fixtures は絶対パスで渡してください: ${fixtures}`);
         body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, ...(fixtures !== undefined && { fixtures }), ...(local && { local }) };
       } else if (kind === "review") {
         if (fixtures !== undefined || local) throw new Usage("review は --fixtures / --local を取りません");
-        if ((runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --runner codex|claude と --prompt <file> と --out <file> が要ります");
-        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, runner, cwd, promptFile: resolve(cwd, prompt), outFile: resolve(cwd, outFile) };
+        if ((runner !== undefined && runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --prompt <file> と --out <file> が要ります（--runner は codex|claude）");
+        if (why !== undefined && !["fallback", "recheck", "audit"].includes(why)) throw new Usage(`--as は fallback / recheck / audit のどれかです: ${why}`);
+        if (why && !runner) throw new Usage("--as（主レビュアーでないランナーに頼む理由）は --runner codex|claude と一緒に渡してください");
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, ...(runner && { runner }), ...(why && { as: why }), cwd, promptFile: resolve(cwd, prompt), outFile: resolve(cwd, outFile) };
       } else throw new Usage(`仕事の種類は local-ci か review です: ${kind ?? "(なし)"}`);
       const job = (await jobsApi(env, opts.fetch ?? fetch)("POST", "", body)) as Job;
       io.out(`job#${job.id}`);

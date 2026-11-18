@@ -64,6 +64,12 @@ export const CiConfig = z
 export type CiConfig = z.infer<typeof CiConfig>;
 
 /**
+ * The name a set of CI steps goes by: the first 12 hex digits of the sha256 of the steps' scripts, in order. A local CI
+ * result names the steps it ran by it, and the merge gate compares it with the steps of the settings in force.
+ */
+export const ciStepsHash = (steps: ReadonlyArray<{ run: string }>): string => new Bun.CryptoHasher("sha256").update(JSON.stringify(steps.map((s) => s.run))).digest("hex").slice(0, 12);
+
+/**
  * A repository's backlog settings (`ops.config.json`). The kit itself holds no value of any one repository: the
  * Project, the choices of each field and the required sections all come from here. The Story Points scale is the kit's
  * (`STORY_POINTS`), not a repository's.
@@ -105,6 +111,14 @@ export const OpsConfig = z
     ci: CiConfig.optional(),
     /** The script that judges a merge (path from the repository root). Set: a Task's `gh` merge stops in front of it unless the script made it or the person allowed it (`ops-kit/bin/gh`). */
     mergeGate: z.string().min(1).optional(),
+    /** The name of the extra reviewer (the prefix of its review comments). Set: the skills a Task reads carry the extra reviewer's steps; how to call it stays in CLAUDE.md. */
+    extraReviewer: z.string().min(1).optional(),
+    /**
+     * Files many PBIs touch (paths from the repository root): two pieces of work that overlap only on these go on side by
+     * side and are brought together before the merge (the parallel guard does not hold one back; the merge gate asks for a
+     * local CI on the base once one of them moved there). Omitted = none: every overlap holds, as before.
+     */
+    sharedFiles: z.array(z.string().min(1)).optional(),
     /** `ops-kit deps-check`: what this repository adds to the tool's own `## 更新の条件`, a line each. */
     depsCheck: z.object({ extraConditions: z.array(z.string().min(1)) }).strict().optional(),
   })
@@ -113,13 +127,35 @@ export type OpsConfig = z.infer<typeof OpsConfig>;
 
 export const CONFIG_FILE = "ops.config.json";
 
-/** `path`, or the nearest `ops.config.json` from `cwd` up. */
-export function findConfig(path: string | undefined, cwd = process.cwd()): string {
+/**
+ * The environment variable that names the settings file of a repository that keeps none of its own (the same shape as
+ * `ops.config.json`, kept wherever the one who runs the kit keeps it). The kit is given the file's place and nothing else.
+ */
+export const CONFIG_ENV = "OPS_KIT_CONFIG";
+
+/**
+ * Which settings a directory is run with, one rule for every reader: the repository's own `ops.config.json` when it
+ * has one, else the file `fallback` names (`OPS_KIT_CONFIG`), else none. A file as a whole: the two are never mixed key by key,
+ * so a key the repository's file leaves out is not taken from the other.
+ */
+const fallbackConfig = (fallback: string | undefined): string | null => (fallback && existsSync(fallback) ? resolve(fallback) : null);
+
+/** The rule for the checkout `dir` itself (no directory above it is read): `<dir>/ops.config.json`, else `fallback`, else null. */
+export function configFileOf(dir: string, fallback: string | undefined = process.env[CONFIG_ENV]): string | null {
+  const own = join(dir, CONFIG_FILE);
+  return existsSync(own) ? own : fallbackConfig(fallback);
+}
+
+/** `path`, or the nearest `ops.config.json` from `cwd` up, or the file `OPS_KIT_CONFIG` names when there is none. */
+export function findConfig(path: string | undefined, cwd = process.cwd(), fallback: string | undefined = process.env[CONFIG_ENV]): string {
   if (path) return resolve(cwd, path);
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     if (existsSync(join(dir, CONFIG_FILE))) return join(dir, CONFIG_FILE);
-    if (dirname(dir) === dir) throw new Error(`${CONFIG_FILE} が ${cwd} から上に見つかりません（--config で指定できます）`);
+    if (dirname(dir) === dir) break;
   }
+  const other = fallbackConfig(fallback);
+  if (other) return other;
+  throw new Error(`${CONFIG_FILE} が ${cwd} から上に見つかりません（--config か環境変数 ${CONFIG_ENV} でファイルを指定できます）`);
 }
 
 export function parseConfig(json: unknown, where = CONFIG_FILE): OpsConfig {
@@ -134,6 +170,26 @@ export function parseConfig(json: unknown, where = CONFIG_FILE): OpsConfig {
     }
   }
   return r.data;
+}
+
+/**
+ * Why `json` is not a settings file, in one line, or null: every key it has must be in its shape and no key may be unknown.
+ * Keys may be left out (a file that holds only the CI's steps is one): each reader asks for the keys it needs (`loadConfig`
+ * for the backlog's, `ci` for the CI's). For whoever keeps a settings file outside a repository and checks it before saving.
+ */
+export function configShapeError(json: unknown): string | null {
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return "設定は JSON のオブジェクトで書く";
+  const r = OpsConfig.partial().safeParse(json);
+  if (!r.success) return r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join(" / ");
+  for (const [path, source] of [["milestone.pattern", r.data.milestone?.pattern], ["sections.origin.pattern", r.data.sections?.origin?.pattern]] as const) {
+    if (source === undefined) continue;
+    try {
+      new RegExp(source);
+    } catch {
+      return `${path}: 正規表現として読めません`;
+    }
+  }
+  return null;
 }
 
 /** The Story Points scale, owned by the kit (not by a repository's config). */
@@ -183,7 +239,8 @@ export function projectOf(cfg: OpsConfig, env: Record<string, string | undefined
  * working tree behind a new tag does not apply old rules to it). The file is the same path in that commit.
  */
 export function loadPublicSync(path?: string, cwd = process.cwd(), at?: string): PublicSync {
-  const file = findConfig(path, cwd);
+  // the repository's own file only (it is read at the commit that is sent): never the settings kept outside it
+  const file = findConfig(path, cwd, "");
   let json: { publicSync?: unknown };
   try {
     json = JSON.parse(at ? gitShow(file, at) : readFileSync(file, "utf8"));
@@ -203,7 +260,7 @@ export function loadPublicSync(path?: string, cwd = process.cwd(), at?: string):
  */
 export function publicCopyOf(cwd = process.cwd()): string | null {
   try {
-    const json = JSON.parse(readFileSync(findConfig(undefined, cwd), "utf8")) as { publicSync?: { target?: unknown } } | null;
+    const json = JSON.parse(readFileSync(findConfig(undefined, cwd, ""), "utf8")) as { publicSync?: { target?: unknown } } | null;
     const target = json?.publicSync?.target;
     return typeof target === "string" && target !== "" ? target : null;
   } catch {
@@ -212,12 +269,35 @@ export function publicCopyOf(cwd = process.cwd()): string | null {
 }
 
 /** `mergeGate` of the nearest `ops.config.json` (only that string is read, as publicCopyOf does); null when there is none. */
-export function mergeGateOf(cwd = process.cwd()): string | null {
+export function mergeGateOf(cwd = process.cwd(), fallback?: string): string | null {
   try {
-    const json = JSON.parse(readFileSync(findConfig(undefined, cwd), "utf8")) as { mergeGate?: unknown } | null;
+    const json = JSON.parse(readFileSync(findConfig(undefined, cwd, fallback), "utf8")) as { mergeGate?: unknown } | null;
     return typeof json?.mergeGate === "string" && json.mergeGate !== "" ? json.mergeGate : null;
   } catch {
     return null;
+  }
+}
+
+/** `extraReviewer` of the nearest `ops.config.json` (read as `mergeGateOf` reads its string); null when there is none. */
+export function extraReviewerOf(cwd = process.cwd(), fallback?: string): string | null {
+  try {
+    const json = JSON.parse(readFileSync(findConfig(undefined, cwd, fallback), "utf8")) as { extraReviewer?: unknown } | null;
+    return typeof json?.extraReviewer === "string" && json.extraReviewer !== "" ? json.extraReviewer : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `sharedFiles` of the nearest `ops.config.json`, or of `path` (from `cwd`) when given: the app names its checkout's own
+ * file, so a directory above it is never read. Only that list is read, as publicCopyOf does; none when there is no file or no list.
+ */
+export function sharedFilesOf(cwd = process.cwd(), path?: string): string[] {
+  try {
+    const json = JSON.parse(readFileSync(findConfig(path, cwd), "utf8")) as { sharedFiles?: unknown } | null;
+    return Array.isArray(json?.sharedFiles) ? json.sharedFiles.filter((p): p is string => typeof p === "string" && p !== "") : [];
+  } catch {
+    return [];
   }
 }
 

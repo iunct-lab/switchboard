@@ -308,3 +308,79 @@ describe("question tool", () => {
     }
   });
 });
+
+describe("account of the usage-limit reports", () => {
+  const EMAIL = "sentinel-user@example.invalid";
+  const USER = "user-5e17e1a1-sentinel";
+  const WORKSPACE = "Sentinel Workspace 7c2f";
+  const answer = (userId: string | null, email = EMAIL) => JSON.stringify({ account: { type: "chatgpt", email, planType: "pro", workspaceName: WORKSPACE }, userId, requiresOpenaiAuth: true });
+  const nameOf = (id: string) => new Bun.CryptoHasher("sha256").update(`codex:${id}`).digest("hex").slice(0, 16);
+
+  /** A session on the fake whose `account/read` answers with what `file` holds; every console line it causes is collected. */
+  async function withAccount(first: string, accountRereadMs: number | undefined, body: (c: { file: string; events: AgentEvent[]; printed: string[]; turn: (text?: string) => Promise<void> }) => Promise<void>) {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-account-"));
+    const file = join(home, "account.json");
+    writeFileSync(file, first);
+    const before = process.env.FAKE_CODEX_ACCOUNT_FILE;
+    process.env.FAKE_CODEX_ACCOUNT_FILE = file;
+    const printed: string[] = [];
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const real = methods.map((m) => console[m]);
+    for (const m of methods) console[m] = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
+    const events: AgentEvent[] = [];
+    const s = createCodexAdapter({ bin: FAKE, codexHome: home, ...(accountRereadMs === undefined ? {} : { accountRereadMs }) }).start({ cwd: home, scope: [home], prompt: "limits: 1", permissionMode: "auto" }, (e) => events.push(e));
+    let turns = 0;
+    const ended = async () => {
+      turns++;
+      for (const deadline = Date.now() + 5000; events.filter((e) => e.t === "session.end").length < turns && Date.now() < deadline; ) await Bun.sleep(20);
+      expect(events.filter((e) => e.t === "session.end").length).toBe(turns);
+    };
+    try {
+      await ended();
+      await body({
+        file,
+        events,
+        printed,
+        turn: async (text = "limits: next") => {
+          s.send(text);
+          await ended();
+        },
+      });
+    } finally {
+      await s.close();
+      methods.forEach((m, i) => (console[m] = real[i]!));
+      if (before === undefined) delete process.env.FAKE_CODEX_ACCOUNT_FILE;
+      else process.env.FAKE_CODEX_ACCOUNT_FILE = before;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+  const accounts = (events: AgentEvent[]) => events.flatMap((e) => (e.t === "quota" ? [e.account] : []));
+
+  test("the email, user id and workspace app-server names reach no event and no log line: the report carries only the 16-character name", async () => {
+    for (const [userId, id] of [[USER, USER], [null, EMAIL]] as const) {
+      await withAccount(answer(userId), undefined, async ({ events, printed }) => {
+        expect(accounts(events)).toEqual([nameOf(id)]);
+        const out = JSON.stringify(events) + printed.join("\n");
+        for (const raw of [EMAIL, "sentinel-user", USER, "5e17e1a1", WORKSPACE]) expect(out).not.toContain(raw);
+      });
+    }
+  });
+
+  test("a login that changed under a running session: the report after the change asks again, and the next one carries the new account's name", async () => {
+    await withAccount(answer("user-first"), 0, async ({ file, events, turn }) => {
+      writeFileSync(file, answer("user-second"));
+      await turn(); // carries the name read before the change, and asks again
+      await Bun.sleep(100);
+      await turn();
+      expect(accounts(events)).toEqual([nameOf("user-first"), nameOf("user-first"), nameOf("user-second")]);
+    });
+    // within the minute of the last question nothing is asked again
+    await withAccount(answer("user-first"), undefined, async ({ file, events, turn }) => {
+      writeFileSync(file, answer("user-second"));
+      await turn();
+      await Bun.sleep(100);
+      await turn();
+      expect(accounts(events)).toEqual([nameOf("user-first"), nameOf("user-first"), nameOf("user-first")]);
+    });
+  });
+});

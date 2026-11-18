@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
-import { compareStopConditions, FenceReader, issueOf, outcomeFromStops, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule, tasksWithStops } from "./stops.ts";
+import { writePresets, recordPresetUse } from "./presets.ts";
+import { WAIT_CUT_EXIT, WAIT_USAGE } from "../../../ops-kit/src/wait.ts";
+import { compareStopConditions, FenceReader, issueOf, outcomeFromStops, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, openStopsPrompt, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule, tasksWithStops } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -71,6 +73,23 @@ describe("reduceStops", () => {
     const open = stop({ reason: "decision", conditions: [{ key: "pr#12", value: "open", met: false }] });
     const c = stop({ reason: "decision", conditions: [{ key: "pr#12", value: "merged", met: true }], answer: b.answer });
     expect(reduceStops([open, c])[0]).toMatchObject({ lastAnswer: null, next: "decide" });
+  });
+
+  test("a later stage Task supersedes the waiting stops of an earlier one", () => {
+    const asked = stop({ reason: "decision", op: "ask", target: "#3264", conditions: [{ key: "issue#3264", value: "## 回答", met: false }], work: { taskId: "A" } });
+    const closed = stop({ reason: "depends", op: "gh pr merge", target: "PR #1", state: "resolved", work: { taskId: "A" } });
+    const gaveUp = stop({ reason: "transient", op: "git push", target: "origin", state: "exhausted", work: { taskId: "A" } });
+    const later = stop({ reason: "depends", op: "gh pr merge", target: "PR #2", work: { taskId: "B" } });
+    const ops = (out: ReturnType<typeof reduceStops>) => out.map((s) => `${s.work.taskId} ${s.target} ${s.state}`).sort();
+    // read for the item, whose newest stage Task is B: A's waiting question is gone; what A closed or gave up on, and B's own, stay
+    expect(ops(reduceStops([asked, closed, gaveUp, later], { newestTaskId: "B" }))).toEqual(["A PR #1 resolved", "A origin exhausted", "B PR #2 waiting"]);
+    // A is still the newest: its question waits
+    expect(ops(reduceStops([asked, closed, gaveUp], { newestTaskId: "A" }))).toContain("A #3264 waiting");
+    // a Task's own reading names no newest Task and keeps every series
+    for (const opts of [undefined, {}, { newestTaskId: null }]) expect(ops(reduceStops([asked, closed, gaveUp, later], opts))).toContain("A #3264 waiting");
+    // the later Task stopped at the same place: the series' newest stop is B's, so it stays, counted with A's
+    const again = stop({ reason: "decision", op: "ask", target: "#3264", conditions: [{ key: "issue#3264", value: "## 回答", met: false }], work: { taskId: "B" } });
+    expect(reduceStops([asked, again], { newestTaskId: "B" })).toMatchObject([{ target: "#3264", count: 2, state: "waiting", work: { taskId: "B" } }]);
   });
 
   test("a stop waiting for the person's decision is not let go by a condition met alone", () => {
@@ -240,6 +259,50 @@ describe("StopFenceReader", () => {
 });
 
 describe("reserveStopRetry / stopRecoveryPrompt", () => {
+  const NONE = { workspaceMcp: false, stage: false, planMode: false };
+  /** A stage Task in plan mode that reports in a fence: every sentence but the Workspace MCP's. */
+  const ALL = { workspaceMcp: false, stage: true, planMode: true };
+
+  test("stopRecoveryPrompt holds only the sentences of the Task's conditions", () => {
+    const plain = stopRecoveryPrompt([], NONE);
+    for (const w of ["Workspace MCP", "task.note", "exec.run", "占有の解放", "並列ガード", "計画モード"]) expect(plain).not.toContain(w);
+    expect(plain).toContain("```switchboard-stop");
+    expect(plain).toContain("待てるのは 7 日まで）。7 日を超えるなら conditions を省く。");
+    expect(plain).toContain("依頼の範囲外の書き込み（リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。");
+    // the wait rule names the kit's command with the flags it requires and the exit of a cut wait
+    expect(plain).toContain("until / while と sleep の繰り返しでは待たない");
+    expect(plain).toContain(`exit ${WAIT_CUT_EXIT}`);
+    for (const flag of ["--for", "--timeout", "--on-timeout <fail|proceed>"]) expect({ flag, prompt: plain.includes(`ops-kit wait`) && plain.includes(flag), kit: WAIT_USAGE.includes(flag) }).toEqual({ flag, prompt: true, kit: true });
+
+    const mcp = stopRecoveryPrompt([], { ...NONE, workspaceMcp: true });
+    expect(mcp).toContain("Workspace MCP の task.note の引数 stop に書きます");
+    expect(mcp).toContain("Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。");
+    expect(mcp).not.toContain("```switchboard-stop");
+    expect(mcp).not.toContain("フェンス");
+
+    const stage = stopRecoveryPrompt([], { ...NONE, stage: true });
+    expect(stage).toContain("7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す");
+    expect(stage).toContain("並列ガードの overlap が重なり（defer）で進めないと言ったら");
+    expect(stage).not.toContain("計画モード");
+
+    const plan = stopRecoveryPrompt([], { ...NONE, planMode: true });
+    expect(plan).toContain("依頼の範囲外の書き込み（計画モードでの commit・push・マージ、リポジトリの CLAUDE.md が認めていない昇格");
+    expect(plan).not.toContain("並列ガード");
+  });
+
+  test("stopRecoveryPrompt says the three operations with a fixed sentence take the refusing side's sentence as the grant", () => {
+    for (const cond of [NONE, ALL, { ...NONE, workspaceMcp: true }]) {
+      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・[merge-answer] の投稿・Task の本文への名指しのパスの追加は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。");
+    }
+  });
+
+  test("openStopsPrompt is the open stops alone, and empty without one", () => {
+    const [s] = reduceStops([tried(1)]);
+    expect(openStopsPrompt([])).toBe("");
+    expect(openStopsPrompt([s!])).toBe("この作業でまだ解けていない停止:\n- gh pr merge PR #12: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
+    expect(stopRecoveryPrompt([s!], NONE).endsWith(openStopsPrompt([s!]))).toBe(true);
+  });
+
   const tried = (n: number, state: StopRecord["state"] = "retrying") => stop({ reason: "transient", safety: "read-only", state, actions: Array.from({ length: n }, (_, i) => ({ attempt: i + 1, at: 1, what: "再試行", ok: null })) });
 
   test("two more tries, 5 s then 30 s, of a passing failure that is harmless to repeat; a resolved stop starts over", () => {
@@ -257,11 +320,11 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
 
   test("the prompt says how to report and the rule, and lists the work's open stops with the retries left", () => {
     const [s] = reduceStops([tried(1)]);
-    const p = stopRecoveryPrompt([s!]);
+    const p = stopRecoveryPrompt([s!], NONE);
     expect(p).toContain("```switchboard-stop");
     expect(p).toContain("最大 2 回（5 秒後、30 秒後）");
     expect(p).toContain("- gh pr merge PR #12: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
-    expect(stopRecoveryPrompt([])).not.toContain("まだ解けていない");
+    expect(stopRecoveryPrompt([], ALL)).not.toContain("まだ解けていない");
   });
 
   test("stop grant: the newest stop's grant is the series' grant; the prompt says to write one for a permission stop", () => {
@@ -270,24 +333,24 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     expect(reduceStops([a])[0]!.grant).toBe("PR #12 をマージすることだけ許可します");
     expect(reduceStops([a, b])[0]!.grant).toBeNull();
     expect(StopRecord.parse({ ...a, grant: "x".repeat(400) }).grant).toHaveLength(300);
-    expect(stopRecoveryPrompt([])).toContain('許可文を "grant" に 1 文で書く');
+    expect(stopRecoveryPrompt([], ALL)).toContain('許可文を "grant" に 1 文で書く');
   });
 
   test("prompt asks for wait conditions: a depends stop names its PRs / Issues as pr#N / issue#N, copied from overlap", () => {
-    const p = stopRecoveryPrompt([]);
+    const p = stopRecoveryPrompt([], ALL);
     expect(p).toContain('"conditions":[{"key":"pr#12","value":"open","met":false}]');
     expect(p).toContain("pr#N / issue#N");
     expect(p).toContain("overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す");
   });
 
   test("stop prompt names the after condition of a date wait and the route for waits over 7 days", () => {
-    const p = stopRecoveryPrompt([]);
+    const p = stopRecoveryPrompt([], ALL);
     expect(p).toContain('{"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}');
     expect(p).toContain("7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す");
   });
 
   test("stop prompt names the runner condition of a usage-limit stop: runner#<runner> with the time, read by reportedLimit", () => {
-    const p = stopRecoveryPrompt([]);
+    const p = stopRecoveryPrompt([], ALL);
     expect(p).toContain("使用上限（usage-limit）は止めたランナーを runner#<ランナー>");
     expect(p).toContain("分からなければ unknown");
     const limit = (over: Partial<Omit<StopRecord, "work">> = {}) => stop({ reason: "usage-limit", state: "waiting", conditions: [{ key: "runner#codex", value: "2026-11-04T15:39:00+09:00", met: false }], ...over });
@@ -303,7 +366,7 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
   });
 
   test("recovery prompt forbids out-of-scope writes", () => {
-    const p = stopRecoveryPrompt([]);
+    const p = stopRecoveryPrompt([], ALL);
     expect(p).toContain("依頼の範囲外の書き込み");
     expect(p).toContain("計画モードでの commit・push・マージ");
     expect(p).toContain("リポジトリの CLAUDE.md が認めていない昇格");
@@ -420,29 +483,50 @@ describe("stops of a schedule", () => {
 });
 
 describe("stopMarks", () => {
+  const NOW = 1_800_000_000_000;
   const mk = (id: string, over: Partial<Task> = {}) =>
     ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1, ...over }) as Task;
   const own = (t: Task, over: Partial<Omit<StopRecord, "work">> = {}) => stop({ ...over, work: { workspaceId: null, issue: null, taskId: t.id } });
 
-  test("the newest series of a stopped Task; no record and 確認済み are left out; a Task judged done is read too", () => {
+  test("the newest series of a stopped Task; no record, 確認済み and a Task whose outcome needs no one are left out; a Task that only waits is read", () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.t4520."));
     const db = new Db(join(dir, "t.db"));
     try {
-      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "finished" }), running = mk("rn", { status: "running", outcome: "unknown" }), idle = mk("id", { status: "idle", outcome: "unknown" }), archived = mk("ar", { archivedAt: 5 });
-      for (const t of [a, none, reviewed, done, running, idle, archived]) {
+      const a = mk("a"), none = mk("none"), reviewed = mk("rv", { reviewedAt: 5 }), done = mk("dn", { outcome: "finished" }), waits = mk("w", { outcome: "waits" }), running = mk("rn", { status: "running", outcome: "unknown" }), idle = mk("id", { status: "idle", outcome: "unknown" }), archived = mk("ar", { archivedAt: 5 });
+      for (const t of [a, none, reviewed, done, waits, running, idle, archived]) {
         db.insertTask(t);
         if (t.id !== "none") db.appendEvent(t.id, { t: "stop.record", stop: own(t, { reason: "transient", evidence: "HTTP 503" }) });
       }
       db.appendEvent("a", { t: "stop.record", stop: own(a, { reason: "decision", evidence: "どちらか決めてください", conditions: [{ key: "pr#7", value: "open", met: false }] }) });
       // the Task's own stops are read, in one query, only for the stopped Tasks that are not 確認済み
-      const marks = stopMarks(db, db.listTasks());
-      expect(Object.keys(marks).sort()).toEqual(["a", "dn"]);
+      const marks = stopMarks(db, db.listTasks(), NOW);
+      // a Task judged done has no mark: its outcome needs no one (`personWait`); one that only waits keeps its mark
+      expect(Object.keys(marks).sort()).toEqual(["a", "w"]);
       // an archived Task is not on the list, and its records are not read either
-      expect([...db.listStopRecordsOfStopped().keys()].sort()).toEqual(["a", "dn"]);
-      expect(marks.dn).toMatchObject({ reason: "transient", state: "waiting" });
-      expect(marks.a).toEqual({ key: expect.any(String), reason: "decision", state: "waiting", conditions: [{ key: "pr#7", value: "open", met: false }], count: 1, answered: false });
+      expect([...db.listStopRecordsOfStopped().keys()].sort()).toEqual(["a", "dn", "w"]);
+      expect(marks.w).toMatchObject({ reason: "transient", state: "waiting" });
+      expect(marks.a).toEqual({ key: expect.any(String), reason: "decision", state: "waiting", conditions: [{ key: "pr#7", value: "open", met: false }], count: 1, answered: false, replies: [] });
       // the Tasks passed in decide too, by personWait: one reviewed or back at work since the read has no mark
-      expect(stopMarks(db, [{ ...a, reviewedAt: 9 }, { ...done, status: "running" }])).toEqual({});
+      expect(stopMarks(db, [{ ...a, reviewedAt: 9 }, { ...done, status: "running" }], NOW)).toEqual({});
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a mark carries the presets answered to its reason before, and none for a reason with no record", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.t5259."));
+    const db = new Db(join(dir, "t.db"));
+    try {
+      const a = mk("a"), b = mk("b");
+      for (const t of [a, b]) db.insertTask(t);
+      db.appendEvent("a", { t: "stop.record", stop: own(a, { reason: "decision", evidence: "どちらか" }) });
+      db.appendEvent("b", { t: "stop.record", stop: own(b, { reason: "auth", evidence: "401" }) });
+      writePresets(db, [{ id: "p1", name: "進めて", text: "すすめて", createdAt: 1, updatedAt: 1 }]);
+      recordPresetUse(db, "p1", "task", NOW - 1000, "decision");
+      const marks = stopMarks(db, db.listTasks(), NOW);
+      expect(marks.a!.replies).toEqual([{ id: "p1", name: "進めて", text: "すすめて" }]);
+      expect(marks.b!.replies).toEqual([]);
     } finally {
       db.close?.();
       rmSync(dir, { recursive: true, force: true });
@@ -459,7 +543,7 @@ describe("stopMarks", () => {
       db.appendEvent("new", { t: "stop.record", stop: stop({ reason: "depends", state: "resolved", work: { workspaceId: "ws1", issue: 939, taskId: "new" } }) });
       // more newer Tasks of the schedule than stopRecordsFor reads: the old Task's own stop is still its mark
       for (let i = 0; i < 40; i++) db.insertTask(mk(`later${i}`, { scheduleId: "sch1", createdAt: 10 + i, status: "running", outcome: "unknown" }));
-      const marks = stopMarks(db, db.listTasks());
+      const marks = stopMarks(db, db.listTasks(), NOW);
       expect(marks.old).toMatchObject({ reason: "decision", state: "waiting" });
       expect(marks.new).toMatchObject({ reason: "depends", state: "resolved" });
     } finally {
@@ -483,7 +567,7 @@ describe("tasksWithStops", () => {
       db.appendEvent("s1", { t: "stop.record", stop: stop({ reason: "decision", evidence: "どちらか決めてください", work: { workspaceId: null, issue: null, taskId: "s1" } }) });
       const items = tasksWithStops(db, db.listTasks(false));
       const byId = Object.fromEntries(items.map((x) => [x.id, x]));
-      expect(byId.s1?.stop).toEqual(stopMarks(db, db.listTasks(false)).s1);
+      expect(byId.s1?.stop).toEqual(stopMarks(db, db.listTasks(false), Date.now()).s1);
       expect(byId.s1?.stop).toMatchObject({ reason: "decision", state: "waiting" });
       expect("stop" in byId.p1!).toBe(false);
     } finally {

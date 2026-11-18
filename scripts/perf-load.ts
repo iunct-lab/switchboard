@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey, Task } from "@switchboard/protocol";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { importGithubSnapshot } from "../packages/core/src/backlog-sync.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { Db } from "../packages/core/src/db.ts";

@@ -5,10 +5,12 @@ import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerId, RunnerSession, StartOptions, Task } from "@switchboard/protocol";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
-import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, STOP_RESUME_PROMPT } from "./interrupted.ts";
+import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, RESUME_CAP_STOP, STOP_RESUME_PROMPT } from "./interrupted.ts";
+import { asksFromTasks } from "./asks.ts";
 import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, GITHUB_WINDOW_MS, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota, usesGraphql } from "./ratelimit.ts";
-import { parseStopReport } from "./stops.ts";
-import { ResumeSupersededError, TaskManager } from "./tasks.ts";
+import { parseStopReport, reduceStops } from "./stops.ts";
+import { ResumeSupersededError } from "./tasks/state.ts";
+import { TaskManager } from "./tasks/manager.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 
 // Fixed example: a Wednesday night stop over the 5-hour quota, resetting the next morning in Tokyo.
@@ -889,8 +891,17 @@ describe("a turn the daemon's stop cut continues on the next start (interrupted.
       await d.tasks.shutdown();
       const planned = db.getTask(t.id)!.resumeAt !== null;
       expect(planned).toBe(i <= MAX_STOP_RESUMES);
+      // below the cap nothing asks the person
+      expect(db.listStopRecords([t.id])).toHaveLength(i <= MAX_STOP_RESUMES ? 0 : 1);
     }
-    expect(statuses(db.listTasks()[0]!.id).at(-1)).toContain("自動再開しません");
+    const id = db.listTasks()[0]!.id;
+    expect(statuses(id).at(-1)).toContain("自動再開しません");
+    // at the cap the Task is not only marked in its own conversation: a stop waits for the person, and the asks screen asks
+    const records = db.listStopRecords([id]);
+    expect(records).toMatchObject([{ id: `${id}/${RESUME_CAP_STOP}`, op: "auto-resume", reason: "unknown", state: "waiting", evidence: `デーモンの停止で ${MAX_STOP_RESUMES + 1} 回続けて中断。自動再開の上限（${MAX_STOP_RESUMES} 回）` }]);
+    expect(reduceStops(records)[0]!.next).toBe("decide");
+    const asked = asksFromTasks({ approvals: [], tasks: [db.getTask(id)!], lastTurnQuestions: () => null, permissionEvents: () => [], stops: (t) => reduceStops(db.listStopRecords([t.id])), workspaceName: () => null, now: Date.now() });
+    expect(asked.filter((a) => a.kind === "stop" && a.id.startsWith("stop:"))).toMatchObject([{ needs: "person", state: "open", task: { id }, reason: `unknown: デーモンの停止で ${MAX_STOP_RESUMES + 1} 回続けて中断。自動再開の上限（${MAX_STOP_RESUMES} 回）` }]);
   });
 
   test("a daemon that died without its shutdown: the next start closes the orphan and plans it the same way; no session, no plan", () => {

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Ask, AskAnswerResult, AskQuestion, AskChanged, AskList, Backlog, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
-import type { GhRunner } from "./backlog.ts";
+import { answerStoredDecision, screenAnswer } from "./backlog-edit.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
@@ -23,9 +24,10 @@ const ASKED = "a".repeat(40);
  * Every call is kept in `calls`.
  */
 type PrView = { state: string; head: string; comments: Array<{ body: string; createdAt: string }>; commits: Array<{ committedDate: string }> };
-function fakeGh(opts: { place?: string; pr?: PrView; prs?: Record<string, PrView>; tasks306?: string[] } = {}) {
+function fakeGh(opts: { place?: string; pr?: PrView; prs?: Record<string, PrView>; tasks306?: string[]; /** Comments added to an Issue, by its alias (`i304`). */ comments?: Record<string, Array<{ body: string; createdAt: string }>> } = {}) {
   const calls: string[][] = [];
   const own = structuredClone(decisions);
+  for (const [alias, nodes] of Object.entries(opts.comments ?? {})) own.data.repository[alias]!.comments.nodes.push(...nodes);
   if (opts.place) {
     const nodes = own.data.repository.i306!.comments.nodes;
     nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace("**止めた場所**: Task #307", `**止めた場所**: ${opts.place}`) };
@@ -78,7 +80,8 @@ async function boot(gh: GhRunner, adapter: RunnerAdapter = holding, pulls: Array
 
 const asks = async (base: string) => ((await (await fetch(`${base}/api/asks`)).json()) as AskList).asks;
 const decisionOf306 = async (base: string) => (await asks(base)).find((a) => a.kind === "decision" && a.pbi?.number === 306)!;
-const answer = (base: string, id: string, a: unknown) => fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id, answer: a }) });
+/** The screen's answer: the headers a browser adds on its own page (`page: false` = a bare call, as a Task's curl sends). */
+const answer = (base: string, id: string, a: unknown, page = true, more: object = {}) => fetch(`${base}/api/asks/answer`, { method: "POST", headers: page ? { origin: base, "sec-fetch-site": "same-origin" } : {}, body: JSON.stringify({ id, answer: a, ...more }) });
 /** What waits to be sent to GitHub: per operation, its Issue's number, kind, field and what is sent. */
 const queued = () =>
   core!.db.listPendingBacklogOperations().map((o) => {
@@ -278,18 +281,24 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(body.ask!.resume!.reason).toContain("ランナー側の拒否");
   });
 
+  // PR 12 as GitHub has it when a grant of it is recorded: the grant holds for this head
+  const HEAD12 = "1".repeat(40);
+  const PR12: PrView = { state: "OPEN", head: HEAD12, comments: [], commits: [] };
+
   test("merge grant on a stage Task's Issue: the grant the person gives there is recorded for the stage Task it starts", async () => {
     const GRANT = "PR #12 を判定の外でマージしてよい";
-    const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
     const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+    core!.db.updateTask(t.id, { outcome: "needs_action" }); // the stop is written straight to the log, so the outcome its record would set is set by hand
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     const r = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
     let next: string | null = null;
     for (let n = 0; n < 200 && !(next = r.ask!.resume?.taskId ?? stageTasks(306).find((x) => x.id !== t.id)?.id ?? null); n++) await Bun.sleep(10);
     expect(next).not.toBeNull();
-    expect(core!.db.hasMergeGrant(next!, "merge", 12)).toBe(true);
-    expect(core!.db.hasMergeGrant(t.id, "merge", 12)).toBe(false);
+    expect(core!.db.hasMergeGrant(next!, "acme/app", "merge", 12, HEAD12)).toBe(true); // for the Issue's repository
+    expect(core!.db.hasMergeGrant(next!, "acme/other", "merge", 12, HEAD12)).toBe(false);
+    expect(core!.db.hasMergeGrant(t.id, "acme/app", "merge", 12, HEAD12)).toBe(false);
     // a later stage Task on the Issue, while that answer is still the newest, does not get it again (the answer is known by its
     // operation's id, not by a time that sending it would move)
     core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [next!]);
@@ -298,7 +307,125 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const third = ((await again.json()) as { id: string }).id;
     expect(third).not.toBe(next);
     expect(third).toBeDefined();
-    expect(core!.db.hasMergeGrant(third!, "merge", 12)).toBe(false);
+    expect(core!.db.hasMergeGrant(third!, "acme/app", "merge", 12, HEAD12)).toBe(false);
+    // the grant is of the head the PR had: another head is not granted to the Task that got it
+    expect(core!.db.hasMergeGrant(next!, "acme/app", "merge", 12, "2".repeat(40))).toBe(false);
+  });
+
+  const startStage = async (base: string, n: number) => {
+    const r = await fetch(`${base}/api/backlog/${n}/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: meta().id, action: "complete" }) });
+    expect([n, r.status]).toEqual([n, 201]);
+    return ((await r.json()) as { id: string }).id;
+  };
+  const grantRows = () => core!.db.sqlite.query("SELECT task_id, repo, kind, target, by, source FROM task_grants ORDER BY rowid").all() as Array<{ task_id: string; repo: string; kind: string; target: number; by: string; source: string }>;
+  const screenAnswerOn = (n: number, text: string) => answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, n, text, Date.now(), { screen: true });
+
+  test("merge grant: an answer without a grant sentence leaves nothing behind, however many stage Tasks start on it", async () => {
+    const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    screenAnswerOn(306, "直してから進めて\n> PR #12 を判定の外でマージしてよい");
+    for (let n = 0; n < 3; n++) {
+      const id = await startStage(base, 306);
+      core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [id]);
+    }
+    expect(grantRows()).toEqual([]);
+    expect(core!.db.getSetting<unknown>("mergeGrantAnswers", null)).toBeNull(); // no list of used answers is kept beside the grants
+  });
+
+  test("merge grant: an answer to an Issue's question is the person's permission only when the request came in as the screen's — a bare call's or a Task's starts the work and grants nothing", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const source = core!.db.getWorkspaceBacklogSource(meta().id)!;
+    const post = (body: object, page: boolean) => fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { "content-type": "application/json", ...(page ? { origin: base, "sec-fetch-site": "same-origin" } : {}) }, body: JSON.stringify({ workspaceId: meta().id, ...body }) });
+    const marks = () => core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment").map((o) => { const p = o.payload as { screen?: boolean; by?: string }; return p.screen ? "screen" : (p.by ?? "none"); });
+    // a Task's own call (no page headers), then one that looks like the page's but names the Task that sends it
+    expect((await post({ text: GRANT }, false)).status).toBe(202);
+    expect(screenAnswer(core!.db, source, 306)).toBeNull();
+    const first = await startStage(base, 306);
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
+    expect(grantRows()).toEqual([]);
+    expect(marks()).toEqual(["api"]);
+  });
+
+  test("merge grant: an Issue's stop answered with its grant by a bare call starts the next stage Task without the grant", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+    core!.db.updateTask(t.id, { outcome: "needs_action" });
+    const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
+    const r = (await (await answer(base, ask.id, { kind: "grant" }, false)).json()) as AskAnswerResult;
+    let next: string | null = null;
+    for (let n = 0; n < 200 && !(next = r.ask!.resume?.taskId ?? stageTasks(306).find((x) => x.id !== t.id)?.id ?? null); n++) await Bun.sleep(10);
+    expect(next).not.toBeNull();
+    expect(grantRows().filter((g) => g.by === "owner")).toEqual([]);
+    expect(core!.db.hasMergeGrant(next!, "acme/app", "merge", 12, HEAD12)).toBe(false);
+  });
+
+  test("merge grant: the answer route keeps who answered — the page's is the screen's answer, one that names a sending Task is that Task's", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const source = core!.db.getWorkspaceBacklogSource(meta().id)!;
+    const post = (n: number, body: object) => fetch(`${base}/api/backlog/${n}/answer`, { method: "POST", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, ...body }) });
+    expect((await post(306, { text: GRANT, from: "task_abc" })).status).toBe(202);
+    expect(screenAnswer(core!.db, source, 306)).toBeNull();
+    expect(core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment").map((o) => (o.payload as { by?: string }).by)).toEqual(["task:task_abc"]);
+    const first = await startStage(base, 306);
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
+    expect(grantRows()).toEqual([]);
+  });
+
+  test("merge grant: the page's answer on the answer route is the person's, and its grant goes to the stage Task started after it", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const source = core!.db.getWorkspaceBacklogSource(meta().id)!;
+    const r = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, text: GRANT }) });
+    expect(r.status).toBe(202);
+    expect(screenAnswer(core!.db, source, 306)?.text).toBe(GRANT);
+    const first = await startStage(base, 306);
+    expect(grantRows()).toEqual([{ task_id: first, repo: "acme/app", kind: "merge", target: 12, by: "owner", source: expect.stringMatching(/./) }]);
+  });
+
+  test("merge grant: an answer that gave its grant here is used for the release before this one too — its id is in the setting that release reads, in its form and within its bound, so a rollback does not give the grant again", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    // the setting as the release before left it: full to its bound
+    const before = Array.from({ length: 200 }, (_, n) => `op_old_${n}`);
+    core!.db.setSetting("mergeGrantAnswers", before);
+    screenAnswerOn(306, GRANT);
+    const first = await startStage(base, 306);
+    const [row] = grantRows();
+    expect(row).toMatchObject({ task_id: first, by: "owner" });
+    // what that release does at the start of a stage: `used.includes(answer.id)` over this array decides whether the grant is given
+    const used = core!.db.getSetting<string[]>("mergeGrantAnswers", []);
+    expect(used.includes(row!.source)).toBe(true);
+    expect(used).toEqual([...before.slice(1), row!.source]);
+    // a second stage Task on the same answer: nothing more is granted, and the id is not written twice
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
+    await startStage(base, 306);
+    expect(grantRows()).toEqual([row!]);
+    expect(core!.db.getSetting<string[]>("mergeGrantAnswers", [])).toEqual(used);
+  });
+
+  test("merge grant: an answer on a PBI's Task gives its grant once — to the first stage Task started after it, however many grants came since", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ tasks306: ["src/a.ts"], pr: PR12 }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    // the person answers on the Issue of the PBI's Task (3061); the PBI's stage Task reads its Tasks' answers too
+    screenAnswerOn(306, "進めて"); // the PBI's own question, so that its stage can start
+    await Bun.sleep(5);
+    screenAnswerOn(3061, `B — 許可: ${GRANT}`);
+    const first = await startStage(base, 306);
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
+    const rows = grantRows();
+    expect(rows).toEqual([{ task_id: first, repo: "acme/app", kind: "merge", target: 12, by: "owner", source: expect.stringMatching(/./) }]);
+    // far more grants than any list of used answers would hold are recorded in between: the answer's own record still says it is spent
+    for (let n = 0; n < 250; n++) core!.db.recordMergeGrant({ taskId: `tsk_other_${n}`, repo: "acme/app", kind: "merge", target: 1000 + n, by: "owner", source: `op_other_${n}` });
+    const second = await startStage(base, 306);
+    expect(second).not.toBe(first);
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [second]);
+    const third = await startStage(base, 306);
+    for (const id of [second, third]) expect([id, core!.db.hasMergeGrant(id, "acme/app", "merge", 12, HEAD12)]).toEqual([id, false]);
+    expect(core!.db.hasMergeGrant(first, "acme/app", "merge", 12, HEAD12)).toBe(true);
+    expect(grantRows().filter((r) => r.source === rows[0]!.source)).toEqual(rows);
   });
 
   test("permission stop grant reply: a stage Task's refused stop is answered on its Issue by its grant — a ## 回答 the next stage Task gets as the person's words", async () => {
@@ -307,6 +434,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const base = await boot(fakeGh().gh, { ...holding, start: (o) => (prompts.push(o.prompt), holding.start(o, () => {})) });
     const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "git push", target: "sb/x", reason: "permission", evidence: "denied", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+    core!.db.updateTask(t.id, { outcome: "needs_action" }); // the stop is written straight to the log, so the outcome its record would set is set by hand
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     expect(ask).toMatchObject({ grant: GRANT, answers: ["grant", "text"], blockers: [] });
     // the grant is written on the Issue; a text goes to the Task as a reply (the tests below)
@@ -346,6 +474,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const t = insertStage(`#${n} 実装: PBI: 実装中の PBI`, "done", { issue: n, action: "complete" });
     if (over.budgetUsd !== undefined) core!.db.updateTask(t.id, { budgetUsd: over.budgetUsd });
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: n, taskId: t.id }, op: "ask", target: "", reason: "input", evidence: "どちらか", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 1000 } });
+    core!.db.updateTask(t.id, { outcome: "needs_action" }); // the stop is written straight to the log, so the outcome its record would set is set by hand
     return t;
   };
   const userTurnsOf = (id: string) => core!.db.listEvents(id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").map((e) => (e.ev as { text: string }).text);
@@ -449,6 +578,139 @@ function scripted(turns: Array<AgentEvent[] | (() => AgentEvent[])>, allows: str
     },
   };
 }
+
+describe("POST /api/asks/answer — questions the work went on from with their recommendation", () => {
+  const ASKED_AT = "2026-09-25T00:00:00Z";
+  // (no word of the table's stop list in it: a question with one would wait, not go on)
+  const B = "B: ファイル — 影響: 読み口はそのまま";
+  const GO = ["## 判断待ち", "", "**問い**: 保存先をどちらにするか", "**選択肢**:", "- A: DB — 影響: 読み口を書き換える", `- ${B}`, "**推奨**: A — 今の読み口のまま", "**進め方**: 推奨で進める（種類: task-order） — 戻せる変更"].join("\n"); // on a PBI's own Issue: the kind a PBI can carry (its place is checked)
+  const going = () => fakeGh({ comments: { i304: [{ body: GO, createdAt: ASKED_AT }], i305: [{ body: GO, createdAt: ASKED_AT }] } });
+  const proceeding = async (base: string) => (await asks(base)).filter((a) => a.proceeding);
+  const comments = () => queued().filter((o) => o[1] === "comment");
+  const NAMED = ` — 問い ${new Date(ASKED_AT).toISOString()}`;
+
+  test("a stage Task that posts a 推奨で進める question the work may not go on from stops at that question: the comment route says why, the Task's turn is ended, and the PBI waits for the person; a question that may go on, or one another Task or a call with no sender wrote, leaves the Task running", async () => {
+    const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const start = async (n: number) => ((await (await fetch(`${base}/api/backlog/${n}/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: meta().id, action: "complete" }) })).json()) as { id: string }).id;
+    // `as`: the Task the request proves it comes from (the headers `ops-kit backlog comment` sends); `token` replaces the Task's own
+    const proofOf = async (id: string) => ((await (await fetch(`${base}/api/tasks/${id}/mcp`)).json()) as { token: string }).token;
+    const post = async (n: number, text: string, as?: string, token?: string) => (await (await fetch(`${base}/api/backlog/${n}/comment`, { method: "POST", headers: as ? { "x-task-id": as, "x-task-token": token ?? (await proofOf(as)) } : {}, body: JSON.stringify({ workspaceId: meta().id, text }) })).json()) as { operation: string; waits?: string };
+    const status = (id: string) => core!.db.getTask(id)!.status;
+    const going = await start(304);
+    const stopping = await start(305);
+    expect([status(going), status(stopping)]).toEqual(["running", "running"]);
+    // 304: the order of its Tasks — the table lets it go on
+    expect((await post(304, GO, going)).waits).toBeUndefined();
+    // 305: the operation is in a code fence and the kind says it is an implementation choice
+    const fenced = ["## 判断待ち", "**問い**: どちらで進めるか", "**選択肢**:", "- A: 下のコマンドで直す", "- B: 待つ", "**推奨**: A", "**進め方**: 推奨で進める（種類: implementation-choice）", "```bash", "gh repo edit --visibility public", "```"].join("\n");
+    // written on 305 by the other PBI's Task, and by a call that names no sender: the question waits for the person, but
+    // it is not the question of the Task at work on 305 — a comment does not end another Task's turn
+    for (const sender of [going, undefined]) {
+      expect((await post(305, fenced, sender)).waits).toContain("安全の確認に当たる語");
+      await Bun.sleep(100);
+      expect([status(going), status(stopping)]).toEqual(["running", "running"]);
+      expect(core!.db.listEvents(stopping).some((e) => e.ev.t === "status" && e.ev.text.includes("この Task はここで止めます"))).toBe(false);
+    }
+    // the Task at work on 305 merely named — with no token, with another Task's token, or in the body (which the route
+    // does not take): the refusal is said, and its turn goes on
+    for (const token of ["", await proofOf(going)]) {
+      expect((await post(305, fenced, stopping, token)).waits).toContain("安全の確認に当たる語");
+      await Bun.sleep(100);
+      expect([status(going), status(stopping)]).toEqual(["running", "running"]);
+    }
+    expect((await fetch(`${base}/api/backlog/305/comment`, { method: "POST", body: JSON.stringify({ workspaceId: meta().id, text: fenced, from: stopping }) })).status).toBe(400);
+    await Bun.sleep(100);
+    expect(status(stopping)).toBe("running");
+    // by the Task at work on 305 itself: it stops
+    const refused = await post(305, fenced, stopping);
+    expect(refused.waits).toContain("安全の確認に当たる語");
+    for (let n = 0; n < 200 && status(stopping) !== "aborted"; n++) await Bun.sleep(10);
+    expect([status(going), status(stopping)]).toEqual(["running", "aborted"]);
+    expect(core!.db.listEvents(stopping).some((e) => e.ev.t === "status" && e.ev.text.includes("「推奨で進める」では進められません") && e.ev.text.includes("この Task はここで止めます"))).toBe(true);
+    // the PBI waits for the person like a labelled one; the other goes on
+    const items = ((await (await fetch(`${base}/api/backlog?workspaceId=${meta().id}`)).json()) as { items: Array<{ number: number; stage: string }> }).items;
+    expect(items.find((i) => i.number === 305)!.stage).toBe("needs-decision");
+    expect(items.find((i) => i.number === 304)!.stage).not.toBe("needs-decision");
+  });
+
+  test("proceed-all: one answer confirms every such question of the Workspace on its own Issue, leaves a waiting decision alone, starts nothing; sent again it confirms none", async () => {
+    const base = await boot(going().gh);
+    const open = await proceeding(base);
+    expect(open.map((a) => [a.pbi?.number, a.state, a.needs, a.answers]).sort()).toEqual([[304, "open", "auto", ["confirm", "choice", "text"]], [305, "open", "auto", ["confirm", "choice", "text"]]]);
+    // a call that is not the page's (a Task's token or curl) cannot confirm in the person's name, at once or one by one
+    const askIds = open.map((a) => a.id);
+    for (const id of [`proceed-all:${meta().id}`, open[0]!.id]) {
+      const bare = await answer(base, id, { kind: "confirm", ok: true }, false, { askIds });
+      expect(bare.status).toBe(403);
+      expect(((await bare.json()) as { reason: string }).reason).toBe("human");
+    }
+    expect(comments()).toEqual([]);
+    // only a confirmation is taken by this id
+    expect((await answer(base, `proceed-all:${meta().id}`, { kind: "allow" })).status).toBe(400);
+    expect((await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: false, text: "違う" })).status).toBe(400);
+    // without the questions the screen showed nothing is confirmed: the set is never read anew for the person
+    expect((await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: true })).status).toBe(400);
+    expect((await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: true }, true, { askIds: [] })).status).toBe(400);
+    expect(comments()).toEqual([]);
+    const r = await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: true }, true, { askIds });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { confirmed: string[] }).confirmed.sort()).toEqual(open.map((a) => a.id).sort());
+    // one ## 回答 per Issue, not marked as the person's words to a stage Task, and no label operation (there is none to take off)
+    expect(queued().sort((x, y) => Number(x[0]) - Number(y[0]))).toEqual([304, 305].map((n) => [n, "comment", null, { body: `## 回答\n\n**確定**: 推奨のまま A（まとめて）${NAMED}` }]));
+    expect(core!.db.listTasks().filter((t) => t.stage)).toEqual([]);
+    expect((await decisionOf306(base)).state).toBe("open");
+    expect((await proceeding(base)).map((a) => a.state)).toEqual(["answered", "answered"]);
+    const again = await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: true }, true, { askIds });
+    expect(((await again.json()) as { confirmed: string[] }).confirmed).toEqual([]);
+    expect(comments()).toHaveLength(2);
+    // another Workspace's id confirms nothing
+    expect(((await (await answer(base, "proceed-all:ws_none", { kind: "confirm", ok: true }, true, { askIds })).json()) as { confirmed: string[] }).confirmed).toEqual([]);
+  });
+
+  test("proceed-all confirms only the questions the screen showed: one of the Workspace that was not on it stays open and gets no ## 回答", async () => {
+    const base = await boot(going().gh);
+    const open = await proceeding(base);
+    const [seen, unseen] = [open.find((a) => a.pbi?.number === 304)!, open.find((a) => a.pbi?.number === 305)!];
+    // the screen was drawn with one question; the other came up before the press (or the id sent is not one of this list)
+    const r = await answer(base, `proceed-all:${meta().id}`, { kind: "confirm", ok: true }, true, { askIds: [seen.id, "proceed:ws_none#1@0"] });
+    expect(((await r.json()) as { confirmed: string[] }).confirmed).toEqual([seen.id]);
+    expect(queued().map((q) => q[0])).toEqual([304]);
+    expect((await proceeding(base)).map((a) => [a.pbi?.number, a.state]).sort()).toEqual([[304, "answered"], [305, "open"]]);
+    expect(unseen.id).not.toBe(seen.id);
+  });
+
+  test("overturn: another choice writes ## 回答 with the 覆す line and starts one stage Task with it; sent again it starts no more", async () => {
+    const base = await boot(going().gh);
+    const ask = (await proceeding(base)).find((a) => a.pbi?.number === 304)!;
+    const r = await answer(base, ask.id, { kind: "choice", choice: B });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as AskAnswerResult;
+    expect(body).toMatchObject({ already: false, ask: { id: ask.id, state: "answered", resume: { state: "running" } } });
+    expect(comments()).toEqual([[304, "comment", null, { body: `## 回答\n\n**覆す**: 推奨 A → B${NAMED}\n\n${B}`, screen: true }]]);
+    expect(stageTasks(304)).toHaveLength(1);
+    expect(body.ask!.resume!.taskId).toBe(stageTasks(304)[0]!.id);
+    const again = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
+    expect(again.already).toBe(true);
+    expect(comments()).toHaveLength(1);
+    expect(stageTasks(304)).toHaveLength(1);
+    // words of the person's own overturn it too
+    const other = (await proceeding(base)).find((a) => a.pbi?.number === 305)!;
+    await answer(base, other.id, { kind: "text", text: "C の読みで" });
+    expect(comments()[1]).toEqual([305, "comment", null, { body: `## 回答\n\n**覆す**: 推奨 A → 自由文${NAMED}\n\nC の読みで`, screen: true }]);
+  });
+
+  test("the recommended choice confirms: ## 回答 with the 確定 line, and no stage Task", async () => {
+    const base = await boot(going().gh);
+    const ask = (await proceeding(base)).find((a) => a.pbi?.number === 304)!;
+    const body = (await (await answer(base, ask.id, { kind: "choice", choice: "A: DB — 影響: 読み口を書き換える" })).json()) as AskAnswerResult;
+    expect(body).toMatchObject({ already: false, ask: { state: "answered", resume: null } });
+    expect(comments()).toEqual([[304, "comment", null, { body: `## 回答\n\n**確定**: 推奨のまま A${NAMED}` }]]);
+    expect(stageTasks(304)).toHaveLength(0);
+    // it cannot be put on hold: nothing waits on it
+    const other = (await proceeding(base)).find((a) => a.pbi?.number === 305)!;
+    expect((await answer(base, other.id, { kind: "hold" })).status).toBe(409);
+  });
+});
 
 describe("POST /api/asks/answer — task side", () => {
   const until = async (ok: () => boolean | Promise<boolean>) => {

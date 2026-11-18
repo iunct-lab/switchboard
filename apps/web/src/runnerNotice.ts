@@ -2,14 +2,14 @@ import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
-/** What is missing when the daemon gave no note (or no runner list): the words Home showed on hover before #3354. */
+/** What is missing when the daemon gave no note (or no runner list): the words Home used to show only on hover. */
 const MISSING: Record<"claude" | "codex" | "dak", string> = {
   claude: t(home.missingClaude),
   codex: t(home.missingCodex),
   dak: t(home.dakUnreachable),
 };
 
-/** Why runner `id` cannot be picked and what to do, as text read without hovering (#3354); null when it can be picked. */
+/** Why runner `id` cannot be picked and what to do, as text read without hovering; null when it can be picked. */
 export function unavailableNotice(info: RunnerInfo | undefined, id: RunnerId): string | null {
   if (info?.available) return null;
   // an ADK server added in Settings (`custom:<name>`) has no fixed install advice: its own detect() note says what failed
@@ -17,7 +17,7 @@ export function unavailableNotice(info: RunnerInfo | undefined, id: RunnerId): s
 }
 
 /**
- * The line under the runners (#3354): each runner the daemon listed as unavailable, with its reason. Empty until the
+ * The line under the runners: each runner the daemon listed as unavailable, with its reason. Empty until the
  * daemon has listed them (loading, unreachable, no token): nothing is known to be missing then.
  */
 export function unavailableNotices(runners: RunnerInfo[] | undefined): Array<{ id: RunnerId; text: string }> {
@@ -25,7 +25,7 @@ export function unavailableNotices(runners: RunnerInfo[] | undefined): Array<{ i
 }
 
 /**
- * The first reason 開始 cannot be pressed, in the order the person fixes them (#3354); null when it can. `runnerOk` is the
+ * The first reason 開始 cannot be pressed, in the order the person fixes them; null when it can. `runnerOk` is the
  * selected runner, `anyRunnerOk` any runner. `ws` false = 自動, which only Cloud refuses.
  */
 export function startBlockedReason(s: { prompt: string; stale: boolean; attachBusy: boolean; runnerOk: boolean; cloud: boolean; ws: boolean; anyRunnerOk: boolean }): string | null {

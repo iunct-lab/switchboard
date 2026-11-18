@@ -1,13 +1,13 @@
-import type { EvalContext, EvalsListRow, EvalsSummary, HumanAnswers, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
+import type { EvalContext, EvalsListRow, EvalsRequestRow, EvalsSummary, EvalStage, HumanAnswers, RuleMetrics, RunnerInfo, TaskEvals } from "@switchboard/protocol";
 import { outcomeIsDerived } from "./attention.ts";
 import { effortLabel } from "./effortOptions.ts";
 import { t } from "./i18n.ts";
 import { insights as m } from "./i18n/insights.ts";
 
-/** The default rubric's criteria as the screen names them (#1219); an id the screen does not know is shown as is. */
+/** The default rubric's criteria as the screen names them; an id the screen does not know is shown as is. */
 const CRITERION_TITLES: Record<string, string> = { goal: t(m.critGoal), instructions: t(m.critInstructions), efficiency: t(m.critEfficiency), communication: t(m.critCommunication), safety: t(m.critSafety), intent: t(m.critIntent), minimal: t(m.critMinimal), value: t(m.critValue) };
 
-/** One line of the 評価 section of the Brief (#1218). `warn` = a count that points at trouble (a failure, an error, a denial, a stop, a bad end). */
+/** One line of the 評価 section of the Brief. `warn` = a count that points at trouble (a failure, an error, a denial, a stop, a bad end). */
 export interface MetricRow {
   label: string;
   value: string;
@@ -31,14 +31,14 @@ export function metricRows(e: TaskEvals): MetricRow[] {
     { label: t(m.daemonStopsShort), value: String(x.daemonStops), warn: x.daemonStops > 0 },
     { label: t(m.turns), value: String(x.turns) },
     { label: t(m.duration), value: fmtDuration(x.durationMs) },
-    // a last turn the daemon's stop cut ended that way by the stop, not by the task (#2089): デーモン停止 carries the mark
+    // a last turn the daemon's stop cut ended that way by the stop, not by the task: デーモン停止 carries the mark
     { label: t(m.ending), value: endLabel(x.lastEnd), warn: (x.lastEnd === "error" || x.lastEnd === "aborted") && !x.lastCutByDaemon },
     // the model an 実装 Task handed each Task to; no row without one
     ...(x.delegatedModel ? [{ label: t(m.delegatedModel), value: t(m.delegatedModelValue, { model: x.delegatedModel }) }] : []),
   ];
 }
 
-/** Claude Code's auto-mode classifier (#2236): what it let through and stopped, the stopped ones per kind; 不明 when nothing was recorded (Codex, not Auto). */
+/** Claude Code's auto-mode classifier: what it let through and stopped, the stopped ones per kind; 不明 when nothing was recorded (Codex, not Auto). */
 function classifierValue(c: RuleMetrics["classifier"]): string {
   if (!c) return t(m.unknown);
   const kinds = Object.entries(c.byCategory).map(([k, n]) => `${k === "asked" ? t(m.askedPerson) : k} ${n}`).join(", ");
@@ -58,7 +58,7 @@ export function endLabel(end: RuleMetrics["lastEnd"]): string {
   return end === "ok" ? t(m.endOk) : end === "error" ? t(m.endError) : end === "aborted" ? t(m.endAborted) : "-";
 }
 
-/** One criterion's line of the rubric judge's row (#1219). `warn` = 2 or below. */
+/** One criterion's line of the rubric judge's row. `warn` = 2 or below. */
 export interface JudgeRow {
   id: string;
   title: string;
@@ -83,7 +83,7 @@ export function judgeAverage(e: TaskEvals): number | null {
   return Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10;
 }
 
-/** The person's own rating as the Brief shows it (#1220): `4 / 5`, with the note after a dot; null without one. */
+/** The person's own rating as the Brief shows it: `4 / 5`, with the note after a dot; null without one. */
 export function humanLabel(e: TaskEvals): string | null {
   if (!e.human) return null;
   return e.human.comment ? `${e.human.rating} / 5 · ${e.human.comment}` : `${e.human.rating} / 5`;
@@ -105,7 +105,7 @@ export function humanAnswerMark(h: HumanAnswers | null | undefined): string {
   ].filter(Boolean).join(" ");
 }
 
-/** The human − judge gap as Insights shows it (#1877): the signed mean to one decimal and the count, or that none is rated yet. */
+/** The human − judge gap as Insights shows it: the signed mean to one decimal and the count, or that none is rated yet. */
 export function gapLabel(gap: EvalsSummary["gap"]): string {
   if (!gap.count || gap.mean === null) return t(m.noHumanRating);
   const sign = gap.mean > 0 ? "+" : gap.mean < 0 ? "−" : "";
@@ -114,13 +114,13 @@ export function gapLabel(gap: EvalsSummary["gap"]): string {
   return [line, ...parts].join(" ／ ");
 }
 
-/** The models the task ran on as the Brief shows them (#1801): the one, or every one in the order used with （混在） after; null when not known. */
+/** The models the task ran on as the Brief shows them: the one, or every one in the order used with （混在） after; null when not known. */
 export function modelsLabel(e: Pick<TaskEvals, "models">): string | null {
   if (!e.models.length) return null;
   return e.models.length === 1 ? e.models[0]! : t(m.mixedModels, { models: e.models.join(" → ") });
 }
 
-/* ---------- the Evals list (#1221) ---------- */
+/* ---------- the Evals list ---------- */
 
 export type EvalsSortKey = "updatedAt" | "judge" | "human" | "toolCalls" | "toolFailures" | "errors" | "userInstructions" | "stops" | "daemonStops" | "costUsd";
 
@@ -161,8 +161,8 @@ export function firstSortDir(key: EvalsSortKey): "asc" | "desc" {
 
 /**
  * The text of a row's cells that are not plain numbers; "-" where the task has no such eval. `model` is every model the
- * task ran on in the order first used (#1801: the list is distinct, so its last entry is not always the one running at
- * the end); `mixed` = two or more. `effort` is the same for the thinking depths the task started with (#1802): the runner's
+ * task ran on in the order first used (the list is distinct, so its last entry is not always the one running at
+ * the end); `mixed` = two or more. `effort` is the same for the thinking depths the task started with: the runner's
  * label of each, "—" when it never started.
  */
 export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts">): { judge: string; human: string; end: string; model: string; mixed: boolean; effort: string; effortMixed: boolean; subagentEffort: string } {
@@ -183,14 +183,14 @@ export function evalCells(row: EvalsListRow, runner?: Pick<RunnerInfo, "efforts"
 const effortKey = (e: string): string => e || "-";
 
 /**
- * The rows that used `model` and started at `effort` (#1801, #1802); an empty value does not filter, "-" is the CLI default. Done on
+ * The rows that used `model` and started at `effort`; an empty value does not filter, "-" is the CLI default. Done on
  * the rows the screen read: the daemon has no index to filter its events by.
  */
 export function filterEvalRows(rows: EvalsListRow[], f: { model: string; effort: string; subagentEffort?: string }): EvalsListRow[] {
   return rows.filter((r) => (!f.model || r.models.includes(f.model)) && (!f.effort || r.efforts.map(effortKey).includes(f.effort)) && (!f.subagentEffort || (r.subagentEffort ?? "-") === f.subagentEffort));
 }
 
-/** The choices of the model and effort selects (#1801): the values in the rows read, distinct and sorted; "-" when a task ran at the CLI default. */
+/** The choices of the model and effort selects: the values in the rows read, distinct and sorted; "-" when a task ran at the CLI default. */
 export function evalFilterOptions(rows: EvalsListRow[]): { models: string[]; efforts: string[]; subagentEfforts: string[] } {
   return {
     models: [...new Set(rows.flatMap((r) => r.models))].sort(),
@@ -207,7 +207,7 @@ export function judgedDiffers(row: EvalsListRow): boolean {
   return row.judgedResult !== null && !outcomeIsDerived(row.status) && row.judgedResult !== row.outcome;
 }
 
-/** Whether a row points at trouble: a failure, an error or a stop, a low rubric average, or a low rating. A daemon stop is not the task's weakness and does not count (#2089). */
+/** Whether a row points at trouble: a failure, an error or a stop, a low rubric average, or a low rating. A daemon stop is not the task's weakness and does not count. */
 export function evalRowWarn(row: EvalsListRow): boolean {
   const r = row.rules;
   return !!((r && (r.toolFailures > 0 || r.errors > 0 || r.stops > 0)) || (row.judge && row.judge.average <= 2.5) || (row.human && row.human.rating <= 2));
@@ -221,6 +221,9 @@ export interface ContextLine {
 }
 
 const STATE_LABELS = { open: m.outOpen, merged: m.outMerged, closed: m.outClosed };
+
+/** Each output in words: what it is, its number, and its stored state when known. */
+const outputTexts = (outputs: EvalContext["outputs"]): string[] => outputs.map((o) => [t(o.kind === "pr" ? m.outPr : o.kind === "change" ? m.outChange : m.outIssue, { n: o.number }), o.state ? t(STATE_LABELS[o.state]) : ""].filter(Boolean).join(" "));
 
 /** The request, its interpretation, the outputs with their states and the person's interventions as lines to read without opening the conversation. */
 export function contextLines(ctx: EvalContext): ContextLine[] {
@@ -236,7 +239,7 @@ export function contextLines(ctx: EvalContext): ContextLine[] {
   } else {
     lines.push({ label: t(m.ctxRequest), text: r.text });
   }
-  const outs = ctx.outputs.map((o) => [t(o.kind === "pr" ? m.outPr : o.kind === "change" ? m.outChange : m.outIssue, { n: o.number }), o.state ? t(STATE_LABELS[o.state]) : ""].filter(Boolean).join(" "));
+  const outs = outputTexts(ctx.outputs);
   if (ctx.pbiStatus) outs.push(t(m.outPbiStatus, { status: ctx.pbiStatus }));
   lines.push({ label: t(m.ctxOutputs), text: outs.length ? outs.join(" · ") : t(m.ctxNoOutputs) });
   const { userInstructions, decisionStops } = ctx.interventions;
@@ -253,3 +256,41 @@ export const HUMAN_QUESTIONS: Array<HumanQuestion<"intent"> | HumanQuestion<"com
   { key: "detour", question: t(m.qDetour), options: [{ value: "none", label: t(m.aDetourNone) }, { value: "some", label: t(m.aDetourSome) }, { value: "unknown", label: t(m.aUnknown) }] },
   { key: "value", question: t(m.qValue), options: [{ value: "used", label: t(m.aValueUsed) }, { value: "unused", label: t(m.aValueUnused) }, { value: "unknown", label: t(m.aValueUnknown) }] },
 ];
+
+/** The stages a request evaluation can name, in the order shown; `none` = nothing went wrong. */
+export const EVAL_STAGES: Array<{ value: EvalStage; label: string }> = [
+  { value: "none", label: t(m.stageNone) },
+  { value: "request", label: t(m.stageRequest) },
+  { value: "pbi", label: t(m.stagePbi) },
+  { value: "impl", label: t(m.stageImpl) },
+  { value: "report", label: t(m.stageReport) },
+];
+
+/** A tap on a stage: `none` clears the others, another stage clears `none`, a selected one is taken off. In the order of `EVAL_STAGES`. */
+export function toggleStage(selected: EvalStage[], stage: EvalStage): EvalStage[] {
+  if (selected.includes(stage)) return selected.filter((s) => s !== stage);
+  const next: EvalStage[] = stage === "none" ? [stage] : [...selected.filter((s) => s !== "none"), stage];
+  return EVAL_STAGES.map((s) => s.value).filter((s) => next.includes(s));
+}
+
+/** A closed request with its PBIs as lines to read without opening anything: the request, how its PBIs ended, each PBI with what it produced, and how often the person stepped in. */
+export function requestRowLines(row: EvalsRequestRow): ContextLine[] {
+  const lines: ContextLine[] = [{ label: t(m.ctxSource), text: `#${row.number} ${row.head}`.trim() }];
+  const dropped = row.pbis.filter((p) => p.dropped).length;
+  const own = outputTexts(row.outputs);
+  if (row.pbis.length === 0) lines.push({ label: t(m.ctxPbi), text: [t(m.ctxNoPbi), ...own].join(" · ") });
+  else {
+    lines.push({ label: t(m.reqPbis), text: [dropped === 0 ? t(m.reqAllDone, { n: row.pbis.length }) : t(m.reqSomeDropped, { n: row.pbis.length, dropped }), ...own].join(" · ") });
+    for (const p of row.pbis) {
+      const outs = outputTexts(p.outputs);
+      lines.push({ label: `#${p.number}`, text: [p.title, p.dropped ? t(m.reqDropped) : (p.status ?? ""), outs.length ? outs.join(" · ") : t(m.reqNoOutputs)].filter(Boolean).join(" · ") });
+    }
+  }
+  lines.push({ label: t(m.ctxInterventions), text: t(m.reqInterventions, { n: row.interventions, tasks: row.taskIds.length + row.pbis.reduce((a, p) => a + p.taskIds.length, 0) }), warn: row.interventions > 0 });
+  return lines;
+}
+
+/** The stage table's rows: every stage with its count and the requests it was chosen for (`#N`, newest first). */
+export function stageTableRows(stages: EvalsSummary["stages"]): Array<{ stage: EvalStage; label: string; count: number; examples: string }> {
+  return stages.rows.map((r) => ({ stage: r.stage, label: EVAL_STAGES.find((s) => s.value === r.stage)?.label ?? r.stage, count: r.count, examples: r.examples.map((e) => `#${e.number}`).join(" ") }));
+}

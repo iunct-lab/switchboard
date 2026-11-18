@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-rebuild (#2186) — what to keep before 作り直す, which replaces the root volume.
+# pre-rebuild — what to keep before 作り直す, which replaces the root volume.
 #   save              to s3://<data>/archive/pre-rebuild/<UTC time>/ : switchboard.sql.zst (a dump of the database; Litestream
 #                     brings the database back, this copy is for when it does not), files.tar.zst (attachments, the
 #                     recordings vault, Knowledge and artifacts: a point-in-time copy, sb-runner-sync brings them back
@@ -175,7 +175,7 @@ restore-work)
   cloned=0 restored=0 left=0 failed=0
   while IFS=$'\t' read -r path url; do
     [ ! -e "$path" ] || continue
-    # bootstrap moved it aside: GitHub did not answer for it as the registered repository (#2799). Not cloned again here
+    # bootstrap moved it aside: GitHub did not answer for it as the registered repository. Not cloned again here
     if compgen -G "$path.unverified-*" > /dev/null; then echo "pre-rebuild: $path was moved aside by bootstrap; not cloned"; left=$((left + 1)); continue; fi
     if git clone -q "$url" "$path"; then cloned=$((cloned + 1)); else echo "pre-rebuild: could not clone $path" >&2; failed=$((failed + 1)); fi
   done < "$WT/repos.tsv"

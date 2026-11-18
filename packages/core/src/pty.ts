@@ -1,6 +1,8 @@
 // Terminal tab: one interactive shell per task, in the task's cwd. The PTY is bun-pty (bun:ffi) inside the
 // daemon — no bridge process. A shell outlives its WebSocket clients; it ends when
-// the task ends (onTaskEnd), when the user exits it, when close() is called, or with the daemon.
+// the task ends (onTaskEnd), when the user exits it, when close() is called, or with the daemon. A Workspace's shell
+// (opened without a Task) has no Task end: it also ends once nobody has been attached to it and nothing has been typed
+// or printed in it for `idleMs` (closeIdle), and from then on it does not count as activity either (busy).
 // The first frame to a socket is PtyAttached (the session's id); after that, output as raw strings. A socket that comes
 // back with ?shell=<id> is attached to that session only — never to a new shell.
 import { childEnv } from "@switchboard/adapter-claude";
@@ -10,6 +12,13 @@ import { z } from "zod";
 
 /** Shells open at once. Not a setting: the host is small and only a task whose terminal tab was opened has one. */
 export const MAX_PTY_SESSIONS = 8;
+/**
+ * How long a Workspace's shell may stay with no socket attached and no input or output before it is closed. The default;
+ * the daemon passes its setting (SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN). A Task's shell is not under it: it ends with its Task.
+ */
+export const WORKSPACE_SHELL_IDLE_MS = 30 * 60_000;
+/** How often the open Workspace shells are looked at for the bound above. */
+const IDLE_SWEEP_MS = 60_000;
 import { supportedTeleportArgs, TeleportOutput, type TeleportResult } from "./claude-cloud.ts";
 
 /** Where an official Teleport is: running, waiting for the user's answer in the terminal, or being ended after it resumed. */
@@ -78,6 +87,10 @@ export class OscStatusReader {
 export const PtyClientMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("input"), data: z.string() }),
   z.object({ type: z.literal("resize"), cols: z.number().int().min(1).max(1000), rows: z.number().int().min(1).max(1000) }),
+  // ends a Workspace's shell and what runs in it (the screen's button). A Workspace's shell has no Task end, so the
+  // screen needs a way to end it before its idle bound. On a Task's shell or Teleport it does nothing: the socket
+  // handler asks ofWorkspace() first, and those end with their Task.
+  z.object({ type: z.literal("close") }),
 ]);
 
 /** How much output (in UTF-16 units, as strings count) is kept per session and re-sent on attach, so coming back to the tab shows what happened. */
@@ -100,13 +113,20 @@ interface Session {
   recent: string;
   cols: number; rows: number;
   clients: Set<PtyClient>;
+  /** A Workspace's shell (no Task ends it): the idle bound applies. */
+  ofWorkspace: boolean;
+  /** When a socket was last attached or detached, or something was last typed or printed (ms). */
+  activeAt: number;
   /** Teleport only: cancels the quiet timers. */
   stopTimers?: () => void;
 }
 
 export class PtyManager {
   private sessions = new Map<string, Session>();
-  private constructor(private spawn: Spawn, private timings: TeleportTimings = TELEPORT_TIMINGS) {}
+  private sweep: ReturnType<typeof setInterval> | null = null;
+  /** The idle bound of a Workspace's shell (ms). The daemon sets it from its config after load. */
+  idleMs = WORKSPACE_SHELL_IDLE_MS;
+  private constructor(private spawn: Spawn, private timings: TeleportTimings = TELEPORT_TIMINGS, private now: () => number = Date.now) {}
 
   /**
    * null when a PTY cannot be opened here: an unsupported OS / arch, or a distribution without the native library.
@@ -114,29 +134,68 @@ export class PtyManager {
    * logs a failed dlopen and lets the import succeed, and only the first spawn throws — so one throwaway process is
    * spawned.
    */
-  static async load(importer: () => Promise<{ spawn: Spawn }> = () => import("bun-pty"), timings?: Partial<TeleportTimings>): Promise<PtyManager | null> {
+  static async load(importer: () => Promise<{ spawn: Spawn }> = () => import("bun-pty"), timings?: Partial<TeleportTimings>, now?: () => number): Promise<PtyManager | null> {
     try {
       const { spawn } = await importer();
       spawn("/bin/sh", ["-c", "exit 0"], { name: "xterm-256color" }).kill();
-      return new PtyManager(spawn, { ...TELEPORT_TIMINGS, ...timings });
+      return new PtyManager(spawn, { ...TELEPORT_TIMINGS, ...timings }, now);
     } catch (e) {
       console.warn(`pty: terminal tab disabled — ${String((e as Error).message ?? e).split("\n")[0]}`);
       return null;
     }
   }
 
-  /** Active shells and imports (keep the host alive until the result is delivered). */
+  /** Open shells and imports: what the cap (MAX_PTY_SESSIONS) counts. */
   get size(): number {
     return [...this.sessions.values()].filter(s => s.pty !== null || s.kind === "importing").length;
   }
 
-  /** The task's shell, started on first use. `onStatus`: Claude Code in it changed state (OSC 7501); null when it or the shell ended. */
-  open(taskId: string, cwd: string, shell: string, onStatus: (s: TerminalStatus | null) => void = () => {}): void {
+  /** A Workspace's shell nobody is attached to and nothing was typed or printed in for `idleMs`. */
+  private idle(s: Session, now: number): boolean {
+    return s.ofWorkspace && s.clients.size === 0 && now - s.activeAt >= this.idleMs;
+  }
+
+  /**
+   * The shells and imports that keep the host from its idle stop: `size` without the Workspace shells past their idle
+   * bound. A forgotten Workspace shell so stops counting at the bound, whether or not the sweep has closed it yet.
+   */
+  busy(now: number = this.now()): number {
+    return [...this.sessions.values()].filter(s => (s.pty !== null || s.kind === "importing") && !this.idle(s, now)).length;
+  }
+
+  /** Closes the Workspace shells past their idle bound; the keys closed. Called by the sweep (and by tests, with their own clock). */
+  closeIdle(now: number = this.now()): string[] {
+    const keys = [...this.sessions].filter(([, s]) => this.idle(s, now)).map(([k]) => k);
+    for (const k of keys) this.close(k);
+    return keys;
+  }
+
+  /** The sweep runs only while a Workspace's shell is open, and never keeps the process alive. */
+  private watchIdle(): void {
+    if (this.sweep) return;
+    this.sweep = setInterval(() => {
+      this.closeIdle();
+      if (![...this.sessions.values()].some(s => s.ofWorkspace)) this.stopSweep();
+    }, IDLE_SWEEP_MS);
+    this.sweep.unref?.();
+  }
+
+  private stopSweep(): void {
+    if (this.sweep) clearInterval(this.sweep);
+    this.sweep = null;
+  }
+
+  /**
+   * The key's shell, started on first use. `onStatus`: Claude Code in it changed state (OSC 7501); null when it or the
+   * shell ended. `of`: whose shell it is. A Task's ends with its Task; a Workspace's is under the idle bound.
+   */
+  open(taskId: string, cwd: string, shell: string, onStatus: (s: TerminalStatus | null) => void = () => {}, of: "task" | "workspace" = "task"): void {
     if (this.sessions.has(taskId)) return;
     if (this.size >= MAX_PTY_SESSIONS) throw new Error(`too many terminals open (max ${MAX_PTY_SESSIONS}); close one first`);
     const pty = this.spawn(shell, ["-i"], { name: "xterm-256color", cols: 80, rows: 24, cwd });
-    const s: Session = { id: crypto.randomUUID(), pty, kind: "shell", recent: "", cols: 80, rows: 24, clients: new Set() };
+    const s: Session = { id: crypto.randomUUID(), pty, kind: "shell", recent: "", cols: 80, rows: 24, clients: new Set(), ofWorkspace: of === "workspace", activeAt: this.now() };
     this.sessions.set(taskId, s);
+    if (s.ofWorkspace) this.watchIdle();
     const reader = new OscStatusReader();
     let status: TerminalStatus | null = null;
     const report = (next: TerminalStatus | null) => {
@@ -145,6 +204,7 @@ export class PtyManager {
       try { onStatus(next); } catch { /* A broken observer must not stop the shell's output. */ }
     };
     pty.onData((data) => {
+      s.activeAt = this.now();
       const read = reader.push(data);
       if (read.query) pty.write(PTY_STATUS_REPLY);
       for (const st of read.statuses) report(st);
@@ -163,7 +223,7 @@ export class PtyManager {
 
   /** Connecting to the Teleport view must not start a shell or a CLI. */
   prepareTeleport(taskId: string): void {
-    if (!this.sessions.has(taskId)) this.sessions.set(taskId, { id: crypto.randomUUID(), pty: null, kind: "pending", recent: "", cols: 80, rows: 24, clients: new Set() });
+    if (!this.sessions.has(taskId)) this.sessions.set(taskId, { id: crypto.randomUUID(), pty: null, kind: "pending", recent: "", cols: 80, rows: 24, clients: new Set(), ofWorkspace: false, activeAt: this.now() });
   }
 
   async startTeleport(taskId: string, cwd: string, bin: string, cloudId: string, exited: (result: TeleportResult) => void | Promise<void>, progress: (p: TeleportProgress) => void = () => {}): Promise<void> {
@@ -253,16 +313,25 @@ export class PtyManager {
     if (!s) return client.close();
     if (s.recent) client.send(s.recent);
     s.clients.add(client);
+    s.activeAt = this.now();
   }
 
   detach(taskId: string, client: PtyClient): void {
     const s = this.sessions.get(taskId);
-    s?.clients.delete(client);
+    // the idle bound counts from when the last socket left, at the earliest
+    if (s?.clients.delete(client)) s.activeAt = this.now();
     if (s?.kind === "pending" && s.clients.size === 0) this.sessions.delete(taskId);
   }
 
   write(taskId: string, data: string): void {
-    this.sessions.get(taskId)?.pty?.write(data);
+    const s = this.sessions.get(taskId);
+    if (s) s.activeAt = this.now();
+    s?.pty?.write(data);
+  }
+
+  /** Whether the key's session is a Workspace's shell (not a Task's shell or Teleport). */
+  ofWorkspace(taskId: string): boolean {
+    return this.sessions.get(taskId)?.ofWorkspace === true;
   }
 
   resize(taskId: string, cols: number, rows: number): void {
@@ -292,6 +361,7 @@ export class PtyManager {
   }
 
   closeAll(): void {
+    this.stopSweep();
     for (const id of [...this.sessions.keys()]) this.close(id);
   }
 }

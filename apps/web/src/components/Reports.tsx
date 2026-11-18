@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReportRow } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { artifactMeta, reportMeta, type AcrossQuery } from "../reports.ts";
 import { ArtifactBody, UNDO_MS } from "./Artifacts.tsx";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";
 
-/** Rows read at a time; a full page offers さらに表示 (#1833). */
+/** Rows read at a time; a full page offers さらに表示. */
 const PAGE = 50;
-/** How many rows show before 残り N 件 (#4035): the newest; a list of 50 pushed Insights' other sections seven screens down on a phone. */
+/** How many rows show before 残り N 件: the newest; a list of 50 pushed Insights' other sections seven screens down on a phone. */
 const SHOWN = 5;
 
 /**
- * The レポート section of Insights (#1835): every task's HTML artifacts — or, switched to すべての成果物, every artifact
- * (#1833) — newest first, opened in place with the same sandboxed body as a Task's 成果物 tab; × removes with 元に戻す,
+ * The レポート section of Insights: every task's HTML artifacts — or, switched to すべての成果物, every artifact
+ * — newest first, opened in place with the same sandboxed body as a Task's 成果物 tab; × removes with 元に戻す,
  * and a row leads to its Task's 成果物 tab. The words typed filter on the daemon, so rows not read yet are found too.
  */
 export function Reports(props: { scope: "reports" | "all"; onScope: (scope: "reports" | "all") => void; openId?: string; onOpenTask: (taskId: string, artifactId: string) => void; onError: (msg: string) => void }) {

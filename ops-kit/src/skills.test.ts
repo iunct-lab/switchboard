@@ -1,9 +1,13 @@
-// test-reads: ops-kit/bin/ ops-kit/skills/ ops-kit/template/ ops-kit/src/cli.ts ops-kit/src/idle-run.ts
+// test-reads: ops-kit/bin/ ops-kit/skills/ ops-kit/processes/ ops-kit/template/ ops-kit/src/cli.ts ops-kit/src/idle-run.ts docs/design/skill-sync.md CLAUDE.md
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { type Dirent, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { checkConditions, CONDITION_KEYS, parseConditions, unmarkedConditions } from "./conditions.ts";
+import { REVIEW_RULES, REVIEWER_ISOLATION, REVIEWER_NOTE } from "./review-note.ts";
+import { OLD_PATHS_ITEM, TRIAGE_HEADING } from "./review-material.ts";
+import { DOC_RULES, docViolations } from "./runner-docs.ts";
 
 /**
  * The shared skills name no command, path or tool of one repository: those come from the working repository's
@@ -120,7 +124,7 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("有効の条件も CLAUDE.md に書く");
   expect(text).toContain("条件が満たされないときは呼ばず");
   expect(text).toContain("<extra>: 無効（<条件>）");
-  expect(text).toContain("CLAUDE.md が名指しし、有効の条件を満たしていれば");
+  expect(text).toContain("`ops.config.json` の `extraReviewer` が名指しし、有効の条件を満たしていれば");
 });
 
 test("cross-runner-review: step 4 appends the fix commits' diff to fix.range-diff after the range-diff (a fix commit added on top shows only as one line in range-diff)", () => {
@@ -141,18 +145,57 @@ test("cross-runner-review: the Intent check also asks whether design document ch
   expect(text).toContain("out-of-scope edits");
 });
 
-test("cross-runner-review: OPS_KIT_REVIEW_RUNNER=same picks the same runner with its own mark; no value keeps the other runner", () => {
+test("cross-runner-review: the main reviewer is split by the review setting, each side with its own mark on the summary", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const chosen = "（同じランナーの別セッション。設定による選択）";
   const substitute = "（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）";
-  expect(text).toContain('[ "${OPS_KIT_REVIEW_RUNNER:-other}" = same ]');
-  expect(text).toContain(`\`[<runner>] review${chosen}\``);
-  expect(text).toContain(`\`[<runner>] review${substitute}\``);
-  expect(chosen).not.toBe(substitute);
-  expect(text).toContain("値が無い・`other`・それ以外の値なら、**既定の別のランナー**");
+  // the setting reaches a Task as the side of the text it reads, not as a variable the text tells it to look at
+  expect(text).not.toContain("OPS_KIT_REVIEW_RUNNER");
+  for (const mark of ["<!-- when review=same -->", "<!-- when review=other -->", "<!-- when review=other reviewer=codex -->", "<!-- when review=same reviewer=claude -->"]) expect({ mark, has: text.includes(mark) }).toEqual({ mark, has: true });
+  const lines = parseConditions(text, "cross-runner-review");
+  const sideOf = (phrase: string) => [...new Set(lines.filter((l) => !l.mark && l.text.includes(phrase)).map((l) => l.when?.review ?? "any"))];
+  expect(sideOf(`\`[<runner>] review${chosen}\``)).toEqual(["same"]);
+  expect(sideOf(`\`[<runner>] review${substitute}\``)).toEqual(["other"]);
+  expect(sideOf("--as fallback")).toEqual(["other"]);
   // the 4th argument of post_review is how either mark reaches the summary's first line
   expect(text).toContain("note=${4:-}");
   expect(text).toContain("printf '[%s] review%s\\n\\n' \"$who\" \"$note\"");
+});
+
+test("skills: condition markers in every skill and process definition render for every combination", () => {
+  const processes = join(import.meta.dir, "../processes");
+  const kit = join(import.meta.dir, "..");
+  // a skill's frontmatter keeps one name and one description on every side of a block
+  const ofSkills = readdirSync(skills).flatMap((n) => checkConditions(readFileSync(join(skills, n, "SKILL.md"), "utf8"), relative(kit, join(skills, n, "SKILL.md")), ["name", "description"]));
+  const ofProcesses = readdirSync(processes).filter((n) => n.endsWith(".md")).flatMap((n) => checkConditions(readFileSync(join(processes, n), "utf8"), relative(kit, join(processes, n))));
+  expect([...ofSkills, ...ofProcesses]).toEqual([]);
+});
+
+test("cross-runner-review: the commands that run a reviewer directly carry the same isolation as the app's review job", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const commands = text.split("\n").filter((l) => /^(# )?\( .*(exec --sandbox|claude -p)/.test(l));
+  expect(commands.length).toBe(4);
+  for (const line of commands) {
+    const runner = line.includes("claude -p") ? "claude" : "codex";
+    const { env, args } = REVIEWER_ISOLATION[runner];
+    // as the shell reads the line: quotes around a value are the shell's, not the argument's
+    const words = line.replaceAll("'", "");
+    if (env.length) expect(words).toContain(`env ${env.join(" ")} claude -p`);
+    expect(words).toContain(args.join(" "));
+    expect(line).toContain(`ops-kit review-note ${runner}`);
+    // only inside the block a session outside the app reads
+    expect(parseConditions(text, "cross-runner-review").find((l) => l.text === line)?.when?.task).toBe("out");
+  }
+});
+
+test("cross-runner-review: the instructions do not say whether to run anything; the reviewer's own note does", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const prompt = text.slice(text.indexOf("cat > \"$M/prompt.md\" <<'PROMPT'"), text.indexOf("\nPROMPT\n"));
+  expect(prompt).toContain("Reproduce claims by reading the code.");
+  for (const word of ["read-only sandbox", "blocked by the sandbox", "plan mode", "run the tests", "test run"]) expect({ word, says: prompt.includes(word) }).toEqual({ word, says: false });
+  expect(REVIEWER_NOTE.codex).toContain("read-only sandbox");
+  expect(REVIEWER_NOTE.claude).toContain("plan mode");
+  for (const note of Object.values(REVIEWER_NOTE)) expect(note).toContain("say so in a finding");
 });
 
 /** cross-runner-review's step 1 before the clone, run as written with REVIEW_ROOT moved under `root` and a fake gh / df first on PATH. */
@@ -740,4 +783,214 @@ test("pbi-complete: resuming recreates the PBI worktree with step 3's worktree a
   const next = text.indexOf("\n## ", start + heading.length);
   const section = text.slice(start, next < 0 ? undefined : next);
   expect(section).toContain("git worktree add --detach <PBI の worktree> origin/main");
+});
+
+/** The rows of the inventory table in docs/design/skill-sync.md (`## Conditional text inventory`): where the skills' text depends on a condition. */
+function inventory(): Array<{ keys: string[]; file: string; phrase: string; side: string[]; decision: string }> {
+  const repo = join(import.meta.dir, "../..");
+  const doc = readFileSync(join(repo, "docs/design/skill-sync.md"), "utf8");
+  const section = doc.slice(doc.indexOf("## Conditional text inventory"));
+  const table = section.slice(0, section.indexOf("\n## ", 3)).split("\n").filter((l) => l.startsWith("| `"));
+  return table.map((row) => {
+    const cells = row.split(" | ").map((c) => c.replace(/^\| /, "").replace(/ \|$/, "").trim());
+    const code = (c: string) => c.replace(/^`/, "").replace(/`$/, "");
+    return { keys: code(cells[0]!).split("+"), file: code(cells[1]!), phrase: code(cells[2]!), side: code(cells[3]!).split("+"), decision: cells[4]! };
+  });
+}
+const skillFile = (name: string) => `ops-kit/skills/${name}/SKILL.md`;
+
+test("skills: every row of the conditional text inventory opens with grep", () => {
+  const repo = join(import.meta.dir, "../..");
+  const rows = inventory();
+  expect(rows.length).toBeGreaterThan(50);
+  // every skill with a mark has rows, and every decision is one of the two
+  for (const name of readdirSync(skills)) {
+    const marked = readFileSync(join(skills, name, "SKILL.md"), "utf8").includes("<!-- when ");
+    expect({ name, listed: !marked || rows.some((r) => r.file === skillFile(name) && r.decision === "split") }).toEqual({ name, listed: true });
+  }
+  for (const r of rows) {
+    expect(["split", "keep"]).toContain(r.decision);
+    expect({ file: r.file, phrase: r.phrase, found: readFileSync(join(repo, r.file), "utf8").includes(r.phrase) }).toEqual({ file: r.file, phrase: r.phrase, found: true });
+  }
+});
+
+test("skills: a conditional phrase outside a when block is in the inventory", () => {
+  const keep = inventory().filter((r) => r.decision === "keep");
+  const missing: string[] = [];
+  for (const name of readdirSync(skills)) {
+    for (const hit of unmarkedConditions(readFileSync(join(skills, name, "SKILL.md"), "utf8"), skillFile(name))) {
+      if (!keep.some((r) => r.file === skillFile(name) && hit.text.includes(r.phrase))) missing.push(`${skillFile(name)}:${hit.line} [${hit.key}] ${hit.text.trim().slice(0, 60)}`);
+    }
+  }
+  // a line here is conditional text added without a mark: split it with `<!-- when … -->`, or list it as keep with the reason
+  expect(missing).toEqual([]);
+  // the check sees a line added outside a block
+  expect(unmarkedConditions("アプリの Task の外では直接走らせる\n", "x.md").length).toBe(1);
+});
+
+test("skills: every split row of the inventory sits inside a when block", () => {
+  const outside: string[] = [];
+  for (const r of inventory().filter((x) => x.decision === "split")) {
+    for (const k of r.keys) expect(Object.keys(CONDITION_KEYS)).toContain(k);
+    const lines = parseConditions(readFileSync(join(import.meta.dir, "../..", r.file), "utf8"), r.file).filter((l) => !l.mark && l.text.includes(r.phrase));
+    for (const l of lines) {
+      const when = (l.when ?? {}) as Record<string, string>;
+      if (!r.keys.every((k, i) => when[k] === r.side[i])) outside.push(`${r.file}:${l.line} ${r.phrase}`);
+    }
+  }
+  expect(outside).toEqual([]);
+});
+
+// ---- one way to say an operation (runner-docs.ts): the kit's half; a repository checks its own CLAUDE.md with the same rules
+
+const skillTexts = () => readdirSync(skills).map((name) => ({ name, path: `${name}/SKILL.md`, text: readFileSync(join(skills, name, "SKILL.md"), "utf8") }));
+
+test("skills: no skill says the other side of an operation that is decided (working directory, who posts a review, attribution, asking, waiting, telling a Task)", () => {
+  expect(skillTexts().flatMap((s) => docViolations(s.text, s.path))).toEqual([]);
+});
+
+test("skills: each rule of runner-docs catches the line it was written for and passes the decided one", () => {
+  const caught = (line: string) => docViolations(line, "x").map((v) => v.split(": ")[1]!.split(" — ")[0]);
+  // the lines the documents once had
+  expect(caught("W=$(mktemp -d /tmp/<リポジトリ名>.pr<Task>.XXXXXX)")).toEqual(["working directory"]);
+  expect(caught("description: サブエージェントへレビューをさせ、PR にインラインコメントを投稿させ、")).toEqual(["who posts a review"]);
+  expect(caught("4. レビュー: PR ごとにサブエージェントを起動しコメントさせる。")).toEqual(["who posts a review"]);
+  expect(caught("🤖 Generated with [Claude Code](https://claude.com/claude-code)")).toEqual(["attribution line"]);
+  expect(caught("解釈メモに前提を書いて進む（`AskUserQuestion` は届かない）")).toEqual(["asking"]);
+  expect(caught("このブロックは 1 回の Bash の呼び出しで、バックグラウンド（`run_in_background`）で回す")).toEqual(["waiting"]);
+  expect(caught("`BACKLOG_URL` があれば（エージェント管理アプリの Task の中）アプリの保存値を読み書きし")).toEqual(["telling a Task"]);
+  // the decided ones
+  for (const line of [
+    'W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.pr<Task>.XXXXXX")',
+    "W=$(mktemp -d)",
+    "レビュアーは PR に書かず、自分が接頭辞つきで転記する",
+    "末尾の帰属の行は、そのときランナーが受けている指示に従う",
+    "質問ツール（`AskUserQuestion`）を 1 回呼び、",
+    "背景の `sleep` や `run_in_background` の待ちのループで待たない",
+    "直接走らせるとき（アプリの Task の外）はバックグラウンドで始めてよい（Bash の `run_in_background`）",
+    "エージェント管理アプリの Task として起動されたなら（見分け方は CLAUDE.md）、main の作業ツリーには触らない",
+    "`BACKLOG_URL`（アプリが Task に渡す）があればアプリの保存値を読み書きし",
+  ]) expect({ line, caught: caught(line) }).toEqual({ line, caught: [] });
+  expect(DOC_RULES.map((r) => r.name)).toEqual(["working directory", "who posts a review", "attribution line", "asking", "waiting", "telling a Task"]);
+});
+
+test("skills: a working directory is made by one form both runners can run (no mktemp -d /tmp/)", () => {
+  const all = skillTexts();
+  expect(all.length).toBe(11);
+  expect(all.filter((s) => s.text.includes("mktemp -d /tmp/")).map((s) => s.name)).toEqual([]);
+  // the form itself, wherever a skill names a directory under the shared temp
+  const made = all.flatMap((s) => [...s.text.matchAll(/mktemp -d ("[^"]*"|\S+)/g)].map((m) => m[1]!)).filter((arg) => !/^[…)`]/.test(arg));
+  expect(made.length).toBeGreaterThan(8);
+  for (const arg of made) expect(arg.startsWith('"${TMPDIR:-/tmp}/')).toBe(true);
+});
+
+test("skills: a reviewer writes only its file and the implementer posts it with a prefix (no skill has the reviewer post)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  for (const name of ["stacked-pr-delivery", "review-with-subagent"]) for (const word of ["投稿させ", "コメントさせ"]) expect({ name, word, has: read(name).includes(word) }).toEqual({ name, word, has: false });
+  const sub = read("review-with-subagent");
+  const prompt = sub.slice(sub.indexOf("プロンプトの骨子:"), sub.indexOf("## 転記"));
+  expect(prompt).toContain("do not post to the PR");
+  for (const word of ["gh pr comment", "pulls/N/comments"]) expect(prompt).not.toContain(word);
+  expect(sub).toContain("post_review <PR> subagent <出力のパス>");
+  expect(sub.split("\n")[2]).toContain("自分が `[subagent]` の接頭辞つきで PR に転記し");
+  // the function it points at is where it says
+  expect(read("cross-runner-review")).toContain("post_review() { # <pr> <who> <file>");
+  expect(read("stacked-pr-delivery")).toContain("どちらもレビュアーは PR に書かず、自分が接頭辞つきで転記する");
+});
+
+test("skills: no skill fixes one runner's attribution line", () => {
+  for (const s of skillTexts()) for (const word of ["Generated with", "Claude-Session", "Co-Authored-By"]) expect({ name: s.name, word, has: s.text.includes(word) }).toEqual({ name: s.name, word, has: false });
+  for (const name of ["task-to-pr", "stacked-pr-delivery"]) expect(readFileSync(join(skills, name, "SKILL.md"), "utf8")).toContain("末尾の帰属の行は、そのときランナーが受けている指示（帰属の行の指定）に従う。無ければ書かない");
+});
+
+test("skills: asking — no skill says the question tool does not reach a Task, and the 運用の確認 section calls it", () => {
+  for (const s of skillTexts()) expect(docViolations(s.text, s.path).filter((v) => v.includes(": asking — "))).toEqual([]);
+  const rules = readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8");
+  const section = rules.slice(rules.indexOf("#### 運用の確認（Task の会話で聞く）"));
+  expect(section.slice(0, 400)).toContain("質問ツール");
+  expect(readFileSync(join(skills, "request-to-backlog", "SKILL.md"), "utf8")).toContain("質問ツールは運用の確認だけ: `issue-workflow` の「運用の確認」");
+});
+
+test("skills: waiting — a line that waits with run_in_background or a sleep loop says it is outside the app's Task or names why it runs directly", () => {
+  for (const s of skillTexts()) expect(docViolations(s.text, s.path).filter((v) => v.includes(": waiting — "))).toEqual([]);
+  const gate = readFileSync(join(skills, "public-release-gate", "SKILL.md"), "utf8").split("\n").find((l) => l.includes("`run_in_background`"))!;
+  expect(gate).toContain("ゲートは `ops-kit job` の仕事の種類に無いので");
+  expect(gate).toContain("直接回す");
+});
+
+test("skills: the other contradictions stay on one side (reviewer at its limit, when to switch to local CI, auto-close, the Project)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  // a reviewer at its limit is replaced at once (cross-runner-review, 0), not planned around
+  expect(read("pbi-complete")).not.toContain("計画に入れる");
+  expect(read("pbi-complete")).toContain("レビューは `cross-runner-review` の 0 のとおり待たずに代替する");
+  // local CI: also when there is no run at all (Actions turned off by a variable), not only a run that never starts
+  expect(read("pbi-complete")).toContain("run が無い・全部 skip（Actions を変数で止めたリポジトリ）なら待たずローカル CI");
+  for (const name of ["pbi-complete", "review-triage-and-merge"]) expect(read(name)).not.toContain("請求の問題");
+  // a Task closes when its PR lands on the default branch; nobody says it always does or that it is fine to leave
+  expect(read("issue-workflow")).not.toContain("自動 close される（それで良い）");
+  expect(read("issue-workflow")).toContain("PR が既定の枝に入ったマージで `Closes #N` の Task が閉じる");
+  expect(read("review-triage-and-merge")).toContain("Task は PR が既定の枝に入ったマージで閉じる");
+  // who adds a new Issue to the Project depends on where the command runs: each side says its own
+  const lines = parseConditions(read("issue-workflow"), "issue-workflow").filter((l) => l.text.includes("--field が無いと Project に入らない"));
+  expect(lines.map((l) => l.when)).toEqual([{ task: "out" }]);
+});
+
+test("skills: the three flow skills say what to do while GitHub cannot be used and when it is back, and never a forced push", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  for (const name of ["task-to-pr", "review-triage-and-merge", "pbi-complete"]) {
+    const text = read(name);
+    expect(text).toContain("**GitHub が使えないときは**");
+    expect(text).toContain("<GitHub 不在の切り替え>");
+    // neither spelling of a push that drops commits
+    expect(text).not.toContain("--force");
+    expect(text).not.toMatch(/git push[^\n`]* \+/);
+  }
+  // the change is numbered apart from the Issues: the kit's commands need the mark
+  expect(read("task-to-pr")).toContain("`--change` を付け");
+  // a change that stands in for a PR is not merged locally, and the person's yes is not written on a change
+  expect(read("review-triage-and-merge")).toContain("ローカルではマージされない");
+  expect(read("task-to-pr")).toContain("`[merge-answer] yes` は変更に投稿できない");
+  const complete = read("pbi-complete");
+  for (const word of ["<GitHub への復帰> --pbi <PBI>", "<GitHub への復帰> --report", "リリースタグを打たない", "exit 4", "exit 5"]) expect(complete).toContain(word);
+});
+
+test("skills: what keeps a review from going round — the conditions decided when Tasks are cut, the lists a command makes, and going back to the policy", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  // conditions across Tasks are decided before the Tasks are cut: four numbered items, one place that says which PBI it is for, one line when it is not
+  const toTasks = read("pbi-to-tasks");
+  const cross = toTasks.slice(toTasks.indexOf("### 3.5 またぐ条件の確認"), toTasks.indexOf("### 4. Task を切る"));
+  for (const item of ["1. **守る条件**", "2. 条件ごとに、それを通る**入口の一覧**", "3. **失敗したときの扱い**", "4. 部品の間で渡す**値の意味**"]) expect(cross).toContain(item);
+  expect(cross).toContain("`またぐ条件: なし（理由）` の 1 行");
+  expect(toTasks.split("当たる PBI").length - 1).toBe(1);
+  expect(toTasks).toContain("守る条件 1 → Task B → 証明するテスト");
+  expect(toTasks).toContain("両側が偽のテストは、つないだときの条件を証明しない");
+  expect(toTasks).toContain("守る条件に、担う Task と証明するテストの割り当てが無いまま Ready にする");
+  expect(read("request-to-backlog")).toContain("**信頼の境界を変える PBI**");
+  // the Task's line reaches the implementer, the template and the reviewer
+  for (const text of [toTasks, read("issue-workflow"), readFileSync(join(skills, "../template/.github/ISSUE_TEMPLATE/task.yml"), "utf8")]) expect(text).toContain("守る条件: なし");
+  const review = read("cross-runner-review");
+  expect(review).toContain("Conditions to keep: when the PBI's 決定ログ lists 守る条件");
+  // the lists are made by the kit's commands, and how a reviewer uses them is not written in the skill a second time
+  for (const cmd of ['ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"', 'ops-kit review-handled $N --kind review > "$M/handled.md"', 'ops-kit old-paths check "origin/$BASE_REF" "$M/pr.md"']) expect(review).toContain(cmd);
+  expect(review).toContain("### Read outside the diff");
+  for (const rule of ["- blocker:", "a reply never settles a finding by itself", "Repeat of:"]) {
+    expect(REVIEW_RULES).toContain(rule);
+    expect({ rule, inSkill: review.includes(rule) }).toEqual({ rule, inSkill: rule === "Repeat of:" });
+  }
+  for (const name of ["task-to-pr", "pbi-to-tasks", "review-triage-and-merge"]) expect(read(name)).toContain("ops-kit old-paths list");
+  expect(read("task-to-pr")).toContain(`- ${OLD_PATHS_ITEM}（語: `);
+  expect(read("task-to-pr")).toContain("受け取る Task の本文に書く");
+  expect(read("task-to-pr")).toContain("その環境・道に入っていることをテストの中で断言する");
+  // a point raised again after its fix: back to the policy before the next fix, reachable from the unattended flow
+  const triage = read("review-triage-and-merge");
+  const again = triage.slice(triage.indexOf("### 同じ論点が続いたら（直す前に）"), triage.indexOf("### 修正する"));
+  for (const word of ["同じ形にできるならそうする", "PBI の決定ログに書く", "`## 判断待ち` を出して止める", "Task の手順を方針に合わせて直す", "回数では止めない", "`Repeat of:`"]) expect(again).toContain(word);
+  expect(read("pbi-complete").split("「同じ論点が続いたら」").length - 1).toBe(2);
+  // nits left as they are: one table in the summary the handled list picks up by its heading
+  expect(triage).toContain("| 見送った nit（[レビュアー] `path:line` と 1 文の引用） | 根拠 |");
+  expect(triage).toContain(`1 行目は必ず \`${TRIAGE_HEADING}\``);
+  expect(triage).toContain("読み手: <変わらない / n か所と結果>");
+  expect(read("review-with-subagent")).toContain("ops-kit review-note rules");
+  // waiting goes through the kit's command
+  expect(read("issue-workflow")).toContain("**待つのは `ops-kit wait` で、素のループで待たない**");
 });

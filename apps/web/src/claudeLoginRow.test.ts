@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { RunnerInfo } from "@switchboard/protocol";
-import type { Health } from "./api.ts";
+import type { Health } from "./api/daemon.ts";
 import { LoginSettings } from "./components/LoginSettings.tsx";
 
 const runner = (r: Partial<RunnerInfo>) => ({ id: "claude", available: true, permissionModes: [], models: [], efforts: [], ...r }) as RunnerInfo;
@@ -10,7 +10,7 @@ const render = (rs: RunnerInfo[], bedrock: Record<string, { region: string }> = 
   renderToStaticMarkup(createElement(LoginSettings, { health: { runners: rs, login } as Health, tasks: [], bedrock, onBedrock: () => undefined, onChanged: async () => undefined, onError: () => undefined }));
 const html = (r: RunnerInfo) => render([r]);
 
-test("logged in: the kind and a logout button, no login buttons (#2528)", () => {
+test("logged in: the kind and a logout button, no login buttons", () => {
   const h = html(runner({ login: "ok", loginKind: "console" }));
   expect(h).toContain("ログイン中: Anthropic Console");
   expect(h).toContain("ログアウト</button>");
@@ -43,7 +43,7 @@ test("the four rows share one shape, Switchboard first; inside the host it has n
 
 const withBedrock = (r: RunnerInfo) => render([r], { [r.id]: { region: "ap-northeast-1" } });
 
-test("Bedrock is offered only by an explicit button, also while the Claude login has lapsed (#1730)", () => {
+test("Bedrock is offered only by an explicit button, also while the Claude login has lapsed", () => {
   const h = withBedrock(runner({ login: "expired", bedrockAvailable: true }));
   expect(h).toContain("ログアウト中");
   expect(h).toContain("Amazon Bedrock を使う");
@@ -51,7 +51,7 @@ test("Bedrock is offered only by an explicit button, also while the Claude login
   expect(withBedrock(runner({ login: "ok", loginKind: "claude.ai", bedrockAvailable: false }))).not.toContain("Amazon Bedrock を使う");
 });
 
-test("while on Bedrock the row says so and offers the way back, no login or logout (#1730)", () => {
+test("while on Bedrock the row says so and offers the way back, no login or logout", () => {
   const h = withBedrock(runner({ login: "ok", loginKind: "bedrock", bedrockAvailable: true }));
   expect(h).toContain("使用中: サードパーティのプラットフォーム（Amazon Bedrock）");
   expect(h).toContain("Claude アカウントに戻す");
@@ -59,7 +59,7 @@ test("while on Bedrock the row says so and offers the way back, no login or logo
   expect(h).not.toContain("でログイン");
 });
 
-test("the saved region stays editable on Bedrock, and the way to Bedrock is there while the login status is unknown (#1730)", () => {
+test("the saved region stays editable on Bedrock, and the way to Bedrock is there while the login status is unknown", () => {
   const on = withBedrock(runner({ login: "ok", loginKind: "bedrock", bedrockAvailable: true }));
   expect(on).toContain('value="ap-northeast-1"');
   expect(on).toContain("リージョンを保存");
@@ -69,7 +69,7 @@ test("the saved region stays editable on Bedrock, and the way to Bedrock is ther
   expect(withBedrock(runner({ login: "unknown", bedrockAvailable: false }))).not.toContain("Amazon Bedrock");
 });
 
-test("the explanation is visible text, not only a tooltip (#1730)", () => {
+test("the explanation is visible text, not only a tooltip", () => {
   expect(withBedrock(runner({ login: "expired", bedrockAvailable: true }))).toContain("Switchboard は鍵を持ちません");
 });
 

@@ -3,7 +3,7 @@ import { t } from "./i18n.ts";
 import { common } from "./i18n/common.ts";
 
 /**
- * Editing a runner's model choices on the settings screen (#1400). Each edit returns the whole new list, which the
+ * Editing a runner's model choices on the settings screen. Each edit returns the whole new list, which the
  * screen saves as is (PATCH /api/settings `models`); the daemon checks the same rules again.
  */
 
@@ -29,7 +29,7 @@ export function moveModel(list: ModelOption[], value: string, dir: -1 | 1): Mode
   return out;
 }
 
-/** The 載せない list (#1401) with one id added at the end (once); the screen saves the whole list (PATCH `hiddenModels`). */
+/** The 載せない list with one id added at the end (once); the screen saves the whole list (PATCH `hiddenModels`). */
 export function hideModel(hidden: string[], value: string): string[] {
   return hidden.includes(value) ? hidden : [...hidden, value];
 }

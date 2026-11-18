@@ -1,6 +1,6 @@
 /**
  * bun scripts/latency-check.ts [--file-request] — hours (JST) of the last 24 hours in which GET /api/health took over
- * 2 s five times or more, with the routes that took longest in that hour (PBI #2821, docs/design/ops-metrics.md "API の所要時間").
+ * 2 s five times or more, with the routes that took longest in that hour (docs/design/ops-metrics.md "API の所要時間").
  * Exit 0 = no slow hour / 1 = some / 2 = cannot tell (no database, no table, unreadable). Read-only: api_requests is read
  * through bun:sqlite readonly, and only ts / method / route / ms.
  *

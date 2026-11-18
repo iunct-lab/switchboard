@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SourceView } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { sourceHeaders, sourceTableRows } from "../sources.ts";
 import { t } from "../i18n.ts";
 import { insights as m } from "../i18n/insights.ts";

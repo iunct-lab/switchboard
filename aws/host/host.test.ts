@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
 /**
- * aws/host (#230): the host scripts run against fake `aws`, `sudo`, `systemctl`, `shutdown` and `curl` on PATH, so no
+ * aws/host: the host scripts run against fake `aws`, `sudo`, `systemctl`, `shutdown` and `curl` on PATH, so no
  * AWS account and no root are needed. systemd-analyze only exists on Linux, so the units are checked as text.
  */
 const HERE = import.meta.dir;
@@ -35,7 +35,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-describe("aws/host (#230)", () => {
+describe("aws/host", () => {
   test("every script parses (bash -n)", () => {
     expect(SCRIPTS.length).toBeGreaterThanOrEqual(4);
     for (const s of SCRIPTS) expect(Bun.spawnSync(["bash", "-n", join(HERE, s)]).exitCode).toBe(0);
@@ -77,7 +77,7 @@ describe("aws/host (#230)", () => {
     expect(statSync(out).mode & 0o777).toBe(0o600);
   });
 
-  test("sb-env hands the login cookie's public key (#211, #701) to the daemon and sb-rescue when the parameter exists; never the old HMAC key", () => {
+  test("sb-env hands the login cookie's public key to the daemon and sb-rescue when the parameter exists; never the old HMAC key", () => {
     fake("aws", `echo "aws $*" >> "${log}"; case "$*" in *edge-header*) echo edge-value-xyz;; *session-public-key*) echo pub-key-b64url;; *session-key*) echo old-hmac-key;; *) echo "ParameterNotFound" >&2; exit 254;; esac`);
     const out = join(dir, "switchboard.env");
     expect(run("sb-env.sh", [out]).code).toBe(0);
@@ -86,14 +86,14 @@ describe("aws/host (#230)", () => {
     expect(readFileSync(log, "utf8")).not.toMatch(/switchboard\/session-key\b/);
   });
 
-  test("sb-env hands the distribution's https origin (#399) to the daemon as SWITCHBOARD_WEB_URL when the parameter exists", () => {
+  test("sb-env hands the distribution's https origin to the daemon as SWITCHBOARD_WEB_URL when the parameter exists", () => {
     fake("aws", `case "$*" in *edge-header*) echo edge-value-xyz;; *web-url*) echo https://d1.example.net;; *) echo "ParameterNotFound" >&2; exit 254;; esac`);
     const out = join(dir, "switchboard.env");
     expect(run("sb-env.sh", [out]).code).toBe(0);
     expect(readFileSync(out, "utf8")).toContain("SWITCHBOARD_WEB_URL=https://d1.example.net\n");
   });
 
-  test("sb-env on a first boot before the stack wrote the Starter's URL: the header still goes in, 作り直す waits (re-review #344)", () => {
+  test("sb-env on a first boot before the stack wrote the Starter's URL: the header still goes in, 作り直す waits", () => {
     fake("aws", `case "$*" in *edge-header*) echo edge-value-xyz;; *starter-url*) echo "ParameterNotFound" >&2; exit 254;; *start-token*) echo start-tok;; esac`);
     const out = join(dir, "switchboard.env");
     expect(run("sb-env.sh", [out]).code).toBe(0);
@@ -127,12 +127,12 @@ describe("aws/host (#230)", () => {
     expect(existsSync(tokenFile)).toBe(false);
   });
 
-  test("sb-env finds runuser in /usr/sbin even with the unit's PATH (first deploy of #232: switchboard.service failed on it)", () => {
+  test("sb-env finds runuser in /usr/sbin even with the unit's PATH (the first deploy: switchboard.service failed on it)", () => {
     expect(readFileSync(join(HERE, "sb-env.sh"), "utf8")).toContain('export PATH="$PATH:/usr/sbin:/sbin"');
     expect(readFileSync(join(HERE, "switchboard.service"), "utf8")).not.toMatch(/Environment=PATH=.*\/usr\/sbin/); // the fix is in sb-env, not the user's PATH
   });
 
-  test("the one-time import from the Mac happens only when Litestream brought nothing back (#232)", () => {
+  test("the one-time import from the Mac happens only when Litestream brought nothing back", () => {
     const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
     const at = boot.indexOf("# --- the one-time move from the Mac");
     expect(at).toBeGreaterThan(boot.indexOf("litestream restore")); // after the restore
@@ -159,7 +159,7 @@ describe("aws/host (#230)", () => {
     expect(clone).toMatch(/done \|\| echo "bootstrap: could not list the workspaces/);
   });
 
-  // The registered workspaces' section (#2799) run alone: as_user runs as is, the database is made here, and a fake gh
+  // The registered workspaces' section run alone: as_user runs as is, the database is made here, and a fake gh
   // records its arguments; its clone makes the folder, and its view answers for the clone what `view` says
   function cloneWorkspaces(rows: { name: string; source?: object }[], view: string) {
     const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
@@ -220,7 +220,7 @@ case "$1 $2" in "repo clone") mkdir -p "$4";; "repo view") echo "${view}";; esac
     expect(cloneWorkspaces([{ name: "app", source: github("acme/app") }], "acme/app false").left).toEqual(["app"]);
   });
 
-  // sb-host-update (#435): a fake git whose clone puts the given sb-env.sh into a new tree; the installed ones are in bin/
+  // sb-host-update: a fake git whose clone puts the given sb-env.sh into a new tree; the installed ones are in bin/
   // current: what releases/current links to (omitted = no link); ancestor: whether the fake git finds it in main's history
   // forward: whether the installed clone's head is in the new tree's history (false = a promotion back to an older release)
   // again: the next start on the host the last call left (bin, the clone and its record as they are)
@@ -254,7 +254,7 @@ ${clone}`);
   }
   const newTree = `for d; do :; done; mkdir -p "$d/aws/host"; for f in sb-stop sb-env archive runner-sync offload pre-rebuild node host-update; do echo ": new $f" > "$d/aws/host/$f.sh"; done`;
 
-  test("sb-host-update installs the host scripts from a fresh clone of main before sb-env runs (#435)", () => {
+  test("sb-host-update installs the host scripts from a fresh clone of main before sb-env runs", () => {
     const r = hostUpdate(newTree);
     expect(r.code).toBe(0);
     expect(r.out).toContain("sb-host-update: abc1234 from main");
@@ -446,7 +446,7 @@ ${clone}`);
     expect(existsSync(join(r.root, "bin", "sb-runner-sync"))).toBe(false);
   });
 
-  test("the scripts sb-host-update installs as root are the ones docs/design/cloud-hosting.md lists (#852)", () => {
+  test("the scripts sb-host-update installs as root are the ones docs/design/cloud-hosting.md lists", () => {
     const sh = readFileSync(join(HERE, "host-update.sh"), "utf8");
     const self = sh.match(/install -m 755 "\$h\/(\S+)" "\$BIN\/(\S+)"/)!;
     const list = sh.match(/^SCRIPTS="(.+)"$/m)![1].split(/\s+/).map((p) => p.split(":") as [string, string]);
@@ -503,7 +503,7 @@ ${clone}`);
     for (const f of readdirSync(HERE)) expect(readFileSync(join(HERE, f), "utf8")).not.toMatch(/\/Users\/|\/Volumes\//);
   });
 
-  test("Litestream comes from the arm64 tarball with a pinned checksum and has its own unit; age is checked too (review #342)", () => {
+  test("Litestream comes from the arm64 tarball with a pinned checksum and has its own unit; age is checked too", () => {
     const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
     expect(boot).toContain("litestream-v$LITESTREAM_VERSION-linux-arm64.tar.gz");
     expect(boot).not.toContain(".rpm");
@@ -526,14 +526,14 @@ ${clone}`);
     expect(yml).toMatch(/\n\s+sync-interval: 60s\n/);
   });
 
-  test("a failed restore stops the bootstrap instead of starting an empty database (review #342)", () => {
+  test("a failed restore stops the bootstrap instead of starting an empty database", () => {
     const boot = readFileSync(join(HERE, "bootstrap.sh"), "utf8");
     const restore = boot.slice(boot.indexOf("litestream restore"), boot.indexOf("litestream restore") + 200);
     expect(restore).not.toContain("|| true");
     expect(boot).toContain("restore -if-replica-exists");
   });
 
-  test("the daily archive finds age (/usr/local/bin) and the host settings, and runs the release, not the working tree (review #342)", () => {
+  test("the daily archive finds age (/usr/local/bin) and the host settings, and runs the release, not the working tree", () => {
     const unit = readFileSync(join(HERE, "sb-archive.service"), "utf8").split("\n");
     expect(unit).toContain("Environment=PATH=/usr/local/bin:@HOME@/.bun/bin:/usr/bin:/bin");
     expect(unit).toContain("EnvironmentFile=/etc/switchboard-host.env");
@@ -574,7 +574,7 @@ ${clone}`);
     expect(readFileSync(join(sb, "archive.status"), "utf8")).toMatch(/^ok /);
   });
 
-  test("the daily archive works on the disk, not /tmp, and records ok / failed in archive.status (#1201)", () => {
+  test("the daily archive works on the disk, not /tmp, and records ok / failed in archive.status", () => {
     const home = join(dir, "home-archive");
     const sb = join(home, ".switchboard");
     mkdirSync(join(sb, "archive-out"), { recursive: true });
@@ -598,7 +598,7 @@ ${clone}`);
     expect(calls().some((c) => c.startsWith("aws s3 cp"))).toBe(false);
     expect(existsSync(join(sb, "archive-out"))).toBe(false);
 
-    // A leftover that cannot be removed fails the run before the export, and that is still recorded (review #1378).
+    // A leftover that cannot be removed fails the run before the export, and that is still recorded.
     fake("bun", `echo pkg > "$3"`);
     expect(archive().code).toBe(0);
     expect(status()).toMatch(/^ok /);
@@ -612,13 +612,13 @@ ${clone}`);
       chmodSync(join(sb, "archive-out", "locked"), 0o700);
     }
 
-    // A run that is killed outright (oom-kill: no trap) leaves "running", which the daemon reads as stopped (#1209).
+    // A run that is killed outright (oom-kill: no trap) leaves "running", which the daemon reads as stopped.
     fake("bun", `kill -9 $PPID`);
     archive();
     expect(status()).toMatch(/^running \d+$/);
   });
 
-  describe("old tasks' events to history/events (#1438)", () => {
+  describe("old tasks' events to history/events", () => {
     const home = () => join(dir, "home-events");
     const committed = () => join(dir, "committed.tsv");
     const status = () => readFileSync(join(home(), ".switchboard", "archive.status"), "utf8").trim();
@@ -692,7 +692,7 @@ ${clone}`);
     });
   });
 
-  describe("old runner records to history/runner (#1440)", () => {
+  describe("old runner records to history/runner", () => {
     const home = () => join(dir, "home-runner");
     const sb = () => join(home(), ".switchboard");
     const OLD = "11111111-1111-4111-8111-111111111111";
@@ -850,13 +850,13 @@ ${clone}`);
     });
   });
 
-  test("nothing on the host rewrites CloudFront any more: the origin is a VPC origin (review #338)", () => {
+  test("nothing on the host rewrites CloudFront any more: the origin is a VPC origin", () => {
     expect(existsSync(join(HERE, "sb-origin.sh"))).toBe(false);
     for (const f of readdirSync(HERE).filter((x) => !x.endsWith(".test.ts"))) expect(readFileSync(join(HERE, f), "utf8")).not.toMatch(/sb-origin|cloudfront/);
   });
 });
 
-describe("aws/host devtools (#371)", () => {
+describe("aws/host devtools", () => {
   const read = (f: string) => readFileSync(join(HERE, f), "utf8");
 
   test("bootstrap runs devtools once gh is logged in and the repository is there, before the units start", () => {
@@ -867,14 +867,14 @@ describe("aws/host devtools (#371)", () => {
     expect(at).toBeLessThan(boot.indexOf("# --- units ---"));
   });
 
-  test("a devtools failure does not stop the bootstrap: the daemon and sb-rescue still start (#389)", () => {
+  test("a devtools failure does not stop the bootstrap: the daemon and sb-rescue still start", () => {
     const line = read("bootstrap.sh").split("\n").find((l) => l.includes('bash "$HERE/devtools.sh"'))!;
     expect(line).toMatch(/^bash "\$HERE\/devtools\.sh" \|\| echo "bootstrap: devtools failed/);
     // the same shape, run: under set -e a failing command before || does not end the script
     const r = Bun.spawnSync(["bash", "-c", `set -euo pipefail; ${line.replace('bash "$HERE/devtools.sh"', "false")}; echo after`], { stderr: "pipe" });
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toContain("after");
-    expect(r.stderr.toString()).toContain("bootstrap: devtools failed (exit 1)"); // $? is devtools' own status (review #390)
+    expect(r.stderr.toString()).toContain("bootstrap: devtools failed (exit 1)"); // $? is devtools' own status
     // and a failed devtools leaves no downloads in /tmp (RAM here) while the daemon goes on to start
     expect(read("devtools.sh")).toContain(`DL="$(mktemp -d)"; trap 'rm -rf "$DL"' EXIT`);
   });
@@ -898,13 +898,13 @@ describe("aws/host devtools (#371)", () => {
     expect(dev).not.toMatch(/@latest|releases\/latest/);
   });
 
-  test("root keeps what it unpacks: every tar is --no-same-owner (a tarball's owner uid can be the host user's, #375)", () => {
+  test("root keeps what it unpacks: every tar is --no-same-owner (a tarball's owner uid can be the host user's)", () => {
     const tars = [...read("devtools.sh").split("\n"), ...read("node.sh").split("\n"), ...read("bootstrap.sh").split("\n")].filter((l) => /\btar\b.*-x/.test(l) && !l.includes("as_user tar")); // the host user's own tar cannot chown anyway
     expect(tars.length).toBe(7);
     for (const l of tars) expect(l).toContain("tar --no-same-owner -x");
   });
 
-  test("an interrupted install is redone, not taken for done (review #377)", () => {
+  test("an interrupted install is redone, not taken for done", () => {
     const dev = read("devtools.sh");
     // docker unpacks into <dir>.new and is renamed into place last, so the directory exists only when complete
     expect(dev).toContain('[ -d "$DOCKER_BIN" ] || {');
@@ -967,7 +967,7 @@ exit 1
     expect(r.err).toContain("could not start sb-dockerd");
   });
 
-  test("docker build and compose up print the sb-offload hint, other commands do not (#678)", () => {
+  test("docker build and compose up print the sb-offload hint, other commands do not", () => {
     const bin = join(dir, "docker-bin-hint");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "docker"), `#!/bin/sh\necho "docker $*" >> "${log}"\n`);
@@ -981,7 +981,7 @@ exit 1
       expect(r.code).toBe(0);
       expect(calls()).toEqual([`docker ${a.join(" ")}`]); // run as before, on the host
     }
-    // only compose's own subcommand counts, not what a container is asked to run (review #687)
+    // only compose's own subcommand counts, not what a container is asked to run
     for (const a of [["ps"], ["compose", "down"], ["compose", "logs", "app"], ["compose", "exec", "app", "build"], ["compose", "-p", "build", "ps"], ["compose", "run", "--rm", "app", "make", "up"], ["run", "--rm", "alpine", "true"], ["images"], ["buildx", "ls"]]) expect(docker(...a).err).toBe("");
   });
 
@@ -1059,7 +1059,7 @@ exit 1
     expect(existsSync(`${mine}.new`)).toBe(false);
   });
 
-  test("the owner's patch is read from the development clone under SB_REPOS_DIR first, else from this clone (#2002)", () => {
+  test("the owner's patch is read from the development clone under SB_REPOS_DIR first, else from this clone", () => {
     // the selection lines of devtools.sh as they are, run with a fake HERE (this clone's aws/host) and SB_REPOS_DIR
     const lines = read("devtools.sh").split("\n");
     const from = lines.findIndex((l) => l.startsWith("DEV_CLONE="));
@@ -1086,7 +1086,7 @@ exit 1
   });
 });
 
-describe("aws/host runner records (#401, #402)", () => {
+describe("aws/host runner records", () => {
   const read = (f: string) => readFileSync(join(HERE, f), "utf8");
   // a fake aws that keeps what it was given: `aws s3 cp <file> s3://bucket/<key>` copies the file to $S3OUT/<key>, and
   // `s3 cp s3://bucket/<key> <file>` the other way; list-objects-v2 prints the keys under $S3OUT; AWS_FAIL fails it all
@@ -1131,7 +1131,7 @@ exit 0`);
   });
 
   // this test failed at 4-5 s (under its limit; ~2 s short = the two same-second waits skipped). The 20 ms is not the cause.
-  // The cause (#3525): the marker's mtime (coarse kernel clock) can land in the second before date's, so a run in the key's
+  // The cause: the marker's mtime (coarse kernel clock) can land in the second before date's, so a run in the key's
   // second did not wait. The test just below fixes that boundary
   test("runner-sync uploads a base first, then only the files that changed into the same set, and nothing on an unchanged day", () => {
     awsFake();
@@ -1207,7 +1207,7 @@ exit 0`);
     expect(sync().code).toBe(0);
     expect(keys().filter((k) => k.endsWith("/base.tar.zst")).length).toBe(3);
     expect(sets().length).toBe(3);
-  }, 30_000); // time assumption (the flake of #2939): 2.2 s of sleeps and three bash runs under load, over the 5 s default
+  }, 30_000); // time assumption (a flake seen on a busy host): 2.2 s of sleeps and three bash runs under load, over the 5 s default
 
   test("runner-sync uploads the artifacts' copies with the runners' records", () => {
     awsFake();
@@ -1261,7 +1261,7 @@ exit 0`);
   const logins = [".claude/.credentials.json", ".codex/auth.json", ".config/gh/hosts.yml", ".aws/sso/cache/x.json", ".aws/cli/cache/y.json", ".switchboard/token"];
   const writeAll = (root: string, paths: string[], text = (p: string) => userData[p] ?? "secret") => { for (const p of paths) { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), text(p)); } };
 
-  test("the user's data goes up with no login among it, and restore alone brings it back to an empty HOME (#3467)", () => {
+  test("the user's data goes up with no login among it, and restore alone brings it back to an empty HOME", () => {
     awsFake();
     fresh();
     home = join(dir, "home-user-data");
@@ -1287,7 +1287,7 @@ exit 0`);
     home = join(dir, "home-runner");
   }, 20000);
 
-  test("only the first-run setup and the trust of .claude.json go up, and restore lays the file devtools wrote over them (#3467)", () => {
+  test("only the first-run setup and the trust of .claude.json go up, and restore lays the file devtools wrote over them", () => {
     awsFake();
     fresh();
     home = join(dir, "home-claude-json");
@@ -1315,7 +1315,7 @@ exit 0`);
     expect(JSON.parse(readFileSync(join(target, ".claude.json"), "utf8"))).toEqual({ mcpServers: { playwright: { command: "npx" } } });
   }, 20000);
 
-  test("the work trees are kept before the run, a slow keep gives way on the rescue page, and a failure does not stop the rest (#3467)", () => {
+  test("the work trees are kept before the run, a slow keep gives way on the rescue page, and a failure does not stop the rest", () => {
     awsFake();
     fresh();
     const slow = join(dir, "slow-keep");
@@ -1330,7 +1330,7 @@ exit 0`);
     expect(keys().length).toBe(1); // the rest went up
   }, 20000);
 
-  test("the table of HOME in the design doc names every path runner-sync saves (#3467)", () => {
+  test("the table of HOME in the design doc names every path runner-sync saves", () => {
     const list = read("runner-sync.sh").match(/^SAVE=\(([\s\S]*?)\)$/m)![1]!.split(/\s+/).filter(Boolean);
     expect(list.length).toBeGreaterThan(15);
     const row = readFileSync(join(HERE, "..", "..", "docs", "design", "cloud-hosting.md"), "utf8").split("\n").find((l) => l.includes("Saved by `sb-runner-sync`"))!;
@@ -1418,7 +1418,7 @@ exit 0`);
     expect(bad.err).toContain("could not list");
   });
 
-  test("a session written to while tar reads it does not stop the upload (review #404: tar exits 1 on a changed file)", () => {
+  test("a session written to while tar reads it does not stop the upload (tar exits 1 on a changed file)", () => {
     awsFake();
     writeFileSync(join(home, ".claude", "projects", "-work", "s3.jsonl"), "{}\n");
     // a tar that archives, then reports "file changed as we read it" (exit 1) as GNU tar does for an active session
@@ -1436,7 +1436,7 @@ exit 0`);
     expect(run("runner-sync.sh", [], { HOME: home, S3OUT: out, SB_PRE_REBUILD: "/bin/true", PATH: `${bin}:${join(dir, "bin")}:/usr/bin:/bin` }).code).toBe(2);
     expect(read("runner-sync.sh")).toContain("flock -w 60 9"); // a stuck run does not hold up sb-stop or 作り直す forever
     // a run killed by 作り直す's time limit leaves its scratch behind (bash's EXIT trap does not run on TERM): the next
-    // run clears what is over an hour old (review #405)
+    // run clears what is over an hour old
     const stale = join(home, ".cache", "sb-runner-sync.stale1");
     mkdirSync(stale, { recursive: true });
     Bun.spawnSync(["touch", "-d", "2 hours ago", stale]);
@@ -1449,7 +1449,7 @@ exit 0`);
     rmSync(young, { recursive: true, force: true });
   });
 
-  test("a folder that cannot be read stops the save: a partial snapshot never replaces the good one (review #404)", () => {
+  test("a folder that cannot be read stops the save: a partial snapshot never replaces the good one", () => {
     awsFake();
     const locked = join(home, ".claude", "projects", "-locked");
     mkdirSync(locked, { recursive: true });
@@ -1476,7 +1476,7 @@ exit 0`);
 
   test("bootstrap brings the records back as the host user after the history, before the units, without overwriting", () => {
     const boot = read("bootstrap.sh");
-    const at = boot.indexOf("# --- the runners' records (#401)");
+    const at = boot.indexOf("# --- the runners' records");
     expect(at).toBeGreaterThan(boot.indexOf("# --- the one-time move from the Mac"));
     expect(at).toBeLessThan(boot.indexOf("# --- units ---"));
     const block = boot.slice(at, boot.indexOf("# --- units ---"));
@@ -1484,15 +1484,15 @@ exit 0`);
     expect(block).toContain("as_user env SB_HOST_ENV=/etc/switchboard-host.env /usr/local/bin/sb-runner-sync restore");
     expect(read("runner-sync.sh")).toContain("tar --zstd --skip-old-files -xf");
     // only "nothing saved" skips the restore; any other failure stops the bootstrap, as for Litestream, so the first
-    // sync cannot put a near-empty base over the good one (review #404)
+    // sync cannot put a near-empty base over the good one
     expect(block).toMatch(/could not bring back .*exit 1/s);
     expect(read("runner-sync.sh")).toContain('mktemp -d "$HOME/.cache/sb-runner-restore.XXXXXX"'); // not /tmp (RAM)
     expect(boot).toContain('install -m 755 "$HERE/runner-sync.sh" /usr/local/bin/sb-runner-sync');
     expect(boot).toContain('install -m 755 "$HERE/pre-rebuild.sh" /usr/local/bin/sb-pre-rebuild');
     expect(boot.indexOf("sb-pre-rebuild restore-work")).toBeGreaterThan(boot.indexOf("/usr/local/bin/sb-runner-sync restore")); // after the tar it reads is back
     expect(boot).toContain('sb-pre-rebuild restore-work || echo "bootstrap: could not bring back the work trees'); // does not stop the daemon
-    expect(boot).toContain("systemctl enable $NOW litestream.service sb-archive.timer sb-runner-sync.timer switchboard.service"); // --now unless a reboot is due (#2186)
-    expect(read("switchboard.service").split("\n")).toContain("Environment=SWITCHBOARD_REBUILD_SAVE_CMD=/usr/local/bin/sb-runner-sync"); // #403
+    expect(boot).toContain("systemctl enable $NOW litestream.service sb-archive.timer sb-runner-sync.timer switchboard.service"); // --now unless a reboot is due
+    expect(read("switchboard.service").split("\n")).toContain("Environment=SWITCHBOARD_REBUILD_SAVE_CMD=/usr/local/bin/sb-runner-sync"); // what is saved before 作り直す replaces the disk
     const timer = read("sb-runner-sync.timer").split("\n");
     expect(timer).toContain("OnCalendar=hourly");
     const unit = read("sb-runner-sync.service").split("\n");
@@ -1500,7 +1500,7 @@ exit 0`);
   });
 });
 
-describe("aws/host memory (#537)", () => {
+describe("aws/host memory", () => {
   const read = (f: string) => readFileSync(join(HERE, f), "utf8");
   let m: string;
 
@@ -1587,7 +1587,7 @@ describe("aws/host memory (#537)", () => {
   });
 });
 
-describe("aws/host cloudwatch (#539)", () => {
+describe("aws/host cloudwatch", () => {
   const read = (f: string) => readFileSync(join(HERE, f), "utf8");
   const block = () => {
     const boot = read("bootstrap.sh");
@@ -1605,7 +1605,7 @@ describe("aws/host cloudwatch (#539)", () => {
     expect(cfg.metrics.metrics_collected.swap.measurement).toEqual(["swap_used_percent"]);
   });
 
-  test("the agent also ships the daemon's log (access / operation lines, #1490) to the host's group, and leaves its retention to the template", () => {
+  test("the agent also ships the daemon's log (access / operation lines) to the host's group, and leaves its retention to the template", () => {
     const cfg = JSON.parse(read("cloudwatch-agent.json"));
     const files = cfg.logs.logs_collected.files.collect_list as Array<Record<string, unknown>>;
     expect(files).toEqual([{ file_path: "@HOME@/.switchboard/daemon.log", log_group_name: "/switchboard/host", log_stream_name: "{instance_id}", retention_in_days: -1 }]);
@@ -1671,7 +1671,7 @@ describe("aws/host cloudwatch (#539)", () => {
   });
 });
 
-describe("aws/host offload (#678)", () => {
+describe("aws/host offload", () => {
   // a fake aws that logs its calls, keeps the upload in $S3OUT and answers from files in $FAKE: status (the build's
   // "<status> <group> <stream>") and events.json (one page of the log; a call with its token gets no more)
   let home: string, repo: string, fakeDir: string, out: string, sleepBin: string;
@@ -1682,7 +1682,7 @@ describe("aws/host offload (#678)", () => {
 case "$1 $2" in
   "ssm get-parameter") case "$4" in */offload-ci-project) echo sb-host-offload-ci ;; */offload-image-project) echo sb-host-offload-image ;; */offload-image-repo) echo 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image ;; *) echo sb-host-offload ;; esac ;;
   "ecr describe-images") [ -f "$FAKE/noimage" ] && { echo "An error occurred (ImageNotFoundException) when calling the DescribeImages operation" >&2; exit 254; }; echo '{}' ;;
-  "s3 cp") cp "$3" "$S3OUT"; case "$4" in *.fixtures.tar.gz) cp "$3" "$S3OUT.fixtures" ;; *.names.json) cp "$3" "$S3OUT.names" ;; *.base.tar) cp "$3" "$S3OUT.base" ;; esac ;;
+  "s3 cp") cp "$3" "$S3OUT"; case "$4" in *.fixtures.tar.gz) cp "$3" "$S3OUT.fixtures" ;; *.names.json) cp "$3" "$S3OUT.names" ;; *.base.tar) cp "$3" "$S3OUT.base" ;; *.image.tar.gz) cp "$3" "$S3OUT.image" ;; esac ;;
   "codebuild start-build") [ -f "$FAKE/busy" ] && { rm "$FAKE/busy"; echo "An error occurred (AccountLimitExceededException) when calling the StartBuild operation: Cannot have more than 2 active builds for the project" >&2; exit 254; }; echo "$4:build-1" ;;
   "codebuild batch-get-builds") if [ -f "$FAKE/status-$4" ]; then cat "$FAKE/status-$4"; else cat "$FAKE/status"; fi ;;
   "logs get-log-events") case "$*" in *--next-token*) echo '{"events":[],"nextForwardToken":"f/2"}' ;; *) if [ -f "$FAKE/events-$6.json" ]; then cat "$FAKE/events-$6.json"; elif [ -f "$FAKE/full.json" ] && [ -f "$FAKE/seen" ]; then cat "$FAKE/full.json"; else touch "$FAKE/seen"; cat "$FAKE/events.json"; fi ;; esac ;;
@@ -1712,7 +1712,7 @@ exit 0`,
     out = join(dir, "offload-out.tar.gz");
     sleepBin = join(dir, "bin-offload-sleep");
     for (const d of [home, repo, fakeDir, sleepBin]) mkdirSync(d, { recursive: true });
-    // offload.sh's polls wait 5 s each; the order of the calls is what these tests read (#3268). Only offload()'s PATH
+    // offload.sh's polls wait 5 s each; the order of the calls is what these tests read. Only offload()'s PATH
     // has it: the shared bin would make every later script's sleep return at once
     writeFileSync(join(sleepBin, "sleep"), "#!/bin/sh\nexit 0\n");
     chmodSync(join(sleepBin, "sleep"), 0o755);
@@ -1734,7 +1734,7 @@ exit 0`,
     writeFileSync(join(repo, "nested", ".gitignore"), "node_modules/\n.env\n");
     writeFileSync(join(repo, "nested", ".env"), "SECRET=2\n");
     writeFileSync(join(repo, "nested", "node_modules", "big.js"), "x\n");
-    // a submodule: its tracked files go (review #685)
+    // a submodule: its tracked files go
     const sub = join(dir, "sub-offload");
     mkdirSync(sub, { recursive: true });
     Bun.spawnSync(["git", "init", "-q"], { cwd: sub });
@@ -1751,7 +1751,7 @@ exit 0`,
     const r = offload(["docker", "compose", "up", "--build", "&&", "pytest", "-k", "a,b"]);
     expect(r.code).toBe(0);
     const files = Bun.spawnSync(["tar", "-tzf", out]).stdout.toString().trim().split("\n").sort();
-    // the nested clone's folder, nothing in it; the submodule's tracked files (review #685)
+    // the nested clone's folder, nothing in it; the submodule's tracked files
     expect(files).toEqual([".gitignore", ".gitmodules", "compose.yaml", "nested/", "new.py", "vendor/sub/lib.py"]);
     expect(Bun.spawnSync(["tar", "-xzOf", out, "compose.yaml"]).stdout.toString()).toBe("services: { app: {} }\n");
     const c = calls();
@@ -1761,7 +1761,7 @@ exit 0`,
     const key = up.match(/s3:\/\/bucket\/(offload\/\S+)/)![1];
     expect(c).toContain("aws ssm get-parameter --name /switchboard/offload-project --query Parameter.Value --output text");
     const start = c.find((l) => l.startsWith("aws codebuild start-build"))!;
-    expect(start).toContain("--project-name sb-host-offload --compute-type-override BUILD_GENERAL1_SMALL --environment-variables-override "); // the smallest unless asked (#2304)
+    expect(start).toContain("--project-name sb-host-offload --compute-type-override BUILD_GENERAL1_SMALL --environment-variables-override "); // the smallest unless asked
     const envs = JSON.parse(start.slice(start.indexOf("[{"), start.lastIndexOf("}]") + 2));
     expect(envs).toEqual([
       { name: "SB_OFFLOAD_KEY", value: key, type: "PLAINTEXT" },
@@ -1771,7 +1771,7 @@ exit 0`,
     expect(readdirSync(join(home, ".cache")).filter((f) => f.startsWith("sb-offload."))).toEqual([]); // cleaned up
   });
 
-  test("sb-offload --size picks the machine for this build; a size off the list sends nothing and exits 2 (#2304)", () => {
+  test("sb-offload --size picks the machine for this build; a size off the list sends nothing and exits 2", () => {
     awsFake();
     setLog("SUCCEEDED", ["sb-offload: exit 0"]);
     const startOf = () => calls().find((l) => l.startsWith("aws codebuild start-build"))!;
@@ -1791,7 +1791,7 @@ exit 0`,
     }
     const none = offload(["--size", "large"]);
     expect(none.code).toBe(2);
-    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>] [--base-tree <tar>]] [--detach] <command…>");
+    expect(none.err).toContain("usage: sb-offload [--size small|medium|large] [--ci [--fixtures <dir>] [--names <file>] [--base-tree <tar>] [--image-root <dir>]] [--detach] <command…>");
     expect(calls()).toEqual([]);
   });
 
@@ -1808,7 +1808,7 @@ exit 0`,
     expect(calls()).toContain("aws codebuild batch-get-builds --ids sb-host-offload:build-1 --query builds[0].[buildStatus,logs.groupName,logs.streamName,environment.computeType] --output text");
   });
 
-  test("sb-offload reads the log again from the head when late events were skipped, and prints what was missing (#4494)", () => {
+  test("sb-offload reads the log again from the head when late events were skipped, and prints what was missing", () => {
     awsFake();
     const all = ["sb-step: 0 begin", "[Container] Running command sh -c ...", "first output", "3 passed", "sb-offload: exit 0"];
     setLog("SUCCEEDED", [all[1], all[3], all[4]]); // the first pass lost "begin" and "first output"
@@ -1823,7 +1823,7 @@ exit 0`,
     // when nothing was missing, nothing is said or printed again (the tests above)
   });
 
-  test("sb-offload --ci runs the command in the ci image tagged with the Dockerfile's hash, building the image first only when the repository lacks the tag (#4707)", () => {
+  test("sb-offload --ci runs the command in the ci image tagged with the Dockerfile's hash, building the image first only when the repository lacks the tag", () => {
     const dockerfile = join(repo, "container", "Dockerfile");
     mkdirSync(join(repo, "container"), { recursive: true });
     writeFileSync(dockerfile, "FROM scratch\n");
@@ -1883,7 +1883,7 @@ exit 0`,
     }
   });
 
-  test("sb-offload --ci --fixtures --names puts two more one-time objects, removes all three, and keeps the names out of every argument and log (#4711)", () => {
+  test("sb-offload --ci --fixtures --names puts two more one-time objects, removes all three, and keeps the names out of every argument and log", () => {
     const dockerfile = join(repo, "container", "Dockerfile");
     mkdirSync(join(repo, "container"), { recursive: true });
     writeFileSync(dockerfile, "FROM scratch\n");
@@ -1943,7 +1943,7 @@ exit 0`,
     }
   });
 
-  test("sb-offload without --ci reads no image parameter and does not look at ECR, and starts the offload project as before (#4707)", () => {
+  test("sb-offload without --ci reads no image parameter and does not look at ECR, and starts the offload project as before", () => {
     awsFake();
     setLog("SUCCEEDED", ["sb-offload: exit 0"]);
     const r = offload(["--size", "medium", "docker", "version"]);
@@ -1963,7 +1963,7 @@ exit 0`,
     expect(offload(["docker", "build", "."]).code).toBe(1);
   });
 
-  test("sb-offload points a command killed with 137 on small or medium at the next size, keeping the exit code (#3245)", () => {
+  test("sb-offload points a command killed with 137 on small or medium at the next size, keeping the exit code", () => {
     awsFake();
     setLog("FAILED", ["Killed", "sb-offload: exit 137"]);
     for (const [args, size, next] of [[[], "small", "medium"], [["--size", "medium"], "medium", "large"]] as const) {
@@ -1973,7 +1973,7 @@ exit 0`,
     }
   });
 
-  test("sb-offload says nothing about a size for 137 on large, or for any other exit code (#3245)", () => {
+  test("sb-offload says nothing about a size for 137 on large, or for any other exit code", () => {
     awsFake();
     setLog("FAILED", ["Killed", "sb-offload: exit 137"]);
     const large = offload(["--size", "large", "docker", "compose", "up"]);
@@ -2003,7 +2003,7 @@ exit 0`,
     // interrupted while the build runs
     setLog("IN_PROGRESS", ["building"]);
     rmSync(log, { force: true });
-    // the real sleep waits: with the fake one the polls do not wait, and the TERM can land outside the wait (#3435)
+    // the real sleep waits: with the fake one the polls do not wait, and the TERM can land outside the wait
     expect(existsSync(join(dir, "bin", "sleep"))).toBe(false);
     const p = Bun.spawn(["bash", join(HERE, "offload.sh"), "docker", "compose", "up"], {
       cwd: repo,
@@ -2011,7 +2011,7 @@ exit 0`,
       stdout: "pipe",
       stderr: "pipe",
     });
-    // load (the flake of #2939): a deadline, not a count of sleeps — the TERM must come in the first poll's wait: the
+    // load (a flake seen on a busy host): a deadline, not a count of sleeps — the TERM must come in the first poll's wait: the
     // call with the token is pull_log's last, and only `sleep 5 & wait $!` follows it
     const signalled = () => calls().some((l) => l.startsWith("aws logs get-log-events") && l.includes("--next-token"));
     for (const t0 = Date.now(); !signalled() && Date.now() - t0 < 20_000; ) await Bun.sleep(50);
@@ -2048,7 +2048,7 @@ exit 0`,
     expect(calls().filter((l) => l.startsWith("aws s3 rm "))).toHaveLength(1); // the upload goes all the same
   }, 15_000);
 
-  test("sb-offload stops the build when it cannot follow it any more: a failing poll does not leave a billed build running (review #685)", () => {
+  test("sb-offload stops the build when it cannot follow it any more: a failing poll does not leave a billed build running", () => {
     setLog("IN_PROGRESS", ["building"]);
     fake("aws", `echo "aws $*" >> "${log}"
 case "$1 $2" in
@@ -2120,7 +2120,75 @@ exit 0`);
     }
   }, 30_000);
 
-  test("sb-offload --detach prints the build id and returns without stopping the build or removing the uploads (#4712)", () => {
+  test("sb-offload --ci --image-root takes the image's tag and its build from the named tree's Dockerfile, whatever the sent work tree has", () => {
+    // the tree that has the ci image's Dockerfile (Switchboard's), not the work tree that is sent (another repository's)
+    const imageRoot = join(dir, "image-root-offload");
+    mkdirSync(join(imageRoot, "container"), { recursive: true });
+    writeFileSync(join(imageRoot, "container", "Dockerfile"), "FROM scratch AS ci\n");
+    writeFileSync(join(imageRoot, "other.txt"), "not sent\n");
+    const tag = new Bun.CryptoHasher("sha256").update("FROM scratch AS ci\n").digest("hex").slice(0, 12);
+    const imageFiles = ["noimage", "status-sb-host-offload-image:build-1", "events-image-1.json"];
+    try {
+      // (a) the work tree has no container/Dockerfile: the image is missing, so it is built from the named tree's file alone, then the build starts
+      awsFake();
+      writeFileSync(join(fakeDir, "noimage"), "");
+      writeFileSync(join(fakeDir, "status-sb-host-offload-image:build-1"), "SUCCEEDED\t/aws/codebuild/sb-host-offload-image\timage-1\n");
+      writeFileSync(join(fakeDir, "events-image-1.json"), JSON.stringify({ events: [{ message: `sb-offload: image ${tag}\n` }], nextForwardToken: "f/2" }));
+      setLog("IN_PROGRESS", ["building"]);
+      const r = offload(["--ci", "--image-root", imageRoot, "--detach", "bun", "test"]);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("sb-offload: started sb-host-offload-ci:build-1\n");
+      const c = calls();
+      const cps = c.filter((l) => l.startsWith("aws s3 cp"));
+      expect(cps).toHaveLength(2);
+      const base = /s3:\/\/[^/]*\/(offload\/[^ ]*)\.tar\.gz /.exec(cps[0]!)![1]!;
+      expect(cps[1]).toContain(`/${base}.image.tar.gz `);
+      expect(Bun.spawnSync(["tar", "-tzf", `${out}.image`]).stdout.toString().trim().split("\n")).toEqual(["container/Dockerfile"]);
+      const starts = c.filter((l) => l.startsWith("aws codebuild start-build"));
+      expect(starts).toHaveLength(2);
+      expect(starts[0]).toContain("--project-name sb-host-offload-image ");
+      expect(starts[0]).toContain(`"name":"SB_OFFLOAD_KEY","value":"${base}.image.tar.gz"`);
+      expect(starts[0]).toContain(`"name":"SB_IMAGE_TAG","value":"${tag}"`);
+      expect(starts[1]).toContain(`--image-override 1.dkr.ecr.r.amazonaws.com/sb-host-offload-image:${tag} `);
+      expect(starts[1]).toContain(`"name":"SB_OFFLOAD_KEY","value":"${base}.tar.gz"`);
+      // the image's upload goes once the image is built, detached or not; the work tree's stays for the detached build
+      expect(c.filter((l) => l.startsWith("aws s3 rm")).map((l) => l.split(" ")[3]!.replace(/^s3:\/\/[^/]*\//, ""))).toEqual([`${base}.image.tar.gz`]);
+      for (const f of imageFiles) rmSync(join(fakeDir, f), { force: true });
+
+      // (b) the work tree has a container/Dockerfile of its own with another content: the tag is still the named tree's
+      mkdirSync(join(repo, "container"), { recursive: true });
+      writeFileSync(join(repo, "container", "Dockerfile"), "FROM another\n");
+      awsFake();
+      setLog("SUCCEEDED", ["ok", "sb-offload: exit 0"]);
+      const own = offload(["--ci", "--image-root", imageRoot, "bun", "test"]);
+      expect(own.code).toBe(0);
+      expect(calls()).toContain(`aws ecr describe-images --repository-name sb-host-offload-image --image-ids imageTag=${tag}`);
+      expect(calls().find((l) => l.startsWith("aws codebuild start-build"))).toContain(`"name":"SB_IMAGE_TAG","value":"${tag}"`);
+      // the image is there: nothing but the work tree is sent
+      expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toHaveLength(1);
+      rmSync(join(repo, "container"), { recursive: true, force: true });
+
+      // only with --ci, only a tree that has the file, and a work tree without the file needs the tree named: nothing is sent
+      const empty = join(dir, "image-root-empty");
+      mkdirSync(empty, { recursive: true });
+      for (const [args, said] of [
+        [["--image-root", imageRoot, "true"], "sb-offload: --image-root goes with --ci"],
+        [["--ci", "--image-root", empty, "true"], `sb-offload: --image-root: ${empty} has no container/Dockerfile`],
+        [["--ci", "--image-root"], "sb-offload: --image-root needs a directory"],
+        [["--ci", "true"], "has no container/Dockerfile (name the tree that has the ci image's with --image-root)"],
+      ] as const) {
+        const bad = offload([...args]);
+        expect(bad.code).toBe(2);
+        expect(bad.err).toContain(said);
+        expect(calls().filter((l) => l.startsWith("aws s3 cp"))).toEqual([]);
+      }
+    } finally {
+      for (const f of imageFiles) rmSync(join(fakeDir, f), { force: true });
+      rmSync(join(repo, "container"), { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("sb-offload --detach prints the build id and returns without stopping the build or removing the uploads", () => {
     awsFake();
     setLog("IN_PROGRESS", ["building"]);
     mkdirSync(join(repo, "container"), { recursive: true });
@@ -2141,7 +2209,7 @@ exit 0`);
     }
   });
 
-  test("sb-offload --collect reads an ended build's log and exits as the call would have, without sending anything or needing git (#4712)", () => {
+  test("sb-offload --collect reads an ended build's log and exits as the call would have, without sending anything or needing git", () => {
     awsFake();
     const cases: [string, string[], number][] = [["SUCCEEDED", ["ok", "sb-offload: exit 0"], 0], ["FAILED", ["1 failed", "sb-offload: exit 1"], 1], ["TIMED_OUT", ["still building"], 124], ["STOPPED", ["building"], 130]];
     for (const [status, lines, code] of cases) {
@@ -2170,7 +2238,7 @@ exit 0`);
     expect(offload(["--collect"]).code).toBe(2);
   });
 
-  test("sb-offload --collect does not stop the build when it is terminated (#4712)", async () => {
+  test("sb-offload --collect does not stop the build when it is terminated", async () => {
     awsFake();
     setLog("IN_PROGRESS", ["building"]);
     rmSync(log, { force: true });
@@ -2202,7 +2270,7 @@ exit 0`);
   });
 });
 
-describe("aws/host gh-guard on the host shell (#824)", () => {
+describe("aws/host gh-guard on the host shell", () => {
   // the profile.d file as bootstrap.sh writes it, with a fake checkout whose ops-kit/bin/gh is executable
   const me = Bun.spawnSync(["id", "-un"]).stdout.toString().trim();
   const guard = (repo: string, home: string, user = me) => {
@@ -2263,7 +2331,7 @@ describe.skipIf(!existsSync(hostOps))("docs/design/host-operations.md emergency 
   });
 });
 
-describe("aws/README.md travelling (#1639)", () => {
+describe("aws/README.md travelling", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   const at = readme.indexOf("- **Travelling**");
   const section = at < 0 ? "" : readme.slice(at, readme.indexOf("- **Web ACL**", at));
@@ -2287,7 +2355,7 @@ describe("aws/README.md travelling (#1639)", () => {
   });
 });
 
-describe("aws/host bootstrap security updates (#2186)", () => {
+describe("aws/host bootstrap security updates", () => {
   const boot = () => readFileSync(join(HERE, "bootstrap.sh"), "utf8");
   // the units' tail of bootstrap.sh run with a fake dnf (needs-restarting's exit code) and systemctl (logged)
   function tail(needsRestart: number) {
@@ -2338,7 +2406,7 @@ describe("aws/host bootstrap security updates (#2186)", () => {
   });
 });
 
-describe("aws/host sb-pre-rebuild (#2186)", () => {
+describe("aws/host sb-pre-rebuild", () => {
   let d: string;
   // a fake aws: `s3 cp - <url>` stores stdin under s3/<key>, `s3 cp <url> -` prints it, list-objects-v2 lists s3/
   function setup() {
@@ -2449,7 +2517,7 @@ exit 254`);
     expect(sh(["nonsense"]).code).toBe(2);
   });
 
-  test("keep-work holds what is not pushed and the origins, rewrites nothing unchanged, and restore-work brings it all back (#3467)", () => {
+  test("keep-work holds what is not pushed and the origins, rewrites nothing unchanged, and restore-work brings it all back", () => {
     setup();
     const out = (cwd: string, ...a: string[]) => git(cwd, ...a).stdout.toString().trim();
     const clone = (to: string) => Bun.spawnSync(["git", "clone", "-q", origin, to], { env: { PATH: "/usr/bin:/bin", GIT_CONFIG_GLOBAL: "/dev/null" } });
@@ -2508,7 +2576,7 @@ exit 254`);
     expect(copies.length).toBeGreaterThan(0); // the main checkout was left: what it had outlives the next keep-work
   }, 30000);
 
-  test("keep-work survives an unreadable file and a dropped branch, is stable with many commits, and restore-work respects a moved-aside repository (#3467)", () => {
+  test("keep-work survives an unreadable file and a dropped branch, is stable with many commits, and restore-work respects a moved-aside repository", () => {
     setup();
     const out = (cwd: string, ...a: string[]) => git(cwd, ...a).stdout.toString().trim();
     const origin = join(d, "origin2.git");
@@ -2625,7 +2693,7 @@ describe("aws/host sb-node: the pinned Node.js reaches a running host", () => {
   });
 
   test("a tarball whose checksum differs, or a failed download, keeps the old version", () => {
-    // one at a time: each run replaces the last one's fixture (review #2513)
+    // one at a time: each run replaces the last one's fixture
     for (const make of [() => nodeRun({ old: "v24.21.0", pin: "real" }), () => nodeRun({ old: "v24.21.0", tarball: false })]) {
       const r = make();
       expect(r.code).not.toBe(0);
@@ -2646,7 +2714,7 @@ describe("aws/host sb-node: the pinned Node.js reaches a running host", () => {
     expect(r.version()).toBe("v99.0.0");
   });
 
-  test("sb-host-update starts the installed sb-node even when main cannot be fetched (review #2513)", () => {
+  test("sb-host-update starts the installed sb-node even when main cannot be fetched", () => {
     const bin = join(dir, "nodebin");
     rmSync(bin, { recursive: true, force: true });
     mkdirSync(bin);
@@ -2665,7 +2733,7 @@ describe("aws/host sb-node: the pinned Node.js reaches a running host", () => {
   });
 });
 
-describe("aws/host sb-host-update security updates (#2186)", () => {
+describe("aws/host sb-host-update security updates", () => {
   test("every start hands AL2023's latest security updates to a unit of their own, without waiting", () => {
     const r = run("host-update.sh", [], { SB_BIN_DIR: join(dir, "nobin"), SB_HOST_CLONE: join(dir, "noclone") }); // no clone: the fetch is skipped
     expect(r.code).toBe(0);
@@ -2673,7 +2741,7 @@ describe("aws/host sb-host-update security updates (#2186)", () => {
     expect(r.err).toContain("skipped"); // the updates are started before the fetch's early returns
   });
 
-  test("the start does not wait for dnf, whose failure stays in its own unit, and goes on (#3344)", () => {
+  test("the start does not wait for dnf, whose failure stays in its own unit, and goes on", () => {
     fake("dnf", `echo "dnf $*" >> "${log}"; echo "Failed to download metadata" >&2; exit 1`);
     const bin = join(dir, "hubin");
     mkdirSync(bin, { recursive: true });
@@ -2701,7 +2769,7 @@ describe("aws/host sb-host-update security updates (#2186)", () => {
   });
 });
 
-describe("aws/host bootstrap from main (#2231)", () => {
+describe("aws/host bootstrap from main", () => {
   // from_main() cut out of bootstrap.sh and run with fake curl (IMDS), aws (Parameter Store) and git. The fake clone
   // writes a bootstrap.sh that runs the same from_main again and then says main-bootstrap, and records its origin, so
   // a second fetch from the clone that was switched to would show as a second clone call.

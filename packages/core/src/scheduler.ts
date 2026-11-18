@@ -3,7 +3,7 @@ import type { Queue, RunnerId, ScanCursors, Schedule, ScheduleInput, Task } from
 import { nextRun, parseCron } from "./cron.ts";
 import { type Db, newId } from "./db.ts";
 import type { ScanSummary } from "./secretscan.ts";
-import type { TaskManager } from "./tasks.ts";
+import type { TaskManager } from "./tasks/manager.ts";
 import { collectProvenance } from "./provenance.ts";
 import { isWorking, workPhase } from "./task-status.ts";
 import { stuckSchedule } from "./stops.ts";
@@ -22,28 +22,8 @@ export type BacklogNextResult = { started: Array<{ task: Task; label: string }>;
 /** What the insights schedule's Task sends: the built-in command alone — Claude Code expands it only as the whole message. */
 export const INSIGHTS_PROMPT = "/insights";
 
-/**
- * What the ui-layers schedule's Task is told: the monthly floor / ceiling / walls check (docs/design/ui-layers.md,
- * docs/design/scheduler.md). The scripts count and write; the Task reads the code and writes the ratings and findings.
- */
-export const UI_LAYERS_PROMPT = `床・天井・壁の月次の点検をしてください（docs/design/ui-layers.md の原則）。このリポジトリの root で、作業ファイルは W=$(mktemp -d /tmp/switchboard.ui-layers.XXXXXX) の下に置きます。
-
-1. 指標を数える: bun scripts/ui-layers-metrics.ts > "$W/metrics.json"
-2. 置き場所の行が無い画面の PBI を名指しする: bun scripts/ui-layers-placement.ts --days 30 > "$W/placement.json"（exit 2 なら理由をレポートの評価の文に書き、{"checked":0,"missing":[]} で続ける）
-3. 評価を書く: docs/design/ui-layers.md を読み、1 の値と前回の値（\${SWITCHBOARD_HOME:-$HOME/.switchboard}/ui-layers/history.jsonl の最後の行。無ければ初回）、画面のコード（apps/web/src）を読んだ所見から、床・天井・壁それぞれの評価を 2〜4 文で書き、{"floor":"…","ceiling":"…","walls":"…"} を "$W/ratings.json" に置く
-4. レポートを作る: bun scripts/ui-layers-report.ts --metrics "$W/metrics.json" --placement "$W/placement.json" --ratings "$W/ratings.json" --out "$W/ui-layers.html"。走らせるたびに履歴に 1 行積むので、1 回の点検で 1 度だけ走らせる（作り直すなら、その履歴を "$W" に写して最後の行（今回の分）を除き、--history にその写しを渡す）。できた HTML を返答の switchboard-artifact のフェンスで成果物に登録する（題は「床・天井・壁の点検 YYYY-MM-DD」）
-5. 要望にする: 前回より悪くなった点と、新しく見つけた問題だけを、所見の JSON（[{"key","title","detail","source"}]。最大 3 件、大事な順。source は指標の変化なら「定期の検査」、コードを読んだ所見なら「エージェント」）にして bun scripts/ui-layers-requests.ts --findings "$W/findings.json"。無ければ走らせない
-
-指標が悪くなっても何も止めません。マージ・リリース・画面の修正・PBI の作成はしません。最後に、作った要望の番号（無ければ「なし」）と評価の要約を 3 行で返してください。`;
-
-/**
- * What the monthly check's prompt schedule says: the steps are in docs/design/ui-layers.md, so the person edits the
- * wording and the runner in Schedules like any prompt schedule's. Only the first start's seed uses it.
- */
-export const UI_LAYERS_CHECK_PROMPT = "床・天井・壁の月次の点検をしてください。手順は docs/design/ui-layers.md の「The monthly check」の節に従います。";
-
-/** The kinds that run on claude only and fire as a Task of their own on a fixed instruction. */
-const claudeOnly = (action: string): action is "insights" | "ui-layers" => action === "insights" || action === "ui-layers";
+/** The kind that runs on claude only and fires as a Task of its own on a fixed instruction. */
+const claudeOnly = (action: string): action is "insights" => action === "insights";
 
 /** Where `missedRuns` stops counting: a schedule years behind is not walked run by run. */
 export const MISSED_RUNS_CAP = 1000;
@@ -60,6 +40,13 @@ export function missedRuns(cron: string, from: number, to: number, cap = MISSED_
   }
   return n;
 }
+
+/** `GET /api/schedules/log`: the lines without `since` or `limit`, the lines of a `since` without `limit`, and the most a `limit` may ask for. */
+export const SCHEDULE_LOG_RECENT = 50;
+export const SCHEDULE_LOG_SINCE_LIMIT = 2000;
+export const SCHEDULE_LOG_MAX_LIMIT = 20000;
+/** The word of the first line of a `since` read whose older lines were cut by the limit. */
+export const SCHEDULE_LOG_CUT = "(省略)";
 
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -83,14 +70,14 @@ export class Scheduler {
     private now: () => number = Date.now,
     private startNext: (scheduleId: string, only?: { workspaceId: string; numbers: number[] }) => Promise<BacklogNextResult> = async () => ({ started: [], skipped: ["backlog-next is not available"] }),
     private scanSecrets: (schedule: { id: string; title: string }, cursors: ScanCursors) => Promise<{ lines: string[]; summary: ScanSummary; cursors?: ScanCursors }> = async () => ({ lines: ["secret-scan is not available"], summary: { repos: 0, hits: 0, failed: 1 } }),
-    /** Claude's 7-day utilization at or above this and an insights or ui-layers firing is skipped: the backlog's `backlogQuotaLimit`. */
+    /** Claude's 7-day utilization at or above this and an insights firing is skipped: the backlog's `backlogQuotaLimit`. */
     private quotaLimit: () => number = () => 0.8,
     /** 上限のときの代わり: the runner a prompt schedule's Task starts on, and the status line when it is another. */
     private autoRunner: (r: RunnerId) => { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string } = (r) => ({ runner: r }),
     /** approval-window: reads the batches still waiting (判断待ち shows them as a notice) and says so, in a line. */
     private approvalWindow: (schedule: { id: string; title: string }) => Promise<string> = async () => "approval-window is not available",
-    /** The budget of a schedule's Task of this model when the schedule has none: the settings' default for it (null = none). */
-    private defaultBudgetUsd: (model: string | null | undefined) => number | null = () => null,
+    /** The budget of a schedule's Task of this model on this runner when the schedule has none: the settings' default for it (null = none). */
+    private defaultBudgetUsd: (model: string | null | undefined, runner: RunnerId) => number | null = () => null,
   ) {}
 
   list(): Schedule[] {
@@ -196,7 +183,7 @@ export class Scheduler {
     const when = `${stamp.getFullYear()}-${p(stamp.getMonth() + 1)}-${p(stamp.getDate())} ${p(stamp.getHours())}:${p(stamp.getMinutes())}`;
     const fixed = claudeOnly(s.action);
     if (fixed) {
-      // the report's session summaries (insights) and the check's reading (ui-layers) spend the subscription: not while
+      // the report's session summaries (insights) spend the subscription: not while
       // Claude's 7-day window is at the backlog's threshold
       const limit = this.quotaLimit();
       const hot = this.db.quotaFor("claude").find((q) => q.window === "seven_day" && q.utilization >= limit && q.resetsAt * 1000 > this.now());
@@ -206,17 +193,17 @@ export class Scheduler {
         return null;
       }
     }
-    // insights and ui-layers run on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model
+    // insights runs on claude only; a prompt schedule's runner at its limit gives way to the fallback order, on its CLI default model
     const { runner, note, deferUntil, deferNote } = fixed ? { runner: "claude" as const, note: undefined, deferUntil: undefined, deferNote: undefined } : this.autoRunner(s.runner);
     const task = this.tasks.create({
       workspaceId: ws.id,
       cwd: ws.path,
-      title: `${s.action === "insights" ? "Claude Code Insights" : s.action === "ui-layers" ? "床・天井・壁の点検" : s.title} (${when})`,
-      prompt: s.action === "insights" ? INSIGHTS_PROMPT : s.action === "ui-layers" ? UI_LAYERS_PROMPT : s.prompt,
+      title: `${s.action === "insights" ? "Claude Code Insights" : s.title} (${when})`,
+      prompt: s.action === "insights" ? INSIGHTS_PROMPT : s.prompt,
       runner,
       ...(s.model && !note ? { model: s.model } : {}),
       ...(s.effort && !note ? { effort: s.effort } : {}),
-      budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd(s.model && !note ? s.model : undefined) ?? undefined,
+      budgetUsd: s.budgetUsd ?? this.defaultBudgetUsd(s.model && !note ? s.model : undefined, runner) ?? undefined,
       scheduleId: s.id,
       kind: "maintenance",
       // Unattended runs get no shadow: the one-active-run guard and the queue's scheduled section only know the
@@ -428,9 +415,18 @@ export class Scheduler {
     this.timer = null;
   }
 
-  /** The last 50 lines of the schedules log, kept in the db (a restart keeps them). */
-  recentLog(): string[] {
-    return this.db.recentScheduleLog(50).map((r) => `${new Date(r.ts).toISOString()} ${r.text}`);
+  /**
+   * The schedules log, kept in the db (a restart keeps it), oldest first. No `since`: the last `limit` lines (50 unless
+   * given). `since` (epoch ms): the lines from that time on, at most the newest `limit` (SCHEDULE_LOG_SINCE_LIMIT unless
+   * given); when older ones were cut, the first line says how many, so a reader who counts lines knows the count is short.
+   */
+  recentLog(opts: { since?: number; limit?: number } = {}): string[] {
+    const line = (r: { ts: number; text: string }) => `${new Date(r.ts).toISOString()} ${r.text}`;
+    if (opts.since === undefined) return this.db.recentScheduleLog(opts.limit ?? SCHEDULE_LOG_RECENT).map(line);
+    const limit = opts.limit ?? SCHEDULE_LOG_SINCE_LIMIT;
+    const { rows, total } = this.db.scheduleLogSince(opts.since, limit);
+    const cut = total - rows.length;
+    return [...(cut > 0 ? [`${new Date(rows[0]!.ts).toISOString()} ${SCHEDULE_LOG_CUT} since 以降の ${total} 行のうち古い ${cut} 行を返していない（limit ${limit}。limit は ${SCHEDULE_LOG_MAX_LIMIT} まで。超えるなら since を新しくして分けて読む）`] : []), ...rows.map(line)];
   }
 
   note(text: string, scheduleId: string | null = null) {

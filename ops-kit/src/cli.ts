@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { BACKLOG_USAGE, readRecords, repoName, runBacklog, triageUsage } from "./backlog-client.ts";
+import { BACKLOG_USAGE, readRecords, repoName, repoTop, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
 import { runTask, TASK_USAGE } from "./task-client.ts";
 import { bootstrap } from "./bootstrap.ts";
@@ -13,6 +13,9 @@ import { forgeTargetOf, originOf, remoteOf } from "./forge.ts";
 import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, startGitlabDiscussion, viewGitlabMr, type Sh } from "./forge-gitlab.ts";
 import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
+import { parseWaitArgs, runWait, WAIT_USAGE } from "./wait.ts";
+import { isReviewer, REVIEW_RULES, REVIEWER_NOTE, type Reviewer } from "./review-note.ts";
+import { addedLines, handledFindings, oldPathHits, oldPathsItem, oldPathsReport, type Hit, type InlineComment } from "./review-material.ts";
 import { formatLint, lint } from "./lint.ts";
 import { KNOWN_FAILURES_FILE, parseKnownFailures } from "./known-failures.ts";
 import { findIssueRefs, publicFiles } from "./issue-refs.ts";
@@ -126,15 +129,34 @@ ${DEPS_CHECK_USAGE}
       枠は ~/.local/state/ops-kit/heavy/ で、どのリポジトリから呼んでも同じ枠を取り合う。--name の既定はコマンドの先頭 3 語。
       --memory-only は枠を取らず、空きメモリが下限を下回る間だけ待つ（レビューのセッションなど、短くて枠を待たせたくない処理）。
       設定ファイル（ops.config.json）は要らない。exit = コマンドの exit、127 = 起動できない、2 = 使い方の誤りか heavy.json の誤り
+  review-note <codex|claude|rules>
+      レビュアーとして起動するランナーに、レビューの指示の後ろに足す文（そのランナーの動き方: 読み取り専用のサンドボックス / plan モード。続けて、
+      どのレビューにも共通の決まり: 指摘の重さの定義・処理済みの指摘の扱い・古い前提の一覧の使い方）を出す。rules は共通の決まりだけ（サブエージェントのレビュー用）。
+      アプリに仕事として頼むレビューにはアプリが同じ文を足すので、直接走らせるときだけ使う。設定ファイルは要らない。exit 2 = 使い方の誤り
+  review-handled <PR> [--kind review|recheck]
+      前の回までの指摘と、それぞれの処理（スレッドの返信と「## レビュー対応」の要約）を Markdown で出す。修正後の見直しと再チェックのレビュアーに渡す材料。
+      処理した指摘がまだ無ければ何も出さない。--kind recheck は、前の再チェックの要約が PR にあるとき（2 回目以降）だけ出す。設定ファイルは要らない
+  old-paths list <base> <語>...
+  old-paths check <base> <PR 本文のファイル>
+      変更が意味を変える語（関数・値・記録の鍵の名前）を使う既存の箇所を、<base>...HEAD の差分が足した行を除いて挙げる（git grep。語は固定の文字列）。
+      list は PR 本文に貼る「古い前提を持つ既存の箇所」の項目を出す（base を HEAD にすれば差分なしで全部。Task を切るとき・修正が値の意味を変えたとき）。
+      check は本文の項目の語で探し直し、一覧に無い箇所を出す（レビュアーに渡す材料）。設定ファイルは要らない
+      exit 0 = 出した / 一覧が揃っている（「なし」も）、1 = 一覧に無い箇所がある・項目が無い、2 = 使い方の誤りか git の失敗
   idle-run --idle <秒> [--] <コマンド…>
       コマンドを自分のプロセスグループで動かし、stdout / stderr のどちらにも <秒> 出力が無ければグループごと切る。総時間の上限は無い。
       出力はそのまま流す。設定ファイルは要らない。exit = コマンドの exit、124 = 切った（理由を stderr に出す）、127 = 起動できない、2 = 使い方の誤り
+  ${WAIT_USAGE}
+      判定コマンドが exit 0 になるまで --interval 秒（既定 5）おきに繰り返して待つ。何を待つか（--for）・上限（--timeout）・切れたときの動作（--on-timeout）は
+      必須で、無ければ動かない。--progress のコマンドの出力が --stall 秒変わらなければ（相手が止まっている）、上限より前に切る。
+      アプリの Task の中では待っている内容と上限がアプリの画面に出て、fail で切れた待ちは利用者に知らされる。設定ファイルは要らない。
+      exit 0 = 判定が成功した / proceed で切れた（理由を stderr に出す）、124 = fail で切れた、127 = 判定コマンドを起動できない、2 = 使い方の誤り
   export-copy <dest> --words-file <file>
       キットを読めないリポジトリ（公開リポジトリなど）が同梱するコピーを <dest> に作る（テストを除くコード、skills、bin、
       README。<dest>/KIT_VERSION に元のコミットと日時）。--words-file で指定した固有語のリスト（キットの外）の語が 1 件でもあればコピーを消して exit 1
       <dest> は無い・空・前のコピー（KIT_VERSION がある）のどれか。前のコピーは置き換える。設定ファイルは要らない
 
---config を省くと、今のディレクトリから上へ ops.config.json を探す。
+--config を省くと、今のディレクトリから上へ ops.config.json を探す。見つからなければ、環境変数 OPS_KIT_CONFIG が指すファイル（同じ形）を使う: リポジトリに設定を置かないときに、キットを呼ぶ側がファイルの場所を渡す。
+リポジトリに ops.config.json があればそれだけを使い、2 つをキーごとに混ぜない。publicSync はリポジトリのファイルからだけ読む。
 Project URL は環境変数 <envPrefix>_PROJECT_URL、設定の省略可能な projectUrl、同名のリポジトリ変数（gh variable get）の順で読む（持ち主もその URL から）。<envPrefix>_PROJECT_OWNER は持ち主だけを変える。リポジトリは GH_REPO、無ければ origin。
 
 設定ファイルの例（ops.config.json）:
@@ -309,6 +331,51 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     }
     return code;
   }
+  if (command === "review-note") {
+    if (rest.length !== 1 || (rest[0] !== "rules" && !isReviewer(rest[0]))) return usage(err, "review-note <codex|claude|rules>", 2);
+    out(rest[0] === "rules" ? REVIEW_RULES : REVIEWER_NOTE[rest[0] as Reviewer]);
+    return 0;
+  }
+  if (command === "review-handled") {
+    const kindAt = rest.indexOf("--kind");
+    const kind = kindAt < 0 ? "review" : rest[kindAt + 1];
+    const [pr, ...extra] = kindAt < 0 ? rest : rest.filter((_, i) => i !== kindAt && i !== kindAt + 1);
+    if (!/^[1-9]\d*$/.test(pr ?? "") || extra.length || (kind !== "review" && kind !== "recheck")) return usage(err, "review-handled <PR> [--kind review|recheck]", 2);
+    try {
+      const pages = JSON.parse(await gh.run(["api", "--paginate", "--slurp", `repos/{owner}/{repo}/pulls/${pr}/comments`])) as InlineComment[][];
+      const view = JSON.parse(await gh.run(["pr", "view", pr!, "--json", "comments"])) as { comments: Array<{ body: string }> };
+      const text = handledFindings(pages.flat(), view.comments.map((c) => c.body), kind);
+      if (text) out(text);
+      return 0;
+    } catch (e) {
+      err((e as Error).message);
+      return 1;
+    }
+  }
+  if (command === "old-paths") {
+    const [sub, base, ...tail] = rest;
+    if ((sub !== "list" && sub !== "check") || !base || base.startsWith("-") || !tail.length || (sub === "check" && tail.length !== 1)) return usage(err, "old-paths list <base> <語>... | old-paths check <base> <PR 本文のファイル>", 2);
+    const git = (args: string[], okCodes = [0]) => {
+      const p = Bun.spawnSync(["git", ...args], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      if (!okCodes.includes(p.exitCode)) throw new Error(`git ${args[0]}: ${p.stderr.toString().trim() || `exit ${p.exitCode}`}`);
+      return p.stdout.toString();
+    };
+    try {
+      const added = addedLines(git(["diff", "-U0", "--no-color", "--no-ext-diff", `${base}...HEAD`]));
+      // git grep exits 1 when nothing matches
+      const hitsFor = (words: string[]): Hit[] => oldPathHits(git(["grep", "-n", "-I", "-F", "--no-color", ...words.flatMap((w) => ["-e", w])], [0, 1]), added);
+      if (sub === "list") {
+        out(oldPathsItem(tail, hitsFor(tail)));
+        return 0;
+      }
+      const report = oldPathsReport(readFileSync(tail[0]!, "utf8"), hitsFor);
+      out(report.text);
+      return report.ok ? 0 : 1;
+    } catch (e) {
+      err((e as Error).message);
+      return 2;
+    }
+  }
   if (command === "idle-run") {
     const IDLE_USAGE = "idle-run --idle <秒> [--] <コマンド…>";
     const [flag, seconds, ...tail] = rest;
@@ -321,6 +388,16 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       return r.code;
     } catch (e) {
       err(`${cmd[0]} を起動できません: ${(e as Error).message}`);
+      return 127;
+    }
+  }
+  if (command === "wait") {
+    const o = parseWaitArgs(rest);
+    if (!o) return usage(err, WAIT_USAGE, 2);
+    try {
+      return (await runWait(o)).code;
+    } catch (e) {
+      err(`${o.check[0]} を起動できません: ${(e as Error).message}`);
       return 127;
     }
   }
@@ -500,7 +577,8 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         const r = await repoOf(gh);
         repo = `${r.owner}/${r.name}`;
       }
-      if (recheck.some((u) => !u.startsWith(`https://github.com/${repo}/`))) return usage(err, SCAN_USAGE, 2);
+      const mine = `https://github.com/${repo}/`.toLowerCase(); // names on GitHub do not tell case
+      if (recheck.some((u) => !u.toLowerCase().startsWith(mine))) return usage(err, SCAN_USAGE, 2);
       const { hits, scanned } = await scanIssues(gh, repo, sleep, hostAws(), { since, recheck });
       for (const h of hits) out(`${h.url}: ${h.kind}（${h.line} 行目）`);
       out(`hits: ${hits.length} / scanned: ${scanned}`);
@@ -564,7 +642,10 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         const registry = dir && own && target && own.toLowerCase() === target.toLowerCase() ? join(dir, KNOWN_FAILURES_FILE) : null;
         if (dir && !registry && existsSync(join(dir, KNOWN_FAILURES_FILE))) err(`${KNOWN_FAILURES_FILE} は検査しない（検査する ${target ?? "リポジトリ不明"} がこの checkout の origin ${own ?? "不明"} と違う）`);
         const knownFailures = registry && existsSync(registry) ? parseKnownFailures(readFileSync(registry, "utf8")) : undefined;
-        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records, knownFailures });
+        // the paths a question names are read against this checkout's top level only when it is the linted repository's
+        const here = dir ? (() => { try { const origin = originOf(dir); return origin ? (remoteOf(origin)?.path ?? null) : null; } catch { return null; } })() : null;
+        const mine = !!dir && !!here && !!target && here.toLowerCase() === target.toLowerCase();
+        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records, knownFailures, ...(mine ? { top: repoTop(dir!) } : {}) });
         for (const line of formatLint(violations, warnings)) out(line);
         return violations.length > 0 ? 1 : 0;
       }

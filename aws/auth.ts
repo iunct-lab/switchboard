@@ -1,5 +1,5 @@
 /**
- * Passkey login for the cloud host (#211, #234): served by the Starter Lambda, which runs while the machine is stopped,
+ * Passkey login for the cloud host: served by the Starter Lambda, which runs while the machine is stopped,
  * under the distribution's own origin (`/_auth/*`, a CloudFront behavior to the Function URL with the shared header).
  *   GET  /_auth/           the one page: register (with a one-time link) / log in / start / 作り直す
  *   GET  /_auth/status     { state, registered, loggedIn } (open: tells nothing but those)
@@ -7,28 +7,28 @@
  *   POST /_auth/register   { code, challenge, clientDataJSON, authenticatorData, publicKey, algorithm } → Set-Cookie
  *                          (code = the agent's /switchboard/register-code, or a device code below)
  *   POST /_auth/device-code { challenge, id, clientDataJSON, authenticatorData, signature } with the cookie → { code, expires }:
- *                          a one-time code for 10 minutes to register another device (#414). The passkey signature is made
+ *                          a one-time code for 10 minutes to register another device. The passkey signature is made
  *                          for this request (the cookie alone, or sb_recent, is not enough); at MAX_PASSKEYS it is 409
  *   POST /_auth/login      { challenge, id, clientDataJSON, authenticatorData, signature } → Set-Cookie
- *                          (an id not in the list: 401 reason "unknown", #1312)
+ *                          (an id not in the list: 401 reason "unknown")
  *   GET  /_auth/passkeys   { passkeys: [{ id, device, created, lastUsed, current }] } with the cookie (no public keys)
  *   POST /_auth/passkeys/delete { target, challenge, id, clientDataJSON, authenticatorData, signature } with the cookie and a
- *                          passkey signature made for this request (#414): removes one passkey, never the last one (409)
- *   POST /_auth/start | /_auth/stop | /_auth/rebuild   with the cookie + a passkey check within 5 minutes (sb_recent, #497; the
+ *                          passkey signature made for this request: removes one passkey, never the last one (409)
+ *   POST /_auth/start | /_auth/stop | /_auth/rebuild   with the cookie + a passkey check within 5 minutes (sb_recent; the
  *                          machine token paths /start /rebuild stay for CI)
- *   GET  /_auth/countries  { base, allowance, active } — the always-allowed countries and the one temporary allowance (#1639;
+ *   GET  /_auth/countries  { base, allowance, active } — the always-allowed countries and the one temporary allowance (
  *                          the cookie only; 404 when the Starter has no countries)
  *   POST /_auth/countries  { countries, from?, until } / POST /_auth/countries/clear   with the cookie + a passkey check within
  *                          5 minutes: set / drop the temporary extra countries of the geo restriction (400 for a bad allowance)
- *   POST /_auth/renew      with the cookie: the same cookie with the idle time 24 hours on (the cap does not move; #498)
+ *   POST /_auth/renew      with the cookie: the same cookie with the idle time 24 hours on (the cap does not move)
  *   POST /_auth/logout     clears the cookies
  *
- * The session cookie is the contract with the daemon and sb-rescue (#235), which verify it with the public key only (#701):
+ * The session cookie is the contract with the daemon and sb-rescue, which verify it with the public key only:
  *   sb_session=<base64url("<passkeyId>.<idleUntilMs>.<expiresMs>")>.<base64url(Ed25519 signature over that first part's text)>
  * The private key is /switchboard/session-signing-key (a 32-byte seed in hex), which only this Lambda reads; the host gets
  * publicKeyOf(seed) as /switchboard/session-public-key, so nothing on the host can make a cookie. Replacing the seed logs
  * every browser out. Every login and registration also sets sb_recent (5 minutes, the same body, the signature over
- * "recent:" + body so a session value is not a recent one), which the strong operations here and on sb-rescue ask for (#497). The WebAuthn checks and the signed challenge
+ * "recent:" + body so a session value is not a recent one), which the strong operations here and on sb-rescue ask for. The WebAuthn checks and the signed challenge
  * follow capsule-host (src/webauthn.ts, src/cloud-host.ts). One person uses this host: every passkey is theirs.
  */
 import { createHash, createHmac, createPrivateKey, createPublicKey, randomBytes, sign, timingSafeEqual, verify, type KeyObject } from "node:crypto";
@@ -52,10 +52,10 @@ export interface AuthDeps {
   /** The machine's state, and starting / rebuilding it (the Starter's own code). */
   state(): Promise<string>;
   start(): Promise<Result>;
-  /** StopInstances; `force` only for a machine that stays in stopping (#1394). */
+  /** StopInstances; `force` only for a machine that stays in stopping. */
   stop(force: boolean): Promise<Result>;
   rebuild(): Promise<Result>;
-  /** Temporary extra countries (#1639); absent = the routes answer 404. */
+  /** Temporary extra countries; absent = the routes answer 404. */
   countries?: ReturnType<typeof import("./countries.ts").makeCountries>;
   now?: () => number;
 }
@@ -75,14 +75,14 @@ export interface Result {
 }
 
 export const SESSION_COOKIE = "sb_session";
-/** The login's two limits: at most 7 days from the sign-in, and 24 hours from the last action (#498). The same values as
+/** The login's two limits: at most 7 days from the sign-in, and 24 hours from the last action. The same values as
  *  packages/core/src/auth.ts and rescue/src/server.ts (aws/session-contract.test.ts pins them). */
 export const SESSION_MAX_MS = 7 * 24 * 3600_000;
 export const SESSION_IDLE_MS = 24 * 3600_000;
 export const RECENT_COOKIE = "sb_recent";
 export const RECENT_MS = 5 * 60_000;
 const CHALLENGE_MS = 5 * 60_000;
-/** A device code (#414) lasts this long, and registers at most one passkey. */
+/** A device code lasts this long, and registers at most one passkey. */
 export const DEVICE_CODE_MS = 10 * 60_000;
 /** Passkeys a device code may bring the list to; the agent's register-code (the first passkey, recovery) is not capped. */
 export const MAX_PASSKEYS = 5;
@@ -144,7 +144,7 @@ function signed(seedHex: string, prefix: string, passkeyId: string, ...times: nu
 }
 /** `times` = how many time fields the body carries: 2 for a session (idle-until, then the cap), 1 for a recent check. Every one must be in the future, and the idle time may not pass the cap. */
 function signedOf(publicKey: string, prefix: string, times: 1 | 2, value: string | undefined, now: number): string | undefined {
-  if (!value || value.length > 512) return; // the same limit as the daemon and sb-rescue (#498)
+  if (!value || value.length > 512) return; // the same limit as the daemon and sb-rescue
   const [body, sig] = value.split(".");
   const raw = Buffer.from(sig ?? "", "base64url");
   if (!body || raw.length !== 64) return;
@@ -161,7 +161,7 @@ function signedOf(publicKey: string, prefix: string, times: 1 | 2, value: string
 
 /**
  * Signs `<passkeyId>.<idleUntilMs>.<expiresMs>` into the cookie value (exported for tests and the contract): Ed25519 with the seed,
- * over the base64url body text (not its bytes) — exactly what the daemon and sb-rescue verify with the public key (#701).
+ * over the base64url body text (not its bytes) — exactly what the daemon and sb-rescue verify with the public key.
  */
 export function sessionValue(seedHex: string, passkeyId: string, idleUntil: number, expires: number): string {
   return signed(seedHex, "", passkeyId, idleUntil, expires);
@@ -171,7 +171,7 @@ export function sessionOf(publicKey: string, value: string | undefined, now: num
   return signedOf(publicKey, "", 2, value, now);
 }
 
-/** Signs a passkey check made just now: the session's body, the signature over "recent:" + body (#497). */
+/** Signs a passkey check made just now: the session's body, the signature over "recent:" + body. */
 export function recentValue(seedHex: string, passkeyId: string, expires: number): string {
   return signed(seedHex, "recent:", passkeyId, expires);
 }
@@ -275,7 +275,7 @@ export function makeAuth(d: AuthDeps) {
   const recentCookie = async (passkeyId: string) =>
     `${RECENT_COOKIE}=${recentValue(await sessionKey(), passkeyId, now() + RECENT_MS)}; HttpOnly; ${secure}SameSite=Lax; Path=/; Max-Age=${RECENT_MS / 1000}`;
   const cookieValue = (req: Request, name: string) => req.cookies.map((c) => c.trim()).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1);
-  /** The (already verified) session cookie's two times: when the idle time and the cap end (#498). */
+  /** The (already verified) session cookie's two times: when the idle time and the cap end. */
   const timesOf = (req: Request) => {
     const [, idleUntil, expiresAt] = Buffer.from(cookieValue(req, SESSION_COOKIE)!.split(".")[0]!, "base64url").toString().split(".");
     return { idleUntil: Number(idleUntil), expiresAt: Number(expiresAt) };
@@ -291,7 +291,7 @@ export function makeAuth(d: AuthDeps) {
     if (!id) return;
     return (s ?? (await load())).passkeys.some((p) => p.id === id) ? id : undefined; // a removed passkey ends its sessions here
   };
-  /** A passkey check within RECENT_MS by the session's own passkey (#497). */
+  /** A passkey check within RECENT_MS by the session's own passkey. */
   const checkedRecently = async (req: Request, id: string): Promise<boolean> => {
     const value = cookieValue(req, RECENT_COOKIE);
     if (!value) return false;
@@ -299,7 +299,7 @@ export function makeAuth(d: AuthDeps) {
   };
   const recent = (ip: string) => (failures.get(addressKey(ip)) ?? []).filter((t) => t > now() - FAILURE_WINDOW_MS);
   const limited = (ip: string) => recent(ip).length >= MAX_FAILURES;
-  /** One JSON line per failure, to the function's log (CloudWatch Logs, #1490). The address is the limiter's key; nothing the caller sent is in it. */
+  /** One JSON line per failure, to the function's log (CloudWatch Logs). The address is the limiter's key; nothing the caller sent is in it. */
   const logFailure = (ip: string, path: string, status: number, message: string) =>
     console.log(JSON.stringify({ log: "auth", t: new Date(now()).toISOString(), ip: addressKey(ip), path, status, reason: message }));
   const failed = (ip: string, path: string, status: number, message: string, reason?: string) => {
@@ -336,7 +336,7 @@ export function makeAuth(d: AuthDeps) {
         /* refused below, the same way as an unknown passkey */
       }
     }
-    // an id that is not in the list (removed, #1312) is told apart so the page can tell the device; a signature that fails is not
+    // an id that is not in the list (removed) is told apart so the page can tell the device; a signature that fails is not
     if (!passkey) return failed(req.sourceIp, path, 401, "このパスキーは Switchboard から外されています", "unknown");
     if (counter === undefined) return failed(req.sourceIp, path, 401, "パスキーを確かめられませんでした");
     let replayed = false, removed = false;
@@ -381,8 +381,8 @@ export function makeAuth(d: AuthDeps) {
     if (req.method !== "POST") return json(404, { error: "not found" });
     if (path === "/_auth/challenge") return json(200, { challenge: await challenge(), rpId });
     if (path === "/_auth/renew") {
-      // The screens call this after an action (#498): the idle time moves 24 hours on, the cap and the passkey stay. Only this
-      // Lambda holds the seed, so only here can a cookie be signed again (#701).
+      // The screens call this after an action: the idle time moves 24 hours on, the cap and the passkey stay. Only this
+      // Lambda holds the seed, so only here can a cookie be signed again.
       const id = await sessionId(req);
       if (!id) return json(401, { error: "パスキーでログインしてください" });
       return json(200, { ok: true }, [await renewed(req, id)]);
@@ -429,7 +429,7 @@ export function makeAuth(d: AuthDeps) {
       }
       if (path === "/_auth/register") {
         // one-time, expiring code the agent put in Parameter Store and sent as a link (the first passkey, recovery), or the
-        // device code a logged-in browser asked for (#414); consumed only by a passkey that verifies
+        // device code a logged-in browser asked for; consumed only by a passkey that verifies
         const given = str(v.code);
         const [code, expires] = (await param(PARAMS.registerCode)).split(".");
         const admin = !!code && Number(expires) > now() && same(given, code);
@@ -482,7 +482,7 @@ export function makeAuth(d: AuthDeps) {
       if (!id) return json(401, { error: "パスキーでログインしてください" });
       if (!(await checkedRecently(req, id))) return json(401, { error: "操作の前にパスキーで確かめてください", reason: "recent" });
       const r = await (path === "/_auth/stop" ? d.stop(body(req).force === true) : path === "/_auth/start" ? d.start() : d.rebuild());
-      // an action that went through counts as use (#498): the cookie comes back with the idle time moved on
+      // an action that went through counts as use: the cookie comes back with the idle time moved on
       return r.statusCode < 300 ? { ...r, cookies: [...(r.cookies ?? []), await renewed(req, id)] } : r;
     }
     if (path === "/_auth/countries" || path === "/_auth/countries/clear") {

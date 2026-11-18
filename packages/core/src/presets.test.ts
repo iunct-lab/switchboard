@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Preset, PresetExpansion, PresetList, RunnerAdapter, Task } from "@switchboard/protocol";
-import type { GhRunner } from "./backlog.ts";
+import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { expandPreset, parseTarget, presetUses, recordPresetUse } from "./presets.ts";
+import { expandPreset, parseTarget, presetReplies, presetUses, recordPresetUse, writePresets } from "./presets.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
 /* Saved instructions: the pure parts, then /api/presets on a daemon with a fake runner and a fake gh. */
@@ -60,6 +60,45 @@ describe("preset uses", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   };
+
+  const pr = (id: string, text = id): Preset => ({ id, name: id, text, createdAt: 1, updatedAt: 1 });
+
+  test("presetReplies: per kind the top 3 by count, the latest use on a tie", () =>
+    withDb((db) => {
+      writePresets(db, ["a", "b", "c", "d"].map((i) => pr(i)));
+      const use = (id: string, at: number, kind: "decision" | "auth") => recordPresetUse(db, id, "task", NOW - at, kind);
+      use("a", 5, "decision");
+      for (const at of [4, 3, 2]) use("b", at, "decision");
+      use("c", 1, "decision");
+      use("d", 9, "decision");
+      use("d", 8, "decision");
+      use("a", 7, "auth");
+      const r = presetReplies(db, NOW);
+      expect(r.get("decision")!.map((x) => x.id)).toEqual(["b", "d", "c"]);
+      expect(r.get("decision")![0]).toEqual({ id: "b", name: "b", text: "b" });
+      expect(r.get("auth")!.map((x) => x.id)).toEqual(["a"]);
+      expect(r.has("input")).toBe(false);
+    }));
+
+  test("presetReplies: uses older than 14 days, home uses and uses with no kind are not counted; a kind-less old record reads", () =>
+    withDb((db) => {
+      writePresets(db, [pr("a"), pr("b"), pr("c")]);
+      recordPresetUse(db, "a", "task", NOW - 15 * DAY, "decision");
+      recordPresetUse(db, "b", "home", NOW - DAY, "decision");
+      recordPresetUse(db, "c", "task", NOW - DAY);
+      expect(presetReplies(db, NOW).size).toBe(0);
+      // a record written before kinds existed
+      db.setSetting("presetUses", [{ id: "a", scene: "task", at: NOW - DAY }]);
+      expect(presetReplies(db, NOW).size).toBe(0);
+      expect(presetUses(db, [pr("a")], NOW)).toEqual([{ id: "a", home: 0, task: 1, lastAt: NOW - DAY }]);
+    }));
+
+  test("presetReplies: a deleted preset and a {{target}} preset are left out", () =>
+    withDb((db) => {
+      writePresets(db, [pr("a"), pr("t", "PR {{target}} をマージ")]);
+      for (const id of ["a", "t", "gone"]) recordPresetUse(db, id, "task", NOW - DAY, "decision");
+      expect(presetReplies(db, NOW).get("decision")!.map((x) => x.id)).toEqual(["a"]);
+    }));
 
   test("counts the last 14 days per scene, with the latest time", () =>
     withDb((db) => {
@@ -217,5 +256,28 @@ describe("/api/presets", () => {
     await core!.stop();
     core = null;
     expect((await listAll(await boot(true))).uses.find((u) => u.id === p.id)?.task).toBe(1);
+  });
+
+  test("expand with a taskId records the reason of the Task's last stop; an unknown id is 404 and records nothing", async () => {
+    const base = await boot();
+    const plain = (await (await send(base, "POST", "/api/presets", { name: "再開して", text: "再開して" })).json()) as Preset;
+    const t = { id: "tk1", workspaceId: null, title: "t", runner: "claude", cwd: home, scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 } as Task;
+    core!.db.insertTask(t);
+    core!.db.appendEvent("tk1", { t: "stop.record", stop: { id: "s1", op: "x", target: "y", reason: "decision", evidence: "e", safety: "safe", state: "waiting", conditions: [], actions: [], answer: null, grant: null, at: 1, work: { workspaceId: null, issue: null, taskId: "tk1" } } as never });
+    const expand = (body: unknown) => send(base, "POST", `/api/presets/${plain.id}/expand`, body);
+    expect((await expand({ scene: "task", taskId: "nope" })).status).toBe(404);
+    expect(core!.db.getSetting("presetUses", null)).toBeNull();
+    expect((await expand({ scene: "task", taskId: "tk1" })).status).toBe(200);
+    expect((core!.db.getSetting<{ kind: string }[]>("presetUses", []) ?? []).map((u) => u.kind)).toEqual(["decision"]);
+    const marks = (await (await fetch(`${base}/api/tasks/stops`)).json()) as Record<string, { replies: { id: string }[] }>;
+    expect(marks.tk1!.replies.map((r) => r.id)).toEqual([plain.id]);
+    // a reply to a Task the person already looked at, or whose last stop is resolved, answers no question: no kind
+    core!.db.insertTask({ ...t, id: "tk2", reviewedAt: 2 });
+    core!.db.appendEvent("tk2", { t: "stop.record", stop: { id: "s2", op: "x", target: "y", reason: "decision", evidence: "e", safety: "safe", state: "waiting", conditions: [], actions: [], answer: null, grant: null, at: 1, work: { workspaceId: null, issue: null, taskId: "tk2" } } as never });
+    core!.db.insertTask({ ...t, id: "tk3" });
+    core!.db.appendEvent("tk3", { t: "stop.record", stop: { id: "s3", op: "x", target: "y", reason: "transient", evidence: "e", safety: "safe", state: "resolved", conditions: [], actions: [], answer: null, grant: null, at: 1, work: { workspaceId: null, issue: null, taskId: "tk3" } } as never });
+    expect((await expand({ scene: "task", taskId: "tk2" })).status).toBe(200);
+    expect((await expand({ scene: "task", taskId: "tk3" })).status).toBe(200);
+    expect((core!.db.getSetting<{ kind: string | null }[]>("presetUses", []) ?? []).map((u) => u.kind)).toEqual(["decision", null, null]);
   });
 });

@@ -2,7 +2,7 @@ import { t } from "./i18n.ts";
 import { settings } from "./i18n/settings.ts";
 
 /**
- * Where an unauthorized browser goes (#211). The daemon says how a person gets in (`/api/health` → `login`): on the
+ * Where an unauthorized browser goes. The daemon says how a person gets in (`/api/health` → `login`): on the
  * cloud host it is a passkey on `/_auth/` (the starter Lambda behind the same CloudFront origin), which sets the
  * `sb_session` cookie; elsewhere (the Mac, the LAN, the tailnet) it is the token prompt.
  *
@@ -15,7 +15,7 @@ export type LoginRoute = { kind: "passkey"; url: string } | { kind: "token" } | 
 
 export function loginRoute(o: { authorized: boolean; hasToken: boolean; mode: LoginMode | undefined; path: string }): LoginRoute {
   if (o.authorized) return { kind: "none" };
-  if (o.mode !== "passkey") return { kind: "token" }; // a saved token that the daemon refuses is invalid: the field comes back (#3740)
+  if (o.mode !== "passkey") return { kind: "token" }; // a saved token that the daemon refuses is invalid: the field comes back
   const [pathname, query = ""] = o.path.split("?", 2);
   const params = new URLSearchParams(query);
   if (params.get("from") === "auth") return { kind: "stuck" };
@@ -27,7 +27,7 @@ export function loginRoute(o: { authorized: boolean; hasToken: boolean; mode: Lo
 
 /**
  * The path without the passkey page's `from=auth` mark, or null when it has none. Dropped once the daemon lets the
- * cookie in (#709): a tab left at `/?from=auth` would otherwise read a later refusal (the passkey removed, the cookie
+ * cookie in: a tab left at `/?from=auth` would otherwise read a later refusal (the passkey removed, the cookie
  * expired) as "the login passed but the daemon refuses" and stay put instead of going back to the passkey page.
  */
 export function withoutFromAuth(path: string): string | null {
@@ -38,25 +38,25 @@ export function withoutFromAuth(path: string): string | null {
   return `${pathname}${params.size ? `?${params}` : ""}`;
 }
 
-/** The cloud host's page for the temporary extra countries (#1639): only with the passkey login (the Starter's `/_auth/`); null elsewhere. */
+/** The cloud host's page for the temporary extra countries: only with the passkey login (the Starter's `/_auth/`); null elsewhere. */
 export function countriesUrl(mode: LoginMode | undefined): string | null {
   return mode === "passkey" ? "/_auth/#countries" : null;
 }
 
-/** The Starter's logout (#1850), which only the `/_auth/` page linked before: only with the passkey login; null elsewhere. */
+/** The Starter's logout, which only the `/_auth/` page linked before: only with the passkey login; null elsewhere. */
 export function logoutPath(mode: LoginMode | undefined): string | null {
   return mode === "passkey" ? "/_auth/logout" : null;
 }
 
-/** Stuck happens with a passkey, so on the cloud host only: the rescue page is the same origin's /rescue/, which CloudFront hands to sb-rescue (#399). */
+/** Stuck happens with a passkey, so on the cloud host only: the rescue page is the same origin's /rescue/, which CloudFront hands to sb-rescue. */
 export const STUCK_RESCUE = "/rescue/";
-/** Settings is not drawn while the daemon refuses (#1851), so the way to log out from here: `#devices` keeps the login page from moving on. */
+/** Settings is not drawn while the daemon refuses, so the way to log out from here: `#devices` keeps the login page from moving on. */
 export const STUCK_LOGIN = "/_auth/#devices";
 
 export const STUCK_MESSAGE = t(settings.stuck);
 
 /**
- * CloudFront's "stopped" page (#211): while the cloud host is stopped, every path — /api/health too — answers with
+ * CloudFront's "stopped" page: while the cloud host is stopped, every path — /api/health too — answers with
  * that HTML page and 503. A daemon never answers its API with HTML, so this is the machine being off, not an error of
  * the app: go to the login page, which can start it. Needed because an installed service worker from an older build
  * cannot update while the machine is off and keeps showing the cached app.
@@ -105,7 +105,7 @@ const at = (ms: number) => {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
-/** The cloud login's end, for the status bar (#498): the earlier of the idle time and the cap, with the cap in the hover text. */
+/** The cloud login's end, for the status bar: the earlier of the idle time and the cap, with the cap in the hover text. */
 export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: number): { text: string; title: string; expired: boolean } {
   return {
     text: t(settings.sessionUntil, { at: at(Math.min(s.idleUntil, s.expiresAt)) }),
@@ -114,16 +114,16 @@ export function sessionLabel(s: { idleUntil: number; expiresAt: number }, now: n
   };
 }
 
-/** How long until /api/health is read again at the login's end (#498): a second after it, at once when it has passed. */
+/** How long until /api/health is read again at the login's end: a second after it, at once when it has passed. */
 export function sessionRefreshDelay(end: number, now: number): number {
   return Math.max(end - now, 0) + 1000;
 }
 
-/** How close the Claude login's end must be before the status bar shows it (#3864): long enough to be seen twice across a night. */
+/** How close the Claude login's end must be before the status bar shows it: long enough to be seen twice across a night. */
 export const RUNNER_LOGIN_WARN_MS = 72 * 3600_000;
 
 /**
- * The Claude login's end (#3864), from `/api/health`'s `loginExpiresAt`: `title` for the runner choice on Home, `bar`
+ * The Claude login's end, from `/api/health`'s `loginExpiresAt`: `title` for the runner choice on Home, `bar`
  * for the status bar — only when less than RUNNER_LOGIN_WARN_MS is left, else "". Null when the end is not known or is no date.
  */
 export function runnerLoginLabel(info: { loginExpiresAt?: number; loginHint?: string }, now: number): { title: string; bar: string } | null {

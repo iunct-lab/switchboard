@@ -88,7 +88,7 @@ told apart. What keeps a page from another site out of that window is the UI's o
 
 In this section a report is narrower than at the top of this file: an HTML artifact of any Task — `kind` file or dir,
 `mime` `text/html` (or XHTML), not removed. No flag, column or table marks one. Two lists read the same query
-(`listArtifactsAcross` in `packages/core/src/db.ts`, the parameters read by `acrossQuery` in `server.ts`):
+(`listArtifactsAcross` in `packages/core/src/db/artifacts.ts`, the parameters read by `acrossQuery` in `routes/shared.ts`):
 
 - `GET /api/reports?q=&before=&limit=` — the reports.
 - `GET /api/artifacts?q=&before=&limit=` — every artifact of every kind (file, folder, URL) that is not removed, so a
@@ -147,8 +147,9 @@ or MCP endpoint:
 ```
 ````
 
-- Every start's preamble carries one paragraph saying so (`artifactPrompt()` in `packages/core/src/artifacts.ts`, after the
-  stop report's paragraph of `stopRecoveryPrompt`); the insights Task gets no preamble at all.
+- The preamble of a new session carries one paragraph saying so (`artifactPrompt()` in `packages/core/src/artifacts.ts`, after the
+  stop report's paragraph of `stopRecoveryPrompt`). A process started again on the same session is not told again, and the
+  insights Task gets no preamble at all.
 - The daemon reads the fence as it reads `switchboard-stop` (`FenceReader<T>` in `stops.ts`, one reader per kind on the
   live session): only a fence opened at the start of a line and outside any other fence — a quoted example in a code
   block is not a registration. A fence whose body is not JSON of `ArtifactReport` (`path` 1..4096, `title` up to 200)
@@ -169,6 +170,21 @@ or MCP endpoint:
   so the row works a second time after another artifact was picked on the tab; a row whose artifact was removed since says
   `その成果物は消されています` until the next choice on the tab (a tab of the strip, `開く`, `追加`, ×, `元に戻す`). `会話をコピー` writes the row as one line `- 成果物: <title>`, like a tool row. No approval is
   asked: a copy is made and the person looks at it.
+
+## On the GitHub Issue of a closed PBI
+
+Reports otherwise live only in the daemon's copy and open only from Switchboard's screens; someone who reads a PBI's result on GitHub alone does not find them. A workspace can ask for them on the Issue.
+
+- **What**: the artifacts of the Tasks that worked on the PBI or on one of its sub-issue Tasks (`tasksOfIssues`: a stage Task of that Issue, or a Task whose title starts with its number) that are a single Markdown file (`.md`, `.markdown`), a single HTML file (`.html`, `.htm`) or a link. Not folders, images or any other kind (an Issue artifact is one document or a link; nothing bundles or converts), and not removed ones.
+- **When**: once, when the PBI's Issue is closed (`editStoredIssue` queues one `artifact` operation per artifact after the close; `artifactOperations` in `packages/core/src/backlog-edit.ts`). Nothing is sent before the close or to a PR, and nothing follows a later edit or removal in Switchboard: the copy on GitHub is one-way and Switchboard's stays the original.
+- **Where and how**: the daemon's backlog send (`packages/core/src/backlog-send.ts`) runs `gh issue artifact create` on that Issue — the same queue, order (after the close), limits and waits as every other backlog edit. Issue artifacts are a public preview of GitHub's with no API, reachable through its CLI only, so the commands are built in one place (`issueArtifactGh`); their exact arguments and output have not been checked against the real CLI.
+- **Off by default**: per workspace, `Workspace.issueArtifacts` (Settings, the workspace's row under `GitHub 同期`: `PBI を閉じたら成果物を Issue に付ける`; `PATCH /api/workspaces/:id {issueArtifacts}`). It can be turned on only while the workspace syncs with GitHub (409 otherwise) and has no effect while the sync is off. It is off because the feature is a preview, CLI-only, and what it sends leaves the machine.
+- **Not twice**: no marker is put into the document (the copy stays byte for byte). Instead the artifact's name on the Issue decides: one already there under the name is done, which also settles an answer lost after the create. Names are made plain (no `#`, brackets or quotes) and distinct within the PBI when they are queued.
+- **What it keeps to**: sent only when the person turned it on for that workspace and its GitHub sync is on. The document's text, the name and a link's URL go through the same check for values that sign in as every other backlog send (`findSecrets`); a hit is not sent and is left as a failed operation with the reason, shown with the Issue's held edits. Nothing is sent to a public repository: the repository's visibility is read right before each send, and anything but private is refused. A refused or failed report holds back neither the other reports nor the Issue's later edits.
+- **What it cannot keep to**: internal information in a shape the check has no rule for (host names, amounts, people's names) is visible to whoever can read the private repository. Once sent, GitHub keeps its own history; removing the artifact in Switchboard does not remove GitHub's copy. Anything running as the same OS user can call `gh` directly; that path is the secret guard's (`secret-guard.md`), not this one's.
+- **Not there**: GitLab (no such feature: the operation is refused as unsupported), another machine's workspace whose artifacts are not on the instance (the operation finds no copy and is skipped), a setting that allows a public repository.
+
+Checked by `packages/core/src/backlog-send-artifacts.test.ts` "issue artifacts" with a fake `gh`, and `packages/core/src/workspaces.api.test.ts` "workspace issueArtifacts". Not checked: the real `gh issue artifact` and the Issue's Artifacts list on GitHub.
 
 ## Not done, by decision
 

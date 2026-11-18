@@ -23,6 +23,9 @@ function task(id: string, updatedAt: number, extra: Partial<Task> = {}): Task {
   return { id, workspaceId: null, title: id, runner: "claude", cwd: "/work/repo", scope: ["/work/repo"], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumePlannedAt: null, resumeSince: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: updatedAt, createdAt: 1_000, updatedAt, ...extra };
 }
 
+/** Where the deltas below lie, as the instance knows it: the registered machine and what it is registered for. */
+const PC = { machine: "pc1", repositories: ["me/repo"] };
+
 let n = 0;
 /** A HOME of its own: database, folders and the delta folder. */
 function home() {
@@ -63,7 +66,7 @@ describe("buildDelta", () => {
     const [d, ...more] = await buildDelta(db, cfg, sent, "pc1", { now: 1_000_000 });
     expect(more).toEqual([]);
     expect(d!.deltaId).toBe("pc1-1000000-000000");
-    expect(d!.cursor).toEqual({ at: 1_000_000, ledger: 3, routing: 0, seqs: { "t-old": 1, "t-new": 1 }, files: {} });
+    expect(d!.cursor).toEqual({ at: 1_000_000, named: 1_000_000, ledger: 3, routing: 0, seqs: { "t-old": 1, "t-new": 1 }, files: {} });
     const { delta } = await open(d!.file, root);
     expect(delta.machine).toBe("pc1");
     expect(delta.createdAt).toBe(1_000_000);
@@ -74,7 +77,7 @@ describe("buildDelta", () => {
     expect(delta.tables.ledger[0].task_id).toBe("t-late");
   });
 
-  test("rows and a session file written after a send with an older time (a terminal session taken in late) go in the next delta", async () => {
+  test("rows written after a send with an older time (a terminal session taken in late) go in the next delta; the runner's session file never goes", async () => {
     const { root, cfg, db } = home();
     db.insertTask(task("t-term", 5_000));
     db.appendEventAt("t-term", { t: "status", text: "first" }, 5_000);
@@ -98,7 +101,7 @@ describe("buildDelta", () => {
     expect((delta.tables.events as Array<{ task_id: string; seq: number }>).filter((e) => e.task_id === "t-term").map((e) => e.seq)).toEqual([2]);
     expect((delta.tables.ledger as Array<{ ts: number }>).map((r) => r.ts)).toEqual([6_000]);
     expect((delta.tables.routing_log as Array<{ ts: number }>).map((r) => r.ts)).toEqual([6_000]);
-    expect(files).toEqual(["files/sessions/claude/-work-repo/s-late.jsonl"]);
+    expect(files).toEqual([]);
     writeCursor(db, d!.cursor);
     expect(await buildDelta(db, cfg, readCursor(db), "pc1", { now: 3_000_000 })).toEqual([]);
   });
@@ -146,6 +149,26 @@ describe("buildDelta", () => {
     expect(ids(delta.tables.artifacts)).toEqual(["ar-new"]);
   });
 
+  test("an artifact's use as an app (a day counted, a request made from it) goes without its time moving, once, and replaces the row there", async () => {
+    const pc = home();
+    const here = home();
+    pc.db.insertTask(task("t-app", 5_000));
+    pc.db.sqlite.query("INSERT INTO artifacts (id, task_id, title, kind, source, entry, mime, size, created_at, updated_at) VALUES ('ar-app', 't-app', 'T', 'html', 'agent', 'index.html', 'text/html', 3, 5000, 5000)").run();
+    const [first] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 900_000 });
+    await applyDelta(here.db, here.cfg, first!.file, PC);
+    writeCursor(pc.db, first!.cursor);
+    expect(await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 1_000_000 })).toEqual([]);
+    expect(pc.db.markArtifactAppUse("ar-app", "2026-11-17")?.counted).toBe(true);
+    pc.db.setArtifactAppRequest("ar-app", "t-req");
+    expect(pc.db.getArtifact("ar-app")!.updatedAt).toBe(5_000); // the list's order is not moved by a look
+    const [second] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 2_000_000 });
+    expect(second!.cursor.apps).toEqual({ "ar-app": "1:t-req" });
+    await applyDelta(here.db, here.cfg, second!.file, PC);
+    expect(here.db.getArtifact("ar-app")).toMatchObject({ appDays: 1, appRequestTaskId: "t-req" });
+    writeCursor(pc.db, second!.cursor);
+    expect(await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 3_000_000 })).toEqual([]);
+  });
+
   test("a delta that cannot be written takes the ones written before it away", async () => {
     const { root, cfg, db } = home();
     db.insertTask(task("t-big", 5_000));
@@ -187,7 +210,7 @@ describe("buildDelta", () => {
     expect(await buildDelta(db, cfg, mark(5_000_000), "pc1")).toEqual([]);
   });
 
-  test("the files of the Task go with it: attachments, reports and the session file, and only the newer ones", async () => {
+  test("the files of the Task go with it: attachments and reports, only the newer ones; a runner's session file is not sent", async () => {
     const { root, cfg, db } = home();
     db.insertTask(task("t-f", 900_000, { runnerSessionId: "sess1", cwd: "/work/my repo" }));
     db.insertTask(task("t-codex", 900_000, { runner: "codex", runnerSessionId: "cx1" }));
@@ -207,7 +230,7 @@ describe("buildDelta", () => {
     writeFileSync(join(cfg.codexHome, "sessions", "2026", "11", "14", "rollout-2026-11-14T00-00-00-cx1.jsonl"), "{}\n");
     const [d] = await buildDelta(db, cfg, mark(900_000), "pc1");
     const { files, dir } = await open(d!.file, root);
-    expect(files).toEqual(["files/artifacts/t-f/r1/index.html", "files/attachments/t-f/shot.png", "files/sessions/claude/-work-my-repo/sess1.jsonl", "files/sessions/codex/2026/11/14/rollout-2026-11-14T00-00-00-cx1.jsonl"]);
+    expect(files).toEqual(["files/artifacts/t-f/r1/index.html", "files/attachments/t-f/shot.png"]);
     expect(readFileSync(join(dir, "files/artifacts/t-f/r1/index.html"), "utf8")).toBe("<p>new</p>");
   });
 
@@ -330,10 +353,10 @@ describe("applyDelta", () => {
     const pc = pcWithTask();
     const here = instance();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    const first = await applyDelta(here.db, here.cfg, d!.file);
-    expect(first).toMatchObject({ status: "applied", deltaId: d!.deltaId, machine: "pc1", rows: { tasks: 1, events: 5, ledger: 2, routing_log: 1, task_evals: 1, check_runs: 1, staging: 1, artifacts: 1, attachments: 1 }, files: 3 });
+    const first = await applyDelta(here.db, here.cfg, d!.file, PC);
+    expect(first).toMatchObject({ status: "applied", deltaId: d!.deltaId, machine: "pc1", rows: { tasks: 1, events: 5, ledger: 2, routing_log: 1, task_evals: 1, check_runs: 1, staging: 1, artifacts: 1, attachments: 1 }, files: 2 });
     const after = snapshot(here.db, here.cfg);
-    const again = await applyDelta(here.db, here.cfg, d!.file);
+    const again = await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(again).toMatchObject({ status: "applied", rows: { tasks: 0, events: 0, ledger: 0, routing_log: 0, task_evals: 0, check_runs: 0, staging: 0, artifacts: 0, attachments: 0 }, files: 0 });
     expect(snapshot(here.db, here.cfg)).toEqual(after);
     expect(listApplied(here.db)).toEqual([d!.deltaId]);
@@ -350,7 +373,34 @@ describe("applyDelta", () => {
     expect(q("SELECT path FROM attachments")).toEqual([{ path: join(here.cfg.attachmentsDir, "t-1", "shot.png") }]);
     expect(readFileSync(join(here.cfg.attachmentsDir, "t-1", "shot.png"), "utf8")).toBe("png");
     expect(readFileSync(join(here.cfg.artifactsDir, "t-1", "ar1", "index.html"), "utf8")).toBe("<p>x</p>");
-    expect(readFileSync(join(here.cfg.claudeProjectsDir, "-work-repo", "sess1.jsonl"), "utf8")).toBe("{}\n");
+    // nothing of a delta is ever written to a runner's folder
+    expect(existsSync(here.cfg.claudeProjectsDir)).toBe(false);
+    expect(existsSync(here.cfg.codexHome)).toBe(false);
+  });
+
+  test("quota: a work machine's usage limits come in by account — the newer report stays, an older one changes nothing, twice adds no row", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const quota = () => here.db.quotaAll().map((q) => [q.runner, q.account, q.window, q.utilization, q.ts]);
+    // the same account on both machines: the instance heard it later than the work machine did
+    here.db.upsertQuota("claude", "five_hour", 0.5, 100, 2_000, "5a3eacc000000000");
+    pc.db.upsertQuota("claude", "five_hour", 0.3, 100, 1_000, "5a3eacc000000000");
+    // an account only the work machine uses
+    pc.db.upsertQuota("claude", "five_hour", 0.8, 300, 1_500, "0cacc00000000000");
+    const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
+    const { delta } = await open(d!.file, pc.root);
+    expect(delta.tables.quota_by_account).toHaveLength(2);
+    expect(await applyDelta(here.db, here.cfg, d!.file, PC)).toMatchObject({ status: "applied", rows: { quota_by_account: 1 } });
+    const taken = [["claude", "0cacc00000000000", "five_hour", 0.8, 1_500], ["claude", "5a3eacc000000000", "five_hour", 0.5, 2_000]];
+    expect(quota()).toEqual(taken); // two accounts, two rows; the older report of the shared one changed nothing
+    expect(await applyDelta(here.db, here.cfg, d!.file, PC)).toMatchObject({ rows: { quota_by_account: 0 } });
+    expect(quota()).toEqual(taken);
+    // a newer report from the work machine replaces the instance's
+    pc.db.upsertQuota("claude", "five_hour", 0.9, 100, 3_000, "5a3eacc000000000");
+    pc.db.appendEventAt("t-1", { t: "status", text: "the turn that reported it" }, 3_000);
+    const [d2] = await buildDelta(pc.db, pc.cfg, d!.cursor, "pc1", { now: d!.cursor.at + 1 });
+    await applyDelta(here.db, here.cfg, d2!.file, PC);
+    expect(quota()).toEqual([taken[0]!, ["claude", "5a3eacc000000000", "five_hour", 0.9, 3_000]]);
   });
 
   test("a ledger row of the instance's own does not collide with one taken in (the instance's ids, the sender's in src_id)", async () => {
@@ -358,7 +408,7 @@ describe("applyDelta", () => {
     const here = instance();
     ledger(here.db, "t-own", 1_000); // id 1 here
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(here.db.sqlite.query("SELECT id, task_id, src_id FROM ledger ORDER BY id").all()).toEqual([
       { id: 1, task_id: "t-own", src_id: null },
       { id: 2, task_id: "t-1", src_id: 1 },
@@ -370,15 +420,15 @@ describe("applyDelta", () => {
     const pc = pcWithTask();
     const here = instance();
     const [d1] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 1_000_000 });
-    await applyDelta(here.db, here.cfg, d1!.file);
+    await applyDelta(here.db, here.cfg, d1!.file, PC);
     pc.db.sqlite.query("UPDATE tasks SET title = 'later', updated_at = 2_000_000 WHERE id = 't-1'").run();
     pc.db.sqlite.query("UPDATE task_evals SET json = '{\"v\":2}', ts = 2_000_000").run();
     pc.db.sqlite.query("UPDATE check_runs SET ok = 0, ts = 2_000_000").run();
     const [d2] = await buildDelta(pc.db, pc.cfg, d1!.cursor, "pc1", { now: 2_100_000 });
-    await applyDelta(here.db, here.cfg, d2!.file);
+    await applyDelta(here.db, here.cfg, d2!.file, PC);
     const read = () => ({ t: here.db.sqlite.query("SELECT title FROM tasks WHERE id = 't-1'").get(), e: here.db.sqlite.query("SELECT json FROM task_evals").get(), c: here.db.sqlite.query("SELECT ok FROM check_runs").get() });
     expect(read()).toEqual({ t: { title: "later" }, e: { json: '{"v":2}' }, c: { ok: 0 } });
-    await applyDelta(here.db, here.cfg, d1!.file); // the first one again, after the second
+    await applyDelta(here.db, here.cfg, d1!.file, PC); // the first one again, after the second
     expect(read()).toEqual({ t: { title: "later" }, e: { json: '{"v":2}' }, c: { ok: 0 } });
   });
 
@@ -387,7 +437,7 @@ describe("applyDelta", () => {
     const here = instance();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
     expect(tasksOfIssues(here.db.sqlite, [12], [here.ws.id]).map((t) => t.id)).toEqual(["t-own"]);
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     const found = tasksOfIssues(here.db.sqlite, [12], [here.ws.id]);
     expect(found.map((t) => t.id).sort()).toEqual(["t-1", "t-own"]);
     expect(found.find((t) => t.id === "t-1")!.costUsd).toBe(1); // its two ledger rows
@@ -399,7 +449,7 @@ describe("applyDelta", () => {
     other.db.upsertWorkspace({ path: "/srv/other", name: "o", kind: "repo" }); // no backlog source
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
     expect(remapWorkspaces(other.db, { w1: "me/repo", w2: null })).toEqual({ w1: null, w2: null });
-    await applyDelta(other.db, other.cfg, d!.file);
+    await applyDelta(other.db, other.cfg, d!.file, PC);
     expect(other.db.sqlite.query("SELECT workspace_id, machine FROM tasks").all()).toEqual([{ workspace_id: null, machine: "pc1" }]);
   });
 
@@ -412,11 +462,11 @@ describe("applyDelta", () => {
     const { delta: head, files, dir } = await open(built!.file, pc.root);
     const d = { deltaId: built!.deltaId, file: join(pc.root, "newer.tar.zst") };
     await writeTarZst(d.file, [{ name: "delta.json", bytes: Buffer.from(JSON.stringify({ ...head, schemaLevel: schemaLevel() + 1 })) }, ...files.map((f) => ({ name: f, path: join(dir, f) }))]);
-    const r = await applyDelta(here.db, here.cfg, d.file, { now: 77 });
+    const r = await applyDelta(here.db, here.cfg, d.file, PC, { now: 77 });
     expect(r.status).toBe("skipped");
     expect(r.status === "skipped" && r.reason).toContain("left out");
     expect(listSkipped(here.db)).toEqual([{ machine: "pc1", deltaId: d!.deltaId, theirs: schemaLevel() + 1, ours: schemaLevel(), at: 77 }]);
-    await applyDelta(here.db, here.cfg, d!.file, { now: 78 }); // again: one entry per delta
+    await applyDelta(here.db, here.cfg, d!.file, PC, { now: 78 }); // again: one entry per delta
     expect(listSkipped(here.db).length).toBe(1);
     expect(listApplied(here.db)).toEqual([]);
     expect(existsSync(join(here.cfg.claudeProjectsDir, "-work-repo"))).toBe(false);
@@ -439,9 +489,9 @@ describe("applyDelta", () => {
     const [d3] = await buildDelta(pc.db, pc.cfg, d2!.cursor, "pc1", { now: 3_100_000 });
     const [whole] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 4_000_000, dir: join(pc.root, "whole") });
     const stepwise = instance();
-    for (const d of [d1!, d2!, d3!]) await applyDelta(stepwise.db, stepwise.cfg, d.file);
+    for (const d of [d1!, d2!, d3!]) await applyDelta(stepwise.db, stepwise.cfg, d.file, PC);
     const once = instance();
-    await applyDelta(once.db, once.cfg, whole!.file);
+    await applyDelta(once.db, once.cfg, whole!.file, PC);
     const { settings: s1, workspaces: w1, ...a } = snapshot(stepwise.db, stepwise.cfg);
     const { settings: s2, workspaces: w2, ...b } = snapshot(once.db, once.cfg);
     expect(a).toEqual(b);
@@ -450,30 +500,33 @@ describe("applyDelta", () => {
     expect((stepwise.db.sqlite.query("SELECT count(*) AS n FROM events WHERE task_id = 't-1'").get() as { n: number }).n).toBe(9);
   });
 
-  test("a file is written when it is not there or smaller, and a bigger one there stays", async () => {
-    const pc = pcWithTask();
+  test("a delta cannot put a file in a runner's folder: a memory file or a session file under the runner's projects refuses the delta, and nothing is written", async () => {
     const here = instance();
-    const mine = join(here.cfg.claudeProjectsDir, "-work-repo", "sess1.jsonl");
-    mkdirSync(join(here.cfg.claudeProjectsDir, "-work-repo"), { recursive: true });
-    writeFileSync(mine, "{}\n{}\n{}\n"); // longer than the sender's
-    const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
-    expect(readFileSync(mine, "utf8")).toBe("{}\n{}\n{}\n");
-    writeFileSync(join(pc.cfg.claudeProjectsDir, "-work-repo", "sess1.jsonl"), "{}\n{}\n{}\n{}\n"); // grew
-    const [d2] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: Date.now() + 1, dir: join(pc.root, "again") });
-    const r = await applyDelta(here.db, here.cfg, d2!.file);
-    expect(r.status === "applied" && r.files).toBe(1);
-    expect(readFileSync(mine, "utf8")).toBe("{}\n{}\n{}\n{}\n");
+    const memory = join(here.cfg.claudeProjectsDir, "-srv-repo", "memory", "MEMORY.md");
+    mkdirSync(join(here.cfg.claudeProjectsDir, "-srv-repo", "memory"), { recursive: true });
+    writeFileSync(memory, "mine\n");
+    const before = snapshot(here.db, here.cfg);
+    const head = (id: string) => Buffer.from(JSON.stringify({ machine: "pc1", deltaId: id, schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [] } }));
+    for (const [i, name] of ["files/sessions/claude/-srv-repo/memory/MEMORY.md", "files/sessions/claude/-srv-repo/0b0e7a1c-1111-4222-8333-444455556666.jsonl", "files/sessions/codex/2026/11/14/rollout-2026-11-14T00-00-00-0b0e7a1c-1111-4222-8333-444455556666.jsonl", "files/attachments/t-1/../../../../claude/-srv-repo/memory/MEMORY.md", "files/artifacts/t-1/ar1/.claude/settings.json", "files/attachments/inbox/x.png"].entries()) {
+      const file = join(here.root, `runner-${n++}.tar.zst`);
+      await writeTarZst(file, [{ name: "delta.json", bytes: head(`pc1-${i + 1}-000000`) }, { name, bytes: Buffer.from("theirs, and longer than what is there\n") }]);
+      await expect(applyDelta(here.db, here.cfg, file, PC)).rejects.toThrow(/not a place a delta writes to|names no Task|not a plain file name|not the shape/);
+    }
+    expect(readFileSync(memory, "utf8")).toBe("mine\n");
+    expect((readdirSync(here.cfg.claudeProjectsDir, { recursive: true }) as string[]).sort()).toEqual(["-srv-repo", "-srv-repo/memory", "-srv-repo/memory/MEMORY.md"]);
+    expect(existsSync(here.cfg.codexHome)).toBe(false);
+    expect(existsSync(here.cfg.attachmentsDir) ? readdirSync(here.cfg.attachmentsDir) : []).toEqual([]);
+    expect(snapshot(here.db, here.cfg)).toEqual(before);
   });
 
   test("an artifact's file that changed in place (same size) is written", async () => {
     const pc = pcWithTask();
     const here = instance();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     writeFileSync(join(pc.cfg.artifactsDir, "t-1", "ar1", "index.html"), "<p>y</p>");
     const [d2] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: Date.now() + 1, dir: join(pc.root, "again") });
-    await applyDelta(here.db, here.cfg, d2!.file);
+    await applyDelta(here.db, here.cfg, d2!.file, PC);
     expect(readFileSync(join(here.cfg.artifactsDir, "t-1", "ar1", "index.html"), "utf8")).toBe("<p>y</p>");
   });
 
@@ -482,7 +535,7 @@ describe("applyDelta", () => {
     pc.db.sqlite.query("UPDATE tasks SET status = 'running', resume_at = 5, resume_reason = 'limit', queued_at = 4, judging_at = 3 WHERE id = 't-1'").run();
     const here = instance();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(here.db.sqlite.query("SELECT status, resume_at, resume_reason, queued_at, judging_at, updated_at FROM tasks WHERE id = 't-1'").get()).toEqual({ status: "idle", resume_at: null, resume_reason: null, queued_at: null, judging_at: null, updated_at: 900_000 });
     expect(abortOrphanedTasks(here.db)).toEqual([]);
     expect(here.db.listTasksWithResume()).toEqual([]);
@@ -494,19 +547,17 @@ describe("applyDelta", () => {
     const here = instance();
     here.db.sqlite.query("UPDATE tasks SET runner_session_id = 'sess-own', cwd = '/work/repo' WHERE id = 't-own'").run();
     pc.db.insertTask(task("t-own", 950_000, { title: "sent back", runnerSessionId: "sess-own" })); // the work machine's database came from this one
-    writeFileSync(join(pc.cfg.claudeProjectsDir, "-work-repo", "sess-own.jsonl"), "{}\n{}\n");
     pc.db.appendEventAt("t-own", { t: "status", text: "x" }, 950_000);
     ledger(pc.db, "t-own", 950_000);
     mkdirSync(join(pc.cfg.artifactsDir, "t-own", "r"), { recursive: true });
     writeFileSync(join(pc.cfg.artifactsDir, "t-own", "r", "index.html"), "theirs");
     const before = here.db.sqlite.query("SELECT * FROM tasks WHERE id = 't-own'").get();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(here.db.sqlite.query("SELECT * FROM tasks WHERE id = 't-own'").get()).toEqual(before);
     expect(here.db.sqlite.query("SELECT count(*) AS n FROM events WHERE task_id = 't-own'").get()).toEqual({ n: 0 });
     expect(here.db.sqlite.query("SELECT count(*) AS n FROM ledger WHERE task_id = 't-own'").get()).toEqual({ n: 0 });
     expect(existsSync(join(here.cfg.artifactsDir, "t-own"))).toBe(false);
-    expect(existsSync(join(here.cfg.claudeProjectsDir, "-work-repo", "sess-own.jsonl"))).toBe(false);
     expect(here.db.getTask("t-1")?.machine).toBe("pc1"); // the rest of the delta came in
   });
 
@@ -514,26 +565,24 @@ describe("applyDelta", () => {
     const pc = pcWithTask();
     const here = instance();
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 1_000_000 });
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(here.db.sqlite.query("SELECT id, status FROM staging ORDER BY id").all()).toEqual([{ id: "s1", status: "applied" }]);
     pc.db.sqlite.query("UPDATE staging SET status = 'rejected', decided_at = 2000000 WHERE id = 's2'").run();
     const [d2] = await buildDelta(pc.db, pc.cfg, d!.cursor, "pc1", { now: 2_100_000 });
-    await applyDelta(here.db, here.cfg, d2!.file);
+    await applyDelta(here.db, here.cfg, d2!.file, PC);
     expect(here.db.sqlite.query("SELECT id, status FROM staging ORDER BY id").all()).toEqual([{ id: "s1", status: "applied" }, { id: "s2", status: "rejected" }]);
   });
 
   test("a delta of files alone does not write over the files of a Task that is this instance's own", async () => {
     const here = instance();
-    here.db.sqlite.query("UPDATE tasks SET runner_session_id = 'sess-own', cwd = '/srv/repo' WHERE id = 't-own'").run();
-    const session = join(here.cfg.claudeProjectsDir, "-srv-repo", "sess-own.jsonl");
-    mkdirSync(join(here.cfg.claudeProjectsDir, "-srv-repo"), { recursive: true });
-    writeFileSync(session, "{}\n");
+    mkdirSync(join(here.cfg.attachmentsDir, "t-own"), { recursive: true });
+    writeFileSync(join(here.cfg.attachmentsDir, "t-own", "shot.png"), "mine");
     const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-1-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [] } }));
     const file = join(here.root, `files-only-${n++}.tar.zst`);
-    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/sessions/claude/-srv-repo/sess-own.jsonl", bytes: Buffer.from("{}\n{\"x\":1}\n") }, { name: "files/artifacts/t-own/r/index.html", bytes: Buffer.from("x") }]);
-    const r = await applyDelta(here.db, here.cfg, file);
+    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/attachments/t-own/shot.png", bytes: Buffer.from("theirs") }, { name: "files/artifacts/t-own/r/index.html", bytes: Buffer.from("x") }]);
+    const r = await applyDelta(here.db, here.cfg, file, PC);
     expect(r.status === "applied" && r.files).toBe(0);
-    expect(readFileSync(session, "utf8")).toBe("{}\n");
+    expect(readFileSync(join(here.cfg.attachmentsDir, "t-own", "shot.png"), "utf8")).toBe("mine");
     expect(existsSync(join(here.cfg.artifactsDir, "t-own"))).toBe(false);
   });
 
@@ -543,10 +592,10 @@ describe("applyDelta", () => {
     mkdirSync(outside);
     mkdirSync(here.cfg.artifactsDir, { recursive: true });
     symlinkSync(outside, join(here.cfg.artifactsDir, "t-x"));
-    const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-1-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [] } }));
+    const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-1-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [{ id: "t-a" }, { id: "t-x" }], events: [] } }));
     const file = join(outside, "..", `linked-${n++}.tar.zst`);
-    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/artifacts/t-a/ok.txt", bytes: Buffer.from("x") }, { name: "files/artifacts/t-x/deep/in.txt", bytes: Buffer.from("x") }]);
-    await expect(applyDelta(here.db, here.cfg, file)).rejects.toThrow("behind a link");
+    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/artifacts/t-a/r/ok.txt", bytes: Buffer.from("x") }, { name: "files/artifacts/t-x/deep/in.txt", bytes: Buffer.from("x") }]);
+    await expect(applyDelta(here.db, here.cfg, file, PC)).rejects.toThrow("behind a link");
     expect(existsSync(join(here.cfg.artifactsDir, "t-a"))).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
   });
@@ -559,26 +608,28 @@ describe("applyDelta", () => {
     mkdirSync(gone);
     mkdirSync(living);
     const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
-    await applyDelta(here.db, here.cfg, d!.file);
+    await applyDelta(here.db, here.cfg, d!.file, PC);
     expect(existsSync(gone)).toBe(false);
     expect(existsSync(living)).toBe(true);
   });
 
-  test("a name that leaves the folder is not written out of it, and a place a delta may not write to refuses the delta whole", async () => {
+  test("a name that leaves its folder, or a place a delta may not write to, refuses the delta whole: nothing is placed and no row is written", async () => {
     const here = instance();
-    const head = (id: string) => Buffer.from(JSON.stringify({ machine: "pc1", deltaId: id, schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [] } }));
+    const head = (id: string) => Buffer.from(JSON.stringify({ machine: "pc1", deltaId: id, schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [{ id: "t-ok" }], events: [] } }));
     const evil = join(tmp, `evil-${n++}`);
     mkdirSync(evil);
-    const escaping = join(evil, "a.tar.zst");
-    await writeTarZst(escaping, [{ name: "delta.json", bytes: head("pc1-1-0") }, { name: "files/artifacts/../../../escaped.txt", bytes: Buffer.from("x") }]);
-    // the unpacking drops the `..`: the delta goes in, and nothing is written outside the artifacts folder
-    expect(await applyDelta(here.db, here.cfg, escaping).then((r) => r.status)).toBe("applied");
     const before = snapshot(here.db, here.cfg);
+    const escaping = join(evil, "a.tar.zst");
+    await writeTarZst(escaping, [{ name: "delta.json", bytes: head("pc1-1-000000") }, { name: "files/artifacts/t-ok/r/ok.txt", bytes: Buffer.from("x") }, { name: "files/artifacts/../../../escaped.txt", bytes: Buffer.from("x") }]);
+    await expect(applyDelta(here.db, here.cfg, escaping, PC)).rejects.toThrow("names no Task");
     expect(existsSync(join(here.cfg.home, "escaped.txt")) || existsSync(join(tmp, "escaped.txt")) || existsSync(join(here.root, "escaped.txt"))).toBe(false);
     const elsewhere = join(evil, "b.tar.zst");
-    await writeTarZst(elsewhere, [{ name: "delta.json", bytes: head("pc1-2-0") }, { name: "files/etc/passwd", bytes: Buffer.from("x") }, { name: "files/artifacts/ok.txt", bytes: Buffer.from("x") }]);
-    await expect(applyDelta(here.db, here.cfg, elsewhere)).rejects.toThrow("not a place");
-    expect(existsSync(join(here.cfg.artifactsDir, "ok.txt"))).toBe(false); // nothing was placed
+    await writeTarZst(elsewhere, [{ name: "delta.json", bytes: head("pc1-2-000000") }, { name: "files/artifacts/t-ok/r/ok.txt", bytes: Buffer.from("x") }, { name: "files/etc/passwd", bytes: Buffer.from("x") }]);
+    await expect(applyDelta(here.db, here.cfg, elsewhere, PC)).rejects.toThrow("not a place");
+    const absolute = join(evil, "c.tar.zst");
+    await writeTarZst(absolute, [{ name: "delta.json", bytes: head("pc1-3-000000") }, { name: "/etc/cron.d/x", bytes: Buffer.from("x") }]);
+    await expect(applyDelta(here.db, here.cfg, absolute, PC)).rejects.toThrow("not a place");
+    expect(existsSync(join(here.cfg.artifactsDir, "t-ok"))).toBe(false); // nothing was placed
     expect(snapshot(here.db, here.cfg)).toEqual(before);
   });
 
@@ -597,7 +648,7 @@ describe("applyDelta", () => {
     const built = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { maxBytes: 8 * 1024 * 1024 });
     expect(built.length).toBeGreaterThan(1);
     const started = performance.now();
-    for (const d of built) await applyDelta(here.db, here.cfg, d.file, { eventBatch: 10_000 });
+    for (const d of built) await applyDelta(here.db, here.cfg, d.file, PC, { eventBatch: 10_000 });
     const ms = performance.now() - started;
     expect(here.db.sqlite.query("SELECT count(*) AS n FROM events").get()).toEqual({ n: tasks * per });
     expect(here.db.sqlite.query("SELECT count(*) AS n FROM tasks WHERE machine = 'pc1'").get()).toEqual({ n: tasks });

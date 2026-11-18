@@ -17,7 +17,7 @@ description: 公開リポジトリを Public にする前に 1 回、公開に�
 公開に出すツリーは `ops-kit public-sync --dry-run` が作る tree（設定は `ops.config.json` の `publicSync`。除外・書き換え・ホームパスとメールアドレスの検査を通ったもの）。dry-run が exit 1 なら先にその理由を直す。
 
 ```bash
-NAME=<リポジトリ名>; W=$(mktemp -d /tmp/$NAME.gate.XXXXXX); echo "$W"   # 表示されたパスを以後そのまま使う（Bash の呼び出しをまたぐと変数は消える）
+NAME=<リポジトリ名>; W=$(mktemp -d "${TMPDIR:-/tmp}/$NAME.gate.XXXXXX"); echo "$W"   # 表示されたパスを以後そのまま使う（Bash の呼び出しをまたぐと変数は消える）
 git fetch -q origin --tags
 ops-kit public-sync --dry-run > "$W/dry-run.txt" 2>&1 || { tail -1 "$W/dry-run.txt"; echo "STOP: dry-run が止まった。先にその理由を直す（この先へ進まない）"; }
 T=$(grep -oE 'with tree [0-9a-f]{40}' "$W/dry-run.txt" | awk '{print $3}')
@@ -105,10 +105,10 @@ for r in claude codex; do cp "$W/commit-message.txt" "$W/scope.md" "$W/seeds.md"
 | 日付 | リポジトリ | 足した観点 |
 |---|---|---|
 | 2026-10-18 | キットの親のリポジトリ（公開の PBI の決定ログ） | Git で管理するファイルか（利用者の指摘: 値を洗う前に、管理すべきファイルかを判断する） |
-| 2026-10-18 | 初回のリポジトリ（公開の PBI の決定ログに振り分け表） | 外部への通信 / 検査の一覧そのもの / 運用の記録と発言の転載 / 配布経路の固定 / 公開側で自動で動く投稿（2 ランナーの「種の外の観点」から） |
-| 2026-10-19 | 初回のリポジトリ（公開の PBI の決定ログ、回し直しの 2 回目） | 製品の表示の正確さ / 伏せ字の痕跡 / 隠れた内容 / ブラウザに残るデータ / 公開側の CI が確かめる範囲（2 ランナーの「種の外の観点」から） |
-| 2026-10-21 | 初回のリポジトリ（公開の PBI の決定ログ、回し直しの 3〜6 回目） | ブロッカーになりうる: Actions のログの公開 / ホストの安全姿勢の開示 / コードに埋め込んだプロンプト / 第三者について公に述べる値 / 利用者の会話・履歴の取り込みと保管。Issue で足りる: 実行可能な成果物の通信 / 通知による二次開示 / バックアップの保持と削除 / 移行・バックアップの完全性 / 書き出すデータの境界 / 二次処理と提供者間のデータ共有 / 他アプリのデータの不可逆な削除 / 利用者側に残る識別子（2 ランナーの「種の外の観点」から） |
-| 2026-10-21 | 2 つ目のリポジトリ（公開の PBI の決定ログ、初回） | ブロッカーになりうる: サーバーログのデータ保持 / 利用者間の記憶の分離 / 決済・認証の検証の完全性 / 公開時に読者のマシンで実行される設定 / 依存取得先の乗っ取り・認証情報の混入。Issue で足りる: ブラウザへの HTML 注入 / 破壊的な後片付け（2 ランナーの「種の外の観点」から） |
+| 2026-10-18 | 初回のリポジトリ（公開の PBI の決定ログに振り分け表） | 表の「外部への通信」から「公開側で自動で動く投稿」までの 5 行（2 ランナーの「種の外の観点」から。以下の行も同じ） |
+| 2026-10-19 | 初回のリポジトリ（公開の PBI の決定ログ、回し直しの 2 回目） | 表の「製品の表示の正確さ」から「公開側の CI が確かめる範囲」までの 5 行 |
+| 2026-10-21 | 初回のリポジトリ（公開の PBI の決定ログ、回し直しの 3〜6 回目） | 表の「Actions のログの公開」から「利用者側に残る識別子」までの 13 行（ブロッカーになりうるか Issue で足りるかは各行に書いた） |
+| 2026-10-21 | 2 つ目のリポジトリ（公開の PBI の決定ログ、初回） | 表の「ブラウザへの HTML 注入」から末尾までの 7 行（同上） |
 
 ## 指示
 
@@ -158,21 +158,23 @@ PROMPT
 
 モデルは利用者の指定（2026-10-17、公開の整理の要望: Claude Code は Fable 5.1、Codex は Astra 6）。CLI の名前は `claude-fable-5-1` と `gpt-6-astra`。変えるのは利用者の指定でこのファイルを直す（設定は足さない）。
 
-2 つは別のディレクトリで回し、重い処理の枠が許せば同時に走る（`ops-kit heavy`。マシンの上限で、枠が 1 なら順に。キットの README の「Heavy-process slots」）。このブロックは 1 回の Bash の呼び出しで、バックグラウンド（`run_in_background`、timeout は上限いっぱい）で回す（枠が 1 なら 2 本が順に走り、`wait` まで長くかかる。途中で切られると `$O` の出力が戻らない）。片方の出力をもう片方の材料に入れないため、出力は 2 本とも終わるまで `$W` の外（`$O`）に置く（順に走ると、先に終えた方の出力が後の方の走る間に残る。Codex の sandbox は `$W` を読める）。ランナーごとの違いはこの 2 行だけ（材料と指示は同じ `_gate/`）:
+2 つは別のディレクトリで回し、重い処理の枠が許せば同時に走る（`ops-kit heavy`。マシンの上限で、枠が 1 なら順に。キットの README の「Heavy-process slots」）。ゲートは `ops-kit job` の仕事の種類に無いので（仕事に頼めるのはローカル CI とレビュー）、どこで動いていてもこのブロックを直接回す。1 回の Bash の呼び出しで、バックグラウンド（`run_in_background`、timeout は上限いっぱい）で回す（枠が 1 なら `wait` まで長くかかり、途中で切られると `$O` の出力が戻らない）。片方の出力をもう片方の材料に入れないため、出力は 2 本とも終わるまで `$W` の外（`$O`）に置く（順に走ると、先に終えた方の出力が後の方の走る間に残る。Codex の sandbox は `$W` を読める）。ランナーごとの違いはこの 2 行だけ（材料と指示は同じ `_gate/`）:
 
 ```bash
-rm -f "$W/claude.jsonl" "$W/claude.md" "$W/claude.log" "$W/codex.md" "$W/codex.log" "$W"/*.post.md   # 前の回の出力を残さない（古い報告が形の確認を通る。Codex の sandbox は $W を読めるので、相手の報告も残さない）
-O=$(mktemp -d /tmp/<リポジトリ名>.gate-out.XXXXXX)   # 2 本が終わるまでの出力の置き場（$W の外）。変数をまたがないよう名前は文字で書く
+rm -f "$W/claude.jsonl" "$W/claude.md" "$W/claude.log" "$W/codex.md" "$W/codex.log" "$W"/*.post.md   # 前の回の出力を残さない（古い報告が形の確認を通る。相手の報告も残さない）
+O=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.gate-out.XXXXXX")   # 2 本が終わるまでの出力の置き場（$W の外）。変数をまたがないよう名前は文字で書く
 ( cd "$W/claude" && ops-kit heavy --name "gate claude" -- claude -p --model claude-fable-5-1 --permission-mode plan --output-format stream-json --verbose "$(cat _gate/prompt.md)" ) > "$O/claude.jsonl" 2> "$O/claude.log" & P1=$!
 ( cd "$W/codex" && ops-kit heavy --name "gate codex" -- codex exec -m gpt-6-astra --sandbox read-only --skip-git-repo-check --ephemeral -o "$O/codex.md" - < _gate/prompt.md ) > "$O/codex.log" 2>&1 & P2=$!
 wait $P1; C1=$?; wait $P2; C2=$?; echo "claude exit=$C1 codex exit=$C2"   # 0 でないランナーの出力は使わない（下の利用上限・やり直し）
 mv "$O"/* "$W"/ && rmdir "$O"
 jq -r 'select(.type=="result") | .result' "$W/claude.jsonl" > "$W/claude.md"
-jq -r 'select(.type=="assistant" and .parent_tool_use_id==null) | .message.model' "$W/claude.jsonl" | sort -u   # Claude Code が実行したモデル（本文を書いたターンの model。サブエージェント（parent_tool_use_id あり）は別のモデルで動くので除く。指定の 1 つだけであること）
-grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデル（ログの冒頭の model: の行）
+jq -r 'select(.type=="assistant" and .parent_tool_use_id==null) | .message.model' "$W/claude.jsonl" | sort -u   # Claude Code が実行したモデル（指定の 1 つだけであること。読み方は下の「実行したモデルの確かめ方」）
+grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデル
 ```
 
-- エージェント管理アプリの Task の中から回していて、入れ子の `claude -p` が拒まれたら `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p …` にする（そのランナーの環境変数を外すだけ。ほかは同じ）
+<!-- when task=in -->
+- 入れ子の `claude -p` が拒まれたら `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p …` にする（そのランナーの環境変数を外すだけ。ほかは同じ）
+<!-- end when -->
 - **実行したモデルの確かめ方**: Claude Code は `claude.jsonl` の assistant のメッセージの `message.model`（本文を書いたターンのモデル。`parent_tool_use_id` の無い assistant だけ。`sort -u` が指定の 1 つだけ）。`result` の `modelUsage` は補助のモデルも載り、短い返答は別のモデルに回ることがある（2026-10-18 に `reply ok` が指定と別のモデルで返った）ので、キーだけでは確かめない。Codex はログの冒頭の `model:` の行。報告の 1 行目（`model:`）はランナー自身の申告で、確かめるのは CLI の記録の方
 - CLI が名前を受け付けない（`-m` / `--model` がエラー）、または実行したモデルが指定と違うときは、**そのランナーの報告を使わずに止め**、公開の PBI に `## 判断待ち`（`issue-workflow` の「判断待ちの出し方」。`**進め方**: 止めて待つ`、ラベル `needs-decision`。選択肢は「そのランナーで選べる別のモデルの名前」と「待つ」、推奨は「待つ」）
 - 利用上限で止まったら（出力に上限の文、終了コードが 0 でない）、もう片方で代替せず止まる（停止の報告 `usage-limit`。枠が戻ってから同じ材料で回す）。もう片方の結果は捨てず `$W` に置いたまま
@@ -219,7 +221,7 @@ grep -m1 -E '^model: ' "$W/codex.log"              # Codex が実行したモデ
 
 ## 観点の追記
 
-報告の `### 種の外の観点` と振り分けで見つかった新しい観点を、「観点の種」の表に足す。足すのは観点の名前と何を見るかだけ（リポジトリ固有の場所・値は書かない。キットは固有の語を持てない）。同時に「追記の記録」に 1 行 `YYYY-MM-DD | <リポジトリ名>（<公開の PBI>） | <足した観点>`。無ければ `追記なし（種の外は無し）` と 1 行。「公開側から外す」の PR と同じ PR か直後の PR で入れ、公開の PBI の決定ログにも足した観点を 1 行。次のリポジトリは追記後の種で回す。
+報告の `### 種の外の観点` と振り分けで見つかった新しい観点を、「観点の種」の表の末尾に足す（「追記の記録」は表の行の範囲で指すので、並べ替えない）。足すのは観点の名前と何を見るかだけ（リポジトリ固有の場所・値は書かない。キットは固有の語を持てない）。同時に「追記の記録」に 1 行 `YYYY-MM-DD | <リポジトリ名>（<公開の PBI>） | <足した観点>`。無ければ `追記なし（種の外は無し）` と 1 行。「公開側から外す」の PR と同じ PR か直後の PR で入れ、公開の PBI の決定ログにも足した観点を 1 行。次のリポジトリは追記後の種で回す。
 
 ## 報告（利用者への返事の型）
 

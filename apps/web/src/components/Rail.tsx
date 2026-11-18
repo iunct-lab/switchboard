@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isWorkingStatus, type TaskStopMark, type TaskSummary, type TerminalStatus, type Workspace } from "@switchboard/protocol";
-import { OriginTag, BackgroundTag, ResumeTag, ShadowTag } from "./ui.tsx";
+import { MachineTag, OriginTag, BackgroundTag, ResumeTag, ShadowTag, WaitTag } from "./ui.tsx";
 import { attentionGroups, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
 import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
@@ -8,13 +8,13 @@ import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 import { listTitle } from "../taskTitle.ts";
 
-/** The tooltip's line of when a Task started and since when it is in its status, JST (#2030); the row itself has no room. */
+/** The tooltip's line of when a Task started and since when it is in its status, JST; the row itself has no room. */
 const timesLine = (t: TaskSummary) => {
   const x = taskTimes(t, Date.now());
   return `${x.started} · ${x.since}`;
 };
 
-/** Claude Code in the Task's terminal tab: working / waiting for the person (#1574). */
+/** Claude Code in the Task's terminal tab: working / waiting for the person. */
 function TerminalMark(props: { status: TerminalStatus | undefined }) {
   const mark = terminalMark(props.status);
   return mark && <span className={mark.className}>{mark.text}</span>;
@@ -22,8 +22,8 @@ function TerminalMark(props: { status: TerminalStatus | undefined }) {
 
 const dotClass = (s: TaskSummary["status"]) => (s === "running" || s === "background" ? "run" : s === "waiting" ? "wait" : s === "error" ? "err" : "idle");
 
-export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
-  // the Tasks group (#1142): searched and filtered in what the page holds, drawn PAGE rows at a time
+export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; /** opens that Workspace's shell with no Task; absent = this daemon cannot open a shell */ onOpenTerminal?: (workspaceId: string) => void; terminalWorkspaceId?: string; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
+  // the Tasks group: searched and filtered in what the page holds, drawn PAGE rows at a time
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [archived, setArchived] = useState(false);
@@ -45,7 +45,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
         <span className="t">{t(home.approvals)}</span>
         {props.approvals > 0 && <span className="badge">{props.approvals}</span>}
       </button>
-      {/* Phones only (#359): the list below is hidden there until this opens it. */}
+      {/* Phones only: the list below is hidden there until this opens it. */}
       <button className={`it rail-tasks ${props.listOpen ? "on" : ""}`} onClick={props.onToggleList}>
         <span className="t">{t(home.list)}</span>
       </button>
@@ -80,11 +80,16 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
       )}
       <div className="grp">Workspace</div>
       {props.workspaces.map((w) => (
-        <div key={w.id} className="it" title={w.path}>
+        <div key={w.id} className={`it ${props.terminalWorkspaceId === w.id ? "on" : ""}`} title={w.path}>
           <span className="t">
             {w.name}
             {w.kind === "meta" && <span className="tag">{t(home.selfTag)}</span>}
           </span>
+          {props.onOpenTerminal && (
+            <button className="ghost rail-term" title={t(home.wsTerminalTitle, { path: w.path })} onClick={() => props.onOpenTerminal!(w.id)}>
+              {t(home.wsTerminal)}
+            </button>
+          )}
           <span className="m">{byWs.get(w.id)?.length ?? 0}</span>
         </div>
       ))}
@@ -118,8 +123,10 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
           <span className="t">{listTitle(x.title)}</span>
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
           {x.resumeAt === null && <OriginTag origin={x.origin} />}
+          <MachineTag machine={x.machine} />
           <ResumeTag resumeAt={x.resumeAt} reason={x.resumeReason} plannedAt={x.resumePlannedAt} compact />
           <BackgroundTag background={x.background} compact />
+          <WaitTag task={x} compact />
           {x.resumeAt === null && <ShadowTag task={x} />}
           <TerminalMark status={props.terminals[x.id]} />
           <span className={`dot ${dotClass(x.status)}`} />

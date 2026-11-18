@@ -141,6 +141,7 @@ describe("classify", () => {
     ["packages/core/package.json", "依存の定義や設定"],
     ["bun.lock", "依存の定義や設定"],
     ["bunfig.toml", "依存の定義や設定"],
+    ["scripts/test-preload.ts", "全テストの前後に走る部品"],
     ["packages/core/tsconfig.json", "依存の定義や設定"],
     [".github/workflows/ci.yml", "CI の手順"],
     ["scripts/ci.ts", "CI の手順"],

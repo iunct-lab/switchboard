@@ -91,12 +91,15 @@ describe("task status transitions", () => {
     expect(workPhase({ status: "idle", resumeAt: null })).toBe("stopped");
   });
 
-  test("drain counts a turn and a background process, not an open approval, a planned resume or a stopped Task", () => {
-    expect(isWorking({ status: "running", resumeAt: null }, "drain")).toBe(true);
-    expect(isWorking({ status: "background", resumeAt: null }, "drain")).toBe(true);
-    expect(isWorking({ status: "waiting", resumeAt: null }, "drain")).toBe(false);
-    expect(isWorking({ status: "idle", resumeAt: 1 }, "drain")).toBe(false);
-    expect(isWorking({ status: "idle", resumeAt: null }, "drain")).toBe(false);
+  test("output (a runner expected to say something) counts a turn and a background process; a restart waits for an open approval too (gate)", () => {
+    expect(isWorking({ status: "running", resumeAt: null }, "output")).toBe(true);
+    expect(isWorking({ status: "background", resumeAt: null }, "output")).toBe(true);
+    expect(isWorking({ status: "waiting", resumeAt: null }, "output")).toBe(false);
+    expect(isWorking({ status: "idle", resumeAt: 1 }, "output")).toBe(false);
+    expect(isWorking({ status: "idle", resumeAt: null }, "output")).toBe(false);
+    // what a promotion with a restart waits for: a Task stopped in the middle of its turn for the person is cut by a restart like a running one
+    for (const status of ["running", "waiting", "background"] as const) expect(isWorking({ status, resumeAt: null }, "gate")).toBe(true);
+    expect(isWorking({ status: "done", resumeAt: 1 }, "gate")).toBe(false);
   });
 
   test("isWorkingStatus in protocol equals COUNTS.display for every status (the web uses it)", () => {
@@ -170,10 +173,10 @@ describe("no side-by-side status comparison", () => {
   const FORMS = String.raw`status === "running" \|\||IN \('running'|"running", ?"waiting"`;
   // One entry per place that may keep a form: file, the one line that must contain `has` (a second such line fails), and why.
   const ALLOWED: Array<{ file: string; has: string; why: string }> = [
-    { file: "packages/core/src/task-status.ts", has: "IN_FLIGHT", why: "the definition of IN_FLIGHT" },
-    { file: "packages/protocol/src/model.ts", has: "TaskStatus = z.enum", why: "the list of statuses" },
-    { file: "packages/protocol/src/model.ts", has: "return status === \"running\" || status === \"waiting\" || status === \"background\";", why: "isWorkingStatus, the web's copy of COUNTS.display (a test keeps them equal)" },
-    { file: "packages/core/src/db.ts", has: "NOT IN ('running', 'waiting', 'idle')", why: "a migration is frozen at the statuses of its day" },
+    { file: "packages/protocol/src/model/shared.ts", has: "IN_FLIGHT: ReadonlySet<TaskStatus> =", why: "the definition of IN_FLIGHT (beside the statuses, so the web's archiveRefusal reads the same set as core)" },
+    { file: "packages/protocol/src/model/shared.ts", has: "TaskStatus = z.enum", why: "the list of statuses" },
+    { file: "packages/protocol/src/model/shared.ts", has: "return status === \"running\" || status === \"waiting\" || status === \"background\";", why: "isWorkingStatus, the web's copy of COUNTS.display (a test keeps them equal)" },
+    { file: "packages/core/src/db/migrations/0010-task-reviewed-at.ts", has: "NOT IN ('running', 'waiting', 'idle')", why: "a migration is frozen at the statuses of its day" },
     { file: "rescue/src/promote.ts", has: "t.status === \"running\" ||", why: "sb-rescue shares no code with the app; it reads the status strings of /api/health" },
     { file: "packages/core/src/jobs.ts", has: "job.status === \"running\" ||", why: "a job's status (running / pass / fail / aborted), not a Task's" },
   ];

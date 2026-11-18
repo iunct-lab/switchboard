@@ -1,11 +1,12 @@
-// test-reads: packages/core/src/db.ts
+// test-reads: packages/core/src/db.ts packages/core/src/db/
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "./db.ts";
 import baseline from "./schema-baseline.json";
+import beforeSplit from "./schema-before-split.json";
 
 /**
  * Migrations are additive (docs/design/releases-and-rescue.md): a rollback puts an older daemon on the newer
@@ -39,12 +40,54 @@ test("every table and column is in the baseline (add new ones to schema-baseline
 });
 
 test("db.ts contains no statement that removes or renames a table or column", () => {
-  const source = readFileSync(join(import.meta.dir, "db.ts"), "utf8");
+  // db.ts and the files it is written across (db/: the schema, the migrations, the queries)
+  const files = ["db.ts", ...(readdirSync(join(import.meta.dir, "db"), { recursive: true }) as string[]).filter((f) => f.endsWith(".ts")).map((f) => join("db", f))];
+  expect(files).toContain("db/schema.ts");
+  expect(files.filter((f) => f.startsWith("db/migrations/")).length).toBeGreaterThan(1);
+  const source = files.map((f) => readFileSync(join(import.meta.dir, f), "utf8")).join("\n");
   // Any RENAME at all: SQLite also accepts `ALTER TABLE t RENAME old TO new` without the COLUMN keyword.
   const destructive = (sql: string) => [...sql.matchAll(/\b(DROP\s+(TABLE|COLUMN)|ALTER\s+TABLE\s+\w+\s+DROP|RENAME)\b[^"'`\n]*/gi)].map((m) => m[0]);
   for (const sql of ["ALTER TABLE tasks RENAME resume_at TO resumed_at", "ALTER TABLE t RENAME COLUMN a TO b", "ALTER TABLE t RENAME TO u", "ALTER TABLE t DROP c", "DROP TABLE t"]) expect(destructive(sql).length, sql).toBe(1);
   expect(destructive('db.exec("DROP INDEX IF EXISTS tasks_shadow_of"); ALTER TABLE tasks ADD COLUMN routing TEXT')).toEqual([]);
   expect(destructive(source)).toEqual([]); // DROP INDEX is fine: an index is not something an older release reads by name
+  // a setting is data an older release reads too: a migration that stops using one leaves the row where it is
+  const settingGone = (sql: string) => [...sql.matchAll(/\bDELETE\s+FROM\s+settings\b[^"'`\n]*/gi)].map((m) => m[0]);
+  expect(settingGone(`db.exec("DELETE FROM settings WHERE key = 'x'")`).length).toBe(1);
+  expect(files.filter((f) => f.startsWith("db/migrations/")).flatMap((f) => settingGone(readFileSync(join(import.meta.dir, f), "utf8")).map((m) => `${f}: ${m}`))).toEqual([]);
+});
+
+/** Tables (with their columns), indexes and `user_version` of a database file. */
+function shapeOf(path: string): { tables: Record<string, string[]>; indexes: string[]; userVersion: number } {
+  const raw = new Database(path, { readonly: true });
+  try {
+    const names = (type: string) => (raw.query("select name from sqlite_master where type = ? and name not like 'sqlite_%' order by name").all(type) as Array<{ name: string }>).map((r) => r.name);
+    const tables = Object.fromEntries(names("table").map((t) => [t, (raw.query(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => c.name).sort()]));
+    return { tables, indexes: names("index"), userVersion: (raw.query("PRAGMA user_version").get() as { user_version: number }).user_version };
+  } finally {
+    raw.close();
+  }
+}
+
+test("a database made before db.ts was cut into files opens to the schema and user_version of a new one", () => {
+  // schema-before-split.json: the statements and user_version of a database the last version with one db.ts created
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-schema-split-"));
+  try {
+    const old = new Database(join(dir, "old.db"), { create: true });
+    for (const sql of beforeSplit.statements) old.exec(sql);
+    old.exec(`PRAGMA user_version = ${beforeSplit.userVersion}`);
+    old.close();
+    const before = shapeOf(join(dir, "old.db"));
+    new Db(join(dir, "old.db")).close();
+    new Db(join(dir, "new.db")).close();
+    const opened = shapeOf(join(dir, "old.db"));
+    expect(opened).toEqual(shapeOf(join(dir, "new.db")));
+    // nothing that was there went away, and the version did not go back
+    for (const [table, columns] of Object.entries(before.tables)) expect(opened.tables[table], table).toEqual(expect.arrayContaining(columns));
+    expect(opened.indexes).toEqual(expect.arrayContaining(before.indexes));
+    expect(opened.userVersion).toBeGreaterThanOrEqual(before.userVersion);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("busy_timeout is 5000", () => {

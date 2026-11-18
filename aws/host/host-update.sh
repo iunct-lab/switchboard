@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# sb-host-update — before every start of switchboard.service (#435), as root: a fresh shallow clone of the repository's
+# sb-host-update — before every start of switchboard.service, as root: a fresh shallow clone of the repository's
 # main, the same way UserData gets it (the token from Parameter Store in a header), and the host scripts from it into
-# /usr/local/bin. Without this a changed sb-env reached the host only with 作り直す (#423).
+# /usr/local/bin. Without this a changed sb-env reached the host only with 作り直す.
 # Which version: the sha of the promoted release (the name `releases/current` links to) when it is an ancestor of main,
 # checked out in this root-owned clone; otherwise main's head, said on stderr. The host user's directories supply that
 # name and nothing else: it must be 40 hex digits, and nothing in them is run here. A tree whose scripts do not parse, or
@@ -25,12 +25,12 @@ TRIAL_MIN=5
 cap() { local l=$((BUDGET - SECONDS)); if [ "$l" -lt "$1" ]; then echo $((l > 1 ? l : 1)); else echo "$1"; fi; }
 SCRIPTS="sb-stop.sh:sb-stop sb-env.sh:sb-env archive.sh:sb-archive runner-sync.sh:sb-runner-sync offload.sh:sb-offload pre-rebuild.sh:sb-pre-rebuild node.sh:sb-node"
 
-# Security updates (#2186): 作り直す runs UserData's bootstrap, but that comes from the stack's GitHubRepo, which can lag
+# Security updates: 作り直す runs UserData's bootstrap, but that comes from the stack's GitHubRepo, which can lag
 # behind (a renamed repository keeps its old name until an instance-replacing deploy), and the pinned AMI brings its
 # own packages back. So every start also applies AL2023's latest security updates, in a unit of its own: the start does
 # not wait for it (systemd gives the whole start 90 s), and a run still going is left alone. A new kernel is used from
 # the next boot: /_auth/'s 停止する → 起動する (aws/README.md, Start, stop, rebuild).
-# --refresh: fetch the metadata again even inside the cache's expiry, or a stale cache reads as no updates (#3344).
+# --refresh: fetch the metadata again even inside the cache's expiry, or a stale cache reads as no updates.
 # skip_if_unavailable off for the AL2023 repository only: dnf's default skips it and exits 0 when its metadata cannot be
 # fetched, the same silent pass; another repository being down does not hold the security updates back.
 security_updates() {
@@ -41,7 +41,7 @@ security_updates() {
 
 # Node.js from nodejs.org is not a dnf package: the pin of the installed sb-node (node.sh) replaces a different version,
 # in a unit of its own like the security updates, since a download does not fit the start. After the fetch, so a new pin
-# is used at once, and also when the fetch fails, so a run stopped halfway is put back (review #2513)
+# is used at once, and also when the fetch fails, so a run stopped halfway is put back
 node_update() {
   [ -x "$BIN/sb-node" ] || return 0
   systemd-run --unit=sb-node-update --no-block --collect --quiet -- "$BIN/sb-node" \

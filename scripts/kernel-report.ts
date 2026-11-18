@@ -24,14 +24,17 @@ export const SKILLS_PREFIX = 8;
 
 export type ReasonKind = "button" | "auto" | "returned" | "other" | "none";
 
+/** The words a button writes as its reason; `backlog stage <x>` (the stage buttons) is read by its prefix. */
+const isButton = (reason: string) => reason === "direct button" || reason === "baseline button" || reason.startsWith("backlog stage ");
+
 /**
- * Who chose the process, from `processReason` (the words the choosers write): the button (`direct button`,
+ * Who chose the process, from `processReason` (the words the choosers write): the button (`direct button`, `baseline button`,
  * `backlog stage <action>`), the automatic choice (`auto direct: …` / `auto pipeline: …`), a direct Task sent back to the
  * pipeline (`direct returned`). No reason recorded (no provenance, or none named) is `none`; any other text is `other`.
  */
 export function reasonKind(reason: string | null | undefined): ReasonKind {
   if (typeof reason !== "string" || !reason) return "none";
-  if (reason === "direct button" || reason.startsWith("backlog stage ")) return "button";
+  if (isButton(reason)) return "button";
   if (reason.startsWith("auto ")) return "auto";
   if (reason === "direct returned") return "returned";
   return "other";
@@ -79,13 +82,13 @@ export type Report = { days: number; since: number; tasks: number; byBundle: boo
 
 /**
  * The kind of reason, with the numbers a chooser writes into it left out so equal rules count together:
- * `direct button` / `backlog stage <x>` → ボタン, `auto direct: <what> N 字 ≤ M` → `自動 direct: <what> ≤ M` (what was
+ * `direct button` / `baseline button` / `backlog stage <x>` → ボタン, `auto direct: <what> N 字 ≤ M` → `自動 direct: <what> ≤ M` (what was
  * measured — 本文 or 要望の文 — and the criterion's limit stay, the actual size goes), `auto pipeline: …` → 自動 pipeline, `direct returned` → 戻した.
  * Any other text is その他 (a schedule's reason), no reason at all is 理由なし.
  */
 export function reasonGroup(reason: string | null | undefined): string {
   if (typeof reason !== "string" || !reason) return "理由なし";
-  if (reason === "direct button" || reason.startsWith("backlog stage ")) return "ボタン";
+  if (isButton(reason)) return "ボタン";
   if (reason.startsWith("auto direct")) {
     const m = /^auto direct:\s*(\S+)\s+\d+\s*字\s*≤\s*(\d+)/.exec(reason);
     return m ? `自動 direct: ${m[1]} ≤ ${m[2]}` : "自動 direct";

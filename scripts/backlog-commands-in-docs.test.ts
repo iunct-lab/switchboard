@@ -43,7 +43,7 @@ test.skipIf(ls.status !== 0)("docs: this repository's instructions and Issue tem
   expect(hits).toEqual([]);
 });
 
-test("docs: the parallel guard needs no --repo in CLAUDE.md (#3072)", () => {
+test("docs: the parallel guard needs no --repo in CLAUDE.md", () => {
   const guard = read("CLAUDE.md")
     .split("\n")
     .filter((line) => line.startsWith("- 並列ガード:"));

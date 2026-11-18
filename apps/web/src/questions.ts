@@ -1,6 +1,6 @@
 import type { AskAnswer, AskQuestion } from "@switchboard/protocol";
 
-/** What the person gave one question (#3058): the option labels chosen, or the free text of a question without options. */
+/** What the person gave one question: the option labels chosen, or the free text of a question without options. */
 export interface QuestionChoice {
   labels: string[];
   text: string;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# devtools (#371) — what a runner on the host needs to develop as on the Mac: Stacked PRs (gh-stack), the E2E scripts'
+# devtools — what a runner on the host needs to develop as on the Mac: Stacked PRs (gh-stack), the E2E scripts'
 # headless Chrome, a Python project's tests (uv and Python 3.11+, docker, gitleaks), an AWS SAM template's lint, sqlite3 for the skills.
 # Run by bootstrap.sh as root after gh is logged in, with the same SB_HOST_USER / SB_HOST_HOME / SB_REPOS_DIR; running it
 # again skips what is there. Last it applies the owner's Claude settings patch, read first from private/ of the development

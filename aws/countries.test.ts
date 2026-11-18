@@ -68,7 +68,7 @@ function setup(o: { base?: string[]; whitelist?: string[]; saved?: Allowance } =
 }
 const window = (from = T0 + H, until = T0 + 48 * H): Allowance => ({ countries: ["US"], from, until, setAt: T0 });
 
-describe("aws/countries.ts (#1639)", () => {
+describe("aws/countries.ts", () => {
   test("parseAllowance refuses bad input", () => {
     const ok = { countries: ["us"], until: T0 + H };
     for (const bad of [

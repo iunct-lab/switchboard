@@ -53,7 +53,7 @@ function matchesAll(glob: string): boolean {
   return glob.slice(open + 1, close).split(",").some((alt) => matchesAll(glob.slice(0, open) + alt + glob.slice(close + 1)));
 }
 
-export function checkPolicy(input: PolicyInput, ctx: PolicyContext): { ok: true; policy: Omit<AnswerPolicy, "id" | "uses"> } | { ok: false; error: string } {
+export function checkPolicy(input: PolicyInput, ctx: PolicyContext): { ok: true; policy: Omit<AnswerPolicy, "id" | "uses" | "useCount" | "firstUsedAt"> } | { ok: false; error: string } {
   const no = (error: string) => ({ ok: false as const, error });
   const { subject } = ctx;
   if (ctx.runnerRefusal) return no("ランナー側の拒否は保存した方針では解除できません");
@@ -168,6 +168,7 @@ export function subjectChanges(prev: PolicySubject, cur: PolicySubject): string[
   return out;
 }
 
+/** One more use: the history keeps the newest 20, the total and the first use are kept whole. */
 export function recordUse(list: AnswerPolicy[], id: string, use: AnswerPolicy["uses"][number]): AnswerPolicy[] {
-  return list.map((p) => (p.id === id ? { ...p, uses: [use, ...p.uses].slice(0, 20) } : p));
+  return list.map((p) => (p.id === id ? { ...p, uses: [use, ...p.uses].slice(0, 20), useCount: p.useCount + 1, firstUsedAt: p.firstUsedAt ?? use.at } : p));
 }

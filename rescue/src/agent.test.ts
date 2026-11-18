@@ -111,7 +111,7 @@ test("the page starts and stops it over HTTP and shows the output in /api/status
   writeFileSync(flag, "");
 });
 
-test("the agent does not get sb-rescue's starter token or the edge header value (#2077)", async () => {
+test("the agent does not get sb-rescue's starter token or the edge header value", async () => {
   // the same OS user, so what it must not have is not in its environment either; the rest of the environment stays
   process.env.SWITCHBOARD_STARTER_TOKEN = "tok";
   process.env.SWITCHBOARD_EDGE_HEADER_VALUE = "edge";

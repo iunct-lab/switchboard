@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Emergency switch (#1492): the WAF Web ACL for Switchboard's CloudFront distribution. A Web ACL for CloudFront exists
+  Emergency switch: the WAF Web ACL for Switchboard's CloudFront distribution. A Web ACL for CloudFront exists
   only in us-east-1, so it is a stack of its own: deploy it there, then give its WebAclArn output to
   aws/template.yaml's WebAclArn. Two rate-based rules per source IP: the login (/_auth/) and everything. Deployed by a
   person: see aws/README.md. It costs money every month while it exists.

@@ -1,6 +1,8 @@
 [test]
 root = "."
 coverage = false
+# after every test: a queue timer a test file left armed is stopped and fails the run (scripts/test-preload.ts)
+preload = ["./scripts/test-preload.ts"]
 
 [install]
 exact = false

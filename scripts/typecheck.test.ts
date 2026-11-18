@@ -1,6 +1,7 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
 import { runTypecheck, type TypecheckDeps } from "./typecheck";
+import { reusedLine, type OffloadRecord } from "./offload-record";
 
 const rig = (o: { code?: number; output?: string; offload?: boolean; hostCode?: number } = {}) => {
   const st = { host: [] as string[][], scripts: [] as string[], logs: [] as string[], slots: [] as string[] };
@@ -64,6 +65,36 @@ describe("runTypecheck", () => {
     expect(await runTypecheck(deps)).toBe(1);
     expect(st.logs.join("\n")).toContain("sb-offload: no build");
     expect(st.host).toEqual([]);
+  });
+
+  test("reuse: the same work tree starts no build and hands back the earlier build's result and code with one line; --force and a build that did not reach its end start a new one", async () => {
+    const rows: OffloadRecord[] = [];
+    const log = { append: (r: OffloadRecord) => void rows.push(r), read: (since: number) => rows.filter((r) => Date.parse(r.at) >= since) };
+    const DONE = "sb-step: 0 begin 1\na.ts(3,5): error TS2322: no\nsb-step: 0 exit 2 2\nsb-offload: exit 2\n";
+    const collected: string[] = [];
+    const logged = (o: { reuseHours?: number; output?: string; code?: number }) => {
+      const { st, deps } = rig();
+      deps.offload = { ...deps.offload!, log, collect: async (b) => (collected.push(b), { code: o.code ?? 2, output: o.output ?? DONE }) };
+      return { st, deps: { ...deps, ...(o.reuseHours === undefined ? {} : { reuseHours: o.reuseHours }) } };
+    };
+    const first = logged({ reuseHours: 24 });
+    expect(await runTypecheck(first.deps)).toBe(2);
+    expect(first.st.scripts).toHaveLength(1);
+    expect(rows.map((r) => [r.caller, r.kind, r.build])).toEqual([["typecheck", "ci", "b1"]]);
+    const again = logged({ reuseHours: 24 });
+    expect(await runTypecheck(again.deps)).toBe(2);
+    expect(again.st.scripts).toEqual([]);
+    expect(collected.at(-1)).toBe("b1");
+    expect(again.st.logs).toContain(reusedLine({ build: "b1", at: rows[0]!.at }));
+    expect(again.st.logs.join("\n")).toContain("error TS2322");
+    // --force: main passes no width
+    const forced = logged({});
+    expect(await runTypecheck(forced.deps)).toBe(2);
+    expect(forced.st.scripts).toHaveLength(1);
+    // every earlier build of this input timed out (no exit line): a new build
+    const cut = logged({ reuseHours: 24, code: 124, output: "sb-step: 0 begin 1\n" });
+    expect(await runTypecheck(cut.deps)).toBe(124);
+    expect(cut.st.scripts).toHaveLength(1);
   });
 
   test("without a build (or with --local) the host's bun run typecheck runs inside the slot and its code is returned", async () => {

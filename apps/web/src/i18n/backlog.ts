@@ -95,6 +95,7 @@ export const backlog = msgs({
   reread: { ja: "読み直す", en: "Reload" },
   heldNew: { ja: "新規作成", en: "New Issue" },
   heldComment: { ja: "コメント", en: "Comment" },
+  heldArtifact: { ja: "成果物", en: "Artifact" },
   heldConflict: { ja: "競合", en: "Conflict" },
   heldFailed: { ja: "GitHub が受け付けませんでした", en: "GitHub did not accept it" },
   heldUnknown: { ja: "送信の結果が分かりません", en: "The send's result is unknown" },
@@ -172,6 +173,7 @@ export const backlog = msgs({
   chainWaits: { ja: "が待つ ", en: "waits for " },
   notRead: { ja: "未取得", en: "not read" },
   prereqOf: { ja: " の前提 ", en: "'s prerequisite " },
+  prereqMoreVia: { ja: " ほか {n} 件", en: " and {n} more" },
   prereqs: { ja: "前提: ", en: "Prerequisites: " },
   stuck: { ja: "進められない: ", en: "Cannot proceed: " },
   overlap: { ja: "重なり:", en: "Overlap:" },
@@ -182,7 +184,7 @@ export const backlog = msgs({
   // Backlog.tsx: the view picker
   layoutList: { ja: "一覧", en: "List" },
   layoutBoard: { ja: "ボード", en: "Board" },
-  // the queue (#3957): the PBIs to implement in order, Switchboard starting them by itself while it is on
+  // the queue: the PBIs to implement in order, Switchboard starting them by itself while it is on
   layoutQueue: { ja: "キュー", en: "Queue" },
   queueEnabled: { ja: "キュー 有効", en: "Queue on" },
   queueConcurrency: { ja: "同時に動かす数", en: "At once" },
@@ -236,7 +238,6 @@ export const backlog = msgs({
   actionBacklogNext: { ja: "バックログを進める", en: "Advance the backlog" },
   actionSecretScan: { ja: "認証の値の検査", en: "Credential scan" },
   actionApprovalWindow: { ja: "承認待ちのメモ", en: "Approval notes" },
-  actionUiLayers: { ja: "床・天井・壁の点検", en: "Floor, ceiling and wall check" },
 
   // scheduleEdit.ts, scheduleResult.ts
   budgetPositive: { ja: "予算は0より大きい数値で入力してください: \"{budget}\"", en: "Enter the budget as a number greater than 0: \"{budget}\"" },
@@ -273,7 +274,6 @@ export const backlog = msgs({
     ja: " を meta workspace で走らせ、できたレポート（最近のセッションの傾向・つまずき・改善案）を Insights の画面の「レポート」に載せます。ランナーは claude、prompt はありません。Claude の 7 日枠が設定の閾値（使用量と自動再開）以上のときは飛ばします。1 回の対象は 200 セッションまでなので、週 2 回が目安です。",
     en: " on the meta workspace and puts the report it makes (recent sessions' trends, stumbles and ideas to improve) under Reports on the Insights screen. The runner is claude, with no prompt. Skipped while Claude's 7-day window is at or above the threshold in Settings (Usage and auto-resume). One run covers up to 200 sessions, so twice a week is a good pace.",
   },
-  uiLayersHint: { ja: "床・天井・壁の点検を meta workspace の claude の Task で行います。Claude の 7 日枠が設定の閾値以上のときは飛ばします。", en: "Runs the floor, ceiling and wall check as a claude Task on the meta workspace. Skipped while Claude's 7-day window is at or above the threshold in Settings." },
   secretScanHint: {
     ja: "登録したリポジトリを全部（同じリポジトリの作業フォルダは 1 回）、Issue・PR・コメント・レビューに認証に使える値が書かれていないか検査します。ランナーは使いません（ホストの gh のログインで読む）。当たりか検査できなかったリポジトリがあれば判断待ちに出します（場所と種類だけ）。スケジュールは meta に置きます。",
     en: "Scans every registered repository (a repository's working folders once) for values usable as credentials in Issues, PRs, comments and reviews. No runner is used (it reads with the host's gh login). A hit, or a repository it could not scan, goes to Awaiting you (place and kind only). The schedule lives on meta.",

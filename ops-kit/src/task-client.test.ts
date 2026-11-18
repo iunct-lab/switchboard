@@ -29,7 +29,7 @@ afterAll(() => {
 });
 
 describe("ops-kit task send", () => {
-  test("posts the text with the sender's line to /api/tasks/<id>/send and prints sent", async () => {
+  test("posts the text as it is, with the sender's id beside it, to /api/tasks/<id>/send and prints sent", async () => {
     const body = `${await tmp()}/body.md`;
     await Bun.write(body, "返事です\n");
     const r = await run(["send", "task_1", "--body-file", body], ok);
@@ -37,7 +37,7 @@ describe("ops-kit task send", () => {
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]!.url).toBe("http://127.0.0.1:4777/api/tasks/task_1/send");
     expect(r.calls[0]!.method).toBe("POST");
-    expect(r.calls[0]!.body).toEqual({ text: "（Task task_me からの返信）\n\n返事です\n" });
+    expect(r.calls[0]!.body).toEqual({ text: "返事です\n", from: "task_me" }); // the app writes the sender's line, and takes no grant from a text that has a sender
     expect(r.out).toBe("sent task_1 running");
   });
 
@@ -49,13 +49,12 @@ describe("ops-kit task send", () => {
     expect((r.calls[0]!.headers as Record<string, string>).authorization).toBe("Bearer secret-key");
   });
 
-  test("--body-file - sends standard input; without OPS_KIT_TASK_ID no sender line is added", async () => {
+  test("--body-file - sends standard input; without OPS_KIT_TASK_ID nothing is sent (the app would take it as the person's)", async () => {
     const r = await run(["send", "task_1", "--body-file", "-"], ok);
     expect(r.code).toBe(0);
-    expect((r.calls[0]!.body as { text: string }).text).toBe("（Task task_me からの返信）\n\nfrom stdin");
+    expect(r.calls[0]!.body).toEqual({ text: "from stdin", from: "task_me" });
     const bare = await run(["send", "task_1", "--body-file", "-"], ok, { BACKLOG_URL: ENV.BACKLOG_URL });
-    expect(bare.code).toBe(0);
-    expect(bare.calls[0]!.body).toEqual({ text: "from stdin" });
+    expect([bare.code, bare.calls, bare.err]).toEqual([2, [], expect.stringContaining("OPS_KIT_TASK_ID")]);
   });
 
   test("the id is URL-encoded", async () => {

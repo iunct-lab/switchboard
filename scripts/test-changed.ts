@@ -4,15 +4,18 @@
 // 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）と、ほかのパッケージが読む共有の型
 // （packages/protocol/）が変わったとき。子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
 // 変更が無い、または選ばれたテストが無ければ何も回さない。SWITCHBOARD_SUPERVISED は抜いて回す。
-// 使い方: bun scripts/test-changed.ts [--local]
+// 使い方: bun scripts/test-changed.ts [--local] [--force]
 // sb-offload があるホストでは、選んだテスト全部（録画を読むものも）を外の 1 本のビルドで回す（local-ci と同じ runBuild /
 // ciScript / parseBuild。docs/design/local-ci-offload.md）。ホストの重い処理の枠は取らない。外が失敗・時間切れ・中断しても
 // ホストで回し直さない。重い処理の枠を取ってホストで回すのは、--local を付けたときと、sb-offload が無いホストだけ
 // （tag-ci.ts の offloadFor。local-ci の --local と同じ選び方。環境変数や設定では切り替えない）。
+// 外のビルドは、入力の鍵（選んだテスト・作業ツリーの全ファイル・録画）がまったく同じビルドが 24 時間以内にあれば新しく始めず、
+// そのビルドの結果を受け取る（走っていれば終わるのを待つ）。--force はその 1 回を回し直す。幅は SWITCHBOARD_OFFLOAD_REUSE_HOURS（0 で使い回さない）。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { type Deps, parseBuild, runBuild, testRun, type Offload } from "./local-ci.ts";
+import { reusedLine, reuseHours } from "./offload-record.ts";
 import { offloadFor } from "./tag-ci.ts";
 import { currentRepo } from "./repo.ts";
 import { repoFiles, selectFrom } from "./test-select.ts";
@@ -47,6 +50,8 @@ export interface RunDeps {
   slot: Deps["slot"];
   /** owner/name。外の作業ツリーに origin として足す（origin を読むテストのため。local-ci と同じ）。 */
   repo?: string;
+  /** 同じ入力の鍵の外のビルドを使い回す時間の幅。無いか 0 なら使い回さない（`--force`、`SWITCHBOARD_OFFLOAD_REUSE_HOURS=0`）。 */
+  reuseHours?: number;
   log: (line: string) => void;
 }
 
@@ -58,7 +63,8 @@ export async function runTests(picked: Picked, d: RunDeps): Promise<number> {
     return code;
   }
   const steps = [{ name: "bun test", run: tests ? testRun(tests) : "bun test" }];
-  const { code, output } = await runBuild(d.offload, steps, ROOT, { caller: "test-changed", ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] } }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}` }));
+  const { code, output, reused } = await runBuild(d.offload, steps, ROOT, { caller: "test-changed", ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] }, ...(d.reuseHours ? { reuse: { hours: d.reuseHours } } : {}) }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}`, reused: undefined }));
+  if (reused) d.log(reusedLine(reused));
   let offCode = 0;
   let passed = 0;
   let counted = false;
@@ -102,6 +108,7 @@ if (import.meta.main) {
   const offload = offloadFor(process.argv.slice(2).includes("--local"));
   process.exit(
     await runTests(picked, {
+      ...(process.argv.slice(2).includes("--force") ? {} : { reuseHours: reuseHours(process.env) }),
       spawnHost: async (cmd) => await Bun.spawn(cmd, { cwd: ROOT, env, stdout: "inherit", stderr: "inherit" }).exited,
       ...(offload ? { offload } : {}),
       slot: (name, fn) => withHeavySlot(name, fn),

@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
-import { claudeSessionExists, createClaudeAdapter, telemetryEnv } from "./index.ts";
+import { accountName, claudeSessionExists, createClaudeAdapter, telemetryEnv } from "./index.ts";
 
 describe("claudeSessionExists", () => {
   test("finds <id>.jsonl under any project folder; false when missing or there is no projects folder", () => {
@@ -158,6 +158,82 @@ describe("question tool", () => {
       expect(events.filter((e) => e.t === "question.ask")).toEqual([{ t: "question.ask", id: "q-1", questions: [{ header: "H", question: "Which?", options: [{ label: "a", description: "x" }], multiSelect: false }] }]);
       expect(events.some((e) => e.t === "permission.ask")).toBe(false);
       expect(events.find((e) => e.t === "session.end")).toMatchObject({ status: "ok" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("account of the usage-limit reports", () => {
+  const EMAIL = "sentinel-user@example.invalid";
+  const ORG = "0b9d3c1e-5e17-4e1a-9c2f-5e17e1a15e17";
+  const ORG_NAME = "Sentinel Org 7c2f";
+  const status = (email = EMAIL) => JSON.stringify({ loggedIn: true, authMethod: "claude.ai", email, orgId: ORG, orgName: ORG_NAME, subscriptionType: "max" });
+  const LIMITS = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: 1790000000 } } } });
+  // what the CLI answers to `initialize` names the account too
+  const INIT = JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "init-1", response: { account: { email: EMAIL, organization: ORG_NAME, subscriptionType: "max" } } } });
+
+  /**
+   * A stand-in `claude`: `auth status` prints what `status.json` holds at that moment (and the email on stderr), counted
+   * in `calls`; a session reads its two first lines, waits, then prints the initialize answer and one usage-limit report.
+   */
+  function fake(dir: string): { bin: string; login: (json: string) => void; reads: () => number } {
+    const bin = join(dir, "claude");
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "2.1.281 (Claude Code)"; exit 0; fi\nif [ "$1 $2" = "auth status" ]; then echo x >> "${dir}/calls"; cat "${dir}/status.json"; echo "logged in as ${EMAIL}" >&2; exit 0; fi\nread a\nread b\nsleep 0.5\necho '${INIT}'\necho '${LIMITS}'\nexit 0\n`,
+    );
+    chmodSync(bin, 0o755);
+    return { bin, login: (json) => writeFileSync(join(dir, "status.json"), json), reads: () => (existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n").length : 0) };
+  }
+  const report = async (adapter: ReturnType<typeof createClaudeAdapter>, dir: string) => {
+    const events: AgentEvent[] = [];
+    await adapter.start({ cwd: dir, scope: [dir], prompt: "p" }, (e) => events.push(e)).exited;
+    return { events, accounts: events.flatMap((e) => (e.t === "quota" ? [e.account] : [])) };
+  };
+
+  test("the email and organization `claude auth status` and the session name reach no detection, event or log line: the report carries only the 16-character name", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-claude-account-"));
+    const printed: string[] = [];
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const real = methods.map((m) => console[m]);
+    for (const m of methods) console[m] = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
+    try {
+      const f = fake(dir);
+      f.login(status());
+      const adapter = createClaudeAdapter({ bin: f.bin });
+      const detection = await adapter.detect();
+      expect(detection).toMatchObject({ available: true, login: "ok", loginKind: "claude.ai" });
+      const { events, accounts } = await report(adapter, dir);
+      expect(accounts).toEqual([accountName(`${ORG}:${EMAIL}`)]);
+      expect(accounts[0]).toMatch(/^[0-9a-f]{16}$/);
+      const out = JSON.stringify(detection) + JSON.stringify(events) + printed.join("\n");
+      for (const raw of [EMAIL, "sentinel-user", ORG, "0b9d3c1e", ORG_NAME]) expect(out).not.toContain(raw);
+    } finally {
+      methods.forEach((m, i) => (console[m] = real[i]!));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a login that changed in a terminal after the last detection: a session that starts reads it again, and its report carries the new account's name", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-claude-account-"));
+    try {
+      const f = fake(dir);
+      f.login(status());
+      const adapter = createClaudeAdapter({ bin: f.bin, accountRereadMs: 0 });
+      await adapter.detect();
+      expect((await report(adapter, dir)).accounts).toEqual([accountName(`${ORG}:${EMAIL}`)]);
+      await Bun.sleep(300); // the read the report asked for is over
+      f.login(status("second@example.invalid"));
+      expect((await report(adapter, dir)).accounts).toEqual([accountName(`${ORG}:second@example.invalid`)]);
+      await Bun.sleep(300);
+      // within a minute of the last read nothing is read again: the status command runs once, for the detection
+      const calm = createClaudeAdapter({ bin: f.bin });
+      await calm.detect();
+      const before = f.reads();
+      f.login(status("third@example.invalid"));
+      expect((await report(calm, dir)).accounts).toEqual([accountName(`${ORG}:second@example.invalid`)]);
+      expect(f.reads()).toBe(before);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

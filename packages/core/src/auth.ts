@@ -74,6 +74,9 @@ export function tokenEquals(a: string | null, b: string): boolean {
 
 /** The header CloudFront adds on its way to the origin; the value lives in Parameter Store, never in the repository. */
 export const EDGE_HEADER = "x-switchboard-edge";
+/** A request made for a Task names it and proves it with the token of that Task's endpoint (`callingTask` in server/guards.ts). */
+export const TASK_HEADER = "x-task-id";
+export const TASK_TOKEN_HEADER = "x-task-token";
 
 /**
  * Only requests that came through the CDN reach a cloud host (same idea as capsule-host's aws-handler): with

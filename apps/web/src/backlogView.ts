@@ -6,9 +6,9 @@ import { shownStops, stopDisplay } from "./stops.ts";
 import { jstStamp } from "./time.ts";
 
 /**
- * How the Backlog screen sorts and narrows its rows (#2695), kept in the browser. Empty arrays = every value; `query`
- * matches a title or a number; `sort` "default" keeps the daemon's order. `layout` is how the rows are laid out (#2696:
- * the stage cards, or the stages as the columns of a board; #3957: the backlog queue), not a condition.
+ * How the Backlog screen sorts and narrows its rows, kept in the browser. Empty arrays = every value; `query`
+ * matches a title or a number; `sort` "default" keeps the daemon's order. `layout` is how the rows are laid out (the stage
+ * cards, the stages as the columns of a board, or the backlog queue), not a condition.
  */
 export interface BacklogView {
   sort: "default" | "priority" | "updated" | "created" | "points";
@@ -137,7 +137,7 @@ export function saveView(store: Pick<Storage, "setItem" | "removeItem">, view: B
   else store.setItem(VIEW_KEY, JSON.stringify(view));
 }
 
-/** A short mark on a board tile (#3707): which of the row's sections the item has, without opening the tile. */
+/** A short mark on a board tile: which of the row's sections the item has, without opening the tile. */
 export interface ItemMark {
   key: "waits" | "until" | "confirm" | "prereq" | "stuck" | "overlap" | "stops" | "reply";
   label: string;
@@ -162,13 +162,11 @@ export function untilMark(item: BacklogItem, now: number): { at: number; left: s
 /**
  * Whole days a user confirmation of the row has waited to be answered: from the later of its 期日 (`after`) and the
  * close of the row's last Task (`tasks.doneAt`, read only once every Task is closed), counted for the confirmations whose
- * 期日 has passed or is not set; the longest. null = none to answer yet (a Task still open, every 期日 to come), or no
- * start to count from (no 期日 and no closed Tasks).
+ * 期日 has passed or is not set; the longest. null = none to answer yet (every 期日 to come; while a Task is open the
+ * daemon gives the row no confirmation at all), or no start to count from (no 期日 and no closed Tasks).
  */
 export function confirmDays(item: BacklogItem, now: number): number | null {
-  const tasks = item.tasks;
-  if (tasks && tasks.total > 0 && tasks.done < tasks.total) return null;
-  const done = tasks?.doneAt ? Date.parse(tasks.doneAt) : NaN;
+  const done = item.tasks?.doneAt ? Date.parse(item.tasks.doneAt) : NaN;
   let days: number | null = null;
   for (const c of item.confirmations) {
     const after = c.after ? Date.parse(c.after) : NaN;

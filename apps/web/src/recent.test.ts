@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { api } from "./api.ts";
+import { api } from "./api/index.ts";
 import { RECENT_MESSAGE, askRecentCheck, isRecentRefusal, onRecentCheck } from "./recent.ts";
 
 const realFetch = globalThis.fetch;

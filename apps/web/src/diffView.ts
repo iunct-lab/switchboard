@@ -4,7 +4,7 @@ import { task as m } from "./i18n/task.ts";
 import { jstClock } from "./time.ts";
 
 /**
- * The diff tab's rows (#3824, #3833): the files to list, and the sentences above them. A `removed` row (the Task wrote under a place
+ * The diff tab's rows: the files to list, and the sentences above them. A `removed` row (the Task wrote under a place
  * that no longer exists) is a sentence naming the place, not a file row. If the API returned copied (`snapshot`) rows right after it,
  * the sentence says when they were copied and the rows are listed; with no row at all the tab says there is no change yet.
  */

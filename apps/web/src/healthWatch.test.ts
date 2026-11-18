@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { watchHealth } from "./healthWatch.ts";
 
-test("health is read again when the page comes back and every interval while visible, not while hidden (#1600)", async () => {
+test("health is read again when the page comes back and every interval while visible, not while hidden", async () => {
   const doc = Object.assign(new EventTarget(), { visibilityState: "visible" as DocumentVisibilityState });
   let reads = 0;
   const stop = watchHealth(doc, () => reads++, 20);
-  // load (the flake of #2939): a fixed 50 ms was too short for two 20 ms ticks on a busy host, so wait for the count
+  // load (a flake seen on a busy host): a fixed 50 ms was too short for two 20 ms ticks on a busy host, so wait for the count
   for (const t0 = Date.now(); reads < 2 && Date.now() - t0 < 2000; ) await Bun.sleep(5);
   expect(reads).toBeGreaterThanOrEqual(2); // the interval while visible
   doc.visibilityState = "hidden";

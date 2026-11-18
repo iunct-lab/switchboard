@@ -53,7 +53,7 @@ test("upsertSummary keeps a task.updated in the list shape", () => {
   const added = upsertSummary(listed, task("z", "New", "/work/new"));
   expect(added.map((t) => t.id)).toEqual(["z", ...ids(list)]);
   for (const t of [...replaced, ...added]) expect(Object.keys(t).sort()).toEqual(keys);
-  expect(keys.length).toBe(22);
+  expect(keys.length).toBe(24); // 23 and `waits`: what the Task waits on is shown on its row in the list
 });
 
 test("openTask keeps the Task last shown while its detail is forgotten", () => {

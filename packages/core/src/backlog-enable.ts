@@ -15,7 +15,8 @@
 import type { BacklogCommentData, BacklogIssueData, BacklogProjectItemData, BacklogSource } from "@switchboard/protocol";
 import type { BacklogOperation, Db, NewBacklogOperation } from "./db.ts";
 import { inSendWindow } from "./db.ts";
-import { BacklogError, type BacklogCreatePayload, type BacklogWorkspace, type GhRunner } from "./backlog.ts";
+import { BacklogError, type BacklogWorkspace, type GhRunner } from "./backlog-gh.ts";
+import type { BacklogCreatePayload } from "./backlog-edit.ts";
 import { importGithubSnapshot } from "./backlog-sync.ts";
 
 /** A create of turning the sync on: the Issue's number here, its body and parent (sent once every Issue has GitHub's number). */

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { LoadKind, OpsLatency } from "@switchboard/protocol";
 import { fmtBytes, fmtSize, kindLabel, latencyRows, loadDays, reasonLabel, stopsTable, taskLoadLine, topGroups } from "./ops.ts";
 
-describe("ops stops table (#2093)", () => {
+describe("ops stops table", () => {
   test("newest day first, only the causes that occurred, totals, distinct tasks", () => {
     const t = stopsTable([
       { day: "2026-10-19", reason: "oomd", stops: 2, turns: 3, taskIds: ["a", "b"] },
@@ -26,7 +26,7 @@ describe("ops stops table (#2093)", () => {
   });
 });
 
-describe("ops load (#2086)", () => {
+describe("ops load", () => {
   const GB = 1024 ** 3;
   const hour = (h: string, maxMem: number, limitHits: number, maxSwap = 0, memMax: number | null = 4 * GB) => ({ hour: h, maxMem, memMax, maxSwap, limitHits, maxCpuPct: null, maxPressureFull: null, maxDockerMem: null });
 
@@ -63,7 +63,7 @@ describe("ops load (#2086)", () => {
   });
 });
 
-describe("API latency rows (#2104)", () => {
+describe("API latency rows", () => {
   const stat = (route: string, p90: number, bytesP50: number | null = 2048, method = "GET") => ({ method, route, count: 1234, p50: p90 / 2, p90, bytesP50 });
   test("the top 10 by the API's order, each with its own days, the newest first", () => {
     const l: OpsLatency = {

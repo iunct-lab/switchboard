@@ -1,4 +1,4 @@
-// test-reads: apps/web/src/policies.ts apps/web/src/priceForm.ts apps/web/src/login.ts apps/web/src/i18n.ts apps/web/src/i18n/settings.ts
+// test-reads: docs/design/local-container.md apps/web/src/policies.ts apps/web/src/priceForm.ts apps/web/src/login.ts apps/web/src/i18n.ts apps/web/src/i18n/settings.ts
 import { expect, test, describe } from "bun:test";
 import { describeRelease, releasePanel, rescueLink, runningParts, shortSha } from "./release.ts";
 
@@ -15,7 +15,7 @@ test("an automatic rollback names both versions; a promotion is the only good ne
 });
 
 test("promote sends the commit that was on the button, not whatever HEAD is by then", async () => {
-  const { api } = await import("./api.ts");
+  const { api } = await import("./api/index.ts");
   const real = globalThis.fetch;
   const sent: Array<{ url: string; body: unknown }> = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
@@ -30,7 +30,7 @@ test("promote sends the commit that was on the button, not whatever HEAD is by t
   }
 });
 
-test("the rescue page's link (#399): only under sb-rescue and only when the daemon names the page, as it is", () => {
+test("the rescue page's link: only under sb-rescue and only when the daemon names the page, as it is", () => {
   expect(rescueLink(null)).toBeNull();
   expect(rescueLink({ managed: false, rescuePage: "http://127.0.0.1:47841" })).toBeNull();
   expect(rescueLink({ managed: true })).toBeNull();
@@ -38,11 +38,36 @@ test("the rescue page's link (#399): only under sb-rescue and only when the daem
   expect(rescueLink({ managed: true, rescuePage: "http://127.0.0.1:47841" })).toBe("http://127.0.0.1:47841");
 });
 
+test("the stand-alone container: no link to a page the machine's browser cannot open — the commands that reach sb-rescue inside it are shown instead", async () => {
+  const { rescueCommands, RESCUE_IN_CONTAINER_COMMANDS, promotionLine } = await import("./release.ts");
+  const container = { managed: true, rescueInContainer: true };
+  expect(rescueLink(container)).toBeNull();
+  expect(rescueCommands(container)).toEqual(RESCUE_IN_CONTAINER_COMMANDS);
+  // a failed promotion's line names no page either
+  expect(promotionLine({ ...container, hold: { tag: "v0.30.0", failed: true, reason: "x", busyTasks: 0 } })!.link).toBeNull();
+  // where the page opens (the cloud host, sb-rescue's own address on the machine) nothing changes: the link, no commands
+  for (const page of ["https://d1.example.net/rescue/", "http://127.0.0.1:47841"]) {
+    expect(rescueLink({ managed: true, rescuePage: page })).toBe(page);
+    expect(rescueCommands({ managed: true, rescuePage: page })).toBeNull();
+  }
+  expect(rescueCommands({ managed: false, rescueInContainer: true })).toBeNull();
+  expect(rescueCommands(null)).toBeNull();
+  // the commands are the ones the container's document gives, on the container's own loopback
+  const doc = await Bun.file(new URL("../../../docs/design/local-container.md", import.meta.url)).text();
+  for (const c of RESCUE_IN_CONTAINER_COMMANDS) {
+    expect(doc).toContain(c);
+    expect(c).toContain("exec switchboard curl -s");
+    expect(c).toContain("http://127.0.0.1:47841/api/");
+  }
+});
+
 test("promotion: the backlog line says which tag waits for how many Tasks, or which failed tag the app stays behind, with the rescue page", async () => {
   const { promotionLine } = await import("./release.ts");
   const managed = { managed: true, rescuePage: "https://d1.example.net/rescue/" };
-  expect(promotionLine({ ...managed, hold: { tag: "v0.30.0", failed: false, reason: "1 件の Task が動いているので v0.30.0 の昇格を待つ", busyTasks: 2 } })).toEqual({ text: "v0.30.0 の昇格待ち: 動いている Task 2 件が終わると入る", link: null });
   expect(promotionLine({ ...managed, hold: { tag: "v0.30.0", failed: true, reason: "昇格に失敗した版のまま: v0.30.0", busyTasks: 0 } })).toEqual({ text: "昇格に失敗した版のまま: v0.30.0", link: "https://d1.example.net/rescue/" });
+  expect(promotionLine({ ...managed, hold: { tag: "v0.30.0", failed: false, reason: "1 件の Task が動いているので v0.30.0 の昇格を待つ", busyTasks: 2 } })).toEqual({ text: "v0.30.0 の昇格待ち: 動いている・待っている Task 2 件が終わると入る", link: null });
+  // held by something that is not a Task: the line does not say that Tasks ending will bring it in
+  expect(promotionLine({ ...managed, hold: { tag: "v0.30.0", failed: false, tasks: false, reason: "v0.30.0 はタグの CI が失敗しているので自動では昇格しない", busyTasks: 3 } })).toEqual({ text: "v0.30.0 はタグの CI が失敗しているので自動では昇格しない", link: null });
   expect(promotionLine({ ...managed, hold: null })).toBeNull();
   expect(promotionLine({ managed: false, hold: { tag: "v0.30.0", failed: false, reason: "", busyTasks: 1 } })).toBeNull();
   expect(promotionLine(null)).toBeNull();
@@ -98,13 +123,13 @@ test("panel: busy tasks, the hold, the last operation and a failure each get a l
     "HEAD: bbbbbbb feat: x — 1 コミット先",
     "未コミットの変更は含まれません",
     "直近: bbbbbbb の昇格を却下（今の版のまま） — boom",
-    "v0.3.0 の昇格待ち: 動いている Task 2 件が終わると入る",
+    "v0.3.0 の昇格待ち: 動いている・待っている Task 2 件が終わると入る",
     "失敗: disk full",
   ]);
   expect(p.lines.filter((l) => l.warn).map((l) => l.text)).toEqual(["直近: bbbbbbb の昇格を却下（今の版のまま） — boom", "失敗: disk full"]);
 });
 
-test("panel: asked is a line until what runs is that sha, and an error is a warning (#2479)", async () => {
+test("panel: asked is a line until what runs is that sha, and an error is a warning", async () => {
   const { releasePanel } = await import("./release.ts");
   const at = Date.UTC(2030, 0, 1, 0, 5); // 09:05 JST whatever the browser's time zone; another day than now, so with the date
   const asked = { tag: "v0.3.0", sha: "c".repeat(40), at, by: "backlog-next" as const };
@@ -127,7 +152,7 @@ test("newVersionLink shows only when HEAD is ahead of what runs under sb-rescue"
   expect(newVersionLink({ ...managed, ahead: 1 })).toBe("新しい版 bbbbbbb →");
 });
 
-test("in English (#2448): the release lines, a policy row, a price form error and the login's end read in English", () => {
+test("in English: the release lines, a policy row, a price form error and the login's end read in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
   const code = `globalThis.localStorage = { getItem: (k) => (k === "switchboard.lang" ? "en" : null) };
@@ -135,7 +160,7 @@ const { describeRelease, releasePanel, shortSha } = await import(${at("./release
 const { policyRow, policyState } = await import(${at("./policies.ts")});
 const { parsePriceForm, EMPTY_PRICE_FORM } = await import(${at("./priceForm.ts")});
 const { sessionLabel } = await import(${at("./login.ts")});
-const policy = { id: "p", op: "merge", target: "PR #1", when: [], scope: "pbi", pbi: 7, workspaceId: "w", expiresAt: null, revokedAt: null, uses: [] };
+const policy = { id: "p", op: "merge", target: "PR #1", when: [], scope: "pbi", pbi: 7, workspaceId: "w", expiresAt: null, revokedAt: null, useCount: 0, firstUsedAt: null, uses: [] };
 console.log(JSON.stringify([
   describeRelease({ ts: 0, action: "rejected", from: null, to: "b".repeat(40), ok: false, reason: "boom" }).text,
   shortSha(null),
@@ -161,7 +186,7 @@ console.log(JSON.stringify([
 describe("release review", () => {
   test("promote without waiting is bound to what was pressed for: a poll that moves the target or its check drops it", async () => {
     const { pendingForce, promoteTarget, releasePanel } = await import("./release.ts");
-    const status = (tag: string, review: Record<string, unknown>) => ({ ...managed, ahead: 0, latestRelease: { tag, sha: "a".repeat(40), ahead: 1 }, review: { tag, sha: "a".repeat(40), findings: [], reason: null, at: 0, ...review } }) as never;
+    const status = (tag: string, review: Record<string, unknown>) => ({ ...managed, ahead: 0, latestRelease: { tag, sha: "a".repeat(40), ahead: 1, newer: true }, review: { tag, sha: "a".repeat(40), findings: [], reason: null, at: 0, ...review } }) as never;
     const target = (r: never) => promoteTarget(r, releasePanel(r));
     const failed = status("v1", { state: "failed", reason: "使用上限", taskId: "t1" });
     const pressed = target(failed);
@@ -175,7 +200,7 @@ describe("release review", () => {
     expect(pendingForce(null, target(failed))).toBeNull();
   });
 
-  const latest = { tag: "v0.9.0", sha: "c".repeat(40), ahead: 41 };
+  const latest = { tag: "v0.9.0", sha: "c".repeat(40), ahead: 41, newer: true };
   const review = (over: Record<string, unknown>) => ({ tag: "v0.9.0", sha: "c".repeat(40), state: "running", findings: [], reason: null, taskId: "task_1", at: Date.UTC(2030, 0, 1, 0, 5), ...over });
   const panel = async (extra: Record<string, unknown>) => (await import("./release.ts")).releasePanel({ ...managed, ahead: 0, latestRelease: latest, ...extra } as never)!;
   const texts = (p: { lines: Array<{ text: string }> }) => p.lines.map((l) => l.text);
@@ -192,10 +217,20 @@ describe("release review", () => {
     expect(p.release).toEqual({ tag: "v0.9.0", state: "running", confirm: null, canReview: false, taskLink: "/task/task_1" });
   });
 
+  test("a check that could not be started says why: the hold's own reason is a line of the card, although no check has a state", async () => {
+    const reason = "v0.9.0 の差分の確認を始められない: 確認に使うランナーが使用上限";
+    const p = await panel({ review: null, hold: { tag: "v0.9.0", failed: false, tasks: false, reason, busyTasks: 0 } });
+    expect(p.release).toMatchObject({ state: null });
+    expect(p.lines).toContainEqual({ text: reason, warn: true });
+    // a hold that waits for Tasks is not said while nothing was checked (its wording would be wrong), as before
+    const waiting = await panel({ review: null, hold: { tag: "v0.9.0", failed: false, reason: "r", busyTasks: 2 } });
+    expect(texts(waiting).some((x) => x.includes("昇格待ち"))).toBe(false);
+  });
+
   test("ok: no concern with the time, the update is allowed without a dialog", async () => {
     const p = await panel({ review: review({ state: "ok" }), hold: { tag: "v0.9.0", failed: false, reason: "r", busyTasks: 2 } });
     expect(texts(p)).toContain("差分の確認: 懸念なし（1/1 09:05）");
-    expect(texts(p)).toContain("v0.9.0 の昇格待ち: 動いている Task 2 件が終わると入る"); // once cleared, waiting for the Tasks is the hold
+    expect(texts(p)).toContain("v0.9.0 の昇格待ち: 動いている・待っている Task 2 件が終わると入る"); // once cleared, waiting for the Tasks is the hold
     expect(p.canPromote).toBe(true);
     expect(p.release).toMatchObject({ state: "ok", confirm: null, canReview: false });
   });
@@ -223,6 +258,19 @@ describe("release review", () => {
     expect((await panel({ review: review({ state: "failed" }) })).release!.confirm).toContain("理由が読めません");
   });
 
+  test("a version installed from a Release (no git): the release line says it is newer and names no count of commits", async () => {
+    // what the daemon answers from an update source: HEAD stands for what runs, and the commits cannot be counted
+    const p = await panel({ head: managed.current, headSubject: undefined, ahead: 0, behind: 0, latestRelease: { tag: "v0.9.0", sha: "c".repeat(40), ahead: null, newer: true }, review: review({ state: "ok" }) });
+    expect(texts(p)).toContain("新しいリリース: v0.9.0（公開側）— 動いている版より新しい");
+    expect(texts(p).some((x) => x.includes("コミット先"))).toBe(false);
+    expect(p.release).toMatchObject({ tag: "v0.9.0", state: "ok" });
+    expect(p.canPromote).toBe(true);
+  });
+
+  test("no check yet: the update waits and the check can be started from the screen", async () => {
+    expect((await panel({ review: null })).release).toMatchObject({ state: null, canReview: true });
+  });
+
   test("no check yet, another tag's check, or a busy sb-rescue: the update waits", async () => {
     expect((await panel({ review: null })).canPromote).toBe(false);
     expect(texts(await panel({ review: null }))).toContain("差分の確認: まだ始まっていません");
@@ -242,7 +290,7 @@ describe("release review", () => {
 
   test("a release that is not newer than what runs (or cannot be counted) shows nothing", async () => {
     for (const ahead of [0, null]) {
-      const p = await panel({ latestRelease: { ...latest, ahead }, review: review({ state: "ok" }) });
+      const p = await panel({ latestRelease: { ...latest, ahead, newer: false }, review: review({ state: "ok" }) });
       expect(p.release).toBeNull();
       expect(texts(p).some((x) => x.includes("v0.9.0"))).toBe(false);
     }
@@ -269,7 +317,7 @@ describe("release review", () => {
     const { newVersionLink } = await import("./release.ts");
     expect(newVersionLink({ ...managed, ahead: 0, latestRelease: latest })).toBe("新しい版 v0.9.0 →");
     expect(newVersionLink({ managed: false, latestRelease: latest })).toBe("新しい版 v0.9.0 →");
-    expect(newVersionLink({ ...managed, ahead: 0, latestRelease: { ...latest, ahead: 0 } })).toBeNull();
+    expect(newVersionLink({ ...managed, ahead: 0, latestRelease: { ...latest, ahead: 0, newer: false } })).toBeNull();
     expect(newVersionLink({ ...managed, ahead: 1, latestRelease: null })).toBe("新しい版 bbbbbbb →");
   });
 });
@@ -286,4 +334,20 @@ test("a web-only promotion is told apart from the core: two lines only when the 
   expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: "promote", history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "Web UI と既定の設定: bbbbbbb"]);
   expect(releasePanel({ managed: true, running: a, current: a, ahead: 0, busy: null, history: [] })!.lines[0]!.text).toBe("動いている版: aaaaaaa");
   expect(describeRelease({ ...entry, action: "promote-web", ok: true, reason: "checked" })).toEqual({ text: "画面と既定の設定を再起動なしで昇格: bbbbbbb — checked", ok: true });
+});
+
+describe("drainBanner", () => {
+  test("while a promotion holds new turns back: the tag, the Tasks it waits for and the minutes left; asked: said so; past the limit: nothing was cut and who decides; none: no band", async () => {
+    const { drainBanner } = await import("./release.ts");
+    const since = Date.UTC(2030, 0, 1);
+    const d = { tag: "v1.2.0", since, limitMs: 60 * 60_000, tasks: 2, queued: 1 };
+    expect(drainBanner(d, since + 10 * 60_000 + 1)).toBe("v1.2.0 の昇格待ち: 動いている・待っている Task 2 件が終わると入ります。新しいターンと Task は昇格の後に始まります（止めておくのはあと 50 分まで）");
+    // past the limit before the daemon lifted it: never a negative time
+    expect(drainBanner(d, since + 61 * 60_000)).toContain("（止めておくのはあと 0 分まで）");
+    expect(drainBanner({ tag: "v1.2.0", since, asked: since + 5, queued: 0 }, since + 10)).toBe("v1.2.0 の昇格を頼みました。再起動まで新しいターンと Task は待ち、再起動の後に始まります");
+    // the hold ended at its limit: the band never says a Task is or will be cut
+    expect(drainBanner({ expired: { tag: "v1.2.0", at: since + 60 * 60_000, since, tasks: 1 } }, since + 75 * 60_000)).toBe("v1.2.0 の昇格が 75 分待っています（Task 1 件）。新しいターンを止めておくのはやめました。Task は切らず、全部止まったときに入ります。待たずに入れるなら「設定」→「動いている版」");
+    expect(drainBanner(null, since)).toBeNull();
+    expect(drainBanner(undefined, since)).toBeNull();
+  });
 });

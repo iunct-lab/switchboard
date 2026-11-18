@@ -5,11 +5,12 @@ import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, StopRecord } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { DISK_CHECK_MS, DISK_FREE_MIN_BYTES, diskFreeBytes, diskFullHit } from "./diskfull.ts";
-import { stopHeld } from "./backlog.ts";
+import { stopHeld } from "./backlog-pick.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { lastStopWasDaemon } from "./interrupted.ts";
 import { DISK_RESUME_PROMPT, MAX_CONSECUTIVE_STOPS, RateLimitResumer } from "./ratelimit.ts";
-import { TaskManager } from "./tasks.ts";
+import { TaskManager } from "./tasks/manager.ts";
+import { stopArmedQueues } from "./tasks/state.ts";
 
 const GIB = DISK_FREE_MIN_BYTES;
 const NOW = Date.parse("2026-10-30T10:00:00Z");
@@ -93,6 +94,8 @@ describe("a turn that says the disk is full", () => {
   afterEach(async () => {
     resumer.stop();
     await tasks.shutdown();
+    // a test that boots twice leaves its first manager
+    stopArmedQueues();
     db.close();
     rmSync(home, { recursive: true, force: true });
   });

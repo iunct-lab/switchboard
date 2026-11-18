@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-// 「プレビュー / テキスト」(#3677): how Markdown is shown — runner replies on the 会話 tab and .md artifacts. One value in
+// 「プレビュー / テキスト」: how Markdown is shown — runner replies on the 会話 tab and .md artifacts. One value in
 // this browser's localStorage, shared by every part of the page through one subscription (a reading preference of this
 // device, not a server setting). Another tab changing it arrives as a `storage` event.
 

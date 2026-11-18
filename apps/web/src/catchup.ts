@@ -1,8 +1,8 @@
 import type { EventEnvelope, Task } from "@switchboard/protocol";
-import type { TaskDetail } from "./api.ts";
+import type { TaskDetail } from "./api/tasks.ts";
 
 /**
- * A Task's events after a dropped WebSocket (#1137): what the page holds, what came live, and what GET /api/tasks/:id?after=
+ * A Task's events after a dropped WebSocket: what the page holds, what came live, and what GET /api/tasks/:id?after=
  * brought back can overlap and arrive in any order. One union by seq, ascending, so none shows twice or out of place.
  * Nothing new → the same array (React keeps the state as is).
  */
@@ -36,10 +36,10 @@ export function caughtUp(details: Record<string, TaskDetail>, id: string, fetche
 }
 
 /**
- * Reading Task details (#1137): `load` reads one whole (opening it); `connected` — on each WebSocket connect, the first
+ * Reading Task details: `load` reads one whole (opening it); `connected` — on each WebSocket connect, the first
  * too — reads each held one past its last seq. A whole read still on its way when the socket connected may have missed an
  * event sent before the subscription, so it is followed by a read past its own last seq. So is one during which `missed`
- * was told of a live event for that Task (#1142): the page drops events of a Task it does not hold yet, and nothing reads
+ * was told of a live event for that Task: the page drops events of a Task it does not hold yet, and nothing reads
  * the Task whole again later. Events that arrived live while a read was on its way are newer than its answer and stay.
  */
 export function taskReader(deps: {
@@ -52,7 +52,7 @@ export function taskReader(deps: {
   /** Tasks with a whole read on its way, and whether a live event of theirs was dropped meanwhile. */
   const loading = new Map<string, boolean>();
   /**
-   * The reads on their way per Task, each with the last Task a task.updated sent for it while that read was out (#2834).
+   * The reads on their way per Task, each with the last Task a task.updated sent for it while that read was out.
    * The socket sends each change after the read's snapshot, so that Task is the newer one; `updatedAt` cannot tell (a
    * title or a judgement keeps it). Each read has its own: a read started later does not take an earlier read's. And
    * a read answering after one started later has answered brings its events only: its Task is the older one.
@@ -117,7 +117,7 @@ export function taskReader(deps: {
         },
       );
     },
-    /** A task.updated came: a read of that Task on its way answers with it instead of its older snapshot (#2834). */
+    /** A task.updated came: a read of that Task on its way answers with it instead of its older snapshot. */
     updated(task: Task): void {
       for (const slot of reading.get(task.id) ?? []) slot.task = task;
     },

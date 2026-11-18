@@ -94,7 +94,7 @@ describe("check-models", () => {
     }
   });
 
-  test("listedModels (#1400): the list saved on the settings screen per runner; the bundled list for a runner never saved, and when there is no database, settings table or row", () => {
+  test("listedModels: the list saved on the settings screen per runner; the bundled list for a runner never saved, and when there is no database, settings table or row", () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
     const bundled = { claude: CLAUDE_MODELS.map((m) => m.value), codex: CODEX_MODELS.map((m) => m.value) };
     try {
@@ -137,7 +137,7 @@ describe("check-models", () => {
     }
   });
 
-  test("hiddenModels (#1401): the settings' 載せない list hides an id from unseen; a runner never saved, and no database or row, falls back to SHIPPED_HIDDEN_MODELS", async () => {
+  test("hiddenModels: the settings' 載せない list hides an id from unseen; a runner never saved, and no database or row, falls back to SHIPPED_HIDDEN_MODELS", async () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
     try {
       const dbPath = join(dir, "switchboard.db");
@@ -159,7 +159,7 @@ describe("check-models", () => {
     }
   });
 
-  test("settingsPrices (#1402): a price saved on the settings screen prices a listed id, as the daemon lays it over pricing.json; a database without one still reports it", async () => {
+  test("settingsPrices: a price saved on the settings screen prices a listed id, as the daemon lays it over pricing.json; a database without one still reports it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "switchboard.check-models."));
     try {
       const dbPath = join(dir, "switchboard.db");
@@ -243,11 +243,11 @@ describe("check-models", () => {
     const req = requestFor(drift([{ runner: "claude", kind: "outdated", ids: ["2.1.289"] }, { runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]), SOURCE)!;
     expect(req.title).toBe("モデル一覧のズレ: claude unseen claude-opus-6 / claude outdated 2.1.289");
     expect(req.body).toContain("`outdated`: CLI を更新する");
-    expect(req.body).toContain("`unseen`: 設定画面の「モデルの選択肢」で「CLI の表を読む」を押し"); // the fix is on the screen, no REVIEWED (#1401)
+    expect(req.body).toContain("`unseen`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で「CLI の表を読む」を押し"); // the fix is on the screen, no REVIEWED
     expect(req.body).not.toContain("REVIEWED");
   });
 
-  test("the 出典 says 誰の言葉: 定期の検査 (#1818)", () => {
+  test("the 出典 says 誰の言葉: 定期の検査", () => {
     expect(requestFor(drift([{ runner: "codex", kind: "unseen", ids: ["gpt-7"] }]), SOURCE)!.body).toContain("## 出典\n- 誰の言葉: 定期の検査\n");
   });
 

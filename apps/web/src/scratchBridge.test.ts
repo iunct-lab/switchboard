@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { apiRaw } from "./api.ts";
+import { apiRaw } from "./api/request.ts";
 import { BRIDGE_MAX, BRIDGE_REFUSED, BRIDGE_WINDOW_MS, BridgeLimiter, type BridgePending, type BridgeRequest, type BridgeResult, createBridge, DECLINED, parseBridgeRequest, parseNavigateRequest } from "./scratchBridge.ts";
 
 const get = (path: string, extra: Record<string, unknown> = {}) => ({ type: "switchboard-api", id: "r1", method: "GET", path, ...extra });
@@ -10,7 +10,7 @@ describe("parseBridgeRequest", () => {
     expect(parseBridgeRequest(get("/api/tasks?archived=1")).ok).toBe(true);
   });
 
-  test("a write passes with confirm, carrying its body (#3681)", () => {
+  test("a write passes with confirm, carrying its body", () => {
     for (const method of ["POST", "PATCH", "DELETE", "PUT", "post"])
       expect(parseBridgeRequest(get("/api/backlog/12/start", { method, body: { a: 1 } }))).toEqual({
         ok: true,
@@ -26,7 +26,7 @@ describe("parseBridgeRequest", () => {
     for (const method of ["OPTIONS", "HEAD", "TRACE", "CONNECT", ""]) expect(parseBridgeRequest(get("/api/tasks", { method }))).toMatchObject({ ok: false, status: 405 });
   });
 
-  test("a write to a sign-in, an approval, a setting or a key is refused with 403 without asking; its read is not (#3681)", () => {
+  test("a write to a sign-in, an approval, a setting or a key is refused with 403 without asking; its read is not", () => {
     const refused = [
       "/api/runners/claude/login",
       "/api/runners/x/login/code",
@@ -68,12 +68,12 @@ describe("parseBridgeRequest", () => {
     expect(parseBridgeRequest(get("/api/workspaces/%E6%97%A5")).ok).toBe(true);
   });
 
-  test("the checks are on the path part; the query may hold // and .., but not refresh (#3726)", () => {
+  test("the checks are on the path part; the query may hold // and .., but not refresh", () => {
     expect(parseBridgeRequest(get("/api/artifacts?q=https://x..y")).ok).toBe(true);
     for (const path of ["/api/backlog?refresh=1", "/api/flow?x=1&refresh=0", "/api/backlog?refresh"]) expect(parseBridgeRequest(get(path))).toMatchObject({ ok: false, status: 400 });
   });
 
-  test("a body JSON cannot write (a cycle, a BigInt) is refused with 400 before any confirm (#3880)", () => {
+  test("a body JSON cannot write (a cycle, a BigInt) is refused with 400 before any confirm", () => {
     const cycle: Record<string, unknown> = {};
     cycle.self = cycle;
     for (const body of [cycle, 1n, { n: 2n }]) expect(parseBridgeRequest(get("/api/tasks/x/abort", { method: "POST", body }))).toMatchObject({ ok: false, status: 400 });
@@ -170,7 +170,7 @@ describe("createBridge", () => {
     expect(s.sent.map((x) => x.result.status)).toEqual([405, 400, 403]);
   });
 
-  test("a GET is read without a confirm (#3681)", async () => {
+  test("a GET is read without a confirm", async () => {
     let asked = 0;
     const s = setup(undefined, async () => (asked++, true));
     await s.bridge({ source: s.frame, data: get("/api/tasks") });
@@ -178,7 +178,7 @@ describe("createBridge", () => {
     expect(s.pending).toEqual([]);
   });
 
-  test("a write waits for the confirm: pending first, then the call with its method and body once 実行する (#3681)", async () => {
+  test("a write waits for the confirm: pending first, then the call with its method and body once 実行する", async () => {
     let yes!: (v: boolean) => void;
     const asked: BridgeRequest[] = [];
     const s = setup(async () => ({ status: 200, body: { started: true } }), (req) => (asked.push(req), new Promise((r) => (yes = r))));
@@ -193,7 +193,7 @@ describe("createBridge", () => {
     expect(s.sent.map((x) => x.result)).toEqual([{ type: "switchboard-api-result", id: "r1", ok: true, status: 200, body: { started: true } }]);
   });
 
-  test("やめる (or a failing confirm) calls nothing and answers 利用者が断った (#3681)", async () => {
+  test("やめる (or a failing confirm) calls nothing and answers 利用者が断った", async () => {
     for (const confirm of [async () => false, async () => Promise.reject(new Error("gone"))]) {
       const s = setup(undefined, confirm);
       await s.bridge({ source: s.frame, data: get("/api/tasks/x/abort", { method: "POST" }) });
@@ -202,7 +202,7 @@ describe("createBridge", () => {
     }
   });
 
-  test("a second write waits until the first confirm is closed: one dialog at a time (#3681)", async () => {
+  test("a second write waits until the first confirm is closed: one dialog at a time", async () => {
     const answers: ((v: boolean) => void)[] = [];
     const s = setup(undefined, () => new Promise((r) => answers.push(r)));
     const first = s.bridge({ source: s.frame, data: get("/api/tasks/a/abort", { method: "POST", id: "w1" }) });
@@ -258,7 +258,7 @@ describe("createBridge", () => {
 });
 
 describe("apiRaw", () => {
-  test("the status and JSON of a read, a failure's status, and a 2xx that is not JSON as status 0 (#3726)", async () => {
+  test("the status and JSON of a read, a failure's status, and a 2xx that is not JSON as status 0", async () => {
     const g = globalThis as Record<string, unknown>;
     const saved = { fetch: g.fetch, localStorage: g.localStorage, location: g.location };
     g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };

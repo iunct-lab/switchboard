@@ -121,7 +121,7 @@ test("scanTmp lists the biggest first and marks only old directories of a known 
   expect(r.owned).toBe(true);
 });
 
-test("where /tmp is not Switchboard's alone, only Switchboard's own kinds go: another app's mktemp directory or cache stays (#2058)", () => {
+test("where /tmp is not Switchboard's alone, only Switchboard's own kinds go: another app's mktemp directory or cache stays", () => {
   const r = scanTmp(root, NOT_OWNED);
   expect(r.owned).toBe(false);
   expect(r.cleanable.names.sort()).toEqual(OWN_REMOVABLE);
@@ -132,7 +132,7 @@ test("where /tmp is not Switchboard's alone, only Switchboard's own kinds go: an
   expect(readdirSync(root)).toEqual(expect.arrayContaining(REMOVABLE.filter((n) => !OWN_REMOVABLE.includes(n))));
 });
 
-test("without the running processes (no /proc, or one that does not list this process) nothing goes: whether it is in use is unknown (#2058)", () => {
+test("without the running processes (no /proc, or one that does not list this process) nothing goes: whether it is in use is unknown", () => {
   const empty = mkdtempSync(join(tmpdir(), "sb-tmp-noproc-"));
   try {
     expect(inUse(root, join(empty, "missing"))).toBeNull();
@@ -356,7 +356,7 @@ test.skipIf(process.platform !== "linux")("a directory with a bound Unix socket 
 /** The device number the root itself has; a path `other` names answers one more, as another mount would. */
 const MOUNTED = (other: (path: string) => boolean) => (path: string, dev: number) => (other(path) ? dev + 1 : dev);
 
-test("a mount point right under /tmp stays in every mode, and cleanTmp skips it and leaves the directory (#3741)", () => {
+test("a mount point right under /tmp stays in every mode, and cleanTmp skips it and leaves the directory", () => {
   const judge = { ...OWNED, dev: MOUNTED((p) => p === join(root, "foo-abcdef")) };
   for (const mode of [{ kind: "auto" }, { kind: "manual", staleMs: 60_000 }, { kind: "force" }] as const) {
     const r = scanTmp(root, judge, Date.now(), mode);
@@ -369,7 +369,7 @@ test("a mount point right under /tmp stays in every mode, and cleanTmp skips it 
   }
 });
 
-test("a mount point inside an old directory keeps the whole directory, and nothing in it is entered or removed; the other old ones still go (#3741)", () => {
+test("a mount point inside an old directory keeps the whole directory, and nothing in it is entered or removed; the other old ones still go", () => {
   const judge = { ...OWNED, dev: MOUNTED((p) => p === join(root, "switchboard.review12.abcDEF", "sub")) };
   const r = scanTmp(root, judge);
   expect(r.entries.find((e) => e.name === "switchboard.review12.abcDEF")!.keep).toBe("mount");
@@ -379,7 +379,7 @@ test("a mount point inside an old directory keeps the whole directory, and nothi
   expect(existsSync(join(root, "switchboard.review12.abcDEF", "sub", "f"))).toBe(true);
 });
 
-test("a mount point right under /tmp is not read into: nothing below it is looked at (#3741)", () => {
+test("a mount point right under /tmp is not read into: nothing below it is looked at", () => {
   const seen: string[] = [];
   const top = join(root, "foo-abcdef");
   const judge = { ...OWNED, dev: (p: string, d: number) => (seen.push(p), p === top ? d + 1 : d) };
@@ -390,7 +390,7 @@ test("a mount point right under /tmp is not read into: nothing below it is looke
   expect(seen.filter((p) => p.startsWith(top + "/"))).toEqual([]);
 });
 
-test("a mount point a folder without permissions hid is neither entered nor changed by the permission repair, and keeps the directory (#3741)", () => {
+test("a mount point a folder without permissions hid is neither entered nor changed by the permission repair, and keeps the directory", () => {
   const entry = join(root, "x.recheck3.a1b2c3");
   const mount = join(entry, "locked", "m");
   mkdirSync(join(mount, "inner"), { recursive: true });

@@ -22,7 +22,7 @@ export function allocationOf(
   spend: Spend[],
   flowIssues: (workspaceId: string) => Set<number>,
   flowShareLimit: number,
-): Omit<BacklogAllocation, "windowStart"> {
+): Omit<BacklogAllocation, "windowStart" | "flowLimit"> {
   const total = spend.reduce((a, r) => a + r.costUsd + r.billedUsd, 0);
   const part = (usd: number) => (total > 0 ? usd / total : 0);
   const flows = new Map<string, Set<number>>();

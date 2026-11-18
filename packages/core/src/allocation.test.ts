@@ -40,7 +40,7 @@ test("allocationOf: flow actual is the part spent on flow-improvement Issues of 
     { workspaceId: "a", issue: 8, costUsd: 60, billedUsd: 0 },
     { workspaceId: "b", issue: 7, costUsd: 0, billedUsd: 20 },
   ];
-  // #7 is flow in a only; in b the same number is an ordinary Issue
+  // `#7` is flow in a only; in b the same number is an ordinary Issue
   const r = allocationOf(three, spend, (id) => (id === "a" ? new Set([7]) : new Set()), 0.25);
   expect(r.flow.actual).toBeCloseTo(0.2);
 });

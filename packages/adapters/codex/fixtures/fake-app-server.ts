@@ -12,9 +12,12 @@
  * its turn/started, answer, a commandExecution approval request, usage, turn/completed; then the main turn finishes.
  * A prompt starting with "question:" asks two questions (item/tool/requestUserInput) and, once answered, ends the turn
  * with "Waiting for your choices".
+ * A prompt starting with "limits:" reports the usage limits (account/rateLimits/updated) and ends the turn.
+ * `account/read` answers with the JSON in the file FAKE_CODEX_ACCOUNT_FILE names, read at each request (a login that
+ * changes under a running app-server); without the variable the method is unknown, as on an app-server without it.
  * Prompts containing "crash" make the process exit 3 without a result; "sleep" keeps the turn open until interrupted.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 const wireLog = process.argv.find((arg) => arg.startsWith("test_wire_log="))?.slice("test_wire_log=".length);
 if (process.argv.includes("features") && process.argv.includes("list")) {
   console.log(`memories  stable  ${process.env.FAKE_CODEX_MEMORIES ?? "false"}`);
@@ -66,6 +69,12 @@ async function runTurn(threadId: string, text: string) {
       enc({ method: "item/tool/requestUserInput", id: reqId, params: { threadId, turnId: id, itemId: "call-q", questions: [{ id: "area", header: "Area", question: "Which part?", isOther: true, isSecret: false, options: [option("web"), option("core")] }, { id: "note", header: "Note", question: "Anything else?", isOther: false, isSecret: false, options: null }], isBlocking: false, autoResolutionMs: null } });
     });
     enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "agentMessage", id: `msg-${id}`, text: "Waiting for your choices", phase: "final_answer" } } });
+    active = null;
+    enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
+    return;
+  }
+  if (text.startsWith("limits:")) {
+    enc({ method: "account/rateLimits/updated", params: { rateLimits: { limitId: "codex", limitName: null, primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1790000000 }, secondary: { usedPercent: 34, windowDurationMins: 10080, resetsAt: 1790500000 }, credits: null, planType: "pro" } } });
     active = null;
     enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
     return;
@@ -123,6 +132,10 @@ for await (const chunk of Bun.stdin.stream()) {
         enc({ id: m.id, result: { userAgent: "fake" } });
         break;
       case "initialized":
+        break;
+      case "account/read":
+        if (process.env.FAKE_CODEX_ACCOUNT_FILE) enc({ id: m.id, result: JSON.parse(readFileSync(process.env.FAKE_CODEX_ACCOUNT_FILE, "utf8")) });
+        else enc({ id: m.id, error: { code: -32601, message: `unknown ${m.method}` } });
         break;
       case "thread/start":
         enc({ id: m.id, result: { thread: thread("thread-new", m.params.cwd), model: m.params.model ?? "gpt-6-luna", modelProvider: "openai" } });

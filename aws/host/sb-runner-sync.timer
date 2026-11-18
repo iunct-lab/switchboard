@@ -1,5 +1,5 @@
 [Unit]
-Description=The runners' records to S3 every hour (#401, #1443)
+Description=The runners' records to S3 every hour
 
 [Timer]
 OnCalendar=hourly

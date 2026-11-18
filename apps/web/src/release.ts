@@ -2,7 +2,7 @@ import { t } from "./i18n.ts";
 import { settings } from "./i18n/settings.ts";
 import { jstClock } from "./time.ts";
 
-/** Releases (#178): what `GET /api/daemon/release` returns under sb-rescue, and one line of its history in words. */
+/** Releases: what `GET /api/daemon/release` returns under sb-rescue, and one line of its history in words. */
 export interface ReleaseHistoryEntry {
   ts: number;
   action: "install" | "promote" | "rejected" | "auto-rollback" | "rollback" | "restart" | "restore-db" | "rebuild" | "promote-web";
@@ -33,17 +33,46 @@ export interface ReleaseStatus {
   /** An operation that failed outside the history (the snapshot could not be taken, …). */
   lastError?: string | null;
   history?: ReleaseHistoryEntry[];
-  /** The rescue page a person opens (#399): the host's `/rescue/` on the cloud, sb-rescue's own address on a Mac. */
+  /** The rescue page a person opens: the host's `/rescue/` on the cloud, sb-rescue's own address on a Mac. */
   rescuePage?: string;
-  /** Why the newest tag is not promoted yet (#626): Tasks still running (`failed: false`), or it is a tag that failed. */
-  hold?: { tag: string; failed: boolean; reason: string; busyTasks: number } | null;
-  /** The last promotion the daemon asked for (#2479), or why it could not (`error`). Memory only: gone after a restart, when `history` has the result. */
+  /** sb-rescue answers inside the container only: there is no page to link, and `rescueCommands` are what reaches it. */
+  rescueInContainer?: boolean;
+  /** Why the newest tag is not promoted yet: it is a tag that failed (`failed`), Tasks a restart would cut (`tasks` not false; `busyTasks` of them now), or something else that `reason` says (`tasks: false`: its diff's check, the tag CI, sb-rescue busy). */
+  hold?: { tag: string; failed: boolean; reason: string; busyTasks: number; tasks?: boolean } | null;
+  /** The wait before a promotion with a restart, as in the health (`PromotionDrain`). */
+  drain?: PromotionDrain;
+  /** The last promotion the daemon asked for, or why it could not (`error`). Memory only: gone after a restart, when `history` has the result. */
   asked?: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null;
-  /** The newest release of a public copy's clone (#4569), `ahead` counted from what runs (from HEAD outside sb-rescue). Null on a development origin. */
-  latestRelease?: { tag: string; sha: string; ahead: number | null } | null;
-  /** The check of that release's diff (#4569), under sb-rescue only. */
+  /**
+   * The newest release of a public copy's clone. `newer`: it is newer than what runs. `ahead`: the commits counted
+   * from what runs (from HEAD outside sb-rescue), null when they cannot be counted (a version installed from a Release has
+   * no git). Null on a development origin.
+   */
+  latestRelease?: { tag: string; sha: string; ahead: number | null; newer: boolean } | null;
+  /** The check of that release's diff, under sb-rescue only. */
   review?: ReleaseReview | null;
 }
+/**
+ * The wait before a promotion with a restart (`promotionDrain` of the health). While `tag` waits for the `tasks` Tasks a
+ * restart would cut (running, stopped on an approval or a question, with background jobs), new turns and Tasks queue
+ * (`queued` of them so far) until `since + limitMs`. `asked` = the restart was asked for at that time, and nothing starts
+ * until it comes. `expired` = the wait went past its limit at `at`: new turns start again, no Task was cut, and the
+ * promotion still waits for the `tasks` Tasks. Null = no wait.
+ */
+export type PromotionDrain =
+  | { tag: string; since: number; limitMs: number; tasks: number; queued: number }
+  | { tag: string; since: number; asked: number; queued: number }
+  | { expired: { tag: string; at: number; since: number; tasks: number } }
+  | null;
+
+/** The one-line band of Home and the Task screen while a promotion holds new turns back, or after that hold ended at its limit; null = no band. */
+export function drainBanner(d: PromotionDrain | undefined, now: number): string | null {
+  if (!d) return null;
+  if ("expired" in d) return t(settings.drainExpired, { tag: d.expired.tag, n: d.expired.tasks, minutes: Math.max(0, Math.floor((now - d.expired.since) / 60_000)) });
+  if ("asked" in d) return t(settings.drainAsked, { tag: d.tag });
+  return t(settings.drainWaiting, { tag: d.tag, n: d.tasks, minutes: Math.max(0, Math.ceil((d.since + d.limitMs - now) / 60_000)) });
+}
+
 /** What `GET /api/daemon/release` says of the check of the newest release's diff (`ReleaseReview` in core). */
 export interface ReleaseReview {
   tag: string;
@@ -55,9 +84,20 @@ export interface ReleaseReview {
   at: number;
 }
 
-/** The link at the top of every screen (#399): only under sb-rescue, and only when the daemon names the page. */
+/** The link at the top of every screen: only under sb-rescue, and only when the daemon names the page. */
 export function rescueLink(r: ReleaseStatus | null): string | null {
   return r?.managed && r.rescuePage ? r.rescuePage : null;
+}
+
+/** What reaches sb-rescue of the stand-alone container from a terminal on the machine: its status, and the roll back (docs/design/local-container.md, "What can reach the screen and the API"). */
+export const RESCUE_IN_CONTAINER_COMMANDS = [
+  "docker compose -f container/compose.yaml exec switchboard curl -s http://127.0.0.1:47841/api/status",
+  "docker compose -f container/compose.yaml exec switchboard curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:47841/api/rollback",
+] as const;
+
+/** The commands shown in place of the rescue page's link: under sb-rescue, where the daemon says the page does not open outside the container. */
+export function rescueCommands(r: ReleaseStatus | null): readonly string[] | null {
+  return r?.managed && r.rescueInContainer && !r.rescuePage ? RESCUE_IN_CONTAINER_COMMANDS : null;
 }
 
 export const shortSha = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : t(settings.shaNone));
@@ -83,20 +123,23 @@ export function runningParts(r: ReleaseStatus): { core: string; web: string } | 
   return r.running && r.current && r.running !== r.current ? { core: shortSha(r.running), web: shortSha(r.current) } : null;
 }
 
-/** The backlog screen's line (#626): the newest tag waiting for the running Tasks, or the failed tag the app stays behind. */
+/** The backlog screen's line: the newest tag waiting for the running Tasks, or the failed tag the app stays behind. */
 export function promotionLine(r: ReleaseStatus | null): { text: string; link: string | null } | null {
   const hold = r?.managed ? r.hold : null;
   if (!hold) return null;
   if (hold.failed) return { text: t(settings.holdFailed, { tag: hold.tag }), link: rescueLink(r) };
+  // held by something that is not a Task: the daemon's own words say what
+  if (hold.tasks === false) return { text: hold.reason, link: null };
   return { text: t(settings.holdWaiting, { tag: hold.tag, n: hold.busyTasks }), link: null };
 }
 
-/** A release of a public copy's clone waiting to be applied (#4569): the button's tag, the dialog before a version that was not cleared, and whether it can be checked again. */
+/** A release of a public copy's clone waiting to be applied: the button's tag, the dialog before a version that was not cleared, and whether it can be checked again. */
 export interface ReleaseTarget {
   tag: string;
   state: ReleaseReview["state"] | null;
   /** The text of the dialog before promoting a version with a concern or one that could not be checked; null when the check cleared it. */
   confirm: string | null;
+  /** The check can be started from the screen: not checked yet (the automatic check is off, or has not come), a concern, or a check that failed. */
   canReview: boolean;
   /** The check's Task, to read the whole reply. */
   taskLink: string | null;
@@ -110,13 +153,13 @@ export interface ReleasePanelView {
   release: ReleaseTarget | null;
 }
 
-/** The newest release when it is newer than what runs (#4569). Not "can be counted" is not "newer": no line, no button. */
-const newerRelease = (r: ReleaseStatus) => (r.latestRelease && (r.latestRelease.ahead ?? 0) > 0 ? r.latestRelease : null);
+/** The newest release when the daemon says it is newer than what runs; otherwise no line, no button. */
+const newerRelease = (r: ReleaseStatus) => (r.latestRelease?.newer ? r.latestRelease : null);
 
-/** The release and the check of its diff in words (#4569). The findings are listed in full: a concern is a safety matter, not folded. */
+/** The release and the check of its diff in words. The findings are listed in full: a concern is a safety matter, not folded. */
 function releaseLines(r: ReleaseStatus, latest: NonNullable<ReleaseStatus["latestRelease"]>): { lines: ReleasePanelView["lines"]; target: ReleaseTarget } {
   const review = r.review && r.review.tag === latest.tag ? r.review : null;
-  const lines: ReleasePanelView["lines"] = [{ text: t(settings.latestRelease, { tag: latest.tag, n: latest.ahead ?? 0 }), warn: false }];
+  const lines: ReleasePanelView["lines"] = [{ text: latest.ahead == null ? t(settings.latestReleaseNewer, { tag: latest.tag }) : t(settings.latestRelease, { tag: latest.tag, n: latest.ahead }), warn: false }];
   const time = review ? jstClock(review.at) : "";
   let confirm: string | null = null;
   if (!review) lines.push({ text: t(settings.reviewNone), warn: false });
@@ -132,10 +175,10 @@ function releaseLines(r: ReleaseStatus, latest: NonNullable<ReleaseStatus["lates
     confirm = t(settings.confirmFailed, { tag: latest.tag, reason });
   }
   const state = review?.state ?? null;
-  return { lines, target: { tag: latest.tag, state, confirm, canReview: state === "concern" || state === "failed", taskLink: review ? `/task/${encodeURIComponent(review.taskId)}` : null } };
+  return { lines, target: { tag: latest.tag, state, confirm, canReview: state === null || state === "concern" || state === "failed", taskLink: review ? `/task/${encodeURIComponent(review.taskId)}` : null } };
 }
 
-/** The "動いている版" section (#1660), shared by the settings screen and a meta-workspace Task: what runs, what HEAD is, and whether promoting is possible. */
+/** The "動いている版" section, shared by the settings screen and a meta-workspace Task: what runs, what HEAD is, and whether promoting is possible. */
 export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
   if (!r) return null;
   if (!r.managed) {
@@ -169,7 +212,10 @@ export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
   }
   // the check's own lines say why a release waits (running, a concern, not checked); the hold line is for the Tasks it waits for, or a version that failed to start
   const hold = promotionLine(r);
-  if (hold && !(shown && shown.target.state !== "ok")) lines.push({ text: hold.text, warn: !!r.hold?.failed });
+  // — and for a check that could not be started at all (no state, and a hold that is not about Tasks): its reason is
+  // the only line that says why nothing happens
+  const notStarted = !!shown && shown.target.state === null && r.hold?.tasks === false;
+  if (hold && (!(shown && shown.target.state !== "ok") || notStarted)) lines.push({ text: hold.text, warn: !!r.hold?.failed || notStarted });
   if (r.lastError) lines.push({ text: t(settings.failed, { error: r.lastError }), warn: true });
   // a public copy's clone does not move HEAD: what is applied is the tag, once the check has not stopped it
   const canPromote = shown ? !r.busy && shown.target.state !== "running" && shown.target.state !== null : !r.busy && (r.ahead ?? 0) > 0;
@@ -189,7 +235,7 @@ export function promoteTarget(r: ReleaseStatus | null, view: ReleasePanelView | 
 }
 
 /**
- * The "promote without waiting" step is bound to what the person pressed for (#4569): when a poll has moved the target
+ * The "promote without waiting" step is bound to what the person pressed for: when a poll has moved the target
  * or its check since (a newer tag, a new HEAD, a re-check with other findings), that step is gone and the button has to
  * be pressed again (with its own dialog).
  */
@@ -197,10 +243,10 @@ export function pendingForce(confirming: PromoteTarget | null, current: PromoteT
   return confirming && current && confirming.key === current.key ? confirming.commit : null;
 }
 
-/** The mark at the top of every screen (#1660): only when HEAD (or a public copy's newest tag) is newer than what runs. */
+/** The mark at the top of every screen: only when HEAD (or a public copy's newest tag) is newer than what runs. */
 export function newVersionLink(r: ReleaseStatus | null): string | null {
   if (!r) return null;
-  const latest = newerRelease(r); // a public copy's clone (#4569): HEAD does not move, the tag does; the mark opens 動いている版 even outside sb-rescue, where it says how to update
+  const latest = newerRelease(r); // a public copy's clone: HEAD does not move, the tag does; the mark opens 動いている版 even outside sb-rescue, where it says how to update
   if (latest) return t(settings.newVersion, { sha: latest.tag });
   return r.managed && (r.ahead ?? 0) > 0 ? t(settings.newVersion, { sha: shortSha(r.head) }) : null;
 }

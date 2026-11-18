@@ -6,7 +6,7 @@ import { panels as m } from "./i18n/panels.ts";
 /** The stages in the order of the way, request to close. */
 const STAGES: readonly FlowStage[] = ["request", "split", "wait", "build", "review-wait", "review", "close"];
 
-/** The stages of a PBI's way from the request to its close (#650), as the 流れ section names them. */
+/** The stages of a PBI's way from the request to its close, as the 流れ section names them. */
 export const STAGE_LABEL: Record<FlowStage, string> = {
   request: t(m.stageRequest),
   split: t(m.stageSplit),

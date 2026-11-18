@@ -33,15 +33,14 @@ Terminal-based agents are flexible, but the person ends up doing the routing (Cl
 - A model select per task and `思考の深さ` per task, both changeable on a running task (`POST /api/tasks/:id/model`, `POST /api/tasks/:id/effort`).
 - Shadow runs (when DAK is enabled): the same request mirrored to DAK as a linked task.
 
-**Knowledge and the inbox**
+**Knowledge**
 
 - Knowledge, a Markdown folder ([`packages/core/src/knowledge.ts`](packages/core/src/knowledge.ts)).
 - The Materializer writes user-level `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.claude/commands/`, never a repository ([`packages/core/src/materializer.ts`](packages/core/src/materializer.ts)).
-- Inbox → Task ([`packages/core/src/inbox.ts`](packages/core/src/inbox.ts)).
 
 **Watching and steering agents**
 
-- The Task screen: transcript, `差分` tab, `ターミナル` tab (`bun-pty` in the daemon), approvals and permission modes ([`docs/design/permission-modes.md`](docs/design/permission-modes.md)), attachments, the Web UI's CSP, and a `成果物` tab for registered reports ([`docs/design/artifacts.md`](docs/design/artifacts.md)).
+- The Task screen: transcript, `差分` tab, `ターミナル` tab (`bun-pty` in the daemon; the Rail opens the same terminal for a registered Workspace without a Task, and on a phone it has a row of the keys the on-screen keyboard lacks), approvals and permission modes ([`docs/design/permission-modes.md`](docs/design/permission-modes.md)), attachments, the Web UI's CSP, and a `成果物` tab for registered reports ([`docs/design/artifacts.md`](docs/design/artifacts.md)).
 - Workspace MCP with staged writes ([`packages/core/src/mcp.ts`](packages/core/src/mcp.ts), [`docs/design/workspace-mcp.md`](docs/design/workspace-mcp.md)).
 - `要対応` and a background turn judge; per-task Evals and the Insights screen (evaluations and the reports across Tasks).
 - Terminal Claude Code sessions imported as tasks.
@@ -52,7 +51,7 @@ Terminal-based agents are flexible, but the person ends up doing the routing (Cl
 
 - Ledger: reported usage into sqlite, priced from a data table (`pricing.json`, dated prices, 1-hour cache writes).
 - Task budgets that hold a task over its budget.
-- The subscriptions' usage windows (`quota` table, [`packages/core/src/db.ts`](packages/core/src/db.ts)) and per-runner auto-resume after a usage-limit stop.
+- The subscriptions' usage windows (`quota` table, [`packages/core/src/db/schema.ts`](packages/core/src/db/schema.ts)) and per-runner auto-resume after a usage-limit stop.
 
 **Changing the tool from inside it**
 
@@ -114,7 +113,7 @@ Releases with a rescue page: run the daemon from an immutable release under `sb-
 
 `設定画面`: the `設定` tab keeps the saved defaults in one place (approval mode, auto-resume, shadow, LLM suggestions, the turn judge, the backlog sweep), `モデルの選択肢` (the models each runner offers on Home, the Brief and the defaults: add, remove and reorder them without a PR or a restart; a runner never saved offers the bundled list, and a runner on Amazon Bedrock its Bedrock list) and `自動で始まる` `Task の既定`: the runner and model the backlog stage buttons and the feedback button start their Tasks on, and `上限のときの代わり`: an order of other runners (and the usage at which to switch, `fallbackAt`) that those Tasks and scheduled ones start on, on their CLI default model, while the decided runner is at its usage limit — the Task's transcript says so; empty switches nothing; `種類ごと` (per kind: `すぐ直す`, `要望として登録`, `PBI にする`, `Task に分解`, `実装`, `状況確認`, `閉じる`, `新しいリポジトリ`, `取り込み`, `立ち上げ`) a line reads `共通` until you open it with `変える` and change its runner, model, effort, approval mode (`<kind> の承認モード`, the same choices as `承認モードの既定`, so a mode that skips confirmations is not offered), budget (`<kind> の予算`, USD; empty falls back to the schedule's budget for `バックログを進める`, then to the default budget `quotaAndResume.defaultBudgetUsd`, shown next to the box) or mirror runner (`<kind> の並走`: follow the common setting, off, or a detected runner other than the kind's own) (opening alone saves nothing; a kind that changes only these keeps following the common runner, shown as `共通` in its runner box); that kind's own choice then wins (a kind's budget before the schedule's, and `バックログを進める` never mirrors), and a kind left on `共通` starts on the common one (`バックログを進める`: on the schedule's); a schedule has its own model, and a new schedule's runner / model start from that default; three more cards hold values you may want to tune while running, each with its default shown and `既定に戻す` per card — `使用量と自動再開`: the usage (of the runner a stage Task starts on) at which `バックログを進める` holds back to one stage Task overall, the automatic resume's first wait when no reset time is known and how long that wait may grow, how many usage-limit stops in a row it resumes after, the text it sends (after the fixed `[Switchboard 自動再開]` head), how many daemon stops in a row a Task is continued after, and the record count under which the Ledger's runner comparison calls a row too thin; `判定と自動選択`: the runner / model asked when the judge's runner cannot answer (both the turn judge and the rubric judge), the turn judge's timeout, and how long `Workspace の自動選択` may take before it asks you to pick; `新規作成の既定`: the runner Home's creation form starts on and the cron a new schedule starts with, and `思考の深さ` (thinking effort) — chosen per task on Home, per schedule, and in `自動で始まる` `Task の既定`, from the runner's own list (`efforts` on `/api/health`): Claude Code gets `--effort <value>`, Codex the `effort` of every `turn/start`; empty is the CLI's own default, DAK decides it itself; it is shown on the Brief and changeable there on a running task like the model — from the next turn (`POST /api/tasks/:id/effort`).
 
-Running it on your own machine as a container, the same tools and paths as the EC2 setup (`bash container/up.sh`; what is kept, what the Docker socket means): [Running Switchboard as a container on your own machine](docs/design/local-container.md).
+As a container instead, with the same tools and paths as the EC2 setup: unpack the tarball as in step 1 and run `bash container/up.sh` in it (two commands; the machine needs only `docker compose`, `curl` and `tar`). It runs the newest Release under `sb-rescue` inside the container and updates itself the same way; what is kept, the rescue page's address and what the Docker socket means are in [Running Switchboard as a container on your own machine](docs/design/local-container.md).
 
 Moving the history to another machine (`docs/design/cloud-hosting.md` §5): `bun packages/core/src/main.ts export <out> [--encrypt <age recipient>]` on the old one, then `bun packages/core/src/main.ts import <file> [--identity <age key file>]` into an empty HOME on the new one (same absolute paths; nothing is rewritten).
 

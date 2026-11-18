@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { RunnerInfo, Settings, TaskSummary } from "@switchboard/protocol";
-import { api, type GithubStatus, type Health } from "../api.ts";
+import { api } from "../api/index.ts";
+import { type GithubStatus, type Health } from "../api/daemon.ts";
 import { githubRowView, loginRowView, logoutConfirmText, switchboardRowView, type LoginRow } from "../loginRow.ts";
 import { logoutPath } from "../login.ts";
 import { t } from "../i18n.ts";

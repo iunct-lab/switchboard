@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 
 /**
  * `gh project item-list` reads every item of the Project (about 400 GraphQL points a call; the hourly budget is 5,000 per
- * user, shared by every Task on the host). Only the warning in issue-workflow may name it (#548).
+ * user, shared by every Task on the host). Only the warning in issue-workflow may name it.
  */
 const root = join(import.meta.dir, "..");
 const self = relative(root, import.meta.path);

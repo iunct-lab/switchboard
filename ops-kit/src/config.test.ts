@@ -1,9 +1,10 @@
 // test-reads: ops-kit/fixtures/ ops-kit/template/ ops.config.json
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfig, findConfig, loadConfig, parseConfig, projectOf, publicCopyOf, publicCopyRefusal, resolveProject, STORY_POINTS, TEMPLATE_CONFIG } from "./config.ts";
+import { CONFIG_ENV, configFileOf, configShapeError, defaultConfig, extraReviewerOf, findConfig, loadConfig, loadPublicSync, mergeGateOf, parseConfig, projectOf, publicCopyOf, publicCopyRefusal, resolveProject, sharedFilesOf, STORY_POINTS, TEMPLATE_CONFIG } from "./config.ts";
+import { forgeOf } from "./forge.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
 const withPhase = () => loadConfig(join(fixtures, "config-with-phase.json"));
@@ -14,6 +15,20 @@ describe("config", () => {
     expect(withPhase().fields.phase).toEqual(["Phase 0", "Phase 1"]);
     expect(noPhase().fields.phase).toBeUndefined();
     expect(noPhase().storyPoints).toBeUndefined();
+  });
+
+  test("extraReviewer names the extra reviewer; without the key, or without a config, there is none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-config-extra-"));
+    try {
+      expect(extraReviewerOf(dir)).toBeNull();
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ ...defaultConfig(), extraReviewer: "local" }));
+      expect(extraReviewerOf(dir)).toBe("local");
+      expect(loadConfig(undefined, dir).extraReviewer).toBe("local"); // the strict schema knows the key
+      writeFileSync(join(dir, "ops.config.json"), JSON.stringify(defaultConfig()));
+      expect(extraReviewerOf(dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("story points belong to the kit — a config that still has storyPoints loads and the kit's scale is 1 to 13", () => {
@@ -93,6 +108,61 @@ describe("config", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("which settings apply is one rule: the repository's ops.config.json when it has one, else the file OPS_KIT_CONFIG names, else none — a file as a whole, never mixed key by key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ops-kit-config-rule-"));
+    try {
+      const repo = join(dir, "repo");
+      mkdirSync(join(repo, "a"), { recursive: true });
+      const kept = join(dir, "kept.json");
+      writeFileSync(kept, JSON.stringify({ ...withPhase(), envPrefix: "KEPT", mergeGate: "scripts/gate.ts", extraReviewer: "bot", sharedFiles: ["a.md"], depsCheck: { extraConditions: ["x"] }, forge: { service: "gitlab", host: "gitlab.example.com", project: "g/p" } }));
+      // 1. neither: none
+      expect(configFileOf(repo, "")).toBeNull();
+      expect(() => findConfig(undefined, repo, "")).toThrow(/OPS_KIT_CONFIG/);
+      expect(() => loadConfig(undefined, repo)).toThrow(/ops\.config\.json/);
+      expect([mergeGateOf(repo, ""), extraReviewerOf(repo, ""), forgeOf(repo, "")]).toEqual([null, null, "app"]);
+      // 2. no file in the repository + the kept settings: every reader takes them (the backlog's keys, mergeGate, forge, depsCheck)
+      expect(configFileOf(repo, kept)).toBe(kept);
+      expect(findConfig(undefined, join(repo, "a"), kept)).toBe(kept);
+      expect([mergeGateOf(repo, kept), extraReviewerOf(repo, kept), forgeOf(repo, kept)]).toEqual(["scripts/gate.ts", "bot", "gitlab"]);
+      const saved = process.env[CONFIG_ENV];
+      process.env[CONFIG_ENV] = kept;
+      try {
+        // the variable is the default of that argument: a command run in the repository needs nothing else
+        expect(loadConfig(undefined, join(repo, "a"))).toMatchObject({ envPrefix: "KEPT", depsCheck: { extraConditions: ["x"] } });
+        expect([mergeGateOf(repo), sharedFilesOf(repo), forgeOf(repo)]).toEqual(["scripts/gate.ts", ["a.md"], "gitlab"]);
+        // publicSync is the repository's alone (it is read at the commit that is sent)
+        writeFileSync(kept, JSON.stringify({ publicSync: { target: "o/public", exclude: [] } }));
+        expect(publicCopyOf(repo)).toBeNull();
+        expect(() => loadPublicSync(undefined, repo)).toThrow(/ops\.config\.json/);
+        // 3. the repository has its own file: that file alone, even for the keys it leaves out
+        writeFileSync(kept, JSON.stringify({ ...withPhase(), envPrefix: "KEPT", mergeGate: "scripts/gate.ts" }));
+        writeFileSync(join(repo, "ops.config.json"), JSON.stringify({ ...withPhase(), envPrefix: "OWN" }));
+        expect(configFileOf(repo)).toBe(join(repo, "ops.config.json"));
+        expect(loadConfig(undefined, join(repo, "a")).envPrefix).toBe("OWN");
+        expect(mergeGateOf(repo)).toBeNull();
+        // a file the variable names but that is not there is none
+        process.env[CONFIG_ENV] = join(dir, "gone.json");
+        rmSync(join(repo, "ops.config.json"));
+        expect(configFileOf(repo)).toBeNull();
+      } finally {
+        if (saved === undefined) delete process.env[CONFIG_ENV];
+        else process.env[CONFIG_ENV] = saved;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("configShapeError: keys may be left out, but each one present must be in its shape and none unknown", () => {
+    expect(configShapeError({})).toBeNull();
+    expect(configShapeError({ ci: { steps: [{ run: "make" }] } })).toBeNull();
+    expect(configShapeError(withPhase())).toBeNull();
+    expect(configShapeError({ ci: { steps: [] } })).toContain("ci.steps");
+    expect(configShapeError({ nope: 1 })).not.toBeNull();
+    expect(configShapeError({ milestone: { pattern: "(" } })).not.toBeNull();
+    for (const bad of [null, [], "x", 3]) expect(configShapeError(bad)).toBe("設定は JSON のオブジェクトで書く");
   });
 
   test("the Project comes from the URL (user or org); <envPrefix>_PROJECT_URL and the owner setting win", () => {

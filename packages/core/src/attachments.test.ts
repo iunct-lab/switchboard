@@ -214,7 +214,7 @@ describe("attachments", () => {
     expect(codexSends).not.toContain(expect.stringContaining(dir)); // not handed to the old process
     const restarted = codexStarts[before + 1]!;
     expect(restarted.resumeSessionId).toBe(`codex-sess-${before + 1}`);
-    expect(restarted.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots
+    expect(restarted.scope).toEqual([home, dir, join(home, "heavy"), join(home, "waits")]); // a Codex start also gets the heavy slots and the directory its waits are recorded in
     expect(restarted.prompt).toContain(join(dir, "shot.png"));
     expect(names(restarted.attachments)).toEqual(["shot.png"]);
     const d = await detail(task.id);
@@ -346,7 +346,7 @@ describe("attachments", () => {
     const dir = join(home, "attachments", task.id);
     const shadowStart = codexStarts[before]!;
     expect(shadowStart.prompt).toContain(join(dir, "shot.png"));
-    expect(shadowStart.scope).toEqual([home, dir, join(home, "heavy")]); // a Codex start also gets the heavy slots
+    expect(shadowStart.scope).toEqual([home, dir, join(home, "heavy"), join(home, "waits")]); // a Codex start also gets the heavy slots and the directory its waits are recorded in
     expect(names(shadowStart.attachments)).toEqual(["shot.png"]);
     const shadow = core.db.shadowTaskOf(task.id)!;
     await settle(shadow.id);

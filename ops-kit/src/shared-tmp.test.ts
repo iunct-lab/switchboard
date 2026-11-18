@@ -68,6 +68,12 @@ describe("sharedTmpWrites", () => {
     for (const command of passes) expect({ command, paths: sharedTmpWrites(command) }).toEqual({ command, paths: [] });
   });
 
+  test("the skills' working-directory form under ${TMPDIR:-/tmp} is not stopped", () => {
+    // the one form the skills and CLAUDE.md write: it runs in a Claude Code Task (this hook) and in a Codex Task (TMPDIR is its own directory)
+    const passes = ['W=$(mktemp -d "${TMPDIR:-/tmp}/repo.pr12.XXXXXX")', 'W=$(mktemp -d "${TMPDIR:-/tmp}/repo.pr12.XXXXXX"); echo "$W"', '> "$W/pr.md"', "cat > /tmp/repo.pr12.Ab3dEf/pr.md", "rm -rf /tmp/repo.pr12.Ab3dEf"];
+    for (const command of passes) expect({ command, paths: sharedTmpWrites(command) }).toEqual({ command, paths: [] });
+  });
+
   test("segments: split on the separators outside quotes, here-document bodies dropped", () => {
     expect(segments("a && b || c; d | e & f\ng")).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
     expect(segments("echo 'a; b' \"c && d\"")).toEqual(["echo 'a; b' \"c && d\""]);

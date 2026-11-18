@@ -16,7 +16,7 @@ let ctx: Ctx;
 let v2: string;
 let rescue: ReturnType<typeof startRescue>;
 let base: string;
-/** A fake /tmp (#797): one old working directory that may go, one new one that may not. */
+/** A fake /tmp: one old working directory that may go, one new one that may not. */
 let tmpRoot: string;
 const OLD_DIR = "x.review1.aaaaaa";
 const NEW_DIR = "x.review2.bbbbbb";
@@ -72,7 +72,7 @@ test("status shows version, state, history and the log; the page is one self-con
   expect(page.headers.get("content-type")).toContain("text/html");
   const html = await page.text();
   expect(html).toContain("前の版に戻す");
-  expect(html).toContain("強制クリア"); // the /tmp section (#797)
+  expect(html).toContain("強制クリア"); // the /tmp section
   expect(html).toContain("api/tmp/clean");
   expect(html).toContain('id="core-row"'); // the core line, shown only when it differs from the current version
   expect(html).toContain("画面と既定の設定だけ（再起動なし）");
@@ -112,6 +112,8 @@ test("with Switchboard down, rollback brings the previous release up; a second o
 
 test("ifNoRestart: a release that needs a restart is refused with 409 before anything is built; status says the question is understood", async () => {
   expect((await fetch(`${base}/api/status`).then((r) => r.json()) as { promoteWithoutRestart?: boolean }).promoteWithoutRestart).toBe(true);
+  // the mark the daemon needs before it asks `ifNoRestart` under running tasks: such a request never ends in a restart
+  expect((await fetch(`${base}/api/status`).then((r) => r.json()) as { promoteKeepsTasks?: boolean }).promoteKeepsTasks).toBe(true);
   const core = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v3"), "third version (core)");
   const built = listReleases(f.home).sort();
   const r = await post("/api/promote", { commit: core, ifNoRestart: true });
@@ -134,7 +136,7 @@ test("bad input and foreign origins are refused before anything runs", async () 
   expect((await status()).busy).toBeNull();
 });
 
-test("a spoofed Host on loopback is refused before anything runs (#1135)", async () => {
+test("a spoofed Host on loopback is refused before anything runs", async () => {
   // A page on a DNS-rebinding name sends that name as both Host and Origin, so the Origin check alone lets it through.
   const evil = { host: "evil.example:47841" };
   for (const [method, path] of [["GET", "/"], ["GET", "/api/status"], ["GET", "/api/tmp"], ["POST", "/api/rollback"]] as const) {
@@ -179,24 +181,24 @@ test("off loopback every request needs the token; the page takes it from ?token=
 });
 
 /**
- * The Starter's side (aws/auth.ts, #701): an Ed25519 seed signs, sb-rescue holds only the public key. A test names a key
+ * The Starter's side (aws/auth.ts): an Ed25519 seed signs, sb-rescue holds only the public key. A test names a key
  * by a label; its seed is the label's SHA-256.
  */
 const privateOf = (label: string) => createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), createHash("sha256").update(label).digest()]), format: "der", type: "pkcs8" });
 const publicOf = (label: string) => createPublicKey(privateOf(label)).export({ format: "jwk" }).x!;
-/** A stand-in for the Starter's GET /_auth/status (#708): `loggedIn` (or a 500) as set. */
+/** A stand-in for the Starter's GET /_auth/status: `loggedIn` (or a 500) as set. */
 const authStarter = { answer: true as boolean | 500, asked: 0, edge: null as string | null };
 const authStarterServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (authStarter.asked++, (authStarter.edge = req.headers.get("x-switchboard-edge")), authStarter.answer === 500 ? new Response("", { status: 500 }) : Response.json({ loggedIn: authStarter.answer })) });
 afterAll(() => void authStarterServer.stop(true));
 const cloudLogin = (label: string) => ({ sessionPublicKey: publicOf(label), starter: { url: `http://127.0.0.1:${authStarterServer.port}`, token: "t" } });
 
-test("the cloud host's login cookie (#211) opens the page and the API off loopback; an expired, foreign-key or host-forged one does not", async () => {
+test("the cloud host's login cookie opens the page and the API off loopback; an expired, foreign-key or host-forged one does not", async () => {
   const key = "k".repeat(64);
   const cookie = (k: string, expires: number, idleUntil = expires) => {
     const body = Buffer.from(`pk1.${idleUntil}.${expires}`).toString("base64url");
     return `sb_session=${body}.${sign(null, Buffer.from(body), privateOf(k)).toString("base64url")}`;
   };
-  // what a process on the host could make: an HMAC keyed with the only value it has, the public key (#701)
+  // what a process on the host could make: an HMAC keyed with the only value it has, the public key
   const forged = (expires: number) => {
     const body = Buffer.from(`pk1.${expires}.${expires}`).toString("base64url");
     return `sb_session=${body}.${createHmac("sha256", publicOf(key)).update(body).digest("base64url")}`;
@@ -210,7 +212,7 @@ test("the cloud host's login cookie (#211) opens the page and the API off loopba
     expect((await fetch(`${url}/`, { headers: { cookie: cookie(key, Date.now() + 60_000) } })).status).toBe(200);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() - 1) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie("z".repeat(64), Date.now() + 60_000) } })).status).toBe(401);
-    // #498: past the cap even with idle time left, past the idle time within the cap, idle beyond the cap, and the old two-field body
+    // past the cap even with idle time left, past the idle time within the cap, idle beyond the cap, and the old two-field body
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() - 1, Date.now() + 60_000) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() + 60_000, Date.now() - 1) } })).status).toBe(401);
     expect((await fetch(`${url}/api/status`, { headers: { cookie: cookie(key, Date.now() + 60_000, Date.now() + 120_000) } })).status).toBe(401);
@@ -235,14 +237,14 @@ test("the cloud host's login cookie (#211) opens the page and the API off loopba
   }
 });
 
-/** The Starter's cookies (aws/auth.ts): sb_session, and sb_recent signed over "recent:" + body (#497). */
+/** The Starter's cookies (aws/auth.ts): sb_session, and sb_recent signed over "recent:" + body. */
 const signed = (name: string, k: string, id: string, times: number[], prefix = "") => {
   const body = Buffer.from([id, ...times].join(".")).toString("base64url");
   return `${name}=${body}.${sign(null, Buffer.from(prefix + body), privateOf(k)).toString("base64url")}`;
 };
 const session = (k: string, expires = Date.now() + 60_000, id = "pk1", idleUntil = expires) => signed("sb_session", k, id, [idleUntil, expires]);
 const recent = (k: string, expires = Date.now() + 60_000, id = "pk1") => signed("sb_recent", k, id, [expires], "recent:");
-test("sb-rescue refuses a removed passkey's cookie within SESSION_RECHECK_MS (#701)", async () => {
+test("sb-rescue refuses a removed passkey's cookie within SESSION_RECHECK_MS", async () => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   authStarter.answer = true;
   authStarter.asked = 0;
@@ -267,7 +269,7 @@ test("sb-rescue refuses a removed passkey's cookie within SESSION_RECHECK_MS (#7
   }
 });
 
-test("sb-rescue on the cloud host refuses the token from off the machine, keeps it on loopback (#701)", async () => {
+test("sb-rescue on the cloud host refuses the token from off the machine, keeps it on loopback", async () => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   authStarter.answer = true;
   let peer = "10.0.1.5";
@@ -306,7 +308,7 @@ const onCloud = async (run: (url: string) => Promise<void>) => {
   }
 };
 
-test("with the login cookie, every state-changing POST needs a passkey check within 5 minutes; status and the page do not (#497)", async () => {
+test("with the login cookie, every state-changing POST needs a passkey check within 5 minutes; status and the page do not", async () => {
   const key = "k".repeat(64);
   await onCloud(async (url) => {
     const cookie = session(key);
@@ -330,7 +332,7 @@ test("with the login cookie, every state-changing POST needs a passkey check wit
   });
 });
 
-test("a recent cookie that is expired, signed with another key, is a session value, or names another passkey is refused (#497)", async () => {
+test("a recent cookie that is expired, signed with another key, is a session value, or names another passkey is refused", async () => {
   const key = "k".repeat(64);
   await onCloud(async (url) => {
     for (const bad of [
@@ -379,7 +381,7 @@ async function runAct(answers: Parameters<typeof loadPage>[0], o: Parameters<typ
   await page.refresh(); // the next 2 s refresh
   return { ok, sent, error: $("error").textContent };
 }
-test("after a change that went through, the page asks the Starter to renew the login once per 10 minutes, off loopback only (#498)", async () => {
+test("after a change that went through, the page asks the Starter to renew the login once per 10 minutes, off loopback only", async () => {
   const cloud = await runAct({ "api/restart": [{ status: 202 }], "/_auth/renew": [{ status: 200 }] });
   expect(cloud).toMatchObject({ ok: true, sent: ["api/restart", "/_auth/renew"] });
   const refused = await runAct({ "api/restart": [{ status: 500, body: { error: "x" } }] });
@@ -403,7 +405,7 @@ test("the core line shows only when the daemon runs from another version than th
 const needsCheck = { status: 401, body: { error: "操作の前にパスキーで確かめてください", reason: "recent" } };
 const challengeOk = { status: 200, body: { challenge: "AAAA", rpId: "d111.cloudfront.net" } };
 
-test("the page checks the passkey on 401 recent and sends the same request once more; a failed or cancelled check sends nothing more and stays on the page (#497)", async () => {
+test("the page checks the passkey on 401 recent and sends the same request once more; a failed or cancelled check sends nothing more and stays on the page", async () => {
   const done = await runAct({ "api/restart": [needsCheck, { status: 202 }], "/_auth/challenge": [challengeOk], "/_auth/login": [{ status: 200 }] });
   expect(done).toMatchObject({ ok: true, sent: ["api/restart", "/_auth/challenge", "/_auth/login", "api/restart"], error: "" });
   // the reason stays over the refresh, also when the service still shows an older failure
@@ -458,7 +460,7 @@ test("停止する refused: the answer's error shows and the button is pressable
   expect($("stop").disabled).toBe(false);
 });
 
-test("the token and loopback need no passkey check (#497)", async () => {
+test("the token and loopback need no passkey check", async () => {
   await onCloud(async (url) => {
     expect((await fetch(`${url}/api/restart`, { method: "POST", headers: { authorization: "Bearer sb_secret" } })).status).toBe(202);
     await until(async () => ((await fetch(`${url}/api/status`, { headers: { authorization: "Bearer sb_secret" } }).then((r) => r.json())) as { busy: string | null }).busy === null, "restart finished");
@@ -466,7 +468,7 @@ test("the token and loopback need no passkey check (#497)", async () => {
   expect((await post("/api/agent/stop")).status).toBe(200); // loopback
 });
 
-test("作り直す saves the runners' records first (#403): the Starter is asked only after the save command succeeded", async () => {
+test("作り直す saves the runners' records first: the Starter is asked only after the save command succeeded", async () => {
   const seen: string[] = [];
   const edges: Array<string | null> = [];
   const starter = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(new URL(req.url).pathname), edges.push(req.headers.get("x-switchboard-edge")), Response.json({}, { status: 202 })) });
@@ -478,7 +480,7 @@ test("作り直す saves the runners' records first (#403): the Starter is asked
     expect(r.status).toBe(202);
     expect(readFileSync(marker, "utf8")).toBe("saved\n");
     expect(seen).toEqual(["/rebuild"]);
-    expect(edges).toEqual(["edge-xyz"]); // the Starter refuses a call without CloudFront's shared header (#1493)
+    expect(edges).toEqual(["edge-xyz"]); // the Starter refuses a call without CloudFront's shared header
     // the save failed: no rebuild, and the page shows why
     const b = await fetch(`http://127.0.0.1:${bad.server.port}/api/rebuild`, { method: "POST" });
     expect(b.status).toBe(424); // not 502: CloudFront would show the start page instead of the reason
@@ -486,7 +488,7 @@ test("作り直す saves the runners' records first (#403): the Starter is asked
     expect(body.error).toContain("not rebuilding");
     expect(body.error).toContain("upload failed: no network");
     expect(seen).toEqual(["/rebuild"]);
-    // the reason stays in the status the page re-reads every 2 s, instead of being wiped by the next render (review #405)
+    // the reason stays in the status the page re-reads every 2 s, instead of being wiped by the next render
     const st = (await fetch(`http://127.0.0.1:${bad.server.port}/api/status`).then((x) => x.json())) as { lastError: string | null };
     expect(st.lastError).toContain("作り直す: the runners' records were not saved");
     // and the page gives the button back on a refusal by the answer, not by the error text the next render clears
@@ -499,7 +501,7 @@ test("作り直す saves the runners' records first (#403): the Starter is asked
   }
 });
 
-test("作り直す pressed again after a refusal does not show the last reason while the new save runs (#409)", async () => {
+test("作り直す pressed again after a refusal does not show the last reason while the new save runs", async () => {
   const seen: string[] = [];
   const starter = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(new URL(req.url).pathname), Response.json({}, { status: 202 })) });
   const once = join(f.root, "refused-once");
@@ -521,7 +523,7 @@ test("作り直す pressed again after a refusal does not show the last reason w
   }
 });
 
-test("作り直す's save has a time limit and a missing command is a reason, not a 500 (review #405: CloudFront cuts at 30 s)", async () => {
+test("作り直す's save has a time limit and a missing command is a reason, not a 500 (CloudFront cuts at 30 s)", async () => {
   const seen: string[] = [];
   const starter = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(new URL(req.url).pathname), Response.json({}, { status: 202 })) });
   const slow = startRescue(ctx, { port: 0, starter: { url: `http://127.0.0.1:${starter.port}`, token: "t" }, beforeRebuild: ["sleep", "30"], beforeRebuildLimitMs: 300 });
@@ -543,7 +545,7 @@ test("作り直す's save has a time limit and a missing command is a reason, no
   }
 });
 
-test("作り直す answers at the limit even when the save's own children keep its stderr open (review #405: aws under bash)", async () => {
+test("作り直す answers at the limit even when the save's own children keep its stderr open (aws under bash)", async () => {
   const seen: string[] = [];
   const starter = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(new URL(req.url).pathname), Response.json({}, { status: 202 })) });
   const r1 = startRescue(ctx, { port: 0, starter: { url: `http://127.0.0.1:${starter.port}`, token: "t" }, beforeRebuild: ["bash", "-c", "sleep 5; true"], beforeRebuildLimitMs: 300 });
@@ -559,7 +561,7 @@ test("作り直す answers at the limit even when the save's own children keep i
   }
 });
 
-test("作り直す (#181): off without a Starter; with one, the rescue page asks it to rebuild with the start token", async () => {
+test("作り直す: off without a Starter; with one, the rescue page asks it to rebuild with the start token", async () => {
   expect(await fetch(`${base}/api/status`).then((r) => r.json())).toMatchObject({ rebuild: false, stop: false });
   expect((await post("/api/rebuild")).status).toBe(404);
 
@@ -590,7 +592,7 @@ test("without SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart keeps sb-rescue and
   expect(((await status()).history[0] as { reason?: string }).reason).toBe("restarted from the rescue page");
 });
 
-test("with SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart ends sb-rescue, and the next start hands the daemon the new environment (#435)", async () => {
+test("with SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart ends sb-rescue, and the next start hands the daemon the new environment", async () => {
   const g = await makeRepo();
   await buildRelease(g.repo, "HEAD", g.home);
   switchTo(g.home, g.v1);
@@ -615,7 +617,7 @@ test("with SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart ends sb-rescue, and th
     await until(() => existsSync(exits) && readFileSync(exits, "utf8").includes("exit 75"), "sb-rescue ended with 75", 30_000);
     const after = await until(async () => ((await daemon())?.webUrl === "https://new.example" ? daemon() : null), "daemon with the new environment", 30_000);
     expect(after!.starterToken).toBeNull(); // the start token still stays with sb-rescue
-    expect(readFileSync(join(g.home, "releases", "history.jsonl"), "utf8")).toContain("the environment and the host scripts are read again (#435)");
+    expect(readFileSync(join(g.home, "releases", "history.jsonl"), "utf8")).toContain("the environment and the host scripts are read again");
   } finally {
     proc.kill();
     await proc.exited;
@@ -623,7 +625,7 @@ test("with SWITCHBOARD_RESCUE_RESTART_BY_EXIT the restart ends sb-rescue, and th
   }
 }, 90_000);
 
-test("the status lists the running and waiting tasks a restart would stop, and nothing for done ones (#435), from the health and not the task list (#2814)", async () => {
+test("the status lists the running and waiting tasks a restart would stop, and nothing for done ones, from the health and not the task list", async () => {
   writeFileSync(join(f.home, "token"), "sb_secret\n");
   const seen: (string | null)[] = [];
   const asked: string[] = [];
@@ -656,7 +658,7 @@ test("the status lists the running and waiting tasks a restart would stop, and n
     ]);
     expect(seen).toContain("Bearer sb_secret"); // the daemon's token, as checkDaemon sends it
     expect(asked).toContain("GET /api/health");
-    expect(asked.filter((a) => a === "GET /api/tasks")).toEqual([]); // one status, not the whole task list (#2814)
+    expect(asked.filter((a) => a === "GET /api/tasks")).toEqual([]); // one status, not the whole task list
   } finally {
     rmSync(join(f.home, "token"), { force: true });
     await r.stop();
@@ -680,7 +682,7 @@ test("a daemon that does not answer gives an empty list, not an error", async ()
   }
 });
 
-test("tmp: sweep — without a press, the old working directory goes on the interval and GET /api/tmp says so (#1720); another app's kind only where /tmp is Switchboard's (#2058); local CI's leftovers everywhere, the caches and docker only there, and the root disk's usage (#2549)", async () => {
+test("tmp: sweep — without a press, the old working directory goes on the interval and GET /api/tmp says so; another app's kind only where /tmp is Switchboard's; local CI's leftovers everywhere, the caches and docker only there, and the root disk's usage", async () => {
   type Sweep = { at: number; removed: number; freedBytes: number };
   type Answer = { owned: boolean; disk: { used: number; total: number; percent: number }; sweeps: Record<"tmp" | "work" | "cache" | "docker", Sweep | null> };
   const before = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as Answer & { sweep?: unknown };
@@ -702,9 +704,9 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
   const twoWeeksAgo = (Date.now() - 15 * 24 * 60 * 60 * 1000) / 1000;
   const docker: string[][] = [];
   const sweepOnce = async (tmpOwned: boolean) => {
-    // one sweep walks /proc and blocks the loop: 100+ ms on a busy host, over 1 s under a full local CI (#2200). With an
+    // one sweep walks /proc and blocks the loop: 100+ ms on a busy host, over 1 s under a full local CI. With an
     // interval well over that (and over the 50 ms polling) the first sweep's answer is read before a later, empty one
-    // replaces it (#1939). 4 s was too close (ordering, the flake of #2939): with /proc walks of 0.8 s a sweep outlasted it and the
+    // replaces it. 4 s was too close (ordering, a flake seen on a busy host): with /proc walks of 0.8 s a sweep outlasted it and the
     // second sweep's empty answer was read
     const dockerSh = async (argv: string[]) => (docker.push(argv), "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n");
     const fast = startRescue(ctx, { port: 0, tmpDir: root, cacheDir: join(home, ".cache"), home, dockerSh, tmpSweepMs: 8000, tmpOwned });
@@ -748,9 +750,9 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
-}, 50_000); // load (the flake of #2939): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "Test flakiness")
+}, 50_000); // load (a flake seen on a busy host): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "Test flakiness")
 
-test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean removes only the old working directory (#797)", async () => {
+test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean removes only the old working directory", async () => {
   const r = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as { usage: { total: number; percent: number }; entries: Array<{ name: string; removable: boolean }>; cleanable: { names: string[]; bytes: number } };
   expect(r.usage.total).toBeGreaterThan(0);
   expect(r.usage.percent).toBeGreaterThanOrEqual(0);
@@ -764,7 +766,7 @@ test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean rem
   expect(await cleaned.json()).toMatchObject({ removed: [OLD_DIR], skipped: [{ name: NEW_DIR, keep: "recent" }, { name: "../etc", keep: "name" }] });
   expect(readdirSync(tmpRoot)).toEqual([NEW_DIR]);
   oldDir(); // back for the tests that follow
-}, 30_000); // time assumption (the flake of #2939): inUse walks the host's /proc on each read, over the 5 s default under load (6 s failed; docs/design/perf.md "Test flakiness")
+}, 30_000); // time assumption (a flake seen on a busy host): inUse walks the host's /proc on each read, over the 5 s default under load (6 s failed; docs/design/perf.md "Test flakiness")
 
 test("tmp: the owner's press takes the age they pick and any name; force takes everything of theirs; the sweep's judgment stays its own", async () => {
   const at = (name: string, hoursAgo: number) => {

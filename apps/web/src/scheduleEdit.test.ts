@@ -33,12 +33,11 @@ test("scheduleEditPatch: backlog-next keeps its workspace and prompt", () => {
   expect(scheduleEditPatch(b, { ...scheduleDraft(b), workspaceId: "other", prompt: "x" })).toEqual({ patch: {} });
 });
 
-test("scheduleCreateInput (#1924): a prompt schedule keeps its workspace and trimmed prompt; the meta-only kinds take the meta workspace and no prompt; insights runs on claude whatever runner the form held and keeps the shown model and effort", () => {
+test("scheduleCreateInput: a prompt schedule keeps its workspace and trimmed prompt; the meta-only kinds take the meta workspace and no prompt; insights runs on claude whatever runner the form held and keeps the shown model and effort", () => {
   const form = { title: " 夜間 ", cron: "0 3 * * *", wsId: "w1", metaId: "meta", runner: "codex" as const, model: "gpt-6", effort: "high", prompt: " go ", budgetUsd: 2 };
   expect(scheduleCreateInput({ ...form, action: "prompt" })).toEqual({ title: "夜間", cron: "0 3 * * *", workspaceId: "w1", runner: "codex", model: "gpt-6", effort: "high", prompt: "go", action: "prompt", budgetUsd: 2 });
   expect(scheduleCreateInput({ ...form, action: "backlog-next" })).toEqual({ title: "夜間", cron: "0 3 * * *", workspaceId: "meta", runner: "codex", model: "gpt-6", effort: "high", prompt: "", action: "backlog-next", budgetUsd: 2 });
   expect(scheduleCreateInput({ ...form, action: "insights", model: "claude-opus-5-5", effort: "max" })).toEqual({ title: "夜間", cron: "0 3 * * *", workspaceId: "meta", runner: "claude", model: "claude-opus-5-5", effort: "max", prompt: "", action: "insights", budgetUsd: 2 });
-  expect(scheduleCreateInput({ ...form, action: "ui-layers", prompt: "ignored" })).toMatchObject({ workspaceId: "meta", runner: "claude", prompt: "", action: "ui-layers" }); // #3353
   // no budget typed: the field is absent, not null (the server's nullable budget means "no limit" only when sent so)
   expect(scheduleCreateInput({ ...form, action: "prompt", budgetUsd: undefined })).toMatchObject({ budgetUsd: undefined });
 });

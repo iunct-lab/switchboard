@@ -1,5 +1,5 @@
 /**
- * Promotion (#178): a release becomes current only after it booted on another port against a copy of the database,
+ * Promotion: a release becomes current only after it booted on another port against a copy of the database,
  * and stays current only if it answers on the real port afterwards. Otherwise the links go back by themselves.
  * Migrations are additive (docs/design/releases-and-rescue.md), so going back needs no database restore; the snapshot
  * taken before each promotion is for the case where going back is not enough.
@@ -21,10 +21,63 @@ export interface Ctx {
   source: string | null;
   port: number;
   sup: Supervisor;
+  /**
+   * The command that runs another command while it holds one of the machine's heavy-process slots (the kit's
+   * `ops-kit heavy --name … --`), or null where the machine has no such limit. A promotion asked for while Tasks run
+   * (`ifNoRestart`) builds and starts its candidate inside one (`holdHeavy`).
+   */
+  heavy?: string[] | null;
+}
+
+/** A heavy-process slot held for a promotion; `release` gives it back (also when sb-rescue ends: the holder reads its end of a pipe). */
+export type HeavyHold = { release: () => Promise<void> };
+
+/**
+ * Takes one of the machine's heavy-process slots through `heavy` (`Ctx.heavy`) and keeps it until `release`: the
+ * command runs a holder that says `held` once it has the slot and then waits for its input to close. `{ busy }` = no
+ * slot within `waitMs` (every slot is held, or the free memory is under the machine's floor — the wrapper's own line
+ * says which), or the wrapper could not be run: nothing is held. Without `heavy` there is no limit to keep (a hold
+ * that does nothing).
+ */
+export async function holdHeavy(heavy: string[] | null | undefined, waitMs: number): Promise<HeavyHold | { busy: string }> {
+  if (!heavy?.length) return { release: async () => undefined };
+  let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+  try {
+    proc = Bun.spawn([...heavy, "sh", "-c", "echo held; exec cat >/dev/null"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: process.env });
+  } catch (e) {
+    return { busy: `could not run ${heavy[0]}: ${String((e as Error).message ?? e)}` };
+  }
+  const said = new Response(proc.stderr).text().catch(() => "");
+  const reader = proc.stdout.getReader();
+  const first = (async () => {
+    let text = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return false;
+      text += new TextDecoder().decode(value);
+      if (text.includes("held")) return true;
+    }
+  })().catch(() => false);
+  const held = await Promise.race([first, Bun.sleep(waitMs).then(() => false)]);
+  const end = async () => {
+    try {
+      await proc.stdin.end();
+    } catch { /* already gone */ }
+    if ((await Promise.race([proc.exited, Bun.sleep(5000).then(() => null)])) === null) proc.kill();
+    void reader.cancel().catch(() => undefined);
+  };
+  if (held) return { release: end };
+  proc.kill();
+  await Promise.race([proc.exited, Bun.sleep(2000)]);
+  const why = (await Promise.race([said, Bun.sleep(500).then(() => "")])).trim().split("\n").filter(Boolean).at(-1) ?? "";
+  void reader.cancel().catch(() => undefined);
+  return { busy: why.slice(0, 300) || `no heavy-process slot within ${Math.round(waitMs / 1000)} s` };
 }
 export interface PromoteTimes {
   /** How long a candidate may take to answer on its own port. */
   candidateMs?: number;
+  /** How long an `ifNoRestart` promotion waits for a heavy-process slot when its caller did not take one. */
+  heavyWaitMs?: number;
   /** After the switch: answer within this, … */
   confirmMs?: number;
   /** … and still be up and answering this much later. */
@@ -200,8 +253,8 @@ export async function checkFeatures(port: number, home: string): Promise<string 
 }
 
 /**
- * The tasks a restart or a release switch stops (#435): the daemon's running and waiting ones and those whose turn ended with background jobs still going, from its health's
- * `busyTasks` (#2814: not the whole task list), read with the same token as checkDaemon. [] when it does not answer or
+ * The tasks a restart or a release switch stops: the daemon's running and waiting ones and those whose turn ended with background jobs still going, from its health's
+ * `busyTasks` (not the whole task list), read with the same token as checkDaemon. [] when it does not answer or
  * answers something else: a daemon that is down has nothing to stop.
  */
 export async function tasksThatStop(port: number, home: string): Promise<{ id: string; title: string; status: string }[]> {
@@ -258,7 +311,7 @@ async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, cand
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     Object.assign(env, { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_REPO_ROOT: ctx.source ? dir : ctx.repo, SWITCHBOARD_CANDIDATE: "1" });
     delete env.SWITCHBOARD_DB;
-    // sb-rescue's own secret for 作り直す (#181): the candidate has no use for it, as supervisor.ts does for the daemon (#2077)
+    // sb-rescue's own secret for 作り直す: the candidate has no use for it, as supervisor.ts does for the daemon
     delete env.SWITCHBOARD_STARTER_TOKEN;
     proc = Bun.spawn([process.execPath, join(dir, "packages", "core", "src", "main.ts")], { cwd: dir, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   } catch (e) {
@@ -359,15 +412,35 @@ async function buildFromSource(source: string, tag: string, home: string, expect
 
 /**
  * `expectSha`: from a source repository, the commit the caller checked; a tag that now points elsewhere is rejected before any build.
- * `ifNoRestart`: the caller asked for a switch that keeps its tasks. The check before the build is asked again here, after
- * the candidate: when it now says restart (the daemon stopped answering health in time, for example), nothing is switched
- * and this throws (the status shows it as the last error). No history entry: a rejected release is never asked for again,
- * and this one is only waiting for the tasks to be idle.
+ * `ifNoRestart`: the caller asked for a switch that keeps its tasks, and this never restarts the daemon for it. Its
+ * build (the install and the Web UI's build), the database snapshot and the candidate daemon run while those tasks
+ * do, so they run inside one of the machine's heavy-process slots (`held`, or taken here: `holdHeavy`) — the same
+ * slots a local CI or a test run waits for, with the same floor of free memory — and with none free nothing is built
+ * (it throws; the caller asks again later). The
+ * check before the build is asked again here, after the candidate: when it now says restart (the daemon stopped
+ * answering health in time, for example), nothing is switched and this throws (the status shows it as the last error).
+ * No history entry: a rejected release is never asked for again, and this one is only waiting for the tasks to be idle.
+ * A reload that is not confirmed is taken back the way it came — the links are put back and the daemon reads the older
+ * release again (a second SIGHUP) — and the release is `rejected` with the reason, so it is not tried again by itself
+ * and the person is told. Only when the daemon process that got the reload is gone (it crashed; its tasks stopped with
+ * it) is the daemon started again, on the older release.
  */
-export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string, ifNoRestart = false): Promise<HistoryEntry> {
+export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string, ifNoRestart = false, held?: HeavyHold): Promise<HistoryEntry> {
   const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000, webMs = 10_000 } = times;
   const from = currentOf(ctx.home);
   const before = previousOf(ctx.home);
+  const slot = ifNoRestart ? (held ?? (await holdHeavy(ctx.heavy, times.heavyWaitMs ?? 15_000))) : null;
+  if (slot && "busy" in slot) throw new Error(`no heavy-process slot for a build under running tasks (${slot.busy}); nothing was built`);
+  try {
+    return await promoteHeld(ctx, rev, { candidateMs, confirmMs, settleMs, webMs }, expectSha, ifNoRestart, from, before, slot);
+  } finally {
+    await slot?.release();
+  }
+}
+
+/** `promote` once its heavy-process slot is held (`slot`; null = a promotion that takes none): the slot is given back as soon as the candidate has been checked. */
+async function promoteHeld(ctx: Ctx, rev: string, times: Required<Omit<PromoteTimes, "heavyWaitMs">>, expectSha: string | undefined, ifNoRestart: boolean, from: string | null, before: string | null, slot: HeavyHold | null): Promise<HistoryEntry> {
+  const { candidateMs, confirmMs, settleMs, webMs } = times;
   let sha: string;
   try {
     sha = ctx.source ? await buildFromSource(ctx.source, rev, ctx.home, expectSha) : await buildRelease(ctx.repo, rev, ctx.home);
@@ -391,6 +464,8 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, e
     return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: `could not start the candidate: ${String((e as Error).message ?? e)}` });
   }
   if (refused) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: refused });
+  // the heavy part is over: the reload and its checks are the running daemon's own work
+  await slot?.release();
   const quiet = from !== null && (await switchesWithoutRestart(ctx, sha));
   if (!quiet && ifNoRestart) throw new Error(`${sha.slice(0, 7)} needs a restart now; asked without one, so nothing was switched`);
   if (quiet && from) {
@@ -403,9 +478,24 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, e
       const removed = pruneReleases(ctx.home, [ctx.sup.running]).length;
       return appendHistory(ctx.home, { action: "promote-web", from, to: sha, ok: true, reason: `checked on a spare port, then read again by the running daemon (no restart) on port ${ctx.port}${snapshot ? `; database snapshot ${snapshot}` : ""}${removed ? `; removed ${removed} old releases` : ""}` });
     }
+    // Asked without a restart: the tasks that run are not this promotion's to stop, whatever went wrong with the reload.
+    // The links go back and the same process reads the older release again; it is not restarted when that cannot be
+    // confirmed either (what differs is the Web UI and the default settings: the person can restart from the rescue page).
+    if (ifNoRestart && ctx.sup.pid === pid && ctx.sup.state === "running") {
+      restoreLinks(ctx.home, from, before);
+      ctx.sup.reload();
+      const end = Date.now() + webMs;
+      let back = false;
+      while (!back && Date.now() < end) {
+        back = (await webReleaseOf(ctx.port, ctx.home)) === from;
+        if (!back) await Bun.sleep(200);
+      }
+      return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: `the reload was not confirmed (${failedWeb}); the links were put back and the daemon was not restarted${back ? "" : `, but it did not report ${from.slice(0, 7)} as its web release again within ${Math.round(webMs / 1000)} s: restart it from the rescue page if the screens are wrong`}` });
+    }
     // Going back restarts the daemon, as after a restart: only a fresh process is sure to serve the older release again
     // (a daemon that half took the new one may not take the old one by SIGHUP either), and the `auto-rollback` line then
-    // means what the stop reasons read it as, a switch that ended the daemon's run.
+    // means what the stop reasons read it as, a switch that ended the daemon's run. Reached without `ifNoRestart` (a
+    // promotion by hand, which accepted a restart), or when the process that got the reload is already gone.
     restoreLinks(ctx.home, from, before);
     await ctx.sup.restart();
     return appendHistory(ctx.home, { action: "auto-rollback", from: sha, to: from, ok: false, reason: `went back by itself (restarted on the older release): ${failedWeb}` });

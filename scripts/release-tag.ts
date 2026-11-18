@@ -152,7 +152,7 @@ export function repairReleases(sh: Sh, repo?: string, depth = REPAIR_DEPTH): str
 const STALE_LOCK_MS = 30 * 60_000;
 
 /**
- * One release-tag at a time on this clone (#915): a lock file in the git directory, made with O_EXCL. Another clone is
+ * One release-tag at a time on this clone: a lock file in the git directory, made with O_EXCL. Another clone is
  * not seen by it — that race is the rejected push in `run`. A lock older than 30 minutes is a crashed run's and is taken.
  */
 export function withReleaseLock<T>(gitDir: string, fn: () => T, now = Date.now()): T {
@@ -184,17 +184,52 @@ export function must(sh: Sh, cmd: string[], input?: string): string {
   return r.out;
 }
 
+/**
+ * The merge commit of PR `pr`, read from GitHub. A PR that is not MERGED throws: the caller tags nothing. This is how a
+ * Task names what it merged — a moving ref (`origin/main`) read after a merge that failed is the merge before it.
+ */
+export function mergedCommitOf(sh: Sh, pr: number, repo?: string): string {
+  const r = sh(["gh", "pr", "view", String(pr), "--json", "state,mergeCommit", "-q", '.state + " " + (.mergeCommit.oid // "")', ...(repo ? ["-R", repo] : [])]);
+  if (!r.ok) throw new Error(`PR ${pr} could not be read: no tag`);
+  const [state, oid] = r.out.trim().split(" ");
+  if (state !== "MERGED" || !oid) throw new Error(`PR ${pr} is ${state || "unreadable"}, not merged: no tag`);
+  return oid;
+}
+
+export type Target = { sha: string; pr?: undefined; repo?: string } | { pr: number; sha?: undefined; repo?: string };
+
+/** `<sha>|--pr <n> [--repo <owner/name>]`: exactly one of a sha and a PR. `null` is a usage error. */
+export function parseTarget(args: string[]): Target | null {
+  let sha: string | undefined, pr: string | undefined, repo: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--repo") {
+      if (!/^[\w.-]+\/[\w.-]+$/.test((repo = args[++i]) ?? "")) return null;
+    } else if (a === "--pr") {
+      if (pr !== undefined || !/^[1-9]\d*$/.test((pr = args[++i]) ?? "")) return null;
+    } else if (a.startsWith("-") || sha !== undefined) return null;
+    else sha = a;
+  }
+  if ((sha === undefined) === (pr === undefined)) return null;
+  return pr !== undefined ? { pr: Number(pr), repo } : { sha: sha!, repo };
+}
+
+/** The commit to tag: the sha as given, or the merge commit of the PR (throws when the PR is not merged). */
+export function targetSha(t: Target, sh: Sh): string {
+  return t.pr !== undefined ? mergedCommitOf(sh, t.pr, t.repo) : t.sha;
+}
+
 if (import.meta.main) {
-  const args = process.argv.slice(2);
-  const sha = args[0];
-  const repoAt = args.indexOf("--repo");
-  const repo = repoAt >= 0 ? args[repoAt + 1] : undefined;
-  if (!sha || sha === "--repo" || (repoAt >= 0 && !/^[\w.-]+\/[\w.-]+$/.test(repo ?? ""))) {
-    console.error("usage: bun scripts/release-tag.ts <sha> [--repo <owner/name>]");
+  const target = parseTarget(process.argv.slice(2));
+  if (!target) {
+    console.error("usage: bun scripts/release-tag.ts <sha>|--pr <n> [--repo <owner/name>]");
     process.exit(2);
   }
+  const repo = target.repo;
   try {
     withReleaseLock(must(spawnSh, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), () => {
+      // a PR that is not merged stops here: no tag, and no repair of other Releases either
+      const sha = targetSha(target, spawnSh);
       let failed: unknown;
       try {
         console.log(run(sha, spawnSh, repo));

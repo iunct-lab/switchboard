@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memory (#537) — a swap file and a gentler swappiness, run as root by bootstrap. The host has 4 GiB and no swap; when the
+# memory — a swap file and a gentler swappiness, run as root by bootstrap. The host has 4 GiB and no swap; when the
 # runners, Chromium and dockerd use it all, it can spend hours re-reading pages from the disk. The limits
 # on the daemon's unit (switchboard.service) keep that from happening; the swap absorbs a short peak on the way.
 # Idempotent. SB_SWAPFILE, SB_SWAP_MB, SB_FSTAB and SB_SYSCTL_D are where the tests point it.

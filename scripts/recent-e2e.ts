@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/recent-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * 直近のパスキー確認 (#1491) in the browser: a device with only the 30-day `sb_session` opens a task's ターミナル tab, is
+ * 直近のパスキー確認 in the browser: a device with only the 30-day `sb_session` opens a task's ターミナル tab, is
  * asked 「操作の前にパスキーで確かめてください」 (no /ws/pty 101 yet), checks the passkey (a virtual authenticator), and the shell
  * opens; a settings save within the 5 minutes is not asked again. The Starter in front is a fake that verifies nothing
  * (aws/auth.test.ts holds that); the front proxy relays HTTP and /ws/pty to the daemon. The two screens go to SCREENSHOT_DIR (default: a new folder under the temp dir; the paths are printed).

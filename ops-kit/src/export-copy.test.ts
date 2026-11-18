@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "./cli.ts";
+import { parseConditions } from "./conditions.ts";
 import { exportCopy, findPrivateWords, KIT, readPrivateWords } from "./export-copy.ts";
 import { fakeGh } from "./gh.ts";
 
@@ -71,6 +72,21 @@ describe("export-copy", () => {
     expect(ts.extends).toBeUndefined();
     expect(ts.compilerOptions.strict).toBe(true);
     expect(findPrivateWords(dest, readPrivateWords(wordsFile()))).toEqual([]);
+  });
+
+  test("export-copy keeps both sides of the condition markers in skills", () => {
+    const dest = join(scratch(), "vendor", "ops-kit");
+    exportCopy({ dest, wordsFile: wordsFile() });
+    // the copy is read outside the app: it is the source as written, marks and all, not a Task's rendering
+    const copy = readFileSync(join(dest, "skills/cross-runner-review/SKILL.md"), "utf8");
+    expect(copy).toBe(readFileSync(join(KIT, "skills/cross-runner-review/SKILL.md"), "utf8"));
+    const lines = parseConditions(copy, "cross-runner-review");
+    const outside = lines.filter((l) => !l.mark && l.when?.task === "out").map((l) => l.text).join("\n");
+    expect(outside).toContain("exec --sandbox read-only");
+    expect(outside).toContain("claude -p --permission-mode plan");
+    expect(lines.some((l) => l.when?.task === "in" && l.text.includes("ops-kit job request review"))).toBe(true);
+    // what renders and checks the marks travels with the copy
+    expect(all(dest)).toContain("src/conditions.ts");
   });
 
   test("replaces an earlier copy, refuses a directory that is not one", () => {

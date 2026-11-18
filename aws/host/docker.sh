@@ -1,8 +1,8 @@
 #!/bin/sh
-# docker (#371) — the docker CLI against the host user's rootless dockerd, which dockerd-up starts when it is not running.
+# docker — the docker CLI against the host user's rootless dockerd, which dockerd-up starts when it is not running.
 D="${SB_DOCKER_BIN:-/usr/local/lib/docker-rootless/bin}"
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.docker/run/docker.sock}"
-# a build or a compose stack may not fit the host's dockerd (sb-dockerd, 1.5 GiB): one line on where it can go (#678).
+# a build or a compose stack may not fit the host's dockerd (sb-dockerd, 1.5 GiB): one line on where it can go.
 # Only a hint: the command still runs here, where its bind mounts and localhost ports are
 # (the hint names the repository: it reaches Tasks of every repository, whose work trees do not have that README)
 heavy=

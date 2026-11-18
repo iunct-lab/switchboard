@@ -1,7 +1,7 @@
 import type { BacklogItem, BacklogQueue, BacklogQueueEnded, BacklogQueueEntry } from "@switchboard/protocol";
 import { applyView, DEFAULT_VIEW, itemMarks, STAGES } from "./backlogView.ts";
 
-/** One entry of the queue with its row (#3957); `item` null = its workspace's backlog does not have it on this screen. */
+/** One entry of the queue with its row; `item` null = its workspace's backlog does not have it on this screen. */
 export interface QueueRow {
   entry: BacklogQueueEntry;
   item: BacklogItem | null;
@@ -10,7 +10,7 @@ export interface QueueRow {
 const same = (a: BacklogQueueEntry, b: BacklogQueueEntry) => a.workspaceId === b.workspaceId && a.number === b.number;
 
 /**
- * The queue view's parts (#3957): `running` = the queued PBIs with a stage Task running or waiting, `waiting` = the rest
+ * The queue view's parts: `running` = the queued PBIs with a stage Task running or waiting, `waiting` = the rest
  * in the queue's order, `outside` = the open PBIs not queued that are Ready or not yet split into Tasks, by Priority,
  * `ended` = the queue's newest left ones.
  */
@@ -32,7 +32,7 @@ export const withAdded = (queue: BacklogQueue, entry: BacklogQueueEntry): Backlo
 export const withRemoved = (queue: BacklogQueue, entry: BacklogQueueEntry): BacklogQueueEntry[] => queue.items.filter((e) => !same(e, entry));
 
 /**
- * How the queue view saves (#3957): each change is shown at once (`show`, on what is shown now) and sent after the one
+ * How the queue view saves: each change is shown at once (`show`, on what is shown now) and sent after the one
  * before it has been answered, so two quick changes do not send two lists made from the same old queue. Only the
  * newest answer is shown. A save that fails says so (`failed`); the stored queue is read back (`reread`) only when no
  * later change is waiting to be sent — that one was made on what was shown and its answer takes the place.
@@ -68,7 +68,7 @@ export function moveEntry<T>(items: T[], from: number, to: number): T[] {
 }
 
 /**
- * Where a dragged row lands (#3958): its index among the other rows, from their middles (`mids`, top to bottom) and
+ * Where a dragged row lands: its index among the other rows, from their middles (`mids`, top to bottom) and
  * the dragged row's middle `y` — the number of rows whose middle it is below.
  */
 export const dropIndex = (mids: number[], y: number): number => mids.filter((m) => m < y).length;
@@ -79,14 +79,14 @@ export function withWaiting(queue: BacklogQueue, running: BacklogQueueEntry[], w
   return queue.items.map((e) => (running.some((r) => same(r, e)) ? e : rest.shift()!));
 }
 
-/** What to put first when the queue takes several PBIs at once (#3959). */
+/** What to put first when the queue takes several PBIs at once. */
 export type PickAxis = "priority" | "progress" | "small" | "old";
 
 /** The marks that leave a PBI out when the waiting ones are not included: 待ち, 前提, 進められない and 重なり. */
 const WAITING_MARKS = new Set(["waits", "prereq", "stuck", "overlap"]);
 
 /**
- * The first `n` PBIs not in the queue that are Ready or not yet split into Tasks, by `axis` (#3959): `priority` = the
+ * The first `n` PBIs not in the queue that are Ready or not yet split into Tasks, by `axis`: `priority` = the
  * Priority sort of the 表示 (none last), `progress` = the larger share of done Tasks first (none last), `small` = the
  * fewer story points first (none last), `old` = the oldest created first; equal ones keep the backlog's order. Without
  * `includeWaiting`, a PBI with a mark of 待ち / 前提 / 重なり (`itemMarks`, `auto` per workspace) is left out.
@@ -102,14 +102,14 @@ export function pickTop(items: BacklogItem[], queue: BacklogQueue, axis: PickAxi
   return keyed.slice(0, n).map((x) => x.i);
 }
 
-/** What a queue row says under its title (#4055): `workspace · Task n/m · SP n · P · 段`, the values it has only. */
+/** What a queue row says under its title: `workspace · Task n/m · SP n · P · 段`, the values it has only. */
 export function queueFacts(item: BacklogItem): string {
   const stage = STAGES.find(([s]) => s === item.stage)?.[1] ?? item.stage;
   return [item.workspaceName, item.tasks ? `Task ${item.tasks.done}/${item.tasks.total}` : null, item.storyPoints !== null ? `SP ${item.storyPoints}` : null, item.priority, stage].filter(Boolean).join(" · ");
 }
 
 /**
- * The queue's last decision in one line (#4055): what it started, and how many lines say why the rest were left (the
+ * The queue's last decision in one line: what it started, and how many lines say why the rest were left (the
  * lines themselves are shown folded). One line alone is shown as it is (キューが空, 同時に動かす数に達している…).
  */
 export function noteSummary(lastNote: string): { line: string; rest: number } {

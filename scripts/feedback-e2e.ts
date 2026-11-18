@@ -72,7 +72,7 @@ async function scenario(capture: boolean) {
     await call("Runtime.enable");
     await call("Log.enable");
     await call("Page.enable");
-    // Records whether the feedback dialog is open when capture starts and when the first frame arrives (#262).
+    // Records whether the feedback dialog is open when capture starts and when the first frame arrives.
     await call("Page.addScriptToEvaluateOnNewDocument", { source: `
       const dialogOpen = () => !!document.querySelector("dialog.feedback-dialog")?.open;
       if (navigator.mediaDevices?.getDisplayMedia) {
@@ -118,7 +118,7 @@ async function scenario(capture: boolean) {
       await until(() => evaluate(`document.querySelectorAll('dialog img').length === 2 && [...document.querySelectorAll('dialog img')].every(i => i.naturalWidth > 0)`), "paste and drop thumbnails");
     }
     await until(() => evaluate(`!document.querySelector('dialog button[type=submit]').disabled`), "send enabled");
-    await click("登録"); // the default mode, not chosen (#263)
+    await click("登録"); // the default mode, not chosen
     await until(() => evaluate(`!document.querySelector('dialog[open]')`), "sent dialog closes");
     const tasks = await (await fetch(`${base}/api/tasks`)).json() as Task[];
     const task = tasks.find((t) => t.title === (capture ? "要望: E2E 撮影" : "要望: E2E 貼り付け・ドロップ"));
@@ -130,14 +130,14 @@ async function scenario(capture: boolean) {
     assert(prompt.includes(`\n画面: Home`), "the prompt names the screen it was sent from");
     await click("フィードバック");
     assert(await evaluate(`document.querySelector('dialog textarea').value === '' && !document.querySelector('dialog img')`), "successful send clears composer");
-    // the send opened the new Task, so the dialog now names that screen (#262)
+    // the send opened the new Task, so the dialog now names that screen
     const screen = await evaluate(`document.querySelector('dialog .feedback-screen')?.textContent ?? ''`) as string;
     const screenShown = screen === `送信元: Task「${task!.title}」(${task!.id})`;
     assert(screenShown, `screen: ${screen}`);
     shot = { ...shot, screenShown, defaultModeTitle: task!.title };
     assert(await evaluate(`document.querySelector('dialog input[value=request]').checked`), "the dialog starts on 要望として登録 again");
     if (capture) {
-      // すぐ直す (#263): capture → 直す → the new Task's screen, titled 「直す: …」
+      // すぐ直す: capture → 直す → the new Task's screen, titled 「直す: …」
       await evaluate(`document.querySelector('dialog input[value=fix]').click()`);
       await until(() => evaluate(`document.querySelector('dialog').textContent.includes('要望 Issue は作りません')`), "fix hint");
       await evaluate(`document.querySelector('dialog textarea').focus()`);

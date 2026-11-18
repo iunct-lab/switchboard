@@ -1,5 +1,5 @@
 /**
- * bun scripts/foreign-repo-e2e.ts (#2576): someone else's repository from its addition to a Task's write, with a fake gh
+ * bun scripts/foreign-repo-e2e.ts: someone else's repository from its addition to a Task's write, with a fake gh
  * (it records every write) and a fake runner. No browser: the screen is checked by its own E2E in the PR.
  *
  * POST /api/workspaces {repo} → the clone → POST /api/tasks is 409 → confirm the runner config → a request and a PBI in
@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunnerAdapter, Task, Workspace } from "@switchboard/protocol";
-import type { GhRunner } from "../packages/core/src/backlog.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
 

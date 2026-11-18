@@ -1,6 +1,7 @@
 import type { AgentEvent, Task } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
 import { AUTO_RESUME_HEAD, isAutomaticUserText, STOP_NOTE } from "./evals.ts";
+import { stopWork } from "./stops.ts";
 
 /**
  * Turns cut by the daemon itself stopping — the host shutting down (a Spot interruption, a stop from the console), a
@@ -18,6 +19,9 @@ export const DISK_NOTE = "ディスクの空き切れで停止";
 export const STOP_RESUME_PROMPT = `${AUTO_RESUME_HEAD} デーモン（ホスト）の停止でターンが中断されました。実行中だったコマンドやバックグラウンドの処理は終了しています。状態を確かめてから、中断した箇所から作業を続けてください。`;
 /** A turn cut this many times in a row is not continued again: a task whose own work takes the host down must not loop. */
 export const MAX_STOP_RESUMES = 2;
+
+/** The id (within the Task) of the stop written when the automatic resumes ran out. */
+export const RESUME_CAP_STOP = "daemon-stop";
 
 const isAutoResume = isAutomaticUserText;
 
@@ -49,15 +53,20 @@ export function lastStopWasDaemon(events: AgentEvent[]): boolean {
 
 /**
  * Plan the continuation of a task whose turn the stop cut: a note in the transcript and `resumeAt = now`. Nothing is
- * planned without a runner session to resume, nor after `max` stops in a row (the note says so). `max` is the setting
- * `quotaAndResume.maxStopResumes`; absent = `MAX_STOP_RESUMES`.
- * `record` writes the note (the TaskManager's, so the UI sees it; the bare database at start-up).
+ * planned without a runner session to resume, nor after `max` stops in a row: the note says so, and a `stop.record`
+ * that waits for the person is written with it, so the Task is asked about where the other stops are and not only
+ * marked in its own conversation. `max` is the setting `quotaAndResume.maxStopResumes`; absent = `MAX_STOP_RESUMES`.
+ * `record` writes the note and the stop (the TaskManager's, so the UI sees it; the bare database at start-up).
  */
 export function planResumeAfterStop(db: Db, task: Task, now: number, record: (ev: AgentEvent) => void, max = MAX_STOP_RESUMES): boolean {
   if (!task.runnerSessionId) return false;
   const before = consecutiveStops(db.listEvents(task.id).map((e) => e.ev));
   if (before >= max) {
     record({ t: "status", text: `${STOP_NOTE}。${before + 1} 回続けて中断されたので自動再開しません（返信すると再開します）` });
+    record({
+      t: "stop.record",
+      stop: { id: `${task.id}/${RESUME_CAP_STOP}`, work: stopWork(task), op: "auto-resume", target: "", reason: "unknown", evidence: `デーモンの停止で ${before + 1} 回続けて中断。自動再開の上限（${max} 回）`, safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: now },
+    });
     return false;
   }
   record({ t: "status", text: `${STOP_NOTE}。次に起動したとき同じセッションで自動再開します（ランナーの自動再開が OFF なら返信で再開）` });

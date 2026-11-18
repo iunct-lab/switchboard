@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { githubBudgetLabel, githubBudgetLow } from "./components/ui.tsx";
 
-test("githubBudgetLabel: what is left, of how much, and when it is back (#549)", () => {
+test("githubBudgetLabel: what is left, of how much, and when it is back", () => {
   const now = Date.parse("2026-10-09T11:00:00+09:00");
   const resetsAt = Date.parse("2026-10-09T11:31:00+09:00") / 1000;
   expect(githubBudgetLabel({ remaining: 500, limit: 5000, resetsAt }, now)).toBe(`500 / ${(5000).toLocaleString()} · 11:31 に戻る`);

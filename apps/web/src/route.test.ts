@@ -14,12 +14,13 @@ const views: View[] = [
   { name: "resources" },
   { name: "approvals" },
   { name: "settings" },
+  { name: "terminal", workspaceId: "ws_abc123" },
 ];
 
-describe("screen URLs (#3355)", () => {
+describe("screen URLs", () => {
   test("every screen has a path and comes back from it", () => {
     for (const v of views) expect(viewFromPath(viewPath(v))).toEqual(v);
-    expect(viewPath({ name: "approvals" })).toBe("/approvals"); // the PWA's start_url stays (#26)
+    expect(viewPath({ name: "approvals" })).toBe("/approvals"); // the PWA's start_url stays
     expect(viewPath({ name: "evals" })).toBe("/insights"); // the tab's name, not the internal one
     expect(viewPath({ name: "home" })).toBe("/");
   });
@@ -55,7 +56,7 @@ describe("screen URLs (#3355)", () => {
   });
 });
 
-describe("when the address bar is written (#3427)", () => {
+describe("when the address bar is written", () => {
   test("a new screen writes its path; the screen already shown writes nothing", () => {
     expect(pathToWrite({ name: "task", id: "t1" }, "/")).toBe("/task/t1");
     expect(pathToWrite({ name: "backlog" }, "/task/t1")).toBe("/backlog");

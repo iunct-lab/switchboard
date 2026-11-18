@@ -1,17 +1,17 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/perf-bench.ts [--runs N] [--json <file>] [--skip-loaded <reason>]. Requires Chrome
- * (CHROME_BIN overrides). Times the four journeys of #637 (launch / new-task / open-task / send), then `open-task-huge`
- * (#2088: after send, a task of 20,000 events — the size of the real ones, 18,866 to 33,110 — is made and opened from
+ * (CHROME_BIN overrides). Times the four journeys (launch / new-task / open-task / send), then `open-task-huge`
+ * (after send, a task of 20,000 events — the size of the real ones, 18,866 to 33,110 — is made and opened from
  * the rail; it reads the `sb:open-task` measure, and comes last so the four others' counts do not move), the same way
  * each run: a fresh daemon with a fake runner (a long task of 2,000 events; every other turn a reply of 200 deltas) and
  * a fresh headless Chrome tab at 1280 × 800. Prints, per journey, the median and p90 of `sb:<journey>` in ms and the
  * counts that do not wobble (API requests, Chrome's LayoutCount / RecalcStyleCount, the layout shift, and `bytes`: the
  * size of the journey's /api/ responses as CDP's encodedDataLength — the daemon does not compress) as the median of the runs;
  * open-task and open-task-huge also say `responses`, those bytes by the shape of the path (`/api/tasks/:id/evals`, the
- * last run's: a response's size does not wobble), which perf-ratchet lists when `bytes` differs from main's (#3921).
+ * last run's: a response's size does not wobble), which perf-ratchet lists when `bytes` differs from main's.
  * Then, once (LOADED_RUNS, not --runs), launch and send again on a daemon holding as much as the real home
  * (scripts/perf-load.ts): launch under a backlog import and the rescue page's status checks, send without them, and the
- * longest the daemon took to answer /api/health during the import (`loaded`, #2822, #3634). `--skip-loaded <reason>`:
+ * longest the daemon took to answer /api/health during the import (`loaded`). `--skip-loaded <reason>`:
  * perf-ratchet's base measure gives it (only main's bytes are wanted there); the result then
  * holds `loadedSkipped` instead of `loaded`, and perf-ratchet leaves the `loaded` ceiling out.
  */
@@ -25,7 +25,7 @@ import { LOAD, LONG_EVENTS, loadGh, longEvents, overlap, seedLoad } from "./perf
 import { BYTES_JOURNEYS, bundleOf, shapeOf, type Responses } from "./perf-ratchet.ts";
 import type { Journey, RunnerAdapter } from "@switchboard/protocol";
 
-/** A journey of the bench: the app's four, and the same open of a task as big as the real ones (#2088). */
+/** A journey of the bench: the app's four, and the same open of a task as big as the real ones. */
 type BenchJourney = Journey | "open-task-huge";
 
 const { values: args } = parseArgs({ options: { runs: { type: "string", default: "5" }, json: { type: "string" }, "skip-loaded": { type: "string" } } });
@@ -35,11 +35,11 @@ const dist = join(import.meta.dir, "../apps/web/dist");
 if (!existsSync(join(dist, "index.html"))) throw new Error("apps/web/dist is missing: run `bun run --cwd apps/web build` first");
 
 const REPLY_DELTAS = 200;
-/** The huge task (#2088): the real ones held 18,866 (6.8 MB) to 33,110 events. */
+/** The huge task: the real ones held 18,866 (6.8 MB) to 33,110 events. */
 const HUGE_EVENTS = 20_000;
 /** A loaded journey waits this long, not `until`'s 30 s: a daemon stuck for longer must read as over its ceiling, not as a timeout. */
 const LOADED_WAIT_MS = 300_000;
-/** `loaded` runs once, whatever --runs is (#3634): it tells a daemon stuck for minutes (the ceiling's ~90 times) from a
+/** `loaded` runs once, whatever --runs is: it tells a daemon stuck for minutes (the ceiling's ~90 times) from a
  * working one, and finer than that the host's load moves it more than more runs would settle; 5 runs took ~8 minutes. */
 const LOADED_RUNS = 1;
 
@@ -77,7 +77,7 @@ function findChrome(): string {
 }
 
 /**
- * GitHub as the bench's daemon sees it: the GraphQL budget only (#549; the ledger asks for it), answered at once and
+ * GitHub as the bench's daemon sees it: the GraphQL budget only (the ledger asks for it), answered at once and
  * the same every run — the real gh would put GitHub's network into what the UI is timed on. Anything else fails.
  */
 const benchGh = async (args: string[]) => args.some((a) => a.includes("rateLimit"))
@@ -170,7 +170,7 @@ async function withTab<T>(chromePort: string, play: (tab: Tab) => Promise<T>): P
       pending.delete(m.id);
       m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result);
     }
-    // the page's own timings sent to the daemon (#639, POST /api/perf) are not any journey's work
+    // the page's own timings sent to the daemon (POST /api/perf) are not any journey's work
     const api = m.method === "Network.requestWillBeSent" ? new URL(m.params.request.url).pathname : "";
     if (api.startsWith("/api/") && api !== "/api/perf") {
       requests++;
@@ -294,7 +294,7 @@ const runOnce = (chromePort: string, base: string, cwd: string) => withTab(chrom
   return out;
 });
 
-/** launch under `overlap` (one import a run, #3634); send on the same loaded daemon without one; opening the long task in between is not timed. */
+/** launch under `overlap` (one import a run); send on the same loaded daemon without one; opening the long task in between is not timed. */
 const runLoaded = (chromePort: string, d: Loaded, workspaceId: string) => withTab(chromePort, async ({ call, journey, click, type, settle }) => {
   const windows: number[] = [];
   const around: Around = async (run) => windows.push(await overlap({ ...d, workspaceId }, run));

@@ -1,5 +1,5 @@
 /**
- * Immutable releases (#178). A release is one commit of the Switchboard repository, exported and built once under
+ * Immutable releases. A release is one commit of the Switchboard repository, exported and built once under
  * `<home>/releases/<sha>/`; `current` and `previous` are relative symlinks next to them. Nothing writes into a
  * release after it is built, so an agent editing the working tree cannot change the daemon that is running.
  * The history is a JSONL file, not a database row: it must be readable while Switchboard itself is down.

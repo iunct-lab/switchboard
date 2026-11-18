@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * GitHub and GitLab chosen per repository (#892), through the daemon's own code with fake services only: a temporary
+ * GitHub and GitLab chosen per repository, through the daemon's own code with fake services only: a temporary
  * database, a local bare git repository, the fake GitHub of the backlog tests and a fake GitLab behind a fake glab. No
  * runner, no network: every gh / glab call goes to a fake, and the run fails if one names another host.
  * `env -u SWITCHBOARD_SUPERVISED bun scripts/forge-e2e.ts` → each case and whether it passed; exit 0 = all passed.
@@ -11,7 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { Db } from "../packages/core/src/db.ts";
-import { answerStoredDecision, createStoredIssue, editStoredIssue, readStoredBacklog, type GhRunner } from "../packages/core/src/backlog.ts";
+import { answerStoredDecision, createStoredIssue, editStoredIssue } from "../packages/core/src/backlog-edit.ts";
+import { readStoredBacklog } from "../packages/core/src/backlog-stored.ts";
+import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { sendGithubOperations } from "../packages/core/src/backlog-send.ts";
 import { BacklogSync } from "../packages/core/src/backlog-sync.ts";
 import { fakeGithub } from "../packages/core/src/backlog-fake-github.ts";
@@ -152,7 +154,7 @@ export async function run(log = console.log): Promise<boolean> {
     throw new Error(`gh asked during the GitLab import: ${a.join(" ")}`);
   }, clock, undefined, false);
   sync.glab = g.glab;
-  /** The fake GitHub answering an import's reads too (as backlog-send.test.ts's importsToo), from the same Issues. */
+  /** The fake GitHub answering an import's reads too (as api-test-harness.ts's importsToo), from the same Issues. */
   const importing: GhRunner = async (args, cwd) => {
     const raw = (i: { node_id: string; number: number; title: string; body: string; state: string; labels: string[] }) => ({ id: i.node_id, number: i.number, title: i.title, url: "", state: i.state, body: i.body, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-03T00:00:00Z", milestone: null, parent: null,
       labels: { totalCount: i.labels.length, nodes: i.labels.map((name) => ({ name })) }, subIssues: { totalCount: 0, nodes: [] }, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, projectItems: { totalCount: 0, nodes: [] } });
@@ -213,7 +215,7 @@ export async function run(log = console.log): Promise<boolean> {
     });
 
     await step("GitHub も同じ: コメントと作成の答えを失っても印で見つけ、二重に送らない", async () => {
-      // on #3: #12's held conflict holds what comes after it on #12
+      // on `#3`: `#12`'s held conflict holds what comes after it on `#12`
       answerStoredDecision(db, HUB, 3, "GitHub で A");
       github.fail.push({ match: (a) => a[1]!.endsWith("/comments") && a.includes("POST"), status: 502, after: true });
       await sendGithubOperations(gh, db, hub, HUB, clock);

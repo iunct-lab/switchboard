@@ -3,7 +3,7 @@ import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
 /**
- * OS notifications for approval waits (#1138), shown only while the page is open (no Web Push).
+ * OS notifications for approval waits, shown only while the page is open (no Web Push).
  * Notices come only from /ws messages, never from a GET /api/approvals refetch, so a reconnect does not notify again.
  */
 
@@ -14,9 +14,9 @@ export type Notice = { key: string; taskId: string; title: string; body: string 
  * The notice a /ws message calls for, or null. A permission.ask notifies once per (task, ask id); its
  * permission.resolved marks the ask seen, so a late redelivery stays quiet. A task.updated notifies when the outcome
  * turns needs_action on a task not reviewed yet and not waiting (a waiting task's ask already notified).
- * A task.updated into a disk wait (#2234) notifies once per wait; leaving it re-arms.
- * A task.terminal waiting (Claude Code in the terminal tab, #1574) notifies once per wait; a task.deviceAuth with a code
- * (#2046) once per code. task.terminals (what is, sent
+ * A task.updated into a disk wait notifies once per wait; leaving it re-arms.
+ * A task.terminal waiting (Claude Code in the terminal tab) notifies once per wait; a task.deviceAuth with a code
+ * once per code. task.terminals (what is, sent
  * after hello; noticesFor) notifies only a wait that came while away from a status this page knew: not after a reload,
  * and not the same wait again on a reconnect.
  * `tasks` is the list before this message is applied; `seen` is kept across messages and grows here.
@@ -49,7 +49,7 @@ export function noticeFor(m: ServerMessage, tasks: TaskSummary[], seen: Set<stri
     return { key, taskId: task.id, title: task.title, body: t(home.noticeNeedsAnswer) };
   }
   if (m.type === "task.terminal") return terminalNotice(m.taskId, m.status, true, tasks, seen);
-  // a device code to approve (#2046): once per code, like an approval wait
+  // a device code to approve: once per code, like an approval wait
   if (m.type === "task.deviceAuth" && m.auth) {
     const key = `${m.taskId}\u0000deviceAuth\u0000${m.auth.expiresAt}`;
     if (seen.has(key)) return null;

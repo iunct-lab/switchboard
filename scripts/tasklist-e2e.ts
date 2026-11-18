@@ -1,6 +1,6 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/tasklist-e2e.ts. Requires Chrome (CHROME_BIN overrides).
- * The rail's Task list (#1142) with 120 Tasks (task-001〜task-010 end in error): 50 rows, 100 after 「さらに表示」, the
+ * The rail's Task list with 120 Tasks (task-001〜task-010 end in error): 50 rows, 100 after 「さらに表示」, the
  * search and the state filter narrow it, アーカイブ on a stopped Task takes it out of the list without reading the
  * archived ones, 「アーカイブ済みを表示」 reads them once (GET /api/tasks?archived=1, counted over CDP), and
  * 「アーカイブを戻す」 brings it back. With the archived ones shown, a Task archived while the page is cut off (its

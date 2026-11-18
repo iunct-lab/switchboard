@@ -1,16 +1,20 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { CloudPreparation, ExecutionMode, CreateTaskInput, LedgerSummary, ReportRow, RoutingSuggestion, RunnerId, RunnerInfo, Schedule, TaskStopMark, TaskSummary, Workspace } from "@switchboard/protocol";
-import { api, type Health } from "../api.ts";
+import { NewDefaultsSettings, type CloudPreparation, type ExecutionMode, type CreateTaskInput, type LedgerSummary, type ReportRow, type RoutingSuggestion, type RunnerId, type RunnerInfo, type Schedule, type TaskStopMark, type TaskSummary, type Workspace } from "@switchboard/protocol";
+import { api } from "../api/index.ts";
+import { type Health } from "../api/daemon.ts";
 import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { activeLabel, attentionGroups, isActive, type AttentionGroup, outcomeDotClass, outcomeLabel } from "../attention.ts";
 import { reportMeta } from "../reports.ts";
-import { quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
+import { accountMark, quotaAsOf, quotaStale, resetLabel, windowLabel } from "../quota.ts";
 import { staleDraft } from "../presets.ts";
 import { isAdkRunner, listedRunners, runnerLabel } from "../runners.ts";
+import { homeEmptyLabel, initialChoice } from "../runnerSettings.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
+import { PresetReplies } from "./PresetReplies.tsx";
+import { repliesFor } from "../presetReplies.ts";
 import { titleToSend } from "../taskTitle.ts";
 import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDetails.ts";
 import { startBlockedReason, unavailableNotice, unavailableNotices } from "../runnerNotice.ts";
@@ -21,7 +25,9 @@ import { ago } from "../inProgress.ts";
 import { REASON_LABEL } from "../interventions.ts";
 import { stuckLine, stuckSchedules } from "../stuck.ts";
 
-/** How many 要対応 rows (groups) show before すべて (#4066). */
+/** Before the settings are read: no saved model / effort for any runner. */
+const ND_NONE: NewDefaultsSettings = NewDefaultsSettings.parse({});
+/** How many 要対応 rows (groups) show before すべて. */
 const ATTENTION_SHOWN = 8;
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
@@ -37,22 +43,22 @@ export function Home(props: {
   onCreate: (input: CreateTaskInput) => Promise<void>;
   onOpenTask: (id: string) => void;
   onError: (msg: string) => void;
-  /** Moves on each stop record (#4501): the stuck schedules are read again. */
+  /** Moves on each stop record: the stuck schedules are read again. */
   stopRev: number;
-  /** The last stop of each Task (#4520); null until read. Drawn from #4522 on. */
+  /** The last stop of each Task; null until read. Home draws the marks from it. */
   stopMarks: Record<string, TaskStopMark> | null;
   onOpenSettings: () => void;
   /** Settings scrolled to its Workspace card (the 「設定で追加 →」 when there is none yet). */
   onOpenWorkspaces: () => void;
-  /** The newest report's line (#1835): opens Insights with it. */
+  /** The newest report's line: opens Insights with it. */
   onOpenReport: (id: string) => void;
-  /** Insights' レポート section with every artifact (#1833) */
+  /** Insights' レポート section with every artifact */
   onOpenArtifacts: () => void;
 }) {
   const [wsId, setWsId] = useState<string>("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  // Attachments (#125): uploaded as they are added, sent as ids with 開始.
+  // Attachments: uploaded as they are added, sent as ids with 開始.
   const attach = useAttachments(props.onError);
   const drop = useDropZone((files) => void attach.add(files), props.onError);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
@@ -63,20 +69,20 @@ export function Home(props: {
   /** "" = follow the runner's saved default (shown selected); anything else is sent explicitly. */
   const [mode, setMode] = useState("");
   const [model, setModel] = useState("");
-  const [effort, setEffort] = useState(""); // "" = the CLI's own default (#833)
+  const [effort, setEffort] = useState(""); // "" = the CLI's own default
   const [budget, setBudget] = useState("");
-  // Shadow run (#99): null = follow the saved default (Settings.shadowRunner); a click makes it explicit for this task.
+  // Shadow run: null = follow the saved default (Settings.shadowRunner); a click makes it explicit for this task.
   const [shadow, setShadow] = useState<boolean | null>(null);
   /** undefined = not loaded yet (the toggle waits; an untouched creation leaves the choice to the daemon). */
-  // Settings 「Switchboard 自体を開発する」 (#2459): read with the other defaults below; unread = off, so 「このアプリを改善 →」 never shows for a moment and goes
+  // Settings 「Switchboard 自体を開発する」: read with the other defaults below; unread = off, so 「このアプリを改善 →」 never shows for a moment and goes
   const [developSelf, setDevelopSelf] = useState(false);
   const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined>(undefined);
-  /** 詳細 (#3354): the rarely set values, folded; open or closed as the person left it in this browser. */
+  /** 詳細: the rarely set values, folded; open or closed as the person left it in this browser. */
   const [detailsOpen, setDetailsOpen] = useState(() => loadDetailsOpen(localStorage));
   const [busy, setBusy] = useState(false);
   const [suggestion, setSuggestion] = useState<RoutingSuggestion | null>(null);
   const [brief, setBrief] = useState<Brief | null>(null);
-  /** The text a 定型の指示 put in (#940) and the workspace it was expanded for: sent only while that workspace is chosen. */
+  /** The text a 定型の指示 put in and the workspace it was expanded for: sent only while that workspace is chosen. */
   const [draft, setDraft] = useState<{ workspaceId: string | null; text: string } | null>(null);
   const briefSeq = useRef(0);
   const promptRef = useRef(prompt);
@@ -90,8 +96,11 @@ export function Home(props: {
   const [runnerTouched, setRunnerTouched] = useState(false);
   /** The model select was changed by hand: the rule table's model proposal no longer fills it. */
   const [modelTouched, setModelTouched] = useState(false);
+  const [effortTouched, setEffortTouched] = useState(false);
+  /** The saved 新規作成の既定 (runner / model / effort): where an untouched form's model and effort start. */
+  const [newDefaults, setNewDefaults] = useState<NewDefaultsSettings | null>(null);
   const runnerTouchedRef = useRef(false);
-  /** 新規作成の既定 (#835): the runner the form starts on when the router has no reason to prefer one (its fallback); null = not changed from the default. */
+  /** 新規作成の既定: the runner the form starts on when the router has no reason to prefer one (its fallback); null = not changed from the default. */
   const savedRunnerRef = useRef<RunnerId | null>(null);
   const suggestionRef = useRef<RoutingSuggestion | null>(null);
   /** The runner an untouched form shows for `s`: the router's, except its fallback, where the saved default stands. */
@@ -105,7 +114,7 @@ export function Home(props: {
   runnerOkRef.current = props.runnerOk;
   const suggestSeq = useRef(0);
 
-  // "" = 自動 (#135), the default: the daemon asks the LLM to pick a registered Workspace when 開始 is pressed.
+  // "" = 自動, the default: the daemon asks the LLM to pick a registered Workspace when 開始 is pressed.
   const ws = props.workspaces.find((w) => w.id === wsId);
   const stale = staleDraft(draft, { workspaceId: ws?.id ?? null, text: prompt });
   const wsSelect = useRef<HTMLSelectElement>(null);
@@ -170,7 +179,7 @@ export function Home(props: {
       briefSeq.current++;
     };
   }, [ws, wsId, brief]);
-  // Permission mode (#58): options and the effective default come from the daemon per runner. `runners` is absent
+  // Permission mode: options and the effective default come from the daemon per runner. `runners` is absent
   // from /api/health until the token is accepted (off-loopback), so nothing mode-related renders until it is there.
   const runnerInfo = props.health?.runners?.find((r) => r.id === runner);
   const modes = runnerInfo?.permissionModes ?? [];
@@ -182,12 +191,15 @@ export function Home(props: {
     setMode("");
     setModel(""); // a model belongs to one runner
     setEffort(""); // so does an effort
+    setEffortTouched(false);
   }, [runner]);
-  // After the runner effect above (which empties the model): an untouched select takes the rule's model proposal, and
-  // goes back to the CLI default when the proposal has none or is for another runner.
+  // After the runner effect above (which empties them): an untouched select takes the rule's model proposal, else the
+  // saved default for this runner, and goes back to the CLI default when there is none.
+  const initial = initialChoice(runner, runnerInfo, newDefaults ?? ND_NONE, suggestion ?? undefined);
   useEffect(() => {
-    if (!modelTouched) setModel(suggestion?.model && runner === suggestion.runner ? suggestion.model : "");
-  }, [suggestion, runner, modelTouched]);
+    if (!modelTouched) setModel(initial.model);
+    if (!effortTouched) setEffort(initial.effort);
+  }, [initial.model, initial.effort, runner, modelTouched, effortTouched]);
   useEffect(() => {
     if (props.health?.runners)
       api
@@ -195,6 +207,7 @@ export function Home(props: {
         .then((s) => {
           setShadowDefault(s.shadowRunner);
           setDevelopSelf(s.developSelf);
+          setNewDefaults(s.newDefaults);
           // only a runner the person saved: left at its default, the router's own fallback (routing.yaml) stands as before
           savedRunnerRef.current = s.newDefaults.taskRunner !== s.defaults.newDefaults.taskRunner ? s.newDefaults.taskRunner : null;
           const r = startRunner(suggestionRef.current);
@@ -204,13 +217,13 @@ export function Home(props: {
   }, [props.health]);
   const dakOk = props.runnerOk.has("dak");
   const shadowOn = !isAdkRunner(runner) && dakOk && (shadow ?? shadowDefault === "dak");
-  // What 詳細 says while closed: what differs from an untouched form (the rule's model, the saved shadow). Cloud sends
+  // What 詳細 says while closed: what differs from an untouched form (the initial model and effort, the saved shadow). Cloud sends
   // none of model / effort / budget / shadow, so they are not shown as changed there. An untouched model is the rule's
   // (the effect below fills the select a render later): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
-  const defaultModel = suggestion?.model && runner === suggestion.runner ? suggestion.model : "";
+  const defaultModel = initial.model;
   const defaultShadow = !isAdkRunner(runner) && dakOk && shadowDefault === "dak";
   const summary = detailsSummary(
-    cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort, budget, shadow: shadowOn },
+    cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort: effort === initial.effort ? "" : effort, budget, shadow: shadowOn },
     { model: defaultModel, shadow: defaultShadow, briefTitle: brief?.title },
   );
   // What the request says about the shadow. Untouched → omitted, so the daemon applies its saved default itself (also
@@ -218,7 +231,7 @@ export function Home(props: {
   // DAK as the default says null: the daemon would only note that the shadow equals the primary. An ADK server added in
   // Settings offers no shadow toggle, so it says null too: the saved DAK default does not ride along unseen.
   const shadowRunnerField: RunnerId | null | undefined = runner.startsWith("custom:") ? null : runner === "dak" ? (shadowDefault === "dak" ? null : undefined) : shadow === null ? undefined : shadow && dakOk ? "dak" : null;
-  // The newest report across Tasks (#1835), read once per visit to Home, and whether any artifact exists (#1833): the
+  // The newest report across Tasks, read once per visit to Home, and whether any artifact exists: the
   // レポート heading and its link to every artifact show when either does; nothing at all when neither does.
   const [latestReport, setLatestReport] = useState<ReportRow | null>(null);
   const [anyArtifact, setAnyArtifact] = useState(false);
@@ -231,9 +244,9 @@ export function Home(props: {
     };
   }, []);
   const active = useMemo(() => props.tasks.filter(isActive), [props.tasks]);
+  const sendReply = (id: string) => async (text: string) => { await api.send(id, text); };
   const { needs, waiting } = useMemo(() => attentionGroups(props.tasks, props.stopMarks), [props.tasks, props.stopMarks]);
-  const needsCount = needs.reduce((n, g) => n + g.count, 0);
-  // 確認済み of a group (#4522): the existing setOutcome for each Task, not a new API; the rows leave with the tasks' events
+  // 確認済み of a group: the existing setOutcome for each Task, not a new API; the rows leave with the tasks' events
   const reviewGroup = async (g: AttentionGroup) => {
     try {
       await Promise.all(g.tasks.map((x) => api.setOutcome(x.id, { reviewed: true })));
@@ -241,7 +254,7 @@ export function Home(props: {
       props.onError(String((e as Error).message ?? e));
     }
   };
-  // Schedules whose Tasks stopped the same way in a row (#4501): read on arriving, when any Task's row changed (a reply, the
+  // Schedules whose Tasks stopped the same way in a row: read on arriving, when any Task's row changed (a reply, the
   // next Task ending) and on each stop record (a stop or one resolved within a turn moves no row), not on other events
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const tasksAt = useMemo(() => props.tasks.reduce((m, x) => Math.max(m, x.updatedAt), 0), [props.tasks]);
@@ -253,7 +266,7 @@ export function Home(props: {
     };
   }, [tasksAt, props.tasks.length, props.stopRev]);
   const stuck = useMemo(() => stuckSchedules(schedules), [schedules]);
-  // the first ones (#4066): 60 rows pushed the cost and the reports five screens down on a phone
+  // the first ones: 60 rows pushed the cost and the reports five screens down on a phone
   const [allAttention, setAllAttention] = useState(false);
   const recent = useMemo(() => {
     const listed = new Set([...needs.flatMap((g) => g.tasks), ...waiting.map((w) => w.task)].map((t) => t.id));
@@ -278,7 +291,7 @@ export function Home(props: {
         executionMode: cloud ? "cloud" : "local",
         workspaceId: ws?.id, // neither = 自動: the daemon chooses, or answers 409 and the person picks
         cwd: ws?.path,
-        // empty, or only the inserted prefix: no title, so the daemon names the task (#491)
+        // empty, or only the inserted prefix: no title, so the daemon names the task
         title: titleToSend(title, brief?.title),
         prompt: prompt.trim(),
         runner,
@@ -298,6 +311,7 @@ export function Home(props: {
       setDraft(null);
       setRunnerTouched(false);
       setModelTouched(false);
+      setEffortTouched(false);
       setShadow(null); // the click was for that task; the next one starts from the saved default again
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
@@ -455,7 +469,7 @@ export function Home(props: {
             {choosing ? t(home.choosingWorkspace) : busy ? t(home.starting) : !cloud && attach.busy ? t(home.uploading) : t(home.start)}
           </button>
         </div>
-        {/* why a runner or 開始 cannot be used, read without hovering (#3354); an empty prompt needs no words, a stale one is said above */}
+        {/* why a runner or 開始 cannot be used, read without hovering; an empty prompt needs no words, a stale one is said above */}
         {offRunners.length > 0 && (
           <div className="hint">
             {offRunners.map((n, i) => (
@@ -478,8 +492,8 @@ export function Home(props: {
               <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t(home.titlePlaceholder)} />
             </label>
             {runner === "claude" && <label>{t(home.runLocation)} <select aria-label={t(home.runLocation)} value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">{t(home.local)}</option><option value="cloud">{t(home.cloud)}</option></select></label>}
-            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} />}
-            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} />}
+            {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} emptyLabel={homeEmptyLabel("model", runnerInfo)} />}
+            {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setEffortTouched(true); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} emptyLabel={homeEmptyLabel("effort", runnerInfo)} />}
             {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder={t(home.budgetPlaceholder)} inputMode="decimal" title={t(home.budgetTitle)} />}
             {!cloud && !isAdkRunner(runner) && listedRunners(props.health?.runners).includes("dak") && (
               <label
@@ -503,7 +517,7 @@ export function Home(props: {
             )}
             <button className="ghost" onClick={props.onOpenSettings} title={t(home.defaultsInSettingsTitle)}>{t(home.defaultsInSettings)}</button>
           </div>
-          {/* the improve preambles are for an improvement request only, not every request: folded with the rest (#3850) */}
+          {/* the improve preambles are for an improvement request only, not every request: folded with the rest */}
           <ImproveButtons ws={ws} meta={meta} developSelf={developSelf} onImprove={(w) => void improve(w)} />
         </details>
         {cloud && <div className="cloud-preparation card" role="note">
@@ -577,7 +591,7 @@ export function Home(props: {
               <span className="m">{activeLabel(x)}</span>
             </button>
           ))}
-          <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: needsCount })}</h5>
+          <h5 style={{ marginTop: 14 }}>{t(home.attentionHeading, { count: needs.length })}</h5>
           {needs.length === 0 && <div className="muted">{t(home.none)}</div>}
           {(allAttention ? needs : needs.slice(0, ATTENTION_SHOWN)).map((g) => {
             const x = g.tasks[0]!;
@@ -589,11 +603,12 @@ export function Home(props: {
                   <RunnerPill runner={x.runner} />
                   <OriginTag origin={x.origin} />
                   <ShadowTag task={x} />
-                  {/* when it last moved (#4066): two Tasks of the same stage of one PBI have the same title */}
+                  {/* when it last moved: two Tasks of the same stage of one PBI have the same title */}
                   <span className="m">
                     {outcomeLabel(x.outcome)} · {ago(x.updatedAt, Date.now())}
                   </span>
                 </button>
+                <PresetReplies taskId={x.id} replies={repliesFor(x.status, props.stopMarks?.[x.id])} onSend={sendReply(x.id)} onError={props.onError} />
                 {g.count > 1 && (
                   <div className="row sub same-cause">
                     <span className="m">{t(home.sameCause, { n: g.count })}</span>
@@ -612,14 +627,17 @@ export function Home(props: {
             <details className="waiting-folded">
               <summary>{t(home.waitingFolded, { n: waiting.length })}</summary>
               {waiting.map((w) => (
-                <button key={w.task.id} className="row link" onClick={() => props.onOpenTask(w.task.id)}>
-                  <span className="dot idle" />
-                  <span className="t">{w.task.title}</span>
-                  <RunnerPill runner={w.task.runner} />
-                  <span className="m">
-                    {w.reason === "depends" && w.conditions.length > 0 ? w.conditions.map((c) => `${c.key}:${c.value}`).join(" ") : REASON_LABEL[w.reason]} · {ago(w.task.updatedAt, Date.now())}
-                  </span>
-                </button>
+                <div key={w.task.id}>
+                  <button className="row link" onClick={() => props.onOpenTask(w.task.id)}>
+                    <span className="dot idle" />
+                    <span className="t">{w.task.title}</span>
+                    <RunnerPill runner={w.task.runner} />
+                    <span className="m">
+                      {w.reason === "depends" && w.conditions.length > 0 ? w.conditions.map((c) => `${c.key}:${c.value}`).join(" ") : w.reason ? REASON_LABEL[w.reason] : outcomeLabel(w.task.outcome)} · {ago(w.task.updatedAt, Date.now())}
+                    </span>
+                  </button>
+                  <PresetReplies taskId={w.task.id} replies={repliesFor(w.task.status, props.stopMarks?.[w.task.id])} onSend={sendReply(w.task.id)} onError={props.onError} />
+                </div>
               ))}
             </details>
           )}
@@ -647,7 +665,7 @@ export function Home(props: {
           </div>
           <div className="kv" style={{ marginTop: 10 }}>
             {(props.ledger?.quota ?? []).map((q) => (
-              <QuotaRow key={`${q.runner}-${q.window}`} label={`${q.runner} · ${windowLabel(q.window)}`} utilization={q.utilization} resetsAt={q.resetsAt} ts={q.ts} />
+              <QuotaRow key={`${q.runner}-${q.account}-${q.window}`} label={[q.runner, accountMark(props.ledger!.quota, q), windowLabel(q.window)].filter(Boolean).join(" · ")} utilization={q.utilization} resetsAt={q.resetsAt} ts={q.ts} />
             ))}
             {(props.ledger?.quota ?? []).length === 0 && <span className="muted">{t(home.quotaEmpty)}</span>}
           </div>
@@ -688,7 +706,7 @@ export function Home(props: {
 }
 
 function QuotaRow(props: { label: string; utilization: number; resetsAt: number; ts: number }) {
-  // the same words as the Ledger's 使用量（枠） (#1836); a window not reported for a day is faded
+  // the same words as the Ledger's 使用量（枠）; a window not reported for a day is faded
   const stale = quotaStale(props.ts);
   return (
     <>
@@ -703,7 +721,7 @@ function QuotaRow(props: { label: string; utilization: number; resetsAt: number;
   );
 }
 
-/** 「<name> を改善 →」 for the chosen workspace, and 「このアプリを改善 →」 only while Switchboard itself is developed (#2459). */
+/** 「<name> を改善 →」 for the chosen workspace, and 「このアプリを改善 →」 only while Switchboard itself is developed. */
 export function ImproveButtons({ ws, meta, developSelf, onImprove }: { ws: Workspace | undefined; meta: Workspace | undefined; developSelf: boolean; onImprove: (w: Workspace) => void }) {
   const own = ws && ws.kind !== "meta" ? ws : undefined;
   const self = developSelf ? meta : undefined;

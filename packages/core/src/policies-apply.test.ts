@@ -20,7 +20,7 @@ const saveApproval = async () => {
 const from = (target: string): PolicySubject => ({ kind: "check", op: "gh pr merge", target, conditions: [], head: null });
 const checkPolicy = (over: Partial<AnswerPolicy> = {}): AnswerPolicy => ({
   id: "pol_t", scope: "repo", workspaceId: h.meta().id, pbi: null, askId: null, kind: "check", op: "gh pr merge", target: "PR #12", when: [], answer: { kind: "choice", choice: "マージする" },
-  expiresAt: Date.now() + DAY, revokedAt: null, createdAt: Date.now() - 1000, updatedAt: Date.now() - 1000, from: from("PR #12"), uses: [], ...over,
+  expiresAt: Date.now() + DAY, revokedAt: null, createdAt: Date.now() - 1000, updatedAt: Date.now() - 1000, from: from("PR #12"), uses: [], useCount: 0, firstUsedAt: null, ...over,
 });
 const settle = () => Bun.sleep(250);
 

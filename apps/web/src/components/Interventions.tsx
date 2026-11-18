@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import type { InterventionView } from "@switchboard/protocol";
-import { api } from "../api.ts";
+import { api } from "../api/index.ts";
 import { interventionRows, populationLine, reasonRows, unknownLine } from "../interventions.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 
 /**
- * 介入（直近 7 日 / 30 日）(#651): how often a person had to step in (approve, decide, restart), against the period before, and
+ * 介入（直近 7 日 / 30 日）: how often a person had to step in (approve, decide, restart), against the period before, and
  * what made work stop. Read apart from the list and the 流れ section, so that this failing leaves them as they are.
  */
 export function Interventions(props: { inView: (workspaceId: string | null) => boolean; onOpenTask: (id: string) => void }) {
@@ -79,7 +79,7 @@ export function Interventions(props: { inView: (workspaceId: string | null) => b
           <div className="hint">{t(m.reasonsHint)}</div>
           {reasonRows(pair.current, pair.previous, props.inView).length === 0 && <div className="muted">{t(m.noStops)}</div>}
           {reasonRows(pair.current, pair.previous, props.inView).map((r) => (
-            // #4060: the reason and its counts on one line, the Tasks it names wrapping under it (kept on one row they
+            // the reason and its counts on one line, the Tasks it names wrapping under it (kept on one row they
             // squeezed the reason to a letter and widened the page past the screen)
             <div key={r.reason} className="reason-row" data-reason={r.reason}>
               <div className="reason-head">

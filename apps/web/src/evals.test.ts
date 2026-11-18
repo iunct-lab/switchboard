@@ -1,8 +1,8 @@
 // test-reads: apps/web/src/ops.ts apps/web/src/perf.ts apps/web/src/quota.ts apps/web/src/runnerStats.ts apps/web/src/reports.ts apps/web/src/i18n.ts apps/web/src/i18n/insights.ts
 import { describe, expect, test } from "bun:test";
-import type { EvalContext, EvalsListRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
+import type { EvalContext, EvalsListRow, EvalsRequestRow, JudgeEval, RuleEval, TaskEvals } from "@switchboard/protocol";
 import type { EvalsSortKey } from "./evals.ts";
-import { contextLines, endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, HUMAN_QUESTIONS, humanAnswerMark, humanLabel, judgeAverage, judgedDiffers, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
+import { contextLines, EVAL_STAGES, requestRowLines, stageTableRows, toggleStage, endLabel, evalCells, evalFilterOptions, evalRowWarn, filterEvalRows, firstSortDir, fmtDuration, gapLabel, HUMAN_QUESTIONS, humanAnswerMark, humanLabel, judgeAverage, judgedDiffers, judgeRows, metricRows, modelsLabel, sortEvalRows } from "./evals.ts";
 
 const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
   metrics: { turns: 2, toolCalls: 7, toolFailures: 0, errors: 0, asks: 1, denials: 0, stops: 0, stopReasons: {}, userInstructions: 1, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false, durationMs: 184_000, classifier: null, delegatedModel: null, ...over },
@@ -10,7 +10,7 @@ const rules = (over: Partial<RuleEval["metrics"]> = {}): RuleEval => ({
 });
 const evals = (r: RuleEval | null, judge: JudgeEval | null = null): TaskEvals => ({ rules: r, judge, human: null, models: [] });
 
-describe("evals rows (#1218)", () => {
+describe("evals rows", () => {
   test("metricRows: the fixed order; a failure, error, denial or stop marks its row", () => {
     const rows = metricRows(evals(rules()));
     expect(rows.map((r) => r.label)).toEqual(["ツール呼び出し", "失敗", "エラー", "追加指示", "承認 / 拒否", "分類器", "停止", "デーモン停止", "ターン", "所要時間", "終わり方"]);
@@ -21,7 +21,7 @@ describe("evals rows (#1218)", () => {
     expect(bad.find((r) => r.label === "停止")?.value).toBe("3（usage-limit 2, transient 1）");
   });
 
-  test("metricRows: a turn cut by the daemon marks デーモン停止, not 終わり方 (#2089)", () => {
+  test("metricRows: a turn cut by the daemon marks デーモン停止, not 終わり方", () => {
     const warns = (over: Partial<RuleEval["metrics"]>) => metricRows(evals(rules(over))).filter((r) => r.warn).map((r) => r.label);
     expect(warns({ lastEnd: "aborted", daemonStops: 1, lastCutByDaemon: true })).toEqual(["デーモン停止"]);
     expect(warns({ lastEnd: "error", daemonStops: 1, lastCutByDaemon: true })).toEqual(["デーモン停止"]);
@@ -35,7 +35,7 @@ describe("evals rows (#1218)", () => {
     expect(metricRows(evals(rules({ delegatedModel: "claude-sonnet-5-5" }))).at(-1)).toEqual({ label: "Task ごとの実装", value: "claude-sonnet-5-5" });
   });
 
-  test("metricRows: classifier — counts with categories, unknown when none (#2236)", () => {
+  test("metricRows: classifier — counts with categories, unknown when none", () => {
     const row = (classifier: RuleEval["metrics"]["classifier"]) => metricRows(evals(rules({ classifier }))).find((r) => r.label === "分類器");
     // nothing recorded (Codex, not Auto): unknown, not zero
     expect(row(null)).toEqual({ label: "分類器", value: "不明" });
@@ -60,7 +60,7 @@ describe("evals rows (#1218)", () => {
   });
 });
 
-describe("judge rows (#1219)", () => {
+describe("judge rows", () => {
   const judge = (scores: JudgeEval["scores"]): JudgeEval => ({ scores, summary: "総評", rubric: "switchboard-default@1", by: "codex:gpt-6-luna", ts: 1 });
   test("judgeRows: the rubric's order for known ids, unknown ids after with their id as title, 2 or below marked; nothing without a judge row", () => {
     const rows = judgeRows(evals(null, judge({ safety: { score: 5, reason: "ok" }, goal: { score: 2, reason: "半分" }, custom: { score: 3, reason: "x" }, efficiency: { score: 1, reason: "繰り返し" } })));
@@ -91,7 +91,7 @@ describe("judge rows (#1219)", () => {
   });
 });
 
-describe("human label (#1220)", () => {
+describe("human label", () => {
   test("humanLabel: null without a rating; the rating alone; the rating with the note", () => {
     expect(humanLabel(evals(null))).toBeNull();
     expect(humanLabel({ rules: null, judge: null, human: { rating: 3, comment: "", by: "user", ts: 1 }, models: [] })).toBe("3 / 5");
@@ -111,7 +111,7 @@ describe("humanAnswerMark", () => {
   });
 });
 
-describe("evals list rows (#1221)", () => {
+describe("evals list rows", () => {
   const row = (taskId: string, over: Partial<EvalsListRow> = {}): EvalsListRow => ({
     taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "finished", judgedResult: null, updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort: null,
     rules: { toolCalls: 3, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "ok", daemonStops: 0, lastCutByDaemon: false }, judge: null, human: null, ...over,
@@ -134,7 +134,7 @@ describe("evals list rows (#1221)", () => {
     expect(judgedDiffers(row("x", { status: "waiting", outcome: "needs_action", judgedResult: "finished" }))).toBe(false);
   });
 
-  test("evalRowWarn: daemon stops alone do not mark the row (#2089); they sort like the other counts", () => {
+  test("evalRowWarn: daemon stops alone do not mark the row; they sort like the other counts", () => {
     const d = row("d", { rules: { toolCalls: 1, toolFailures: 0, errors: 0, userInstructions: 0, stops: 0, lastEnd: "aborted", daemonStops: 3, lastCutByDaemon: true } });
     expect(evalRowWarn(d)).toBe(false);
     expect(firstSortDir("daemonStops")).toBe("desc");
@@ -161,7 +161,7 @@ describe("evals list rows (#1221)", () => {
     expect(evalRowWarn(row("j", { judge: { average: 2.5, scores: {}, rubric: "r@1", by: "x" } }))).toBe(true);
   });
 
-  test("evalCells: every model in the order first used (混在 with two or more) and the efforts started with by the runner's label (#1801, #1802)", () => {
+  test("evalCells: every model in the order first used (混在 with two or more) and the efforts started with by the runner's label", () => {
     const runner = { efforts: [{ value: "high", label: "高" }] };
     expect(evalCells(row("one", { models: ["claude-opus-5-5"], efforts: ["high"] }), runner)).toMatchObject({ model: "claude-opus-5-5", mixed: false, effort: "高", effortMixed: false });
     // opus → sonnet → opus reads ["opus", "sonnet"] (distinct): the cell names both rather than claim sonnet ran last
@@ -170,13 +170,13 @@ describe("evals list rows (#1221)", () => {
     expect(evalCells(row("none", { models: [], efforts: [] }))).toMatchObject({ model: "-", mixed: false, effort: "—", effortMixed: false });
   });
 
-  test("modelsLabel: null when not known, the one, or every one with （混在） (#1801)", () => {
+  test("modelsLabel: null when not known, the one, or every one with （混在）", () => {
     expect(modelsLabel({ models: [] })).toBeNull();
     expect(modelsLabel({ models: ["claude-opus-5-5"] })).toBe("claude-opus-5-5");
     expect(modelsLabel({ models: ["claude-opus-5-5", "claude-sonnet-5-5"] })).toBe("claude-opus-5-5 → claude-sonnet-5-5（混在）");
   });
 
-  test("filterEvalRows and evalFilterOptions: by a model used, by an effort started with (- = the CLI default; a mixed row matches both values), both (#1801, #1802)", () => {
+  test("filterEvalRows and evalFilterOptions: by a model used, by an effort started with (- = the CLI default; a mixed row matches both values), both", () => {
     const list = [
       row("a", { models: ["claude-opus-5-5", "claude-sonnet-5-5"], efforts: ["low", "high"] }),
       row("b", { models: ["claude-sonnet-5-5"], efforts: [""] }),
@@ -196,7 +196,7 @@ describe("evals list rows (#1221)", () => {
   });
 });
 
-describe("subagentEffort on the Evals list (#3866)", () => {
+describe("subagentEffort on the Evals list", () => {
   const sub = (taskId: string, subagentEffort: string | null): EvalsListRow => ({
     taskId, title: taskId, runner: "claude", workspaceId: null, status: "done", outcome: "finished", judgedResult: null, updatedAt: 1, costUsd: 0, models: [], efforts: [], subagentEffort,
     rules: null, judge: null, human: null,
@@ -213,7 +213,7 @@ describe("subagentEffort on the Evals list (#3866)", () => {
   });
 });
 
-describe("gapLabel (#1877)", () => {
+describe("gapLabel", () => {
   const none = { count: 0, mean: null };
   test("none rated → the line says so; otherwise the signed mean to one decimal and the count", () => {
     expect(gapLabel({ count: 0, mean: null, intent: { count: 0, mean: null }, minimal: none, value: none })).toBe("人の評価がまだありません");
@@ -228,7 +228,7 @@ describe("gapLabel (#1877)", () => {
   });
 });
 
-describe("in English (#2449)", () => {
+describe("in English", () => {
   // the language is read once when i18n.ts loads: a fresh process with the browser's choice set to en
   test("the Brief's eval rows, the ledger's and Insights' helpers read in English", () => {
     const at = (f: string) => JSON.stringify(new URL(f, import.meta.url).pathname);
@@ -317,5 +317,52 @@ describe("contextLines", () => {
   });
   test("the four questions keep the values the daemon accepts", () => {
     expect(HUMAN_QUESTIONS.map((q) => [q.key, q.options.map((o) => o.value)])).toEqual([["intent", ["fit", "partial", "wrong", "unknown"]], ["complexity", ["none", "some", "unknown"]], ["detour", ["none", "some", "unknown"]], ["value", ["used", "unused", "unknown"]]]);
+  });
+});
+
+describe("a closed request rated as one unit", () => {
+  const row = (over: Partial<EvalsRequestRow> = {}): EvalsRequestRow => ({
+    kind: "request", workspaceId: "w1", number: 9, title: "速くして", closedAt: 1, head: "一覧が遅い", taskIds: ["t0"], outputs: [],
+    pbis: [
+      { number: 12, title: "一覧を速くする", status: "Done", dropped: false, taskIds: ["t1", "t2"], outputs: [{ kind: "pr", repo: "acme/app", number: 50, title: null, state: "merged" }], interventions: 3 },
+      { number: 10, title: "別の案", status: null, dropped: true, taskIds: [], outputs: [], interventions: 0 },
+    ],
+    interventions: 4, human: null, ...over,
+  });
+
+  test("requestRowLines: the request, how its PBIs ended, each PBI with its outputs, and the interventions in amber", () => {
+    expect(requestRowLines(row())).toEqual([
+      { label: "元の要望", text: "#9 一覧が遅い" },
+      { label: "派生 PBI", text: "2 件（うち 1 件はやらない）" },
+      { label: "#12", text: "一覧を速くする · Done · PR #50 マージ済み" },
+      { label: "#10", text: "別の案 · やらない · 成果なし" },
+      { label: "利用者の介入", text: "追加指示と判断待ち 計 4（Task 3 件）", warn: true },
+    ]);
+    const done = requestRowLines(row({ pbis: [row().pbis[0]!], interventions: 0 }));
+    expect(done[1]).toEqual({ label: "派生 PBI", text: "1 件すべて完了" });
+    expect(done.at(-1)).toEqual({ label: "利用者の介入", text: "追加指示と判断待ち 計 0（Task 3 件）", warn: false });
+  });
+  test("requestRowLines: a request done without a PBI shows its own outputs", () => {
+    const direct = requestRowLines(row({ pbis: [], outputs: [{ kind: "pr", repo: "acme/app", number: 51, title: null, state: "open" }], interventions: 0 }));
+    expect(direct.map((l) => l.text)).toEqual(["#9 一覧が遅い", "PBI なし · PR #51 未マージ", "追加指示と判断待ち 計 0（Task 1 件）"]);
+  });
+  test("toggleStage: 外れていない stands alone, another stage takes it off, a second tap takes a stage off; kept in the shown order", () => {
+    expect(toggleStage([], "impl")).toEqual(["impl"]);
+    expect(toggleStage(["impl"], "request")).toEqual(["request", "impl"]);
+    expect(toggleStage(["request", "impl"], "none")).toEqual(["none"]);
+    expect(toggleStage(["none"], "report")).toEqual(["report"]);
+    expect(toggleStage(["request", "impl"], "impl")).toEqual(["request"]);
+    expect(toggleStage(["none"], "none")).toEqual([]);
+    expect(EVAL_STAGES.map((s) => s.label)).toEqual(["外れていない", "要望の解釈", "PBI の切り方", "実装", "報告"]);
+  });
+  test("stageTableRows: every stage has a row, 0 too, with the requests it was chosen for", () => {
+    const rows = stageTableRows({ from: 0, rows: [
+      { stage: "none", count: 0, examples: [] },
+      { stage: "request", count: 2, examples: [{ workspaceId: "w1", number: 9 }, { workspaceId: "w2", number: 4 }] },
+      { stage: "pbi", count: 1, examples: [{ workspaceId: "w1", number: 9 }] },
+      { stage: "impl", count: 0, examples: [] },
+      { stage: "report", count: 0, examples: [] },
+    ] });
+    expect(rows.map((r) => [r.label, r.count, r.examples])).toEqual([["外れていない", 0, ""], ["要望の解釈", 2, "#9 #4"], ["PBI の切り方", 1, "#9"], ["実装", 0, ""], ["報告", 0, ""]]);
   });
 });

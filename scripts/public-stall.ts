@@ -1,5 +1,5 @@
 /**
- * The public sync standing still (#3601). The sync publishes only the newest tag that passed the tag CI
+ * The public sync standing still. The sync publishes only the newest tag that passed the tag CI
  * (`bun scripts/tag-ci.ts --latest-pass`), so a tag CI that keeps failing or never judges (recordings missing) stops the
  * public repository without anyone filing anything. tag-ci's scheduled run (Switchboard itself, no --repo) calls
  * stallFollow after its own report: when a tag newer than the newest pass has stood for more than STALL_HOURS, it files
