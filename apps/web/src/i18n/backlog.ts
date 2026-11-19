@@ -259,6 +259,8 @@ export const backlog = msgs({
   schedulesHeading: { ja: "定期タスク", en: "Scheduled tasks" },
   cancel: { ja: "やめる", en: "Cancel" },
   add: { ja: "+ 追加", en: "+ Add" },
+  fromSample: { ja: "サンプルから", en: "From a sample" },
+  sampleNone: { ja: "使わない", en: "Don't use" },
   kind: { ja: "種類", en: "Kind" },
   title: { ja: "タイトル", en: "Title" },
   cron: { ja: "cron（分 時 日 月 曜日、または @nightly など）", en: "cron (minute hour day month weekday, or @nightly and the like)" },

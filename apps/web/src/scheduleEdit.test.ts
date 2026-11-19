@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Schedule } from "@switchboard/protocol";
-import { scheduleCreateInput, scheduleDraft, scheduleEditPatch } from "./scheduleEdit.ts";
+import { sampleFields, scheduleCreateInput, scheduleDraft, scheduleEditPatch } from "./scheduleEdit.ts";
 
 const base = { id: "s1", title: "夜間", cron: "0 3 * * *", workspaceId: "w1", runner: "claude", model: "opus", effort: "high", prompt: "go", action: "prompt", budgetUsd: 2, enabled: true } as unknown as Schedule;
 
@@ -40,4 +40,14 @@ test("scheduleCreateInput: a prompt schedule keeps its workspace and trimmed pro
   expect(scheduleCreateInput({ ...form, action: "insights", model: "claude-opus-5-5", effort: "max" })).toEqual({ title: "夜間", cron: "0 3 * * *", workspaceId: "meta", runner: "claude", model: "claude-opus-5-5", effort: "max", prompt: "", action: "insights", budgetUsd: 2 });
   // no budget typed: the field is absent, not null (the server's nullable budget means "no limit" only when sent so)
   expect(scheduleCreateInput({ ...form, action: "prompt", budgetUsd: undefined })).toMatchObject({ budgetUsd: undefined });
+});
+
+test("sampleFields: a sample fills a prompt schedule with its title, cron, runner and prompt; the typed-over form is what scheduleCreateInput makes", () => {
+  const sample = { id: "weekly-eval", title: "週次の評価レポート", cron: "0 9 * * 1", runner: "codex" as const, prompt: "  評価を読む  " };
+  const f = sampleFields(sample);
+  expect(f).toEqual({ action: "prompt", title: "週次の評価レポート", cron: "0 9 * * 1", runner: "codex", prompt: "  評価を読む  " });
+  const form = { ...f, wsId: "w1", metaId: "meta", model: "", effort: "" };
+  expect(scheduleCreateInput(form)).toMatchObject({ action: "prompt", title: "週次の評価レポート", cron: "0 9 * * 1", workspaceId: "w1", runner: "codex", prompt: "評価を読む" });
+  // rewritten before adding: the row takes the form's values, not the sample's
+  expect(scheduleCreateInput({ ...form, title: "自分の題", cron: "5 4 * * *", wsId: "w2", prompt: "別の指示" })).toMatchObject({ title: "自分の題", cron: "5 4 * * *", workspaceId: "w2", prompt: "別の指示" });
 });
