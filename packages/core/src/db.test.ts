@@ -972,12 +972,12 @@ test("migration: outcome from stops — a done Task takes the outcome its open s
   new Db(path).close();
   const raw = new Database(path);
   const put = raw.query("INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, outcome, reviewed_at, created_at, updated_at, status_at) VALUES (?, 'ws', ?, 'claude', '/tmp', '[]', ?, ?, ?, 1000, 9000, 9000)");
-  const stopJson = (id: string, reason: string, state: string) => JSON.stringify({ t: "stop.record", stop: { id, work: { workspaceId: "ws", issue: null, taskId: "x" }, op: "ask", target: "t", reason, evidence: "e", safety: "unknown", conditions: [], answer: null, actions: [], state, at: 1 } });
+  const stopJson = (id: string, reason: string, state: string, conditions: unknown[] = []) => JSON.stringify({ t: "stop.record", stop: { id, work: { workspaceId: "ws", issue: null, taskId: "x" }, op: "ask", target: "t", reason, evidence: "e", safety: "unknown", conditions, answer: null, actions: [], state, at: 1 } });
   const ev = raw.query("INSERT INTO events (task_id, seq, ts, json) VALUES (?, 1, 1, ?)");
   put.run("t_decision", "d", "done", "finished", null);
   ev.run("t_decision", stopJson("s", "decision", "waiting"));
   put.run("t_depends", "w", "done", "needs_action", null);
-  ev.run("t_depends", stopJson("s", "depends", "waiting"));
+  ev.run("t_depends", stopJson("s", "depends", "waiting", [{ key: "pr#12", value: "open", met: false }]));
   put.run("t_reviewed", "r", "done", "finished", 5000);
   ev.run("t_reviewed", stopJson("s", "decision", "waiting"));
   put.run("t_none", "n", "done", "unknown", null);

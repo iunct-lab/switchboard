@@ -6,6 +6,7 @@ import type { AskForApproval } from "./generated/v2/AskForApproval";
 import type { SandboxMode } from "./generated/v2/SandboxMode";
 import type { SandboxPolicy } from "./generated/v2/SandboxPolicy";
 import type { Thread } from "./generated/v2/Thread";
+import type { ThreadForkParams } from "./generated/v2/ThreadForkParams";
 import type { ThreadResumeParams } from "./generated/v2/ThreadResumeParams";
 import type { ThreadStartParams } from "./generated/v2/ThreadStartParams";
 import type { Turn } from "./generated/v2/Turn";
@@ -172,6 +173,11 @@ export function buildThreadResumeParams(opts: StartOptions, threadId: string, o:
   };
 }
 
+/** `thread/fork`: the same settings as a resume, cut after `lastTurnId` (inclusive). The source thread is left as it is. */
+export function buildThreadForkParams(opts: StartOptions, threadId: string, turn: string, o: CodexAdapterOptions = {}): ThreadForkParams {
+  return { ...buildThreadResumeParams(opts, threadId, o), lastTurnId: turn };
+}
+
 /** Scope directories other than cwd become extra writable roots (the Codex analogue of Claude's --add-dir). */
 export function buildSandboxPolicy(opts: StartOptions, sandbox: SandboxMode = "workspace-write"): SandboxPolicy | null {
   if (sandbox === "read-only") return { type: "readOnly", networkAccess: false };
@@ -306,6 +312,8 @@ export function commandsTimeoutMs(env: NodeJS.ProcessEnv = process.env): number 
 export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAdapter {
   return {
     id: "codex",
+    forks: true,
+    forkMinVersion: "0.170.0",
     permissionModes: CODEX_PERMISSION_MODES,
     defaultPermissionMode: CODEX_DEFAULT_PERMISSION_MODE,
     models: CODEX_MODELS,
@@ -441,13 +449,17 @@ class CodexSession implements RunnerSession {
     this.write(jsonRpcNotification("initialized"));
     this.readAccount();
     const resume = this.opts.resumeSessionId;
-    const res = resume
-      ? await this.request("thread/resume", buildThreadResumeParams(this.opts, resume, this.o))
-      : await this.request("thread/start", buildThreadStartParams(this.opts, this.o));
-    if (res.error) throw new Error(res.error.message ?? "thread/start failed");
+    const fork = this.opts.fork;
+    const method = resume && fork ? "thread/fork" : resume ? "thread/resume" : "thread/start";
+    const res = resume && fork
+      ? await this.request(method, buildThreadForkParams(this.opts, resume, fork.turn, this.o))
+      : resume
+        ? await this.request(method, buildThreadResumeParams(this.opts, resume, this.o))
+        : await this.request(method, buildThreadStartParams(this.opts, this.o));
+    if (res.error) throw new Error(res.error.message ?? `${method} failed`);
     const started = res.result as { thread?: Thread; model?: string } | undefined;
     const thread = started?.thread;
-    if (!thread) throw new Error("thread/start returned no thread");
+    if (!thread) throw new Error(`${method} returned no thread`);
     this.threadId = thread.id;
     // on Bedrock a usage without a model would be billed as the subscription: fall back to the model app-server runs
     const model = this.opts.model ?? defaultModelFromConfig(this.o.codexHome);

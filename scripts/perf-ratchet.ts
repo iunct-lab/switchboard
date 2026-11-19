@@ -79,7 +79,7 @@ const BAND: Record<string, number> = { requests: 1, layoutCount: 1, recalcStyleC
 const round4 = (n: number) => Math.round(n * 1e4) / 1e4;
 /** The ceilings judged on the high side only: `over` above them, never `improved` below, so `update` never lowers them.
  * The load moves them by more than twice (a quiet host: 1,700–1,924 ms against the first ceiling and band, 5,440 − 2 × 1,750 = 1,940, 2026-11-02),
- * the same reason as `judgeDurations` (a regression seen in the loaded measure). */
+ * the same reason as `judgeDurations` (the load swings it, and a quiet host's low reading must not turn local CI red). */
 const HIGH_SIDE_ONLY = new Set(["loaded.healthMaxMs"]);
 
 /** Every ceiling as `journeys.<name>.<count>` / `loaded.healthMaxMs` → value (a result's `bytes` and `responses` are not ceilings). */

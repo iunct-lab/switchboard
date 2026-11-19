@@ -60,7 +60,7 @@ description: PBI 1 件を一気通貫で終わらせるコマンド。/pbi-compl
 /pbi-complete は PBI ごとに別のセッションで同時に走らせてよい。ただし CLAUDE.md が並列ガードのコマンドを名指ししているときだけ（以下 `<guard>` と書く）。無ければ PBI は 1 セッションずつ進める。待たずに並べるための決まり:
 
 - **1 PBI = 1 セッション = 1 worktree**（場所と名前は CLAUDE.md の worktree の規則。PBI 番号を入れる）。`gh stack` は worktree ごとに別のスタックを持てる（追跡の目録は `<common-dir>/gh-stack` の 1 つ）。他のセッションの worktree・枝・スクラッチには触らない（`git worktree list` に出ても消さない）
-- **同じ PBI は 1 セッションだけ**: 1 の最初に `<guard> claim <PBI>`。PBI に占有コメントを書き、release 後の最初の占有が勝つ（同時に書いたら後の方が自分のコメントを消して exit 1）
+- **同じ PBI は 1 セッションだけ**: 1 の最初に `<guard> claim <PBI>`。PBI に占有コメントを書き、release 後の最初の占有コメントが先着（同時に書いたら後の方が自分のコメントを消す。claim の結果の扱いは 1）
 - **同じファイルは同時に触らない**: Task に着手する前に `<guard> overlap <Task>`。Task 本文に名指ししたパスを、他のセッションの Draft・`needs-decision` を除く開いている PR の変更ファイルと、判断待ちを除く In progress の Task が名指ししたパスと突き合わせる（自分の PBI の Task と PR は除く）。In progress にした後の `--claimed` は Task に着手の印コメントを書き、同じファイルの In progress の Task のうち**先に印を書いた方**だけが進む（後から印を書く側が譲る）。Draft は単独では占有しないが、その実装を進めている In progress Task は占有する。先着の印は同時編集の衝突防止だけであり、作成順・古い PR の存在を優先度の根拠にしない。保留した PR を他の作業のためにマージ・クローズする必要はない。重なったら**その Task だけ後回しにして、重ならない次の Task を進める**（3 の「重なったとき」）。`STALE_HOURS`（72 時間）更新の無い PR / Task は `stale` に出るだけで止めない
 - **合流ファイルだけの重なりは止めない**: 重なったファイルが `ops.config.json` の `sharedFiles`（多くの PBI が触るファイル）だけなら verdict は `go`（出力の `shared`）。進め、rebase で衝突したら自分で解き、解いたコミットを見直しに出して（`cross-runner-review` の 4）ローカル CI を回し直す
 - **重なりで譲った PBI は順番を持つ**: 最初に譲った時刻の順（同じなら番号の小さい方）で、後から来た PBI の Task は着手の印の後でも譲る（出力の `blocking` に `turn` = 先の PBI の番号。扱いは 3 の「重なったとき」）。順番は、その PBI が `--overlap-waits` の無い release をする・閉じる・そのパスを名指ししなくなると消え、判断待ち・保留（`on-hold`）・期日や使用上限の待ち・前提の未完・72 時間印の無い PBI は飛ばされる。合流ファイルの上では順番も止めない
@@ -69,13 +69,14 @@ description: PBI 1 件を一気通貫で終わらせるコマンド。/pbi-compl
 ## 1. Ready を確かめる
 
 ```bash
-<guard> claim <PBI>     # exit 1 = 別のセッションが実行中
+<guard> claim <PBI>     # exit 1 = 取れなかった / 2 = 判定できなかった（扱いは下）
 ops-kit backlog view <PBI> --fresh
 ops-kit backlog view <PBI> --json | jq -r '.issue.subIssues[]'    # sub-issue の番号。題と状態は 1 件ずつ ops-kit backlog view <Task>
 ops-kit lint --fresh
 ```
 
-claim が exit 1 なら、何も触らず、占有コメントの日時と worktree を報告して終わる（同じ PBI を二重に進めない）。利用者が「再開」と言ったとき（前のセッションが止まった）だけ `claim <PBI> --takeover`。
+claim が exit 1 なら、何も触らず止まる（同じ PBI を二重に進めない）。占有コメントで止まったなら、その日時と worktree を報告して終わる。利用者が「再開」と言ったとき（前のセッションが止まった）だけ `claim <PBI> --takeover`。
+出力が `PBI #<n> は <マシン> が <時刻> まで持っている` なら、ほかのマシンのリース（占有コメントは取り下げ済み。`--takeover` でも外れない）。その行を報告し、待つか利用者に聞く。exit 2（判定できなかった）も止まる。
 Task が無い・受け入れ条件が覆われていない・lint 違反 → `pbi-to-tasks` を先にやる。PBI の Status が Ready でなければ Ready にしてから（`ops-kit backlog set <PBI> Status Ready`）。
 PBI の `## 元要望` の原文を読み、PBI の解釈が原文からずれていないか一度確かめる。
 
@@ -174,7 +175,7 @@ Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコ�
 本文を直したら `ops-kit backlog view <Task> --fresh` で GitHub に送ってから判定し直す）。CI が**始まらない**（ジョブのステップ 0 件）か、run が無い・全部 skip（Actions を変数で止めたリポジトリ）なら待たずローカル CI（CLAUDE.md のコマンド。`review-triage-and-merge` の「CI 緑」）。主レビュアーが使用上限なら見直しも実装したランナーの新しいセッションで代替（`cross-runner-review` の 0）。直せなければ同じく運用の確認として Task の会話で聞く
 - exit 2（判定できなかった）はマージしない（止めた理由を Task の会話に書いてターンを終える）
 
-止めるときは `<guard> release <PBI> "返事待ち: <確認の 1 文>"`（並列ガードを使うとき）。返信を受けて再開するときは `<guard> claim <PBI>` からやり直し、**必ずマージ判定をもう一度通す**。`[merge-ask]` を付けて聞いた PR への返信なら、マージ判定の前に `[merge-answer] <yes|no> <聞いたときと同じ kinds> <head sha>` を PR に投稿する（記録の印。CI など large 以外の理由で聞いたときは `[merge-ask]` も `[merge-answer]` も付けない）。`[merge-ask]` を付けずに聞いていた（Task の会話以外の経路で認められた、付け忘れ）なら、`[merge-answer]` の前に `[merge-ask] <kinds> <head sha>` を投稿してから付ける（`<kinds>` は聞く直前の印と同じ。印の時刻は付けた時刻で、その PR の「返事まで」は短く出る。それでよい。#1069）。返信が大きい変更のマージを認めた（`yes`）ときだけ、`[merge-answer] yes` を投稿して `--allow-large` を付ける（印が無ければマージ判定が止める。CI・未解決のスレッド・見直されていないコミット・CLEAN でないこと・Task の名指しの外のファイルは、返信があっても外れない）。
+止めるときは `<guard> release <PBI> "返事待ち: <確認の 1 文>"`（並列ガードを使うとき）。返信を受けて再開するときは `<guard> claim <PBI>` からやり直し（通らなければ 1 のとおり止まる）、**必ずマージ判定をもう一度通す**。`[merge-ask]` を付けて聞いた PR への返信なら、マージ判定の前に `[merge-answer] <yes|no> <聞いたときと同じ kinds> <head sha>` を PR に投稿する（記録の印。CI など large 以外の理由で聞いたときは `[merge-ask]` も `[merge-answer]` も付けない）。`[merge-ask]` を付けずに聞いていた（Task の会話以外の経路で認められた、付け忘れ）なら、`[merge-answer]` の前に `[merge-ask] <kinds> <head sha>` を投稿してから付ける（`<kinds>` は聞く直前の印と同じ。印の時刻は付けた時刻で、その PR の「返事まで」は短く出る。それでよい。#1069）。返信が大きい変更のマージを認めた（`yes`）ときだけ、`[merge-answer] yes` を投稿して `--allow-large` を付ける（印が無ければマージ判定が止める。CI・未解決のスレッド・見直されていないコミット・CLEAN でないこと・Task の名指しの外のファイルは、返信があっても外れない）。
 <!-- when mergeGate=on task=in -->
 `[merge-answer] yes` の投稿は、`gh` の前段が利用者の許可文 `PR #<n> に [merge-answer] yes を投稿してよい` の記録なしには止めるので、聞くときにその許可文を選択肢に添える。
 <!-- end when -->
@@ -239,7 +240,7 @@ main: <pull 済み（pulled <old>..<new>） / up to date / pull していない�
 
 ## 途中で止まったとき（再開）
 
-占有を取り直す（並列ガードを使うとき）: `<guard> claim <PBI>`（前のセッションが release していれば通る。止まったセッションの占有が残っていて、利用者が再開を指示したときだけ `--takeover`）。
+占有を取り直す（並列ガードを使うとき）: `<guard> claim <PBI>`（通らなければ 1 のとおり止まる。止まったセッションの占有が残っていて、利用者が再開を指示したときだけ `--takeover`）。
 PBI の worktree が無ければ（全部既定の枝に入って止まった worktree はアプリの片付けで消える。枝は残る）、3 の `git worktree add --detach <PBI の worktree> origin/main` で作り直し、依存の導入も CLAUDE.md の手順に従って済ませてから続ける。
 スタックは PBI の worktree の中で `gh stack switch` / `git branch --list`（CLAUDE.md の枝の名前）を確認し、各 PR の状態（`gh pr view --json state,mergeStateStatus`）と Task の Status（`ops-kit backlog view <Task> --fresh`）を読む。
 結果コメントの無い Task は「閉じているが未完了」。そこから 4 か 5 を再開する。前の会話の記憶ではなく Issue と PR の記録を正とする。

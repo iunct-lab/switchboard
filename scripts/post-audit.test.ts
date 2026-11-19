@@ -197,6 +197,8 @@ describe("record", () => {
     expect(create).toContain("create");
     expect(create.slice(create.indexOf("--title"), create.indexOf("--title") + 2)).toEqual(["--title", pbiTitle("o/r", 7)]);
     for (const l of ["type:pbi", "bug", "security"]) expect(create.join(" ")).toContain(`--label ${l}`);
+    const fields = create.flatMap((x, i) => (x === "--field" ? [create[i + 1]] : []));
+    expect(fields).toEqual(["Status=Backlog", "Priority=P2", "Story Points=2"]);
     expect(w[1]!.slice(0, 7)).toEqual(["gh", "pr", "comment", "7", "-R", "o/r", "--body"]);
     expect(w[1]![7]).toBe(`[post-audit] finding ${MERGE}\n\n- a.ts:1 認証 無認証で呼べる`);
   });
@@ -209,6 +211,17 @@ describe("record", () => {
     const g = fake([{ number: 98, title: t, state: "CLOSED" }]);
     expect((await record({ pr: 7, repo: "o/r", text: finding, dryRun: false }, g.run)).existing).toBeNull();
     expect(writes(g.calls)).toHaveLength(2);
+  });
+  test("Task の外でほかのリポジトリへ起票するとき、Project の URL が無ければ何も書かない", async () => {
+    const f = fake();
+    await expect(record({ pr: 7, repo: "o/r", text: finding, dryRun: false, backlogEnv: true }, f.run)).rejects.toThrow("SWITCHBOARD_PROJECT_URL");
+    expect(writes(f.calls)).toEqual([]);
+    const g = fake();
+    await record({ pr: 7, repo: "o/r", text: finding, dryRun: false, backlogEnv: true, projectUrl: "https://github.com/orgs/o/projects/1" }, g.run);
+    expect(writes(g.calls)).toHaveLength(2);
+    const h = fake();
+    await record({ pr: 7, repo: "o/r", text: finding, dryRun: false, backlogEnv: true, workspace: "ws_1" }, h.run);
+    expect(writes(h.calls)).toHaveLength(2);
   });
   test("dry-run は何も書かない", async () => {
     const f = fake();
@@ -228,7 +241,7 @@ describe("record", () => {
     await record({ pr: 7, repo: "o/r", text: finding, dryRun: false, workspace: "ws_1" }, f.run);
     expect(f.calls.filter((c) => c.includes("backlog")).every((c) => c.includes("--workspace") && c.includes("ws_1"))).toBe(true);
     const g = fake();
-    await record({ pr: 7, repo: "o/r", text: finding, dryRun: false, backlogEnv: true }, g.run);
+    await record({ pr: 7, repo: "o/r", text: finding, dryRun: false, backlogEnv: true, projectUrl: "https://github.com/orgs/o/projects/1" }, g.run);
     expect(g.calls.filter((c) => c.includes("backlog")).every((c) => c[0] === "env" && c[1] === "GH_REPO=o/r")).toBe(true);
   });
 });

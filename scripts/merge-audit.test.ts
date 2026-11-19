@@ -173,7 +173,7 @@ describe("readHistory + tally (fixture)", () => {
     expect(rows.find((r) => r.kind === "size")).toMatchObject({ recheckMerged: [2] });
   });
 
-  test("a PR's answers count once, by its latest answer (the shape of a real PR)", () => {
+  test("a PR's answers count once, by its latest answer (one ask, answered again on a new head)", () => {
     const H2 = "b".repeat(40);
     const at = (h: number) => `2026-10-02T${String(h).padStart(2, "0")}:00:00Z`;
     const marks = (last: "yes" | "no") => parseMarks([c(`[merge-ask] rescue ${SHA}`, at(1)), c(`[merge-answer] yes rescue ${SHA}`, at(3)), c(`[merge-answer] ${last} rescue ${H2}`, at(5))]);

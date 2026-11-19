@@ -25,7 +25,7 @@ const read = (file: string) => readFileSync(join(root, file), "utf8");
 const privateRules = "private/CLAUDE.md"; // the public copy has no private/
 const ls = spawnSync("git", ["ls-files", ".claude/skills", ".github/ISSUE_TEMPLATE"], { cwd: root, encoding: "utf8" });
 
-test.skipIf(ls.status !== 0)("docs: this repository's instructions and Issue templates use ops-kit backlog for the backlog (#3072)", () => {
+test.skipIf(ls.status !== 0)("docs: this repository's instructions and Issue templates use ops-kit backlog for the backlog", () => {
   const listed = ls.stdout.split("\n");
   const skills = listed.filter((file) => file.endsWith("/SKILL.md"));
   expect(skills).toContain(".claude/skills/flow-loop/SKILL.md");
@@ -52,7 +52,7 @@ test("docs: the parallel guard needs no --repo in CLAUDE.md", () => {
   expect(guard[0]).toContain("`--repo` を付けなくてよい");
 });
 
-test.skipIf(!existsSync(join(root, privateRules)))("docs: private/CLAUDE.md adds Issues to the Project by the current route (#3072)", () => {
+test.skipIf(!existsSync(join(root, privateRules)))("docs: private/CLAUDE.md adds Issues to the Project by the current route", () => {
   const text = read(privateRules);
   expect(text).not.toContain("project-autoadd");
   expect(text).toContain("ops-kit backlog create");

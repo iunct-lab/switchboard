@@ -27,6 +27,7 @@ If a later version stops honouring the override, the runner's option on Home say
 1. `initialize {clientInfo}` → result `{userAgent, codexHome, …}`
 2. notification `initialized`
 3. `thread/start {cwd, approvalPolicy, sandbox, model, ephemeral:false}` → result `{thread}` — or `thread/resume {threadId, …}` for a later turn; the rollout under `~/.codex/sessions/` is reused.
+   A branch uses `thread/fork {threadId, lastTurnId, …}` instead (the same settings as `thread/resume`): the result is a new `thread` with a new id, holding the source thread up to and including `lastTurnId`, and the source thread is unchanged. `lastTurnId` is the `turn.id` that `session.end` carries. The call is in the stable API (no `experimentalApi`) and a `deprecationNotice` about full-history hydration arrives before the result; the adapter ignores it. The experimental attached fork is not used. Recorded on codex-cli 0.170.0: two turns (a passphrase, then a changed one), a fork at the first turn gets a new thread id and answers the first passphrase; `forkMinVersion` on the adapter is that version.
 4. `turn/start {threadId, input:[{type:"text", text}], sandboxPolicy, cwd}` → result `{turn}` (status `inProgress`). While a turn is active, further input goes through `turn/steer {threadId, expectedTurnId, input}`.
 
 `approvalPolicy`, `sandbox`, and `approvalsReviewer` come from the presets in `docs/design/permission-modes.md`:

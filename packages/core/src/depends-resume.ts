@@ -12,15 +12,10 @@ import type { Db } from "./db.ts";
 import { ANSWER_HEADING } from "./backlog-comments.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
-import { issueAnsweredAction, issueOf, JOB_KEY, openStops, type StopReport } from "./stops.ts";
+import { AFTER_KEY, isAfterWait, issueAnsweredAction, issueOf, JOB_KEY, openStops, resumableDepends, WAIT_KEY, type StopReport } from "./stops.ts";
 import { ResumeSupersededError } from "./tasks/state.ts";
 import type { TaskManager } from "./tasks/manager.ts";
 import { isWorking } from "./task-status.ts";
-
-/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
-export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
-/** A wait for a date: the condition's value is an ISO 8601 time with a time zone, like the `runner#<runner>` value of a usage limit. */
-export const AFTER_KEY = "after";
 
 /** How long a Task's stops are looked at after it last changed: the stops' summary covers the same week. */
 export const STOP_WAITS_MS = 7 * 24 * 3600_000;
@@ -33,9 +28,8 @@ export const STOP_WAITS_MS = 7 * 24 * 3600_000;
  */
 export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; jobs: number[]; after?: number }[] {
   return openStops(records).flatMap((stop) => {
-    const isAfter = (c: { key: string; value: string }) => c.key === AFTER_KEY && !Number.isNaN(afterTime(c.value));
-    if (stop.reason !== "depends" || stop.conditions.length === 0 || !stop.conditions.every((c) => WAIT_KEY.test(c.key) || isAfter(c))) return [];
-    const times = stop.conditions.filter((c) => !c.met && isAfter(c)).map((c) => afterTime(c.value));
+    if (!resumableDepends(stop)) return [];
+    const times = stop.conditions.filter((c) => !c.met && isAfterWait(c)).map((c) => afterTime(c.value));
     const after = times.length ? Math.max(...times) : undefined;
     const open = stop.conditions.filter((c) => !c.met && WAIT_KEY.test(c.key)).map((c) => WAIT_KEY.exec(c.key)!);
     const numbers = [...new Set(open.filter((m) => m[1] !== "job").map((m) => Number(m[2])))];

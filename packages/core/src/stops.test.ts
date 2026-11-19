@@ -6,7 +6,8 @@ import { StopRecord, type Task } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { writePresets, recordPresetUse } from "./presets.ts";
 import { WAIT_CUT_EXIT, WAIT_USAGE } from "../../../ops-kit/src/wait.ts";
-import { compareStopConditions, FenceReader, issueOf, outcomeFromStops, reduceStops, reportedLimit, reserveStopRetry, StopFenceReader, lastStopMark, openStopsPrompt, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule, tasksWithStops } from "./stops.ts";
+import { dependsWaits } from "./depends-resume.ts";
+import { compareStopConditions, FenceReader, issueOf, outcomeFromStops, reduceStops, reportedLimit, reserveStopRetry, resumableDepends, StopFenceReader, lastStopMark, openStopsPrompt, stopKey, stopMarks, stopRecordsFor, stopRecoveryPrompt, stopWork, stuckSchedule, tasksWithStops } from "./stops.ts";
 import { parseArtifactFence } from "./artifacts.ts";
 
 let n = 0;
@@ -268,6 +269,8 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     for (const w of ["Workspace MCP", "task.note", "exec.run", "占有の解放", "並列ガード", "計画モード"]) expect(plain).not.toContain(w);
     expect(plain).toContain("```switchboard-stop");
     expect(plain).toContain("待てるのは 7 日まで）。7 日を超えるなら conditions を省く。");
+    expect(plain).toContain("pr#N / issue#N / job#N");
+    expect(plain).toContain("どの鍵でも書けない待ちはアプリが再開できないので、利用者の要対応に出る。");
     expect(plain).toContain("依頼の範囲外の書き込み（リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。");
     // the wait rule names the kit's command with the flags it requires and the exit of a cut wait
     expect(plain).toContain("until / while と sleep の繰り返しでは待たない");
@@ -632,7 +635,9 @@ describe("outcomeFromStops", () => {
     ["a decision waiting on the person", [stop({ reason: "decision", state: "waiting" })], false, "needs_action"],
     ["a decision that ran out of retries", [stop({ reason: "decision", state: "exhausted" })], false, "needs_action"],
     ["a decision that waits on an Issue only waits", [stop({ reason: "decision", state: "waiting", conditions: issueCond })], false, "waits"],
-    ["depends waits", [stop({ reason: "depends", state: "waiting" })], false, "waits"],
+    ["depends that waits on a PR waits", [stop({ reason: "depends", state: "waiting", conditions: [{ key: "pr#12", value: "open", met: false }] })], false, "waits"],
+    ["depends without a condition the app resumes needs the person", [stop({ reason: "depends", state: "waiting" })], false, "needs_action"],
+    ["depends on a subagent only needs the person", [stop({ reason: "depends", state: "waiting", conditions: [{ key: "subagent", value: "running", met: false }] })], false, "needs_action"],
     ["a retrying human reason waits", [stop({ reason: "permission", state: "retrying" })], false, "waits"],
     ["every stop resolved: after the turn is finished", [stop({ id: "r", state: "waiting" }), stop({ id: "r", state: "resolved" })], false, "finished"],
     ["every stop resolved: during the turn is not decided", [stop({ id: "r", state: "resolved" })], true, "unknown"],
@@ -641,7 +646,29 @@ describe("outcomeFromStops", () => {
     ["an answer the newest record brings closes the stop", [stop({ id: "q", reason: "decision", state: "waiting", at: 1_000 }), stop({ id: "q", reason: "decision", state: "waiting", at: 9_000, answer })], false, "finished"],
     ["the same stop reported again after its answer is open again", [stop({ id: "p", reason: "auth", state: "waiting", at: 1_000 }), stop({ id: "p", reason: "auth", state: "waiting", at: 6_000, answer }), stop({ id: "p", reason: "auth", state: "waiting", at: 9_000, answer })], false, "needs_action"],
     ["only the newest record of a stop counts", [stop({ id: "n", reason: "decision", state: "waiting" }), stop({ id: "n", reason: "decision", state: "resolved" })], false, "finished"],
-    ["a person's stop beats an open one that only waits", [stop({ id: "a", reason: "depends", state: "waiting" }), stop({ id: "b", reason: "auth", state: "waiting" })], false, "needs_action"],
+    ["a person's stop beats an open one that only waits", [stop({ id: "a", reason: "depends", state: "waiting", conditions: issueCond }), stop({ id: "b", reason: "auth", state: "waiting" })], false, "needs_action"],
   ];
   for (const [name, records, inTurn, want] of table) test(name, () => expect(outcomeFromStops(records, inTurn)).toBe(want));
+});
+
+describe("resumableDepends", () => {
+  const c = (key: string, value = "open") => ({ key, value, met: false });
+  const cases: Array<[string, StopRecord]> = [
+    ["a PR", stop({ id: "pr", reason: "depends", state: "waiting", conditions: [c("pr#12")] })],
+    ["a job", stop({ id: "job", reason: "depends", state: "waiting", conditions: [c("job#3")] })],
+    ["a date", stop({ id: "date", reason: "depends", state: "waiting", conditions: [c("after", "2099-01-01T00:00:00+09:00")] })],
+    ["a date it cannot read", stop({ id: "baddate", reason: "depends", state: "waiting", conditions: [c("after", "tomorrow")] })],
+    ["no condition", stop({ id: "none", reason: "depends", state: "waiting" })],
+    ["a subagent", stop({ id: "sub", reason: "depends", state: "waiting", conditions: [c("subagent")] })],
+    ["a PR and a subagent", stop({ id: "mix", reason: "depends", state: "waiting", conditions: [c("pr#12"), c("subagent")] })],
+    ["a PR already met", stop({ id: "met", reason: "depends", state: "waiting", conditions: [{ key: "pr#12", value: "merged", met: true }] })],
+  ];
+  test("depends the app does not resume needs the person", () => {
+    for (const [name, record] of cases) {
+      const resumed = dependsWaits([record]).length > 0;
+      expect(resumableDepends(record), name).toBe(resumed);
+      expect(outcomeFromStops([record], false), name).toBe(resumed ? "waits" : "needs_action");
+    }
+    expect(cases.filter(([, r]) => resumableDepends(r)).map(([n]) => n)).toEqual(["a PR", "a job", "a date"]);
+  });
 });

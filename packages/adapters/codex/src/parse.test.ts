@@ -2,7 +2,7 @@
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { AgentEvent, QUESTION_DEFERRED_REPLY, type StartOptions } from "@switchboard/protocol";
-import { appServerEnv, buildSandboxPolicy, buildThreadResumeParams, buildThreadStartParams, buildTurnStartParams, childEnv, CODEX_PERMISSION_MODES, resolveApprovalPolicy, resolvePermissionPreset } from "./index.ts";
+import { appServerEnv, buildSandboxPolicy, buildThreadForkParams, buildThreadResumeParams, buildThreadStartParams, buildTurnStartParams, childEnv, CODEX_PERMISSION_MODES, resolveApprovalPolicy, resolvePermissionPreset } from "./index.ts";
 import { approvalDecision, createCodexParser, deferredUserInput, diffStat, jsonRpcResult, windowName } from "./parse.ts";
 
 /** Fixtures are raw app-server stdio recordings; lines starting with "> " are what Switchboard sent. */
@@ -12,11 +12,13 @@ async function load(name: string) {
 }
 
 /** Replay like the session does: responses to our requests are correlated by id; thread/start|resume results seed session.start. */
-async function replay(name: string) {
+async function replay(name: string, from?: (line: string) => boolean) {
   const p = createCodexParser();
   const events: AgentEvent[] = [];
   const sent = new Map<number, string>();
-  for (const line of await load(name)) {
+  let lines = await load(name);
+  if (from) lines = lines.slice(lines.findIndex(from)); // a new process: its own parser, from the line given
+  for (const line of lines) {
     if (line.startsWith("> ")) {
       const m = JSON.parse(line.slice(2));
       if (typeof m.id === "number" && typeof m.method === "string") sent.set(m.id, m.method);
@@ -25,7 +27,7 @@ async function replay(name: string) {
     const m = JSON.parse(line);
     if (m.id !== undefined && typeof m.method !== "string") {
       const method = sent.get(m.id);
-      if ((method === "thread/start" || method === "thread/resume") && m.result?.thread) events.push(...p.threadStarted(m.result.thread));
+      if ((method === "thread/start" || method === "thread/resume" || method === "thread/fork") && m.result?.thread) events.push(...p.threadStarted(m.result.thread));
       continue;
     }
     events.push(...p.feed(line));
@@ -200,7 +202,7 @@ describe("codex app-server → AgentEvent (recorded replay, codex-cli 0.166.0)",
       const m = JSON.parse(line);
       if (m.id !== undefined && typeof m.method !== "string") {
         const method = sent.get(m.id);
-        if ((method === "thread/start" || method === "thread/resume") && m.result?.thread) evs.push(...p.threadStarted(m.result.thread));
+        if ((method === "thread/start" || method === "thread/resume" || method === "thread/fork") && m.result?.thread) evs.push(...p.threadStarted(m.result.thread));
         continue;
       }
       const edited = edit(m);
@@ -263,6 +265,37 @@ describe("request building", () => {
     expect(createCodexParser().feed(JSON.stringify({ method: "item/autoApprovalReview/completed", params: { review: { status: "denied", rationale: "Not authorized" } } }))).toEqual([{ t: "status", text: "Codex 自動審査: denied — Not authorized" }]);
   });
   const opts: StartOptions = { cwd: "/repo", scope: ["/repo", "/other"], prompt: "hi" };
+
+  test("session.end carries the turn id of the turn/completed that ended the session", () => {
+    const p = createCodexParser();
+    const thread = { id: "t1" };
+    p.threadStarted(thread as never);
+    p.feed(JSON.stringify({ method: "turn/started", params: { threadId: "t1", turn: { id: "turn-7", status: "inProgress" } } }));
+    const end = p.feed(JSON.stringify({ method: "turn/completed", params: { threadId: "t1", turn: { id: "turn-7", status: "completed", durationMs: 5 } } })).find((e) => e.t === "session.end");
+    expect(end).toMatchObject({ t: "session.end", status: "ok", turn: "turn-7" });
+  });
+
+  test("thread/fork params: the resume settings plus lastTurnId", () => {
+    expect(buildThreadForkParams(opts, "src", "turn-1")).toEqual({ ...buildThreadResumeParams(opts, "src"), lastTurnId: "turn-1" });
+  });
+
+  // fixtures/fork-turn.jsonl: codex-cli 0.170.0, recorded 2026-11-18 — two turns (passphrase pelican, then changed to heron) on one
+  // thread, then thread/fork with lastTurnId = the first turn, and a question on the new thread. Cwd is a placeholder.
+  test.skipIf(skipRecordings("packages/adapters/codex/fixtures/fork-turn.jsonl"))("fork: new thread id, answers pelican not heron", async () => {
+    assertRecordings("packages/adapters/codex/fixtures/fork-turn.jsonl");
+    const sent = (await load("fork-turn")).filter((l) => l.startsWith("> ")).map((l) => JSON.parse(l.slice(2)));
+    const fork = sent.find((m) => m.method === "thread/fork");
+    const firstTurn = (await load("fork-turn")).map((l) => (l.startsWith("> ") ? null : JSON.parse(l))).find((m) => m?.method === "turn/completed");
+    expect(fork.params.lastTurnId).toBe(firstTurn.params.turn.id);
+    // a fork is a new session (its own parser): replay from the thread/fork request on
+    const evs = await replay("fork-turn", (l) => l.startsWith("> ") && JSON.parse(l.slice(2)).method === "thread/fork");
+    for (const ev of evs) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const starts = evs.filter((e) => e.t === "session.start");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.t === "session.start" && starts[0].runnerSessionId).not.toBe(fork.params.threadId); // a new thread
+    expect(text(evs)).toBe("pelican");
+    expect(evs.filter((e) => e.t === "session.end")).toEqual([expect.objectContaining({ t: "session.end", status: "ok" })]);
+  });
 
   test("auto review is explicit across start, resume and mode switches", () => {
     for (const mode of [undefined, "auto", "on-request", "read-only", "untrusted", "full-access"]) {

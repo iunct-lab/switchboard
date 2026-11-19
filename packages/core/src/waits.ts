@@ -13,8 +13,8 @@ import { personWait, waitOver, type QuotaAndResumeSettings, type StopRecord, typ
 import { WaitFile } from "../../../ops-kit/src/wait.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
 import type { Db } from "./db.ts";
-import { AFTER_CHECK_MS, AFTER_KEY, STOP_WAITS_MS, WAIT_KEY } from "./depends-resume.ts";
-import { issueOf, openStops, RUNNER_LIMIT_KEY, spanText, stopRecordsFor } from "./stops.ts";
+import { AFTER_CHECK_MS, STOP_WAITS_MS } from "./depends-resume.ts";
+import { AFTER_KEY, issueOf, openStops, RUNNER_LIMIT_KEY, spanText, stopRecordsFor, WAIT_KEY } from "./stops.ts";
 import { isWorking } from "./task-status.ts";
 import type { TaskManager } from "./tasks/manager.ts";
 

@@ -59,3 +59,13 @@ export const ScheduleInput = z.object({
   enabled: z.boolean().optional(),
 });
 export type ScheduleInput = z.infer<typeof ScheduleInput>;
+
+/** One of the sample schedules the daemon offers (the list API): `title` is the sample's own title, without the `（サンプル）` prefix the startup rows carry. */
+export const ScheduleSampleInfo = z.object({
+  id: z.string(),
+  title: z.string(),
+  cron: z.string(),
+  runner: RunnerId,
+  prompt: z.string(),
+});
+export type ScheduleSampleInfo = z.infer<typeof ScheduleSampleInfo>;

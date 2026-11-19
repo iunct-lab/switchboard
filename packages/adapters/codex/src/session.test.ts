@@ -73,6 +73,35 @@ describe("preamble", () => {
   });
 });
 
+describe("fork", () => {
+  test("fork sends thread/fork with lastTurnId instead of thread/resume, and session.start names the new thread", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-fork-"));
+    const log = join(home, "wire.jsonl");
+    const events: AgentEvent[] = [];
+    const s = createCodexAdapter({ bin: FAKE, codexHome: home, config: [`test_wire_log=${log}`] }).start({ cwd: home, scope: [home], prompt: "hi", permissionMode: "auto", resumeSessionId: "thread-src", fork: { turn: "turn-1" } }, (e) => events.push(e));
+    try {
+      for (const deadline = Date.now() + 5000; !events.some((e) => e.t === "permission.ask") && Date.now() < deadline; ) await Bun.sleep(20);
+      const ask = events.find((e) => e.t === "permission.ask");
+      expect(ask).toBeDefined();
+      if (ask?.t === "permission.ask") s.respondPermission(ask.id, "allow");
+      for (const deadline = Date.now() + 5000; !events.some((e) => e.t === "session.end") && Date.now() < deadline; ) await Bun.sleep(20);
+    } finally {
+      await s.close();
+    }
+    const wire = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((m) => typeof m.method === "string");
+    expect(wire.map((m) => m.method)).not.toContain("thread/resume");
+    expect(wire.map((m) => m.method)).not.toContain("thread/start");
+    const fork = wire.find((m) => m.method === "thread/fork");
+    expect(fork.params).toMatchObject({ threadId: "thread-src", lastTurnId: "turn-1", cwd: home });
+    const start = events.find((e) => e.t === "session.start");
+    expect(start?.t === "session.start" && start.runnerSessionId).toBe("thread-forked");
+    const end = events.find((e) => e.t === "session.end");
+    expect(end?.t === "session.end" && end.turn).toBe("turn-1");
+    expect(wire.find((m) => m.method === "turn/start").params.threadId).toBe("thread-forked");
+    rmSync(home, { recursive: true, force: true });
+  });
+});
+
 describe("effort", () => {
   test("effort: every turn/start of the session carries it (the first and a reply); thread/start does not; none without one", async () => {
     const home = mkdtempSync(join(tmpdir(), "sb-codex-effort-"));

@@ -280,7 +280,7 @@ describe("perf-ratchet exceptions", () => {
 });
 
 describe("perf-ratchet environments", () => {
-  test("the approved unstable metrics stay out of the gate in both environments (the owner's decision)", async () => {
+  test("the approved unstable metrics stay out of the gate in both environments (open-task.layoutShift and send.layoutCount, by the owner's choice)", async () => {
     const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
     for (const env of ENVS) {
       const b = budgets[env];

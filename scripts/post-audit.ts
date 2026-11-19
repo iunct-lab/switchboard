@@ -102,6 +102,9 @@ export function parseVerdict(text: string): { verdict: "pass" | "finding"; items
   return { verdict, items };
 }
 
+/** Story Points of a filed PBI: the one value for the body line and the Project field. */
+const PBI_STORY_POINTS = 2;
+
 export const pbiTitle = (repo: string, pr: number) => `PBI: マージ後の監査の指摘 — ${repo}#${pr}`;
 
 /** The PBI a finding files: the title, and a body with the sections of `ops.config.json` `sections.pbi`, the speaker line and Story Points. */
@@ -127,7 +130,7 @@ export function pbiFor(a: { repo: string; pr: number; mergeSha: string; items: s
       "- 誰の言葉: 定期の検査",
       `- 対象: ${a.repo}#${a.pr}、マージ commit ${a.mergeSha}。PR の \`[post-audit] finding\` の印に同じ commit がある`,
       "",
-      "**Story Points**: 2",
+      `**Story Points**: ${PBI_STORY_POINTS}`,
       "**前提**: なし",
       "",
     ].join("\n"),
@@ -158,7 +161,7 @@ export async function prepare(pr: number, repo: string, dir: string, run: Run): 
 type Recorded = { repo: string; pr: number; mark: string; verdict: "pass" | "finding"; pbi: { title: string; body: string } | null; existing: number | null; dryRun: boolean };
 
 /** The mark on the PR and, for a finding, the PBI (not when an open PBI has the same title). `dryRun` reads but writes nothing. */
-export async function record(a: { pr: number; repo: string; text: string; dryRun: boolean; workspace?: string; backlogEnv?: boolean }, run: Run): Promise<Recorded> {
+export async function record(a: { pr: number; repo: string; text: string; dryRun: boolean; workspace?: string; backlogEnv?: boolean; projectUrl?: string }, run: Run): Promise<Recorded> {
   const parsed = parseVerdict(a.text);
   if (!parsed) throw new Error("出力の 1 行目が pass でも finding でもない。印は書かない");
   const pull = JSON.parse(await run(["gh", "api", `repos/${a.repo}/pulls/${a.pr}`])) as { merged_at: string | null; merge_commit_sha: string | null };
@@ -177,11 +180,13 @@ export async function record(a: { pr: number; repo: string; text: string; dryRun
   }
   const result: Recorded = { repo: a.repo, pr: a.pr, mark, verdict: parsed.verdict, pbi, existing, dryRun: a.dryRun };
   if (a.dryRun) return result;
+  // outside a Task the fields go to the Project named by SWITCHBOARD_PROJECT_URL (CLAUDE.md): without it, stop before writing anything
+  if (pbi && existing === null && !a.workspace && a.backlogEnv && !a.projectUrl) throw new Error(`${a.repo} の Project の URL が無い。Task の外では SWITCHBOARD_PROJECT_URL にそのリポジトリの Project の URL を渡す（印も PBI も書いていない）`);
   if (pbi && existing === null) {
     const dir = mkdtempSync(join(tmpdir(), "post-audit."));
     try {
       writeFileSync(join(dir, "body.md"), pbi.body);
-      await run(backlog("create", "--title", pbi.title, "--body-file", join(dir, "body.md"), "--label", "type:pbi", "--label", "bug", "--label", "security"));
+      await run(backlog("create", "--title", pbi.title, "--body-file", join(dir, "body.md"), "--label", "type:pbi", "--label", "bug", "--label", "security", "--field", "Status=Backlog", "--field", "Priority=P2", "--field", `Story Points=${PBI_STORY_POINTS}`));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -255,7 +260,7 @@ export async function main(args: string[], run: Run = spawnRun, now = Date.now()
       } else {
         const out = opt("--out");
         if (!out) throw new Error(usage);
-        const r = await record({ pr, repo, text: readFileSync(out, "utf8"), dryRun: rest.includes("--dry-run"), workspace: opt("--workspace"), backlogEnv: repo !== currentRepo() }, run);
+        const r = await record({ pr, repo, text: readFileSync(out, "utf8"), dryRun: rest.includes("--dry-run"), workspace: opt("--workspace"), backlogEnv: repo !== currentRepo(), projectUrl: env.SWITCHBOARD_PROJECT_URL }, run);
         if (r.existing !== null) console.error(`既にある #${r.existing}`);
         console.log(JSON.stringify(r, null, 2));
       }
