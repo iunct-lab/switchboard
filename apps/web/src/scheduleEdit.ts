@@ -1,4 +1,4 @@
-import type { RunnerId, Schedule, ScheduleInput } from "@switchboard/protocol";
+import type { RunnerId, Schedule, ScheduleInput, ScheduleSampleInfo } from "@switchboard/protocol";
 import { claudeOnlyAction } from "./scheduleActions.ts";
 import { t } from "./i18n.ts";
 import { backlog as m } from "./i18n/backlog.ts";
@@ -58,3 +58,15 @@ export function scheduleCreateInput(f: { title: string; cron: string; wsId: stri
     ? { title: f.title.trim(), cron: f.cron, workspaceId: f.metaId ?? "", runner: onClaude ? "claude" : f.runner, model: f.model, effort: f.effort, prompt: "", action: f.action, budgetUsd: f.budgetUsd }
     : { title: f.title.trim(), cron: f.cron, workspaceId: f.wsId, runner: f.runner, model: f.model, effort: f.effort, prompt: f.prompt.trim(), action: f.action, budgetUsd: f.budgetUsd };
 }
+
+/**
+ * The create form's values for a sample: a prompt schedule with the sample's title (no prefix), cron, runner and prompt.
+ * Choosing it only fills the form; the row is made by the person's "add", so scheduleCreateInput takes it as any typed form.
+ */
+export const sampleFields = (s: ScheduleSampleInfo): { action: "prompt"; title: string; cron: string; runner: RunnerId; prompt: string } => ({
+  action: "prompt",
+  title: s.title,
+  cron: s.cron,
+  runner: s.runner,
+  prompt: s.prompt,
+});

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import type { Queue, RunnerId, RunnerInfo, Schedule, Workspace } from "@switchboard/protocol";
+import type { Queue, RunnerId, RunnerInfo, Schedule, ScheduleSampleInfo, Workspace } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
 import { fmtUsd, RunnerPill } from "./ui.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
@@ -7,7 +7,7 @@ import { EffortSelect } from "./EffortSelect.tsx";
 import { effortLabel } from "../effortOptions.ts";
 import { NIGHTLY_SHOWN, scheduledFacts, scheduleResultLine } from "../scheduleResult.ts";
 import { claudeOnlyAction, SCHEDULE_ACTIONS, scheduleActionLabel } from "../scheduleActions.ts";
-import { scheduleCreateInput, scheduleDraft, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
+import { scheduleCreateInput, scheduleDraft, sampleFields, scheduleEditPatch, type ScheduleDraft } from "../scheduleEdit.ts";
 import { jstDateTime } from "../time.ts";
 import { listedRunners } from "../runners.ts";
 import { t } from "../i18n.ts";
@@ -42,6 +42,9 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   actionRef.current = action;
   const savedDefaults = useRef<{ runner: RunnerId; model: string; effort: string } | null>(null); // put back when the kind leaves insights
   const [budget, setBudget] = useState("");
+  // The samples to start the form from, read each time the form opens; unread = no choice shown
+  const [samples, setSamples] = useState<ScheduleSampleInfo[]>([]);
+  const [sampleId, setSampleId] = useState("");
   const [busy, setBusy] = useState(false);
   // The row being edited: its own state, apart from the create form's
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -79,6 +82,35 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
       .catch((e) => props.onError(t(m.defaultsReadFailed, { error: String(e.message ?? e) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNew, defaultsReady]);
+  useEffect(() => {
+    setSampleId("");
+    if (!showNew) return;
+    api.scheduleSamples().then(setSamples).catch(() => setSamples([]));
+  }, [showNew]);
+  // Choosing a sample fills the form (the row is made by 追加); "none" puts back the defaults a new form starts from
+  const chooseSample = (id: string) => {
+    setSampleId(id);
+    const sample = samples.find((x) => x.id === id);
+    const d = savedDefaults.current;
+    if (sample) {
+      const f = sampleFields(sample);
+      setAction(f.action);
+      setTitle(f.title);
+      setCron(f.cron);
+      setRunner(f.runner);
+      setModel("");
+      setEffort("");
+      setPrompt(f.prompt);
+    } else {
+      setAction("prompt");
+      setTitle("");
+      setCron(savedCron.current);
+      setRunner(d?.runner ?? "claude");
+      setModel(d?.model ?? "");
+      setEffort(d?.effort ?? "");
+      setPrompt("");
+    }
+  };
   // Every new schedule starts from the saved cron, not from the one the last form was left with
   useEffect(() => {
     if (showNew && defaultsReady) setCron(savedCron.current);
@@ -209,6 +241,19 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
         </div>
         {showNew && (
           <div className="fields" style={{ marginBottom: 10 }}>
+            {samples.length > 0 && (
+              <label>
+                <span>{t(m.fromSample)}</span>
+                <select value={sampleId} disabled={!defaultsReady} onChange={(e) => chooseSample(e.target.value)}>
+                  <option value="">{t(m.sampleNone)}</option>
+                  {samples.map((x) => (
+                    <option key={x.id} value={x.id}>
+                      {x.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               <span>{t(m.kind)}</span>
               <select
@@ -217,6 +262,7 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
                   const next = e.target.value as Schedule["action"];
                   const was = action;
                   setAction(next);
+                  if (next !== "prompt") setSampleId(""); // a sample is a prompt schedule; the picker no longer matches the form
                   if (claudeOnlyAction(next)) {
                     setRunner("claude");
                     setModel("");
