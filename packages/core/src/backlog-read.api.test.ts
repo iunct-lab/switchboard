@@ -345,7 +345,7 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   const meta3040 = await run(metaId(), "#3040 実装: 別の番号", "ok"); // another number that shares a digit prefix
   expect([done.status, failed.status]).toEqual(["done", "error"]);
   // the same stop from both of Issue 305's Tasks is one series of 2; lib's Issue 304 and the meta's Issue 3040 are other work
-  const merge = { id: "m", op: "gh pr merge", target: "PR #9", reason: "depends" as const, evidence: "CI", safety: "unknown" as const, conditions: [], actions: [], state: "waiting" as const };
+  const merge = { id: "m", op: "gh pr merge", target: "PR #9", reason: "depends" as const, evidence: "CI", safety: "unknown" as const, conditions: [{ key: "pr#9", value: "open", met: false }], actions: [], state: "waiting" as const };
   for (const t of [first, done, lib304, meta3040]) expect(core!.tasks.recordStop(t.id, merge).ok).toBe(true);
 
   const items = (await (await fetch(`${base}/api/backlog`)).json() as Backlog).items;
@@ -371,7 +371,7 @@ test("GET /api/backlog: an in-progress item carries its Project Status, the Issu
   core!.db.updateTask(done.id, { outcome: "waits" });
   expect((await askedOf()).replyWaiting).toBe(false);
   core!.db.updateTask(done.id, { outcome: "needs_action" });
-  expect(core!.tasks.recordStop(done.id, { ...merge, id: "d", op: "ask", reason: "decision" }).ok).toBe(true);
+  expect(core!.tasks.recordStop(done.id, { ...merge, id: "d", op: "ask", reason: "decision", conditions: [] }).ok).toBe(true);
   expect((await askedOf()).replyWaiting).toBe(true);
   expect(mine(307).replyWaiting).toBe(false);
 });

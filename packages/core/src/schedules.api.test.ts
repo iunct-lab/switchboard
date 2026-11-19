@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, Schedule, StartOptions, Task, Workspace } from "@switchboard/protocol";
+import type { AgentEvent, Schedule, ScheduleSampleInfo, StartOptions, Task, Workspace } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { PROVISIONED_KEY, SAMPLES_KEY, SCHEDULE_SAMPLES, SECRET_SCAN, UI_LAYERS_CHECK_PROMPT } from "./scheduleSamples.ts";
@@ -80,6 +80,38 @@ describe("schedule samples", () => {
       c = await boot();
       expect((await samples(c)).map((s) => s.id).sort()).toEqual(first.filter((s) => s.id !== check.id).map((s) => s.id).sort());
       await c.stop();
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("schedule samples API: every sample is listed on an instance that recorded them all and holds no row, and picking one to add twice makes two enabled rows without touching the record", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-samples-api-"));
+    try {
+      // an instance from before the samples: the migration recorded every id and no sample row exists
+      const before = new Db(join(h, "switchboard.db"));
+      before.setSetting(SAMPLES_KEY, SCHEDULE_SAMPLES.map((s) => s.id));
+      before.close();
+      const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
+      try {
+        const url = `http://127.0.0.1:${c.server.port}/api/schedules`;
+        expect(await samples(c)).toHaveLength(0);
+        const list = (await fetch(`${url}/samples`).then(j)) as ScheduleSampleInfo[];
+        expect(list.map((s) => s.id)).toEqual(SCHEDULE_SAMPLES.map((s) => s.id));
+        const pick = list.find((s) => s.id === "ui-layers-check")!;
+        expect(pick).toEqual({ id: "ui-layers-check", title: "床・天井・壁の点検", cron: "0 9 1 * *", runner: "claude", prompt: UI_LAYERS_CHECK_PROMPT });
+        const meta = ((await fetch(`http://127.0.0.1:${c.server.port}/api/workspaces`).then(j)) as Workspace[]).find((w) => w.kind === "meta")!;
+        const recorded = c.db.getSetting<string[]>(SAMPLES_KEY, []);
+        const add = () => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: pick.title, cron: pick.cron, runner: pick.runner, prompt: pick.prompt, action: "prompt", workspaceId: meta.id }) });
+        expect((await add()).status).toBe(201);
+        expect((await add()).status).toBe(201);
+        const rows = ((await fetch(url).then(j)) as Schedule[]).filter((s) => s.title === pick.title);
+        expect(rows).toHaveLength(2);
+        for (const r of rows) expect(r).toMatchObject({ enabled: true, prompt: pick.prompt, cron: pick.cron });
+        expect(c.db.getSetting<string[]>(SAMPLES_KEY, [])).toEqual(recorded);
+      } finally {
+        await c.stop();
+      }
     } finally {
       rmSync(h, { recursive: true, force: true });
     }

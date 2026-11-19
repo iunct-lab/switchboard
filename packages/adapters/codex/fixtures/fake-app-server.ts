@@ -2,7 +2,7 @@
 /**
  * A tiny stand-in for `codex app-server` used by the session tests. Speaks the same JSON-RPC lines the recorded
  * fixtures show, deterministically:
- *   initialize → {}                          thread/start | thread/resume → {thread}
+ *   initialize → {}                          thread/start | thread/resume → {thread}; thread/fork → {thread: thread-forked}
  *   turn/start → {turn} then: turn/started, agentMessage delta/completed, one commandExecution approval request
  *                (answered by the client), commandExecution completed, tokenUsage, turn/completed
  *   turn/steer (while active) → {} and the text is echoed as another agentMessage
@@ -150,6 +150,9 @@ for await (const chunk of Bun.stdin.stream()) {
         break;
       case "thread/start":
         enc({ id: m.id, result: { thread: thread("thread-new", m.params.cwd), model: m.params.model ?? "gpt-6-luna", modelProvider: "openai" } });
+        break;
+      case "thread/fork":
+        enc({ id: m.id, result: { thread: thread("thread-forked", m.params.cwd) } });
         break;
       case "thread/resume":
         enc({ id: m.id, result: { thread: thread(m.params.threadId, m.params.cwd) } });

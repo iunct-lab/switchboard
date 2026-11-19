@@ -2,6 +2,7 @@ import { HUMAN_STOP_REASONS, personWait, RunnerId, StopRecord, taskSummary, type
 import { z } from "zod";
 import type { Db } from "./db.ts";
 import { presetReplies } from "./presets.ts";
+import { afterTime } from "../../../scripts/parallel-guard.ts";
 
 /**
  * Repeated stops: which stops are the same one again, what changed since the previous one, and what the work
@@ -209,6 +210,23 @@ export type StopReport = z.infer<typeof StopReport>;
 
 /** A job the daemon runs for the Task: its id is no number on GitHub, and is read from the jobs table. */
 export const JOB_KEY = /^job#(\d+)$/;
+/** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
+export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
+/** A wait for a date: the condition's value is an ISO 8601 time with a time zone, like the `runner#<runner>` value of a usage limit. */
+export const AFTER_KEY = "after";
+
+/** A condition that waits for a date the app can read: `after` with an ISO 8601 time with a zone. */
+export const isAfterWait = (c: { key: string; value: string }): boolean => c.key === AFTER_KEY && !Number.isNaN(afterTime(c.value));
+
+/**
+ * Whether the app continues a `depends` stop when what it waits for is over: every condition is a PR / Issue / job
+ * (`WAIT_KEY`) or a date it can read (`after`), and one of them is still unmet. Any other `depends` (no condition, one
+ * the app cannot watch, like a subagent or a background run, or every condition already met) is never continued, so it
+ * waits for the person.
+ */
+export function resumableDepends(stop: StopRecord): boolean {
+  return stop.reason === "depends" && stop.conditions.some((c) => !c.met) && stop.conditions.every((c) => WAIT_KEY.test(c.key) || isAfterWait(c));
+}
 
 /**
  * A stop that is not `depends` is no wait the daemon resumes, so nothing else closes its `job#<id>` conditions: the ones
@@ -334,7 +352,7 @@ export function openStops(records: StopRecord[]): StopRecord[] {
 /**
  * The `outcome` a Task's stop records decide (docs/design/task-outcome.md), or null when it has none (the outcome is left as
  * it is). Of each stop's newest record, those not `resolved` and not answered since the stop was last reported are open: one that waits for the person
- * (a human reason, `waiting` / `exhausted`, no condition to wait on) is `needs_action`; any other open one is `waits`;
+ * (a human reason, `waiting` / `exhausted`, no condition to wait on; or a `depends` the app does not continue, `resumableDepends`) is `needs_action`; any other open one is `waits`;
  * records that are all closed are `unknown` during a turn (`inTurn`: the reply after them is still to come) and `finished`
  * after it. Written each time a stop is recorded (`TaskManager.recordStopEvent`), so the column is the one place that
  * says whether the Task waits on the person.
@@ -353,7 +371,8 @@ export function outcomeFromStops(records: StopRecord[], inTurn: boolean): TaskOu
   const brought = (r: StopRecord) => before.has(r.id) && r.answer!.ref !== before.get(r.id)!.answer?.ref;
   const answered = (r: StopRecord) => !!r.answer && (brought(r) || r.answer.at >= r.at);
   const open = [...latest.values()].filter((r) => r.state !== "resolved" && !answered(r));
-  if (open.some((r) => HUMAN_STOP_REASONS.has(r.reason) && (r.state === "waiting" || r.state === "exhausted") && r.conditions.length === 0)) return "needs_action";
+  const waitsOnPerson = (r: StopRecord) => (r.state === "waiting" || r.state === "exhausted") && (r.reason === "depends" ? !resumableDepends(r) : HUMAN_STOP_REASONS.has(r.reason) && r.conditions.length === 0);
+  if (open.some(waitsOnPerson)) return "needs_action";
   if (open.length) return "waits";
   return inTurn ? "unknown" : "finished";
 }
@@ -508,11 +527,11 @@ export function stopRecoveryPrompt(open: StopSummary[], cond: PreambleConditions
           "```",
         ]),
     `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。${cond.workspaceMcp ? "Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。" : ""}`,
-    `依存の待ち（depends）は待っている PR・Issue を conditions に pr#N / issue#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。${
+    `依存の待ち（depends）は待っている PR・Issue・デーモンに頼んだ仕事を conditions に pr#N / issue#N / job#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。${
       cond.stage
         ? "7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。"
         : "7 日を超えるなら conditions を省く。"
-    }`,
+    }サブエージェント・背景の実行・別リポジトリの待ちのように、どの鍵でも書けない待ちはアプリが再開できないので、利用者の要対応に出る。`,
     "何かが済むのを待つときは `ops-kit wait --for \"<何を待つか>\" --timeout <秒> --on-timeout <fail|proceed> -- <判定コマンド>` を使い、until / while と sleep の繰り返しでは待たない（何を待つか・上限・切れたときの動作が無い待ちは書けない。待ちと上限は画面に出る）。fail で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を報告して止まる。",
     'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・[merge-answer] の投稿・Task の本文への名指しのパスの追加は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
     `依頼の範囲外の書き込み（${cond.planMode ? "計画モードでの commit・push・マージ、" : ""}リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。`,

@@ -706,7 +706,9 @@ describe("the kit's skills as a Task reads them", () => {
     // they were split by condition and 257,417 after; rules added since took the copy to 279,325, and stating each of
     // them once (in the skill that owns it, or behind its condition) brought it to this number. A text that makes it
     // grow fails here: shorten it (or move it behind a condition), and raise the number only with the reason.
-    expect(bytes).toBeLessThanOrEqual(256_915);
+    // Raised to 257,354 (+439 bytes, the copy measured 256,913 before and 257,352 after): what a claim stopped by another
+    // machine's lease means and what its exit codes ask for, in pbi-complete (the only skill that owns the claim).
+    expect(bytes).toBeLessThanOrEqual(257_354);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

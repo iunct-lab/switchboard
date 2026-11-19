@@ -127,7 +127,7 @@ describe("automatic judgement", () => {
       await waitFor(async () => calls.length === 1);
       calls[0]!.answer("needs_action");
       await waitFor(async () => c.db.getTask(t.id)!.outcome === "needs_action");
-      const report = { id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI 待ち" };
+      const report = { id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI 待ち", conditions: [{ key: "pr#12", value: "open", met: false }] };
       // a stop of an earlier turn, written straight to the log (as one reported before the judged turn)
       c.db.appendEvent(t.id, { t: "stop.record", stop: StopRecord.parse({ ...report, id: `${t.id}/ci`, work: { workspaceId: null, issue: null, taskId: t.id }, at: 1, state: "waiting" }) });
       c.tasks.recordStopEvent(t.id, StopRecord.parse({ ...report, id: `${t.id}/ci`, work: { workspaceId: null, issue: null, taskId: t.id }, at: Date.now(), state: "resolved" }));

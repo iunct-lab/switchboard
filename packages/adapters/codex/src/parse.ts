@@ -162,7 +162,7 @@ export function mapCodexMessage(m: Any, s: CodexParserState): AgentEvent[] {
       s.subagentUsage.clear();
       s.subagentModel.clear();
       const status = turn.status === "completed" ? "ok" : turn.status === "interrupted" ? "aborted" : "error";
-      out.push({ t: "session.end", status, summary: turn.error?.message ?? s.lastAgentText, durationMs: turn.durationMs ?? undefined });
+      out.push({ t: "session.end", status, summary: turn.error?.message ?? s.lastAgentText, durationMs: turn.durationMs ?? undefined, turn: turn.id });
       return out;
     }
     case "error": {

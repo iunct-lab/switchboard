@@ -1,5 +1,6 @@
-import { ScheduleInput } from "@switchboard/protocol";
+import { ScheduleInput, type ScheduleSampleInfo } from "@switchboard/protocol";
 import { SCHEDULE_LOG_MAX_LIMIT } from "../scheduler.ts";
+import { SCHEDULE_SAMPLES } from "../scheduleSamples.ts";
 import { stuckSchedule } from "../stops.ts";
 import type { Routes, ServerContext } from "../server/context.ts";
 
@@ -23,6 +24,10 @@ export function schedulesRoutes(sc: Pick<ServerContext, "json" | "scheduler" | "
           return sc.bad(String((e as Error).message ?? e));
         }
       },
+    },
+    // every sample, whatever `schedules.samples` records or the rows hold: the person picks one in the new-schedule form
+    "/api/schedules/samples": {
+      GET: () => sc.json(SCHEDULE_SAMPLES.map(({ id, title, cron, runner, prompt }): ScheduleSampleInfo => ({ id, title, cron, runner, prompt }))),
     },
     "/api/schedules/:id": {
       GET: (req) => {

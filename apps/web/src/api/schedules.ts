@@ -1,9 +1,10 @@
-import type { Schedule, ScheduleInput, Task } from "@switchboard/protocol";
+import type { Schedule, ScheduleInput, ScheduleSampleInfo, Task } from "@switchboard/protocol";
 import { req } from "./request.ts";
 
 /** The calls of this group; `api` (index.ts) holds every group's. */
 export const schedulesApi = {
   schedules: () => req<Schedule[]>("/api/schedules"),
+  scheduleSamples: () => req<ScheduleSampleInfo[]>("/api/schedules/samples"),
   createSchedule: (input: ScheduleInput) => req<Schedule>("/api/schedules", { method: "POST", body: JSON.stringify(input) }),
   updateSchedule: (id: string, patch: Partial<ScheduleInput>) => req<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteSchedule: (id: string) => req<{ ok: boolean }>(`/api/schedules/${id}`, { method: "DELETE" }),

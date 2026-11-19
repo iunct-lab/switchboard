@@ -20,7 +20,7 @@ const outDir = join(root, "packages", "adapters", "codex", "src", "generated");
 /** Types the adapter imports directly. Everything they reference is pulled in transitively. */
 const SEEDS = [
   "InitializeParams", "InitializeResponse",
-  "v2/ThreadStartParams", "v2/ThreadStartResponse", "v2/ThreadResumeParams", "v2/ThreadResumeResponse",
+  "v2/ThreadStartParams", "v2/ThreadStartResponse", "v2/ThreadResumeParams", "v2/ThreadResumeResponse", "v2/ThreadForkParams", "v2/ThreadForkResponse",
   "v2/TurnStartParams", "v2/TurnStartResponse", "v2/TurnSteerParams", "v2/TurnInterruptParams", "v2/TurnInterruptResponse",
   "v2/ThreadStartedNotification", "v2/ThreadStatusChangedNotification", "v2/ThreadTokenUsageUpdatedNotification",
   "v2/TurnStartedNotification", "v2/TurnCompletedNotification",
