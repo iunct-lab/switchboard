@@ -136,6 +136,8 @@ export interface UplinkConfig {
   /** How long a lease lasts without being renewed, and how often it is renewed (SWITCHBOARD_LEASE_TTL_S 900, SWITCHBOARD_LEASE_RENEW_S 60). */
   leaseTtlMs: number;
   leaseRenewMs: number;
+  /** How long one request of the lease store may take before it is given up (SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20); a request that never answers must not hold the renewal round. */
+  leaseCallTimeoutMs: number;
   /** A work machine's copy of the instance's database: the Litestream replica's URL (SWITCHBOARD_REPLICA_URL) and how often it is taken (SWITCHBOARD_REPLICA_INTERVAL_S, 60 minutes). */
   replicaUrl: string;
   replicaIntervalMs: number;
@@ -191,6 +193,7 @@ export function loadUplink(env: NodeJS.ProcessEnv = process.env, warn: (line: st
     ...(maxBytes > 0 ? { maxBytes } : {}),
     leaseTtlMs: positiveOr(env.SWITCHBOARD_LEASE_TTL_S, 900) * 1000,
     leaseRenewMs: positiveOr(env.SWITCHBOARD_LEASE_RENEW_S, 60) * 1000,
+    leaseCallTimeoutMs: positiveOr(env.SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20) * 1000,
     replicaUrl: env.SWITCHBOARD_REPLICA_URL ?? "",
     replicaIntervalMs: positiveOr(env.SWITCHBOARD_REPLICA_INTERVAL_S, 3600) * 1000,
   };

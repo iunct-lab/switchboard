@@ -11,7 +11,7 @@ import { reduceStops } from "../stops.ts";
 import { IN_FLIGHT, workPhase } from "../task-status.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
 import { join } from "node:path";
-import { awsS3, bucketFromParameter } from "../s3.ts";
+import { uplinkStores } from "../s3.ts";
 import { Workbench } from "../backlog-replica.ts";
 import { PbiLeases } from "../lease.ts";
 import { originOf, remoteOf } from "../../../../ops-kit/src/forge.ts";
@@ -33,9 +33,11 @@ export const flowWorkspaces = (sc: Pick<ServerContext, "db">): FlowWorkspace[] =
 export const storedBacklog = (sc: Pick<ServerContext, "db" | "leasedElsewhere" | "backlog">, ws: Workspace, released?: (oid: string) => boolean | null): StoredBacklog => {
   // a PBI whose stage Task runs now counts as other work in the overlap judgement, before its Tasks are In progress (a planned resume alone does not)
   // and so does a PBI another machine holds the lease of: its Tasks' files are at work there
-  const active = (n: number) => !!sc.db.workingStageTask(ws.id, n) || !!sc.leasedElsewhere(ws, n);
+  const working = sc.db.workingStageIssues(ws.id);
+  const active = (n: number) => working.has(n) || !!sc.leasedElsewhere(ws, n);
   // one whose stage Task only has a resume planned cannot move before that time: its place after an overlap is passed over until then
-  const parked = (n: number) => !active(n) && !!sc.db.activeStageTask(ws.id, n);
+  const stage = sc.db.activeStageIssues(ws.id);
+  const parked = (n: number) => !active(n) && stage.has(n);
   const stored = sc.backlog.read(ws, { released, active, parked });
   if (stored.fetchedAt !== null || stored.error || stored.syncing) return stored;
   sc.backlog.request(ws);
@@ -144,9 +146,10 @@ export function setupBacklog(sc: Pick<ServerContextInit, "backlog" | "db" | "opt
   // Two machines sharing work (cfg.uplink): none of this exists on a daemon that runs alone, and S3 is never asked.
   // sb-rescue's candidate runs on a copy of the database and neither sends, takes in nor holds a lease.
   sc.uplink = sc.cfg.uplink;
-  sc.s3 = !sc.uplink.mode || sc.cfg.candidate ? null : (sc.opts.s3 ?? awsS3(sc.uplink.bucket || (() => bucketFromParameter())));
-  /** The PBI leases of this machine; null = alone. */
-  sc.leases = sc.s3 ? new PbiLeases(sc.s3, { machine: sc.uplink.machine, ttlMs: sc.uplink.leaseTtlMs }) : null;
+  const stores = !sc.uplink.mode || sc.cfg.candidate ? null : uplinkStores(sc.uplink);
+  sc.s3 = stores && (sc.opts.s3 ?? stores.s3);
+  const leaseStore = sc.s3 && (sc.opts.s3 ?? stores!.leases);
+  sc.leases = leaseStore ? new PbiLeases(leaseStore, { machine: sc.uplink.machine, ttlMs: sc.uplink.leaseTtlMs }) : null;
   // a work machine reads the instance's copy and never asks the backlog's service
   if (sc.s3 && sc.uplink.mode === "send")
     sc.backlog.workbench = new Workbench(sc.db, {

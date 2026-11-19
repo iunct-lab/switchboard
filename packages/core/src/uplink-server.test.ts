@@ -10,7 +10,8 @@ import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig, UPLINK_PREVIEW } from "./config.ts";
 import { Db } from "./db.ts";
 import { leaseKey, PbiLeases } from "./lease.ts";
-import { memoryS3 } from "./s3.ts";
+import { awsS3, memoryS3, runCommand, uplinkStores, type AwsRun } from "./s3.ts";
+import { leaseRound } from "./server/lease.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { sendUplink } from "./uplink-s3.ts";
 
@@ -117,6 +118,63 @@ describe("lease", () => {
     expect(state).toBe("released");
     expect(await new PbiLeases(s3, { machine: "pc1", ttlMs: 900_000 }).acquire("acme/app", 306)).toEqual({ ok: true });
   });
+});
+
+describe("the renewal round with a request that never answers", () => {
+  /** The `aws` CLI over an S3 kept in memory; a get of `stuckKey` is a `sleep` that ends only when the limit the caller passed kills it. */
+  const emulated = (mem: ReturnType<typeof memoryS3>, stuck: { key: string | null }): AwsRun => async (args, opts) => {
+    const at = (flag: string) => args[args.indexOf(flag) + 1]!;
+    const fail = (stderr: string) => ({ code: 254, stdout: "", stderr });
+    if (args[1] === "get-object") {
+      if (args.includes(`--key`) && at("--key") === stuck.key) return runCommand("sleep", ["30"], opts?.timeoutMs);
+      const got = await mem.get(at("--key"));
+      if (!got) return fail("NoSuchKey");
+      writeFileSync(args[args.length - 1]!, got.body);
+      return { code: 0, stdout: JSON.stringify({ ETag: got.etag }), stderr: "" };
+    }
+    if (args[1] === "put-object") {
+      const cond = args.includes("--if-none-match") ? { ifNoneMatch: true as const } : args.includes("--if-match") ? { ifMatch: at("--if-match") } : undefined;
+      const r = await mem.put(at("--key"), new Uint8Array(readFileSync(at("--body"))), cond);
+      return r === "conflict" ? fail("PreconditionFailed") : { code: 0, stdout: JSON.stringify({ ETag: r.etag }), stderr: "" };
+    }
+    const listed = await mem.list(at("--prefix"));
+    return { code: 0, stdout: JSON.stringify(listed.map((o) => ({ key: o.key, etag: o.etag, size: o.size }))), stderr: "" };
+  };
+
+  const REPO = "acme/app";
+  /** A daemon holding PBIs 7 (recovered: nobody is at it here, so a round gives it back) and 8, whose reads of 7 never come back. */
+  async function holding78(timeoutMs: number | undefined) {
+    const mem = memoryS3();
+    const clock = { now: 1_000_000 };
+    const first = new PbiLeases(mem, { machine: "instance", ttlMs: 900_000, now: () => clock.now });
+    await first.acquire(REPO, 7);
+    const stuck: { key: string | null } = { key: null };
+    const leases = new PbiLeases(awsS3("b", emulated(mem, stuck), timeoutMs === undefined ? undefined : { timeoutMs }), { machine: "instance", ttlMs: 900_000, now: () => clock.now });
+    await leases.refresh();
+    await leases.acquire(REPO, 8); // taken by this daemon for a session of its own: not recovered, not a stage's, so a round leaves it be
+    stuck.key = leaseKey(REPO, 7);
+    void leases.acquire(REPO, 7, true).catch(() => undefined);
+    const sc = { leases, leaseBusy: false, leaseTicks: 1, uplink: { leaseTtlMs: 900_000, leaseRenewMs: 60_000 }, db: { listWorkspaces: () => [] }, leaseRepository: () => null, tasks: {} } as unknown as Parameters<typeof leaseRound>[0];
+    const expiry = async (n: number) => (await stored(mem, n)).expiresAt as number;
+    return { sc, clock, expiry };
+  }
+
+  test("one PBI's request that never answers is given up at the limit, and another PBI's lease is renewed in every round meanwhile", async () => {
+    const { sc, clock, expiry } = await holding78(300);
+    const before = await expiry(8);
+    clock.now += 60_000;
+    const round1 = leaseRound(sc);
+    // renewed while 7's request is still stuck: the give-back of 7 does not come first, and the round does not wait for it
+    await Bun.sleep(100);
+    expect(await expiry(8)).toBe(clock.now + 900_000);
+    expect(await expiry(8)).toBeGreaterThan(before);
+    await round1;
+    expect(sc.leaseBusy).toBe(false);
+    // the next round is not skipped, and renews 8 again
+    clock.now += 60_000;
+    await leaseRound(sc);
+    expect(await expiry(8)).toBe(clock.now + 900_000);
+  }, 10_000);
 });
 
 describe("the lease where a turn starts, resumes and where a Task ends", () => {
@@ -449,5 +507,21 @@ describe("uplink", () => {
     expect(((await (await fetch(`${base}/api/health`)).json()) as { uplinkSkipped: unknown[] }).uplinkSkipped).toEqual([]);
     core!.db.setSetting("uplink.skipped", [{ machine: "pc1", deltaId: "pc1-1-000000", theirs: 301, ours: 297, at: 1 }]);
     expect(((await (await fetch(`${base}/api/health`)).json()) as { uplinkSkipped: unknown[] }).uplinkSkipped).toEqual([{ machine: "pc1", theirs: 301, ours: 297 }]);
+  });
+});
+
+describe("the stores setupBacklog builds", () => {
+  test("only the lease store's requests carry the time limit, the bucket-name lookup included; the uplink's own carry none", async () => {
+    const seen: Array<{ cmd: string; timeoutMs?: number }> = [];
+    const run: AwsRun = async (args, opts) => {
+      seen.push({ cmd: args[0] === "ssm" ? "ssm" : `${args[0]} ${args[1]}`, timeoutMs: opts?.timeoutMs });
+      return args[0] === "ssm" ? { code: 0, stdout: "named\n", stderr: "" } : { code: 254, stdout: "", stderr: "NoSuchKey" };
+    };
+    const { s3, leases } = uplinkStores({ bucket: "", leaseCallTimeoutMs: 20_000 }, run);
+    await leases.get("k");
+    expect(seen).toEqual([{ cmd: "ssm", timeoutMs: 20_000 }, { cmd: "s3api get-object", timeoutMs: 20_000 }]);
+    seen.length = 0;
+    await s3.get("k");
+    expect(seen).toEqual([{ cmd: "ssm", timeoutMs: undefined }, { cmd: "s3api get-object", timeoutMs: undefined }]);
   });
 });

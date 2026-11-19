@@ -105,18 +105,28 @@ test("toItem: an in-progress PBI's confirmations wait for every Task to close", 
     return [i.confirmations.map((c) => c.n), i.closable, i.progress];
   };
   // a Task still open: what is not built cannot be checked, so nothing is asked — In review too (a Task left open is not built)
-  expect(of("In progress", 3, 1)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null }]);
-  expect(of("In review", 3, 2)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null }]);
+  expect(of("In progress", 3, 1)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null, checking: false }]);
+  expect(of("In review", 3, 2)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null, checking: false }]);
   // every Task closed: each line is asked; neither answer alone closes it
-  expect(of("In progress", 3, 3)).toEqual([[2, 3], false, { closableByApi: true, closesOnAnswer: null }]);
-  expect(of("In review", 3, 3)).toEqual([[2, 3], false, { closableByApi: true, closesOnAnswer: null }]);
+  expect(of("In progress", 3, 3)).toEqual([[2, 3], false, { closableByApi: true, closesOnAnswer: null, checking: false }]);
+  expect(of("In review", 3, 3)).toEqual([[2, 3], false, { closableByApi: true, closesOnAnswer: null, checking: false }]);
   // a PBI with no Tasks at all is asked as before, and is never closable
-  expect(of("In progress", 0, 0)).toEqual([[2, 3], false, { closableByApi: false, closesOnAnswer: null }]);
+  expect(of("In progress", 0, 0)).toEqual([[2, 3], false, { closableByApi: false, closesOnAnswer: null, checking: false }]);
   // not started: none
-  expect(of("Ready", 3, 3)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null }]);
+  expect(of("Ready", 3, 3)).toEqual([[], false, { closableByApi: false, closesOnAnswer: null, checking: false }]);
   // the last line left is the one whose answer closes it
   const last = toItem({ ...raw(["type:pbi"], body.replace("- [ ] 3.", "- [x] 3."), "In progress"), subIssuesSummary: { total: 2, completed: 2, doneAt: null } }, 11, { id: "ws_meta", name: "switchboard" })!;
-  expect(last).toMatchObject({ confirmations: [{ n: 2 }], closable: false, progress: { closableByApi: true, closesOnAnswer: 2 } });
+  expect(last).toMatchObject({ confirmations: [{ n: 2 }], closable: false, progress: { closableByApi: true, closesOnAnswer: 2, checking: false } });
+});
+
+test("toItem: after-merge lines reach the item, and a PBI left with them is checking", () => {
+  const body = "## 到達点 / 受け入れ条件\n- [x] 1. 実装した\n- [ ] 2. 画面（マージの後: 画面）\n- [ ] 3. 実機（利用者確認: 見る）\n- [ ] 4. 両方（マージの後: E2E）（利用者確認: 見る）\n";
+  const of = (labels: string[], total: number, completed: number) => toItem({ ...raw(labels, body, "In review"), subIssuesSummary: { total, completed, doneAt: null } }, 11, { id: "ws_meta", name: "switchboard" })!;
+  // a line with both marks is read as a user check only
+  expect(of(["type:pbi"], 2, 2)).toMatchObject({ postMerge: [{ n: 2, kind: "画面", after: null }], closable: false, progress: { closableByApi: true, closesOnAnswer: null, checking: true } });
+  expect(of(["type:pbi"], 2, 1)).toMatchObject({ postMerge: [{ n: 2 }], progress: { checking: false } });
+  // not a PBI: nothing is read
+  expect(of(["type:request"], 0, 0)).toMatchObject({ postMerge: [], progress: { checking: false } });
 });
 
 test("a PBI with a Task still open: no confirmation in the backlog or in 判断待ち, and an answer to one is refused with nothing written", async () => {
@@ -124,7 +134,7 @@ test("a PBI with a Task still open: no confirmation in the backlog or in 判断�
   const base = await boot(openTaskAndConfirmationGh().gh, holdingClaude().adapter);
   const i308 = ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.number === 308)!;
   expect(i308.tasks!.done).toBeLessThan(i308.tasks!.total);
-  expect(i308).toMatchObject({ confirmations: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null } });
+  expect(i308).toMatchObject({ confirmations: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null, checking: false } });
   const asks = ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string }> }).asks;
   expect(asks.filter((a) => a.id.startsWith("confirm:") && a.id.includes("#308:"))).toEqual([]);
   const r = await fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id: `confirm:${metaId()}#308:2`, answer: { kind: "confirm", ok: true } }) });

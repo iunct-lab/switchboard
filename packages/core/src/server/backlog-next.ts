@@ -8,9 +8,9 @@ import { listProcesses } from "../process-defs.ts";
 import { readQueue } from "../backlog-queue.ts";
 import { allocationOf, sweepOrder, weekWindowStart } from "../allocation.ts";
 import { askWithdrawnPrereqs } from "../backlog-waits.ts";
-import { awaitingReply, failedIn, failedSince, plannedResumeLine, checksOnlyLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, spinningIn, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
+import { awaitingReply, failedIn, failedSince, plannedResumeLine, checksOnlyLine, checkingLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, spinningIn, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
 import { storedFlowIssues, canStartStoredBacklog } from "../backlog-stored.ts";
-import { overlapLine, overlapHolderLines, swapOverlapLines } from "../backlog-overlap.ts";
+import { overlapLine, overlapHolderLines, overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { runGh } from "../backlog-gh.ts";
 import { SLOT_OF_ACTION, type Slot } from "../backlog-item.ts";
 import { approvalWindowLine } from "../approval-batch.ts";
@@ -52,6 +52,8 @@ export const leftLines = (_sc: unknown, items: BacklogItem[], slot: Slot, flow?:
   if (planned) out.push(planned);
   const checksOnly = checksOnlyLine(unheld, slot);
   if (checksOnly) out.push(checksOnly);
+  const checking = checkingLine(unheld, slot);
+  if (checking) out.push(checking);
   const unchanged = unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i));
   if (unchanged.length) out.push(`前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
   // what holds them: an overlap still open, a prerequisite not done yet, one a person has to look at
@@ -208,7 +210,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       ...(r.syncHeld.length ? [`${r.ws.name}: 競合があるので自動では始めない: ${r.syncHeld.join(" ")}`] : []),
     ];
   // the flow limit and the week's holds of a workspace as read; `flowStarted` = the flow PBIs this firing started from Ready since
-  const flowOfRead = (r: ReadOk, flowStarted: ReadonlySet<number> = new Set()): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...r.flowCounted, ...flowStarted], r.flowStopped);
+  const flowOfRead = (r: ReadOk, flowStarted: ReadonlySet<number> = new Set()): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...new Set([...r.flowCounted, ...flowStarted])], r.flowStopped);
   const holdOf = (ws: Workspace): AllocationHold => ({ flowShare: alloc.flow, mode: alloc.workspaces.find((w) => w.workspaceId === ws.id)?.mode });
   // whether a turn would start something there: a slot is free (and the firing's, not the queue's) and has an item to pick
   const hasWork = (r: ReadOk) => SLOTS.some((slot) => !(slot === "implement" && queued()) && busy(r.ws.id, slot).length < r.ws.sweep[slot]
@@ -231,6 +233,8 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
     // checked again after GitHub was read: a button may have started a stage meanwhile
     let reported = false;
     let reread = false;
+    // the overlap lines the first read of this slot put in the log: what the reread takes out again (and no other workspace's)
+    let firstOverlap: string[] = [];
     for (let n = 0; ; n++) {
       // the import was refused the login: the 実装 slot starts nothing until it is back (the 計画 slot and the buttons go on)
       const authHeld = slot === "implement" ? (r.ghLoginHeld ?? sc.authStopHeld(ws)) : null;
@@ -249,7 +253,11 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         break;
       }
       const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws), dueSoon(ws), hold);
-      if (n === 0) skipped.push(...sc.leftLines(r.items, slot, flow(), hold).map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
+      if (n === 0) {
+        const left = sc.leftLines(r.items, slot, flow(), hold);
+        skipped.push(...left.map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
+        firstOverlap = overlapLinesUnder(`${ws.name}: ${SLOT_NAME[slot]}: `, left);
+      }
       if (n === 0) reported = true;
       if (!next) {
         if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 進められる項目が無い`);
@@ -309,13 +317,17 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       if (again.item.flow && again.item.stage === "ready") flowStarted.add(again.item.number);
       started.push({ task: t.task, label: `${ws.name} #${next.item.number} を ${next.action}` });
       // the next candidate is judged against what this start took (its stage Task now runs): the stored data only; the sync lines stay those of the first read
-      r.items = (await load(ws)).items;
+      // (the flow PBIs in progress are read again too: another may have become one since the first read)
+      const reloaded = await load(ws);
+      r.items = reloaded.items;
+      r.flowCounted = reloaded.flowCounted;
+      r.flowStopped = reloaded.flowStopped;
       reread = true;
     }
     // an overlap that only the starts made is said too: the line is the first read's with them counted
     if (reread) {
       const head = `${ws.name}: ${SLOT_NAME[slot]}: `;
-      swapOverlapLines(skipped, head, sc.leftLines(r.items, slot, flow(), hold));
+      swapOverlapLines(skipped, firstOverlap, overlapLinesUnder(head, sc.leftLines(r.items, slot, flow(), hold)));
     }
     // the flow PBIs left, said after the starts: one started in this firing may be what holds the next
     const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)), slot, flow()), flow());

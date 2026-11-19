@@ -1,10 +1,10 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { CoreConfig } from "./config.ts";
 import { type Db, schemaLevel } from "./db.ts";
 import { isMachineName } from "./machine.ts";
 import { IN_FLIGHT } from "./task-status.ts";
-import { type TarEntry, writeTarZst } from "./transfer.ts";
+import { type TarEntry, tarHeaderBytes, tarPad, writeTarZst } from "./transfer.ts";
 import { RunnerId } from "@switchboard/protocol";
 import { deltaFileRefusal, isRowId, placeOf, unpackDelta, UPLINK_LIMITS, type UplinkLimits } from "./uplink-in.ts";
 
@@ -35,7 +35,7 @@ import { deltaFileRefusal, isRowId, placeOf, unpackDelta, UPLINK_LIMITS, type Up
 /** The mark is set back this far when a delta is built (a row written while the last one was being built is sent twice, not never). */
 export const OVERLAP_MS = 60_000;
 
-/** One delta's content (rows as JSON, plus the files), not counting zstd: what the 64 MiB of a first send are measured in. */
+/** One delta's size unpacked (the tar: delta.json with its rows, the files, their headers and padding), not counting zstd: what the 64 MiB of a first send are measured in. */
 export const DELTA_MAX_BYTES = 64 * 1024 * 1024;
 
 const CURSOR_KEY = "uplink.cursor";
@@ -91,7 +91,7 @@ const TABLES = ["tasks", "events", ...CHILD_TABLES.map((c) => c.table), QUOTA_TA
 
 /**
  * The deltas since `since` (the mark; `readCursor` of a database that never sent = everything), written under `opts.dir` (default `<home>/uplink`), oldest Task
- * first. A delta holds up to `opts.maxBytes` of rows and files: a first send is cut into several, a Task's events by
+ * first. A delta unpacks to at most `opts.maxBytes` (its tar, headers and padding counted): a first send is cut into several, a Task's events by
  * seq (its row comes with the first of them), a file bigger than the limit alone. None when nothing is new. Every
  * delta of one call has the same `createdAt` and `cursor`; the mark moves to it after all of them were sent. A delta's id
  * is `<machine>-<createdAt>-<n>` with `n` padded, so the ids sort in the order the deltas must be taken in. When a
@@ -143,26 +143,40 @@ export async function buildDelta(db: Db, cfg: CoreConfig, since: Cursor, machine
   let tables: Record<string, string[]> = {};
   let files: Array<{ name: string; path: string }> = [];
   let bytes = 0;
-  const empty = () => ((tables = Object.fromEntries(TABLES.map((t) => [t, [] as string[]]))), (files = []), (bytes = 0));
+  let items = 0;
+  const headOf = (deltaId: string, rows: Record<string, string[]>) => `{"machine":${JSON.stringify(machine)},"deltaId":${JSON.stringify(deltaId)},"schemaLevel":${level},"createdAt":${createdAt},"repos":${JSON.stringify(repos)},"tables":{${TABLES.map((t) => `${JSON.stringify(t)}:[${rows[t]!.join(",")}]`).join(",")}}}\n`;
+  // what a delta weighs once unpacked before any row or file: delta.json (its tables empty) with its tar header and the
+  // most its padding can be, and the two empty blocks that end the tar. A row adds its JSON and a comma; a file adds its
+  // headers (a pax record too when its name needs one), its bytes and the padding after them.
+  const fixed = 512 + Buffer.byteLength(headOf(`${machine}-${stamp}-${"0".repeat(6)}`, Object.fromEntries(TABLES.map((t) => [t, []])))) + 511 + 1024;
+  const empty = () => ((tables = Object.fromEntries(TABLES.map((t) => [t, [] as string[]]))), (files = []), (bytes = fixed), (items = 0));
   empty();
   const flush = async () => {
-    if (bytes === 0 && files.length === 0) return;
+    if (items === 0) return;
     const deltaId = `${machine}-${stamp}-${String(built.length).padStart(6, "0")}`;
-    const head = `{"machine":${JSON.stringify(machine)},"deltaId":${JSON.stringify(deltaId)},"schemaLevel":${level},"createdAt":${createdAt},"repos":${JSON.stringify(repos)},"tables":{${TABLES.map((t) => `${JSON.stringify(t)}:[${tables[t]!.join(",")}]`).join(",")}}}\n`;
+    const head = headOf(deltaId, tables);
     const file = join(dir, `${deltaId}.tar.zst`);
     const entries: TarEntry[] = [{ name: "delta.json", bytes: Buffer.from(head) }, ...files.map((f): TarEntry => ({ name: `files/${f.name}`, path: f.path }))];
-    await writeTarZst(file, entries);
+    // an attachment that was gone (or a link) when the tar was written did not go: its size is not what the mark says was
+    // sent, so the next call sees it as changed. `next` is the one the deltas of this call share.
+    for (const gone of await writeTarZst(file, entries)) {
+      const name = gone.slice("files/".length);
+      if (!name.startsWith("attachments/")) continue;
+      if (since.files[name] === undefined) delete next.files[name];
+      else next.files[name] = since.files[name]!;
+    }
     built.push({ deltaId, file, cursor: next });
     empty();
   };
-  /** Adds `size` to the delta being filled, closing it first when it would pass the limit (a delta is never closed empty). */
+  /** Adds `size` (what it weighs unpacked) to the delta being filled, closing it first when it would pass the limit (a delta is never closed empty). */
   const room = async (size: number) => {
-    if (bytes > 0 && bytes + size > max) await flush();
+    if (items > 0 && bytes + size > max) await flush();
     bytes += size;
+    items++;
   };
   const addRow = async (table: string, row: Row) => {
     const json = JSON.stringify(row);
-    await room(Buffer.byteLength(json));
+    await room(Buffer.byteLength(json) + 1);
     tables[table]!.push(json);
   };
   /** Whether the file went in: one the instance would refuse (its name, its size) is left out and said, so it never holds the deltas after it. */
@@ -172,11 +186,13 @@ export async function buildDelta(db: Db, cfg: CoreConfig, since: Cursor, machine
       console.warn(`[uplink] not sent: ${why}`);
       return false;
     }
-    await room(size);
+    await room(tarHeaderBytes(`files/${name}`, size) + size + tarPad(size));
     files.push({ name, path });
     return true;
   };
 
+  // the attachments folder as it really is, a link to it followed (read once: the check below compares every file with it)
+  const root = realPath(cfg.attachmentsDir);
   try {
     // A usage report comes from a Task's turn, so whenever a limit moved there is a Task to send it with. The rows
     // carry the account's stored name (a hash), never the provider's id.
@@ -208,17 +224,19 @@ export async function buildDelta(db: Db, cfg: CoreConfig, since: Cursor, machine
             await addRow(table, r);
             continue;
           }
-          // only a file in the attachments folder is this machine's to send (a row says where its file is, a tampered one anywhere)
+          // only a file in the attachments folder is this machine's to send (a row says where its file is, a tampered one
+          // anywhere), and where the file really is, a link on the way followed: a folder of the Task that is a link out leads out
           const path = resolve(String(r.path));
-          const size = fileSize(path);
-          if (size === null || !path.startsWith(resolve(cfg.attachmentsDir) + sep)) {
+          const real = realPath(path);
+          const size = real === null ? null : fileSize(real);
+          if (real === null || size === null || root === null || !path.startsWith(resolve(cfg.attachmentsDir) + sep) || !real.startsWith(root + sep)) {
             if (Number(r.created_at) > from) await addRow(table, r);
             continue;
           }
           const name = `attachments/${relative(cfg.attachmentsDir, path)}`;
           if (size === since.files[name]) continue;
           await addRow(table, r);
-          await addFile(name, path, size);
+          await addFile(name, real, size);
           next.files[name] = size;
         }
       }
@@ -255,6 +273,14 @@ const lexists = (path: string) => statOrNull(path) !== null;
 function statOrNull(path: string): Stats | null {
   try {
     return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function realPath(path: string): string | null {
+  try {
+    return realpathSync(path);
   } catch {
     return null;
   }
@@ -371,6 +397,8 @@ interface Delta {
   machine: string;
   deltaId: string;
   schemaLevel: number;
+  /** When the sender built it (every delta of one call has the same); 0 when it says none. */
+  createdAt: number;
   repos: Record<string, string | null>;
   tables: Record<string, Row[]>;
 }
@@ -421,7 +449,8 @@ function readDelta(raw: unknown): Delta {
     }
     tables[table] = rows as Row[];
   }
-  return { machine, deltaId, schemaLevel: level, repos, tables };
+  const createdAt = typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : 0;
+  return { machine, deltaId, schemaLevel: level, createdAt, repos, tables };
 }
 
 /**
@@ -439,6 +468,11 @@ function readDelta(raw: unknown): Delta {
  *  - the machine it names is `from.machine`, and so is the machine in its id;
  *  - every Task it names is new here or already that machine's. One that is another machine's refuses the delta (a
  *    machine cannot write over another's record); one that is this instance's own is passed over, with its rows and files;
+ *  - a file is written only where it is the delta's turn to write it: not into a Task that is this instance's own, not
+ *    through a link (a folder on the way, or one left at the temp name: that one is removed, and the copy is made
+ *    exclusively), and not into an artifact whose row here is newer than the delta's row, or, when the delta brings no
+ *    row for it (a send cut into several deltas puts a row and its files in different ones), newer than the delta's
+ *    `createdAt` (an older delta taken in again leaves the row and its files at the newer version);
  *  - a Task is put on a workspace only when its repository is one the machine is registered for;
  *  - the id it names itself by is the one the caller knows it by (`expectId`: its key in the bucket);
  *  - every row's Task id, and the id of a staged change, an artifact and an attachment, is a plain name, and their
@@ -519,7 +553,19 @@ export async function applyDelta(db: Db, cfg: CoreConfig, file: string, from: De
         if (had && had.task_id !== r.task_id) throw new Error(`delta ${deltaId} from ${machine} names a row of ${table} that belongs to another Task here`);
       }
     }
-    const placed = placeFiles(cfg, unpacked.files, (id) => own.has(id));
+    // an artifact whose row here is newer than the delta's keeps its files: the row and the files stay one version. A
+    // file whose row the delta does not bring is compared with when the delta was built (its row came in an earlier part)
+    const arrivingAt = new Map((tables.artifacts ?? []).map((r) => [String(r.id), Number(r.updated_at)]));
+    const rowAt = sqlite.query("SELECT updated_at FROM artifacts WHERE id = ?");
+    const stale = new Set<string>();
+    for (const f of unpacked.files) {
+      const [kind, , id] = f.name.split("/");
+      if (kind !== "artifacts" || !id) continue;
+      const here = (rowAt.get(id) as { updated_at: number } | null)?.updated_at;
+      const theirs = arrivingAt.get(id) ?? delta.createdAt;
+      if (here !== undefined && !(theirs >= here)) stale.add(f.name);
+    }
+    const placed = placeFiles(cfg, unpacked.files, (id) => own.has(id), stale);
     // only a repository the machine is registered for puts a Task on a workspace here
     const registered = new Set(from.repositories.map((r) => r.toLowerCase()));
     const workspaces = remapWorkspaces(db, Object.fromEntries(Object.entries(delta.repos).map(([id, repo]) => [id, repo !== null && registered.has(repo.toLowerCase()) ? repo : null])));
@@ -598,15 +644,17 @@ export async function applyDelta(db: Db, cfg: CoreConfig, file: string, from: De
 /**
  * Moves the unpacked files to their places (`placeOf`: inside the Task's own folder of attachments or artifacts, never
  * anywhere else): a file that is not there or differs is written. The files of a Task that is this instance's own
- * (`ownTask`, by the database) are left. A place whose way goes through a link out of that Task's folder refuses the
+ * (`ownTask`, by the database) are left, and so are the files named in `stale` (an artifact's whose row here is newer
+ * than the delta's). A place whose way goes through a link out of that Task's folder refuses the
  * delta before anything is placed. Returns how many were written.
  */
-function placeFiles(cfg: CoreConfig, files: Array<{ name: string; path: string; size: number }>, ownTask: (id: string) => boolean): number {
+function placeFiles(cfg: CoreConfig, files: Array<{ name: string; path: string; size: number }>, ownTask: (id: string) => boolean, stale: ReadonlySet<string>): number {
   const todo: Array<{ src: string; dest: string }> = [];
   for (const f of files) {
     const at = placeOf(cfg, f.name);
     if ("refusal" in at) throw new Error(at.refusal);
     if (ownTask(at.task)) continue;
+    if (stale.has(f.name)) continue;
     const root = resolve(at.kind === "attachments" ? cfg.attachmentsDir : cfg.artifactsDir);
     // a folder on the way that is a link to somewhere else is not written through: the nearest one that is there
     // resolves to a place inside this Task's own folder (not merely inside the store: another Task's folder is
@@ -634,7 +682,9 @@ function placeFiles(cfg: CoreConfig, files: Array<{ name: string; path: string; 
     const had = statOrNull(dest);
     if (had?.isFile() && had.size === lstatSync(src).size && readFileSync(dest).equals(readFileSync(src))) continue;
     const tmp = join(dirname(dest), `.tmp-${process.pid}-${basename(dest)}`);
-    copyFileSync(src, tmp);
+    // a link left at the temp name is removed itself, and the copy never opens what it points to
+    rmSync(tmp, { force: true });
+    copyFileSync(src, tmp, constants.COPYFILE_EXCL);
     renameSync(tmp, dest);
     written++;
   }

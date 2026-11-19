@@ -100,7 +100,6 @@ export const settings = msgs({
   rowAutoResume: { ja: "上限のあとの自動再開", en: "Auto-resume after the limit" },
   rowModels: { ja: "モデルの選択肢", en: "Model choices" },
   notChangeable: { ja: "このランナーでは変えられない", en: "Not changeable on this runner" },
-  runnerDefault: { ja: "ランナーの既定", en: "Runner default" },
   jobManual: { ja: "手で始める Task", en: "Tasks you start by hand" },
   jobAutoStart: { ja: "自動で始まる Task（共通）", en: "Tasks that start by themselves (common)" },
   jobReview: { ja: "レビュー", en: "Review" },

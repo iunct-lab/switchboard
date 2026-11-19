@@ -146,6 +146,21 @@ export class TaskQueries extends GrantQueries {
     return r ? rowToTask(r) : null;
   }
 
+  /** The Issues of a workspace that have a Task workingStageTask finds, in one read: what the overlap judgement of every item asks. */
+  workingStageIssues(workspaceId: string): Set<number> {
+    return this.stageIssues(workspaceId, "slot");
+  }
+
+  /** The Issues of a workspace that have a Task activeStageTask finds, in one read. */
+  activeStageIssues(workspaceId: string): Set<number> {
+    return this.stageIssues(workspaceId, "dedupe");
+  }
+
+  private stageIssues(workspaceId: string, purpose: "dedupe" | "slot"): Set<number> {
+    const rows = this.sqlite.query(`SELECT DISTINCT stage_issue FROM tasks WHERE workspace_id = ? AND stage_issue IS NOT NULL AND ${activeStage(purpose)}`).all(workspaceId) as Array<{ stage_issue: number }>;
+    return new Set(rows.map((r) => r.stage_issue));
+  }
+
   /** The newest-created stage Task of a backlog Issue, of `action` only when given. */
   lastStageTask(workspaceId: string, issue: number, action?: BacklogAction): Task | null {
     const r = action

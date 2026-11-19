@@ -50,6 +50,7 @@ export const RECORDINGS = [
   "packages/adapters/codex/fixtures/effort-high.jsonl",
   "packages/adapters/codex/fixtures/exec-workspace-write.jsonl",
   "packages/adapters/codex/fixtures/fork-turn.jsonl",
+  "packages/adapters/codex/fixtures/mcp-elicitation-0.170.jsonl",
   "packages/adapters/codex/fixtures/question-tool.jsonl",
   "packages/adapters/codex/fixtures/resume.jsonl",
   "packages/adapters/codex/fixtures/skill-text-0.169.0.jsonl",

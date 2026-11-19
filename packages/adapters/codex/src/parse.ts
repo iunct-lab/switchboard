@@ -5,6 +5,7 @@ import type { CommandExecutionRequestApprovalParams } from "./generated/v2/Comma
 import type { ErrorNotification } from "./generated/v2/ErrorNotification";
 import type { FileChangeRequestApprovalParams } from "./generated/v2/FileChangeRequestApprovalParams";
 import type { ItemCompletedNotification } from "./generated/v2/ItemCompletedNotification";
+import type { McpServerElicitationRequestParams } from "./generated/v2/McpServerElicitationRequestParams";
 import type { ItemStartedNotification } from "./generated/v2/ItemStartedNotification";
 import type { Thread } from "./generated/v2/Thread";
 import type { ThreadItem } from "./generated/v2/ThreadItem";
@@ -25,6 +26,7 @@ import type { TurnStartedNotification } from "./generated/v2/TurnStartedNotifica
  *  - item/completed same                                          → tool.result (+ artifact(diff) for fileChange)
  *  - item/agentMessage/delta                                      → message.delta (assistant); item/completed fills in un-streamed text
  *  - item/commandExecution/requestApproval, item/fileChange/requestApproval (server *requests*, carry a JSON-RPC id) → permission.ask
+ *  - mcpServer/elicitation/request with `_meta.codex_approval_kind: "mcp_tool_call"` (0.170.0: a tool the server declared destructive, or declared nothing about) → permission.ask; any other elicitation stays unsupported
  *  - thread/tokenUsage/updated                                    → usage(turn)   (per-call `last`)
  *  - turn/completed                                               → usage(reported) for the turn (Δ of `total`) + session.end
  *  - account/rateLimits/updated                                   → quota (primary 5h / secondary 7d as five_hour / seven_day)
@@ -238,8 +240,13 @@ function mapServerRequest(id: string, method: string, p: Any, s: CodexParserStat
       }));
       return [{ t: "question.ask", id, questions }];
     }
+    case "mcpServer/elicitation/request": {
+      const a = mcpApprovalOf(p as McpServerElicitationRequestParams);
+      if (!a) return [{ t: "status", text: `unsupported server request: ${method}` }];
+      return [{ t: "permission.ask", id, kind: "other", tool: `MCP ${a.server}.${a.tool}`, input: a.input, detail: a.message || a.tool, mcpHint: mcpHintOf(a.annotations) }];
+    }
     default:
-      // Anything else (permission profiles, elicitation, tool calls back into the client) is answered by
+      // Anything else (permission profiles, other elicitations, tool calls back into the client) is answered by
       // the session with a JSON-RPC error: no fixture covers them yet, so we do not guess their response shape.
       return [{ t: "status", text: `unsupported server request: ${method}` }];
   }
@@ -399,6 +406,31 @@ export function jsonRpcResult(id: string | number, result: unknown): string {
 }
 export function jsonRpcError(id: string | number, message: string, code = -32601): string {
   return JSON.stringify({ jsonrpc: "2.0", id: /^\d+$/.test(String(id)) ? Number(id) : id, error: { code, message } }) + "\n";
+}
+
+/**
+ * An MCP tool call's approval, read from the `_meta` of an elicitation (recorded on codex-cli 0.170.0): `codex_approval_kind`
+ * "mcp_tool_call", `tool_name`, `tool_params` (the call's arguments) and `tool_annotations` (the server's hints; absent when it
+ * declared none). Any other elicitation (a form or URL asking the person for values) is not an approval: null.
+ */
+export function mcpApprovalOf(p: McpServerElicitationRequestParams): { server: string; tool: string; input: unknown; message: string; annotations: unknown } | null {
+  const meta = p.mode === "form" ? (p._meta as Any | null) : null;
+  if (!meta || typeof meta !== "object" || meta.codex_approval_kind !== "mcp_tool_call" || typeof meta.tool_name !== "string" || !meta.tool_name) return null;
+  return { server: p.serverName, tool: meta.tool_name, input: meta.tool_params, message: p.message, annotations: meta.tool_annotations };
+}
+
+/** The server's own declaration of a tool as one of four values; a claim of the server, never a reason to skip the approval. */
+export function mcpHintOf(annotations: unknown): "read-only" | "destructive" | "write" | "unknown" {
+  const a = annotations && typeof annotations === "object" ? (annotations as Any) : {};
+  if (a.readOnlyHint === true) return "read-only";
+  if (a.destructiveHint === true) return "destructive";
+  if (a.readOnlyHint === false && a.destructiveHint === false) return "write";
+  return "unknown";
+}
+
+/** Switchboard permission decision → the answer to an MCP elicitation (`McpServerElicitationRequestResponse`, as recorded). */
+export function elicitationAnswer(decision: "allow" | "deny"): { action: "accept" | "decline"; content: null; _meta: null } {
+  return { action: decision === "allow" ? "accept" : "decline", content: null, _meta: null };
 }
 
 /** Switchboard permission decision → Codex approval decision. */

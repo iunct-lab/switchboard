@@ -24,7 +24,7 @@ const turnOf = (question: string | null, options: Array<string | [string, string
   question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9, askedAt };
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null }, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null, checking: false }, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 /** The last stage Task of an item whose stop asks the person: the Task's outcome (written from its stop records) is what opens the question. */
@@ -543,13 +543,13 @@ describe("rankAsks", () => {
     const waiter = item({ number: 20, title: "waits on 5", prereqs: [pre(5)] });
     const confirms = (own: BacklogItem) => rankAsks(dedupeAsks(asksFromBacklog([own, waiter], NOW)), [own, waiter]).filter((a) => a.kind === "confirmation").map((a) => [a.id.split(":").at(-1), a.unblocks.map((u) => u.number), a.waiting.map((u) => u.number)]);
     // the last line of a PBI whose Tasks are all closed: answering it closes the PBI
-    expect(confirms(building({ confirmations: [line(3)], progress: { closableByApi: true, closesOnAnswer: 3 } }))).toEqual([["3", [20], []]]);
+    expect(confirms(building({ confirmations: [line(3)], progress: { closableByApi: true, closesOnAnswer: 3, checking: false } }))).toEqual([["3", [20], []]]);
     // two lines left: neither answer closes it, the PBI behind it only waits
-    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: null } }))).toEqual([["3", [], [20]], ["4", [], [20]]]);
+    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: null, checking: false } }))).toEqual([["3", [], [20]], ["4", [], [20]]]);
     // the line that closes is the one named, not any line of a PBI that has one (and it is ranked first)
-    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: 4 } }))).toEqual([["4", [20], []], ["3", [], [20]]]);
+    expect(confirms(building({ confirmations: [line(3), line(4)], progress: { closableByApi: true, closesOnAnswer: 4, checking: false } }))).toEqual([["4", [20], []], ["3", [], [20]]]);
     // a decision on the same PBI closes nothing, whatever the PBI's lines
-    const asked = item({ number: 5, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 5 }, tasks: { total: 2, done: 2, doneAt: null }, confirmations: [line(3)], progress: { closableByApi: false, closesOnAnswer: null } });
+    const asked = item({ number: 5, stage: "needs-decision", decision: { body: DECISION, at: "2026-10-07T10:00:00Z", issue: 5 }, tasks: { total: 2, done: 2, doneAt: null }, confirmations: [line(3)], progress: { closableByApi: false, closesOnAnswer: null, checking: false } });
     expect(rankAsks(dedupeAsks(asksFromBacklog([asked, waiter], NOW)), [asked, waiter]).map((a) => [a.kind, a.unblocks.length, a.waiting.length])).toEqual([["decision", 0, 1], ["confirmation", 0, 1]]);
   });
 
@@ -572,7 +572,7 @@ describe("rankAsks", () => {
       item({ number: 31, prereqs: [pre(4), pre(9)] }),
       item({ number: 32, prereqs: [pre(10), pre(12)] }),
       // the last user check of a PBI whose Tasks are all closed: answering it lets `#33` go on
-      item({ number: 40, stage: "in-progress", updatedAt: "2026-10-07T05:00:00Z", tasks: { total: 1, done: 1, doneAt: null }, confirmations: [{ n: 2, text: "2. 見た目（利用者確認: 画面）", after: null }], progress: { closableByApi: true, closesOnAnswer: 2 } }),
+      item({ number: 40, stage: "in-progress", updatedAt: "2026-10-07T05:00:00Z", tasks: { total: 1, done: 1, doneAt: null }, confirmations: [{ n: 2, text: "2. 見た目（利用者確認: 画面）", after: null }], progress: { closableByApi: true, closesOnAnswer: 2, checking: false } }),
       item({ number: 33, prereqs: [pre(40)] }),
     ];
     const deduped = dedupeAsks(asksFromBacklog(items, NOW));

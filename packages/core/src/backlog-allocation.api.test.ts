@@ -120,6 +120,25 @@ describe("flow-improvement limit", () => {
     expect(pickNext([next, plain], "implement", undefined, { limit: 1, running: 0 })).toMatchObject({ item: { number: 2 } });
   });
 
+  test("a checking flow PBI is not counted and a Ready flow PBI starts", () => {
+    const checking = flowItem({ number: 1, stage: "in-progress", projectStatus: "In review", tasks: { total: 3, done: 3, doneAt: null }, postMerge: [{ n: 1, text: "昇格後に画面で見る", kind: "画面" as const, after: null }] });
+    const next = flowItem({ number: 2, priority: "P1" });
+    const all = [checking, next];
+    expect(checking.progress.checking).toBe(true);
+    expect(flowCounted(all)).toEqual([]);
+    expect(flowRunning(all)).toBe(0);
+    expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 2 } });
+    // an answered one resumes (`pickNext` takes it), so it counts: the firing that resumes it starts no Ready flow PBI past the limit
+    const answered = { ...checking, updatedAt: "2026-09-28T01:00:00Z", answeredAt: "2026-09-28T01:00:00Z", lastTask: { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: 1, action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true } };
+    expect(pickNext([answered], "implement")).toMatchObject({ item: { number: 1 } });
+    expect(flowCounted([answered, next]).map((i) => i.number)).toEqual([1]);
+    expect(pickNext([next], "implement", undefined, limit(1, [answered, next]))).toBeNull();
+    // a stage Task running on it counts again
+    const running = { ...checking, activeTaskId: "t9" };
+    expect(flowCounted([running]).map((i) => i.number)).toEqual([1]);
+    expect(pickNext([running, next], "implement", undefined, limit(1, [running, next]))).toBeNull();
+  });
+
   test("flow: a P0 flow PBI is taken whatever the count", () => {
     const urgent = flowItem({ number: 2, priority: "P0" });
     expect(pickNext([working, urgent], "implement", undefined, limit(1, [working]))).toMatchObject({ item: { number: 2 } });

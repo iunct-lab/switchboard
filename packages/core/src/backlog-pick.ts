@@ -147,6 +147,8 @@ export const flowLimitOf = (limit: number, counted: number[], stopped: number): 
  */
 export function flowCounted(items: BacklogItem[], order?: number[]): BacklogItem[] {
   const goes = new Set(candidates(items, "implement", order).filter((c) => !(c.action === "complete" && isOverlapped(c.item))).map((c) => c.item));
+  // a PBI left with only after-merge checks (`progress.checking`) is a candidate only when an answer or a met wait resumes it
+  // (it is never closable): it counts then, and not while it only waits for the checks
   return items.filter((i) => i.flow && i.stage === "in-progress" && (i.activeTaskId || goes.has(i)));
 }
 /** How many `flowCounted` counts. */
@@ -241,12 +243,26 @@ export function plannedResumeLine(items: BacklogItem[], slot: Slot, now: number,
 export const checksOnlyIn = (items: BacklogItem[], slot: Slot) =>
   slot !== "implement"
     ? []
-    : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.closableByApi && i.confirmations.length > 0 && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !failedSince(i) && !stopHeld(i));
+    : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.closableByApi && i.confirmations.length > 0 && !i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !failedSince(i) && !stopHeld(i));
 
 /** The log line for `checksOnlyIn`; null when none. */
 export function checksOnlyLine(items: BacklogItem[], slot: Slot): string | null {
   const held = checksOnlyIn(items, slot);
   return held.length ? `利用者確認だけ: ${held.map((i) => `#${i.number}`).join(" ")}` : null;
+}
+
+/**
+ * The in-progress PBIs of the implement slot that are `checking` (`pbiProgress`: built, Tasks all closed, only after-merge
+ * lines unchecked) with no stage Task running: backlog-next starts no 閉じる for them. One an answer or a met wait starts
+ * again, or one another line already names (a wait, a reply, a failure, a stop), is left out, as for `checksOnlyIn`.
+ */
+export const checkingIn = (items: BacklogItem[], slot: Slot) =>
+  slot !== "implement" ? [] : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !failedSince(i) && !stopHeld(i));
+
+/** The log line for `checkingIn`; null when none. */
+export function checkingLine(items: BacklogItem[], slot: Slot): string | null {
+  const held = checkingIn(items, slot);
+  return held.length ? `確認中: ${held.map((i) => `#${i.number}`).join(" ")}` : null;
 }
 
 /** Worked on at this stage before and updated since: picked after the items of its slot not yet worked on. */

@@ -180,6 +180,72 @@ describe("buildDelta", () => {
     expect(readdirSync(dir)).toEqual(["pc1-9000-000001.tar.zst"]);
   });
 
+  test("an attachment whose folder is a link out of the attachments folder is not sent", async () => {
+    const { root, cfg, db } = home();
+    db.insertTask(task("t-l", 5_000));
+    db.appendEventAt("t-l", { t: "status", text: "start" }, 5_000);
+    const outside = join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "secret.txt"), "not this machine's to send");
+    mkdirSync(cfg.attachmentsDir, { recursive: true });
+    symlinkSync(outside, join(cfg.attachmentsDir, "t-l"));
+    db.sqlite.query("INSERT INTO attachments (id, task_id, name, mime, size, path, created_at) VALUES ('a1', 't-l', 'secret.txt', 'text/plain', 26, ?, 5000)").run(join(cfg.attachmentsDir, "t-l", "secret.txt"));
+    const [d] = await buildDelta(db, cfg, readCursor(db), "pc1", { now: 1_000_000 });
+    const opened = await open(d!.file, root);
+    expect(opened.files).toEqual([]);
+    expect(Object.keys(d!.cursor.files)).toEqual([]);
+    expect(ids(opened.delta.tables.attachments)).toEqual(["a1"]); // the row goes by its time, as one whose file is refused does
+  });
+
+  test("an attachment gone before it is packed is sent again by the next delta", async () => {
+    const { root, cfg, db } = home();
+    db.insertTask(task("t-g", 5_000));
+    db.appendEventAt("t-g", { t: "status", text: "start" }, 5_000);
+    const dir = join(cfg.attachmentsDir, "t-g");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "shot.png");
+    writeFileSync(path, "png");
+    db.sqlite.query("INSERT INTO attachments (id, task_id, name, mime, size, path, created_at) VALUES ('a1', 't-g', 'shot.png', 'image/png', 3, ?, 5000)").run(path);
+    const name = "attachments/t-g/shot.png";
+    // the file is removed when the mark is asked for it: after its size was taken, before the tar is opened
+    const since = readCursor(db);
+    since.files = new Proxy({} as Record<string, number>, {
+      get(target, key) {
+        if (key === name) rmSync(path, { force: true });
+        return target[key as string];
+      },
+    });
+    const [first] = await buildDelta(db, cfg, since, "pc1", { now: 1_000_000 });
+    expect((await open(first!.file, root)).files).toEqual([]);
+    expect(first!.cursor.files[name]).toBeUndefined();
+    writeFileSync(path, "png"); // back, the same size
+    writeCursor(db, first!.cursor);
+    db.appendEventAt("t-g", { t: "status", text: "later" }, 2_000_000);
+    const [again] = await buildDelta(db, cfg, readCursor(db), "pc1", { now: 2_100_000 });
+    expect((await open(again!.file, root)).files).toEqual(["files/attachments/t-g/shot.png"]);
+  });
+
+  test("no delta unpacks to more than maxBytes", async () => {
+    const { root, cfg, db } = home();
+    db.insertTask(task("t-m", 5_000));
+    for (let i = 0; i < 30; i++) db.appendEventAt("t-m", { t: "status", text: `e${i} ${"x".repeat(200)}` }, 5_000 + i);
+    mkdirSync(join(cfg.artifactsDir, "t-m", "r"), { recursive: true });
+    writeFileSync(join(cfg.artifactsDir, "t-m", "r", "a.bin"), "a".repeat(3_000));
+    // a name that is not plain ASCII takes a pax record before its header in the tar
+    writeFileSync(join(cfg.artifactsDir, "t-m", "r", "スクリーンショット.bin"), "s".repeat(1_000));
+    const unpacked = (file: string) => Bun.zstdDecompressSync(readFileSync(file)).length;
+    const [whole] = await buildDelta(db, cfg, readCursor(db), "pc1", { now: 9_000 });
+    const total = unpacked(whole!.file);
+    // the limits are just under the size of all of it unpacked: a delta counted by its rows and file bytes alone would
+    // pass them by what the tar adds (headers, padding, delta.json's frame)
+    for (const [i, maxBytes] of [total - 4_000, total - 2_000, total - 500, total - 1].entries()) {
+      const out = await buildDelta(db, cfg, readCursor(db), "pc1", { maxBytes, now: 10_000 + i });
+      expect(out.length).toBeGreaterThan(1);
+      for (const d of out) expect(unpacked(d.file)).toBeLessThanOrEqual(maxBytes);
+      expect((await Promise.all(out.map((d) => open(d.file, root)))).flatMap((o) => o.files).sort()).toEqual(["files/artifacts/t-m/r/a.bin", "files/artifacts/t-m/r/スクリーンショット.bin"]);
+    }
+  });
+
   test("a file bigger than the limit goes in a delta of its own", async () => {
     const { root, cfg, db } = home();
     db.insertTask(task("t-f", 5_000));
@@ -598,6 +664,85 @@ describe("applyDelta", () => {
     await expect(applyDelta(here.db, here.cfg, file, PC)).rejects.toThrow("behind a link");
     expect(existsSync(join(here.cfg.artifactsDir, "t-a"))).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  test("a stale temp link next to a file is not written through", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const outside = join(tmp, `outside-${n++}`);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "victim.txt"), "mine");
+    mkdirSync(join(here.cfg.attachmentsDir, "t-1"), { recursive: true });
+    symlinkSync(join(outside, "victim.txt"), join(here.cfg.attachmentsDir, "t-1", `.tmp-${process.pid}-shot.png`));
+    const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
+    await applyDelta(here.db, here.cfg, d!.file, PC);
+    expect(readFileSync(join(outside, "victim.txt"), "utf8")).toBe("mine");
+    expect(readFileSync(join(here.cfg.attachmentsDir, "t-1", "shot.png"), "utf8")).toBe("png");
+  });
+
+  test("an older delta taken in again does not put back an artifact's older file", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const file = join(here.cfg.artifactsDir, "t-1", "ar1", "index.html");
+    const [d1] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 1_000_000 });
+    writeFileSync(join(pc.cfg.artifactsDir, "t-1", "ar1", "index.html"), "<p>new</p>");
+    pc.db.sqlite.query("UPDATE artifacts SET updated_at = 950000 WHERE id = 'ar1'").run();
+    const [d2] = await buildDelta(pc.db, pc.cfg, d1!.cursor, "pc1", { now: Date.now() + 1, dir: join(pc.root, "again") });
+    await applyDelta(here.db, here.cfg, d1!.file, PC);
+    await applyDelta(here.db, here.cfg, d2!.file, PC);
+    expect(readFileSync(file, "utf8")).toBe("<p>new</p>");
+    await applyDelta(here.db, here.cfg, d1!.file, PC);
+    expect(here.db.sqlite.query("SELECT updated_at FROM artifacts WHERE id = 'ar1'").get()).toEqual({ updated_at: 950_000 });
+    expect(readFileSync(file, "utf8")).toBe("<p>new</p>");
+  });
+
+  test("an artifact's file whose row the delta does not bring is not placed when the row here is newer than the delta", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const [d1] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { now: 1_000_000 });
+    await applyDelta(here.db, here.cfg, d1!.file, PC);
+    const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-2-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [] } }));
+    const file = join(here.root, `rowless-${n++}.tar.zst`);
+    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/artifacts/t-1/ar1/index.html", bytes: Buffer.from("<p>rowless</p>") }]);
+    const r = await applyDelta(here.db, here.cfg, file, PC);
+    expect(r.status === "applied" && r.files).toBe(0);
+    expect(readFileSync(join(here.cfg.artifactsDir, "t-1", "ar1", "index.html"), "utf8")).toBe("<p>x</p>");
+  });
+
+  test("a send cut into several deltas places an artifact's file that comes without its row", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const big = "<p>" + "b".repeat(20_000) + "</p>";
+    writeFileSync(join(pc.cfg.artifactsDir, "t-1", "ar1", "index.html"), big);
+    const parts = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1", { maxBytes: 5_000 });
+    const opened = await Promise.all(parts.map((d) => open(d.file, here.root)));
+    const rowAt = opened.findIndex((o) => (o.delta as { tables: { artifacts?: unknown[] } }).tables.artifacts?.length);
+    const fileAt = opened.findIndex((o) => o.files.includes("files/artifacts/t-1/ar1/index.html"));
+    expect(rowAt).toBeLessThan(fileAt);
+    for (const d of parts) await applyDelta(here.db, here.cfg, d.file, PC);
+    expect(readFileSync(join(here.cfg.artifactsDir, "t-1", "ar1", "index.html"), "utf8")).toBe(big);
+  });
+
+  test("an attachment row with .. in task_id is refused", async () => {
+    const here = instance();
+    const row = { id: "a-evil", task_id: "..", name: "switchboard.db", mime: "x/y", size: 1, path: "/x/switchboard.db", created_at: 1 };
+    const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-1-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [], events: [], attachments: [row] } }));
+    const file = join(here.root, `dotdot-${n++}.tar.zst`);
+    await writeTarZst(file, [{ name: "delta.json", bytes: head }]);
+    await expect(applyDelta(here.db, here.cfg, file, PC)).rejects.toThrow();
+    expect(here.db.sqlite.query("SELECT count(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+  });
+
+  test("a link in the store to a local Task's folder is not written through", async () => {
+    const here = instance();
+    mkdirSync(join(here.cfg.attachmentsDir, "t-own"), { recursive: true });
+    writeFileSync(join(here.cfg.attachmentsDir, "t-own", "shot.png"), "mine");
+    symlinkSync(join(here.cfg.attachmentsDir, "t-own"), join(here.cfg.attachmentsDir, "alias"));
+    const head = Buffer.from(JSON.stringify({ machine: "pc1", deltaId: "pc1-1-000000", schemaLevel: schemaLevel(), createdAt: 1, repos: {}, tables: { tasks: [{ id: "alias" }], events: [] } }));
+    const file = join(here.root, `alias-${n++}.tar.zst`);
+    await writeTarZst(file, [{ name: "delta.json", bytes: head }, { name: "files/attachments/alias/shot.png", bytes: Buffer.from("theirs") }]);
+    await expect(applyDelta(here.db, here.cfg, file, PC)).rejects.toThrow("behind a link");
+    expect(readFileSync(join(here.cfg.attachmentsDir, "t-own", "shot.png"), "utf8")).toBe("mine");
   });
 
   test("what a process that is gone left unpacked is removed; a living one's stays", async () => {

@@ -108,6 +108,25 @@ export function oldPathsItem(words: string[], hits: Hit[]): string {
 /** The item's own line: a list item that starts with its name (a sentence that only mentions the name is not it). */
 const itemLine = (body: string) => body.split("\n").find((l) => /^\s*[-*] /.test(l) && l.replace(/^\s*[-*] /, "").startsWith(OLD_PATHS_ITEM));
 
+/**
+ * The rows under the item's line: the lines indented deeper than the item line, up to a blank line or a line at the
+ * same or a shallower indent. `[]` when there is no item.
+ */
+function itemRows(body: string): string[] {
+  const lines = body.split("\n");
+  const line = itemLine(body);
+  const at = line === undefined ? -1 : lines.indexOf(line);
+  if (at < 0) return [];
+  const indent = (l: string) => l.length - l.trimStart().length;
+  const base = indent(lines[at]!);
+  const rows: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (!l.trim() || indent(l) <= base) break;
+    rows.push(l);
+  }
+  return rows;
+}
+
 /** The words a description's item names; `[]` when the item says none apply (なし), null when there is no item. */
 export function oldPathWords(body: string): string[] | null {
   const line = itemLine(body);
@@ -120,10 +139,11 @@ export function oldPathWords(body: string): string[] | null {
  * The hits the description has no row for. A row is matched by the file and the line's text, not its number: later
  * commits move lines. A row answers for one hit only: a file with the same line twice needs two rows (the second place
  * was looked at too, or it was not). The longer texts take their rows first, so a row is not spent on a hit whose
- * text is only a part of it.
+ * text is only a part of it. Only the item's own rows are counted: the same place written elsewhere in the description
+ * does not answer for it.
  */
 export function unlistedHits(body: string, hits: Hit[]): Hit[] {
-  const rows = body.split("\n");
+  const rows = itemRows(body);
   const listed = new Set<Hit>();
   for (const h of [...hits].sort((a, b) => rowText(b).length - rowText(a).length)) {
     const at = rows.findIndex((r) => r.includes(`\`${h.path}:`) && r.includes(rowText(h)));

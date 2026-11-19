@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { createClaudeHistoryParser, hasPendingEnd, serializeHistoryState, type TimedEvent } from "@switchboard/adapter-claude";
 import type { EventEnvelope, HistoryScanResult, HistorySession, HistoryStatus, PricingTable, ServerMessage, Task, Workspace } from "@switchboard/protocol";
 import { Db, newId } from "./db.ts";
+import { otherMachineOf } from "./machine.ts";
 import { ledgerRowFor } from "./pricing.ts";
 
 export interface HistoryImporterOptions {
@@ -216,6 +217,12 @@ export class HistoryImporter {
       return;
     }
     const owners = known ? [this.db.getTask(known.taskId)].filter((t): t is Task => !!t) : this.db.listTasksBySession("claude", sessionId);
+    const foreign = owners.map((t) => otherMachineOf(t)).find((m) => m !== null);
+    if (foreign) {
+      // A Task taken in from a work machine: that machine's own history writes its events (their `seq` would collide with the ones sent later).
+      res.errors.push(`${basename(path)}: session of a Task of ${foreign}; not imported`);
+      return;
+    }
     let task: Task | null = owners[0] ?? null;
     if (owners.some((t) => this.opts.isLive?.(t.id))) return; // our own process is writing this file; read it once released
 

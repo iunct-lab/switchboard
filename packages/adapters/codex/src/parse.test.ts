@@ -3,7 +3,7 @@ import { recordingText, skipRecordings, assertRecordings } from "../../../../scr
 import { describe, expect, test } from "bun:test";
 import { AgentEvent, QUESTION_DEFERRED_REPLY, type StartOptions } from "@switchboard/protocol";
 import { appServerEnv, buildSandboxPolicy, buildThreadForkParams, buildThreadResumeParams, buildThreadStartParams, buildTurnStartParams, childEnv, CODEX_PERMISSION_MODES, resolveApprovalPolicy, resolvePermissionPreset } from "./index.ts";
-import { approvalDecision, createCodexParser, deferredUserInput, diffStat, jsonRpcResult, windowName } from "./parse.ts";
+import { approvalDecision, createCodexParser, deferredUserInput, diffStat, elicitationAnswer, jsonRpcResult, mcpHintOf, windowName } from "./parse.ts";
 
 /** Fixtures are raw app-server stdio recordings; lines starting with "> " are what Switchboard sent. */
 async function load(name: string) {
@@ -709,5 +709,43 @@ describe("privateTmp", () => {
     expect(buildTurnStartParams("t1", "go", { ...base, privateTmp: "/tmp/x" })).toMatchObject({ sandboxPolicy: { excludeSlashTmp: true } });
     expect(appServerEnv({ ...base, env: { A: "1" }, privateTmp: "/tmp/x" })).toEqual({ A: "1", TMPDIR: "/tmp/x" });
     expect(appServerEnv({ ...base, env: { A: "1" } })).toEqual({ A: "1" });
+  });
+});
+
+describe("MCP tool approvals (mcpServer/elicitation/request, codex-cli 0.170.0)", () => {
+  const MCP = "packages/adapters/codex/fixtures/mcp-elicitation-0.170.jsonl";
+  const elicitation = (meta: unknown, mode = "form") => JSON.stringify({ method: "mcpServer/elicitation/request", id: 7, params: { threadId: "t", turnId: "u", serverName: "rec", mode, _meta: meta, message: "Allow?", requestedSchema: { type: "object", properties: {} } } });
+
+  test.skipIf(skipRecordings(MCP))("mcp elicitation approval maps to permission.ask", async () => {
+    // recorded 2026-11-19 with codex-cli 0.170.0, approvalPolicy on-request: read_note (readOnlyHint) ran without asking; drop_table (destructive) and append_note (no hint) asked
+    assertRecordings(MCP);
+    const evs = await replay("mcp-elicitation-0.170");
+    for (const ev of evs) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    const asks = evs.filter((e) => e.t === "permission.ask");
+    expect(asks).toEqual([
+      { t: "permission.ask", id: "0", kind: "other", tool: "MCP rec.drop_table", input: { table: "logs" }, detail: 'Allow the rec MCP server to run tool "drop_table"?', mcpHint: "destructive" },
+      { t: "permission.ask", id: "1", kind: "other", tool: "MCP rec.append_note", input: { line: "x" }, detail: 'Allow the rec MCP server to run tool "append_note"?', mcpHint: "unknown" },
+    ]);
+    expect(evs.some((e) => e.t === "status" && e.text.startsWith("unsupported server request"))).toBe(false);
+  });
+
+  test("mcp approval hints", () => {
+    expect(mcpHintOf({ readOnlyHint: true })).toBe("read-only");
+    expect(mcpHintOf({ readOnlyHint: false, destructiveHint: true })).toBe("destructive");
+    expect(mcpHintOf({ readOnlyHint: false, destructiveHint: false })).toBe("write");
+    expect(mcpHintOf(undefined)).toBe("unknown");
+    expect(mcpHintOf({ idempotentHint: true })).toBe("unknown"); // only one of the two claims, or none: not a write
+    expect(mcpHintOf({ destructiveHint: false })).toBe("unknown");
+  });
+
+  test("mcp elicitation answers are accept / decline with no content", () => {
+    expect(elicitationAnswer("allow")).toEqual({ action: "accept", content: null, _meta: null });
+    expect(elicitationAnswer("deny")).toEqual({ action: "decline", content: null, _meta: null });
+  });
+
+  test("non-approval elicitation stays unsupported", () => {
+    for (const line of [elicitation({ codex_approval_kind: "other" }), elicitation(null), elicitation({ codex_approval_kind: "mcp_tool_call" }), elicitation({ codex_approval_kind: "mcp_tool_call", tool_name: "x" }, "url")]) {
+      expect(createCodexParser().feed(line)).toEqual([{ t: "status", text: "unsupported server request: mcpServer/elicitation/request" }]);
+    }
   });
 });

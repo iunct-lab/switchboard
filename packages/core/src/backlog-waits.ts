@@ -7,7 +7,7 @@ import type { BacklogCommentData, BacklogIssueData, BacklogItem, BacklogPrereq, 
 import type { Db } from "./db.ts";
 import { pbiProgress } from "./pbi-progress.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
-import { confirmDecisionsOf, prereqsOf } from "./backlog-item.ts";
+import { confirmDecisionsOf, pbiFactsOf, prereqsOf } from "./backlog-item.ts";
 import { ANSWER_HEADING, type Comment, PBI_COMPLETE_MARK } from "./backlog-comments.ts";
 import { BacklogEditError, askStoredDecision } from "./backlog-edit.ts";
 import { shownRecords } from "./backlog-stored.ts";
@@ -48,8 +48,32 @@ export interface WaitTarget {
   stateReason: string | null;
   /** A merged PR's merge commit; null otherwise. */
   mergeCommit: string | null;
-  /** An open Issue left with only the user's checks (`prereqMet` of pbi-progress.ts); false for a PR. */
+  /** An open Issue left with only the user's checks and after-merge lines (`prereqMet` of pbi-progress.ts); false for a PR. */
   confirmOnly: boolean;
+}
+
+/** What a stored Issue is counted from (the app's record and the kit's read of it both fit). */
+export type StoredIssue = { state: string; stateReason: string | null; labels: string[]; body: string; subIssues: number[] };
+
+/**
+ * The children of an Issue that are closed as the last import read them: stored as `CLOSED` and read in full. A child
+ * not stored or not read counts as open, never as closed (a value that could not be read is not an empty one).
+ */
+export function readClosedTasks(subIssues: number[], issues: Map<number, Pick<StoredIssue, "state">>, unread: (n: number) => boolean): number[] {
+  return subIssues.filter((m) => issues.get(m)?.state === "CLOSED" && !unread(m));
+}
+
+/**
+ * What an Issue a PBI waits for is, from the stored records, for the app and the parallel guard alike. undefined = not
+ * stored or not read in full by the last import (`unread`): not judged, so a prerequisite on it stays `missing`.
+ * `confirmOnly` counts the Tasks closed by `readClosedTasks`.
+ */
+export function storedIssueTarget(n: number, issues: Map<number, StoredIssue>, unread: (n: number) => boolean): WaitTarget | undefined {
+  const i = issues.get(n);
+  if (!i || unread(n)) return undefined;
+  const done = readClosedTasks(i.subIssues, issues, unread).length;
+  const confirmOnly = pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length, done } })).prereqMet;
+  return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly };
 }
 
 /**
@@ -140,11 +164,12 @@ export function withConfirmDecisions(items: BacklogItem[], targets: Map<number, 
       if (ns.some((n) => targets.get(n)!.labels.includes("needs-decision"))) held = true;
       return true;
     }).map((c) => c.n);
-    // `others` is not carried by an item and only `prereqMet` reads it, which is not taken here
-    const p = pbiProgress({ pbi: true, decision: i.stage === "needs-decision", status: i.projectStatus, tasks: i.tasks ?? { total: 0, done: 0 }, others: 0, confirms: i.confirmations.map((c) => c.n), decided, held });
+    // `others` is not carried by an item and only `prereqMet` and `checking` read it, which are not taken here: `checking` is
+    // the item's own (toItem, from the body) and is kept as it is
+    const p = pbiProgress({ pbi: true, decision: i.stage === "needs-decision", status: i.projectStatus, tasks: i.tasks ?? { total: 0, done: 0 }, others: 0, confirms: i.confirmations.map((c) => c.n), postMerge: i.postMerge.map((c) => c.n), decided, held });
     i.confirmations = i.confirmations.filter((c) => p.asked.includes(c.n));
     i.closable = p.closable;
-    i.progress = { closableByApi: p.closableByApi, closesOnAnswer: p.closesOnAnswer };
+    i.progress = { closableByApi: p.closableByApi, closesOnAnswer: p.closesOnAnswer, checking: i.progress.checking };
   }
 }
 

@@ -247,4 +247,30 @@ describe("events archive", () => {
     expect(db.sqlite.query("PRAGMA auto_vacuum").get()).toEqual({ auto_vacuum: 2 });
     db.close();
   });
+
+  test("commit waits out another connection's write lock held past the default 5 s when the connection's busy_timeout is longer", async () => {
+    const path = join(tmp, "wait.db");
+    const seeding = new Db(path);
+    seed(seeding, "a", "done", LONG_AGO);
+    const dir = join(tmp, "wait-out");
+    const entries = await prepareEventsArchive(seeding.sqlite, dir, { now: NOW });
+    seeding.close();
+    const db = new Db(path, { busyTimeoutMs: 30_000 });
+    const other = new Db(path); // the default 5 s wait
+    // another process holds the write lock for 6 s, a little longer than the default wait
+    const writer = Bun.spawn(["bun", "-e", `import { Database } from "bun:sqlite"; const d = new Database(process.argv[1]); d.exec("BEGIN IMMEDIATE"); d.exec("CREATE TABLE IF NOT EXISTS w (x)"); console.log("locked"); await Bun.sleep(6000); d.exec("COMMIT");`, path], { stdout: "pipe" });
+    const reader = writer.stdout.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("locked");
+    const started = Date.now();
+    const moved = commitEventsArchive(db.sqlite, dir, upload(entries), { now: NOW });
+    expect(Date.now() - started).toBeGreaterThan(5000);
+    expect(moved).toEqual(["a"]);
+    // the commit holds the write lock only briefly: a connection with the default wait writes right after it returns
+    // (whether others can write during the wait itself is not checked here: bun:sqlite blocks this thread while it waits)
+    other.sqlite.query("UPDATE tasks SET title = 'after' WHERE id = 'a'").run();
+    expect(other.getTask("a")?.title).toBe("after");
+    other.close();
+    db.close();
+    await writer.exited;
+  }, 20_000);
 });

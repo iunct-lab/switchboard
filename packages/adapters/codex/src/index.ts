@@ -13,7 +13,7 @@ import type { Turn } from "./generated/v2/Turn";
 import type { TurnStartParams } from "./generated/v2/TurnStartParams";
 import type { TurnSteerParams } from "./generated/v2/TurnSteerParams";
 import { listCodexSkills } from "./commands.ts";
-import { approvalDecision, CLIENT_INFO, createCodexParser, deferredUserInput, jsonRpcError, jsonRpcNotification, jsonRpcRequest, jsonRpcResult } from "./parse.ts";
+import { approvalDecision, CLIENT_INFO, createCodexParser, deferredUserInput, elicitationAnswer, jsonRpcError, jsonRpcNotification, jsonRpcRequest, jsonRpcResult } from "./parse.ts";
 
 export * from "./parse.ts";
 
@@ -380,8 +380,8 @@ class CodexSession implements RunnerSession {
   private parser = createCodexParser();
   private nextId = 1;
   private pending = new Map<number, (r: RpcResponse) => void>();
-  /** permission.ask id (unique per process) → raw JSON-RPC id of the server request, replied with the same type. */
-  private openApprovals = new Map<string, RpcId>();
+  /** permission.ask id (unique per process) → raw JSON-RPC id of the server request, replied with the same id; `reply` is the shape of the answer. */
+  private openApprovals = new Map<string, { raw: RpcId; reply: "decision" | "elicitation" }>();
   private nonce = Math.random().toString(16).slice(2, 6);
   private closed = false;
   private aborting = false;
@@ -502,10 +502,10 @@ class CodexSession implements RunnerSession {
   }
 
   respondPermission(id: string, decision: PermissionDecision, _reason?: string, by: "user" | "rule" = "user"): void {
-    const raw = this.openApprovals.get(id);
-    if (raw === undefined) throw new Error(`no pending approval ${id}`);
+    const open = this.openApprovals.get(id);
+    if (open === undefined) throw new Error(`no pending approval ${id}`);
     this.openApprovals.delete(id);
-    this.write(jsonRpcResult(raw, approvalDecision(decision)));
+    this.write(jsonRpcResult(open.raw, open.reply === "elicitation" ? elicitationAnswer(decision) : approvalDecision(decision)));
     this.emit({ t: "permission.resolved", id, decision, by });
   }
 
@@ -653,7 +653,7 @@ class CodexSession implements RunnerSession {
       const publicId = `${this.nonce}:${String(m.id)}`;
       const events = this.parser.feed(JSON.stringify({ ...m, id: publicId }));
       const ask = events.find((e) => e.t === "permission.ask");
-      if (ask && ask.t === "permission.ask") this.openApprovals.set(ask.id, m.id as RpcId);
+      if (ask && ask.t === "permission.ask") this.openApprovals.set(ask.id, { raw: m.id as RpcId, reply: m.method === "mcpServer/elicitation/request" ? "elicitation" : "decision" });
       // the question tool is answered at once with the deferred reply: the turn ends, the answers come as the next turn
       else if (events.some((e) => e.t === "question.ask")) this.write(jsonRpcResult(m.id as RpcId, deferredUserInput(m.params)));
       else this.write(jsonRpcError(m.id as RpcId, `Switchboard does not support ${m.method}`));

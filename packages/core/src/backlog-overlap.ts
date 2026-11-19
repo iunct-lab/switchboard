@@ -9,6 +9,26 @@ import { overlaps, pathsIn } from "../../../ops-kit/src/task-paths.ts";
 import { readdirSync } from "node:fs";
 import { type Comment, PBI_COMPLETE_MARK } from "./backlog-comments.ts";
 
+/**
+ * What `pathsIn` answered, by the body and the names it read against: a pure function's result, so the same input is the
+ * same answer. Oldest first out past the limit. The arrays are shared between reads: a caller copies before it changes one.
+ */
+const PATHS_MEMO_MAX = 4000;
+const pathsMemo = new Map<string, readonly string[]>();
+/** `pathsIn` against these names through the memo; the names part of the key is built once per reader. */
+function pathsReader(names: ReturnType<typeof topWith>): (body: string) => string[] {
+  const prefix = `${names.map((t) => `${t.dir ? "/" : ""}${t.name}`).join("\0")}\0\0`;
+  return (body) => {
+    const key = prefix + body;
+    const hit = pathsMemo.get(key);
+    if (hit) return hit as string[];
+    const paths = pathsIn(body, names);
+    pathsMemo.set(key, paths);
+    if (pathsMemo.size > PATHS_MEMO_MAX) pathsMemo.delete(pathsMemo.keys().next().value!);
+    return paths;
+  };
+}
+
 /** An item whose 実装 would touch what other work touches, or cannot be judged. */
 export const isOverlapped = (i: BacklogItem) => !!i.overlap && (i.overlap.hits.length > 0 || i.overlap.unknown !== null);
 
@@ -42,13 +62,21 @@ export function overlapHolderLines(items: BacklogItem[]): string[] {
 /** Whether a line of `leftLines` is one of the overlap's: `overlapLine`'s or `overlapHolderLines`'. */
 export const isOverlapLine = (line: string) => /^(重なり|(?:Task|PR) #\d+ が \d+ 件を止めている)/.test(line);
 
+/** The overlap lines (`isOverlapLine`) of a `leftLines`, each under `head` (a workspace's name and a slot, as the log says it). */
+export const overlapLinesUnder = (head: string, lines: string[]): string[] => lines.filter(isOverlapLine).map((l) => `${head}${l}`);
+
 /**
- * Swap the overlap lines (`isOverlapLine`) under `head` in `lines` for those of `fresh` (a later `leftLines`), in place:
- * after a firing's starts a holder's count and the 重なり lines are said as the reread counts them, none left from the first read.
+ * Swap in `lines`, in place, the overlap lines this workspace and slot put in at the first read (`before`) for those of a
+ * later read (`after`; both from `overlapLinesUnder`): after a firing's starts a holder's count and the 重なり lines are said as
+ * the reread counts them, none left from the first read. One line is taken out for each of `before`, so a line another
+ * workspace of the same name put in (the same text) stays; the head is no key, the name is not unique.
  */
-export function swapOverlapLines(lines: string[], head: string, fresh: string[]): void {
-  for (let k = lines.length - 1; k >= 0; k--) if (lines[k]!.startsWith(head) && isOverlapLine(lines[k]!.slice(head.length))) lines.splice(k, 1);
-  lines.push(...fresh.filter(isOverlapLine).map((l) => `${head}${l}`));
+export function swapOverlapLines(lines: string[], before: string[], after: string[]): void {
+  for (const line of before) {
+    const k = lines.lastIndexOf(line);
+    if (k >= 0) lines.splice(k, 1);
+  }
+  lines.push(...after);
 }
 
 type OverlapTurn = { since: string; waits: number[]; last: string };
@@ -135,7 +163,8 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   }
   const prs = pulls.filter((p) => p.state === "OPEN").map((p) => ({ number: p.number, linked: p.closes, updatedAt: p.updatedAt, files: p.files, isDraft: p.isDraft, labels: p.labels }));
   const names = topWith(rootTop, prs);
-  const taskPaths = (n: number) => pathsIn(issues.get(n)?.body ?? "", names);
+  const pathsFor = pathsReader(names);
+  const taskPaths = (n: number) => pathsFor(issues.get(n)?.body ?? "");
   // a Task of a PBI that waits for a date is not at work: nothing of it changes before the date
   const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
   const linked = pulls.map((p) => ({ state: p.state, linked: p.closes }));
@@ -165,7 +194,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
     const all = todo.flatMap(taskPaths);
     if (!all.length) continue;
     const free = (startable.get(i.number) ?? []).filter((n) => todo.includes(n));
-    const { others, unknown } = othersOf(new Set<number>([i.number, ...subs]), { prs, working }, names);
+    const { others, unknown } = othersOf(new Set<number>([i.number, ...subs]), { prs, working }, names, pathsFor);
     others.push(...turnsAhead(turns, i.number));
     const judged = (free.length ? free.map((task) => ({ task: task as number | null, paths: taskPaths(task) })) : [{ task: null, paths: all }])
       .map((j) => ({ ...j, blocking: judge({ paths: j.paths }, others, now, opts.sharedFiles).blocking }));

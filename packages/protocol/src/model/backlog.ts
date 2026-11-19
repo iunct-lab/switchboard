@@ -45,6 +45,9 @@ export const ProceedingQuestion = z.object({
 });
 export type ProceedingQuestion = z.infer<typeof ProceedingQuestion>;
 
+/** The kinds of an acceptance criterion's `（マージの後: <kind> …）` mark: what only a look after the merge can check. */
+export const POST_MERGE_KINDS = ["画面", "E2E", "実ランナー", "観測"] as const;
+
 /**
  * Where an open request or PBI of the meta workspace's GitHub backlog stands. Read from GitHub on request, never
  * stored: `request` = a request with no derived PBI yet, `needs-tasks` = a PBI not yet Ready (Project Status Backlog or
@@ -163,6 +166,12 @@ export const BacklogItem = z.object({
    */
   confirmations: z.array(z.object({ n: z.number(), text: z.string(), after: z.string().nullable() })),
   /**
+   * The acceptance criteria that can only be checked after the merge: unchecked lines with `（マージの後: <kind>）`
+   * (`POST_MERGE_KINDS`), numbered as `confirmations` are; `after` = the time of an 観測 line's `期日 … 以降`, null = none.
+   * Empty for a request. A PBI with any left is not `closable` (`packages/core/src/pbi-progress.ts`).
+   */
+  postMerge: z.array(z.object({ n: z.number(), text: z.string(), kind: z.enum(POST_MERGE_KINDS), after: z.string().nullable() })),
+  /**
    * An in-progress PBI whose Tasks are all closed and with no confirmation left: its row offers 閉じる. Not while a
    * decision a confirmation line names is still labelled `needs-decision`. The answer of `packages/core/src/pbi-progress.ts`.
    */
@@ -170,9 +179,9 @@ export const BacklogItem = z.object({
   /**
    * The other answers of `packages/core/src/pbi-progress.ts` (docs/design/pbi-progress.md): `closableByApi` = the API
    * takes 閉じる (Tasks all closed, confirmations left or not); `closesOnAnswer` = the one confirmation line whose answer
-   * closes the PBI, null = none does.
+   * closes the PBI, null = none does; `checking` = built, every Task closed and only `postMerge` lines unchecked.
    */
-  progress: z.object({ closableByApi: z.boolean(), closesOnAnswer: z.number().nullable() }),
+  progress: z.object({ closableByApi: z.boolean(), closesOnAnswer: z.number().nullable(), checking: z.boolean() }),
   /** Labelled `on-hold`: backlog-next leaves it in every slot and stage; only that firing looks at this, its row's buttons do not. */
   onHold: z.boolean(),
   /** Carries the `flow-improvement` label. */

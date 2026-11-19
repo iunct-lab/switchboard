@@ -7,17 +7,16 @@ import type { ProceedingQuestion } from "@switchboard/protocol";
 import type { Backlog, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogSyncInfo, BacklogSyncState } from "@switchboard/protocol";
 import type { BacklogOperation, Db } from "./db.ts";
 import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
-import { pbiProgress } from "./pbi-progress.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../../../ops-kit/src/config.ts";
 import { workspaceConfigPath } from "./workspace-config.ts";
 import type { Turn } from "../../../scripts/parallel-guard.ts";
 import { readdirSync } from "node:fs";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { type BacklogWorkspace, localBacklogSource, syncsGithub, changesApart } from "./backlog-gh.ts";
-import { type RawBacklogIssue, pbiFactsOf, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
+import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
 import { withOverlap } from "./backlog-overlap.ts";
 import { type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
-import { type PbiWait, waitsOf, type WaitTarget, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
+import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
 
 /**
@@ -153,7 +152,6 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       // as GitHub last answered, not as shown
       const stored = storedIssues.get(r.externalId);
       readOf.set(r.remote.number, { externalId: r.externalId, fetchedAt: stored?.fetchedAt ?? null, fetchState: stored?.fetchState ?? "unfetched" });
-      targets.set(r.remote.number, { kind: "issue", state: r.remote.state, isDraft: false, labels: r.remote.labels, closes: [], stateReason: r.remote.stateReason, mergeCommit: null, confirmOnly: false });
     } else if (r.objectKind === "pull-request" && r.remote) {
       targets.set(r.remote.number, { kind: "pr", state: r.remote.state, isDraft: r.remote.isDraft, labels: r.remote.labels, closes: r.remote.closes, mergeCommit: r.remote.mergeCommit, stateReason: null, confirmOnly: false });
       pulls.push(r.remote);
@@ -167,10 +165,10 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       statuses.set(r.remote.issue, r.remote.fields.Status ?? null);
     }
   }
-  for (const [n, t] of targets) {
-    const i = issues.get(n);
-    // a Task not stored counts as open
-    if (t.kind === "issue" && i) t.confirmOnly = pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length, done: i.subIssues.filter((m) => issues.get(m)?.state === "CLOSED").length } })).prereqMet;
+  const unread = (n: number) => readOf.get(n)?.fetchState !== "fetched";
+  for (const n of issues.keys()) {
+    const t = storedIssueTarget(n, issues, unread);
+    if (t) targets.set(n, t);
   }
   for (const c of comments.values()) c.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const commentsOf = (n: number) => comments.get(n) ?? [];
@@ -183,7 +181,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   const items: BacklogItem[] = [];
   for (const i of issues.values()) {
     if (i.state !== "OPEN" || !i.labels.some((l) => l === "type:pbi" || l === "type:request")) continue;
-    const closedSubs = i.subIssues.filter((n) => issues.get(n)?.state === "CLOSED");
+    const closedSubs = readClosedTasks(i.subIssues, issues, unread);
     const raw: RawBacklogIssue = {
       number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, updatedAt: i.updatedAt, body: i.body,
       labels: { nodes: labelsOf(i).map((name) => ({ name })) },

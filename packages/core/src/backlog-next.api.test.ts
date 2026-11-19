@@ -886,6 +886,34 @@ test("backlog-next flow limit: with implement 2, a firing starts one flow PBI, l
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 開発の流れの PBI は同時 1 件まで（Settings の「開発の流れの同時の上限」。実装中 1 件: #${waiting === 309 ? 304 : 309}）: 待ち #${waiting}`));
 });
 
+test("backlog-next flow limit: a flow PBI that became in progress after the first read counts against the limit after a start", async () => {
+  // Issue 307 (in progress; its close was tried, so the first read does not count it) and Issue 309 (Ready) carry flow-improvement; the limit is 1
+  const inner = moreReadyGh(309, 310);
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 307 || node.number === 309) node.labels.nodes.push({ name: "flow-improvement" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  let first = true;
+  // while the firing starts Issue 304, a stage Task of Issue 307 starts elsewhere (a button): the first read did not count it
+  const routing: Suggester = { suggest: async () => {
+    if (first) { first = false; runningStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"); }
+    return { runner: "claude", reason: "r", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
+  } };
+  const base = await boot(gh, holdingClaude().adapter, {}, () => routing);
+  closeTried();
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
+  await sweepAll(base, { implement: 3, plan: 0 });
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const started = startedTasks().map((t) => t.title.split(":")[0]);
+  // 309 is held by the limit once 307 runs; 304 and 310 (no label) start
+  expect(started.filter((t) => t?.startsWith("#309"))).toEqual([]);
+  expect(started).toEqual(expect.arrayContaining(["#304 実装", "#310 実装"]));
+});
+
 test("backlog-next slots per workspace: lib implement 2 starts two, app and meta at implement 0 start none and log no slot line", async () => {
   const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, moreReadyGh(309));
   closeTried(...Object.values(ids));

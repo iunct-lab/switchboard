@@ -126,6 +126,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
   const stops = [...byId.values()].sort((a, b) => first.get(a.id)! - first.get(b.id)!);
   const series = new Map<string, StopRecord[]>();
   for (const s of stops) series.set(stopKey(s), [...(series.get(stopKey(s)) ?? []), s]);
+  const places = new Map(stops.map((s) => [s.id, placeKey(s)]));
   const out: StopSummary[] = [];
   for (const [key, list] of series) {
     const last = list[list.length - 1]!;
@@ -133,7 +134,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
     const lastFirst = first.get(last.id)!;
     const newest = (rs: StopRecord[]) => rs.reduce<StopRecord["answer"]>((a, s) => (s.answer && (!a || s.answer.at >= a.at) ? s.answer : a), null);
     // Answers seen before `last`, at this place in any series: one that came back is not a new answer.
-    const before = stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < lastFirst);
+    const before = stops.filter((s) => places.get(s.id) === places.get(last.id) && first.get(s.id)! < lastFirst);
     const ours = (a: StopRecord["answer"]) => answerIsOwn(stops, first, last, a);
     const changes = compareStopConditions(before.at(-1), last, newest(before)).filter((c) => c.kind !== "answer" || ours(last.answer));
     const lastAnswer = newest(list.filter((x) => x.answer?.ref.startsWith("seq:")));

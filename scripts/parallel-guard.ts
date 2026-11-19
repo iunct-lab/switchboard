@@ -26,7 +26,7 @@ import { currentRepo } from "./repo.ts";
  */
 
 import { pbiFactsOf, prereqsOf } from "../packages/core/src/backlog-item.ts";
-import { prereqOf, prereqState, waitsOf, type WaitTarget } from "../packages/core/src/backlog-waits.ts";
+import { prereqOf, prereqState, storedIssueTarget, waitsOf, type WaitTarget } from "../packages/core/src/backlog-waits.ts";
 import { pbiProgress } from "../packages/core/src/pbi-progress.ts";
 import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
@@ -452,14 +452,12 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && !waitsOnlyForCheck(t.number, linked)),
     shared: r.shared ?? [],
     turns: r.turns ?? [],
+    // an Issue first, as the app reads a number stored as both (a workspace kept only here numbers its own)
     target: async (n) => {
+      const i = storedIssueTarget(n, issues, (m) => r.unread.includes(m));
+      if (i) return i;
       const p = pulls.get(n);
-      if (p) return { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null, confirmOnly: false };
-      const i = issues.get(n);
-      if (!i || r.unread.includes(n)) return undefined;
-      // a child not stored or not read counts as open
-      const closed = i.subIssues.filter((m) => issues.get(m)?.state === "CLOSED" && !r.unread.includes(m)).length;
-      return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly: pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length, done: closed } })).prereqMet };
+      return p ? { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null, confirmOnly: false } : undefined;
     },
   };
 }
@@ -479,10 +477,10 @@ export function topWith(top: { name: string; dir: boolean }[], prs: { files: str
  * start and the guard in the Task share: each ready PR (not a Draft, not `needs-decision`, not the PBI's own) with its
  * files, and each Task at work (`working`) of another PBI with the paths its body names. A Task with a ready PR and no
  * other is judged by that PR's files, not by its plan; a Draft or `needs-decision` PR reserves nothing by itself, but its
- * files belong to the Task at work on it (with that Task's claim order). `top`: `topWith`. `unknown`: the PRs that count
+ * files belong to the Task at work on it (with that Task's claim order). `top`: `topWith`. `pathsOfBody`: how a body is read for its paths (the app passes one that remembers). `unknown`: the PRs that count
  * but whose files are not all stored — they cannot be judged.
  */
-export function othersOf(own: Set<number>, m: Pick<Material, "prs" | "working">, top: { name: string; dir: boolean }[]): { others: Work[]; unknown: number[] } {
+export function othersOf(own: Set<number>, m: Pick<Material, "prs" | "working">, top: { name: string; dir: boolean }[], pathsOfBody: (body: string) => string[] = (body) => pathsIn(body, top)): { others: Work[]; unknown: number[] } {
   const others: Work[] = [];
   const unknown: number[] = [];
   const parked = (pr: Material["prs"][number]) => pr.isDraft || pr.labels.includes("needs-decision");
@@ -490,7 +488,7 @@ export function othersOf(own: Set<number>, m: Pick<Material, "prs" | "working">,
   const inPr = new Set(m.prs.filter((pr) => !parked(pr)).flatMap((pr) => pr.linked).filter((n) => !kept.has(n)));
   for (const t of m.working) {
     if (own.has(t.number)) continue;
-    others.push({ ref: `Task #${t.number}`, task: t.number, paths: inPr.has(t.number) ? [] : pathsIn(t.body, top), updatedAt: t.updatedAt });
+    others.push({ ref: `Task #${t.number}`, task: t.number, paths: inPr.has(t.number) ? [] : pathsOfBody(t.body), updatedAt: t.updatedAt });
   }
   for (const pr of m.prs) {
     if (pr.linked.some((n) => own.has(n))) continue;

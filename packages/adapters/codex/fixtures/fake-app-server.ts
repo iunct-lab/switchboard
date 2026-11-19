@@ -12,6 +12,8 @@
  * its turn/started, answer, a commandExecution approval request, usage, turn/completed; then the main turn finishes.
  * A prompt starting with "question:" asks two questions (item/tool/requestUserInput) and, once answered, ends the turn
  * with "Waiting for your choices".
+ * A prompt starting with "mcp:" asks one MCP tool approval (mcpServer/elicitation/request, the shape recorded on 0.170.0; the word
+ * after "mcp:" picks the tool's hint: read-only, destructive, write, or none) and ends the turn once answered; the answer's `action` is in the wire log.
  * A prompt starting with "limits:" reports the usage limits (account/rateLimits/updated) and ends the turn.
  * `account/read` answers with the JSON in the file FAKE_CODEX_ACCOUNT_FILE names, read at each request (a login that
  * changes under a running app-server); without the variable the method is unknown, as on an app-server without it.
@@ -76,6 +78,19 @@ async function runTurn(threadId: string, text: string) {
     enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
     return;
   }
+  if (text.startsWith("mcp:")) {
+    const hint = text.slice(4).trim();
+    const annotations = hint === "read-only" ? { readOnlyHint: true } : hint === "destructive" ? { readOnlyHint: false, destructiveHint: true } : hint === "write" ? { readOnlyHint: false, destructiveHint: false } : undefined;
+    const reqId = approvalSeq++;
+    const decision = await new Promise<string>((r) => {
+      waiting.set(reqId, r);
+      enc({ method: "mcpServer/elicitation/request", id: reqId, params: { threadId, turnId: id, serverName: "rec", mode: "form", _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"], tool_name: "drop_table", ...(annotations ? { tool_annotations: annotations } : {}), tool_params: { table: "logs" } }, message: 'Allow the rec MCP server to run tool "drop_table"?', requestedSchema: { type: "object", properties: {} } } });
+    });
+    enc({ method: "item/completed", params: { threadId, turnId: id, item: { type: "agentMessage", id: `msg-${id}`, text: decision === "accept" ? "ran" : "declined", phase: "final_answer" } } });
+    active = null;
+    enc({ method: "turn/completed", params: { threadId, turn: { id, items: [], status: "completed", error: null, durationMs: 5 } } });
+    return;
+  }
   if (text.startsWith("limits:")) {
     enc({ method: "account/rateLimits/updated", params: { rateLimits: { limitId: "codex", limitName: null, primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1790000000 }, secondary: { usedPercent: 34, windowDurationMins: 10080, resetsAt: 1790500000 }, credits: null, planType: "pro" } } });
     active = null;
@@ -126,7 +141,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const r = waiting.get(Number(m.id));
       if (r) {
         waiting.delete(Number(m.id));
-        r(m.result?.decision ?? "decline");
+        r(m.result?.decision ?? m.result?.action ?? "decline");
       }
       continue;
     }

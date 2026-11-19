@@ -559,9 +559,9 @@ describe("parallel-guard prereqs", () => {
     expect(rows.length).toBeGreaterThanOrEqual(15);
     expect(rows.some((r) => r.want.prereqMet) && rows.some((r) => !r.want.prereqMet)).toBe(true);
     for (const { row, facts, want } of rows) {
-      const last = Math.max(0, ...facts.confirms) + facts.others + 1;
+      const last = Math.max(0, ...facts.confirms, ...facts.postMerge) + facts.others + 1;
       let others = facts.others;
-      const lines = Array.from({ length: last }, (_, k) => k + 1).map((n) => (facts.confirms.includes(n) ? `- [ ] ${n}. 見る（利用者確認: 画面で見る）` : others-- > 0 ? `- [ ] ${n}. 直す（検証: テスト）` : `- [x] ${n}. 済み`));
+      const lines = Array.from({ length: last }, (_, k) => k + 1).map((n) => (facts.confirms.includes(n) ? `- [ ] ${n}. 見る（利用者確認: 画面で見る）` : facts.postMerge.includes(n) ? `- [ ] ${n}. 動かす（マージの後: 画面）` : others-- > 0 ? `- [ ] ${n}. 直す（検証: テスト）` : `- [x] ${n}. 済み`));
       const body = `## 到達点 / 受け入れ条件\n${lines.join("\n")}\n`;
       const labels = [facts.pbi ? "type:pbi" : "type:task", ...(facts.decision ? ["needs-decision"] : [])];
       const expected = want.prereqMet ? { verdict: "go", prereqs: [{ ref: "#61", state: "met", confirming: true }] } : { verdict: "wait", prereqs: [{ ref: "#61", state: "pending" }] };

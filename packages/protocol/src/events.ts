@@ -130,6 +130,11 @@ export const AgentEvent = z.discriminatedUnion("t", [
     reason: z.literal("classifier").optional(),
     /** Set by the daemon when a Knowledge approval rule matched (confirm → still asked, with the reason shown). */
     rule: ApprovalRuleMatch.optional(),
+    /**
+     * An MCP tool call's own declaration (Codex): `readOnlyHint` true → "read-only", `destructiveHint` true → "destructive",
+     * both false → "write", anything else → "unknown". It is the server's claim, not a guarantee: never a reason to skip the approval.
+     */
+    mcpHint: z.enum(["read-only", "destructive", "write", "unknown"]).optional(),
   }),
   /**
    * The runner's question tool asked the person. The adapter declines the call at once (QUESTION_DEFERRED_REPLY),

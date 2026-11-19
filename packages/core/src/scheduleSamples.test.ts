@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findSecrets } from "../../../ops-kit/src/secrets.ts";
 import { Db, SAMPLES_BEFORE_THE_LIST } from "./db.ts";
-import { addSamples, SAMPLE_TITLE_PREFIX, SAMPLES_DOC, SAMPLES_KEY, SCHEDULE_SAMPLES, type ScheduleSample } from "./scheduleSamples.ts";
+import { addSamples, ensureSecretScan, PROVISIONED_KEY, SAMPLE_TITLE_PREFIX, SAMPLES_DOC, SAMPLES_KEY, SCHEDULE_SAMPLES, type ScheduleSample } from "./scheduleSamples.ts";
 import { Scheduler } from "./scheduler.ts";
 import { TaskManager } from "./tasks/manager.ts";
 
@@ -115,4 +115,50 @@ test("samples: an instance from before the list (the old flag in its settings) i
   db = new Db(file);
   expect(db.getSetting<string[]>(SAMPLES_KEY, [])).toEqual([...SAMPLES_BEFORE_THE_LIST, "one"]);
   expect(db.getSetting<unknown>("uiLayers.seeded", null)).toBe(true);
+});
+
+/** Makes the first `setSetting` of `key` throw, as a disk error at the record would. */
+function failRecordOnce(key: string) {
+  const real = db.setSetting.bind(db);
+  let thrown = false;
+  db.setSetting = (k: string, v: unknown) => {
+    if (k === key && !thrown) {
+      thrown = true;
+      throw new Error("disk I/O error");
+    }
+    return real(k, v);
+  };
+}
+
+test("addSamples: a failure to record a sample's id leaves no row, and the next call adds each sample once", () => {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    failRecordOnce(SAMPLES_KEY);
+    expect(addSamples(db, scheduler, metaId, ONE)).toEqual([]);
+  } finally {
+    console.warn = warn;
+  }
+  expect(scheduler.list()).toHaveLength(0);
+  expect(db.getSetting<string[]>(SAMPLES_KEY, [])).toEqual([]);
+  expect(addSamples(db, scheduler, metaId, TWO).map((s) => s.title)).toEqual(["（サンプル）一つ目", "（サンプル）二つ目"]);
+  expect(addSamples(db, scheduler, metaId, TWO)).toEqual([]);
+  expect(scheduler.list()).toHaveLength(2);
+});
+
+test("ensureSecretScan: a failure to record leaves no row, and the next call adds one scan and records it", () => {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    failRecordOnce(PROVISIONED_KEY);
+    expect(ensureSecretScan(db, scheduler, metaId)).toBeNull();
+  } finally {
+    console.warn = warn;
+  }
+  expect(scheduler.list()).toHaveLength(0);
+  expect(db.getSetting<string[]>(PROVISIONED_KEY, [])).toEqual([]);
+  expect(ensureSecretScan(db, scheduler, metaId)?.action).toBe("secret-scan");
+  expect(db.getSetting<string[]>(PROVISIONED_KEY, [])).toEqual(["secret-scan"]);
+  expect(ensureSecretScan(db, scheduler, metaId)).toBeNull();
+  expect(scheduler.list().filter((s) => s.action === "secret-scan")).toHaveLength(1);
 });

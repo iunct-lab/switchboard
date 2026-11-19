@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, closeSync, cpSync, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, constants, closeSync, cpSync, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -154,10 +154,12 @@ export type TarEntry = { name: string; bytes: Uint8Array } | { name: string; pat
 
 /**
  * tar → zstd into `out` (never overwritten, 0600), entry by entry: a file is read in chunks straight into the stream,
- * cut at the size it had when it was opened, so no file is held whole. A file that is gone when its turn comes is left
- * out (it was removed after the entries were chosen). A partial `out` is removed on failure.
+ * cut at the size it had when it was opened, so no file is held whole. A file that is gone when its turn comes, or whose
+ * last element is a link (a file is opened without following one), is left out (it was removed or replaced after the
+ * entries were chosen): the names of those are returned. A partial `out` is removed on failure.
  */
-export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Promise<void> {
+export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Promise<string[]> {
+  const skipped: string[] = [];
   const fd = openSync(out, "wx", 0o600);
   const z = createZstdCompress();
   try {
@@ -175,9 +177,13 @@ export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Pro
       }
       let f: number;
       try {
-        f = openSync(e.path, "r");
+        f = openSync(e.path, constants.O_RDONLY | constants.O_NOFOLLOW);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ELOOP") {
+          skipped.push(e.name);
+          continue;
+        }
         throw err;
       }
       try {
@@ -198,6 +204,7 @@ export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Pro
     await write(new Uint8Array(1024)); // the two empty blocks that end a tar
     z.end();
     await done;
+    return skipped;
   } catch (e) {
     z.destroy();
     rmSync(out, { force: true });
@@ -262,11 +269,22 @@ function walk(source: string, entry: string, skip: { dev: number; ino: number })
  * not used: macOS writes names with dakuten as NFD) read it back as is. A size past the 11 octal digits does too.
  */
 function tarHeader(name: string, size: number): Uint8Array {
-  const bytes = Buffer.from(name);
+  const pax = paxOf(name, size);
+  if (pax === null) return ustar(name, size, "0");
+  return Buffer.concat([ustar("PaxHeader", pax.length, "x"), pax, new Uint8Array(tarPad(pax.length)), ustar("PaxFallback", size > 0o77777777777 ? 0 : size, "0")]);
+}
+
+/** The pax record an entry needs before its own header (a name too long or not plain ASCII, a size too big), or null. */
+function paxOf(name: string, size: number): Buffer | null {
   const big = size > 0o77777777777;
-  if (bytes.length <= 100 && /^[\x20-\x7e]*$/.test(name) && !big) return ustar(name, size, "0");
-  const pax = Buffer.from(paxRecord("path", name) + (big ? paxRecord("size", String(size)) : ""));
-  return Buffer.concat([ustar("PaxHeader", pax.length, "x"), pax, new Uint8Array(tarPad(pax.length)), ustar("PaxFallback", big ? 0 : size, "0")]);
+  if (Buffer.byteLength(name) <= 100 && /^[\x20-\x7e]*$/.test(name) && !big) return null;
+  return Buffer.from(paxRecord("path", name) + (big ? paxRecord("size", String(size)) : ""));
+}
+
+/** What an entry's headers weigh in the tar `writeTarZst` writes: one block, or with a pax record before it three or more. */
+export function tarHeaderBytes(name: string, size: number): number {
+  const pax = paxOf(name, size);
+  return pax === null ? 512 : 1024 + pax.length + tarPad(pax.length);
 }
 
 function ustar(name: string, size: number, type: "0" | "x"): Uint8Array {
@@ -298,7 +316,7 @@ function paxRecord(key: string, value: string): string {
 }
 
 /** Zero bytes after `size` to the next 512-byte block. */
-function tarPad(size: number): number {
+export function tarPad(size: number): number {
   return (512 - (size % 512)) % 512;
 }
 

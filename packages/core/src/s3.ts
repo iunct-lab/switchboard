@@ -61,13 +61,28 @@ export function memoryS3(): S3Store & { calls: number; largestRead: number; obje
 }
 
 /** Runs the `aws` CLI; a test passes its own. */
-export type AwsRun = (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+export type AwsRun = (args: string[], opts?: { timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-export const runAws: AwsRun = async (args) => {
-  const p = Bun.spawn(["aws", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-  return { code, stdout, stderr };
+/**
+ * Runs a command and reads what it printed. With `timeoutMs` a command that has not ended by then is killed and the
+ * call throws: a request that never answers must not hold whatever waits for it (the lease renewal round). Without
+ * it there is no limit, as a big send or receive of the uplink needs.
+ */
+export const runCommand = async (bin: string, args: string[], timeoutMs?: number): Promise<{ code: number; stdout: string; stderr: string }> => {
+  const p = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe" });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  if (timeoutMs !== undefined) timer = setTimeout(() => ((timedOut = true), p.kill("SIGKILL")), timeoutMs);
+  try {
+    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    if (timedOut) throw new Error(`${bin} ${args.slice(0, 2).join(" ")} did not answer within ${timeoutMs! >= 1000 ? `${Math.round(timeoutMs! / 1000)} s` : `${timeoutMs} ms`}`);
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+  }
 };
+
+export const runAws: AwsRun = (args, opts) => runCommand("aws", args, opts?.timeoutMs);
 
 /** What kind of failure the CLI reported, without its text. */
 export function awsFailureKind(stderr: string): string {
@@ -83,14 +98,15 @@ const EMPTY_RANGE = /InvalidRange|\(416\)/;
 /**
  * The bucket through the `aws` CLI the host already has (no SDK is added): `s3api get-object` / `put-object` /
  * `list-objects-v2`, with the machine's own credentials and region. `bucket` is asked for at the first call, so a
- * daemon that never uses the store never looks its name up.
+ * daemon that never uses the store never looks its name up. `limit.timeoutMs` ends a call that has not answered by then
+ * (the store of the leases has one; the uplink's own has none).
  */
-export function awsS3(bucket: string | (() => Promise<string>), run: AwsRun = runAws): S3Store {
+export function awsS3(bucket: string | (() => Promise<string>), run: AwsRun = runAws, limit?: { timeoutMs?: number }): S3Store {
   let name: Promise<string> | undefined;
-  const at = () => (name ??= typeof bucket === "string" ? Promise.resolve(bucket) : bucket());
+  // a lookup that failed (the limit ended it) is not kept: the next call asks again
+  const at = () => (name ??= typeof bucket === "string" ? Promise.resolve(bucket) : bucket().catch((e) => ((name = undefined), Promise.reject(e))));
   const call = async (args: string[]) => {
-    const r = await run(args);
-    return r;
+    return run(args, limit?.timeoutMs !== undefined ? { timeoutMs: limit.timeoutMs } : undefined);
   };
   // only the kind of failure leaves this module: the CLI's own text names the role (with its account) and the bucket,
   // and what is thrown here ends in logs, in stored notes and in API answers
@@ -151,4 +167,16 @@ export async function bucketFromParameter(run: AwsRun = runAws): Promise<string>
   const name = r.stdout.trim();
   if (r.code !== 0 || !name) throw new Error(`the uplink bucket is not set: SWITCHBOARD_UPLINK_BUCKET is empty and ${UPLINK_BUCKET_PARAMETER} cannot be read (${awsFailureKind(r.stderr)})`);
   return name;
+}
+
+/**
+ * The two views of the uplink bucket: the uplink's own (big sends and receives, no time limit) and the lease store's
+ * (every request, the bucket-name lookup too, ends at `leaseCallTimeoutMs`: a stuck one would hold the renewal round).
+ */
+export function uplinkStores(uplink: { bucket: string; leaseCallTimeoutMs: number }, run: AwsRun = runAws): { s3: S3Store; leases: S3Store } {
+  const limit = { timeoutMs: uplink.leaseCallTimeoutMs };
+  return {
+    s3: awsS3(uplink.bucket || (() => bucketFromParameter(run)), run),
+    leases: awsS3(uplink.bucket || (() => bucketFromParameter((a) => run(a, limit))), run, limit),
+  };
 }

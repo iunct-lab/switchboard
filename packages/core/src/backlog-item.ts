@@ -3,7 +3,7 @@
  * acceptance criteria and their confirmations, the prerequisites, the screen image), the stage it is stuck at with the
  * action and the slot of that stage, and the item the screens and the selection read (`toItem`).
  */
-import type { BacklogAction, BacklogItem, BacklogStage, BacklogSyncInfo } from "@switchboard/protocol";
+import { POST_MERGE_KINDS, type BacklogAction, type BacklogItem, type BacklogStage, type BacklogSyncInfo } from "@switchboard/protocol";
 import { pbiProgress, type PbiFacts } from "./pbi-progress.ts";
 import type { ProcessDef } from "./process-defs.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
@@ -128,15 +128,40 @@ export function confirmationsOf(body: string): Array<{ n: number; text: string; 
   return criteria(body).filter((c) => !c.checked && c.text.replace(CODE_SPAN, "").includes(CONFIRM_MARK)).map(({ n, text }) => ({ n, text, after: confirmAfterOf(text) }));
 }
 
+const POST_MERGE_MARK = "（マージの後:";
+
+/**
+ * The acceptance criteria that can only be checked after the merge: unchecked lines with `（マージの後: <kind>）`, kind
+ * one of `POST_MERGE_KINDS`; 観測 says `（マージの後: 観測 期日 <ISO 8601 with a zone> 以降）` and `after` is that time
+ * (null = none, or one `afterTime` cannot read). A mark inside inline code, or of another kind, does not count. The
+ * first mark of a line is the one read.
+ */
+export function postMergeOf(body: string): Array<{ n: number; text: string; kind: BacklogItem["postMerge"][number]["kind"]; after: string | null }> {
+  const out: ReturnType<typeof postMergeOf> = [];
+  for (const c of criteria(body)) {
+    if (c.checked) continue;
+    const rest = c.text.replace(CODE_SPAN, "").split(POST_MERGE_MARK)[1];
+    if (rest === undefined) continue;
+    const mark = rest.split("）")[0]!.trim();
+    const kind = POST_MERGE_KINDS.find((k) => k === mark.split(/[\s、,]/)[0]);
+    if (!kind) continue;
+    const due = kind === "観測" ? /期日\s+(\S+)\s*以降/.exec(mark)?.[1] : undefined;
+    out.push({ n: c.n, text: c.text, kind, after: due !== undefined && !Number.isNaN(afterTime(due)) ? due : null });
+  }
+  return out;
+}
+
 /**
  * What `pbiProgress` (pbi-progress.ts) reads of a PBI, from its labels, body, Status and Tasks: the unchecked user-check
- * lines and how many other criteria are unchecked. `decided` / `held` are not in a body (`withConfirmDecisions` reads
+ * lines, the unchecked after-merge lines and how many other criteria are unchecked. `decided` / `held` are not in a body (`withConfirmDecisions` reads
  * them from the stored decisions); `status` null = not read.
  */
 export function pbiFactsOf(i: { labels: string[]; body: string; status: string | null; tasks: { total: number; done: number } }): PbiFacts {
   const confirms = confirmationsOf(i.body).map((c) => c.n);
-  const others = criteria(i.body).filter((c) => !c.checked && !confirms.includes(c.n)).length;
-  return { pbi: i.labels.includes("type:pbi"), decision: i.labels.includes("needs-decision"), status: i.status, tasks: { total: i.tasks.total, done: i.tasks.done }, others, confirms, decided: [], held: false };
+  // a line that carries both marks stays the user's check: one answer is not read two ways
+  const postMerge = postMergeOf(i.body).map((c) => c.n).filter((n) => !confirms.includes(n));
+  const others = criteria(i.body).filter((c) => !c.checked && !confirms.includes(c.n) && !postMerge.includes(c.n)).length;
+  return { pbi: i.labels.includes("type:pbi"), decision: i.labels.includes("needs-decision"), status: i.status, tasks: { total: i.tasks.total, done: i.tasks.done }, others, confirms, postMerge, decided: [], held: false };
 }
 
 /**
@@ -249,6 +274,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
   const labels = raw.labels.nodes.map((l) => l.name);
   const progress = pbiProgress(pbiFactsOf({ labels, body: raw.body, status, tasks: tasks ?? { total: 0, done: 0 } }));
   // the lines asked now: an in-progress PBI's (a needs-decision label or not), none while a Task is open
+  const confirmed = new Set(confirmationsOf(raw.body).map((c) => c.n));
   const confirmations = confirmationsOf(raw.body).filter((c) => progress.asked.includes(c.n));
   return {
     number: raw.number, title: raw.title, url: raw.url, type: pbi ? "pbi" : "request", stage,
@@ -267,7 +293,8 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     heldAt: null,
     confirmations,
     closable: progress.closable,
-    progress: { closableByApi: progress.closableByApi, closesOnAnswer: progress.closesOnAnswer },
+    postMerge: pbi ? postMergeOf(raw.body).filter((c) => !confirmed.has(c.n)) : [],
+    progress: { closableByApi: progress.closableByApi, closesOnAnswer: progress.closesOnAnswer, checking: progress.checking },
     onHold: labels.includes(ON_HOLD_LABEL),
     flow: labels.includes(FLOW_LABEL),
     bodyChars: raw.body.length,
