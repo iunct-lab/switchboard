@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PbiFacts, PbiProgress } from "./pbi-progress.ts";
 
-const COLUMNS = ["Row", "pbi", "decision", "status", "tasks", "others", "confirms", "decided", "held", "asked", "closableByApi", "closable", "prereqMet", "closesOnAnswer"];
+const COLUMNS = ["Row", "pbi", "decision", "status", "tasks", "others", "confirms", "postMerge", "decided", "held", "asked", "closableByApi", "closable", "prereqMet", "checking", "closesOnAnswer"];
 
 export function readProgressTable(): Array<{ row: string; facts: PbiFacts; want: PbiProgress }> {
   const doc = readFileSync(join(import.meta.dir, "../../../docs/design/pbi-progress.md"), "utf8").split("\n");
@@ -20,12 +20,12 @@ export function readProgressTable(): Array<{ row: string; facts: PbiFacts; want:
   return rest.slice(0, end < 0 ? rest.length : end).map((l) => {
     const c = cells(l);
     if (c.length !== COLUMNS.length) throw new Error(`docs/design/pbi-progress.md: row "${c[0]}" has ${c.length} cells`);
-    const [row, pbi, decision, status, tasks, others, confirms, decided, held, asked, closableByApi, closable, prereqMet, closesOnAnswer] = c as [string, string, string, string, string, string, string, string, string, string, string, string, string, string];
+    const [row, pbi, decision, status, tasks, others, confirms, postMerge, decided, held, asked, closableByApi, closable, prereqMet, checking, closesOnAnswer] = c as [string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string];
     const [done, total] = tasks.split("/").map(Number) as [number, number];
     return {
       row,
-      facts: { pbi: bool(pbi, row), decision: bool(decision, row), status: status === "-" ? null : status, tasks: { total, done }, others: Number(others), confirms: list(confirms), decided: list(decided), held: bool(held, row) },
-      want: { asked: list(asked), closableByApi: bool(closableByApi, row), closable: bool(closable, row), prereqMet: bool(prereqMet, row), closesOnAnswer: closesOnAnswer === "-" ? null : Number(closesOnAnswer) },
+      facts: { pbi: bool(pbi, row), decision: bool(decision, row), status: status === "-" ? null : status, tasks: { total, done }, others: Number(others), confirms: list(confirms), postMerge: list(postMerge), decided: list(decided), held: bool(held, row) },
+      want: { asked: list(asked), closableByApi: bool(closableByApi, row), closable: bool(closable, row), prereqMet: bool(prereqMet, row), checking: bool(checking, row), closesOnAnswer: closesOnAnswer === "-" ? null : Number(closesOnAnswer) },
     };
   });
 }

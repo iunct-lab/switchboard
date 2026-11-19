@@ -8,7 +8,7 @@ import { listProcesses, loadProcess, parseProcessDef } from "./process-defs.ts";
 import { type CoreServer } from "./server.ts";
 import { fmtTime } from "./ratelimit.ts";
 import { buildStartPrompt, tasksDoneMark, TASKS_DONE_MARK } from "./backlog-prompt.ts";
-import { pickNext, dueSoonIssues, dueSoonOf, spinningIn, unchangedIn, heldIn, awaitingReply, isAnswered, failedIn, failedSince, plannedResumeLine, checksOnlyLine, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog-pick.ts";
+import { pickNext, dueSoonIssues, dueSoonOf, spinningIn, unchangedIn, heldIn, awaitingReply, isAnswered, failedIn, failedSince, plannedResumeLine, checksOnlyLine, checkingLine, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog-pick.ts";
 import { toItem, requestTextChars, chooseProcess, type RawBacklogIssue } from "./backlog-item.ts";
 import { STOPPED, backlogNextSchedule, boot, fixtureStage, holdingClaude, item, metaId, raw, runSchedule, scheduleLogAll, subTask, taskDecisionGh, useBacklogDaemon, wait } from "./api-test-harness.ts";
 
@@ -438,6 +438,37 @@ test("a PBI left with only the person's checks is named", () => {
   expect(checksOnlyLine(items, "implement")).toBe("利用者確認だけ: #3467 #2799");
   expect(checksOnlyLine(items, "plan")).toBeNull();
   expect(checksOnlyLine(items.slice(2), "implement")).toBeNull();
+});
+
+describe("a checking PBI (only after-merge checks left)", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const checking = (n: number, extra: object = {}) => item({ number: n, stage: "in-progress", tasks: { total: 3, done: 3, doneAt: null }, postMerge: [{ n: 1, text: "昇格後に画面で見る", kind: "画面" as const, after: null }], ...extra });
+
+  test("pickNext does not close or resume a checking PBI", () => {
+    const c = checking(10);
+    expect(c.progress.checking).toBe(true);
+    expect(c.closable).toBe(false);
+    expect(pickNext([c], "implement")).toBeNull();
+    // the same PBI without the after-merge line is closable and is closed
+    expect(pickNext([item({ number: 11, stage: "in-progress", tasks: { total: 3, done: 3, doneAt: null }, closable: true })], "implement")).toMatchObject({ action: "close" });
+  });
+
+  test("an answered checking PBI still resumes", () => {
+    const answered = checking(12, { updatedAt: "2026-09-28T01:00:00Z", answeredAt: "2026-09-28T01:00:00Z", lastTask: { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true } });
+    expect(isAnswered(answered)).toBe(true);
+    expect(pickNext([answered], "implement")).toMatchObject({ item: { number: 12 } });
+    expect(checkingLine([answered], "implement")).toBeNull();
+  });
+
+  test("the log names checking PBIs on one line", () => {
+    const items = [checking(10), checking(13), checking(14, { activeTaskId: "tsk_run" }), checking(15, { tasks: { total: 3, done: 2, doneAt: null }, progress: { closableByApi: false, closesOnAnswer: null, checking: false } })];
+    expect(checkingLine(items, "implement")).toBe("確認中: #10 #13");
+    expect(checkingLine(items, "plan")).toBeNull();
+    // named on this line only: a checking PBI with a user check is not also "利用者確認だけ"
+    const both = checking(16, { confirmations: [{ n: 2, text: "見る", after: null }] });
+    expect(checksOnlyLine([both], "implement")).toBeNull();
+    expect(checkingLine([both], "implement")).toBe("確認中: #16");
+  });
 });
 
 test("pickNext awaiting reply: an item whose last stage Task ended asking the person (needs_action, not reviewed) is left until a ## 回答 or the Task reviewed", () => {

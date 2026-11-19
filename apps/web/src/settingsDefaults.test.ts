@@ -4,6 +4,7 @@ import { Settings } from "@switchboard/protocol";
 import { RESETTABLE_CARDS, resetCard, type ResettableCard } from "./settingsDefaults.ts";
 import { SETTINGS_GROUPS } from "./settingsGroups.ts";
 import { settings } from "./i18n/settings.ts";
+import { jobRows } from "./runnerSettings.ts";
 
 const source = await Bun.file(new URL("./components/Settings.tsx", import.meta.url)).text();
 const defaults = Settings.parse({});
@@ -51,11 +52,40 @@ describe("RESETTABLE_CARDS", () => {
   });
 });
 
+describe("quotaAndResume", () => {
+  test("every value of it is reset by some card, but the budgets of 予算 and of the kinds' rows", () => {
+    const budgets = new Set(["fableBudgetUsd", "defaultBudgetUsd"]);
+    const listed = new Set(cards.flatMap((c) => RESETTABLE_CARDS[c]).filter((p) => p.startsWith("quotaAndResume.")).map((p) => p.split(".")[1]!));
+    const missing = Object.keys(defaults.quotaAndResume).filter((k) => !budgets.has(k) && !listed.has(k));
+    expect(missing).toEqual([]);
+  });
+});
+
+describe("the default shown next to a value", () => {
+  test("each 「どの仕事を」 row shows the runner its row reads from the defaults", () => {
+    for (const r of jobRows(defaults)) expect(r.runner).not.toBe("");
+    expect(source).toContain("jobRows(d).find((r) => r.id === j.id)?.runner");
+  });
+  test("the cap's box follows the saved value, and SweepSlots' own save of it reaches the screen's settings", () => {
+    expect(source).toContain("flowLimit={qr.flowShareLimit}");
+    expect(source).toContain("props.onSettings(await api.updateSettings({ quotaAndResume: { flowShareLimit: flow } }))");
+    // compared with the saved value, not the allocation read when the card opened: after 既定に戻す that one is stale
+    expect(source).toContain("flow !== props.flowLimit) props.onSettings(");
+    expect(source).toContain("setFlowDraft(shareText(props.flowLimit))), [props.flowLimit]");
+    expect(source).not.toMatch(/<SweepSlots key=/);
+  });
+});
+
 describe("resetCard", () => {
   test("a whole key goes back by null", () => {
     expect(resetCard("release", defaults)).toEqual({ release: null });
     expect(resetCard("outbound", defaults)).toEqual({ outbound: null });
-    expect(resetCard("sweep", defaults)).toEqual({ maxRunners: null });
+    expect(resetCard("sweep", defaults).maxRunners).toBeNull();
+  });
+  test("the self-improvement cap of 「バックログを進める」 goes back by its default, not by the whole key", () => {
+    const sweep = resetCard("sweep", defaults);
+    expect(sweep.quotaAndResume).toEqual({ flowShareLimit: defaults.quotaAndResume.flowShareLimit });
+    expect(defaults.quotaAndResume.flowShareLimit).toBe(0.25);
   });
   test("a value inside a key goes back by its default, and the key's other values are not sent", () => {
     expect(resetCard("newSchedule", defaults)).toEqual({ newDefaults: { scheduleCron: defaults.newDefaults.scheduleCron } });

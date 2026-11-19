@@ -1,7 +1,7 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
-import { awsS3, bucketFromParameter, memoryS3, type AwsRun } from "./s3.ts";
+import { awsS3, bucketFromParameter, memoryS3, runCommand, type AwsRun } from "./s3.ts";
 
 const bytes = (s: string) => new TextEncoder().encode(s);
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -74,6 +74,16 @@ describe("awsS3", () => {
     expect(none.seen[0]!.slice(0, 6)).toEqual(["s3api", "get-object", "--bucket", "named", "--key", "k"]);
   });
 
+  test("a bucket name that could not be looked up is asked for again at the next call", async () => {
+    let asked = 0;
+    const none = fake(() => ({ code: 254, stderr: "An error occurred (NoSuchKey) when calling the GetObject operation" }));
+    const s3 = awsS3(async () => { if (++asked === 1) throw new Error("did not answer within 20 s"); return "named"; }, none.run);
+    await expect(s3.get("k")).rejects.toThrow("did not answer");
+    expect(await s3.get("k")).toBeNull();
+    expect(asked).toBe(2);
+    expect(none.seen[0]!.slice(0, 4)).toEqual(["s3api", "get-object", "--bucket", "named"]);
+  });
+
   test("get with a byte limit asks S3 for that much only, and says when the object is bigger", async () => {
     // the fake answers what S3 would for the range asked: at most the bytes of the range
     const object = Buffer.alloc(1024 * 1024, "x");
@@ -105,5 +115,23 @@ describe("awsS3", () => {
   test("the instance's bucket name comes from the parameter; an empty answer is an error that says what to set", async () => {
     expect(await bucketFromParameter(fake(() => ({ stdout: "bucket-1\n" })).run)).toBe("bucket-1");
     await expect(bucketFromParameter(fake(() => ({ code: 254, stderr: "ParameterNotFound" })).run)).rejects.toThrow("SWITCHBOARD_UPLINK_BUCKET");
+  });
+});
+
+describe("the time limit of a request", () => {
+  test("a command that has not ended by the limit is killed and the call throws; one that ends in time answers, and none has no limit", async () => {
+    const t0 = Date.now();
+    await expect(runCommand("sleep", ["30"], 50)).rejects.toThrow("did not answer within");
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(await runCommand("echo", ["hi"], 5000)).toEqual({ code: 0, stdout: "hi\n", stderr: "" });
+    expect((await runCommand("echo", ["hi"])).stdout).toBe("hi\n");
+  });
+
+  test("awsS3 hands its limit to every request it makes, and none when it has none", async () => {
+    const seen: Array<{ timeoutMs?: number } | undefined> = [];
+    const run: AwsRun = async (_args, opts) => (seen.push(opts), { code: 255, stdout: "", stderr: "NoSuchKey" });
+    await awsS3("b", run, { timeoutMs: 1234 }).get("k");
+    await awsS3("b", run).get("k");
+    expect(seen).toEqual([{ timeoutMs: 1234 }, undefined]);
   });
 });

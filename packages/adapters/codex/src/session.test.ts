@@ -338,6 +338,52 @@ describe("question tool", () => {
   });
 });
 
+describe("MCP tool approvals", () => {
+  /** One turn on the fake whose MCP approval is answered with `decision`; returns the permission.ask, the wire and the events. */
+  async function mcpTurn(hint: string, decision: "allow" | "deny" | null) {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-mcp-"));
+    const log = join(home, "wire.jsonl");
+    const events: AgentEvent[] = [];
+    const session = createCodexAdapter({ bin: FAKE, codexHome: home, config: [`test_wire_log=${log}`] }).start({ cwd: home, scope: [home], prompt: `mcp: ${hint}`, permissionMode: "on-request" }, (e) => events.push(e));
+    try {
+      for (const deadline = Date.now() + 5000; !events.some((e) => e.t === "permission.ask") && Date.now() < deadline; ) await Bun.sleep(20);
+      const ask = events.find((e) => e.t === "permission.ask");
+      if (ask?.t !== "permission.ask") throw new Error("no permission.ask");
+      if (decision === null) {
+        await Bun.sleep(200); // nothing answers by itself
+        const wire = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+        return { ask, answers: wire.filter((m) => m.id !== undefined && typeof m.method !== "string"), events };
+      }
+      session.respondPermission(ask.id, decision);
+      for (const deadline = Date.now() + 5000; !events.some((e) => e.t === "session.end") && Date.now() < deadline; ) await Bun.sleep(20);
+      const wire = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      return { ask, answers: wire.filter((m) => m.id !== undefined && typeof m.method !== "string"), events };
+    } finally {
+      await session.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  test("answers an mcp elicitation approval", async () => {
+    const allowed = await mcpTurn("destructive", "allow");
+    expect(allowed.ask).toMatchObject({ kind: "other", tool: "MCP rec.drop_table", input: { table: "logs" }, mcpHint: "destructive" });
+    expect(allowed.answers.map((m) => m.result)).toEqual([{ action: "accept", content: null, _meta: null }]);
+    expect(allowed.events.find((e) => e.t === "permission.resolved")).toMatchObject({ id: allowed.ask.id, decision: "allow", by: "user" });
+    expect(allowed.events.filter((e) => e.t === "session.end")).toMatchObject([{ status: "ok", summary: "ran" }]);
+    const denied = await mcpTurn("none", "deny");
+    expect(denied.ask.mcpHint).toBe("unknown");
+    expect(denied.answers.map((m) => m.result)).toEqual([{ action: "decline", content: null, _meta: null }]);
+    expect(denied.events.filter((e) => e.t === "session.end")).toMatchObject([{ status: "ok", summary: "declined" }]);
+  });
+
+  test("read-only hint still asks", async () => {
+    const r = await mcpTurn("read-only", null);
+    expect(r.ask.mcpHint).toBe("read-only");
+    expect(r.answers).toEqual([]); // the adapter did not answer; the turn waits for the person
+    expect(r.events.some((e) => e.t === "session.end")).toBe(false);
+  });
+});
+
 describe("account of the usage-limit reports", () => {
   const EMAIL = "sentinel-user@example.invalid";
   const USER = "user-5e17e1a1-sentinel";

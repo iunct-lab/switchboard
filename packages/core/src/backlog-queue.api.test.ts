@@ -9,7 +9,8 @@ import { startServer, type CoreServer } from "./server.ts";
 import { saveQueue } from "./backlog-queue.ts";
 import { importing } from "../fixtures/github-import.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { FAKE_ORIGIN, STOPPED, backlogNextSchedule, boot, closeTried, endableClaude, fakeGh, getQueue, holdingClaude, metaId, metaName, overlapReadyGh, putQueue, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, until, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
+import type { Suggester } from "./routing.ts";
+import { FAKE_ORIGIN, STOPPED, backlogNextSchedule, boot, closeTried, endableClaude, fakeGh, getQueue, holdingClaude, metaId, metaName, moreReadyGh, overlapReadyGh, putQueue, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, until, useBacklogDaemon, threeWorkspaces, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -167,6 +168,54 @@ test("startFromQueue: with concurrency 2, a queued PBI whose Task names the path
   await Bun.sleep(300);
   expect(startedTitles().sort()).toEqual(["#304 実装", "#310 実装"]);
   expect((await getQueue(base)).lastNote ?? "").toContain("重なり: #309（Task #3041: src/a.ts）");
+});
+
+test("startFromQueue: two workspaces with the same name: one's start keeps the other's overlap line in lastNote", async () => {
+  // Issue 309's Task names a file an open PR changes; Issue 304's names another
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, overlapReadyGh({ 304: "src/b.ts", 309: "src/a.ts", 310: "src/c.ts" }));
+  closeTried(...Object.values(ids));
+  // the names are not unique: both workspaces are called twin
+  for (const ws of [ids.lib!, ids.app!]) core!.db["sqlite"].query("UPDATE workspaces SET name = 'twin' WHERE id = ?").run(ws);
+  // one workspace has only the overlapped PBI queued and starts nothing; the other starts its PBI and reads its backlog again
+  expect((await putQueue(base, { items: [{ workspaceId: ids.lib!, number: 309 }, { workspaceId: ids.app!, number: 304 }], concurrency: 2, enabled: true })).status).toBe(200);
+  const queueLog = async () => (await scheduleLogAll(base)).filter((l) => l.includes("キュー:"));
+  await until(async () => (await queueLog()).some((l) => l.includes("開始")));
+  expect(startedTasks().map((t) => t.workspaceId)).toEqual([ids.app!]);
+  // the run that started the PBI says the other workspace's overlap line too (a later run says it again, so the line is read from this run's notes: one timestamp)
+  const log = await queueLog();
+  const at = log.find((l) => l.includes("開始"))!.slice(0, 24);
+  expect(log.filter((l) => l.startsWith(at))).toContainEqual(expect.stringContaining("キュー: twin: 重なり: #309（PR #900: src/a.ts）"));
+});
+
+test("startFromQueue: a flow PBI that became in progress after the first read counts against the limit after a start", async () => {
+  // Issue 307 (in progress, not queued) and Issue 309 (Ready, queued) carry flow-improvement; the limit is 1
+  const inner = moreReadyGh(309, 310);
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await inner(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout) as { data?: { repository?: { issues?: { nodes: { number: number; labels: { nodes: { name: string }[] } }[] } } } };
+    for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 307 || node.number === 309) node.labels.nodes.push({ name: "flow-improvement" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  let first = true;
+  // while the queue starts Issue 304, a stage Task of Issue 307 starts elsewhere (a button): the first read did not count it
+  const routing: Suggester = { suggest: async () => {
+    if (first) {
+      first = false;
+      const now = Date.now();
+      core!.db.insertTask({ id: "task_307", workspaceId: metaId(), title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 307, action: "close" }, statusAt: now, createdAt: now, updatedAt: now });
+    }
+    return { runner: "claude", reason: "r", ruleId: "llm", model: null, available: true, alternatives: [], llm: null };
+  } };
+  const base = await boot(gh, holdingClaude().adapter, {}, () => routing);
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ routing: { llm: { enabled: true } } }) });
+  expect((await putQueue(base, { items: queueOf(304, 309, 310), concurrency: 3, enabled: true })).status).toBe(200);
+  await until(() => startedTitles().includes("#310 実装"));
+  await Bun.sleep(300);
+  // 309 is held by the limit once 307 runs; 310 (no label) goes on
+  expect(startedTitles().filter((t) => t?.startsWith("#309"))).toEqual([]);
+  expect(startedTitles()).toContain("#304 実装");
 });
 
 test("startFromQueue, developSelf off: a queued PBI of the meta workspace is not started, and the note says why", async () => {

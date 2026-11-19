@@ -96,11 +96,30 @@ describe("the old-assumption list", () => {
       { path: "src/old.ts", line: 90, text: "if (releaseOf(title)) promote();" },
     ];
     const row = (line: number) => `  - \`src/old.ts:${line}\` \`if (releaseOf(title)) promote();\` — 成り立つ`;
-    expect(unlistedHits(row(40), twice)).toEqual([twice[1]!]);
-    expect(unlistedHits([row(40), row(90)].join("\n"), twice)).toEqual([]);
+    const item = (...rows: string[]) => ["- 古い前提を持つ既存の箇所（語: `releaseOf`）:", ...rows].join("\n");
+    expect(unlistedHits(item(row(40)), twice)).toEqual([twice[1]!]);
+    expect(unlistedHits(item(row(40), row(90)), twice)).toEqual([]);
     // a row is not spent on a hit whose text is a part of it
     const part: Parameters<typeof unlistedHits>[1] = [{ path: "src/old.ts", line: 3, text: "releaseOf(title)" }, twice[0]!];
-    expect(unlistedHits(row(40), part)).toEqual([part[0]!]);
+    expect(unlistedHits(item(row(40)), part)).toEqual([part[0]!]);
+  });
+
+  test("unlistedHits: a place written only outside the item is not listed", () => {
+    const hits: Parameters<typeof unlistedHits>[1] = [{ path: "src/old.ts", line: 40, text: "if (releaseOf(title)) promote();" }];
+    const body = [
+      "## レビュアーへ",
+      "- 古い前提を持つ既存の箇所（語: `releaseOf`）:",
+      "  - `src/other.ts:1` `releaseOf(x)` — 成り立つ",
+      "- 検証: pass",
+      "",
+      "## 変更点",
+      "- `src/old.ts:40` `if (releaseOf(title)) promote();` を直した",
+    ].join("\n");
+    expect(unlistedHits(body, hits)).toEqual(hits);
+    // inside the item it answers; a blank line ends the item
+    expect(unlistedHits(`${body.split("\n").slice(0, 3).join("\n")}\n  - \`src/old.ts:40\` \`if (releaseOf(title)) promote();\` — 成り立つ`, hits)).toEqual([]);
+    expect(unlistedHits("- 古い前提を持つ既存の箇所（語: `releaseOf`）:\n\n  - `src/old.ts:40` `if (releaseOf(title)) promote();`", hits)).toEqual(hits);
+    expect(unlistedHits("## 変更点\n  - `src/old.ts:40` `if (releaseOf(title)) promote();`", hits)).toEqual(hits);
   });
 
   test("the report: rows matched by file and text (a moved line still counts), a place the list lacks is named, なし and a missing item are told apart", () => {
@@ -170,6 +189,9 @@ describe("the commands", () => {
       // with HEAD as the base there is no diff: every place, the new one too
       expect((await run(["old-paths", "list", "HEAD", "releaseOf"])).out).toContain("`new.ts:1`");
       writeFileSync(join(dir, "pr.md"), "- 古い前提を持つ既存の箇所（語: `releaseOf`）:\n");
+      expect(await run(["old-paths", "check", "main", "pr.md"])).toMatchObject({ code: 1, out: expect.stringContaining("missing from the PR's list: 1\n- `old.ts:2`") });
+      // the same place written only outside the item does not count
+      writeFileSync(join(dir, "pr.md"), "- 古い前提を持つ既存の箇所（語: `releaseOf`）:\n\n## 変更点\n- `old.ts:2` `if (releaseOf(title)) promote();` を直した\n");
       expect(await run(["old-paths", "check", "main", "pr.md"])).toMatchObject({ code: 1, out: expect.stringContaining("missing from the PR's list: 1\n- `old.ts:2`") });
       writeFileSync(join(dir, "pr.md"), `${list.out}\n`);
       expect(await run(["old-paths", "check", "main", "pr.md"])).toMatchObject({ code: 0, out: expect.stringContaining("missing from the PR's list: 0") });

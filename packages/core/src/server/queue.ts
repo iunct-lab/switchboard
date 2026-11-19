@@ -4,7 +4,7 @@ import { type BacklogQueue, BacklogAction, type BacklogItem, type Task, type Wor
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue } from "../backlog-queue.ts";
 import { pickNext, dueSoonOf, isUnblocked, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, flowStopped, flowOutsideQueueLine, type FlowLimit } from "../backlog-pick.ts";
 import { storedIssueHeads, canStartStoredBacklog } from "../backlog-stored.ts";
-import { swapOverlapLines } from "../backlog-overlap.ts";
+import { overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { SLOT_OF_ACTION } from "../backlog-item.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
 import { resumeDepends } from "../depends-resume.ts";
@@ -101,7 +101,7 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
   const usage = sc.SLOT_ACTIONS.map(sc.queueUsage);
   if (usage.every(Boolean)) return (lines.push(...new Set(usage)), finish());
   // each workspace of the queue, as stored, its queued items only
-  const read: Array<{ ws: Workspace; items: BacklogItem[]; flowCounted: number[]; flowStopped: number }> = [];
+  const read: Array<{ ws: Workspace; items: BacklogItem[]; flowCounted: number[]; flowStopped: number; overlapLines: string[] }> = [];
   for (const id of [...new Set(queue.items.map((e) => e.workspaceId))]) {
     const order = queue.items.filter((e) => e.workspaceId === id).map((e) => e.number);
     const ws = sc.db.getWorkspace(id);
@@ -128,15 +128,16 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
     const stopped = flowStopped(stored, order);
     const outside = flowOutsideQueueLine(stored, order);
     if (outside) lines.push(`${ws.name}: ${outside}`);
-    lines.push(...sc.leftLines(items, "implement", flowLimitOf(sc.settings().quotaAndResume.flowLimit, counted, stopped)).map((l) => `${ws.name}: ${l}`));
-    read.push({ ws, items, flowCounted: counted, flowStopped: stopped });
+    const left = sc.leftLines(items, "implement", flowLimitOf(sc.settings().quotaAndResume.flowLimit, counted, stopped));
+    lines.push(...left.map((l) => `${ws.name}: ${l}`));
+    read.push({ ws, items, flowCounted: counted, flowStopped: stopped, overlapLines: overlapLinesUnder(`${ws.name}: `, left) });
   }
   const picked = new Set<string>();
   // flow PBIs started from Ready in this run: still ready in `items`, so counted as in progress here
   const flowStarted = new Set<string>();
   const dueSoonBy = new Map<string, Set<number>>(); // each workspace's registry, read once per firing
   const dueSoon = (ws: Workspace) => dueSoonBy.get(ws.id) ?? (dueSoonBy.set(ws.id, dueSoonOf(ws.path)), dueSoonBy.get(ws.id)!);
-  const flowOf = (ws: Workspace, counted: number[], stopped: number): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...counted, ...[...flowStarted].filter((k) => k.startsWith(`${ws.id}:`)).map((k) => Number(k.slice(ws.id.length + 1)))], stopped);
+  const flowOf = (ws: Workspace, counted: number[], stopped: number): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...new Set([...counted, ...[...flowStarted].filter((k) => k.startsWith(`${ws.id}:`)).map((k) => Number(k.slice(ws.id.length + 1)))])], stopped);
   let startedAny = false;
   const reread = new Set<string>();
   for (;;) {
@@ -172,17 +173,21 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
     startedAny = true;
     // the next candidate is judged against what this start took: the workspace's queued items read again from the stored data
     const mine = read.find((x) => x.ws.id === ws.id)!;
-    const queued = new Set(live.items.filter((e) => e.workspaceId === ws.id).map((e) => e.number));
-    mine.items = sc.withActive({ fetchedAt: 0, items: (await sc.storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.filter((i) => queued.has(i.number) && canStartStoredBacklog(i).ok);
+    const order = live.items.filter((e) => e.workspaceId === ws.id).map((e) => e.number);
+    const queued = new Set(order);
+    // (and the flow PBIs in progress, counted as the first read counts them: another may have become one since)
+    const stored = sc.withActive({ fetchedAt: 0, items: (await sc.storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items;
+    mine.items = stored.filter((i) => queued.has(i.number) && canStartStoredBacklog(i).ok);
+    mine.flowCounted = flowCounted(stored, order).map((i) => i.number);
+    mine.flowStopped = flowStopped(stored, order);
     reread.add(ws.id);
     if (p.item.flow && p.item.stage === "ready") flowStarted.add(sc.queueKey(ws.id, p.item.number));
     lines.push(`${ws.name} #${p.item.number} を ${p.action} で開始 ${t.task.id}`);
   }
   // an overlap that only the starts made is said too, as the first read's line with them counted
-  for (const { ws, items, flowCounted: running, flowStopped: stopped } of read) {
+  for (const { ws, items, flowCounted: running, flowStopped: stopped, overlapLines } of read) {
     if (!reread.has(ws.id)) continue;
-    const head = `${ws.name}: `;
-    swapOverlapLines(lines, head, sc.leftLines(items, "implement", flowOf(ws, running, stopped)));
+    swapOverlapLines(lines, overlapLines, overlapLinesUnder(`${ws.name}: `, sc.leftLines(items, "implement", flowOf(ws, running, stopped))));
   }
   // the flow PBIs left, said after the starts: one started in this run may be what holds the next
   for (const { ws, items, flowCounted: running, flowStopped: stopped } of read) {

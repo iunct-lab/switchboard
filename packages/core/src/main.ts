@@ -13,6 +13,9 @@ import { Db, snapshotBeforeMigrate } from "./db.ts";
 import { commitEventsArchive, prepareEventsArchive, readUploaded } from "./events-archive.ts";
 
 const cfg = loadConfig();
+// The wait stays on the connection, so it covers opening (the auto_vacuum pragma, migrate) and commit's IMMEDIATE
+// transaction alike. Commit runs after the upload: failing on a lock there leaves the next run to write the archive
+// again, so it waits too. Waiting takes no lock of its own, so the daemon's writes are not held up by it.
 const ARCHIVE_BUSY_TIMEOUT_MS = 60_000;
 
 // `main.ts export <out> [--encrypt <age recipient>]` / `main.ts import <file> [--identity <age key file>]` move the
@@ -47,8 +50,8 @@ if (cmd === "events-archive") {
     console.error("usage: bun packages/core/src/main.ts events-archive prepare <dir> --encrypt <age recipient>\n       bun packages/core/src/main.ts events-archive commit <dir>");
     process.exit(2);
   }
-  // Opening writes (the auto_vacuum pragma, migrate), and the daemon can hold the write lock for longer than its own
-  // 5 s wait (a backlog sync of about 20 s, 2026-11-13): the daily archive waits up to a minute instead of failing.
+  // Opening and commit write, and the daemon can hold the write lock for longer than its own 5 s wait (a backlog sync
+  // of about 20 s, 2026-11-13): the daily archive waits up to a minute instead of failing (see ARCHIVE_BUSY_TIMEOUT_MS).
   const db = new Db(cfg.dbPath, { busyTimeoutMs: ARCHIVE_BUSY_TIMEOUT_MS });
   try {
     if (step === "prepare") {

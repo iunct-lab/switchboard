@@ -19,6 +19,8 @@ export interface PbiFacts {
   others: number;
   /** The numbers of its unchecked user-check lines, dated ones and ones checked by a decision's answer too. */
   confirms: number[];
+  /** The numbers of its unchecked after-merge lines (`（マージの後: …）`): only a look at what runs after the merge can tick them. */
+  postMerge: number[];
   /** The lines among `confirms` whose named decisions are all stored: the decisions' own cards ask, not the user's check. */
   decided: number[];
   /** One of those decisions is still open. */
@@ -34,6 +36,8 @@ export interface PbiProgress {
   closable: boolean;
   /** Left with only the user's checks: as a prerequisite it is met, since it waits for the person and not for more work. */
   prereqMet: boolean;
+  /** Built and every Task closed, and only after-merge lines are unchecked (at least one): the PBI is being checked, not waited on for work. */
+  checking: boolean;
   /** The one line whose answer closes the PBI (the last one asked, nothing else in the way); null = no answer closes it. */
   closesOnAnswer: number | null;
 }
@@ -46,12 +50,13 @@ export function pbiProgress(f: PbiFacts): PbiProgress {
   // a question holds closing and counting it met, not the user's checks: those are asked beside the question
   const asked = started && (f.tasks.total === 0 || allDone) ? f.confirms.filter((n) => !f.decided.includes(n)) : [];
   const closableByApi = started && !f.decision && allDone;
-  const closable = closableByApi && asked.length === 0 && !f.held;
+  const closable = closableByApi && asked.length === 0 && !f.held && f.postMerge.length === 0;
   return {
     asked,
     closableByApi,
     closable,
-    prereqMet: f.pbi && !f.decision && allDone && f.confirms.length > 0 && f.others === 0,
-    closesOnAnswer: closableByApi && !f.held && asked.length === 1 ? asked[0]! : null,
+    prereqMet: f.pbi && !f.decision && allDone && f.confirms.length + f.postMerge.length > 0 && f.others === 0,
+    checking: f.pbi && !f.decision && allDone && f.others === 0 && f.postMerge.length > 0,
+    closesOnAnswer: closableByApi && !f.held && f.postMerge.length === 0 && asked.length === 1 ? asked[0]! : null,
   };
 }

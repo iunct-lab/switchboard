@@ -326,6 +326,19 @@ describe("resumeDepends", () => {
       expect(await at(DUE + 1000)).toEqual([]); // not sent twice
     });
 
+    test("a Task of another machine is passed over and does not stop the others' resume", async () => {
+      const foreign = await startAfter([{ key: "after", value: DUE_TEXT, met: false }]);
+      const local = await startAfter([{ key: "after", value: DUE_TEXT, met: false }]);
+      db.sqlite.query("UPDATE tasks SET machine = 'pc1' WHERE id = ?").run(foreign.id);
+      const stops = () => db.listStopRecords([foreign.id]).length;
+      const before = stops();
+      expect(await resumeDueAfters({ db, tasks, now: DUE })).toEqual([local.id]);
+      await settle();
+      expect(sends).toEqual([dependsResumePrompt([], [DUE_TEXT])]);
+      expect(stops()).toBe(before);
+      expect(stopOf(foreign.id).state).toBe("waiting");
+    });
+
     test("after: sent after the date too", async () => {
       const t = await startAfter([{ key: "after", value: DUE_TEXT, met: false }]);
       expect(await at(DUE + 3600_000)).toEqual([t.id]);

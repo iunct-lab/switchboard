@@ -11,7 +11,7 @@ import { prereqsOf } from "./backlog-item.ts";
 import { prereqState, type WaitTarget, waitsOf } from "./backlog-waits.ts";
 import { pickNext, heldIn, isUnblocked } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine, isOverlapped, swapOverlapLines } from "./backlog-overlap.ts";
+import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine, isOverlapped, swapOverlapLines, overlapLinesUnder } from "./backlog-overlap.ts";
 import { FAKE_ORIGIN, STOPPED, backlogNextSchedule, boot, fixtureStage, getQueue, holdingClaude, item, metaId, metaName, putQueue, refreshed, releaseBody, runSchedule, scheduleLogAll, start, subTask, sweepAll, until, useBacklogDaemon, wait, waitsGh, waitsOfItem, withProcesses } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
@@ -670,10 +670,16 @@ describe("backlog waitsUntil", () => {
       expect(isOverlapLine("保留: #1")).toBe(false);
       // the first read's holder count (2) is swapped for the reread's (3); the other lines and other workspaces' stay
       const log = ["app: 実装の枠: 保留: #9", "app: 実装の枠: Task #3007 が 2 件を止めている（作業していない）", "app: 実装の枠: 重なり: #1（Task #3007: src/a.ts）", "other: 実装の枠: 重なり: #5（PR #7: x.ts）"];
-      swapOverlapLines(log, "app: 実装の枠: ", ["保留: #9", ...overlapHolderLines(items), ...overlapLine(items.filter(isOverlapped))]);
+      const head = "app: 実装の枠: ";
+      const first = ["Task #3007 が 2 件を止めている（作業していない）", "重なり: #1（Task #3007: src/a.ts）"].map((l) => `${head}${l}`);
+      swapOverlapLines(log, first, overlapLinesUnder(head, ["保留: #9", ...overlapHolderLines(items), ...overlapLine(items.filter(isOverlapped))]));
       expect(log.slice(0, 2)).toEqual(["app: 実装の枠: 保留: #9", "other: 実装の枠: 重なり: #5（PR #7: x.ts）"]);
       expect(log.slice(2, 4)).toEqual(["app: 実装の枠: Task #3007 が 3 件を止めている（作業していない）", "app: 実装の枠: PR #900 が 1 件を止めている（作業中）"]);
       expect(log.filter((l) => l.includes("2 件"))).toEqual([]);
+      // a workspace of the same name put in the same line: only the one `first` names is taken out, the other's stays
+      const twin = [...first, ...first];
+      swapOverlapLines(twin, first, overlapLinesUnder(head, ["重なり: #2（Task #3007: src/a.ts）"]));
+      expect(twin).toEqual([...first, `${head}重なり: #2（Task #3007: src/a.ts）`]);
       // the PBI's stage Task runs: the same Task is at work
       const again = [1, 2, 3, 4].map((n) => item({ number: n, stage: "ready" }));
       again.push(item({ number: 3000, stage: "in-progress" }));

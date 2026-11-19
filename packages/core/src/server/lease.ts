@@ -154,15 +154,20 @@ export const leaseRound = async (sc: Pick<ServerContext, "leases" | "leaseBusy" 
     const every = Math.max(1, Math.floor(sc.uplink.leaseTtlMs / 3 / sc.uplink.leaseRenewMs));
     if (sc.leaseTicks++ % every === 0) await sc.leases.refresh();
     const sources = sc.db.listWorkspaces().flatMap((ws) => ((r) => (r ? [{ ws, repository: r.toLowerCase() }] : []))(sc.leaseRepository(ws)));
+    // what closed or has no one at it is given back alongside the renewal, not before it: a give-back waits behind
+    // a stuck take of the same PBI, and the renewal of the others must not wait for that
+    const giving: Array<Promise<void>> = [];
     for (const held of sc.leases.held()) {
       const at = sources.filter((x) => x.repository === held.repository.toLowerCase());
       const closed = at.some(({ ws }) => storedIssueHeads(sc.db, { id: ws.id }).get(held.pbi)?.state === "CLOSED");
       // a lease taken for a stage Task (by this daemon, or by one before it), with no stage Task of the PBI at it here
       // any more: nobody is at it. One a session took for itself (the lease route) is its own to give back
       const orphan = (held.recovered || held.stage) && !at.some(({ ws }) => leaseWanted(sc, ws.id, held.pbi));
-      if (closed || orphan) await sc.leases.release(held.repository, held.pbi);
+      if (closed || orphan) giving.push(sc.leases.release(held.repository, held.pbi).catch((e) => console.error(`[lease] PBI #${held.pbi} was not given back: ${String((e as Error)?.message ?? e).slice(0, 200)}`)));
     }
-    for (const lost of await sc.leases.renewAll()) {
+    const lostLeases = await sc.leases.renewAll();
+    await Promise.allSettled(giving);
+    for (const lost of lostLeases) {
       console.error(`[lease] PBI #${lost.pbi} (${lost.repository}): the lease is lost (${lost.why})`);
       for (const { ws } of sources.filter((x) => x.repository === lost.repository.toLowerCase())) {
         // the Task at it: also one between turns that waits for a PR, a date or the person (it would go on later)

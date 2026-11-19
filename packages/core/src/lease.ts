@@ -26,6 +26,10 @@ export interface Lease {
 export type Acquired = { ok: true } | { ok: false; holder: string; until: number };
 
 export const leaseKey = (repository: string, pbi: number) => `lease/${repository.toLowerCase()}/${pbi}.json`;
+/** The proof of a machine's holding of a PBI (its current token only): written by that machine under a prefix only it can write, so a lease naming a machine is believed only with it. */
+export const proofKey = (machine: string, repository: string, pbi: number) => `lease-proof/${machine}/${repository.toLowerCase()}/${pbi}.json`;
+const TOKEN_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const encodeProof = (token: string, state: "held" | "released") => new TextEncoder().encode(JSON.stringify({ token, state }));
 const PREFIX = "lease/";
 
 /** The most a lease is read as: one is a few hundred bytes, and whatever else lies under a lease's key is not brought here whole. */
@@ -63,6 +67,18 @@ export class PbiLeases {
 
   constructor(private store: S3Store, private opts: { machine: string; ttlMs: number; now?: () => number }) {}
 
+  /** The operations on one lease key that change it (take, give back, one renewal) run one at a time on this machine: a give-back never lands between a take's read and its write. */
+  private chains = new Map<string, Promise<unknown>>();
+  private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.chains.get(key) ?? Promise.resolve()).then(fn, fn);
+    const tail = run.catch(() => {});
+    this.chains.set(key, tail);
+    void tail.then(() => {
+      if (this.chains.get(key) === tail) this.chains.delete(key);
+    });
+    return run;
+  }
+
   private now(): number {
     return (this.opts.now ?? Date.now)();
   }
@@ -71,6 +87,40 @@ export class PbiLeases {
   private async read(key: string, pbi: number): Promise<{ etag: string; lease: Lease | null } | null> {
     const got = await this.store.get(key, { maxBytes: LEASE_MAX_BYTES });
     return got ? { etag: got.etag, lease: got.more ? null : decode(got.body, pbi) } : null;
+  }
+
+  /** The proof of a machine's holding as stored: its token and state, or null when there is none (or it is no proof). A read that fails throws. */
+  private async readProof(machine: string, repository: string, pbi: number): Promise<{ token?: unknown; state?: unknown } | null> {
+    const got = await this.store.get(proofKey(machine, repository, pbi), { maxBytes: LEASE_MAX_BYTES });
+    if (!got || got.more) return null;
+    try {
+      const p = JSON.parse(new TextDecoder().decode(got.body));
+      return p && typeof p === "object" ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether a lease that names a machine was written by it: its token has the shape this code gives (anything else is
+   * no holder's, and not looked up) and the proof under that machine's own prefix says the same token is held (a given-back
+   * holding's proof says released). Without one the lease is no holder's, and the PBI may be taken (as one that ran out).
+   * A proof that cannot be read throws: the caller does not take the PBI on a guess.
+   */
+  private async vouched(repository: string, pbi: number, lease: Lease, quiet = false): Promise<boolean> {
+    let ok = false;
+    if (TOKEN_SHAPE.test(lease.token)) {
+      const p = await this.readProof(lease.machine, repository, pbi);
+      ok = p?.token === lease.token && p.state === "held";
+    }
+    if (!ok && !quiet) console.error(`[lease] PBI #${pbi}: ${lease.machine} を名乗るリースに証が無い`);
+    return ok;
+  }
+
+  /** Marks this machine's proof released when it is the proof of `token`: that token written back proves nothing from now on. */
+  private async retire(repository: string, pbi: number, token: string): Promise<void> {
+    const p = await this.readProof(this.opts.machine, repository, pbi);
+    if (p?.token === token && p.state !== "released") await this.store.put(proofKey(this.opts.machine, repository, pbi), encodeProof(token, "released"));
   }
 
   /**
@@ -116,7 +166,7 @@ export class PbiLeases {
     // a look at the bucket under way (`refresh`) must not take this lease for one a daemon before this one left
     this.acquiring.set(key, (this.acquiring.get(key) ?? 0) + 1);
     try {
-      return await this.take(key, repository, pbi, forStage);
+      return await this.serial(key, () => this.take(key, repository, pbi, forStage));
     } finally {
       const left = this.acquiring.get(key)! - 1;
       if (left > 0) this.acquiring.set(key, left);
@@ -131,15 +181,23 @@ export class PbiLeases {
       const now = this.now();
       const had = await this.read(key, pbi);
       const lease = had?.lease ?? null;
-      if (had && lease && lease.state === "held" && lease.machine !== this.opts.machine && !this.over(key, lease, had.etag, now)) {
+      if (had && lease && lease.state === "held" && lease.machine !== this.opts.machine && !this.over(key, lease, had.etag, now) && (await this.vouched(repository, pbi, lease))) {
         const until = this.endOf(lease, now);
         this.theirs.set(key, { repository, pbi, holder: lease.machine, until });
         return { ok: false, holder: lease.machine, until };
       }
-      const token = crypto.randomUUID();
       const expiresAt = now + this.opts.ttlMs;
+      // its own held lease (even one that ran out) is written again under the token it has, with the proof it has: a failure half way leaves them agreeing
+      let token = lease && lease.state === "held" && lease.machine === this.opts.machine && (await this.vouched(repository, pbi, lease, true)) ? lease.token : "";
+      if (!token) {
+        // anything else is a new holding: its proof first (over the last one, which is no longer the lease's), so a lease of this machine is never there without it
+        token = crypto.randomUUID();
+        await this.store.put(proofKey(this.opts.machine, repository, pbi), encodeProof(token, "held"));
+      }
       const put = await this.store.put(key, encode({ pbi, machine: this.opts.machine, token, state: "held", expiresAt }), had ? { ifMatch: had.etag } : { ifNoneMatch: true });
       if (put === "conflict") continue;
+      // the holding's proof is written again once the lease is: whatever else touched it (a give-back that ran before this machine kept the lease) does not leave the lease unproven
+      await this.store.put(proofKey(this.opts.machine, repository, pbi), encodeProof(token, "held"));
       this.mine.set(key, { repository, pbi, token, etag: put.etag, expiresAt, ...(forStage ? { stage: true } : {}) });
       this.theirs.delete(key);
       return { ok: true };
@@ -148,12 +206,18 @@ export class PbiLeases {
   }
 
   /** Gives the PBI's lease back, when this machine holds it (also one a daemon before this one took); another's is left. */
-  async release(repository: string, pbi: number): Promise<void> {
+  release(repository: string, pbi: number): Promise<void> {
     const key = leaseKey(repository, pbi);
+    return this.serial(key, () => this.giveBack(key, repository, pbi));
+  }
+
+  private async giveBack(key: string, repository: string, pbi: number): Promise<void> {
     this.mine.delete(key);
     const had = await this.read(key, pbi);
     const lease = had?.lease ?? null;
     if (!had || !lease || lease.machine !== this.opts.machine || lease.state !== "held") return;
+    // the proof says released first: the token left in the lease proves nothing from now on, so it cannot be written back
+    await this.retire(repository, pbi, lease.token);
     // a write lost here means another machine took it over meanwhile (it had run out): then it is theirs
     await this.store.put(key, encode({ ...lease, state: "released", expiresAt: this.now() }), { ifMatch: had.etag });
   }
@@ -161,37 +225,65 @@ export class PbiLeases {
   /**
    * Renews every lease held, each with one conditional write over this machine's last one. A lease is lost — no longer
    * held here, and returned so the caller can stop the work on it — when another machine wrote over it meanwhile
-   * (`taken`), or when it could not be renewed (the bucket not reached, the credentials run out, the machine asleep)
+   * (`taken`: the write was refused or failed, and the lease read again is missing, given back, unreadable or not this
+   * machine's token; one still carrying this machine's token is kept), or when it could not be renewed (the bucket not reached, the credentials run out, the machine asleep)
    * until its own end came near (`expired`: within a fifth of its life of the end this machine last wrote): from then
    * on another machine may take it at any moment, so this one no longer acts as its holder. A failed renewal before
-   * that keeps the lease and is tried again next round.
+   * that keeps the lease and is tried again next round. The leases are renewed side by side, so the order of what
+   * is returned is the order they were settled in.
    */
   async renewAll(): Promise<Array<{ repository: string; pbi: number; why: "taken" | "expired" }>> {
     const lost: Array<{ repository: string; pbi: number; why: "taken" | "expired" }> = [];
-    for (const [key, held] of [...this.mine]) {
-      const now = this.now();
-      const drop = (why: "taken" | "expired") => {
-        this.mine.delete(key);
-        this.seen.delete(key);
-        lost.push({ repository: held.repository, pbi: held.pbi, why });
-      };
-      // not renewed in time (this machine slept, or every try failed): it is not written again as if nothing happened
-      if (now >= held.expiresAt) {
-        drop("expired");
-        continue;
-      }
-      const expiresAt = now + this.opts.ttlMs;
-      let put: Awaited<ReturnType<S3Store["put"]>>;
-      try {
-        put = await this.store.put(key, encode({ pbi: held.pbi, machine: this.opts.machine, token: held.token, state: "held", expiresAt }), { ifMatch: held.etag });
-      } catch (e) {
-        if (this.now() >= held.expiresAt - this.opts.ttlMs / 5) drop("expired");
-        else console.error(`[lease] PBI #${held.pbi} (${held.repository}) was not renewed: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-        continue;
-      }
-      if (put === "conflict") drop("taken");
-      else if (this.mine.get(key)?.token === held.token) this.mine.set(key, { ...held, etag: put.etag, expiresAt });
-    }
+    // the keys run side by side (one slow take or give-back of a PBI does not hold up the renewal of another's), each one behind its own `serial`
+    await Promise.all([...this.mine].map(([key, held]) =>
+      this.serial(key, async () => {
+        // a take or give-back that ran first changed this holding: what was seen at the start of the round is not renewed or dropped
+        const cur = this.mine.get(key);
+        if (!cur || cur.token !== held.token || cur.etag !== held.etag) return;
+        const now = this.now();
+        const drop = async (why: "taken" | "expired") => {
+          this.mine.delete(key);
+          this.seen.delete(key);
+          lost.push({ repository: held.repository, pbi: held.pbi, why });
+          // what this machine no longer holds cannot be written back as its holding (a failure is only logged)
+          await this.retire(held.repository, held.pbi, held.token).catch((e) => console.error(`[lease] PBI #${held.pbi} (${held.repository}): the proof was not released: ${String((e as Error)?.message ?? e).slice(0, 200)}`));
+        };
+        // not renewed in time (this machine slept, or every try failed): it is not written again as if nothing happened
+        if (now >= held.expiresAt) return drop("expired");
+        const expiresAt = now + this.opts.ttlMs;
+        let put: Awaited<ReturnType<S3Store["put"]>> | undefined;
+        let failure: unknown;
+        try {
+          put = await this.store.put(key, encode({ pbi: held.pbi, machine: this.opts.machine, token: held.token, state: "held", expiresAt }), { ifMatch: held.etag });
+        } catch (e) {
+          failure = e;
+        }
+        if (put && put !== "conflict") {
+          this.mine.set(key, { ...held, etag: put.etag, expiresAt });
+          return;
+        }
+        // a write that threw (the limit ended it) may have reached the bucket, and a refused one may be refused for a lease that is still this machine's: the key is read again before anything is dropped
+        let again: Awaited<ReturnType<PbiLeases["read"]>> | undefined;
+        try {
+          again = await this.read(key, held.pbi);
+        } catch (e) {
+          failure ??= e;
+        }
+        if (again !== undefined) {
+          const l = again?.lease;
+          if (again && l && l.state === "held" && l.machine === this.opts.machine && l.token === held.token) {
+            // still this holding: kept under what the bucket has now (the renewal arrived, or the next round makes it), unless it did not arrive and the end is near
+            if (failure && this.now() >= l.expiresAt - this.opts.ttlMs / 5) return drop("expired");
+            this.mine.set(key, { ...held, etag: again.etag, expiresAt: l.expiresAt });
+            return;
+          }
+          return drop("taken");
+        }
+        // the bucket cannot be read either: kept until the end comes near, and tried again next round
+        if (this.now() >= held.expiresAt - this.opts.ttlMs / 5) await drop("expired");
+        else console.error(`[lease] PBI #${held.pbi} (${held.repository}) was not renewed: ${String((failure as Error)?.message ?? failure).slice(0, 200)}`);
+      }),
+    ));
     return lost;
   }
 
@@ -222,7 +314,7 @@ export class PbiLeases {
       if (!got || this.mine.has(key) || this.acquiring.has(key)) continue;
       this.seen.set(key, got.etag);
       const at = { repository: m[1]!, pbi: Number(m[2]) };
-      if (lease?.state === "held" && lease.machine !== this.opts.machine && !this.over(key, lease, got.etag, now)) this.theirs.set(key, { ...at, holder: lease.machine, until: this.endOf(lease, now) });
+      if (lease?.state === "held" && lease.machine !== this.opts.machine && !this.over(key, lease, got.etag, now) && (await this.vouched(at.repository, at.pbi, lease).catch(() => true))) this.theirs.set(key, { ...at, holder: lease.machine, until: this.endOf(lease, now) });
       else this.theirs.delete(key);
       if (lease?.state === "held" && lease.expiresAt > now && lease.machine === this.opts.machine) this.mine.set(key, { ...at, token: lease.token, etag: got.etag, expiresAt: this.endOf(lease, now), recovered: true });
     }

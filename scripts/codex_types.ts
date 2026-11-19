@@ -30,6 +30,7 @@ const SEEDS = [
   "v2/CommandExecutionRequestApprovalParams", "v2/CommandExecutionRequestApprovalResponse",
   "v2/FileChangeRequestApprovalParams", "v2/FileChangeRequestApprovalResponse",
   "v2/ToolRequestUserInputParams", "v2/ToolRequestUserInputResponse",
+  "v2/McpServerElicitationRequestParams", "v2/McpServerElicitationRequestResponse",
 ];
 
 let genDir = process.env.CODEX_TS_DIR;

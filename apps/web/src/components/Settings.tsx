@@ -181,6 +181,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
               <span className="job-name">
                 {t(j.label)}
                 {j.id === "judge" && !judge.enabled && s.evals.judge.enabled && <span className="hint"> {t(settings.usedByRubric)}</span>}
+                {j.id !== "review" && <span className="muted" style={{ display: "block" }}>{t(settings.defaultValue, { value: jobRows(d).find((r) => r.id === j.id)?.runner ?? "" })}</span>}
               </span>
               {j.id === "review" ? (
                 <>
@@ -191,8 +192,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
                       </option>
                     ))}
                   </select>
-                  <span className="muted">{t(settings.runnerDefault)}</span>
-                  <span className="muted">{t(settings.runnerDefault)}</span>
+                  <span className="muted" style={{ gridColumn: "span 2" }}>{t(settings.defaultValue, { value: t(REVIEW_RUNNER_LABELS[d.reviewRunner]) })}</span>
                 </>
               ) : (
                 <>
@@ -268,7 +268,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
       </SettingsCard>
 
       <SettingsCard title={t(settings.sweep)} className="tunables">
-        <SweepSlots onError={props.onError} />
+        <SweepSlots onError={props.onError} flowLimit={qr.flowShareLimit} defaultFlowLimit={d.quotaAndResume.flowShareLimit} onSettings={setS} />
         {/* the limit of Tasks running at once: over it a Task waits for a run slot; the daemon starts the waiting ones as soon as it is raised */}
         <NumberField label={t(settings.maxRunnersLabel)} hint={t(settings.maxRunnersHint)} value={s.maxRunners} def={d.maxRunners} min={1} max={8} disabled={saving} onSave={(v) => save({ maxRunners: v })} />
         <div className="muted">{t(settings.maxRunnersHint)}</div>
@@ -654,7 +654,7 @@ export function GithubSync() {
 }
 
 /** backlog-next's slots of each workspace: what each firing reads, so a save applies from the next one. */
-export function SweepSlots(props: { onError: (msg: string) => void }) {
+export function SweepSlots(props: { onError: (msg: string) => void; flowLimit: number; defaultFlowLimit: number; onSettings: (s: SettingsResponse) => void }) {
   const [saved, setSaved] = useState<Workspace[] | null>(null);
   const [alloc, setAlloc] = useState<BacklogAllocation | null>(null);
   const [draft, setDraft] = useState<Record<string, { implement: string; plan: string; share: string; mode: WorkspaceMode }>>({});
@@ -670,8 +670,8 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
   const load = () => Promise.all([api.workspaces(), api.backlogAllocation().catch(() => null)]).then(([list, a]) => show(list, a));
   useEffect(() => {
     load().catch((e) => props.onError(String(e.message ?? e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => void (alloc && setFlowDraft(shareText(props.flowLimit))), [props.flowLimit]); // eslint-disable-line react-hooks/exhaustive-deps -- the card's 既定に戻す saves through the parent: only the cap's box follows, so unsaved slot edits stay
   const save = async () => {
     if (!saved) return;
     // an emptied box would be Number("") = 0, which switches the slot off: only a typed digit counts
@@ -701,7 +701,7 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
         .map((w) => ({ w, from: w.allocation.share, to: parseShare(draft[w.id]!.share) as number | null, mode: draft[w.id]!.mode }))
         .filter((c) => c.to !== c.from || c.mode !== c.w.allocation.mode);
       for (const c of saveOrder(changed)) await api.setWorkspaceAllocation(c.w.id, { share: c.to, mode: c.mode });
-      if (alloc && typeof flow === "number" && flow !== alloc.flow.limit) await api.updateSettings({ quotaAndResume: { flowShareLimit: flow } });
+      if (alloc && typeof flow === "number" && flow !== props.flowLimit) props.onSettings(await api.updateSettings({ quotaAndResume: { flowShareLimit: flow } }));
     } catch (e) {
       props.onError(String((e as Error).message ?? e));
     } finally {
@@ -765,7 +765,7 @@ export function SweepSlots(props: { onError: (msg: string) => void }) {
       {alloc && (
         <div className="row" data-flow-limit style={{ alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           <span className="t">{t(settings.allocFlow)}</span>
-          <input type="text" inputMode="decimal" aria-label={t(settings.allocFlowLabel)} value={flowDraft} onChange={(e) => setFlowDraft(e.target.value)} style={{ width: 56 }} />
+          <input type="text" inputMode="decimal" aria-label={t(settings.allocFlowLabel)} value={flowDraft} onChange={(e) => setFlowDraft(e.target.value)} style={{ width: 56 }} /><span className="muted">{t(settings.defaultValue, { value: shareText(props.defaultFlowLimit) })}</span>
           <span className="hint">
             {t(settings.allocActual)} {Math.round(alloc.flow.actual * 100)}%
           </span>

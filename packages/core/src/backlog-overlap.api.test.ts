@@ -11,7 +11,7 @@ import type { GhRunner } from "./backlog-gh.ts";
 import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine } from "./backlog-overlap.ts";
 import { judge as guardJudge } from "../../../scripts/parallel-guard.ts";
 import { overlapTurnOf } from "./backlog-overlap.ts";
-import { backlogNextSchedule, boot, closeTried, holdingClaude, item, metaId, metaName, overlapReadyGh, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, sweepAll, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
+import { backlogNextSchedule, boot, closeTried, holdingClaude, item, metaId, metaName, overlapReadyGh, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, sweepAll, threeWorkspaces, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -117,6 +117,22 @@ test("backlog-next overlap: in one firing of implement 2, a Ready PBI whose Task
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 重なり: #309（Task #3041: src/a.ts）`));
   expect(log.filter((l) => l.includes("実装の枠: 重なり: "))).toHaveLength(1);
+});
+
+test("backlog-next overlap: two workspaces with the same name: a start in one keeps the other's overlap line", async () => {
+  const { base, ids } = await threeWorkspaces(holdingClaude().adapter, undefined, overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/c.ts" }));
+  closeTried(...Object.values(ids));
+  const patch = (ws: string, sweep: unknown) => fetch(`${base}/api/workspaces/${ws}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ sweep }) });
+  expect((await patch(metaId(), { implement: 0, plan: 0 })).status).toBe(200);
+  for (const ws of [ids.lib!, ids.app!]) expect((await patch(ws, { implement: 2, plan: 0 })).status).toBe(200);
+  // the names are not unique: both workspaces are called twin
+  for (const ws of [ids.lib!, ids.app!]) core!.db["sqlite"].query("UPDATE workspaces SET name = 'twin' WHERE id = ?").run(ws);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  // each workspace started 304 and 310 (309 names 304's file)
+  expect(startedTasks().map((t) => `${t.workspaceId === ids.lib ? "lib" : "app"}${t.title.split(":")[0]}`).sort()).toEqual(["app#304 実装", "app#310 実装", "lib#304 実装", "lib#310 実装"]);
+  // each said its own 重なり line after its starts; the second's reread did not take the first's out
+  expect((await scheduleLogAll(base)).filter((l) => l.includes("twin: 実装の枠: 重なり: #309（Task #3041: src/a.ts）"))).toHaveLength(2);
 });
 
 test("backlog-next overlap: Ready PBIs whose Tasks name different paths all start in one firing", async () => {

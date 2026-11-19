@@ -16,7 +16,7 @@ describe("pbiProgress", () => {
   });
 
   test("the table has a row for each answer being given and not given", () => {
-    for (const k of ["closableByApi", "closable", "prereqMet"] as const) expect(new Set(table.map((r) => r.want[k])).size, k).toBe(2);
+    for (const k of ["closableByApi", "closable", "prereqMet", "checking"] as const) expect(new Set(table.map((r) => r.want[k])).size, k).toBe(2);
     expect(table.some((r) => r.want.asked.length > 1) && table.some((r) => r.want.asked.length === 0)).toBe(true);
     expect(table.some((r) => r.want.closesOnAnswer !== null) && table.some((r) => r.want.closesOnAnswer === null && r.want.closableByApi)).toBe(true);
     expect(table.some((r) => r.facts.held) && table.some((r) => r.facts.decision) && table.some((r) => r.facts.status === null) && table.some((r) => !r.facts.pbi)).toBe(true);
@@ -24,7 +24,7 @@ describe("pbiProgress", () => {
 
   test("pbiFactsOf reads the user-check lines and the other unchecked criteria from the body", () => {
     const body = ["## 到達点 / 受け入れ条件", "- [x] 1. 済み", "- [ ] 2. まだ（検証: テスト）", "- [ ] 3. 見た目（利用者確認: 画面で見る）", "- [ ] 4. 書き方の説明 `（利用者確認: …）` の形", "", "## スコープ外", "- [ ] 数えない"].join("\n");
-    expect(pbiFactsOf({ labels: ["type:pbi"], body, status: "In progress", tasks: { total: 2, done: 2 } })).toEqual({ pbi: true, decision: false, status: "In progress", tasks: { total: 2, done: 2 }, others: 2, confirms: [3], decided: [], held: false });
+    expect(pbiFactsOf({ labels: ["type:pbi"], body, status: "In progress", tasks: { total: 2, done: 2 } })).toEqual({ pbi: true, decision: false, status: "In progress", tasks: { total: 2, done: 2 }, others: 2, confirms: [3], postMerge: [], decided: [], held: false });
     const only = ["## 到達点 / 受け入れ条件", "- [x] 1. 済み", "- [ ] 2. 見た目（利用者確認: 画面で見る）"].join("\n");
     expect(pbiFactsOf({ labels: ["type:pbi", "needs-decision"], body: only, status: null, tasks: { total: 1, done: 1 } })).toMatchObject({ decision: true, status: null, others: 0, confirms: [2] });
     expect(pbiProgress(pbiFactsOf({ labels: ["type:pbi"], body: only, status: null, tasks: { total: 1, done: 1 } })).prereqMet).toBe(true);

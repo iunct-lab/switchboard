@@ -370,4 +370,34 @@ describe("history import: Claude Code sessions run in a terminal, from ~/.claude
       rmSync(h, { recursive: true, force: true });
     }
   });
+
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/terminal-session.jsonl"))("a session file of another machine's Task is not imported into it", async () => {
+    assertRecordings("packages/adapters/claude/fixtures/terminal-session.jsonl");
+    const { h, repo, projects, pdir } = setup("hist-other");
+    const c = await daemon(h, projects, fakeAdapter([{ t: "session.end", status: "ok" }]));
+    try {
+      const ws = c.db.upsertWorkspace({ name: "repo", path: repo, kind: "repo" });
+      const t = c.tasks.create({ runner: "claude", workspaceId: ws.id, cwd: repo, title: "taken in", prompt: "go" });
+      await waitFor(async () => c.db.getTask(t.id)!.status === "done");
+      c.db.sqlite.query("UPDATE tasks SET machine = 'pc1', runner_session_id = ? WHERE id = ?").run(SESSION, t.id);
+      const file = join(pdir, `${SESSION}.jsonl`);
+      writeFileSync(file, FIXTURE.replaceAll("/work/repo", repo));
+      age(file);
+      const events = () => c.db.listEvents(t.id).length;
+      const before = events(), tasks = c.db.listTasks().length;
+      const first = c.history.scan();
+      expect(first).toMatchObject({ files: 1, created: 0, appended: 0 });
+      expect(first.errors).toEqual([`${SESSION}.jsonl: session of a Task of pc1; not imported`]);
+      expect(events()).toBe(before);
+      expect(c.db.listTasks()).toHaveLength(tasks);
+      expect(c.db.getHistoryImport(SESSION)).toBeNull();
+      // the file growing does not change it
+      appendFileSync(file, `${cliUser(repo, SESSION, "もう一言", "2026-09-06T14:00:00.000Z")}\n`);
+      c.history.scan();
+      expect(events()).toBe(before);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
 });

@@ -402,14 +402,14 @@ export function importedAs(n: number, over: Record<string, unknown>, fetchState:
 }
 
 const bareItem = (over: Partial<BacklogItem>): Omit<BacklogItem, "progress"> => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 /** A hand-built item with the answers `pbiProgress` gives for its stage and Tasks (what the daemon's read puts on it). */
 export const item = (over: Partial<BacklogItem>): BacklogItem => {
   const i = bareItem(over);
-  const p = pbiProgress({ pbi: i.type === "pbi", decision: i.stage === "needs-decision", status: i.stage === "in-progress" ? "In progress" : null, tasks: i.tasks ?? { total: 0, done: 0 }, others: 0, confirms: i.confirmations.map((c) => c.n), decided: [], held: false });
-  return { ...i, progress: over.progress ?? { closableByApi: p.closableByApi, closesOnAnswer: p.closesOnAnswer } };
+  const p = pbiProgress({ pbi: i.type === "pbi", decision: i.stage === "needs-decision", status: i.stage === "in-progress" ? "In progress" : null, tasks: i.tasks ?? { total: 0, done: 0 }, others: 0, confirms: i.confirmations.map((c) => c.n), postMerge: i.postMerge.map((c) => c.n), decided: [], held: false });
+  return { ...i, progress: over.progress ?? { closableByApi: p.closableByApi, closesOnAnswer: p.closesOnAnswer, checking: p.checking } };
 };
 
 /** A fake meta checkout carries the kit's process candidates, as the real one does: a stage start reads `ops-kit/processes/p0-pipeline.md` from the meta workspace. */

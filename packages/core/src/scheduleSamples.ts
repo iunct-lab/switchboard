@@ -72,7 +72,8 @@ export const SCHEDULE_SAMPLES: readonly ScheduleSample[] = [
 
 /**
  * Adds the samples the setting does not hold yet to `workspaceId`, disabled; returns the rows it added. Each id is
- * recorded as its row is made, so one that failed is tried again at the next start and the others are in.
+ * recorded in the same transaction as its row, so one that failed leaves neither and is tried again at the next start,
+ * and the others are in.
  */
 export function addSamples(db: Db, scheduler: Scheduler, workspaceId: string, samples: readonly ScheduleSample[] = SCHEDULE_SAMPLES): Schedule[] {
   const added: Schedule[] = [];
@@ -81,8 +82,14 @@ export function addSamples(db: Db, scheduler: Scheduler, workspaceId: string, sa
     const have = db.getSetting<string[]>(SAMPLES_KEY, []);
     if (have.includes(s.id)) continue;
     try {
-      added.push(scheduler.create({ title: SAMPLE_TITLE_PREFIX + s.title, cron: s.cron, action: "prompt", prompt: s.prompt, runner: s.runner, workspaceId, enabled: false }));
-      db.setSetting(SAMPLES_KEY, [...have, s.id]);
+      // the row and its record are one write: a failure to record rolls the row back, so the next call does not add it twice
+      added.push(
+        db.sqlite.transaction(() => {
+          const row = scheduler.create({ title: SAMPLE_TITLE_PREFIX + s.title, cron: s.cron, action: "prompt", prompt: s.prompt, runner: s.runner, workspaceId, enabled: false });
+          db.setSetting(SAMPLES_KEY, [...have, s.id]);
+          return row;
+        })(),
+      );
     } catch (e) {
       failed.push(`${s.id} (${String((e as Error).message ?? e)})`);
     }
@@ -111,16 +118,21 @@ export const SECRET_SCAN = { id: "secret-scan", title: "認証の値の検査", 
 export function ensureSecretScan(db: Db, scheduler: Scheduler, workspaceId: string): Schedule | null {
   const have = db.getSetting<string[]>(PROVISIONED_KEY, []);
   if (have.includes(SECRET_SCAN.id)) return null;
-  let added: Schedule | null = null;
-  if (!db.listSchedules().some((s) => s.action === "secret-scan" && s.enabled)) {
-    try {
-      added = scheduler.create({ title: SECRET_SCAN.title, cron: SECRET_SCAN.cron, action: "secret-scan", runner: "claude", workspaceId, enabled: true });
-    } catch (e) {
-      // not recorded: tried again at the next start (the meta folder is missing)
-      console.warn(`secret scan: could not add the schedule (${String((e as Error).message ?? e)})`);
-      return null;
-    }
+  // an enabled scan already there: nothing to add, only the record
+  if (db.listSchedules().some((s) => s.action === "secret-scan" && s.enabled)) {
+    db.setSetting(PROVISIONED_KEY, [...have, SECRET_SCAN.id]);
+    return null;
   }
-  db.setSetting(PROVISIONED_KEY, [...have, SECRET_SCAN.id]);
-  return added;
+  try {
+    // the row and its record are one write: a failure of either leaves neither, so the next start adds one scan
+    return db.sqlite.transaction(() => {
+      const row = scheduler.create({ title: SECRET_SCAN.title, cron: SECRET_SCAN.cron, action: "secret-scan", runner: "claude", workspaceId, enabled: true });
+      db.setSetting(PROVISIONED_KEY, [...have, SECRET_SCAN.id]);
+      return row;
+    })();
+  } catch (e) {
+    // not recorded: tried again at the next start (the meta folder is missing, or the record failed)
+    console.warn(`secret scan: could not add the schedule (${String((e as Error).message ?? e)})`);
+    return null;
+  }
 }

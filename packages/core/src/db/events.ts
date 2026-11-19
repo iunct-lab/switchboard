@@ -24,6 +24,17 @@ export function eventsByPrefixSql(prefixes: string[]): string {
     .join(" UNION ALL ");
 }
 
+const PERMISSION_PREFIXES = ['{"t":"permission.ask",', '{"t":"permission.resolved",'];
+const PERMISSION_EVENTS_CHUNK = 500;
+
+/** The query `listPermissionEvents` runs for one prefix and `n` task ids (bound as `?`): the WHERE of the prefix's partial index. */
+export function permissionEventsSql(prefix: string, n: number): string {
+  const len = EVENT_PREFIX_INDEX[prefix];
+  if (len === undefined) throw new Error(`listPermissionEvents: no index for the prefix ${prefix}`);
+  // the literal has no quote, so it is safe inline (as in eventsByPrefixSql)
+  return `SELECT task_id, ts, seq, json FROM events WHERE task_id IN (${Array(n).fill("?").join(", ")}) AND substr(json, 1, ${len}) = '${prefix}'`;
+}
+
 /** The most events one page of a Task's conversation returns: `limit` is clamped to it, and a page that reaches back to a message's start stops there. */
 export const EVENTS_PAGE_MAX = 5000;
 
@@ -59,12 +70,21 @@ export class EventQueries extends TaskQueries {
     return out;
   }
 
-  /** The permission.ask / permission.resolved events of these tasks, oldest first; the same prefix compare as listStopRecords. */
+  /**
+   * The permission.ask / permission.resolved events of these tasks, oldest first (ties in the order of `taskIds`). Each kind
+   * is read with the WHERE of its partial index (events_ask / events_resolved), word for word (`permissionEventsSql`), so
+   * the rows come from the index and not from every event of the task.
+   */
   listPermissionEvents(taskIds: string[]): EventEnvelope[] {
-    const prefix = '{"t":"permission.';
-    const q = this.sqlite.query("SELECT task_id, ts, seq, json FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ?");
-    const rows = taskIds.flatMap((id) => q.all(id, prefix, prefix) as Array<{ task_id: string; ts: number; seq: number; json: string }>);
-    return rows.sort((a, b) => a.ts - b.ts || a.seq - b.seq).map((r) => ({ taskId: r.task_id, ts: r.ts, seq: r.seq, ev: JSON.parse(r.json) as AgentEvent }));
+    const rows: Array<{ task_id: string; ts: number; seq: number; json: string }> = [];
+    for (let i = 0; i < taskIds.length; i += PERMISSION_EVENTS_CHUNK) {
+      const chunk = taskIds.slice(i, i + PERMISSION_EVENTS_CHUNK);
+      for (const p of PERMISSION_PREFIXES) rows.push(...(this.sqlite.query(permissionEventsSql(p, chunk.length)).all(...chunk) as typeof rows));
+    }
+    const order = new Map(taskIds.map((id, i) => [id, i]));
+    return rows
+      .sort((a, b) => a.ts - b.ts || a.seq - b.seq || order.get(a.task_id)! - order.get(b.task_id)!)
+      .map((r) => ({ taskId: r.task_id, ts: r.ts, seq: r.seq, ev: JSON.parse(r.json) as AgentEvent }));
   }
 
   /**

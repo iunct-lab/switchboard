@@ -6,10 +6,11 @@ import { BacklogEditInput, type BacklogIssueData, type BacklogSource } from "@sw
 import { PROCEED_CONFIRMED, PROCEED_OVERTURNED, proceedAnswerLine, proceedingAnswer } from "./backlog-comments.ts";
 import { storedEnds } from "./backlog-stored.ts";
 import { answerStoredDecision, BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue } from "./backlog-edit.ts";
-import { askWithdrawnPrereqs, mergePrereqs } from "./backlog-waits.ts";
+import { askWithdrawnPrereqs, mergePrereqs, prereqOf } from "./backlog-waits.ts";
 import { isUnblocked, overlapIn, pickNext, heldIn } from "./backlog-pick.ts";
-import { readStoredBacklog, readStoredIssue, workspaceSyncOf } from "./backlog-stored.ts";
+import { readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
 import { asksFromBacklog } from "./asks.ts";
+import { storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
 // The backlog read from what the last import stored: no GitHub involved — readStoredBacklog takes no gh at all.
@@ -206,6 +207,32 @@ describe("pickNext prerequisite", () => {
     ]);
     // so the firing's log and the row name it once
     expect(heldIn(readStoredBacklog(db, ws).items, "implement").find((h) => h.item.number === 1)!.pending.map((p) => p.number)).toEqual([2, 3]);
+  });
+
+  test("a closed Task or a prerequisite the last import could not read (unread) counts the same for the daemon and the parallel guard", async () => {
+    const left = "## 到達点 / 受け入れ条件\n- [x] 作る\n- [ ] 目で見る（利用者確認: 画面を見る）";
+    const base = (extra: BacklogSnapshotEntry[]) => [
+      ...pbi(1, "P0", "**前提**: #2", { subIssues: [10] }), issue(10, ["type:task"]),
+      issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), issue(20, ["type:task"], { state: "CLOSED" }),
+      ...extra,
+    ];
+    const both = async (ws: { id: string; name: string; path: string }) => {
+      const daemon = readStoredBacklog(db, ws).items.find((i) => i.number === 1)!.prereqs.map(({ number, state, confirming }) => ({ number, state, confirming }));
+      const guard = prereqOf(await storedMaterial(readStoredRecords(db, ws)!, 10).target(2), "done", () => null);
+      return { daemon, guard };
+    };
+    // every Task read as closed: left with only the user's check, met and confirming — the same on both sides
+    const ws = imported(base([issue(21, ["type:task"], { state: "CLOSED" })]));
+    expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "met", confirming: true }], guard: { state: "met", confirming: true } });
+    // (a) one Task stored CLOSED but not read in full: not counted closed, so the PBI is not left with only the check
+    db.putBacklogSnapshot(SOURCE, { records: [{ ...issue(21, ["type:task"], { state: "CLOSED" }), fetchState: "forbidden" }], cursor: null, syncedAt: 6000 });
+    expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "pending", confirming: false }], guard: { state: "pending", confirming: false } });
+    // (b) the prerequisite itself not read in full: not judged (missing), however it was stored
+    db.putBacklogSnapshot(SOURCE, { records: [issue(21, ["type:task"], { state: "CLOSED" }), { ...issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), fetchState: "unavailable" }], cursor: null, syncedAt: 7000 });
+    expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "missing", confirming: false }], guard: { state: "missing", confirming: false } });
+    // (c) a number stored as both an Issue and a PR (a workspace kept only here numbers its own): the Issue on both sides
+    db.putBacklogSnapshot(SOURCE, { records: [issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), { objectKind: "pull-request", externalId: "PR_2", remote: { number: 2, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" }], cursor: null, syncedAt: 8000 });
+    expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "met", confirming: true }], guard: { state: "met", confirming: true } });
   });
 
   test("mergePrereqs: the entry kept is the one that holds the PBI most (a cycle, else one not met), with every naming Task", () => {
@@ -405,6 +432,24 @@ describe("pickNext overlap", () => {
       const ws = imported([...two(issue(10, ["type:task"], { body: "パスの名指し無し", parent: 1 }), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), pr(51, null)]);
       expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
     }
+  });
+
+  test("a Task whose body changed is read for its paths again", () => {
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts")]);
+    const hits = () => readStoredBacklog(db, ws, { active: (n) => n === 1 }).items.find((i) => i.number === 2)!.overlap;
+    expect(hits()).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true }], unknown: null });
+    db.putBacklogSnapshot(SOURCE, { records: [issue(20, ["type:task"], { body: "触る場所: `src/z.ts`", parent: 2 })], cursor: null, syncedAt: 6000 });
+    expect(hits()).toBeNull();
+  });
+
+  test("a Task at work whose body changed is read for its paths again", () => {
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })]);
+    const hits = () => readStoredBacklog(db, ws).items.find((i) => i.number === 1)!.overlap;
+    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
+    db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task"], { body: "`src/z.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
+    expect(hits()).toBeNull();
+    db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 7000 });
+    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
   });
 
   test("a PBI whose stage Task runs (active) holds its open Tasks as the other work, Ready or not; one that does not overlap starts too; without active nothing changes", () => {

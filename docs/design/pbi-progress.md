@@ -4,7 +4,8 @@ Several places need to know how far a PBI is: the asks screen (is this user chec
 other work go on), the Backlog screen (can the row be closed), the scheduled run that moves the backlog on (close it,
 leave it to the person, or count it as a met prerequisite) and the parallel guard that a Task runs before it starts
 (is the prerequisite met). They used to each write the rule out, and a rule added in one place disagreed with the
-others: a PBI with open Tasks showed its user check with "answering lets 2 more go on", although answering changed nothing.
+others. The invariant they have to share: an answer to a user check is said to let other work go on only when it
+actually does, so while a PBI still has open Tasks, answering its user check moves nothing and is not shown as if it did.
 
 `pbiProgress` in [`packages/core/src/pbi-progress.ts`](../../packages/core/src/pbi-progress.ts) is the one place that
 decides. It is a pure function: the same facts give the same answers. Callers read facts (`pbiFactsOf` in
@@ -23,6 +24,7 @@ answers; none of them compares Task counts or counts confirmation lines itself. 
 | `others` | Unchecked acceptance criteria that are not user checks. |
 | `confirms` | The numbers of the unchecked user-check lines (`（利用者確認: …）`), including dated ones and ones checked by a decision's answer. |
 | `decided` | The lines among `confirms` that name decisions which are all stored: the decisions' own cards ask, not the user check. |
+| `postMerge` | The numbers of the unchecked after-merge lines (`（マージの後: <kind>）`, kind = `画面` / `E2E` / `実ランナー` / `観測`; a `観測` line also says `期日 <ISO 8601 with a zone> 以降`). Only a look at what runs after the merge can tick them, so they are not "other" criteria. A line that also carries a user-check mark counts as the user check. |
 | `held` | One of those decisions is still open. |
 
 ## Answers (output)
@@ -31,9 +33,10 @@ answers; none of them compares Task counts or counts confirmation lines itself. 
 |---|---|---|
 | `asked` | The user-check lines asked now. None while a Task is open: what is not built cannot be checked, and pressing "confirmed" would tick a criterion nobody verified. | `BacklogItem.confirmations`: the asks screen, the Backlog row, the answer route |
 | `closableByApi` | Built (In progress / In review, no open question) and every Task closed. The API accepts `close`, user checks left or not. | `BacklogItem.progress.closableByApi`: the start route, the "user checks only" line of the log |
-| `closable` | `closableByApi`, nothing left to ask, and no named decision open. | `BacklogItem.closable`: the row's close button, the scheduled run's close, what an answer starts |
-| `prereqMet` | Every Task closed (at least one), no open question, and the only unchecked criteria are user checks (at least one). The PBI waits for the person, not for more work, so a PBI that names it as a prerequisite goes on. Status is not looked at. | prerequisites in the app (`prereqOf`) and in the parallel guard |
-| `closesOnAnswer` | The one line whose answer closes the PBI: `closableByApi`, no named decision open, and exactly one line asked. `-` = no answer closes it. | `rankAsks`: "answering lets N more go on" is shown only on that line's question; every other question lists the PBIs as waiting for this PBI to be done |
+| `closable` | `closableByApi`, nothing left to ask, no named decision open, and no after-merge line left. | `BacklogItem.closable`: the row's close button, the scheduled run's close, what an answer starts |
+| `prereqMet` | Every Task closed (at least one), no open question, and the only unchecked criteria are user checks and after-merge lines (at least one of them). The PBI waits for the person, not for more work, so a PBI that names it as a prerequisite goes on. Status is not looked at. | prerequisites in the app (`prereqOf`) and in the parallel guard |
+| `checking` | Every Task closed (at least one), no open question, no other unchecked criterion, and at least one after-merge line left: the PBI is built and is being looked at after the merge, so it is neither closable nor waiting for more work. Status is not looked at. | `BacklogItem.progress.checking` |
+| `closesOnAnswer` | The one line whose answer closes the PBI: `closableByApi`, no named decision open, no after-merge line left, and exactly one line asked. `-` = no answer closes it. | `rankAsks`: "answering lets N more go on" is shown only on that line's question; every other question lists the PBIs as waiting for this PBI to be done |
 
 A date a line waits for (`期日 … 以降`) is not in the table: it changes with the clock, so the asks screen reads it when it
 builds the questions. A dated line still counts in `asked`.
@@ -48,32 +51,38 @@ write the rule at a caller.
 Notation: `yes` / `no`; `tasks` is closed/total; a list of line numbers is comma-separated; `-` is an empty list, a
 Status that was not read, or no line.
 
-| Row | pbi | decision | status | tasks | others | confirms | decided | held | asked | closableByApi | closable | prereqMet | closesOnAnswer |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| a request | no | no | - | 0/0 | 0 | - | - | no | - | no | no | no | - |
-| not a PBI, though it looks done | no | no | - | 2/2 | 0 | 5 | - | no | - | no | no | no | - |
-| Ready, nothing built | yes | no | Ready | 0/3 | 2 | 5 | - | no | - | no | no | no | - |
-| Ready, yet only user checks left | yes | no | Ready | 2/2 | 0 | 5 | - | no | - | no | no | yes | - |
-| In progress, a Task open | yes | no | In progress | 1/3 | 0 | 5 | - | no | - | no | no | no | - |
-| In review, a Task open | yes | no | In review | 2/3 | 0 | 5 | - | no | - | no | no | no | - |
-| In progress, no Tasks at all | yes | no | In progress | 0/0 | 0 | 5 | - | no | 5 | no | no | no | - |
-| all closed, two user checks | yes | no | In progress | 3/3 | 0 | 5, 6 | - | no | 5, 6 | yes | no | yes | - |
-| all closed, the last user check | yes | no | In progress | 3/3 | 0 | 5 | - | no | 5 | yes | no | yes | 5 |
-| In review, the last user check | yes | no | In review | 3/3 | 0 | 5 | - | no | 5 | yes | no | yes | 5 |
-| all closed, nothing unchecked | yes | no | In progress | 3/3 | 0 | - | - | no | - | yes | yes | no | - |
-| all closed, only other criteria unchecked | yes | no | In progress | 3/3 | 1 | - | - | no | - | yes | yes | no | - |
-| a user check and another criterion | yes | no | In progress | 3/3 | 1 | 5 | - | no | 5 | yes | no | no | 5 |
-| an open question, only user checks left | yes | yes | In progress | 3/3 | 0 | 5 | - | no | 5 | no | no | no | - |
-| one of two lines decided, its decision open | yes | no | In progress | 3/3 | 0 | 5, 6 | 6 | yes | 5 | yes | no | yes | - |
-| one of two lines decided, its decision answered | yes | no | In progress | 3/3 | 0 | 5, 6 | 6 | no | 5 | yes | no | yes | 5 |
-| every line decided, a decision open | yes | no | In progress | 3/3 | 0 | 5 | 5 | yes | - | yes | no | yes | - |
-| every line decided and answered | yes | no | In progress | 3/3 | 0 | 5 | 5 | no | - | yes | yes | yes | - |
-| guard: only user checks left | yes | no | - | 3/3 | 0 | 5, 6 | - | no | - | no | no | yes | - |
-| guard: a Task open | yes | no | - | 2/3 | 0 | 5 | - | no | - | no | no | no | - |
-| guard: no Tasks | yes | no | - | 0/0 | 0 | 5 | - | no | - | no | no | no | - |
-| guard: another criterion unchecked | yes | no | - | 3/3 | 1 | 5 | - | no | - | no | no | no | - |
-| guard: nothing unchecked | yes | no | - | 3/3 | 0 | - | - | no | - | no | no | no | - |
-| guard: an open question | yes | yes | - | 3/3 | 0 | 5 | - | no | - | no | no | no | - |
+| Row | pbi | decision | status | tasks | others | confirms | postMerge | decided | held | asked | closableByApi | closable | prereqMet | checking | closesOnAnswer |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| a request | no | no | - | 0/0 | 0 | - | - | - | no | - | no | no | no | no | - |
+| not a PBI, though it looks done | no | no | - | 2/2 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| Ready, nothing built | yes | no | Ready | 0/3 | 2 | 5 | - | - | no | - | no | no | no | no | - |
+| Ready, yet only user checks left | yes | no | Ready | 2/2 | 0 | 5 | - | - | no | - | no | no | yes | no | - |
+| In progress, a Task open | yes | no | In progress | 1/3 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| In review, a Task open | yes | no | In review | 2/3 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| In progress, no Tasks at all | yes | no | In progress | 0/0 | 0 | 5 | - | - | no | 5 | no | no | no | no | - |
+| all closed, two user checks | yes | no | In progress | 3/3 | 0 | 5, 6 | - | - | no | 5, 6 | yes | no | yes | no | - |
+| all closed, the last user check | yes | no | In progress | 3/3 | 0 | 5 | - | - | no | 5 | yes | no | yes | no | 5 |
+| In review, the last user check | yes | no | In review | 3/3 | 0 | 5 | - | - | no | 5 | yes | no | yes | no | 5 |
+| all closed, nothing unchecked | yes | no | In progress | 3/3 | 0 | - | - | - | no | - | yes | yes | no | no | - |
+| all closed, only other criteria unchecked | yes | no | In progress | 3/3 | 1 | - | - | - | no | - | yes | yes | no | no | - |
+| a user check and another criterion | yes | no | In progress | 3/3 | 1 | 5 | - | - | no | 5 | yes | no | no | no | 5 |
+| an open question, only user checks left | yes | yes | In progress | 3/3 | 0 | 5 | - | - | no | 5 | no | no | no | no | - |
+| one of two lines decided, its decision open | yes | no | In progress | 3/3 | 0 | 5, 6 | - | 6 | yes | 5 | yes | no | yes | no | - |
+| one of two lines decided, its decision answered | yes | no | In progress | 3/3 | 0 | 5, 6 | - | 6 | no | 5 | yes | no | yes | no | 5 |
+| every line decided, a decision open | yes | no | In progress | 3/3 | 0 | 5 | - | 5 | yes | - | yes | no | yes | no | - |
+| every line decided and answered | yes | no | In progress | 3/3 | 0 | 5 | - | 5 | no | - | yes | yes | yes | no | - |
+| guard: only user checks left | yes | no | - | 3/3 | 0 | 5, 6 | - | - | no | - | no | no | yes | no | - |
+| guard: a Task open | yes | no | - | 2/3 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| guard: no Tasks | yes | no | - | 0/0 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| guard: another criterion unchecked | yes | no | - | 3/3 | 1 | 5 | - | - | no | - | no | no | no | no | - |
+| guard: nothing unchecked | yes | no | - | 3/3 | 0 | - | - | - | no | - | no | no | no | no | - |
+| guard: an open question | yes | yes | - | 3/3 | 0 | 5 | - | - | no | - | no | no | no | no | - |
+| after-merge checking | yes | no | In progress | 3/3 | 0 | - | 7 | - | no | - | yes | no | yes | yes | - |
+| after-merge checking beside a user check | yes | no | In progress | 3/3 | 0 | 5 | 7 | - | no | 5 | yes | no | yes | yes | - |
+| after-merge checking, another criterion unchecked | yes | no | In progress | 3/3 | 1 | - | 7 | - | no | - | yes | no | no | no | - |
+| after-merge checking, a Task open | yes | no | In progress | 2/3 | 0 | - | 7 | - | no | - | no | no | no | no | - |
+| after-merge checking, an open question | yes | yes | In progress | 3/3 | 0 | - | 7 | - | no | - | no | no | no | no | - |
+| guard: after-merge checking | yes | no | - | 3/3 | 0 | - | 7 | - | no | - | no | no | yes | yes | - |
 
 ## What is not decided here
 

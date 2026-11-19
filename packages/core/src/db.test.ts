@@ -8,6 +8,7 @@ import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey, Task } from "@switchboard/protocol";
 import { InvalidTaskOutcomeError } from "./task-status.ts";
 import { abortOrphanedTasks, createdIssuesOf, createdPullsOf, Db, deferredOf, schemaLevel, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { permissionEventsSql } from "./db/events.ts";
 import { MIGRATIONS } from "./db/migrations/index.ts";
 import { columnsOf } from "./db/migrate.ts";
 import { SCHEMA } from "./db/schema.ts";
@@ -866,6 +867,50 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   expect(db.workingStageTask("ws", 8)!.id).toBe("t_plain"); // a reply being judged is work under way, for the overlap check too
   db.updateTask("t_plain", { judgingAt: null, updatedAt: 3 });
   expect(db.activeStageTask("ws", 8)).toBeNull();
+  db.close();
+});
+
+test("StageIssues: the Issue sets are what workingStageTask / activeStageTask find, per workspace", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const mk = (id: string, ws: string, issue: number | null, status: "done" | "error" | "running", updatedAt: number) => db.insertTask({ id, workspaceId: ws, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: issue === null ? null : { issue, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
+  mk("t_run", "ws", 10, "running", 1);
+  mk("t_run2", "ws", 10, "running", 2); // two Tasks of one Issue: one member
+  mk("t_other_ws", "ws2", 11, "running", 3);
+  mk("t_done", "ws", 12, "done", 4);
+  mk("t_plan", "ws", 13, "error", 5);
+  mk("t_nostage", "ws", null, "running", 6);
+  db.updateTask("t_plan", { resumeAt: 100 }); // a resume planned: held (dedupe), not working (slot)
+  expect([...db.workingStageIssues("ws")]).toEqual([10]);
+  expect([...db.activeStageIssues("ws")].sort()).toEqual([10, 13]);
+  expect([...db.workingStageIssues("ws2")]).toEqual([11]);
+  for (const n of [10, 11, 12, 13, 14]) {
+    expect(db.workingStageIssues("ws").has(n)).toBe(!!db.workingStageTask("ws", n));
+    expect(db.activeStageIssues("ws").has(n)).toBe(!!db.activeStageTask("ws", n));
+  }
+  expect(db.workingStageIssues("none").size).toBe(0);
+  db.close();
+});
+
+test("listPermissionEvents: only the given Tasks' ask and resolved events, oldest first, from the partial indexes", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  db.appendEventAt("t_a", { t: "permission.resolved", id: "p1", decision: "allow" } as AgentEvent, 30);
+  db.appendEventAt("t_a", { t: "permission.ask", id: "p1", kind: "other", tool: "T", detail: "d" }, 10);
+  db.appendEventAt("t_a", { t: "message.delta", role: "assistant", text: "x" }, 15);
+  db.appendEventAt("t_b", { t: "permission.ask", id: "p2", kind: "other", tool: "T", detail: "d" }, 20);
+  db.appendEventAt("t_c", { t: "permission.ask", id: "p3", kind: "other", tool: "T", detail: "d" }, 5);
+  const got = db.listPermissionEvents(["t_a", "t_b"]);
+  expect(got.map((e) => [e.taskId, e.ev.t, e.ts])).toEqual([["t_a", "permission.ask", 10], ["t_b", "permission.ask", 20], ["t_a", "permission.resolved", 30]]);
+  expect(db.listPermissionEvents([])).toEqual([]);
+  // ties on (ts, seq) across Tasks (each Task's first event, at the same time) keep the order of the ids asked for
+  db.appendEventAt("t_d", { t: "permission.resolved", id: "p4", decision: "allow" } as AgentEvent, 40);
+  db.appendEventAt("t_e", { t: "permission.ask", id: "p5", kind: "other", tool: "T", detail: "d" }, 40);
+  expect(db.listPermissionEvents(["t_d", "t_e"]).map((e) => e.taskId)).toEqual(["t_d", "t_e"]);
+  expect(db.listPermissionEvents(["t_e", "t_d"]).map((e) => e.taskId)).toEqual(["t_e", "t_d"]);
+  // the query the function runs reads the partial index of each kind, not every event of the Task
+  const sqlite = (db as unknown as { sqlite: Database }).sqlite;
+  const plan = (p: string) => sqlite.query(`EXPLAIN QUERY PLAN ${permissionEventsSql(p, 2)}`).all("t_a", "t_b").map((r) => (r as { detail: string }).detail).join("\n");
+  expect(plan('{"t":"permission.ask",')).toContain("events_ask");
+  expect(plan('{"t":"permission.resolved",')).toContain("events_resolved");
   db.close();
 });
 
