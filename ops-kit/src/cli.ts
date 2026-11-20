@@ -36,7 +36,7 @@ const SCAN_TEXT_USAGE = `  scan-text <file|->
       出力は <file>:<行>: <種類>。値は出さない。exit 0 = 無い、1 = ある、2 = 読めなかった。設定ファイルは要らない`;
 
 const ISSUE_REFS_USAGE = `  issue-refs [<path>...]
-      コードのコメント（//・/* */・SQL の --・シェルや YAML の #・HTML の <!-- -->）とテストの名前（test / it / describe の第 1 引数）にある Issue 番号 #N を出す。文字列のデータ・色コード・URL の # は見ない。*.md と画像などは見ない
+      コードのコメント（//・/* */・SQL の --・シェルや YAML の #・HTML の <!-- -->）とテストの名前（test / it / describe の第 1 引数。test.skipIf(x)(…)・test.each(rows)(…) のような修飾子の後ろの呼び出しなら、その呼び出しの第 1 引数）にある Issue 番号 #N を出す。文字列のデータ・色コード・URL の # は見ない。*.md と画像などは見ない
       <path>（リポジトリの top からのファイルかディレクトリ）を渡せばその下の git のファイル、渡さなければ設定の publicSync の include / exclude が選ぶファイル
       出力は <path>:<行>: <行の文>、最後に hits: <当たり> / files: <読んだファイル>。exit 0 = 無い、1 = ある、2 = 読めなかった（設定・git の失敗）`;
 

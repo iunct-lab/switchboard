@@ -442,6 +442,45 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   for (const head of ["main@{0}", "sb/9-x.lock", "sb/", "/sb"]) expect((await create(ws, { title: "x", change: { head, base: "main" } })).status).toBe(400);
 });
 
+test("a merged change's record is written once: another merge is 409, the same one again changes nothing, reportedAt still goes", async () => {
+  const { base, local, create, view, send, add, dir } = await boot();
+  const ws = await local();
+  const tips = gitRepo(ws.path);
+  expect((await create(ws, { title: "c", change: { head: "sb/9-x", base: "main" } })).body.number).toBe(1);
+  const at = new Date().toISOString();
+  const merge = (n: number, change: Record<string, unknown>, q = "", w: Workspace = ws) => send("PATCH", `/api/backlog/${n}${q}`, { workspaceId: w.id, state: "CLOSED", change });
+  const record = { mergeCommit: tips.head, mergedAt: at, reviewedHead: tips.head };
+  expect((await merge(1, record)).status).toBe(202);
+  // another record, in any one of the three values, is refused and nothing of it is kept
+  for (const other of [{ ...record, mergeCommit: tips.main }, { ...record, mergedAt: "2030-01-01T00:00:00.000Z" }, { ...record, reviewedHead: tips.main }]) expect((await merge(1, other)).status).toBe(409);
+  expect((await view(ws, 1)).issue.change).toMatchObject(record);
+  // the same record again (a resend whose answer was lost) is let through and writes nothing
+  const queued = core!.db.listBacklogOperations(core!.db.getWorkspaceBacklogSource(ws.id)!).length;
+  expect((await merge(1, record)).status).toBe(202);
+  expect(core!.db.listBacklogOperations(core!.db.getWorkspaceBacklogSource(ws.id)!).length).toBe(queued);
+  expect((await view(ws, 1)).issue.change).toMatchObject(record);
+  // the report time is no merge record
+  expect((await send("PATCH", "/api/backlog/1", { workspaceId: ws.id, change: { reportedAt: at } })).status).toBe(202);
+  expect((await view(ws, 1)).issue.change).toMatchObject({ ...record, reportedAt: at });
+  // a change that is closed without a merge still takes its record once
+  expect((await create(ws, { title: "d", change: { head: "sb/9-x", base: "main" } })).body.number).toBe(2);
+  expect((await send("PATCH", "/api/backlog/2", { workspaceId: ws.id, state: "CLOSED" })).status).toBe(202);
+  expect((await merge(2, record)).status).toBe(202);
+  expect((await merge(2, { ...record, mergeCommit: tips.main })).status).toBe(409);
+  // the same on a GitHub workspace's change (?change=1)
+  const gh = (await (await add(dir("gh"))).json()) as Workspace;
+  gitRepo(gh.path);
+  core!.db.setWorkspaceBacklogSource(gh.id, { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } });
+  github.down = true;
+  expect((await send("POST", "/api/backlog", { workspaceId: gh.id, title: "c", change: { head: "sb/9-x", base: "main", pr: 77 } })).body.number).toBe(1);
+  expect((await merge(1, record, "?change=1", gh)).status).toBe(202);
+  expect((await merge(1, { ...record, mergeCommit: tips.main }, "?change=1", gh)).status).toBe(409);
+  expect((await merge(1, record, "?change=1", gh)).status).toBe(202);
+  expect((await send("PATCH", "/api/backlog/1?change=1", { workspaceId: gh.id, change: { reportedAt: at } })).status).toBe(202);
+  const shown = (await (await fetch(`${base}/api/backlog/1?workspaceId=${gh.id}&change=1`)).json()) as BacklogIssueDetail;
+  expect(shown.issue.change).toMatchObject({ ...record, reportedAt: at });
+});
+
 test("changes: every open one newest first, then the newest 10 closed", async () => {
   const { base, local, create, send } = await boot();
   const ws = await local();

@@ -111,12 +111,16 @@ export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" |
   const b = await sc.readBacklog(false);
   const live = new Map([...sc.db.listTasksUpdatedSince(now - ASK_HISTORY_MS), ...sc.db.listTasksWithResume(), ...sc.db.listTasksByStatus("waiting"), ...sc.db.listTasksByStatus("running"), ...sc.db.listTasksWithWaits()].map((t) => [t.id, t]));
   const policy = sc.policyEnv(b);
+  // each Task's stop records are read and reduced once in this call: asksFromTasks asks for a Task's stops several times, and the batches below read the same records
+  const recorded = new Map<string, ReturnType<typeof sc.db.listStopRecords>>();
+  const recordsOf = (id: string) => recorded.get(id) ?? recorded.set(id, sc.db.listStopRecords([id])).get(id)!;
+  const reduced = new Map<string, ReturnType<typeof reduceStops>>();
   const fromTasks = asksFromTasks({
     approvals: sc.tasks.pendingApprovals(),
     tasks: [...live.values()],
     lastTurnQuestions: (id) => sc.db.lastTurnQuestions(id),
     permissionEvents: (ids) => sc.db.listPermissionEvents(ids),
-    stops: (t) => reduceStops(sc.db.listStopRecords([t.id])),
+    stops: (t) => reduced.get(t.id) ?? reduced.set(t.id, reduceStops(recordsOf(t.id))).get(t.id)!,
     workspaceName: (id) => sc.db.getWorkspace(id)?.name ?? null,
     now,
     resumeFailures: sc.failed,
@@ -139,7 +143,7 @@ export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" |
   for (const id of sc.headMisses.keys()) if (!all.some((a) => a.id === id && (a.state === "open" || a.state === "held"))) sc.headMisses.delete(id);
   const asks = all.map((a) => (sc.headMisses.has(a.id) ? { ...a, policy: { ...a.policy, previous: sc.headMisses.get(a.id)! } } : a));
   // the same stop records as above, each Task's own
-  const batches = sc.batchAnswers.decorate(approvalBatches([...live.values()].map((t) => ({ task: t, records: sc.db.listStopRecords([t.id]) })), asks));
+  const batches = sc.batchAnswers.decorate(approvalBatches([...live.values()].map((t) => ({ task: t, records: recordsOf(t.id) })), asks));
   // the daemon's notices last: one of them reads the batches
   return { backlog: b, asks: rankAsks(dedupeAsks([...asks, ...sc.currentNotices(now, batches, asks), ...configAsks(sc, now)]), b.items), batches };
 };

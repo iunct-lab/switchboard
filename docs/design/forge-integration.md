@@ -164,7 +164,7 @@ A workspace whose Issues and PRs are GitHub's keeps working while GitHub cannot 
 | Reason of the gate | On the local path |
 |---|---|
 | Size over the limit; a protected path, a migration | The same, from git's diff of the branch against the base |
-| The security groups (`[聞く]`, `[再チェック]`), `rescue`, the responsibility files, the design rules of the README | The same kinds from the same file lists (git's diff, no rename guessing: both paths of a rename are judged) |
+| The security groups (`[聞く]`, `[再チェック]`), `rescue`, the instruction files (asked as `instructions`), the responsibility file, the design rules of the README | The same kinds from the same file lists (git's diff, no rename guessing: both paths of a rename are judged) |
 | `[再チェック <kind>]` lifted by a `[recheck] <kind> pass <head>` | The same, from the change's comments |
 | `--allow-large` without the person's `[merge-answer] yes` of the head | Evaluated, and never lifted here: the yes is not kept on such a change — the kit's command refuses it and so does the app's route, both reading the text in the one form the gate reads (`markText`), so a leading space or a full-width bracket changes nothing. A change with an ask reason waits for GitHub |
 | Files the Task's body does not name | The same, from the Task as last imported; the stop is recorded for the Task as a PR's is. A linked Issue that is not stored, or records that cannot be read, is no judgement (exit 2) |

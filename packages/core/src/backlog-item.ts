@@ -157,11 +157,28 @@ export function postMergeOf(body: string): Array<{ n: number; text: string; kind
  * them from the stored decisions); `status` null = not read.
  */
 export function pbiFactsOf(i: { labels: string[]; body: string; status: string | null; tasks: { total: number; done: number } }): PbiFacts {
-  const confirms = confirmationsOf(i.body).map((c) => c.n);
+  const { confirms, postMerge, others } = bodyFactsOf(i.body);
+  return { pbi: i.labels.includes("type:pbi"), decision: i.labels.includes("needs-decision"), status: i.status, tasks: { total: i.tasks.total, done: i.tasks.done }, others, confirms: [...confirms], postMerge: [...postMerge], decided: [], held: false };
+}
+
+/**
+ * What `pbiFactsOf` reads of the body alone, by the body: a pure function's result, so the same body is the same answer
+ * (a PBI whose body changed is read again, as its body is the key). Oldest first out past the limit, as `pathsIn`'s memo in
+ * backlog-overlap.ts. The arrays are shared between reads: `pbiFactsOf` copies them out.
+ */
+const BODY_FACTS_MEMO_MAX = 4000;
+const bodyFactsMemo = new Map<string, { confirms: readonly number[]; postMerge: readonly number[]; others: number }>();
+function bodyFactsOf(body: string): { confirms: readonly number[]; postMerge: readonly number[]; others: number } {
+  const hit = bodyFactsMemo.get(body);
+  if (hit) return hit;
+  const confirms = confirmationsOf(body).map((c) => c.n);
   // a line that carries both marks stays the user's check: one answer is not read two ways
-  const postMerge = postMergeOf(i.body).map((c) => c.n).filter((n) => !confirms.includes(n));
-  const others = criteria(i.body).filter((c) => !c.checked && !confirms.includes(c.n) && !postMerge.includes(c.n)).length;
-  return { pbi: i.labels.includes("type:pbi"), decision: i.labels.includes("needs-decision"), status: i.status, tasks: { total: i.tasks.total, done: i.tasks.done }, others, confirms, postMerge, decided: [], held: false };
+  const postMerge = postMergeOf(body).map((c) => c.n).filter((n) => !confirms.includes(n));
+  const others = criteria(body).filter((c) => !c.checked && !confirms.includes(c.n) && !postMerge.includes(c.n)).length;
+  const facts = { confirms, postMerge, others };
+  bodyFactsMemo.set(body, facts);
+  if (bodyFactsMemo.size > BODY_FACTS_MEMO_MAX) bodyFactsMemo.delete(bodyFactsMemo.keys().next().value!);
+  return facts;
 }
 
 /**

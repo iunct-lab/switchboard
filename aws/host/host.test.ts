@@ -2308,7 +2308,7 @@ describe("aws/host gh-guard on the host shell", () => {
 
 // docs/design/host-operations.md is left out of the public tree (publicSync.exclude), so a public clone skips these
 const hostOps = new URL("../../docs/design/host-operations.md", import.meta.url);
-describe.skipIf(!existsSync(hostOps))("docs/design/host-operations.md emergency steps (#1492)", () => {
+describe.skipIf(!existsSync(hostOps))("docs/design/host-operations.md emergency steps", () => {
   const readme = existsSync(hostOps) ? readFileSync(hostOps, "utf8") : "";
   const at = readme.indexOf("## 緊急時: 不審なアクセスがあったとき（#1492）");
   const section = at < 0 ? "" : readme.slice(at, readme.indexOf("\n## ", at + 1));

@@ -7,7 +7,7 @@ import type { TaskManager } from "./tasks/manager.ts";
 import { DISK_NOTE, GITHUB_NOTE, lastStopWasDaemon, STOP_RESUME_PROMPT } from "./interrupted.ts";
 import { GITHUB_REMAINING_MIN } from "./backlog-gh.ts";
 import type { GithubBudget } from "@switchboard/protocol";
-import { AUTO_RESUME_HEAD } from "./evals.ts";
+import { AUTO_RESUME_HEAD, isAutomaticUserText } from "./evals.ts";
 import { reportedLimit, type StopReport } from "./stops.ts";
 import type { StopRecord } from "@switchboard/protocol";
 import { isWorking } from "./task-status.ts";
@@ -94,9 +94,10 @@ const SATURATED = 0.999;
 
 const LIMIT_TEXT: Record<RunnerId, RegExp[]> = {
   // Verified: "You've hit your session limit · resets 4:10am (Asia/Tokyo)" (Claude Code 2.1.265, stream-json result), and the
-  // API's `rate_limit_error` body on a refused start. Anchored so "generate_limits", "cli.js:429:17", "context limit reached",
+  // API's `rate_limit_error` body on a refused start. Also verified: "You've hit your Fable limit · resets Nov 23, 11am (UTC). Switch to another model, …"
+  // (Claude Code 2.1.325, a model's own limit: 0-2 words between "your" and "limit"). Anchored so "generate_limits", "cli.js:429:17", "context limit reached",
   // "max turns (429)" and the like are not mistaken for it.
-  claude: [/hit your (?:session |usage |weekly |daily )?limit/i, /\busage limit/i, /\brate[ _-]?limit/i, /too many requests/i],
+  claude: [/hit your (?:[\w.-]+ ){0,2}limit/i, /\busage limit/i, /\brate[ _-]?limit/i, /too many requests/i],
   // Not recorded yet: matched on wording only (unverified against a recorded message).
   codex: [/\brate[ _-]?limit/i, /\busage limit/i, /too many requests/i, /credits? (?:depleted|exhausted)/i],
   dak: [],
@@ -108,14 +109,15 @@ export function isLimitText(runner: RunnerId, text: string | undefined): boolean
   return (LIMIT_TEXT[runner] ?? []).some((re) => re.test(text));
 }
 
-const TIME = "(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?";
+const TIME = "(\\d{1,2})(?::(\\d{2}))?(?!\\d)\\s*(am|pm)?";
 const ZONE = "(?:\\s*\\(([^)]+)\\))?";
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
 /**
  * When a banner says the limit lifts (ms), or undefined when it names no time. Verified wording: `resets 4:10am
- * (Asia/Tokyo)`. Also read, unverified: `resets at 16:10`, `resets in 3 hours`, `resets Sep 15 at 4am`, `resets Tue 4am`.
+ * (Asia/Tokyo)` and `resets Nov 23, 11am (UTC)` (Claude Code 2.1.325). Also read, unverified: `resets at 16:10`,
+ * `resets in 3 hours`, `resets Sep 15 at 4am`, `resets Tue 4am`.
  * A wall-clock time is the next time it comes round in the named zone (the daemon's zone when none or unknown), except
  * that a time passed less than `PAST_GRACE_MS` ago is returned as that past moment — it is the reset that has not taken
  * effect yet, not tomorrow's.
@@ -123,7 +125,7 @@ const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 export function parseResetBanner(text: string, now: number): number | undefined {
   const rel = /resets?\s+in\s+(?:(\d+)\s*(?:h|hr|hrs|hours?)\b)?(?:\s*(?:and\s+)?(\d+)\s*(?:m|min|mins|minutes?)\b)?/i.exec(text);
   if (rel && (rel[1] || rel[2])) return now + Number(rel[1] ?? 0) * 3600_000 + Number(rel[2] ?? 0) * 60_000;
-  const dated = new RegExp(`resets?\\s+(?:on\\s+)?(${MONTHS.join("|")})[a-z]*\\.?\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?\\s+(?:at\\s+)?${TIME}${ZONE}`, "i").exec(text);
+  const dated = new RegExp(`resets?\\s+(?:on\\s+)?(${MONTHS.join("|")})[a-z]*\\.?\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?,?\\s+(?:at\\s+)?${TIME}${ZONE}`, "i").exec(text);
   if (dated) {
     const hm = clock(dated[4], dated[5], dated[6]);
     if (!hm) return undefined;
@@ -359,7 +361,12 @@ export class RateLimitResumer {
 
   /** The follow-up of the wait the task is in. */
   private followUp(t: Task): string {
-    return t.resumeReason === "github" ? GITHUB_RESUME_PROMPT : t.resumeReason === "disk" ? DISK_RESUME_PROMPT : this.resumePrompt();
+    if (t.resumeReason === "github") return GITHUB_RESUME_PROMPT;
+    if (t.resumeReason === "disk") return DISK_RESUME_PROMPT;
+    const base = this.resumePrompt();
+    if (t.resumeReason !== "limit") return base;
+    const jobs = jobsAtLimit(this.db.listEvents(t.id).map((e) => e.ev));
+    return jobs.length > 0 ? `${base}\n\n使用上限の時点で動いていた背景の作業: ${jobNames(jobs)}。使用上限で止まったサブエージェントは、止まった所から続けさせてください。` : base;
   }
 
   /** Subscribe to turn ends and start the ticker. */
@@ -453,8 +460,10 @@ export class RateLimitResumer {
             ? "リセット時刻は過ぎているのに止まったので少し待って再試行"
             : "リセット時刻は停止メッセージから"
           : `リセット時刻が分からないので ${Math.round((at - now) / 60_000)} 分後に試します`;
+    const atLimit = jobsAtStop(this.db.listEvents(taskId).map((e) => e.ev));
+    const jobsNote = atLimit.length > 0 ? `上限の時点で動いていた背景の作業 ${atLimit.length} 件${atLimit.find((n) => n) ? `（${atLimit.find((n) => n)}${atLimit.length > 1 ? " ほか" : ""}）` : ""}。` : "";
     const action = tryAt !== undefined ? `${fmtTime(tryAt, now)} に 1 回試し、だめなら ${when} に自動再開します` : enabled ? `${when} に自動再開します` : `${when} に再開できます（自動再開は OFF — Home のランナー設定で ON にするか、返信で再開）`;
-    this.tasks.record(taskId, { t: "status", text: `使用上限で停止: ${stop.text}。${action}。${basis}` });
+    this.tasks.record(taskId, { t: "status", text: `使用上限で停止: ${stop.text}。${jobsNote}${action}。${basis}` });
     this.log(`ratelimit: ${taskId} hit the ${task.runner} limit; resume at ${new Date(tryAt ?? at).toISOString()} (${stop.source})`);
   }
 
@@ -798,6 +807,76 @@ const fmtFree = (bytes: number) => `${(bytes / DISK_FREE_MIN_BYTES).toFixed(1)} 
 const resumeStop = (r: Partial<StopReport>): StopReport => ({ id: RESUME_STOP, op: "resume.send", target: "", reason: "transient", evidence: "", safety: "before-effect", conditions: [], actions: [], state: "waiting", ...r, ...(r.evidence !== undefined ? { evidence: r.evidence.slice(0, 300) } : {}) });
 
 /* ---------- time helpers ---------- */
+
+/**
+ * The background jobs (a `background` event's `jobs`) a turn that ended on the limit was waiting on. The turn starts at
+ * the last `session.start`; the event right before it is the notification that started it (a job ended: the runner
+ * began the turn itself), so the count then is one job short, and the one before it is read. A turn a person's message
+ * started has no such notification before it: the nearest `background` is read. An old event without `jobs` gives
+ * `count` empty names: the number is kept, the names are not known.
+ */
+function jobsOfTurn(events: AgentEvent[]): string[] {
+  let start = events.length - 1;
+  while (start >= 0 && events[start]!.t !== "session.start") start--;
+  if (start < 0) return [];
+  let i = start - 1;
+  if (events[i]?.t === "background") i--;
+  while (i >= 0 && events[i]!.t !== "background") i--;
+  const ev = events[i];
+  if (ev?.t !== "background") return [];
+  // the runner leaves out a job it has no description for: the count stays, the missing names are empty
+  const names = ev.jobs ?? [];
+  return names.length >= ev.count ? names : [...names, ...Array.from({ length: ev.count - names.length }, () => "")];
+}
+
+const isLimitLine = (ev: AgentEvent) => ev.t === "status" && ev.text.startsWith("使用上限で停止");
+
+const isUserText = (ev: AgentEvent) => ev.t === "message.delta" && ev.role === "user";
+
+/** Where the daemon's own message (`AUTO_RESUME_HEAD`) began the turn that ended at `events[end]` (its `session.end`), or -1. */
+function resumeMessage(events: AgentEvent[], end: number): number {
+  for (let i = end - 1; i >= 0 && events[i]!.t !== "session.end"; i--) {
+    const ev = events[i]!;
+    if (ev.t === "message.delta" && ev.role === "user" && isAutomaticUserText(ev.text)) return i;
+  }
+  return -1;
+}
+
+/**
+ * The jobs running when the turn that ended last in `events` hit the limit. A turn the daemon's resume began right
+ * after a usage-limit stop (the early try, the resume at the planned time: no message, a person's or the daemon's,
+ * between that stop line and the resume) is not where the jobs stopped: its stop takes the jobs of that stop, so every
+ * resume of one wait names the same jobs. Any other turn (a person's, a notification's, a resume of another wait or
+ * of an older stop) counts its own.
+ */
+function jobsAtStop(events: AgentEvent[]): string[] {
+  let end = events.length;
+  for (;;) {
+    let turnEnd = end - 1;
+    while (turnEnd >= 0 && events[turnEnd]!.t !== "session.end") turnEnd--;
+    if (turnEnd < 0) return [];
+    const own = () => jobsOfTurn(events.slice(0, end));
+    const msg = resumeMessage(events, turnEnd);
+    if (msg < 0) return own();
+    let line = msg;
+    while (line > 0 && !isLimitLine(events[line - 1]!) && !isUserText(events[line - 1]!)) line--;
+    if (line === 0 || !isLimitLine(events[line - 1]!)) return own();
+    end = line;
+  }
+}
+
+/** The jobs of the last usage-limit stop (the last `使用上限で停止` line, else the end of the events): what a resume names. */
+export function jobsAtLimit(events: AgentEvent[]): string[] {
+  let end = events.length;
+  while (end > 0 && !isLimitLine(events[end - 1]!)) end--;
+  return jobsAtStop(end > 0 ? events.slice(0, end) : events);
+}
+
+function jobNames(jobs: string[]): string {
+  const names = jobs.filter((n) => n);
+  const unnamed = jobs.length - names.length;
+  return names.length === 0 ? `${jobs.length} 件` : unnamed > 0 ? `${names.join("、")} ほか名前の無い ${unnamed} 件` : names.join("、");
+}
 
 function localZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";

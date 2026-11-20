@@ -244,7 +244,7 @@ test("a directory a running process has as its cwd stays (in-use) until the proc
 // prctl(PR_SET_DUMPABLE, 0) hides the process's cwd and files from its own user, as ssh-agent does; its command line stays.
 // Not as root: root reads them anyway.
 const python = process.platform === "linux" && process.getuid?.() !== 0 ? Bun.which("python3") : null;
-test.skipIf(!python)("a process that cannot be read keeps what its command line names, also inside an option (#2058)", async () => {
+test.skipIf(!python)("a process that cannot be read keeps what its command line names, also inside an option", async () => {
   dir("switchboard.named.Ab12Cd", 8);
   dir("switchboard.option.Ab12Cd", 8);
   dir("switchboard.var.Ab12Cd", 8);

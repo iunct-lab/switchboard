@@ -1,6 +1,7 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, sharedMoved, loadReversibility, localCiOf, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { markedLinesTouched } from "./merge-gate-rules";
 import { resultComment } from "./local-ci";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -59,16 +60,16 @@ describe("merge-gate judge", () => {
     expect(judge(base({ files }), off)).toMatchObject({ verdict: "merge", impact: "small" });
   });
 
-  test("skill markdown counts and is a responsibility", () => {
+  test("skill markdown counts and is an instruction file", () => {
     const j = judge(base({ files: [{ path: ".claude/skills/pbi-complete/SKILL.md", additions: 1, deletions: 0 }] }), off);
     expect(j.impact).toBe("large");
-    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: .claude/skills/pbi-complete/SKILL.md"]);
+    expect(j.reasons).toEqual(["[聞く] 指示のファイル: .claude/skills/pbi-complete/SKILL.md"]);
     const big = judge(base({ files: [{ path: ".claude/skills/pbi-complete/SKILL.md", additions: 301, deletions: 0 }] }), off);
     expect(big.reasons[0]).toBe("[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている");
     // the shared skills in the kit are skills too
     const kit = judge(base({ files: [{ path: "ops-kit/skills/pbi-complete/SKILL.md", additions: 301, deletions: 0 }] }), off);
     expect(kit.impact).toBe("large");
-    expect(kit.reasons).toEqual(["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている", "[再チェック responsibility] 責務: ops-kit/skills/pbi-complete/SKILL.md"]);
+    expect(kit.reasons).toEqual(["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている", "[聞く] 指示のファイル: ops-kit/skills/pbi-complete/SKILL.md"]);
   });
 
   test.each([
@@ -82,8 +83,8 @@ describe("merge-gate judge", () => {
     ["packages/core/src/selfdev.ts", "[再チェック size] 保護するパスに触れている"],
     ["packages/core/config/pricing.json", "[再チェック size] 保護するパスに触れている"],
     ["scripts/setup/lint_backlog.sh", "[再チェック size] 保護するパスに触れている"],
-    [".claude/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
-    ["ops-kit/skills/x/SKILL.md", "[再チェック responsibility] 責務"],
+    [".claude/skills/x/SKILL.md", "[聞く] 指示のファイル"],
+    ["ops-kit/skills/x/SKILL.md", "[聞く] 指示のファイル"],
     ["package.json", "[再チェック size] 保護するパスに触れている"],
     ["bun.lock", "[再チェック security:lockfile] セキュリティ（security:lockfile）"],
   ])("one line in %s is large: %s", (path, why) => {
@@ -137,9 +138,9 @@ describe("merge-gate judge", () => {
   test("--allow-large lifts the security and responsibility stops too", () => {
     const files = [
       { path: "src/auth/session.ts", additions: 1, deletions: 0 },
-      { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 },
+      { path: "ops.config.json", additions: 1, deletions: 0 },
     ];
-    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"]);
+    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: ops.config.json"]);
     expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"] });
   });
 
@@ -154,8 +155,8 @@ describe("merge-gate judge", () => {
   });
 
   test("allow-large needs merge-answer", () => {
-    const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 }];
-    const large = ["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"];
+    const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: "ops.config.json", additions: 1, deletions: 0 }];
+    const large = ["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: ops.config.json"];
     const missing = expect.stringContaining("[merge-answer] yes が無い: security:words,responsibility");
     const allow = { allowLarge: true };
     // no mark: the reasons of a judgement without the flag, and the missing mark
@@ -332,6 +333,8 @@ describe("security sub-kinds", () => {
     ["scripts/local-ci.ts", "security:gates"],
     ["scripts/forge-resync.ts", "security:gates"],
     ["ops-kit/reversibility.json", "security:gates"],
+    ["scripts/merge-gate-limits.ts", "security:gates"],
+    ["scripts/merge-gate-rules.ts", "security:gates"],
     ["aws/host/sb-host-update.sh", "security:host"],
   ] as const)("%s → %s: the reason names the group, ask has it, still asked", (path, kind) => {
     const j = one(path);
@@ -526,10 +529,11 @@ describe("security sub-kinds", () => {
     // skills, CLAUDE.md, AGENTS.md and the .github templates decide what a Task gets: their group, not docs
     expect(groups(one(".github/PULL_REQUEST_TEMPLATE.md"))).toEqual(["security:github"]);
     expect(groups(one(".github/workflows/README.md"))).toEqual(["security:github"]);
-    expect(groups(one(".claude/skills/auth/SKILL.md"))).toEqual(["security:words"]);
-    expect(groups(one("ops-kit/skills/secret-x/SKILL.md"))).toEqual(["security:words"]);
-    expect(groups(one("aws/host/CLAUDE.md"))).toEqual(["security:host"]);
-    expect(groups(one("auth/AGENTS.md"))).toEqual(["security:words"]);
+    // and an instruction file is asked as instructions too, whatever group its path is in
+    expect(groups(one(".claude/skills/auth/SKILL.md"))).toEqual(["security:words", "instructions"]);
+    expect(groups(one("ops-kit/skills/secret-x/SKILL.md"))).toEqual(["security:words", "instructions"]);
+    expect(groups(one("aws/host/CLAUDE.md"))).toEqual(["security:host", "instructions"]);
+    expect(groups(one("auth/AGENTS.md"))).toEqual(["security:words", "instructions"]);
   });
 
   test("--allow-large needs a yes naming every group left", () => {
@@ -573,15 +577,72 @@ describe("approved security sub-kind rechecks", () => {
   });
 });
 
-describe("responsibility", () => {
-  test.each(["CLAUDE.md", "packages/core/CLAUDE.md", "AGENTS.md", "ops.config.json", ".claude/skills/a/SKILL.md", "ops-kit/skills/a/SKILL.md"])(
-    "one line in %s stops as 責務",
+describe("instructions", () => {
+  const file = (path: string, over: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, ...over });
+
+  test.each(["CLAUDE.md", "packages/core/CLAUDE.md", "AGENTS.md", ".claude/skills/a/SKILL.md", "ops-kit/skills/a/SKILL.md"])(
+    "instructions: one line in %s is asked of the owner, whose yes of the head lifts it and no recheck does",
     (path) => {
-      const j = judge(base({ files: [{ path, additions: 1, deletions: 0 }] }), off);
-      expect(j).toMatchObject({ verdict: "stop", impact: "large" });
-      expect(j.reasons).toEqual([`[再チェック responsibility] 責務: ${path}`]);
+      const j = judge(base({ files: [file(path)] }), off);
+      expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [`[聞く] 指示のファイル: ${path}`], ask: ["instructions"], recheck: [] });
+      expect(judge(base({ files: [file(path)], rechecks: ["responsibility", "size"] }), off).verdict).toBe("stop");
+      expect(judge(yes("instructions", { files: [file(path)] }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
+      expect(judge(yes("size", { files: [file(path)] }), { allowLarge: true }).verdict).toBe("stop");
+      // instructions is no recheck kind: its mark is not read at all
+      expect(RECHECK_PASS.exec(`[recheck] instructions pass ${"a".repeat(40)}`)).toBeNull();
     },
   );
+
+  test("instructions mixed: an instruction file with a file that is no test is split, and no yes lifts it", () => {
+    const allow = { allowLarge: true };
+    for (const other of ["scripts/x.ts", "docs/design/x.md", "README.md"]) {
+      const files = [file(".claude/skills/x/SKILL.md"), file(other)];
+      const split = `[分ける] 指示のファイル（.claude/skills/x/SKILL.md）とほかのファイル（${other}）を同じ PR で変えている。指示のファイルだけの PR に分けて出し直す`;
+      expect(judge(base({ files }), off).reasons).toContain(split);
+      const lifted = judge(yes("instructions", { files }), allow);
+      expect(lifted).toMatchObject({ verdict: "stop", reasons: [split] });
+    }
+    // a test beside the instruction file is no mix (the test's name is data; the file is not changed)
+    const withTest = [file("ops-kit/skills/x/SKILL.md"), file("ops-kit/src/x.test.ts")];
+    expect(judge(base({ files: withTest }), off).reasons).toEqual(["[聞く] 指示のファイル: ops-kit/skills/x/SKILL.md"]);
+    expect(judge(yes("instructions,security:tests", { files: withTest }), allow).verdict).toBe("merge");
+    // a rename out of an instruction path is the instruction file's change too
+    const renamed = [file("docs/x.md", { status: "renamed", previous: "CLAUDE.md" }), file("scripts/y.ts")];
+    expect(judge(base({ files: renamed }), off).reasons).toContainEqual(expect.stringContaining("[分ける] 指示のファイル（docs/x.md（改名前: CLAUDE.md））とほかのファイル（docs/x.md, scripts/y.ts）"));
+  });
+
+  test("rescue/CLAUDE.md is an instruction file too: asked, and split from the rescue code", () => {
+    const alone = judge(base({ files: [file("rescue/CLAUDE.md")] }), off);
+    expect(alone).toMatchObject({ verdict: "stop", ask: ["instructions"], recheck: ["rescue"] });
+    expect(alone.reasons).toContain("[聞く] 指示のファイル: rescue/CLAUDE.md");
+    const j = judge(base({ files: [file("rescue/CLAUDE.md"), file("rescue/src/x.ts")] }), off);
+    expect(j.reasons.some((r) => r.startsWith("[分ける]"))).toBe(true);
+  });
+
+  test("a rename out of an instruction path is asked, and split as a local change shows it (a file removed and a file added)", () => {
+    const j = judge(base({ files: [{ path: "docs/old-rules.md", additions: 0, deletions: 0, status: "renamed", previous: "CLAUDE.md" }] }), off);
+    expect(j).toMatchObject({ verdict: "stop", ask: ["instructions"] });
+    expect(j.reasons).toContain("[聞く] 指示のファイル: docs/old-rules.md（改名前: CLAUDE.md）");
+    expect(j.reasons).toContain("[分ける] 指示のファイル（docs/old-rules.md（改名前: CLAUDE.md））とほかのファイル（docs/old-rules.md）を同じ PR で変えている。指示のファイルだけの PR に分けて出し直す");
+    // a copy out of an instruction file changes no instruction file, as a local change sees it (a file added)
+    const copy = judge(base({ files: [{ path: "docs/rules-copy.md", additions: 3, deletions: 0, status: "copied", previous: "CLAUDE.md" }] }), off);
+    expect(copy.ask).toEqual([]);
+    expect(copy.reasons.some((r) => r.includes("指示のファイル"))).toBe(false);
+    // a rename into an instruction path removes an ordinary file: split, as a local change shows it
+    const into = judge(base({ files: [{ path: "CLAUDE.md", additions: 0, deletions: 0, status: "renamed", previous: "src/notes.ts" }] }), off);
+    expect(into.reasons).toContain("[分ける] 指示のファイル（CLAUDE.md）とほかのファイル（src/notes.ts（改名で消える））を同じ PR で変えている。指示のファイルだけの PR に分けて出し直す");
+    // a rename between instruction paths is not a mix
+    const inside = judge(base({ files: [{ path: ".claude/skills/b/SKILL.md", additions: 0, deletions: 0, status: "renamed", previous: ".claude/skills/a/SKILL.md" }] }), off);
+    expect(inside.reasons.some((r) => r.startsWith("[分ける]"))).toBe(false);
+  });
+});
+
+describe("responsibility", () => {
+  test("one line in ops.config.json stops as 責務", () => {
+    const j = judge(base({ files: [{ path: "ops.config.json", additions: 1, deletions: 0 }] }), off);
+    expect(j).toMatchObject({ verdict: "stop", impact: "large" });
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
+  });
 
   test("ops.config.json alone (where the CI steps live) is a responsibility recheck, not security:github", () => {
     const j = judge(base({ files: [{ path: "ops.config.json", additions: 3, deletions: 1 }] }), off);
@@ -594,9 +655,9 @@ describe("responsibility", () => {
   test("docs/design alone is not a responsibility file (the scope is the main review's)", () => {
     const design = { path: "docs/design/x.md", additions: 1, deletions: 0 };
     expect(judge(base({ files: [design] }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
-    const j = judge(base({ files: [design, { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 }] }), off);
+    const j = judge(base({ files: [design, { path: "ops.config.json", additions: 1, deletions: 0 }] }), off);
     expect(j.recheck).toEqual(["responsibility"]);
-    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"]);
+    expect(j.reasons).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
   });
 
   test("docs outside docs/design do not stop", () => {
@@ -639,6 +700,45 @@ describe("responsibility", () => {
   });
 });
 
+describe("user-marked lines", () => {
+  const file = "# C\n- a\n- b（2026-11-03 の利用者の指摘）\n- c（2026-11-07 の利用者の決定）\n- d\n";
+  test("a deleted or rewritten marked line is listed by its base line number", () => {
+    expect(markedLinesTouched(file, "@@ -2,3 +2,2 @@\n - a\n-- b（2026-11-03 の利用者の指摘）\n - c（2026-11-07 の利用者の決定）\n")).toEqual([3]);
+    expect(markedLinesTouched(file, "@@ -3,2 +3,2 @@\n-- b（2026-11-03 の利用者の指摘）\n+- b, reworded\n-- c（2026-11-07 の利用者の決定）\n+- c2\n")).toEqual([3, 4]);
+  });
+
+  test("an unmarked line changed, or a line only added, is not listed", () => {
+    expect(markedLinesTouched(file, "@@ -2 +2 @@\n-- a\n+- a2\n")).toEqual([]);
+    expect(markedLinesTouched(file, "@@ -3,0 +4 @@\n+- new（2026-11-09 の利用者の指示）\n")).toEqual([]);
+    expect(markedLinesTouched(file, "@@ -3 +3,2 @@\n - b（2026-11-03 の利用者の指摘）\n+- more\n")).toEqual([]);
+  });
+
+  test("the reason of an instruction file's change names the lines; none, no note", () => {
+    const files = [{ path: "CLAUDE.md", additions: 1, deletions: 1 }];
+    const j = judge(base({ files, userRulesTouched: ["CLAUDE.md:3", "AGENTS.md:9"] }), off);
+    expect(j.reasons).toEqual(["[聞く] 指示のファイル: CLAUDE.md（利用者の決まりの行を消す・変える: CLAUDE.md:3, AGENTS.md:9）"]);
+    expect(judge(base({ files }), off).reasons).toEqual(["[聞く] 指示のファイル: CLAUDE.md"]);
+    expect(judge(base({ files, userRulesTouched: [] }), off).reasons).toEqual(["[聞く] 指示のファイル: CLAUDE.md"]);
+    // the responsibility reason carries no such note
+    expect(judge(base({ files: [{ path: "ops.config.json", additions: 1, deletions: 0 }], userRulesTouched: ["CLAUDE.md:3"] }), off).reasons.filter((r) => r.includes("責務"))).toEqual(["[再チェック responsibility] 責務: ops.config.json"]);
+  });
+
+  test("the lines are never dropped: an instruction file that is security, in rescue, or renamed out still lists them on the instructions reason", () => {
+    const note = "（利用者の決まりの行を消す・変える: ";
+    // a skill under a security path word: the security reason, and the lines on instructions
+    const sec = judge(base({ files: [{ path: ".claude/skills/auth/SKILL.md", additions: 1, deletions: 1 }], userRulesTouched: [".claude/skills/auth/SKILL.md:4"] }), off);
+    expect(sec.reasons).toContain(`[聞く] 指示のファイル: .claude/skills/auth/SKILL.md${note}.claude/skills/auth/SKILL.md:4）`);
+    expect(sec.ask).toEqual(["security:words", "instructions"]);
+    // under rescue: the rescue recheck, and the lines on instructions
+    const res = judge(base({ files: [{ path: "rescue/CLAUDE.md", additions: 1, deletions: 1 }], userRulesTouched: ["rescue/CLAUDE.md:2"] }), off);
+    expect(res.reasons).toEqual(["[再チェック rescue] rescue: rescue/CLAUDE.md", "[聞く] 指示のファイル: rescue/CLAUDE.md" + note + "rescue/CLAUDE.md:2）"]);
+    // renamed out of an instruction path (the PR's paths hold the new path only): the lines name the old one
+    const moved = judge(base({ files: [{ path: "docs/rules.md", additions: 0, deletions: 0, status: "renamed", previous: "CLAUDE.md" }], userRulesTouched: ["CLAUDE.md:3"] }), off);
+    expect(moved.reasons).toContain(`[聞く] 指示のファイル: docs/rules.md（改名前: CLAUDE.md）${note}CLAUDE.md:3）`);
+    expect(moved.ask).toEqual(["instructions"]);
+  });
+});
+
 describe("recheck", () => {
   const one = (path: string, additions = 1) => [{ path, additions, deletions: 0 }];
   const marked = (files: PrFacts["files"], rechecks: RecheckKind[], over: Partial<PrFacts> = {}) => judge(base({ files, rechecks, ...over }), off);
@@ -647,7 +747,8 @@ describe("recheck", () => {
     ["security only", one("src/auth.ts"), ["[聞く] セキュリティ（security:words）: src/auth.ts"], ["security:words"], []],
     ["rescue only", one("rescue/src/server.ts"), ["[再チェック rescue] rescue: rescue/src/server.ts"], [], ["rescue"]],
     ["Design rules only", one("README.md"), ["[再チェック design-rules] 責務: README.md の ## Design rules"], [], ["design-rules"]],
-    ["responsibility only", one(".claude/skills/x/SKILL.md"), ["[再チェック responsibility] 責務: .claude/skills/x/SKILL.md"], [], ["responsibility"]],
+    ["instructions only", one(".claude/skills/x/SKILL.md"), ["[聞く] 指示のファイル: .claude/skills/x/SKILL.md"], ["instructions"], []],
+    ["responsibility only", one("ops.config.json"), ["[再チェック responsibility] 責務: ops.config.json"], [], ["responsibility"]],
     ["size only", one("apps/web/src/App.tsx", 301), ["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"], [], ["size"]],
     ["another protected path", one("scripts/setup/x.sh"), ["[再チェック size] 保護するパスに触れている: scripts/setup/x.sh"], [], ["size"]],
     ["db.ts only", one("packages/core/src/db.ts"), ["[再チェック migration] 保護するパスに触れている: packages/core/src/db.ts"], [], ["migration"]],
@@ -673,8 +774,8 @@ describe("recheck", () => {
     expect(judge(base({ files }), off)).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: ["rescue"], reasons: ["[再チェック rescue] rescue: rescue/src/x.ts"] });
     expect(marked(files, ["rescue"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
     expect(marked(files, ["size"]).reasons).toEqual(["[再チェック rescue] rescue: rescue/src/x.ts"]);
-    // a responsibility file inside rescue is still rescue; a security one there says セキュリティ
-    expect(marked(one("rescue/CLAUDE.md"), ["responsibility"])).toMatchObject({ verdict: "stop", reasons: ["[再チェック rescue] rescue: rescue/CLAUDE.md"], recheck: ["rescue"] });
+    // an instruction file inside rescue is rescue and instructions; a security one there says セキュリティ
+    expect(marked(one("rescue/CLAUDE.md"), ["rescue"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] 指示のファイル: rescue/CLAUDE.md"], recheck: [] });
     expect(marked(one("rescue/src/auth.ts"), ["rescue"]).reasons).toEqual(["[聞く] セキュリティ（security:words）: rescue/src/auth.ts"]);
   });
 
@@ -689,7 +790,7 @@ describe("recheck", () => {
   test("the kinds come once each, in the order size, responsibility, migration", () => {
     const files = [
       { path: "packages/core/src/db.ts", additions: 1, deletions: 0 },
-      { path: ".claude/skills/x/SKILL.md", additions: 1, deletions: 0 },
+      { path: "ops.config.json", additions: 1, deletions: 0 },
       { path: "apps/web/src/App.tsx", additions: 301, deletions: 0 },
       { path: "package.json", additions: 1, deletions: 0 },
     ];
@@ -697,24 +798,24 @@ describe("recheck", () => {
   });
 
   test("a recheck-only PR with a mark per kind merges; impact stays large", () => {
-    expect(marked(one(".claude/skills/x/SKILL.md"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
-    const files = [...one("apps/web/src/App.tsx", 301), ...one(".claude/skills/x/SKILL.md"), ...one("packages/core/src/schema-baseline.json")];
+    expect(marked(one("ops.config.json"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    const files = [...one("apps/web/src/App.tsx", 301), ...one("ops.config.json"), ...one("packages/core/src/schema-baseline.json")];
     expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "merge", reasons: [], ask: [], recheck: [] });
   });
 
   test("a kind without its mark still stops, and only that kind is left", () => {
-    const files = [...one("apps/web/src/App.tsx", 301), ...one("CLAUDE.md")];
+    const files = [...one("apps/web/src/App.tsx", 301), ...one("ops.config.json")];
     expect(marked(files, ["responsibility"])).toEqual({
       verdict: "stop",
       impact: "large",
-      reasons: ["[再チェック size] テストと docs を除いた変更が 301 行で、300 行を超えている"],
+      reasons: ["[再チェック size] テストと docs を除いた変更が 302 行で、300 行を超えている"],
       ask: [],
       recheck: ["size"],
     });
   });
 
   test("a mark does not lift an ask reason", () => {
-    const files = [...one("src/auth.ts"), ...one(".claude/skills/x/SKILL.md")];
+    const files = [...one("src/auth.ts"), ...one("ops.config.json")];
     expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], recheck: [] });
   });
 
@@ -724,7 +825,7 @@ describe("recheck", () => {
     ["a commit after the review", { headCommittedAt: "2026-09-24T12:00:00Z" }, "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"],
     ["not CLEAN", { mergeState: "BLOCKED" }, "mergeStateStatus が CLEAN でない: BLOCKED"],
   ] as const)("a mark does not lift %s", (_, over, reason) => {
-    expect(marked(one(".claude/skills/x/SKILL.md"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
+    expect(marked(one("ops.config.json"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
   });
 });
 
@@ -987,6 +1088,12 @@ describe("merge-gate readPr", () => {
     calls.length = 0;
     await readPr(1, fake(threads([])));
     expect(calls.some((a) => a.some((s) => s.includes("vnd.github.diff") || s.includes("/contents/")))).toBe(false);
+  });
+
+  test("limit files: read at the merge base and the head, not at the base's tip", async () => {
+    const budget = (n: number) => JSON.stringify({ local: { journeys: { launch: { layoutCount: n } } }, exceptions: [] });
+    const x = hostPr([{ filename: "scripts/perf-budget.json", status: "modified" }], { "scripts/perf-budget.json": { mb1: budget(7), base1: budget(10), abc123: budget(10) } }, {}, "mb1");
+    expect((await x.facts).limitsRaised).toEqual(["scripts/perf-budget.json local.journeys.launch.layoutCount: 7 → 10"]);
   });
 
   test("host files: a # line in the sudoers here-document, a # or blank line between continued lines, and a mode change are asked", async () => {
@@ -1554,6 +1661,53 @@ describe("merge-gate readPr", () => {
     });
   });
 
+  describe("user-marked lines (readPr)", () => {
+    const file = "# C\n- a\n- b（2026-11-03 の利用者の指摘）\n- c\n";
+    const read = (instruction: string, patch: string, changeType = "MODIFIED", changes = 2, previous?: string) => {
+      const v = { ...view, baseRefOid: "base1", files: [{ path: instruction, additions: 1, deletions: 1, changeType }] };
+      return readPr(1, async (args) => {
+        if (args[0] === "pr" && args[1] === "list") return "[]";
+        if (args[0] === "pr") return JSON.stringify(v);
+        if (args.some((a) => a.includes("/pulls/1/files"))) return JSON.stringify({ filename: instruction, previous_filename: previous ?? null, status: changeType.toLowerCase(), changes, patch: patch ?? null }) + "\n"; // as jq writes it: a missing key is null
+        if (args.some((a) => a.includes("/compare/"))) return "merge1\n";
+        if (args.some((a) => a.includes("/contents/"))) return file;
+        if (args[1]?.includes("/actions/runs")) return JSON.stringify(runs);
+        return JSON.stringify(threads([]));
+      });
+    };
+
+    test("a rewritten marked line is read against the file at the merge base", async () => {
+      const facts = await read("packages/core/CLAUDE.md", "@@ -3 +3 @@\n-- b（2026-11-03 の利用者の指摘）\n+- b2\n");
+      expect(facts.userRulesTouched).toEqual(["packages/core/CLAUDE.md:3"]);
+      expect(judge(facts, off).reasons[0]).toContain("packages/core/CLAUDE.md:3");
+    });
+
+    test("an unmarked line, or a file that is new, gives no field", async () => {
+      expect((await read("CLAUDE.md", "@@ -2 +2 @@\n-- a\n+- a2\n")).userRulesTouched).toBeUndefined();
+      expect((await read("CLAUDE.md", "@@ -0,0 +1 @@\n+x\n", "ADDED")).userRulesTouched).toBeUndefined();
+    });
+
+    test("a rename out of an instruction path is read at the path before it", async () => {
+      const facts = await read("docs/rules.md", "@@ -3 +3 @@\n-- b（2026-11-03 の利用者の指摘）\n+- b2\n", "RENAMED", 2, "CLAUDE.md");
+      expect(facts.userRulesTouched).toEqual(["CLAUDE.md:3"]);
+      // and judge gets the rename from the same rows: asked and split
+      const j = judge(facts, off);
+      expect(j.reasons).toContain("[聞く] 指示のファイル: docs/rules.md（改名前: CLAUDE.md）（利用者の決まりの行を消す・変える: CLAUDE.md:3）");
+      expect(j.reasons.some((r) => r.startsWith("[分ける]"))).toBe(true);
+    });
+
+    test("a copy out of an instruction file reads no line of it", async () => {
+      const facts = await read("docs/copy.md", "@@ -3 +3 @@\n-- b（2026-11-03 の利用者の指摘）\n+- b2\n", "COPIED", 2, "CLAUDE.md");
+      expect(facts.userRulesTouched).toBeUndefined();
+    });
+
+    test("a file whose patch GitHub leaves out is listed as not read", async () => {
+      expect((await read("CLAUDE.md", undefined as unknown as string)).userRulesTouched).toEqual(["CLAUDE.md: 差分を読めない"]);
+      // a pure rename or a binary file has no patch and no changed line
+      expect((await read("CLAUDE.md", undefined as unknown as string, "RENAMED", 0)).userRulesTouched).toBeUndefined();
+    });
+  });
+
   test("more review threads than one page fails instead of judging", async () => {
     const nodes = Array.from({ length: 100 }, () => ({ isResolved: true }));
     expect(readPr(1, fake(threads(nodes, 101)))).rejects.toThrow("101");
@@ -1926,6 +2080,33 @@ describe("local change", () => {
     expect(marked.code).toBe(0);
   });
 
+  test("readChange instructions and limits", async () => {
+    const r = fresh();
+    const budget = (n: number) => JSON.stringify({ local: { journeys: { launch: { layoutCount: n } } }, exceptions: [] }, null, 2) + "\n";
+    mkdirSync(join(r.dir, "scripts"));
+    writeFileSync(join(r.dir, "scripts", "perf-budget.json"), budget(7));
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "budget");
+    r.git("checkout", "-q", "sb/5-x");
+    r.git("rebase", "-q", "main");
+    writeFileSync(join(r.dir, "scripts", "perf-budget.json"), budget(10));
+    writeFileSync(join(r.dir, "CLAUDE.md"), "a rule\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "raise");
+    r.git("checkout", "-q", "main");
+    const g = await gate(r, [REVIEW, pass(r)]);
+    expect(g.code).toBe(1);
+    expect(g.j.ask).toEqual(["instructions", "limits"]);
+    expect(g.j.recheck).toEqual([]);
+    expect(g.j.reasons).toContain("[聞く] 検査の上限・許可リストを上げる: scripts/perf-budget.json local.journeys.launch.layoutCount: 7 → 10");
+    // the limit file beside CLAUDE.md is a mix: split, and no yes lifts it, whatever kinds it names
+    expect(g.j.reasons).toContainEqual(expect.stringContaining("[分ける] 指示のファイル（CLAUDE.md）とほかのファイル（scripts/perf-budget.json, src/b.ts）"));
+    const yes = (kinds: string) => ({ body: `[merge-answer] yes ${kinds} ${r.tip("sb/5-x")}`, createdAt: "2026-01-04T00:00:00Z" });
+    const lifted = await gate(r, [REVIEW, pass(r), yes("instructions,limits")], ["--allow-large"]);
+    expect(lifted.code).toBe(1);
+    expect(lifted.j.reasons.filter((x: string) => x.startsWith("[聞く]"))).toEqual([]);
+  });
+
   describe("host files and renames, from git alone", () => {
     const HOST = ["#!/bin/sh", "set -eu", "cat > /etc/sudoers.d/x <<SUDO", "host ALL=(root) NOPASSWD: /usr/bin/true", "SUDO", "curl \"$U\" \\", "  --checksum \"$S\"", ""];
     const host = (at: number, ...add: string[]) => [...HOST.slice(0, at), ...add, ...HOST.slice(at)].join("\n");
@@ -1960,6 +2141,35 @@ describe("local change", () => {
         boot(host(2, "# why the file is written"))(dir);
         chmodSync(join(dir, "aws", "host", "bootstrap.sh"), 0o755);
       })).toEqual({ ask: ["security:host"], recheck: [] });
+    });
+
+    test("an instruction file under a non-ASCII directory is read by its plain path, not git's quoted one", async () => {
+      const r = fresh();
+      r.git("checkout", "-q", "sb/5-x");
+      mkdirSync(join(r.dir, "文書"));
+      writeFileSync(join(r.dir, "文書", "CLAUDE.md"), "a rule\n");
+      r.git("add", "-A");
+      r.git("commit", "-q", "-m", "rules");
+      r.git("checkout", "-q", "main");
+      const g = await gate(r, [REVIEW, pass(r)]);
+      expect(g.j.ask).toContain("instructions");
+      expect(g.j.reasons).toContainEqual(expect.stringContaining("[聞く] 指示のファイル: 文書/CLAUDE.md"));
+    });
+
+    test("CLAUDE.md renamed out of an instruction path: asked and split, as on GitHub", async () => {
+      const r = fresh();
+      writeFileSync(join(r.dir, "CLAUDE.md"), "a rule\n");
+      r.git("add", "-A");
+      r.git("commit", "-q", "-m", "rules");
+      r.git("checkout", "-q", "sb/5-x");
+      r.git("merge", "-q", "--no-edit", "main");
+      mkdirSync(join(r.dir, "docs"));
+      r.git("mv", "CLAUDE.md", "docs/old-rules.md");
+      r.git("commit", "-q", "-m", "move");
+      r.git("checkout", "-q", "main");
+      const g = await gate(r, [REVIEW, pass(r)]);
+      expect(g.j.ask).toContain("instructions");
+      expect(g.j.reasons).toContainEqual(expect.stringMatching(/^\[分ける\] 指示のファイル（CLAUDE\.md）とほかのファイル（.*docs\/old-rules\.md/));
     });
 
     test("product code renamed into a fixture path is asked by its old path (a rename is a file removed and a file added)", async () => {
@@ -2078,7 +2288,7 @@ describe("reversibility table", () => {
   const write = (name: string, t: unknown) => { const p = join(W, name); writeFileSync(p, JSON.stringify(t)); return p; };
 
   test("derives the ask and recheck kinds from the table (the owner moved security:docs, security:tests and security:lockfile to a recheck)", () => {
-    expect(ASK_KINDS).toEqual(SECURITY_KINDS.filter((k) => !MOVED.includes(k)));
+    expect(ASK_KINDS).toEqual([...SECURITY_KINDS.filter((k) => !MOVED.includes(k)), "instructions", "limits"]);
     expect(RECHECK_KINDS).toEqual(["security:docs", "security:tests", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
     expect(RECHECK_PASS.test(`[recheck] design-rules pass ${"a".repeat(40)}`)).toBe(true);
     expect(RECHECK_PASS.test(`[recheck] security:gates pass ${"a".repeat(40)}`)).toBe(false);

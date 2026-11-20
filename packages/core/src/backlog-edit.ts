@@ -131,6 +131,12 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   // a merged or closed change is not opened again: its branch may have another open one now (make a new change)
   if (cur.change && input.state === "OPEN" && cur.state === "CLOSED") throw new BacklogEditError(`#${ref} は閉じた変更なので開き直せません（新しい変更を作る）`, 422);
   if (create && input.change) throw new BacklogEditError("作成が確定する前の変更はマージ済みにできません", 409);
+  // a merged change keeps its first merge record: another one is refused, the same one again (a resend whose answer
+  // was lost) writes nothing
+  const mergeInput = input.change && "mergeCommit" in input.change ? input.change : null;
+  const merged = mergeInput && cur.change?.mergeCommit ? cur.change : null;
+  const sameMerge = !!mergeInput && !!merged && mergeInput.mergeCommit === merged.mergeCommit && mergeInput.mergedAt === merged.mergedAt && mergeInput.reviewedHead === merged.reviewedHead;
+  if (merged && !sameMerge) throw new BacklogEditError(`#${ref} はマージ済みの変更なので、マージの記録は書き換えられません`, 409);
   if (create) {
     const p = create.payload as BacklogCreatePayload;
     const project = input.project === false ? null : input.project || someFields(input.fields) || p.project ? { ...source.project, fields: { ...p.project?.fields, ...input.fields } } : null;
@@ -145,7 +151,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   // the body as shown: without the marker a post sent from here left on it
   const was = { ...cur, body: withoutMarker(cur.body) };
   for (const f of ["title", "body", "state", "milestone", "parent"] as const) if (input[f] !== undefined && input[f] !== was[f]) set(f, input[f], was[f]);
-  if (input.change) set("change", input.change, was.change ?? null);
+  if (input.change && !sameMerge) set("change", input.change, was.change ?? null);
   // after the close: an Issue closed just now is completed until its reason is changed, as GitHub answers it
   // (one closed by a close still waiting to be sent shows that: applyBacklogField). A close that only takes back a
   // reopen still waiting is one with it (Db.applyBacklogEdit) and writes nothing: GitHub keeps its reason, or the one a

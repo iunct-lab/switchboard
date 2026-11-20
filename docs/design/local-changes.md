@@ -17,7 +17,7 @@ A workspace with a remote keeps its PRs.
 
 ## The change
 
-A change is a stored backlog Issue with a `change` field: `{ head, base, mergeCommit, mergedAt }`, `head` and `base`
+A change is a stored backlog Issue with a `change` field: `{ head, base, mergeCommit, mergedAt, reviewedHead }`, `head` and `base`
 being branch names. It is numbered with the Issues, as GitHub numbers pull requests. There is no new table or
 endpoint:
 
@@ -27,7 +27,7 @@ endpoint:
 | Read one | `GET /api/backlog/:number`: the Issue, its comments oldest first, and `changeRefs` — the branches' tips read by `git rev-parse` at each read (they are never stored: they move with every commit) |
 | List them | `GET /api/backlog`'s `changes`: every open one, and each workspace's newest 10 closed |
 | Comment | `POST /api/backlog/:number/comment` (`ops-kit backlog comment`): the review summary, the triage table, and the marks |
-| Merge | `PATCH /api/backlog/:number` with `state: "CLOSED"` and `change: { mergeCommit, mergedAt }` (only together). A closed change is not opened again: make a new one |
+| Merge | `PATCH /api/backlog/:number` with `state: "CLOSED"` and `change: { mergeCommit, mergedAt, reviewedHead }` (only together; `reviewedHead` is required, a 40-digit sha). A merged change keeps its first record: a different one is refused (409), the same one again changes nothing. A closed change is not opened again: make a new one |
 
 The Backlog screen shows a `変更` section when a change is open (the closed ones are folded). A row opens in place with
 the tips, the marks (the newest main review, the newest local CI result, the rechecks of the head; whether they count

@@ -53,3 +53,31 @@ describe("pbiFactsOf with after-merge lines", () => {
     expect(pbiProgress(f).checking).toBe(false);
   });
 });
+
+describe("pbiFactsOf reads the body through a memo", () => {
+  const facts = (body: string, over: { labels?: string[]; done?: number } = {}) => pbiFactsOf({ labels: over.labels ?? ["type:pbi"], body, status: "In progress", tasks: { total: 2, done: over.done ?? 2 } });
+
+  test("a body edited between two reads is read again, and the same body again answers the same", () => {
+    const before = pbi("- [ ] 1. a（マージの後: 画面）", "- [ ] 2. 直す");
+    expect(facts(before)).toMatchObject({ others: 1, confirms: [], postMerge: [1] });
+    const after = pbi("- [x] 1. a（マージの後: 画面）", "- [ ] 2. 直す（利用者確認: 見る）");
+    expect(facts(after)).toMatchObject({ others: 0, confirms: [2], postMerge: [] });
+    expect(facts(before)).toMatchObject({ others: 1, confirms: [], postMerge: [1] });
+  });
+
+  test("the parts that are not the body's (labels, Tasks) are not kept with it, and a caller changing an array does not change the next read", () => {
+    const body = pbi("- [ ] 1. a（マージの後: 画面）");
+    const first = facts(body, { labels: ["type:pbi", "needs-decision"], done: 1 });
+    expect(first).toMatchObject({ pbi: true, decision: true, tasks: { total: 2, done: 1 } });
+    first.postMerge.push(99);
+    first.confirms.push(98);
+    expect(facts(body, { labels: [], done: 2 })).toMatchObject({ pbi: false, decision: false, tasks: { total: 2, done: 2 }, confirms: [], postMerge: [1] });
+  });
+
+  test("past the limit the oldest are dropped and a dropped body is read again to the same answer", () => {
+    const first = pbi("- [ ] 1. c（マージの後: 画面）");
+    const expected = facts(first);
+    for (let i = 0; i < 4100; i++) facts(pbi(`- [ ] 1. b${i}（利用者確認: 見る）`));
+    expect(facts(first)).toEqual(expected);
+  });
+});

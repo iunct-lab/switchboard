@@ -91,11 +91,13 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
  * (work + op + target) that was newest when it was given — one to another series' stop is not this one's, and one given
  * before anything stopped here answers nothing. A runner names an Issue comment by URL, which is a pointer, not proof:
  * until the comment is read and its repository and author checked (nothing reads it yet), only an answer the daemon saw
- * the person give (`seq:`) counts. `stops` = one record per stop (its latest), `first` = when each stop first came.
+ * the person give (`seq:`) counts. `stops` = one record per stop (its latest), `first` = when each stop first came,
+ * `places` = each stop's `placeKey` (made once by `reduceStops`).
  */
-function answerIsOwn(stops: StopRecord[], first: Map<string, number>, last: StopRecord, a: StopRecord["answer"]): boolean {
+function answerIsOwn(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, last: StopRecord, a: StopRecord["answer"]): boolean {
   if (!a || !a.ref.startsWith("seq:")) return false;
-  const owner = stops.filter((s) => placeKey(s) === placeKey(last) && first.get(s.id)! < a.at).at(-1);
+  const lastPlace = places.get(last.id);
+  const owner = stops.filter((s) => places.get(s.id) === lastPlace && first.get(s.id)! < a.at).at(-1);
   return !!owner && stopKey(owner) === stopKey(last);
 }
 
@@ -103,8 +105,8 @@ function answerIsOwn(stops: StopRecord[], first: Map<string, number>, last: Stop
  * Whether `last` (the newest stop of its series) was answered after it came: an answer the newest stop carries over from
  * an earlier stop at the same place (recordStop keeps it) is not an answer to this one — the Task stopped again after it.
  */
-function answeredAfter(stops: StopRecord[], first: Map<string, number>, last: StopRecord): boolean {
-  return answerIsOwn(stops, first, last, last.answer) && last.answer!.at >= first.get(last.id)!;
+function answeredAfter(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, last: StopRecord): boolean {
+  return answerIsOwn(stops, first, places, last, last.answer) && last.answer!.at >= first.get(last.id)!;
 }
 
 /**
@@ -135,7 +137,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
     const newest = (rs: StopRecord[]) => rs.reduce<StopRecord["answer"]>((a, s) => (s.answer && (!a || s.answer.at >= a.at) ? s.answer : a), null);
     // Answers seen before `last`, at this place in any series: one that came back is not a new answer.
     const before = stops.filter((s) => places.get(s.id) === places.get(last.id) && first.get(s.id)! < lastFirst);
-    const ours = (a: StopRecord["answer"]) => answerIsOwn(stops, first, last, a);
+    const ours = (a: StopRecord["answer"]) => answerIsOwn(stops, first, places, last, a);
     const changes = compareStopConditions(before.at(-1), last, newest(before)).filter((c) => c.kind !== "answer" || ours(last.answer));
     const lastAnswer = newest(list.filter((x) => x.answer?.ref.startsWith("seq:")));
     const unchanged = list.length > 1 && changes.length === 0;
@@ -152,7 +154,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
       firstAt: first.get(list[0]!.id)!,
       lastAt: last.at,
       lastAnswer,
-      answered: answeredAfter(stops, first, last) || answeredOnIssue(last),
+      answered: answeredAfter(stops, first, places, last) || answeredOnIssue(last),
       grant: last.grant ?? null,
       conditions: last.conditions,
       actions: last.actions,
@@ -191,8 +193,9 @@ export function lastStopMark(records: StopRecord[]): Omit<TaskStopMark, "replies
   }
   if (!best) return null;
   const { key, last, count } = best;
-  // the answer is checked for the newest series only: the others are not shown
-  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, last) || answeredOnIssue(last) };
+  // the answer is checked for the newest series only: the others are not shown; the places are made only when it carries an answer to check
+  const places = new Map<string, string>(last.answer ? stops.map((s) => [s.id, placeKey(s)]) : []);
+  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, places, last) || answeredOnIssue(last) };
 }
 
 /**
