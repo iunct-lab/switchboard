@@ -33,6 +33,28 @@ question は事実で答える（「分からない」なら調べてから）�
 
 優先度: blocker → should-fix → question → nit。blocker が「対処不要」になるのは誤読のときだけで、必ず根拠を書く。
 
+### 収束しないとき（main との比較）
+
+きっかけ（どちらかが当たれば回す。数は決めた値で設定にしない。変えるならこの文を直す）:
+
+- 4 の修正後の見直しを 2 回回しても blocker / should-fix が残る PR
+- 差分が 500 行（`task-to-pr` の Task の粒度の上限）を超える PR は、1 回目のレビューの後
+
+`cross-runner-review` の 5 を回す（主レビュアーが残る指摘を 1 件ずつ main と読み比べて分類する。比較の転記は主レビューに数えない）。`ops-kit review-compare check` が exit 1 なら後退がある。分類で振り分ける:
+
+- `REGRESSION`: 「修正」（3 のまま。直して返信し、見直しは `cross-runner-review` の 4。`$M/compared.md` が材料に入るので、後退が閉じたか・ほかの分類の行を挙げ直さないかは見直しが読む）
+- ほかの分類（`NEW-FEATURE-GAP` / `IMPROVED-BUT-INCOMPLETE` / `SAME` / `OWNER-DECIDED`）: 後退でないので、触る場所の領域ごとに要望 Issue にして「Issue 化」で返信する
+
+```bash
+W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.triage<PR番号>.XXXXXX"); echo "$W"   # 新しいシェルなら。表示されたパスを控える
+ops-kit review-compare leftovers "$M/compared.md" --source "PR #$N の [<runner>] compare" --out "$W/leftovers"   # 後退以外が無ければ何も書かない
+# 領域ごとに $W/leftovers/<n>.md（本文）と titles.tsv（<n> と題）ができる。本文ごとに:
+ops-kit backlog create --title "<titles.tsv の題>" --label type:request --body-file "$W/leftovers/<n>.md"   # 出る番号が要望
+ops-kit backlog set <要望の番号> Status Backlog
+```
+
+各指摘のスレッドに `Issue 化: #<要望>（main と比べて後退でない: <分類>）` で返信して resolve する（4）。この返信は 4 の「Issue 化」の返信と同じ扱いで、5 の「全指摘が…返信済み」に数える。
+
 ## 3. 直す
 
 ### 同じ論点が続いたら（直す前に）
@@ -75,6 +97,7 @@ blocker / should-fix / question と、直した nit は **1 コメント 1 返�
 ```
 修正: <何をどう直したか> — <commit sha 短縮>。確かめた方法: <回帰テスト名（追加先: 既存 / 単体 / 新規）か、Scenario を再現したコマンドと結果>。読み手: <変わらない / n か所と結果>
 Issue 化: #<n>（<なぜこの PR の外か>）
+Issue 化: #<要望>（main と比べて後退でない: <分類>）   ← 「収束しないとき（main との比較）」の返信。上の Issue 化と同じ扱い
 対処不要: <根拠>。<ファイル / Issue / doc>
 回答: <事実>
 ```
@@ -113,7 +136,7 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 全部 yes ならそのままマージする（聞き直さない。`pbi-complete` の「この依頼が含む範囲」）。1 つでも no なら理由を要約に書いて止める（PR は open のまま。聞くものは `issue-workflow` の「判断待ちの出し方」で分ける: マージしてよいかは運用の確認として Task の会話で聞いてターンを終え、Issue に書かない。実装の判断は Issue の `## 判断待ち`）:
 
 - [ ] マージ判定（CLAUDE.md のコマンド。ローカルの変更では `<マージ判定> --change <変更>`、マージは Task への指示が名指しする `local-merge.ts <変更>`（判定をもう一度通してから rebase で入れ、Task も閉じる）。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。large の理由の扱いは `pbi-complete` の 5: `[聞く]` は小さな差分でも、利用者が Task の会話でマージを認めるまで（`--allow-large`）マージしない。`[再チェック <kind>]` は聞かずに再チェックを回して印で外す。記録の印も同じ節）
-- [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み（見送る nit は要約の表で）
+- [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み（見送る nit は要約の表で）（main との比較で要望にした指摘の `Issue 化: #<要望>（main と比べて後退でない: …）` の返信も数える）
 - [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
 - [ ] 主レビュアーの独立レビューがある（`cross-runner-review` の「誰がレビューするか」。利用上限のときは同じスキルの 0。自己レビューだけでは満たさない。レビューできなければ未レビューとして止める）
 <!-- when extra=on -->

@@ -239,6 +239,31 @@ describe("overlap free tasks", () => {
   });
 });
 
+test("backlog-next overlap: two PBIs held by each other's idle In progress Task: one starts, then holds the other", () => {
+  // each PBI has an In progress Task that nobody works on (no claim, no stage Task) and one to start that names the other's path
+  const w = overlapWorld({ 1: { 11: "src/a.ts", 12: "src/b.ts" }, 2: { 21: "src/b.ts", 22: "src/a.ts" } });
+  try {
+    const statuses = new Map<number, string | number | null>([[11, "In progress"], [21, "In progress"]]);
+    const startable = new Map([[1, [12]], [2, [22]]]);
+    const read = (active: (n: number) => boolean) => {
+      const items = [item({ number: 1, stage: "ready" }), item({ number: 2, stage: "ready" })];
+      withOverlap(items, w.issues, startable, [], statuses, w.root, { active, commentsOf: () => [] });
+      return items;
+    };
+    // the firing: neither is held, so the first in the queue starts
+    const before = read(() => false);
+    expect(before.map((i) => i.overlap)).toEqual([null, null]);
+    expect(pickNext(before, "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
+    // reread with its stage Task running: its Tasks are the other work, so the other PBI is held by the started one's Task
+    const after = read((n) => n === 1);
+    expect(after[0]!.overlap).toBeNull();
+    expect(after[1]!.overlap).toEqual({ hits: [{ ref: "Task #11", path: "src/a.ts", working: true }], unknown: null });
+    expect(pickNext(after.filter((i) => i.number !== 1), "implement")).toBeNull();
+  } finally {
+    w.done();
+  }
+});
+
 describe("shared files", () => {
   test("an overlap only on a shared file does not hold the PBI; one on another file too does, and only that file is the hit", () => {
     const w = overlapWorld({ 1: { 11: "src/server.ts" }, 2: { 21: "src/server.ts src/asks.ts" }, 3: { 31: "src/server.ts src/asks.ts" } });

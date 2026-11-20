@@ -1,4 +1,4 @@
-// test-reads: ops-kit/processes/p0-pipeline.md ops-kit/processes/p1-direct.md ops-kit/processes/p2-baseline.md
+// test-reads: ops-kit/processes/p0-pipeline.md ops-kit/processes/p1-direct.md ops-kit/processes/p2-baseline.md ops-kit/processes/p3-bundle.md
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -92,6 +92,19 @@ test("p2-baseline is never chosen by the backlog's automatic processing, whateve
   for (const item of [request(100), request(5000), request(100, ["type:request", "flow-improvement"]), request(100, ["direct-returned"])]) {
     expect(chooseProcess(item, kit).process).not.toBe("p2-baseline");
   }
+});
+
+test("p3-bundle: loads without auto and renders the bundle entry", () => {
+  const def = loadProcess("p3-bundle");
+  expect(def.auto).toBeNull();
+  expect(Object.keys(def.entries)).toEqual(["bundle"]);
+  const text = renderEntry(def, "bundle", { pbis: "#1, #2", reviewer: "レビュアーの印" });
+  expect(text).not.toContain("{{");
+  expect(text).toContain("#1, #2");
+  expect(text).toContain("レビュアーの印");
+  for (const step of ["集める", "切る", "入れる", "合わせる", "攻める", "入れ切る", "確かめる"]) expect(text).toContain(`**${step}**`);
+  // a bundle needs the PBIs: rendering without them is refused, not sent with a literal hole
+  expect(() => renderEntry(def, "bundle", { reviewer: "別のランナー" })).toThrow("uses {{pbis}}, which was not given");
 });
 
 test("a definition without id, version or title is refused with the path and the reason", () => {

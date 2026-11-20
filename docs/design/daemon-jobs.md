@@ -91,8 +91,11 @@ The same note carries the rules that hold for every review, whatever its kind (`
 finding's weight (blocker / should-fix / nit / question, decided by what breaks and not by an earlier round's mark), checking
 in the code each earlier finding `_review/handled.md` lists, whatever its reply says (a reply never settles a finding by
 itself; a finding is left out only when the reviewer verified in the code that it is resolved), marking a point raised again
-after its fix (`Repeat of:`), and checking the places `_review/old-paths.md` lists. They are here and not in each
-kind's instructions so that the main review, the follow-up and a recheck cannot drift apart; the two files are made by
+after its fix (`Repeat of:`), checking the places `_review/old-paths.md` lists, and using a comparison with main
+(`_review/compared.md`, the output of a comparison round asked for with `ops-kit review-compare prompt`): a `REGRESSION` row is raised again until the code closes it, and the
+other rows are not raised again unless the change makes them worse than main. A branch that carries anything under `_review` does not
+get its classes used; that is a blocker. These rules are here and not in each
+kind's instructions so that the main review, the follow-up and a recheck cannot drift apart; `handled.md` and `old-paths.md` are made by
 `ops-kit review-handled` and `ops-kit old-paths check` when the review's material is prepared (the kit's README, "Review material").
 
 Status of the measurement (2026-11-17): the variables, flags and feature names above exist in the installed CLIs

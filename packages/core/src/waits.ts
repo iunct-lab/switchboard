@@ -85,6 +85,8 @@ export interface WaitFacts {
   superseded: boolean;
   /** Why the queue waits (`TaskManager.queueWait`). */
   queue: "slot" | "memory" | "promotion" | null;
+  /** Why this Task's queued reply was refused at its last start (`TaskManager.queueRefusal`): it waits for that, not for the queue. */
+  refusal?: string | null;
   now: number;
   bounds: WaitBounds;
 }
@@ -116,7 +118,7 @@ export function waitsOf(f: WaitFacts): WaitRecord[] {
     const at = Math.max(t.resumeAt, t.resumePlannedAt ?? 0);
     out.push({ kind: "resume", key: "resume", label: t.resumeReason ? RESUME_LABEL[t.resumeReason] : "中断からの自動再開", since: t.resumeSince ?? Math.min(t.updatedAt, t.resumeAt), until: at + b.graceMs });
   }
-  if (t.queuedAt !== null) out.push({ kind: "queue", key: "queue", label: QUEUE_LABEL[f.queue ?? "slot"], since: t.queuedAt, until: t.queuedAt + b.ownMs });
+  if (t.queuedAt !== null) out.push({ kind: "queue", key: "queue", label: f.refusal ? `返信の開始の条件（${f.refusal}）` : QUEUE_LABEL[f.queue ?? "slot"], since: t.queuedAt, until: t.queuedAt + b.ownMs });
   if (atWork || t.status === "waiting" || t.reviewedAt !== null || f.superseded || (t.outcome !== "waits" && t.outcome !== "needs_action")) return out;
   // since when each stop has been open: its first record, or the first after it was last resolved (it came back)
   const openSince = new Map<string, number>();
@@ -172,7 +174,7 @@ export const WAIT_CHECK_MS = 30_000;
 
 export interface WaitWatchDeps {
   db: Db;
-  tasks: Pick<TaskManager, "lastEvents" | "queueWait" | "recordStop" | "record" | "abort">;
+  tasks: Pick<TaskManager, "lastEvents" | "queueWait" | "queueRefusal" | "recordStop" | "record" | "abort">;
   dir: string;
   bounds: () => WaitBounds;
   broadcastTask: (task: Task) => void;
@@ -231,7 +233,7 @@ export async function checkWaits(deps: WaitWatchDeps, now: number): Promise<void
   for (const task of candidates.values()) {
     const issue = issueOf(task);
     const superseded = issue !== null && db.lastStageTask(task.workspaceId!, issue)?.id !== task.id;
-    const waits = task.archivedAt !== null ? [] : shownWaits(waitsOf({ task, stops: db.listStopRecords([task.id]), files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, superseded, queue, now, bounds }), now);
+    const waits = task.archivedAt !== null ? [] : shownWaits(waitsOf({ task, stops: db.listStopRecords([task.id]), files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, superseded, queue, refusal: tasks.queueRefusal(task.id), now, bounds }), now);
     if (JSON.stringify(waits) === JSON.stringify(task.waits ?? [])) continue;
     db.setTaskWaits(task.id, waits);
     const next = db.getTask(task.id);

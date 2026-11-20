@@ -10,7 +10,7 @@ import { askWithdrawnPrereqs, mergePrereqs, prereqOf } from "./backlog-waits.ts"
 import { isUnblocked, overlapIn, pickNext, heldIn } from "./backlog-pick.ts";
 import { readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
 import { asksFromBacklog } from "./asks.ts";
-import { storedMaterial } from "../../../scripts/parallel-guard.ts";
+import { readOthers, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
 // The backlog read from what the last import stored: no GitHub involved — readStoredBacklog takes no gh at all.
@@ -375,12 +375,55 @@ describe("pickNext overlap", () => {
   });
 
   test("an In progress Task of another PBI is the other work unless it asks (needs-decision); a PR untouched for 72 hours does not hold", () => {
-    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })]);
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")]);
     expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task", "needs-decision"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
     expect(pick(ws)).toBe(1);
     db.putBacklogSnapshot(SOURCE, { records: [pr(61, ["src/a.ts"], { updatedAt: "2026-01-01T00:00:00Z" })], cursor: null, syncedAt: 7000 });
     expect(pick(ws)).toBe(1);
+  });
+
+  // PBI 1 names src/a.ts; Task 60 of PBI 6 (In progress) names it too
+  const idleWorld = (...marks: string[]) => imported([
+    ...pbi(1, "P0", "src/a.ts"),
+    issue(6, ["type:pbi"], { subIssues: [60] }),
+    issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }),
+    ...marks.map((m, k) => comment(6, `c6_${k}`, m, `2026-10-02T00:0${k}:00Z`)),
+  ]);
+  const hitsOf = (ws: { id: string; name: string; path: string }, active?: (n: number) => boolean) => readStoredBacklog(db, ws, { active }).items.find((i) => i.number === 1)!.overlap;
+
+  test("an In progress Task of a PBI no session works on is not other work", () => {
+    // no mark at all, and a claim that a release ended: nobody holds PBI 6 and no stage Task runs
+    expect(hitsOf(idleWorld())).toBeNull();
+    db.putBacklogSnapshot(SOURCE, { records: [comment(6, "c6_9", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z"), comment(6, "c6_10", "<!-- pbi-complete:release -->", "2026-10-02T01:00:00Z")], cursor: null, syncedAt: 6000 });
+    expect(hitsOf(idleWorld())).toBeNull();
+    // a Task with no parent is still counted
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(61, ["type:task"], { body: "`src/a.ts`", updatedAt: new Date().toISOString() }), item(61, { Status: "In progress" })]);
+    expect(hitsOf(ws)).toEqual({ hits: [{ ref: "Task #61", path: "src/a.ts", working: false }], unknown: null });
+  });
+
+  test("an In progress Task of a PBI a session works on is still other work", () => {
+    // a stage Task runs (active) with no claim: counted, and shown as at work. PBI 7 has no comment stored at all
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(7, ["type:pbi"], { subIssues: [70] }), issue(70, ["type:task"], { body: "`src/a.ts`", parent: 7, updatedAt: new Date().toISOString() }), item(70, { Status: "In progress" })]);
+    expect(hitsOf(ws)).toBeNull(); // nobody works on PBI 7 yet
+    expect(hitsOf(ws, (n) => n === 7)).toEqual({ hits: [{ ref: "Task #70", path: "src/a.ts", working: true }], unknown: null });
+    // PBI 7's last read was not complete: a claim may not be stored yet, so it counts, as the guard counts it
+    db.putBacklogSnapshot(SOURCE, { records: [{ ...issue(7, ["type:pbi"], { subIssues: [70] }), fetchState: "unavailable" }], cursor: null, syncedAt: 6000 });
+    expect(hitsOf(ws)!.hits.map((h) => h.ref)).toEqual(["Task #70"]);
+    // held: a claim only (PBI 6)
+    const held = idleWorld("<!-- pbi-complete:claim t1 -->");
+    expect(hitsOf(held)!.hits).toContainEqual({ ref: "Task #60", path: "src/a.ts", working: false });
+  });
+
+  test("the guard counts no In progress Task the app does not count", async () => {
+    const guardRefs = async (ws: { id: string; name: string; path: string }) => (await readOthers(10, storedMaterial(readStoredRecords(db, ws)!, 10))).others.map((o) => o.ref);
+    const ws = idleWorld();
+    expect(hitsOf(ws)).toBeNull();
+    expect(await guardRefs(ws)).toEqual([]);
+    // a claim: both count it
+    db.putBacklogSnapshot(SOURCE, { records: [comment(6, "c6_0", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")], cursor: null, syncedAt: 6000 });
+    expect(hitsOf(ws)!.hits.map((h) => h.ref)).toEqual(["Task #60"]);
+    expect(await guardRefs(ws)).toEqual(["Task #60"]);
   });
 
   test("pickNext overlap: a free Task lets the PBI go while another of its Tasks overlaps; a Task waiting on its sibling does not count", () => {
@@ -443,7 +486,7 @@ describe("pickNext overlap", () => {
   });
 
   test("a Task at work whose body changed is read for its paths again", () => {
-    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })]);
+    const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")]);
     const hits = () => readStoredBacklog(db, ws).items.find((i) => i.number === 1)!.overlap;
     expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task"], { body: "`src/z.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
@@ -525,7 +568,7 @@ describe("pickNext overlap", () => {
       expect(overlapOf(ws2, 1)).toBeNull();
       db.putBacklogSnapshot(SOURCE, { records: [item(20, { Status: "In progress" })], cursor: null, syncedAt: 7000 });
       expect(overlapOf(ws2, 1)).toBeNull();
-      const checking = [issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" })];
+      const checking = [issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")];
       const ws = imported([...pbi(1, "P0", "src/a.ts"), ...checking, prOf(61, [60], "MERGED", ["src/a.ts"])]);
       expect(overlapOf(ws, 1)).toBeNull();
       db.putBacklogSnapshot(SOURCE, { records: [prOf(62, [60], "OPEN", ["src/a.ts"])], cursor: null, syncedAt: 6000 });
@@ -543,7 +586,7 @@ describe("pickNext overlap", () => {
     const task = (n: number, parent: number) => issue(n, ["type:task"], { body: "`fresh/component/`", parent, updatedAt: new Date().toISOString() });
     const ws = imported([
       issue(1, ["type:pbi"], { subIssues: [10] }), item(1, { Status: "Ready" }), task(10, 1),
-      issue(60, ["type:task"], { body: "fresh/component/ に足す", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }),
+      issue(60, ["type:task"], { body: "fresh/component/ に足す", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z"),
       pr(50, ["fresh/component/a.ts"], { isDraft: true }),
     ]);
     expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "fresh/component/", working: false }], unknown: null });

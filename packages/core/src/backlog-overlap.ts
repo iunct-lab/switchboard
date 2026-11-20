@@ -4,7 +4,7 @@
  * (`withOverlap`), and the lines the screens show for it.
  */
 import type { BacklogIssueData, BacklogItem } from "@switchboard/protocol";
-import { judge, othersOf, STALE_HOURS, topWith, turnsAhead, waitsOnlyForCheck, type Turn } from "../../../scripts/parallel-guard.ts";
+import { holder, judge, othersOf, STALE_HOURS, topWith, turnsAhead, waitsOnlyForCheck, type Turn } from "../../../scripts/parallel-guard.ts";
 import { overlaps, pathsIn } from "../../../ops-kit/src/task-paths.ts";
 import { readdirSync } from "node:fs";
 import { type Comment, PBI_COMPLETE_MARK } from "./backlog-comments.ts";
@@ -140,8 +140,10 @@ export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssue
  * the Task uses (scripts/parallel-guard.ts: `othersOf`, `turnsAhead`, `judge`; ops-kit/src/task-paths.ts: `pathsIn`) read
  * from the stored records, so that backlog-next does not start a session that would only find the overlap itself, and a
  * session it does start is not deferred by that guard. The other work: `othersOf` (ready PRs, Tasks at work, the Draft of
- * a Task at work), where a Task at work is an In progress Task of another PBI that is not `needs-decision`, and every open
- * Task of a PBI whose stage Task runs now (`active`), before its Status says so. Not at work: a Task of a PBI that waits
+ * a Task at work), where a Task at work is an In progress Task of another PBI that is not `needs-decision`, whose PBI has a stage Task running
+ * (`active`) or a claim of /pbi-complete that no release ended (`holder`; a Task with no PBI always counts, and so does any
+ * Task when `commentsOf` is not given or its PBI's last read was not complete, `unread`), and every open
+ * Task of a PBI whose stage Task runs now (`active`), before its Status says so. Not at work: an In progress Task of a PBI nobody works on, a Task of a PBI that waits
  * for a date, one that only waits for a check (`waitsOnlyForCheck`), the unstarted Tasks of a PBI whose stage Task only has
  * a resume planned. Then the places ahead of the PBI's own (`turnWorks`: a PBI that yielded goes before one that came
  * later; a hit on one carries `turn`). An overlap only on `sharedFiles` does not count. A PR whose files are not all
@@ -151,7 +153,7 @@ export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssue
  * the PBI go, and the free ones are kept in `freeTasks` for the prompt; with none that can start, the Tasks left to do as
  * one. A PBI with nothing left to start (every open Task in review) is not held. Returns the places it read.
  */
-export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; sharedFiles?: string[] } = {}): Turn[] {
+export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; sharedFiles?: string[] } = {}): Turn[] {
   const active = opts.active ?? (() => false);
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
   if (!mine.length) return [];
@@ -170,7 +172,11 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   const linked = pulls.map((p) => ({ state: p.state, linked: p.closes }));
   const holds = (t: BacklogIssueData) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && !waitsOnlyForCheck(t.number, linked);
   const now = new Date();
-  const inProgress = [...issues.values()].filter((t) => holds(t) && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)));
+  // a PBI the guard in the Task counts as worked on: a claim of /pbi-complete that no release ended (`holder`). Without the
+  // comments it cannot be told, and a PBI whose last read was not complete may have a claim not stored yet: both count
+  const held = (pbi: number) => !opts.commentsOf || (opts.unread?.(pbi) ?? false) || holder(opts.commentsOf(pbi).map((c, k) => ({ id: k, body: c.body }))) !== null;
+  // an In progress Task counts only where a session works on its PBI (`active`, or a claim); one left In progress by a check that was still to come blocks no one
+  const inProgress = [...issues.values()].filter((t) => holds(t) && statuses.get(t.number) === "In progress" && !(t.parent !== null && dated.has(t.parent)) && (t.parent === null || active(t.parent) || held(t.parent)));
   // a PBI whose stage Task runs now: its open child Tasks are the other work too, even while their Status is not In progress yet
   const started = [...issues.values()]
     .filter((m) => m.state === "OPEN" && m.labels.includes("type:pbi") && active(m.number))

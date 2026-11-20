@@ -6,6 +6,12 @@ import type { TaskManager } from "./manager.ts";
 
 /** The queue: how many runner processes may run, which waiting Task starts next when a slot frees, and releasing an idle process. */
 export abstract class TaskAdmission extends TaskSessions {
+  /** Why a reply that continues a session may not start now (null = it may). Defined where a direct reply is checked. */
+  protected abstract resumeRefusal(task: Task): string | null;
+
+  /** The refusal already written for a queued reply (by Task), so a tick that finds it again does not write it again. */
+  private readonly refusalNoted = new Map<string, string>();
+
   /** Local Tasks with a turn in progress: the same count as the busy list and the backlog's stage count (running / waiting). */
   private occupied(): number {
     return [...this.db.listTasksByStatus("running"), ...this.db.listTasksByStatus("waiting")].filter((t) => t.executionMode === "local").length;
@@ -55,6 +61,11 @@ export abstract class TaskAdmission extends TaskSessions {
     if (!this.db.listQueuedTasks()[0]) return null;
     const block = this.slotBlock();
     return block === null ? null : block.promotion ? "promotion" : block.memory ? "memory" : "slot";
+  }
+
+  /** Why a reply waiting in the queue was refused at its last start (budget, Teleport); null = not refused, or the daemon restarted since. Memory only: the record is the Task's status line. */
+  queueRefusal(taskId: string): string | null {
+    return this.refusalNoted.get(taskId) ?? null;
   }
 
   /** The admission hold has ended: start what waited for it (the same as drain()). */
@@ -109,12 +120,27 @@ export abstract class TaskAdmission extends TaskSessions {
    */
   drain(): void {
     if (this.draining || this.stopped || this.holdQueue) return;
-    if (!this.db.listQueuedTasks()[0]) return; // nothing waits: do not read the memory
+    const waiting = this.db.listQueuedTasks();
+    // a refusal is written once per stay in the queue: a Task that left it (aborted, even with every slot taken) is forgotten
+    for (const id of [...this.refusalNoted.keys()]) if (!waiting.some((t) => t.id === id)) this.refusalNoted.delete(id);
+    if (!waiting[0]) return; // nothing waits: do not read the memory
     this.draining = true;
     try {
       while (this.freeSlots() > 0) {
-        const next = this.db.listQueuedTasks()[0];
+        const queued = this.db.listQueuedTasks();
+        // a queued reply (the Task has a session) goes through the same refusals as a direct one; one that is refused
+        // keeps its place and the Tasks behind it may start. A first prompt has no session and no refusal.
+        const next = queued.find((t) => {
+          const refusal = t.runnerSessionId === null ? null : this.resumeRefusal(t);
+          if (refusal === null) return true;
+          if (this.refusalNoted.get(t.id) !== refusal) {
+            this.refusalNoted.set(t.id, refusal);
+            this.record(t.id, { t: "status", text: `実行枠が空きましたが、この返信はまだ始めません（${refusal}）。待ち列に残します` });
+          }
+          return false;
+        });
         if (!next) break;
+        this.refusalNoted.delete(next.id);
         const prompt = this.db.takeQueued(next.id);
         if (prompt === null) continue;
         for (const [id] of this.live) {

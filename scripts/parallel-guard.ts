@@ -5,7 +5,8 @@ import { currentRepo } from "./repo.ts";
  *   claim   — the same PBI started twice. The first claim comment on the PBI after the last release wins; a later one
  *             withdraws. A takeover (the user said 再開 after a session died) starts a new holder.
  *   overlap — two sessions editing the same file. A Task's named paths are compared with the files of open PRs and the
- *             paths named by other In progress Tasks. Work left untouched for STALE_HOURS is reported but does not block.
+ *             paths named by other In progress Tasks (not those of a PBI no session holds: no `claim` of it after its last
+ *             release, and a Task with no PBI counts). Work left untouched for STALE_HOURS is reported but does not block.
  *             After setting In progress, `--claimed` leaves a claim comment on the Task; of two In progress Tasks on the
  *             same file the one whose claim came first (smaller comment order) goes on. It also judges the
  *             prerequisites the Task and its PBI name (`**前提**:`) as the daemon does (prereqState): one of
@@ -336,7 +337,8 @@ async function project(repo: string, run: Run): Promise<{ owner: string; number:
 
 /**
  * What the overlap check reads: the top level of the repository, the Task with its PBI, the open PRs, the other
- * In progress Tasks (in the Project, not `needs-decision`, not under a PBI that waits for a date still ahead) and each prerequisite's state — from GitHub (`ghMaterial`)
+ * In progress Tasks (in the Project, not `needs-decision`, not under a PBI that waits for a date still ahead, not under a PBI
+ * no session holds — a Task with no PBI counts) and each prerequisite's state — from GitHub (`ghMaterial`)
  * or from the records the app stored (`storedMaterial`), judged the same way (`readOthers`).
  */
 export interface Material {
@@ -374,7 +376,7 @@ async function waitingForCheck(owner: string, name: string, tasks: number[], run
   });
 }
 
-export async function ghMaterial(repo: string, task: number, run: Run = gh, now = Date.now()): Promise<Material> {
+export async function ghMaterial(repo: string, task: number, run: Run = gh): Promise<Material> {
   const [owner, name] = repo.split("/");
   const top = lines(await run(["api", `repos/${repo}/contents`, "-q", '.[] | {name, dir: (.type == "dir")}'])) as { name: string; dir: boolean }[];
   const issue = JSON.parse(
@@ -402,19 +404,20 @@ export async function ghMaterial(repo: string, task: number, run: Run = gh, now 
     const item = t.projectItems.nodes.find((i) => String(i.project.number) === p.number && i.project.owner.login?.toLowerCase() === p.owner.toLowerCase());
     return item?.fieldValueByName?.name === "In progress" && !t.labels.nodes.some((l) => l.name === "needs-decision");
   });
-  // a PBI whose last release waits for a date still ahead holds its Tasks' files no more: every comment of it is
-  // read, as holder() reads them, for each parent of an In progress Task (a few)
-  const dateWaiting = new Set<number>();
+  // a PBI no session holds holds its Tasks' files no more: every comment of it is read, as holder() reads them, for
+  // each parent of an In progress Task (a few). A PBI that waits for a date ended with a release, so it is not held either
+  const held = new Set<number>();
   for (const n of new Set(inProgress.flatMap((t) => (t.parent ? [t.parent.number] : [])))) {
-    if (waitsForDate((await comments(repo, n, run)).map((c) => ({ body: c.body, createdAt: "" })), now)) dateWaiting.add(n);
+    if (holder(await comments(repo, n, run)) !== null) held.add(n);
   }
-  const unlinked = inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !prs.some((pr) => linkedIssues(pr).includes(t.number)));
+  const unlinked = inProgress.filter((t) => (!t.parent || held.has(t.parent.number)) && !prs.some((pr) => linkedIssues(pr).includes(t.number)));
   const checking = new Set<number>(await waitingForCheck(owner!, name!, unlinked.map((t) => t.number), run));
   return {
     top,
     issue: { body: issue.body, parent: issue.parent && { number: issue.parent.number, body: issue.parent.body, subIssues: issue.parent.subIssues.nodes.map((n: { number: number }) => n.number) } },
     prs: prs.map((pr) => ({ number: pr.number, linked: linkedIssues(pr), updatedAt: pr.updatedAt, files: pr.files.map((f) => f.path), isDraft: pr.isDraft, labels: pr.labels.map((l) => l.name) })),
-    working: inProgress.filter((t) => (!t.parent || !dateWaiting.has(t.parent.number)) && !checking.has(t.number)),
+    // a Task of a PBI no session holds is no one's work: it blocks no other PBI
+    working: inProgress.filter((t) => (!t.parent || held.has(t.parent.number)) && !checking.has(t.number)),
     shared: [],
     turns: [],
     target: async (n) => {
@@ -448,8 +451,9 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     top: r.top.map((t) => ({ ...t })),
     issue: { body: mine.body, parent: parent ? { number: parent.number, body: parent.body, subIssues: parent.subIssues } : null },
     prs,
-    // a Task whose PBI waits for a date still ahead holds no file until then
-    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && !waitsOnlyForCheck(t.number, linked)),
+    // a Task whose PBI waits for a date still ahead holds no file until then; nor does one whose PBI no session holds.
+    // A PBI whose last read was not complete may have a claim not stored yet: it counts as held, as the app counts it
+    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && (t.parent === null || r.unread.includes(t.parent) || holder(r.comments.filter((c) => c.issue === t.parent).map((c, k) => ({ id: k, body: c.body }))) !== null) && !waitsOnlyForCheck(t.number, linked)),
     shared: r.shared ?? [],
     turns: r.turns ?? [],
     // an Issue first, as the app reads a number stored as both (a workspace kept only here numbers its own)

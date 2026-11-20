@@ -100,6 +100,13 @@ describe("waitsOf: every wait in one form, each with its limit", () => {
     expect(of({ task: task({ status: "idle", queuedAt: T0 }), queue: "slot" })[0]!.label).toBe("実行枠の空き");
   });
 
+  test("a queued reply that was refused: the row names the refusal, with the same kind, key and limit", () => {
+    const t = task({ status: "idle", outcome: "unknown", queuedAt: T0 });
+    expect(brief(of({ task: t, queue: "slot", refusal: "budget exceeded" }))).toEqual([["queue", "queue", "返信の開始の条件（budget exceeded）", 0, 6 * HOUR]]);
+    expect(of({ task: t, queue: "slot", refusal: null })[0]!.label).toBe("実行枠の空き");
+    expect(of({ task: t, queue: null, refusal: "budget exceeded" })[0]!.label).toBe("返信の開始の条件（budget exceeded）");
+  });
+
   test("the open stops of a stopped Task: each unmet condition is a wait — a PR, an Issue, a job, a date, another runner's limit", () => {
     const stops = [
       stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "issue#7", value: "open", met: false }, { key: "pr#3", value: "merged", met: true }, { key: "job#5", value: "running", met: false }, { key: "after", value: "2026-11-12T00:00:00Z", met: false }] }),
@@ -420,7 +427,7 @@ describe("checkWaits: which stopped Tasks are looked at", () => {
     db.close();
     rmSync(home, { recursive: true, force: true });
   });
-  const none = { lastEvents: () => new Map<string, number>(), queueWait: () => null, recordStop: () => ({ ok: false as const, why: "" }), record: () => undefined, abort: async () => { throw new Error("not called"); } };
+  const none = { lastEvents: () => new Map<string, number>(), queueWait: () => null, queueRefusal: () => null, recordStop: () => ({ ok: false as const, why: "" }), record: () => undefined, abort: async () => { throw new Error("not called"); } };
   const look = (now: number) => checkWaits({ db, tasks: none, dir: waitsDirOf(home), bounds: () => BOUNDS, broadcastTask: () => undefined }, now);
   const stopped = (id: string, updatedAt: number, stage: number | null = null) => {
     db.insertTask({ id, workspaceId: stage === null ? null : "ws", title: id, runner: "claude", cwd: home, scope: [home], status: "done", runnerSessionId: "s", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "waits", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: stage === null ? null : { issue: stage, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });
@@ -446,6 +453,17 @@ describe("checkWaits: which stopped Tasks are looked at", () => {
     db.updateTask("task_recent", { reviewedAt: now + 10 * DAY });
     await look(now + 10 * DAY);
     expect(db.getTask("task_recent")!.waits).toBeNull();
+  });
+
+  test("the watch asks for the refusal of each queued Task by its id", async () => {
+    const now = Date.now();
+    stopped("task_refused", now);
+    stopped("task_plain", now);
+    for (const id of ["task_refused", "task_plain"]) db.sqlite.query("UPDATE tasks SET status = 'idle', outcome = 'unknown', queued_at = ? WHERE id = ?").run(now, id);
+    const tasks = { ...none, queueWait: () => "slot" as const, queueRefusal: (id: string) => (id === "task_refused" ? "budget exceeded" : null) };
+    await checkWaits({ db, tasks, dir: waitsDirOf(home), bounds: () => BOUNDS, broadcastTask: () => undefined }, now);
+    expect(db.getTask("task_refused")!.waits?.find((w) => w.kind === "queue")?.label).toBe("返信の開始の条件（budget exceeded）");
+    expect(db.getTask("task_plain")!.waits?.find((w) => w.kind === "queue")?.label).toBe("実行枠の空き");
   });
 });
 

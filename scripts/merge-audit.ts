@@ -345,8 +345,6 @@ export async function mergedSince(from: string, run: Run, repo: string, now = Da
  */
 export async function readHistory(since: string, run: Run = spawnRun, repo = currentRepo()): Promise<{ prs: PrRecord[]; reverts: Revert[] }> {
   const jsonLines = <T>(out: string) => out.split("\n").filter(Boolean).map((l) => JSON.parse(l) as T);
-  type Comment = { body: string; created_at: string; author_association: string };
-  const isMark = (c: Comment) => MARK_AUTHORS.includes(c.author_association) && ANY_MARK.some((re) => re.test(c.body));
   const candidates = new Set<number>();
   const stream = await run(["gh", "api", "-X", "GET", `repos/${repo}/issues/comments`, "-f", `since=${since}`, "-f", "per_page=100", "--paginate",
     "-q", ".[] | {body, created_at, issue_url, author_association}"]);
@@ -357,20 +355,34 @@ export async function readHistory(since: string, run: Run = spawnRun, repo = cur
   const prs: PrRecord[] = [];
   for (const n of [...candidates].sort((a, b) => a - b)) {
     const comments = jsonLines<Comment>(await run(["gh", "api", `repos/${repo}/issues/${n}/comments`, "--paginate", "-q", ".[] | {body, created_at, author_association}"]));
-    const marks = parseMarks(comments.filter(isMark));
-    if (marks.length === 0) continue;
-    const reviewed = comments.some((c) => MARK_AUTHORS.includes(c.author_association) && REVIEW.test(c.body));
-    let pull: { merged_at: string | null; head: { sha: string } };
-    try {
-      pull = JSON.parse(await run(["gh", "api", `repos/${repo}/pulls/${n}`]));
-    } catch (e) {
-      if (/HTTP 404/.test((e as Error).message)) continue;
-      throw e;
-    }
-    prs.push({ number: n, mergedAt: pull.merged_at, headSha: pull.head.sha, marks, reviewed });
+    const pr = await prRecordOf(n, comments, run, repo);
+    if (pr) prs.push(pr);
   }
+  return { prs, reverts: await revertsSince(since, run, repo) };
+}
+
+type Comment = { body: string; created_at: string; author_association: string };
+const isMark = (c: Comment) => MARK_AUTHORS.includes(c.author_association) && ANY_MARK.some((re) => re.test(c.body));
+
+/** One PR's record from its comments (all of them, read whole): null when it has no mark, or when pulls/<n> is 404 (a plain Issue). Reads `pulls/<n>` once. */
+export async function prRecordOf(n: number, comments: Comment[], run: Run, repo: string): Promise<PrRecord | null> {
+  const marks = parseMarks(comments.filter(isMark));
+  if (marks.length === 0) return null;
+  const reviewed = comments.some((c) => MARK_AUTHORS.includes(c.author_association) && REVIEW.test(c.body));
+  let pull: { merged_at: string | null; head: { sha: string } };
+  try {
+    pull = JSON.parse(await run(["gh", "api", `repos/${repo}/pulls/${n}`]));
+  } catch (e) {
+    if (/HTTP 404/.test((e as Error).message)) return null;
+    throw e;
+  }
+  return { number: n, mergedAt: pull.merged_at, headSha: pull.head.sha, marks, reviewed };
+}
+
+/** The reverts on main since `since`: main's commits (this clone's `git log`, or the API for another repository) and the PRs they took back. */
+export async function revertsSince(since: string, run: Run, repo: string): Promise<Revert[]> {
   const { commits, prOf } = repo === currentRepo() ? await localCommits(since, run, repo) : await remoteCommits(since, run, repo);
-  return { prs, reverts: parseReverts(commits, (s) => prOf.get(s) ?? []) };
+  return parseReverts(commits, (s) => prOf.get(s) ?? []);
 }
 
 type Commits = { commits: { sha: string; at: string; message: string }[]; prOf: Map<string, number[]> };

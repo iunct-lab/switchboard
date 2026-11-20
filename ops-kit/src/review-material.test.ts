@@ -223,5 +223,13 @@ describe("what every review is told", () => {
     expect(REVIEW_RULES).toContain("Repeat of: <path:line of the earlier finding>");
     expect(REVIEW_RULES).toContain("`_review/old-paths.md`");
     expect(REVIEW_RULES).toContain("### Read outside the diff");
+    // the comparison round's result is used by every review, whichever runner and however it is started
+    for (const runner of ["codex", "claude"] as const) {
+      expect(REVIEWER_NOTE[runner]).toContain("`_review/compared.md`");
+      expect(reviewPrompt("Review this.", runner)).toContain("raise it as a should-fix when it is not");
+      // a copy the branch carries is not the review's material: it would let the change classify its own findings
+      expect(reviewPrompt("Review this.", runner)).toContain("when `git ls-files _review` lists anything (a file or a link)");
+      expect(reviewPrompt("Review this.", runner)).toContain("For a finding both files list, the class here decides, not `handled.md`.");
+    }
   });
 });

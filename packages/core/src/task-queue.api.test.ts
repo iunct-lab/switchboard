@@ -162,6 +162,55 @@ describe("core daemon", () => {
       }
     }, 20000);
 
+    test("maxRunners 予算: 待ち列から始まる返信も予算の確認を通り、超えていれば待ち列に残して理由を 1 回だけ記録し、後ろの Task は始まり、予算を上げると始まる", async () => {
+      const fast = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+      const starts: StartOptions[] = [];
+      const { c, home, b } = await boot([fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(fast, { id: "codex", starts })]);
+      try {
+        const done = await create(b, home, "done", "codex");
+        await waitFor(async () => (await statusOf(b, done.id)) === "done");
+        await patchRunners(b, 1);
+        const busy = await create(b, home, "busy");
+        await waitFor(async () => (await statusOf(b, busy.id)) === "waiting");
+        await c.tasks.releaseAndWait(done.id);
+        expect((await post(b, `/api/tasks/${done.id}/send`, { text: "again" })).status).toBe(200);
+        const behind = await create(b, home, "behind", "codex");
+        expect(c.db.listQueuedTasks().map((t) => t.id)).toEqual([done.id, behind.id]);
+        c.db.updateTask(done.id, { budgetUsd: 1e-9 }); // below what the first turn cost
+        expect(c.tasks.isOverBudget(done.id)).toBe(true);
+        expect(starts).toHaveLength(1);
+        await patchRunners(b, 2); // a slot is free: the reply is refused, the Task behind it starts
+        await waitFor(async () => starts.length === 2);
+        expect(starts[1]!.prompt).toBe("behind");
+        c.tasks.drain();
+        c.tasks.drain();
+        expect(starts).toHaveLength(2);
+        expect(c.db.getTask(done.id)!.queuedAt).not.toBeNull();
+        const refused = () => c.db.listEvents(done.id).filter((e) => e.ev.t === "status" && e.ev.text.startsWith("実行枠が空きましたが、この返信はまだ始めません（budget exceeded"));
+        expect(refused()).toHaveLength(1);
+        // aborted while every slot is taken, queued again under a raised budget, refused again once the budget is
+        // lowered: the new reply's refusal is written again
+        await patchRunners(b, 1);
+        expect((await post(b, `/api/tasks/${done.id}/abort`, {})).status).toBe(200);
+        expect(c.db.getTask(done.id)!.queuedAt).toBeNull();
+        c.db.updateTask(done.id, { budgetUsd: 1000 });
+        expect((await post(b, `/api/tasks/${done.id}/send`, { text: "again" })).status).toBe(200);
+        expect(c.db.getTask(done.id)!.queuedAt).not.toBeNull();
+        c.db.updateTask(done.id, { budgetUsd: 1e-9 });
+        await patchRunners(b, 2);
+        await waitFor(async () => (c.tasks.drain(), refused().length === 2));
+        expect(starts).toHaveLength(2);
+        c.db.updateTask(done.id, { budgetUsd: 1000 }); // raised: the next drain starts it, with --resume
+        await waitFor(async () => (c.tasks.drain(), starts.length === 3));
+        expect(starts[2]!.resumeSessionId).toBe("sess-1");
+        expect(starts[2]!.prompt).toBe("again");
+        expect(c.db.getTask(done.id)!.queuedAt).toBeNull();
+      } finally {
+        await c.stop();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
     test("maxRunners 返信: 待ち列の Task への返信は待ちの prompt の後ろに足され、添付は返信ぶんだけが渡り、中断すれば待ちごと消える", async () => {
       const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-reply-"));
       const starts: StartOptions[] = [];

@@ -107,7 +107,7 @@ date -d @<resets_at>
 
 工程ボタンの API（`/api/backlog/<n>/start`）が積んだ Task（応答の `resumeReason` が `"start"`）を返したら、その Task は別の Task を始めず、`resumeAt` の時刻を報告して止まる（上限の直前で代わりが無いとき、起動せずにリセット時刻まで積まれる）。
 
-Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で止まったら、レビューは Claude のサブエージェントで代替する（`cross-runner-review` の 0）。
+Codex の `five_hour` が 0.9 以上、または `codex exec` が使用上限で止まったら、レビューは Claude のサブエージェントで代替する（`cross-runner-review` の 0）。main との比較（`cross-runner-review` の 5）は代替せず、戻る時刻まで待つ。
 
 ## マージ判定とローカル CI
 

@@ -33,7 +33,7 @@ reads it from where it already is, and gives it a limit:
 | The runner's next event, in a turn or on its background jobs | the attached runner's last event | `output` | last event + silence limit |
 | An approval, or a turn that ended needing the person | the Task's status and outcome | `person` | start + limit for others' work |
 | A usage limit, GitHub's API limit, a full disk, a cut turn | the Task's planned resume (`resumeAt`) | `resume` | the planned time + grace |
-| A run slot, memory, a promotion letting turns start again | the Task's place in the queue (`queuedAt`) | `queue` | start + limit for own work |
+| A run slot, memory, a promotion letting turns start again; for a queued reply refused at the start (budget, a Teleport Terminal on its folder), that refusal | the Task's place in the queue (`queuedAt`), and the refusal last written for it | `queue` | start + limit for own work |
 | A pull request or an Issue | an unmet `pr#N` / `issue#N` condition of an open stop | `depends` | stop + limit for others' work |
 | A job the daemon runs for the Task | an unmet `job#N` condition | `job` | stop + limit for own work |
 | A date | an unmet `after` condition | `date` | the date + grace |

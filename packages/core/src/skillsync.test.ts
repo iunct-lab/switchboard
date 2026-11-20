@@ -708,7 +708,9 @@ describe("the kit's skills as a Task reads them", () => {
     // grow fails here: shorten it (or move it behind a condition), and raise the number only with the reason.
     // Raised to 257,354 (+439 bytes, the copy measured 256,913 before and 257,352 after): what a claim stopped by another
     // machine's lease means and what its exit codes ask for, in pbi-complete (the only skill that owns the claim).
-    expect(bytes).toBeLessThanOrEqual(257_354);
+    // Raised to 262,601 (+5,247 bytes over 257,354): the comparison with main when review findings do not converge, once in
+    // cross-runner-review (how to run and post it) and once in review-triage-and-merge (when to run it and how to sort its output).
+    expect(bytes).toBeLessThanOrEqual(262_601);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

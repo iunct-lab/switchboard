@@ -11,6 +11,7 @@ import { HostIdle } from "./hostidle.ts";
 import { idleInput } from "./server/lifecycle.ts";
 import { MAX_PTY_SESSIONS, OscStatusReader, PTY_STATUS_REPLY, PtyManager, REPLAY_CHARS, TELEPORT_SESSION_NAME, WORKSPACE_SHELL_IDLE_MS } from "./pty.ts";
 import { startServer } from "./server.ts";
+import { waitFor } from "./api-test-harness.ts";
 
 const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
@@ -554,12 +555,14 @@ test("Cloud socket starts no process until explicit request and uses saved ID/cw
 async function teleportBusyFixture(env: Record<string, string>, run: (f: {
   base: string; sockets: string; h: string; other: string; bin: string; id: string; calls: Array<{ bin: string; args: string[]; cwd?: string }>;
   finish: Map<string, () => void>; closed: string[]; letExit: () => void; create: (body: object) => Promise<any>;
+  c: Awaited<ReturnType<typeof startServer>>; endTeleport: () => void;
 }) => Promise<void>) {
   const h = mkdtempSync(join(tmpdir(), "sb-teleport-busy-")), other = mkdtempSync(join(tmpdir(), "sb-teleport-other-"));
   const bin = join(h, "claude-fake"); writeFileSync(bin, '#!/bin/sh\necho "--teleport [session] Resume a cloud session"\n', { mode: 0o755 });
   const id = "session_0123456789abcdefghijklmn";
   const calls: Array<{ bin: string; args: string[]; cwd?: string }> = [];
-  const fake = { pid: 99999999, onData: () => {}, onExit: () => {}, write: () => {}, resize: () => {}, kill: () => {} };
+  let endTeleport = () => {}; // the Teleport Terminal's process exiting
+  const fake = { pid: 99999999, onData: () => {}, onExit: (cb: (e: { exitCode: number }) => void) => { endTeleport = () => cb({ exitCode: 0 }); }, write: () => {}, resize: () => {}, kill: () => {} };
   const manager = (await PtyManager.load(async () => ({ spawn: ((b: string, a: string[], o: { cwd?: string }) => { calls.push({ ...unwrapEnv(b, a), cwd: o.cwd }); return fake; }) as any })))!; calls.length = 0;
   const finish = new Map<string, () => void>(), closed: string[] = [];
   let letExit!: () => void; const exitGate = new Promise<void>(r => (letExit = r));
@@ -574,7 +577,7 @@ async function teleportBusyFixture(env: Record<string, string>, run: (f: {
   try {
     const base = `http://127.0.0.1:${c.server.port}`;
     const create = (body: object) => fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runner: "claude", ...body }) }).then(j);
-    await run({ base, sockets: `ws://127.0.0.1:${c.server.port}`, h, other, bin, id, calls, finish, closed, letExit, create });
+    await run({ base, sockets: `ws://127.0.0.1:${c.server.port}`, h, other, bin, id, calls, finish, closed, letExit, create, c, endTeleport: () => endTeleport() });
   } finally { letExit(); await c.stop(); rmSync(h, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); }
 }
 
@@ -667,6 +670,35 @@ test("a Local Task at work in the continuation worktree blocks a second Teleport
   letExit();
   for (let i = 0; i < 100 && calls.length === 0; i++) await Bun.sleep(10);
   expect(calls).toEqual([{ bin, args: ["--teleport", id], cwd: wc }]);
+}));
+
+test("待ち列の返信: Teleport Terminal が同じ作業場所を使っている間は枠が空いても始まらず待ち列に残り、終わった後の drain() で前のセッションで始まる", () => teleportBusyFixture({}, async ({ base, h, other, calls, finish, letExit, create, c, endTeleport }) => {
+  const g = gitClone(h);
+  const cloud = await create({ cwd: h, title: "Teleport", prompt: "cloud", executionMode: "cloud" });
+  const wc = workCopy(h, cloud.id);
+  g("worktree", "add", "--detach", wc, "HEAD");
+  const local = await create({ cwd: wc, title: "続きの作業", prompt: "same" });
+  for (let i = 0; i < 100 && finish.size < 1; i++) await Bun.sleep(10);
+  finish.get("same")!();
+  await waitFor(async () => c.db.getTask(local.id)!.status === "done");
+  letExit();
+  await c.tasks.releaseAndWait(local.id);
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 1 }) });
+  const busy = await create({ cwd: other, title: "別の場所", prompt: "busy" }); // holds the only slot
+  expect((await fetch(`${base}/api/tasks/${local.id}/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "more" }) })).status).toBe(200);
+  expect(c.db.getTask(local.id)!.queuedAt).not.toBeNull();
+  expect((await fetch(`${base}/api/tasks/${cloud.id}/teleport`, { method: "POST" })).status).toBe(202);
+  await waitFor(async () => calls.length === 1);
+  finish.get("busy")!(); // the slot frees: the reply may not start while Teleport holds the folder
+  await waitFor(async () => c.db.getTask(busy.id)!.status === "done");
+  c.tasks.drain();
+  expect(finish.has("more")).toBe(false);
+  expect(c.db.getTask(local.id)!.queuedAt).not.toBeNull();
+  const refused = () => c.db.listEvents(local.id).filter((e) => e.ev.t === "status" && e.ev.text.startsWith("実行枠が空きましたが、この返信はまだ始めません（Teleport Terminalが使用中"));
+  expect(refused()).toHaveLength(1);
+  endTeleport(); // Teleport ends: the next drain() starts the reply
+  await waitFor(async () => (c.tasks.drain(), finish.has("more")));
+  expect(c.db.getTask(local.id)!.queuedAt).toBeNull();
 }));
 
 test("an archived Local Task idling in the continuation worktree is closed before Teleport too", () => teleportBusyFixture({}, async ({ base, h, bin, id, calls, finish, closed, letExit, create }) => {
