@@ -242,6 +242,74 @@ test("(h) main moved after the judgement while checked out nowhere: it is not th
   expect((await s.view(3)).issue.state).toBe("OPEN");
 });
 
+test("(i) the record refused after the base moved: the left line names --record, and that command records the merge and closes the Task", async () => {
+  const s = await setup();
+  writeFileSync(join(s.repo, "z.txt"), "z\n");
+  s.git("add", "-A");
+  s.git("commit", "-q", "-m", "z");
+  await s.mark();
+  const reviewed = s.tip("sb/2-x");
+  // the app refuses the change's and the Task's update the first time only (a daemon that does not know the field, a cut line)
+  const refused = new Set<string>();
+  const f = async (u: string, init?: RequestInit) => {
+    const key = `${init?.method} ${new URL(u).pathname}`;
+    if (init?.method === "PATCH" && /\/(2|3)$/.test(new URL(u).pathname) && !refused.has(key)) {
+      refused.add(key);
+      return new Response(JSON.stringify({ error: "refused" }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return fetch(u, init);
+  };
+  const first = await s.run(["3"], f);
+  expect(first.code).toBe(1);
+  const tip = s.tip("main");
+  expect(s.subjects()).toEqual(["c", "b", "z", "a"]);
+  expect((await s.view(3)).issue.state).toBe("OPEN");
+  expect((await s.view(2)).issue.state).toBe("OPEN");
+  const cmd = /bun scripts\/local-merge\.ts 3 (--record [0-9a-f]{40} --reviewed [0-9a-f]{40})/.exec(first.out);
+  expect(cmd?.[1]).toBe(`--record ${tip} --reviewed ${reviewed}`);
+  // a commit that was never judged landed on top: recording it as this change's merge would let forge-resync send it
+  const marksBefore = (await s.view(3)).comments.length;
+  writeFileSync(join(s.repo, "y.txt"), "y\n");
+  s.git("add", "-A");
+  s.git("commit", "-q", "-m", "unjudged");
+  const later = await s.run(["3", "--record", s.tip("main"), "--reviewed", reviewed]);
+  expect(later.code).toBe(1);
+  expect(later.out).toContain("と同じでない");
+  expect((await s.view(3)).issue.state).toBe("OPEN");
+  expect((await s.view(3)).comments.length).toBe(marksBefore);
+  s.git("reset", "-q", "--hard", tip);
+  // the line that was printed, as typed
+  const again = await s.run(["3", ...cmd![1]!.split(" ")]);
+  expect(again.code).toBe(0);
+  expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED", change: { mergeCommit: tip, reviewedHead: reviewed } });
+  // the mark the first run posted is not posted again; the merge time is when the base moved
+  const marks = (await s.view(3)).comments.filter((c) => c.body.startsWith("[local-merge] merged "));
+  expect(marks.length).toBe(1);
+  expect(marks[0]!.body).toMatch(new RegExp(`^\\[local-merge\\] merged ${tip} base=[0-9a-f]{40}$`));
+  expect((await s.view(3)).issue.change?.mergedAt).toBe(new Date(s.git("log", "-1", "--format=%cI", tip)).toISOString());
+  expect((await s.view(2)).issue.state).toBe("CLOSED");
+  // nothing else moved: main is as the merge left it
+  expect(s.tip("main")).toBe(tip);
+  // recorded once: a second run finds the change closed and writes nothing
+  expect((await s.run(["3", ...cmd![1]!.split(" ")])).code).toBe(1);
+});
+
+test("(j) --record with a tip not on the base writes nothing", async () => {
+  const s = await setup();
+  const head = s.tip("sb/2-x");
+  const commentsBefore = (await s.view(3)).comments.length;
+  // the branch's head is not on main: it was never merged
+  const r = await s.run(["3", "--record", head, "--reviewed", head]);
+  expect(r.code).toBe(1);
+  expect(r.out).toContain("に入っていない");
+  expect((await s.view(3)).issue).toMatchObject({ state: "OPEN", change: { mergeCommit: null } });
+  expect((await s.view(3)).comments.length).toBe(commentsBefore);
+  expect((await s.view(2)).issue.state).toBe("OPEN");
+  expect(s.branches()).toEqual(["main", "sb/2-x"]);
+  // not both values, not 40 hex: the usage
+  for (const args of [["3", "--record", head], ["3", "--record", "abc", "--reviewed", head], ["3", "--reviewed", head, "--record", head]]) expect((await s.run(args)).code).toBe(2);
+});
+
 test("not judged (2): no number, another argument", async () => {
   for (const args of [[], ["x"], ["3", "--merge"]]) expect(await main(args, tmpdir(), { env: {}, log: () => {}, err: () => {} })).toBe(2);
 });

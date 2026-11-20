@@ -77,12 +77,28 @@
       "why": "A large diff can be reverted as a whole, and a recheck reads it again before the merge."
     },
     {
+      "op": "merge: instructions",
+      "gateKind": "instructions",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "Instruction files decide what every later Task does; a gate cannot tell a weakened rule from a clarified one, so the owner reads the diff before it merges."
+    },
+    {
       "op": "merge: responsibility",
       "gateKind": "responsibility",
       "effect": "repository",
       "beforeObserved": true,
       "answer": "compensable",
-      "why": "Instruction files change what Tasks do next, but a revert restores them and a recheck reads the scope first."
+      "why": "The files that decide what the CI and the gate run (ops.config.json) can be reverted whole, and a recheck reads the scope first."
+    },
+    {
+      "op": "merge: limits",
+      "gateKind": "limits",
+      "effect": "repository",
+      "beforeObserved": false,
+      "answer": "irreversible",
+      "why": "A raised ceiling or a new allowance hides, on every later merge, the regression or the dependency it was set to catch; only the owner raises one."
     },
     {
       "op": "merge: migration",

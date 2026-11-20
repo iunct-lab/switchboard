@@ -7,7 +7,7 @@ import { abortOrphanedTasks, Db } from "./db.ts";
 import { STOP_NOTE } from "./evals.ts";
 import { consecutiveStops, lastStopWasDaemon, MAX_STOP_RESUMES, RESUME_CAP_STOP, STOP_RESUME_PROMPT } from "./interrupted.ts";
 import { asksFromTasks } from "./asks.ts";
-import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, GITHUB_WINDOW_MS, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, parseResetBanner, planResumeAt, resetFromQuota, usesGraphql } from "./ratelimit.ts";
+import { FALLBACK_DELAY_MS, GITHUB_NOTE, GITHUB_RESUME_PROMPT, GITHUB_WINDOW_MS, LATE_RETRY_MS, MAX_CONSECUTIVE_STOPS, MAX_FALLBACK_DELAY_MS, PAST_GRACE_MS, PROBE_AFTER_MS, RESUME_MARGIN_MS, RESUME_PROMPT, RateLimitResumer, type ResumeTunables, detectLimitStop, fallbackNote, fallbackRunner, fmtTime, githubLimitHit, isLimitText, jobsAtLimit, parseResetBanner, planResumeAt, resetFromQuota, usesGraphql } from "./ratelimit.ts";
 import { parseStopReport, reduceStops } from "./stops.ts";
 import { ResumeSupersededError } from "./tasks/state.ts";
 import { TaskManager } from "./tasks/manager.ts";
@@ -84,6 +84,35 @@ describe("rate limit: recognising the stop and its reset time", () => {
     expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor(now / 1000) - 60 }], now)?.at).toBe((Math.floor(now / 1000) - 60) * 1000); // a minute ago: lifted late
     expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: Math.floor((now - PAST_GRACE_MS) / 1000) - 60 }], now)?.at).toBeUndefined(); // stale
     expect(resetFromQuota([{ window: "five_hour", utilization: 1, resetsAt: RESETS_AT * 1000 }], now)?.at).toBe(RESETS_AT * 1000); // ms accepted too
+  });
+
+  test("a model's own limit (Claude Code 2.1.325 'hit your Fable limit') is a stop; other model names too; its dated reset 'Nov 23, 11am (UTC)' is read", () => {
+    const FABLE = "You've hit your Fable limit · resets Nov 23, 11am (UTC). Switch to another model, or wait for the limit to reset.";
+    const stopAt = Date.parse("2026-11-17T18:16:57Z");
+    const reset = Date.parse("2026-11-23T11:00:00Z");
+    expect(isLimitText("claude", FABLE)).toBe(true);
+    expect(isLimitText("claude", "You've hit your Opus 5.5 limit · resets Nov 23, 11am (UTC)")).toBe(true);
+    expect(isLimitText("claude", "You've hit your weekly limit")).toBe(true);
+    expect(isLimitText("claude", "hit your own context window and the output limit")).toBe(false); // more than two words before "limit"
+    expect(parseResetBanner(FABLE, stopAt)).toBe(reset);
+    expect(parseResetBanner("resets Sep 15 at 4am (UTC)", Date.parse("2026-09-09T12:00:00Z"))).toBe(Date.parse("2026-09-15T04:00:00Z")); // the older dated form still reads
+    expect(parseResetBanner("resets Nov 23, 2026.", stopAt)).toBeUndefined(); // a year with no time is not read as a time ("20" of 2026)
+    const q = [{ window: "seven_day_overage_included", utilization: 1, resetsAt: 1795431600 }];
+    expect(detectLimitStop("claude", [FABLE], q, stopAt, "seven_day_overage_included")).toEqual({ text: FABLE, resetsAt: 1795431600 * 1000, source: "quota", window: "seven_day_overage_included" });
+    expect(detectLimitStop("claude", [FABLE], [], stopAt)).toEqual({ text: FABLE, resetsAt: reset, source: "banner" });
+  });
+
+  test("a resume of another wait or of an older stop counts its own background jobs; only a resume right after a limit stop takes that stop's jobs", () => {
+    const start: AgentEvent = { t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/tmp" };
+    const user = (text: string): AgentEvent => ({ t: "message.delta", role: "user", text });
+    const limitLine: AgentEvent = { t: "status", text: "使用上限で停止: You've hit your Fable limit。11/23 20:01 に自動再開します" };
+    const oldStop: AgentEvent[] = [{ t: "background", count: 2, jobs: ["A", "B"] }, user("go on"), start, { t: "session.end", status: "error", summary: "limit" }, limitLine];
+    const laterRun: AgentEvent[] = [{ t: "background", count: 1, jobs: ["C"] }, user(STOP_RESUME_PROMPT), start, { t: "session.end", status: "error", summary: "limit" }, limitLine];
+    // the old stop was resumed and a person went on; days later the daemon-stop resume hits the limit with C running
+    expect(jobsAtLimit([...oldStop, user(RESUME_PROMPT), start, { t: "session.end", status: "ok", summary: "" }, user("next"), start, { t: "session.end", status: "ok", summary: "" }, ...laterRun])).toEqual(["C"]);
+    expect(jobsAtLimit(laterRun)).toEqual(["C"]); // no stop before it at all
+    // right after the stop (notification turns in between, no message): the resume takes the stop's jobs
+    expect(jobsAtLimit([...oldStop, { t: "background", count: 0, jobs: [] }, start, { t: "session.end", status: "ok", summary: "" }, user(RESUME_PROMPT), start, { t: "session.end", status: "error", summary: "limit" }, limitLine])).toEqual(["A", "B"]);
   });
 
   test("detection prefers the quota's time over the banner's, then the banner, then none; the plan: margin after a future reset, short retry after a passed one, doubling fallback when unknown", () => {
@@ -576,6 +605,128 @@ describe("rate limit: RateLimitResumer", () => {
     await tasks.abort(t.id);
     expect(db.getTask(t.id)!.resumeAt).toBeNull();
     await expect(resumer.resumeNow(t.id)).resolves.toBeDefined(); // still possible by hand (a new turn)
+  });
+
+  /** The 2026-11-17 recording: four background jobs, the first notification turn refused by the model's limit, three ok turns after it. */
+  let emit!: (ev: AgentEvent) => void;
+  async function subagentRun(jobs: string[] | undefined, count = 4) {
+    const FABLE = "You've hit your Fable limit · resets Nov 23, 11am (UTC). Switch to another model, or wait for the limit to reset.";
+    const stopAt = Date.parse("2026-11-17T18:16:57Z");
+    const resetSec = 1795431600; // 2026-11-23T11:00:00Z
+    now = stopAt;
+    const adapter: RunnerAdapter = {
+      id: "claude",
+      async detect() {
+        return { available: true };
+      },
+      start(_opts, e) {
+        emit = e;
+        let resolveExit!: (c: number | null) => void;
+        const exited = new Promise<number | null>((r) => (resolveExit = r));
+        queueMicrotask(() => {
+          e({ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" });
+          e({ t: "session.end", status: "ok", summary: "started four subagents" });
+        });
+        return {
+          send: (text) => {
+            sends.push(text);
+            e({ t: "message.delta", role: "user", text }); // as every adapter echoes what it sends
+          },
+          respondPermission: () => undefined,
+          abort: async () => resolveExit(null),
+          close: async () => resolveExit(0),
+          exited,
+        } satisfies RunnerSession;
+      },
+    };
+    tasks = new TaskManager(db, new Map([["claude", adapter]]), (m) => broadcasts.push(m), { idleMs: -1 });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    emit({ t: "background", count, ...(jobs ? { jobs } : {}) });
+    emit({ t: "background", count: count - 1, ...(jobs ? { jobs: jobs.slice(1) } : {}) });
+    // the notification turn the runner starts itself: refused by the model's limit
+    emit({ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" });
+    emit({ t: "quota", runner: "claude", windows: { seven_day_overage_included: { utilization: 1, resetsAt: resetSec } }, status: "rejected", limitType: "seven_day_overage_included" });
+    emit({ t: "session.end", status: "error", summary: FABLE });
+    await settle();
+    const planned = db.getTask(t.id)!.resumeAt;
+    expect(planned).toBe(stopAt + PROBE_AFTER_MS); // the reset is days away: one early probe, as for any long wait
+    // the other three notification turns end ok with an empty summary; the plan stays
+    for (const count of [2, 1, 0]) {
+      emit({ t: "background", count });
+      emit({ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" });
+      emit({ t: "session.end", status: "ok", summary: "" });
+      await settle();
+      expect(db.getTask(t.id)!.resumeAt).toBe(planned);
+    }
+    expect(await resumer.tick()).toEqual([]); // not yet due
+    now = planned!;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(await resumer.tick()).toEqual([]); // once
+    return t;
+  }
+
+  test("subagents stopped by a model's limit (2026-11-17 recording): the first notification turn's error plans the resume, the ok notification turns after it keep it, the due tick sends once", async () => {
+    await subagentRun(["Fix promotion drain findings", "b", "c", "d"]);
+    expect(sends.length).toBe(1);
+  });
+
+  test("the stop note and the resume prompt name the background jobs running at the limit; without jobs the prompt is the setting's text as before", async () => {
+    const t = await subagentRun(["Fix promotion drain findings", "Review core", "Review web", "Write docs"]);
+    const stop = statuses(t.id).find((s) => s.startsWith("使用上限で停止"))!;
+    expect(stop).toContain("。上限の時点で動いていた背景の作業 4 件（Fix promotion drain findings ほか）。");
+    expect(stop).toContain("に 1 回試し、だめなら");
+    expect(sends).toEqual([`${RESUME_PROMPT}\n\n使用上限の時点で動いていた背景の作業: Fix promotion drain findings、Review core、Review web、Write docs。使用上限で止まったサブエージェントは、止まった所から続けさせてください。`]);
+  });
+
+  test("resumes refused by the same limit (the early try, then the resume at the planned time): every stop line and every resume names the jobs of the first stop", async () => {
+    const names = ["Fix promotion drain findings", "Review core", "Review web", "Write docs"];
+    const t = await subagentRun(names);
+    const named = `使用上限の時点で動いていた背景の作業: ${names.join("、")}。`;
+    const refuse = async () => {
+      emit({ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" });
+      emit({ t: "session.end", status: "error", summary: "You've hit your Fable limit · resets Nov 23, 11am (UTC)." });
+      await settle();
+    };
+    expect(sends.length).toBe(1); // the try
+    await refuse();
+    expect(statuses(t.id).at(-1)).toContain("試しは使用上限で断られました");
+    now = db.getTask(t.id)!.resumeAt!;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends[1]).toContain(named);
+    // the resume at the planned time is refused too (the reset has passed, the limit still holds): the next one still names them
+    await refuse();
+    expect(statuses(t.id).at(-1)).toContain("上限の時点で動いていた背景の作業 4 件（Fix promotion drain findings ほか）。");
+    now = db.getTask(t.id)!.resumeAt!;
+    expect(await resumer.tick()).toEqual([t.id]);
+    await settle();
+    expect(sends.length).toBe(3);
+    expect(sends[2]).toContain(named);
+  });
+
+  test("a background event with fewer names than its count keeps the count in the stop line and the resume", async () => {
+    const t = await subagentRun(["Fix promotion drain findings", "c", "d"], 4); // the runner left out a job with no description
+    expect(statuses(t.id).find((s) => s.startsWith("使用上限で停止"))).toContain("。上限の時点で動いていた背景の作業 4 件（Fix promotion drain findings ほか）。");
+    expect(sends[0]).toContain("使用上限の時点で動いていた背景の作業: Fix promotion drain findings、c、d ほか名前の無い 1 件。");
+  });
+
+  test("an old background event without names still gives the count; a stop with no background jobs keeps the stop line and RESUME_PROMPT as before", async () => {
+    const t = await subagentRun(undefined);
+    expect(statuses(t.id).find((s) => s.startsWith("使用上限で停止"))).toContain("。上限の時点で動いていた背景の作業 4 件。");
+    expect(sends[0]).toContain("使用上限の時点で動いていた背景の作業: 4 件。");
+    await tasks.shutdown();
+    sends.length = 0;
+    boot([LIMIT_TURN]);
+    const u = tasks.create({ cwd: home, title: "u", prompt: "go", runner: "claude" });
+    await settle();
+    expect(statuses(u.id).at(-1)).not.toContain("背景の作業");
+    now = db.getTask(u.id)!.resumeAt!;
+    await resumer.tick();
+    expect(sends).toEqual([RESUME_PROMPT]);
   });
 
   test("resumeNow refuses a task waiting on its runner's background jobs", async () => {

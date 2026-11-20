@@ -20,8 +20,11 @@ import { WorkspaceClones } from "../workspace-clone.ts";
 
 /** Whether the backlog reads the workspace: the meta workspace only on an instance that develops Switchboard itself. The one judgement; BacklogSync.sync and the lists use it, and so do the request Task's entry and the stage start. */
 export function backlogReads(sc: Pick<ServerContext, "settings">, ws: Pick<Workspace, "kind">): boolean {
-  return ws.kind !== "meta" || sc.settings().developSelf;
+  return readsWorkspace(() => sc.settings().developSelf, ws);
 }
+
+/** The judgement of `backlogReads`, with the setting given as a function so one read of many workspaces can parse the settings once. */
+const readsWorkspace = (developSelf: () => boolean, ws: Pick<Workspace, "kind">): boolean => ws.kind !== "meta" || developSelf();
 
 // the flow of the closed PBIs: the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
 export const flowWorkspaces = (sc: Pick<ServerContext, "db">): FlowWorkspace[] => sc.db.listWorkspaces().map((w) => ({ id: w.id, name: w.name, path: w.path, repository: sc.db.getWorkspaceBacklogSource(w.id)?.repository ?? null }));
@@ -87,8 +90,11 @@ export const withActive = (sc: Pick<ServerContext, "db" | "activeStageTask" | "m
 });
 
 /** Every workspace's stored backlog with its stage Tasks (withActive); `refresh` imports each first (GET /api/backlog). */
-export const readBacklog = async (sc: Pick<ServerContext, "db" | "backlogReads" | "backlog" | "storedBacklogReleased" | "withActive" | "syncEntry">, refresh: boolean): Promise<Backlog> => {
-  const read = await Promise.all(sc.db.listWorkspaces().filter(sc.backlogReads).map(async (ws) => {
+export const readBacklog = async (sc: Pick<ServerContext, "db" | "settings" | "backlog" | "storedBacklogReleased" | "withActive" | "syncEntry">, refresh: boolean): Promise<Backlog> => {
+  // the settings are parsed once for this read, and only when a meta workspace asks (a setting saved before the read is in it)
+  let developSelf: boolean | undefined;
+  const reads = (ws: Workspace) => readsWorkspace(() => (developSelf ??= sc.settings().developSelf), ws);
+  const read = await Promise.all(sc.db.listWorkspaces().filter(reads).map(async (ws) => {
     if (!existsSync(ws.path)) return { ws, stored: null };
     if (refresh) await sc.backlog.sync(ws, undefined, { full: true }).catch(() => undefined);
     // the prerequisites judged as backlog-next judges them

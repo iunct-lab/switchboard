@@ -17,6 +17,14 @@ describe("findIssueRefs: picks up", () => {
   test("a multi-line /* */ comment and JSX {/* */}", () => {
     expect(lines("a.tsx", "/**\n * about #5\n */\nconst x = <a>{/* #6 */}</a>;")).toEqual(["comment:2", "comment:4"]);
   });
+  test("a comment after a regular expression or a template that is divided, and after a line-leading division", () => {
+    const src = ["const n = /x/ / 2; // see #12", "const m = `${8}` / 2; // see #13", "const k = 8 /* a", "   b */ / 2; // see #14"].join("\n");
+    expect(lines("a.ts", src)).toEqual(["comment:1", "comment:2", "comment:4"]);
+  });
+  test("a comment after a regular expression at the start of a line after `if (…)`, and inside a template's `${`", () => {
+    const src = ["if (ok)", "  /^'/.test(s) && f(); // see #12", "const s = `${/'/.test(x)}`; // see #13"].join("\n");
+    expect(lines("a.ts", src)).toEqual(["comment:2", "comment:3"]);
+  });
   test("SQL -- in a .ts", () => {
     expect(lines("db.ts", "const q = `\n-- added by #7\nselect 1`;")).toEqual(["comment:2"]);
   });
@@ -33,12 +41,69 @@ describe("findIssueRefs: picks up", () => {
       { line: 2, text: "it.skip(`x #13`, f);", kind: "test-title" },
     ]);
   });
-  test("a test name on the line after the call", () => {
-    expect(lines("a.test.ts", 'test(\n  "works (#12)",\n  () => {},\n);')).toEqual(["test-title:2"]);
+  test("a test name on the line after the call, after a blank line, and after a comment", () => {
+    expect(lines("a.test.ts", 'test(\n  "works (#12)",\n  () => {},\n);\ntest(\n\n  "b #2", f);\ntest(/* c */ "c #3", f);')).toEqual(["test-title:2", "test-title:7", "test-title:8"]);
+  });
+  test("a test name passed to the call after a modifier", () => {
+    const src = [
+      'test.skipIf(x)("a (#1)", f);',
+      'test.if(!y(z))("b #2", f);',
+      "describe.skipIf(x)(`c #3`, f);",
+      'test.each([[1, ")"]])("d %s #4", f);',
+      "test.each([",
+      "  [1],",
+      '])("e #5", f);',
+    ].join("\n");
+    expect(lines("a.test.ts", src)).toEqual(["test-title:1", "test-title:2", "test-title:3", "test-title:4", "test-title:7"]);
+  });
+  test("a test call past a regular expression or a comment that holds a quote or a parenthesis", () => {
+    const src = [
+      "const re = /'/; test(",
+      '  "a #1", f);',
+      'test.skipIf(/\\)/.test(x))("b #2", f);',
+      "test.each([",
+      "  [1], // don't (",
+      '])("c #3", f);',
+    ].join("\n");
+    expect(lines("a.test.ts", src)).toEqual(["test-title:2", "test-title:3", "test-title:6"]);
+  });
+  test("a test after a line-leading division, and a modifier whose condition holds a comment with no space before it", () => {
+    const src = ["const n = 8", '/ 2; test("a #1", f);', "test.skipIf(x// )", ')("b #2", f);'].join("\n");
+    expect(lines("a.test.ts", src)).toEqual(["test-title:2", "test-title:4"]);
+  });
+  test("a modifier whose condition starts with a string or a block comment, and a test after a line that only looks like SQL", () => {
+    const src = [
+      'test.skipIf("ci" === mode)("a #1", f);',
+      'test.skipIf(/* gate */ /\\)/.test(x))("b #2", f);',
+      '-- i; test("c #3", f);',
+      "const q = `select 1",
+      "-- note`;",
+      'test("d #4", f);',
+    ].join("\n");
+    expect(lines("a.test.ts", src)).toEqual(["test-title:1", "test-title:2", "test-title:3", "test-title:6"]);
   });
 });
 
 describe("findIssueRefs: leaves alone", () => {
+  test("a name without a number after a modifier, and a chained call that is not a name", () => {
+    const src = [
+      'test.skipIf(x)("a", f);',
+      'test.if(!y(z))("b", f);',
+      "describe.skipIf(x)(`c`, f);",
+      'test.each([[1, ")"]])("d %s", f);',
+      "test.each([",
+      "  [1],",
+      '])("e", f);',
+      "test.each(rows).map((r) => r);",
+      'test.each(rows).map("label #12");',
+      'test.skipIf("#12" === mode)(name, f);',
+    ].join("\n");
+    expect(lines("a.test.ts", src)).toEqual([]);
+  });
+  test("a test call written inside a template literal that spans lines", () => {
+    const src = ["const fixture = `import { test } from 'bun:test';", 'test.skipIf(a)("x #1", f);', 'test("y #2", f);`;'].join("\n");
+    expect(lines("a.test.ts", src)).toEqual([]);
+  });
   test("a string, a color, a URL fragment, an entity, a repo reference", () => {
     const src = 'const a = "#12";\nconst c = "#fff", d = "#0006";\nconst u = "https://x/#1"; const e = "&#123;";\nconst r = "owner/name#12";';
     expect(lines("a.ts", src)).toEqual([]);

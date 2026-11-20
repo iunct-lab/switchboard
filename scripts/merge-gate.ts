@@ -9,6 +9,8 @@ import { overlaps, scopeIn } from "../ops-kit/src/task-paths.ts";
 import { client, recordScopeStop, runBacklog, type Detail, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../ops-kit/src/config.ts";
 import { mergeAnswerOf } from "../ops-kit/src/gh-guard.ts";
+import { LIMIT_FILES, limitsRaisedOf } from "./merge-gate-limits.ts";
+import { markedLinesTouched } from "./merge-gate-rules.ts";
 import { heldSettingsOf, stepsNotConfirmed, type HeldSettings } from "./workspace-settings.ts";
 
 export const LARGE_LINES = 300;
@@ -34,8 +36,8 @@ export const PROTECTED = [
  * Rules for any repository (--repo too): a PR touching one of these is large whatever its size, with the class as the reason.
  * Security: a path word (split at / . _ -, lower-cased) in SECURITY_WORDS, or a path of SECURITY_GROUPS (CI and repository
  * settings, lock files — adding a dependency changes the lock —, the gates, the host scripts) or SECURITY_WORD_FILES (secrets
- * files). Responsibility: design rules, design docs, agent instructions and operating settings; README.md's
- * `## Design rules` section is judged per line (designRulesTouched).
+ * files). Instructions: CLAUDE.md, AGENTS.md and the skills, asked of the owner. Responsibility: the operating settings
+ * (ops.config.json); README.md's `## Design rules` section is judged per line (designRulesTouched).
  */
 export const SECURITY_WORDS = ["auth", "approval", "permission", "permissions", "secret", "secrets", "credential", "credentials", "token", "tokens", "crypto", "sandbox"];
 /**
@@ -56,7 +58,7 @@ export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "se
   "security:github": glob([".github/**"]),
   // the gate and local CI decide merges like CI does, local-merge makes them and forge-resync pushes main:
   // a small change to them is still the user's to approve
-  "security:gates": glob(["scripts/merge-gate.ts", "ops-kit/reversibility.json", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
+  "security:gates": glob(["scripts/merge-gate.ts", "scripts/merge-gate-limits.ts", "scripts/merge-gate-rules.ts", "ops-kit/reversibility.json", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update)
   "security:host": glob(["aws/host/**"]),
@@ -73,26 +75,22 @@ export const HOST_COMMENT_FILES = glob(["aws/host/**/*.{sh,service,timer,yml,yam
 const HOST_ROOT_NOTE = "（aws/host は起動のたびに root が main から入れて走らせる。root で走る範囲が増えるなら main の保護の見直しの契機: docs/design/cloud-hosting.md §6.5）";
 // Design documents are not here: they do not decide what a Task does, and a PR fixes them with the change, so they would
 // match nearly every PR. Whether a PBI's scope holds for them is the main review's (cross-runner-review).
-export const RESPONSIBILITY = [
-  "**/CLAUDE.md",
-  "**/AGENTS.md",
-  "ops.config.json",
-  ".claude/skills/**",
-  "ops-kit/skills/**",
-].map((p) => new Bun.Glob(p));
+export const RESPONSIBILITY = ["ops.config.json"].map((p) => new Bun.Glob(p));
+/** The files that instruct the Task: the owner reads their diff (`instructions`), and they come alone, with tests at most. */
+export const INSTRUCTIONS_FILES = ["**/CLAUDE.md", "**/AGENTS.md", ".claude/skills/**", "ops-kit/skills/**"].map((p) => new Bun.Glob(p));
 const DESIGN_RULES = "README.md の ## Design rules";
 
 /**
  * Two kinds of large reason. Ask: only the user lifts it (--allow-large) — the security groups the table answers
  * irreversible. Recheck: a `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line count and the other
- * protected paths; responsibility: the other responsibility files; migration: MIGRATION; rescue: RESCUE, the rollback itself;
+ * protected paths; responsibility: ops.config.json; migration: MIGRATION; rescue: RESCUE, the rollback itself;
  * design-rules: README.md's Design rules; security:docs, security:tests and security:lockfile: the security groups the
  * owner moved to a recheck, docs/design/merge-gate.md).
  */
 export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules" | "security:docs" | "security:tests" | "security:lockfile";
-export type AskKind = SecurityKind;
+export type AskKind = SecurityKind | "instructions" | "limits";
 /** The words of the record marks, in this order: who lifted which kind of a large PR. */
-export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "responsibility", "migration"] as const;
+export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "instructions", "responsibility", "migration", "limits"] as const;
 export type MergeKind = (typeof MERGE_KINDS)[number];
 
 /**
@@ -172,6 +170,10 @@ export interface PrFacts {
   checks: { name: string; conclusion: string }[];
   /** README.md's `## Design rules` section changed (designRulesTouched); absent = not. */
   designRulesTouched?: boolean;
+  /** `<path>:<line of the base>` of the user-marked lines an instruction file's change deletes or rewrites (markedLinesTouched); absent = none. */
+  userRulesTouched?: string[];
+  /** What the PR raises in the limit files (`limitsRaised`, one line each); absent = nothing, or the change was not read. */
+  limitsRaised?: string[];
   /** A CI run that never started, or none, was replaced by the local pass of the head and the base's tip; GitHub still calls the PR UNSTABLE for a failed run. */
   localCi?: boolean;
   /** Why the PR's local-ci results did not count (an older base, a newer fail); absent = none, or one counted. */
@@ -429,8 +431,9 @@ export function plainDiffHeader(diff: string, path: string): boolean {
   return at === 4 && /^index [0-9a-f]+\.\.[0-9a-f]+ 100(644|755)$/.test(lines[1]!) && lines[2] === `--- a/${path}` && lines[3] === `+++ b/${path}`;
 }
 
-export function classify(path: string): "security" | "responsibility" | null {
+export function classify(path: string): "security" | "instructions" | "responsibility" | null {
   if (securityKinds(path).length > 0) return "security";
+  if (matches(INSTRUCTIONS_FILES, path)) return "instructions";
   if (matches(RESPONSIBILITY, path)) return "responsibility";
   return null;
 }
@@ -567,7 +570,27 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   }
   add("rescue", "rescue", paths.filter(rescue));
   add("design-rules", "責務", f.designRulesTouched ? [DESIGN_RULES] : []);
+  add("limits", "検査の上限・許可リストを上げる", f.limitsRaised ?? []);
+  // the user-marked lines an instruction file's change deletes or rewrites go on this reason, whatever the file's own kind is
+  // (security by a path word, rescue, renamed out of an instruction path): a line is never left without a reason
+  const userRules = f.userRulesTouched ?? [];
+  // an instruction file is asked whatever else it is (a path word, rescue/), and so is one renamed out of an instruction path
+  // only a rename: a copy leaves its source as it was, and a local change sees the copy as a file added
+  const isInstruction = (x: PrFacts["files"][number]) => matches(INSTRUCTIONS_FILES, x.path) || (x.status === "renamed" && x.previous !== undefined && matches(INSTRUCTIONS_FILES, x.previous));
+  const instructed = f.files.filter(isInstruction).map((x) => (matches(INSTRUCTIONS_FILES, x.path) ? x.path : `${x.path}（改名前: ${x.previous}）`));
+  const ruleNote = userRules.length > 0 ? `（利用者の決まりの行を消す・変える: ${userRules.join(", ")}）` : "";
+  if (instructed.length > 0) add("instructions", "指示のファイル", instructed, ruleNote);
+  else if (userRules.length > 0) add("instructions", "指示のファイル", [...new Set(userRules.map((r) => r.replace(/:[^:]*$/, "")))], ruleNote);
   add("responsibility", "責務", paths.filter((p) => classify(p) === "responsibility" && !rescue(p)));
+  // an instruction file comes with tests at most: a PR of both is split, and no yes lifts it. A file renamed out of an
+  // instruction path leaves a file that is not one, as a local change (a file removed and a file added) shows it
+  const others = f.files.flatMap((x) => {
+    const isOther = (p: string) => !matches(INSTRUCTIONS_FILES, p) && !/\.test\.ts$/.test(p);
+    // a rename into an instruction path removes the file it came from, as a local change shows it
+    const from = x.status === "renamed" && x.previous !== undefined && isOther(x.previous) ? [`${x.previous}（改名で消える）`] : [];
+    return [...(isOther(x.path) ? [x.path] : []), ...from];
+  });
+  const mixed = instructed.length > 0 && others.length > 0 ? `[分ける] 指示のファイル（${instructed.join(", ")}）とほかのファイル（${others.join(", ")}）を同じ PR で変えている。指示のファイルだけの PR に分けて出し直す` : "";
   add("migration", "保護するパスに触れている", touched.filter((p) => matches(MIGRATION, p)));
   add("size", "保護するパスに触れている", touched.filter((p) => !matches(MIGRATION, p)));
   // a direct PR skips the main review when no large reason is left once the kinds the table answers reversible are set aside;
@@ -591,6 +614,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     : large
       .filter((l) => isAsk(l.kind) || !marked.has(l.kind))
       .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}`);
+  if (mixed) reasons.push(mixed);
   if (opts.allowLarge && !lifted) reasons.push(`[merge-answer] yes が無い: ${left.join(",")}（--allow-large は head の最後の印が yes で ask と recheck を全部含むときだけ効く）`);
   // the settings kept by Switchboard (the CI's steps, the gate) have a change the person has not confirmed: the merge waits
   // for that answer. Not lifted by --allow-large or a [merge-answer]: it is answered where the change is shown (判断待ち)
@@ -781,6 +805,33 @@ async function checksWithLocalCi(runs: WorkflowRun[], localPass: boolean, run: (
 }
 
 /**
+ * `<path>:<line>` of the user-marked lines the PR's instruction files delete or rewrite, from the merge base's file and the
+ * PR's patch of it. A new file has none; a file whose patch GitHub leaves out (a very large diff) is listed as `<path>: 差分を読めない` (one with no changed line, a pure rename or a binary file, is not).
+ */
+async function readUserRulesTouched(n: number, run: (args: string[]) => Promise<string>, repo: string, base: string, head: string): Promise<string[]> {
+  const listed = (await run(["api", "--paginate", `repos/${repo}/pulls/${n}/files?per_page=100`, "-q", ".[] | {filename, previous_filename, status, changes, patch}"])).trim();
+  // jq writes a key GitHub leaves out as null
+  const files: { filename: string; previous_filename: string | null; status: string; changes: number | null; patch: string | null }[] = listed ? listed.split("\n").map((l) => JSON.parse(l)) : [];
+  // the base's file a row changed: the path before a rename (a copy changes no file of the base)
+  const before = (x: (typeof files)[number]) => (x.status === "renamed" ? x.previous_filename ?? x.filename : x.filename);
+  const mine = files.filter((x) => x.status !== "added" && x.status !== "copied" && matches(INSTRUCTIONS_FILES, before(x)));
+  if (mine.length === 0) return [];
+  const mergeBase = (await run(["api", `repos/${repo}/compare/${base}...${head}`, "-q", ".merge_base_commit.sha"])).trim();
+  const out: string[] = [];
+  for (const x of mine) {
+    const path = before(x);
+    // no patch and no changed line: a pure rename, a mode change or a binary file — no line moved
+    if (x.patch === null) {
+      if (x.changes !== 0) out.push(`${path}: 差分を読めない`);
+      continue;
+    }
+    const text = await run(["api", "-H", "Accept: application/vnd.github.raw", `repos/${repo}/contents/${contentsPath(path)}?ref=${mergeBase}`]);
+    out.push(...markedLinesTouched(text, x.patch).map((i) => `${path}:${i}`));
+  }
+  return out;
+}
+
+/**
  * The README at the merge base (the PR's diff is against it, not the base branch's tip) and the PR's README.md patch.
  * GitHub leaves the patch out of a very large diff; then a section that is there cannot be ruled out, so it counts as touched.
  */
@@ -899,6 +950,10 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   const comments: { body: string; createdAt: string }[] = pr.comments.filter((c: { authorAssociation?: string }) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
   const rules = pr.files.some((x: { path: string; changeType?: string }) => x.path === "README.md" && x.changeType !== "ADDED")
     && await readmeDesignRulesTouched(n, run, repo, pr.baseRefOid, pr.headRefOid);
+  // a rename may come from an instruction path: readUserRulesTouched reads the path before it
+  const userRules = pr.files.some((x: { path: string; changeType?: string }) => x.changeType !== "ADDED" && (matches(INSTRUCTIONS_FILES, x.path) || x.changeType === "RENAMED"))
+    ? await readUserRulesTouched(n, run, repo, pr.baseRefOid, pr.headRefOid)
+    : [];
   const runs = JSON.parse(await run(["api", `repos/${repo}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`]));
   const threads = JSON.parse(
     await run([
@@ -926,12 +981,17 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   const configScope = task && files.some((x) => x.path === CONFIG_FILE) ? await readConfigScope(run, repo, pr.baseRefOid, pr.headRefOid) : undefined;
   const commentOnly = await readCommentOnly(n, files, run, repo, pr.baseRefOid, pr.headRefOid);
   for (const x of files) if (commentOnly.has(x.path)) x.commentOnly = true;
+  const limitFiles = files.some((x) => LIMIT_FILES.includes(x.path));
+  const forked = limitFiles ? (await run(["api", `repos/${repo}/compare/${pr.baseRefOid}...${pr.headRefOid}`, "-q", ".merge_base_commit.sha"])).trim() : "";
+  const raised = limitFiles ? await limitsRaisedOf(files, (side, path) => run(["api", "-H", "Accept: application/vnd.github.raw", `repos/${repo}/contents/${contentsPath(path)}?ref=${side === "head" ? pr.headRefOid : forked}`])) : [];
   return {
     files,
     ...(configScope ? { configScope } : {}),
     headCommittedAt: authored.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)),
     checks,
     ...(rules ? { designRulesTouched: true } : {}),
+    ...(userRules.length > 0 ? { userRulesTouched: userRules } : {}),
+    ...(raised.length > 0 ? { limitsRaised: raised } : {}),
     ...(checks.some((c) => c.name.endsWith(LOCAL_CI_SUFFIX) || c.name === LOCAL_CI_ONLY) ? { localCi: true } : {}),
     ...(local.note ? { localCiNote: local.note } : {}),
     ...(held ? { held } : {}),
@@ -1001,11 +1061,11 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
   // judged (the scope check and the security groups) without trusting git's guess of what was renamed. Any other letter
   // (a type change is "changed") leaves the status out: not known
   const STATUS: Record<string, FileStatus> = { A: "added", D: "removed", M: "modified", T: "changed" };
-  const status = new Map((await git("diff", "--name-status", "--no-renames", range)).split("\n").filter(Boolean).map((l) => {
-    const [st, ...path] = l.split("\t");
-    return [path.join("\t"), STATUS[st!]] as const;
-  }));
-  const files: PrFacts["files"] = (await git("diff", "--numstat", "--no-renames", range)).split("\n").filter(Boolean).map((l) => {
+  // -z: paths as they are (git quotes a path with a non-ASCII character or a quote otherwise, and a quoted path matches no glob)
+  const named = (await git("diff", "-z", "--name-status", "--no-renames", range)).split("\0");
+  const status = new Map<string, FileStatus | undefined>();
+  for (let i = 0; i + 1 < named.length; i += 2) if (named[i]) status.set(named[i + 1]!, STATUS[named[i]!]);
+  const files: PrFacts["files"] = (await git("diff", "-z", "--numstat", "--no-renames", range)).split("\0").filter(Boolean).map((l) => {
     const [add, del, ...path] = l.split("\t");
     // a binary file is "-": no lines
     const st = status.get(path.join("\t"));
@@ -1036,6 +1096,14 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
     const readme = await git("show", `${mergeBase}:README.md`).catch(() => "");
     rules = DESIGN_RULES_HEADING.test(readme) && designRulesTouched(readme, await git("diff", range, "--", "README.md"));
   }
+  const userRules: string[] = [];
+  for (const f of files.filter((x) => x.status !== "added" && matches(INSTRUCTIONS_FILES, x.previous ?? x.path))) {
+    const path = f.previous ?? f.path;
+    const mergeBase = (await git("merge-base", base, head)).trim();
+    const text = await git("show", `${mergeBase}:${path}`).catch(() => "");
+    userRules.push(...markedLinesTouched(text, await git("diff", "--no-renames", range, "--", path)).map((i) => `${path}:${i}`));
+  }
+  const raised = await limitsRaisedOf(files, async (side, path) => git("show", `${side === "head" ? head : await mergeBaseOf()}:${path}`));
   const rechecks = RECHECK_KINDS.filter((k) => comments.some((c) => {
     const m = RECHECK_PASS.exec(c.body);
     return m?.[1] === k && m[2] === head;
@@ -1055,6 +1123,8 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
     headCommittedAt,
     checks: local.pass ? [{ name: LOCAL_CHANGE_CI, conclusion: "SUCCESS" }] : [],
     ...(rules ? { designRulesTouched: true } : {}),
+    ...(userRules.length > 0 ? { userRulesTouched: userRules } : {}),
+    ...(raised.length > 0 ? { limitsRaised: raised } : {}),
     ...(local.note ? { localCiNote: local.note } : {}),
     ...(held ? { held } : {}),
     ...(rechecks.length > 0 ? { rechecks } : {}),

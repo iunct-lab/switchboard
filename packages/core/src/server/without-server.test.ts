@@ -1,14 +1,15 @@
 // The functions that used to be closures of startServer take the context first: here they are called with a
 // context made by hand (only the fields each one reads), with no daemon, port or runner.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Ask, BacklogQueue } from "@switchboard/protocol";
+import { type Ask, type Backlog, type BacklogQueue, StopRecord, type Task, type Workspace } from "@switchboard/protocol";
 import type { NoticeRecord } from "../asks-notices.ts";
 import { readQueue } from "../backlog-queue.ts";
 import { Db } from "../db.ts";
-import { answerAsk } from "./asks.ts";
+import { answerAsk, currentAsks } from "./asks.ts";
+import { readBacklog } from "./backlog-read.ts";
 import { startNext } from "./backlog-next.ts";
 import { queueOnce, startFromQueue } from "./queue.ts";
 
@@ -126,5 +127,58 @@ describe("startNext without a server", () => {
     expect(n.lines).toEqual([]);
     expect(await startNext(sc, "sched-1", { workspaceId: meta.id, numbers: [7] })).toMatchObject({ promotion: "v1.2.3 を昇格する" });
     expect(n.lines).toEqual(["バックログを進める: v1.2.3 を昇格する (待ちが解けた)"]);
+  });
+});
+
+describe("currentAsks without a server", () => {
+  const task = (id: string): Task =>
+    ({ id, workspaceId: null, title: id, runner: "claude", cwd: "/tmp", scope: [], status: "waiting", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgingAt: null, judgedBy: null, titlePending: false, stage: null, statusAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }) as Task;
+
+  test("each Task's stop records are read once in one call, however many times the asks look at its stops", async () => {
+    for (const [i, id] of ["tk_a", "tk_b"].entries()) {
+      db.insertTask(task(id));
+      db.appendEvent(id, { t: "stop.record", stop: StopRecord.parse({ id: `s_${id}`, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "CI が終わっていない", at: Date.now(), work: { workspaceId: "ws1", issue: 939 + i, taskId: id } }) });
+    }
+    const reads: string[][] = [];
+    const counted = new Proxy(db, { get: (d, k) => (k === "listStopRecords" ? (ids: string[]) => (reads.push(ids), d.listStopRecords(ids)) : Reflect.get(d, k, d)) });
+    const sc = contextFor(currentAsks, {
+      db: counted,
+      readBacklog: async () => ({ fetchedAt: 0, items: [], errors: [], changes: [], syncs: [] }),
+      policyEnv: () => ({ policies: [], pbiOpen: () => false, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null }) as never,
+      tasks: { pendingApprovals: () => [] } as never,
+      failed: () => null,
+      mockupsOf: () => [],
+      approvalPendingOf: () => () => false,
+      tieAnswers: () => undefined,
+      headMisses: new Map(),
+      batchAnswers: { decorate: (b: never) => b } as never,
+      currentNotices: () => [],
+    });
+    const { asks } = await currentAsks(sc);
+    expect(asks.filter((a) => a.task !== null).map((a) => a.task!.id).sort()).toEqual(["tk_a", "tk_b"]);
+    expect(reads.map((r) => r.join()).sort()).toEqual(["tk_a", "tk_b"]);
+  });
+});
+
+describe("readBacklog without a server", () => {
+  test("the settings are parsed once for a read of several workspaces, and a setting saved before the read is the one used", async () => {
+    const metas = ["m1", "m2"].map((name) => (mkdirSync(join(home, name)), db.upsertWorkspace({ name, path: join(home, name), kind: "meta" })));
+    let parsed = 0;
+    let developSelf = false;
+    const stored = async () => ({ items: [], changes: [], proceeding: [], error: null, fetchedAt: 1 });
+    const sc = contextFor(readBacklog, {
+      db,
+      settings: () => ((parsed += 1), { developSelf } as never),
+      backlog: {} as never,
+      storedBacklogReleased: stored as never,
+      withActive: (b: Backlog) => b,
+      syncEntry: (ws: Workspace) => ({ workspaceId: ws.id }) as never,
+    });
+    expect((await readBacklog(sc, false)).syncs).toEqual([]);
+    expect(parsed).toBe(1);
+    developSelf = true;
+    parsed = 0;
+    expect((await readBacklog(sc, false)).syncs.map((s) => s.workspaceId).sort()).toEqual(metas.map((m) => m.id).sort());
+    expect(parsed).toBe(1);
   });
 });

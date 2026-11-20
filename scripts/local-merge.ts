@@ -18,18 +18,21 @@
  * has the commits (a Task is not Done on GitHub before its code is there).
  * A conflict, a stop, a dirty worktree of the base or a base that moved changes nothing (exit 1). Once the merge landed,
  * a failure of the app is said with what is left (exit 1); it is not taken back. No fetch, no push, no gh.
+ * `<n> --record <tip> --reviewed <head>` (both 40 hex) only writes that record again, for a merge that landed but whose record
+ * the app refused: no judgement, no rebase, no base move, no branch deleted. It writes only while the change is still open
+ * and `tip` is on the base (its landing ref where the merge lands there); otherwise it exits 1 and writes nothing.
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { client } from "../ops-kit/src/backlog-client.ts";
+import { client, runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
 import { sh } from "./local-ci.ts";
 import { judge, noteScopeStop, readChange, readChangeDetail, readChangeRecords } from "./merge-gate.ts";
 import type { StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
 import { landedTip, landingRef } from "../packages/core/src/landing.ts";
 
-const USAGE = "usage: bun scripts/local-merge.ts <n> [--allow-large]";
+const USAGE = "usage: bun scripts/local-merge.ts <n> [--allow-large] | bun scripts/local-merge.ts <n> --record <tip> --reviewed <head>";
 const BACKLOG_TASK = /^Backlog-Task: (\d+)\s*$/gm;
 /** The record local-merge leaves on a change it merged: the commits `base..tip` are that change's, as judged. */
 export const LOCAL_MERGE = /^\[local-merge\] merged ([0-9a-f]{40}) base=([0-9a-f]{40})\b/;
@@ -89,15 +92,120 @@ export async function landOn(root: string, branch: string, to: string, from: { l
   await sh(["git", "-C", root, "update-ref", landingRef(branch), to, from.landing ?? "0".repeat(40)]);
 }
 
+/** What `recordMerge` writes about a merge that landed: `base` is the tip it was rebased onto, `head` the head that was judged. */
+interface MergeRecord {
+  n: number;
+  workspace: string;
+  tip: string;
+  base: string;
+  head: string;
+  mergedAt: string;
+  apart: boolean;
+  detail: { issue: { body: string } };
+  headName: string;
+  log: (s: string) => void;
+  /** the mark is on the change already (a record retried after only the PATCH was refused) */
+  marked?: boolean;
+}
+
+/** Records a landed merge on its change (the mark, the closed state) and closes the Tasks it closes; returns what could not be written. */
+async function recordMerge(api: ReturnType<typeof client>, r: MergeRecord): Promise<string[]> {
+  const { n, workspace, tip, base, head, mergedAt, apart, detail, headName, log, marked } = r;
+  const left: string[] = [];
+  try {
+    // which commits are this change's: forge-resync sends the local merges only when every commit is named by such a record
+    if (!marked) await api("POST", `/${n}/comment?change=1`, { workspaceId: workspace, text: localMergeMark(tip, base) });
+    await api("PATCH", `/${n}?change=1`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt, reviewedHead: head } });
+  } catch (e) {
+    // without this record forge-resync stops at this commit (it sends only recorded merges) and says what the person can do
+    left.push(`変更 #${n} をマージ済みにする（${(e as Error).message}）。デーモンを昇格してから bun scripts/local-merge.ts ${n} --record ${tip} --reviewed ${head} で記録だけやり直せる。記録が無いと bun scripts/forge-resync.ts はこのコミットで止まる（止まったときの出力に、利用者が端末で実行する --adopt-landing ${tip} / --drop-landing ${tip} が出る）`);
+  }
+  // in a GitHub workspace the Tasks are closed once GitHub's main has the commits (forge-resync.ts --report): a close
+  // kept here would be sent as soon as GitHub is back, before the code
+  if (apart) log(`閉じる Task（${closedBy(0, detail.issue.body, headName).map((t) => `#${t}`).join(", ") || "無し"}）は、GitHub の main に入ってから forge-resync.ts --report が閉じる`);
+  for (const t of apart ? [] : closedBy(n, detail.issue.body, headName)) {
+    try {
+      // its Status with it: a closed Task left In review on the board reads as not done
+      await api("PATCH", `/${t}`, { workspaceId: workspace, state: "CLOSED", fields: { Status: "Done" } });
+      log(`#${t} を閉じた`);
+    } catch (e) {
+      left.push(`#${t} を閉じる（${(e as Error).message}）`);
+    }
+  }
+  return left;
+}
+
+/** Whether `base..tip` holds the commits of `head` (since it left `base`'s line) and no others, compared by patch (a rebase changes the ids). A commit git cannot read counts as not the same. */
+async function sameCommits(root: string, base: string, tip: string, head: string): Promise<boolean> {
+  try {
+    const at = ["git", "-C", root];
+    const from = (await sh([...at, "merge-base", base, head])).trim();
+    const extra = (out: string) => out.split("\n").some((l) => l.startsWith("+ "));
+    // a commit of tip that head does not have, and a commit of head that tip does not have
+    return !extra(await sh([...at, "cherry", head, tip, base])) && !extra(await sh([...at, "cherry", tip, head, from]));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `--record`: writes the record of a merge that landed but was not recorded. The change must still be open and `tip` on the
+ * base (the landing ref where merges land there); the base it was rebased onto is the one its `[local-ci] pass` for `head`
+ * names (the judgement only passes at the base's tip). Anything else: exit 1, nothing written.
+ */
+async function recordOnly(n: number, r: { tip: string; head: string }, cwd: string, o: MergeOpts, log: (s: string) => void, err: (s: string) => void): Promise<number> {
+  const stop = (why: string) => (err(`${why}。何も書いていない`), 1);
+  let root: string;
+  let detail: Detail;
+  let apart: boolean;
+  try {
+    root = (await sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
+    const out: string[] = [];
+    const code = await runBacklog(["view", String(n), "--change", "--json"], o.env, { out: (s) => out.push(s), err: (s) => out.push(s) }, { fetch: o.fetch, cwd });
+    if (code !== 0) throw new Error(`#${n} を読めない: ${out.join(" ").trim() || `exit ${code}`}`);
+    detail = JSON.parse(out.join("\n")) as Detail;
+    apart = (await readChangeRecords(detail as Parameters<typeof readChangeRecords>[0], o.env, o.fetch)).service !== "switchboard";
+  } catch (e) {
+    err(`判定できなかった: ${(e as Error).message}`);
+    return 2;
+  }
+  const change = detail.issue.change;
+  const workspace = detail.workspaceId;
+  if (!change || !workspace) return stop(`#${n} は変更ではないか、workspace が分からない`);
+  if (detail.issue.state !== "OPEN") return stop(`変更 #${n} は開いていない（もう記録されている）`);
+  const landed = landedTip(root, change.base);
+  const onBase = landed ? await sh(["git", "-C", root, "merge-base", "--is-ancestor", r.tip, landed.sha]).then(() => true, () => false) : false;
+  if (!onBase) return stop(`${r.tip.slice(0, 7)} は ${change.base} に入っていない`);
+  const judged = detail.comments.map((c) => new RegExp(`^\\[local-ci\\] pass ${r.head} base=([0-9a-f]{40})\\b`).exec(c.body)?.[1]).filter(Boolean).pop();
+  if (!judged || !(await sh(["git", "-C", root, "merge-base", "--is-ancestor", judged, r.tip]).then(() => true, () => false))) return stop(`${r.head.slice(0, 7)} の判定（[local-ci] pass）が変更に無いか、その base が ${r.tip.slice(0, 7)} の祖先でない`);
+  // the record names judged..tip as this change's commits, and forge-resync sends what a record names: they must be the
+  // judged head's commits and nothing else (a commit that landed after it waits for the person's --adopt-landing)
+  if (!(await sameCommits(root, judged, r.tip, r.head))) return stop(`${judged.slice(0, 7)}..${r.tip.slice(0, 7)} の中身が判定した ${r.head.slice(0, 7)} のコミットと同じでない`);
+  const api = client(o.env, o.fetch ?? fetch);
+  // when the base moved, not when the record was written again: the rebased tip's committer date
+  const mergedAt = new Date((await sh(["git", "-C", root, "log", "-1", "--format=%cI", r.tip])).trim()).toISOString();
+  const marked = detail.comments.some((c) => c.body.trim() === localMergeMark(r.tip, judged).trim());
+  const left = await recordMerge(api, { n, workspace, tip: r.tip, base: judged, head: r.head, mergedAt, apart, detail, headName: change.head, log, marked });
+  if (left.length) {
+    err(`記録が残った: ${left.join(" / ")}`);
+    return 1;
+  }
+  log(`変更 #${n} の記録を書いた（${r.tip}）`);
+  return 0;
+}
+
 /** The command: 0 = merged and every state written / 1 = stopped (nothing changed), or the app's update failed after the merge / 2 = not judged. */
 export async function main(args: string[], cwd: string, o: MergeOpts): Promise<number> {
   const log = o.log ?? console.log;
   const err = o.err ?? console.error;
   const n = Number(args[0]);
-  if (!/^\d+$/.test(args[0] ?? "") || args.slice(1).some((a) => a !== "--allow-large")) {
+  const rest = args.slice(1);
+  const record = rest[0] === "--record" && rest[2] === "--reviewed" && rest.length === 4 && rest.slice(1).every((a, i) => i % 2 === 1 || /^[0-9a-f]{40}$/.test(a)) ? { tip: rest[1]!, head: rest[3]! } : undefined;
+  if (!/^\d+$/.test(args[0] ?? "") || (!record && rest.some((a) => a !== "--allow-large"))) {
     err(USAGE);
     return 2;
   }
+  if (record) return recordOnly(n, record, cwd, o, log, err);
   let root: string;
   let detail: Awaited<ReturnType<typeof readChangeDetail>>;
   let facts: Awaited<ReturnType<typeof readChange>>;
@@ -204,26 +312,7 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
     left.push(`枝 ${headName} の削除（${(e as Error).message.split("\n")[0]}）`);
   }
   const mergedAt = (o.now ?? (() => new Date()))().toISOString();
-  try {
-    // which commits are this change's: forge-resync sends the local merges only when every commit is named by such a record
-    await api("POST", `/${n}/comment?change=1`, { workspaceId: workspace, text: localMergeMark(tip, base) });
-    await api("PATCH", `/${n}?change=1`, { workspaceId: workspace, state: "CLOSED", change: { mergeCommit: tip, mergedAt, reviewedHead: head } });
-  } catch (e) {
-    // without this record forge-resync stops at this commit (it sends only recorded merges) and says what the person can do
-    left.push(`変更 #${n} をマージ済みにする（${(e as Error).message}）。記録が無いので bun scripts/forge-resync.ts はこのコミットで止まる（止まったときの出力に、利用者が端末で実行する --adopt-landing ${tip} / --drop-landing ${tip} が出る）`);
-  }
-  // in a GitHub workspace the Tasks are closed once GitHub's main has the commits (forge-resync.ts --report): a close
-  // kept here would be sent as soon as GitHub is back, before the code
-  if (apart) log(`閉じる Task（${closedBy(0, detail.issue.body, headName).map((t) => `#${t}`).join(", ") || "無し"}）は、GitHub の main に入ってから forge-resync.ts --report が閉じる`);
-  for (const t of apart ? [] : closedBy(n, detail.issue.body, headName)) {
-    try {
-      // its Status with it: a closed Task left In review on the board reads as not done
-      await api("PATCH", `/${t}`, { workspaceId: workspace, state: "CLOSED", fields: { Status: "Done" } });
-      log(`#${t} を閉じた`);
-    } catch (e) {
-      left.push(`#${t} を閉じる（${(e as Error).message}）`);
-    }
-  }
+  left.push(...(await recordMerge(api, { n, workspace, tip, base, head, mergedAt, apart, detail, headName, log })));
   if (left.length) {
     err(`${baseName} は入った。状態の更新が残った: ${left.join(" / ")}`);
     return 1;
