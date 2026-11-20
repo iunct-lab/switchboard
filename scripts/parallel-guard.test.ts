@@ -335,10 +335,11 @@ describe("parallel-guard readOthers", () => {
         taskParents: { 12: 59 },
         comments: { 59: [{ id: 150, body: `<!-- pbi-complete:release after=${after} -->\n/pbi-complete 終了: 期日待ち` }, ...later] },
       });
-      return ghMaterial(REPO, 11, g.run, now.getTime());
+      return ghMaterial(REPO, 11, g.run);
     };
     expect((await readOthers(11, await material("2026-10-01T00:00:00Z"))).others.map((w) => w.ref)).toEqual([]);
-    expect((await readOthers(11, await material("2026-09-28T12:00:00Z"))).others.map((w) => w.ref)).toEqual(["Task #12"]); // at the date it holds again
+    // at the date the wait is over, but the release still stands: no session holds the PBI, so its Task still holds no file
+    expect((await readOthers(11, await material("2026-09-28T12:00:00Z"))).others.map((w) => w.ref)).toEqual([]);
   });
 
   // a review's follow-up: a root file only an open PR adds is not in the repository's root yet
@@ -613,12 +614,54 @@ describe("parallel-guard from the app's stored records", () => {
     expect((await overlap({ ...ghBoard(REPO, g.run), material: async () => storedMaterial(t, 40) }, 40, false, now)).blocking.map((h) => h.ref)).toEqual(["Task #60"]);
   });
 
+  describe("an In progress Task and its PBI's holder", () => {
+    const claimMark = "<!-- pbi-complete:claim aaa -->\n/pbi-complete 開始";
+    const releaseMark = "<!-- pbi-complete:release -->\n/pbi-complete 終了";
+    const takeoverMark = "<!-- pbi-complete:takeover bbb -->\n/pbi-complete 再開";
+    const marks = (...bodies: string[]) => bodies.map((body, i) => ({ id: 100 + i, body }));
+    // Task 11 (PBI 10) asks for the file the In progress Task 12 of PBI 20 names
+    const refs = async (pbi: string[], fromGh: boolean) => {
+      if (fromGh) {
+        const g = github({
+          bodies: { 11: db, 12: db }, parents: { 11: { number: 10, subs: [11] } }, inProgress: [12], taskParents: { 12: 20 },
+          comments: { 20: marks(...pbi) },
+        });
+        return (await readOthers(11, await ghMaterial(REPO, 11, g.run))).others.map((w) => w.ref);
+      }
+      const r = { ...records([issue(10, { labels: ["type:pbi"], subIssues: [11] }), issue(11, { parent: 10, body: db }), issue(20, { labels: ["type:pbi"], subIssues: [12] }), issue(12, { parent: 20, body: db, fields: inProgress })]), comments: pbi.map((body) => ({ issue: 20, body, createdAt: fresh })) };
+      return (await readOthers(11, storedMaterial(r, 11, now.getTime()))).others.map((w) => w.ref);
+    };
+    for (const [name, fromGh] of [["storedMaterial", false], ["ghMaterial", true]] as const) {
+      test(`an In progress Task of a PBI no session holds does not block (${name})`, async () => {
+        expect(await refs([claimMark, releaseMark], fromGh)).toEqual([]); // the last mark is a release
+        expect(await refs([], fromGh)).toEqual([]); // no mark at all
+      });
+
+      test(`an In progress Task of a held PBI still blocks (${name})`, async () => {
+        expect(await refs([claimMark], fromGh)).toEqual(["Task #12"]);
+        expect(await refs([claimMark, releaseMark, claimMark.replace("aaa", "ccc")], fromGh)).toEqual(["Task #12"]);
+        expect(await refs([claimMark, takeoverMark], fromGh)).toEqual(["Task #12"]);
+      });
+    }
+
+    test("an In progress Task of a PBI whose last read was not complete still blocks (storedMaterial)", async () => {
+      // a claim written after the last good read is not stored: the PBI counts as held, as the app counts it
+      const r = { ...records([issue(10, { labels: ["type:pbi"], subIssues: [11] }), issue(11, { parent: 10, body: db }), issue(20, { labels: ["type:pbi"], subIssues: [12] }), issue(12, { parent: 20, body: db, fields: inProgress })]), unread: [20] };
+      expect((await readOthers(11, storedMaterial(r, 11, now.getTime()))).others.map((w) => w.ref)).toEqual(["Task #12"]);
+    });
+
+    test("an In progress Task with no PBI still blocks", async () => {
+      const r = records([issue(11, { body: db }), issue(12, { body: db, fields: inProgress })]);
+      expect((await readOthers(11, storedMaterial(r, 11, now.getTime()))).others.map((w) => w.ref)).toEqual(["Task #12"]);
+    });
+  });
+
   test("after: an In progress Task whose PBI waits for a date still ahead holds no file until the date", async () => {
     const mark = (after: string) => ({ issue: 59, body: `<!-- pbi-complete:release after=${after} -->\n/pbi-complete 終了: 期日待ち`, createdAt: fresh });
     const t = (after: string) => ({ ...records([issue(40, { body: db }), issue(59, { labels: ["type:pbi"], subIssues: [60] }), issue(60, { parent: 59, body: db, fields: inProgress })]), comments: [mark(after)] });
     const run = (x: StoredRecords) => overlap({ ...ghBoard(REPO, github({ bodies: {} }).run), material: async () => storedMaterial(x, 40, now.getTime()) }, 40, false, now);
     expect((await run(t("2026-10-01T00:00:00Z"))).verdict).toBe("go"); // the date is ahead
-    expect((await run(t("2026-09-28T12:00:00Z"))).blocking.map((h) => h.ref)).toEqual(["Task #60"]); // at the date it holds again
+    expect((await run(t("2026-09-28T12:00:00Z"))).verdict).toBe("go"); // at the date the wait is over, but the release stands: no session holds the PBI
   });
 
   test("a Task that only waits for a check does not block", async () => {

@@ -86,6 +86,18 @@ At the very bottom of the Backlog screen there is a section `流れ（直近 30 
 - **1-hour cache**: the result is held in the daemon's memory for 1 hour, and during that time GitHub's PRs are not read. A result with a repository that could not be read (`errors` is not empty) is not kept, and is read again the next time it is opened. It is read again with `?refresh=1` (the screen's `読み直す`)
 - **When it cannot read**: when the GitHub API's remaining points are few (under `MIN_REMAINING`), the run would exceed the limit, or `gh` fails, the reason goes into that workspace's `errors` and the other repositories are returned. The section shows a line with the reason, and the Backlog list is read separately from the flow, so it appears as before
 
+## Review rounds
+
+`bun scripts/review-rounds.ts [--days 30] [--repo <owner/name>] [--json <file>]` prints one tab-separated row per rule: each recheck kind of the merge gate (the kinds only a user's answer lifts have no row, since no recheck runs for them), `review` (the main review route) and `direct` (merged with no main review). The PRs are the merged PRs of the period that `scripts/merge-audit.ts` reads, and the counting is that script's (`tally`, `auditRows`); nothing is counted a second way. Exit 0 = printed, 2 = could not read or bad arguments.
+
+The columns sit under the group `拾った問題` (problems caught). These columns are what is known after the merge:
+
+- **`自動マージ`** (recheck-kind rows only): PRs merged with that kind lifted by a recheck of the merged head and no user answer
+- **`戻された`** (same rows): of those, the PRs a revert on main took back
+- **`監査の抜き取り` / `監査の finding` / `finding の率`**: PRs whose latest `[post-audit]` mark in the period exists, and those it found something in. For a recheck kind the PRs are the auto-merged ones of that kind; for `review` and `direct` they are the PRs of that route. A rule with nothing sampled shows a rate of `-`
+
+For a recheck kind only the PRs merged in the period count, while `review` and `direct` count every PR audited in the period (this is how `merge-audit` counts each). A high rate in a rule with few sampled PRs is a clue, not a verdict (see "How to read the numbers").
+
 ## How to read the numbers
 
 - **Do not make it a goal, do not compare with others.** As DORA warns, making numbers a goal distorts the agents' behavior. What to look at is your own before and after (the median and p90 before and after acting) and which stage is large

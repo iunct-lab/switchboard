@@ -152,7 +152,6 @@ export abstract class TaskSending extends TaskAdmission {
     }
     task = this.mustGet(taskId);
     if (moved) throw new ResumeSupersededError("中断 or a reply came meanwhile");
-    this.beforeResume?.(task);
     if (opts.asResume) {
       if (task.resumeAt === null) throw new ResumeSupersededError("the plan was cleared meanwhile");
       if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
@@ -162,8 +161,22 @@ export abstract class TaskSending extends TaskAdmission {
       if (task.resumeAt !== null) throw new ResumeSupersededError("a resume is planned");
       if (IN_FLIGHT.has(task.status)) throw new ResumeSupersededError(`the task is ${task.status}`);
     }
-    if (this.isOverBudget(taskId)) throw new Error(`budget exceeded ($${task.budgetUsd}); raise the budget to continue`);
+    const refusal = this.resumeRefusal(task);
+    if (refusal !== null) throw new Error(refusal);
     return task;
+  }
+
+  /**
+   * Why a reply that continues this Task's session may not start now (null = it may): a Teleport Terminal holds the
+   * folder, or the budget is spent. preflight() throws it for a direct reply; drain() asks it before starting a queued one.
+   */
+  protected resumeRefusal(task: Task): string | null {
+    try {
+      this.beforeResume?.(task);
+    } catch (e) {
+      return String((e as Error).message ?? e);
+    }
+    return this.isOverBudget(task.id) ? `budget exceeded ($${task.budgetUsd}); raise the budget to continue` : null;
   }
 
   /**

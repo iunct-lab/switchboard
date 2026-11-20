@@ -64,9 +64,15 @@ Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力�
 Claude の枠（週間上限なども）が上限、またはレビュー実行の出力に利用上限が出たら、新しい Codex のセッション（サブエージェントか、2 の頼み方）で代替する。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
 <!-- end when -->
 <!-- when review=other -->
+main との比較（5）は代替しない。主レビュアーが上限なら停止の報告 `usage-limit` で戻る時刻まで待ってから回す。
+<!-- end when -->
+<!-- when review=same -->
+main との比較（5）も設定どおり実装したランナーの別セッションが回し、上限なら同じく `usage-limit` で止まって待つ。
+<!-- end when -->
+<!-- when review=other -->
 
 - 材料と指示は 1 と同じ fresh clone と `_review/` だけ（**実装時の会話・判断の要約・memory は渡さない**）。別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する。
-- サブエージェントで代替するなら、渡すのは「`$R` の checkout で `_review/prompt.md` に従い、出力を `_review/<runner>.md` に書く」だけ。
+- サブエージェント（Claude）で代替するなら、`{ cat "$M/prompt.md"; ops-kit review-note claude; } > "$M/prompt-sub.md"`の後、渡すのは「`$R` の checkout で `_review/prompt-sub.md` に従い、出力を `_review/<runner>.md` に書く」だけ。
 <!-- end when -->
 <!-- when review=other reviewer=codex task=in -->
 - 仕事で代替するなら、代替のランナーを名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
@@ -133,7 +139,7 @@ ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"; [ -s "$M/handled.md"
 ( cd "$R" && ops-kit old-paths check "origin/$BASE_REF" "$M/pr.md" ) > "$M/old-paths.md"   # PR 本文の「古い前提を持つ既存の箇所」の語で探し直した箇所（exit 1 でも続ける）
 ```
 
-**ローカルの変更では**（`task-to-pr` の「ローカルの変更では」の workspace）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT`・`KIND`・`R=` の行は上のまま。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸だけ。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。`handled.md` は見直しの前に `ops-kit backlog view <変更> --fresh > "$M/handled.md"`（変更へのコメントに振り分けの表がある。`ops-kit review-handled` は呼ばない）、`old-paths.md` は上の行の `origin/$BASE_REF` を `$BASE_REF` にして作る。
+**ローカルの変更では**（`task-to-pr` の「ローカルの変更では」の workspace）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT`・`KIND`・`R=` の行は上のまま。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸だけ。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。main との比較（5）の材料の `handled.md` は同じく `ops-kit backlog view <変更> --fresh`、`DEFAULT=` と `git fetch` の行は飛ばし、`main.txt` は `git -C "$R" rev-parse "$BASE_REF" > "$M/main.txt"`（`origin/` を付けない）、転記は `ops-kit backlog comment <変更> --body-file <ファイル>` で、1 行目を `[<runner>] compare` にして全文を 1 件。`handled.md` は見直しの前に `ops-kit backlog view <変更> --fresh > "$M/handled.md"`（変更へのコメントに振り分けの表がある。`ops-kit review-handled` は呼ばない）、`old-paths.md` は上の行の `origin/$BASE_REF` を `$BASE_REF` にして作る。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
 
@@ -309,7 +315,7 @@ post_review $N <extra> "$M/<extra>.md"
 ## 4. 修正後の見直し
 
 レビューのあとに修正コミットを積んだら、**マージ前に主レビュアーに見直させる**。マージ判定（CLAUDE.md のコマンド）は「最後のコミットより新しい主レビュアーの要約（`[<runner>] review` で始まるコメント）」が無い PR を止める。
-材料は**この PR の修正コミットだけ**の差分、前回のレビュー、作り直した `handled.md` と `old-paths.md`。出力形式は 1 と同じ:
+材料は**この PR の修正コミットだけ**の差分、前回のレビュー、作り直した `handled.md` と `old-paths.md`（5 の `$M/compared.md` があれば残す。レビューの文（`REVIEW_RULES`）が読む）。出力形式は 1 と同じ:
 
 ```bash
 # R・M・HEAD_REF・BASE_REF は 1 で作ったもの。OLD = 3 で控えた、前回レビューした head（fetch の前に控えておく）
@@ -363,6 +369,56 @@ NOTE='（同じランナーの別セッション。設定による選択）'
 exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも `[<runner>] review` で始まる要約を書き、マージ判定が「見直し済み」と数えてしまう）。
 rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（マージ判定は author date を見る）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
 見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
+
+## 5. main との比較（指摘が収束しないとき）
+
+使いどころは `review-triage-and-merge` の「収束しないとき（main との比較）」。残る blocker / should-fix を主レビュアーが 1 件ずつ既定の枝と読み比べて分類する回で、PR 全体は読み直さない（主レビューの代わりにならない）。スタックは一番上の PR で 1 回。
+
+上限のときは 0 のとおり。
+
+1 と同じ clone（`KIND=review`）に材料を足す:
+
+```bash
+DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)   # 既定の枝
+git -C "$R" fetch -q origin "$DEFAULT"
+ops-kit review-compare prompt > "$M/prompt-compare.md"
+cp "$M/<runner>.md" "$M/latest-review.md"   # 直近の回の出力（4 の見直しがあれば fix-review.md）
+ops-kit review-handled $N --kind review > "$M/handled.md"; [ -s "$M/handled.md" ] || rm -f "$M/handled.md"   # 作り直す
+git -C "$R" rev-parse "origin/$DEFAULT" > "$M/main.txt"
+rm -f "$M/compared.md"   # 切れたときに前回の出力を使わない
+```
+
+<!-- when task=in reviewer=codex -->
+主レビュアーに頼む（2 と同じ。`job#<id>` で止まる）:
+
+```bash
+ops-kit job request review $N --runner codex --cwd "$R" --prompt "$M/prompt-compare.md" --out "$M/compared.md"
+```
+<!-- end when -->
+<!-- when task=in reviewer=claude -->
+主レビュアーに頼む（2 と同じ。`job#<id>` で止まる）:
+
+```bash
+ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt-compare.md" --out "$M/compared.md"
+```
+<!-- end when -->
+<!-- when task=out -->
+アプリの Task の外では 2 と同じ直接の実行で、`$M/prompt.md` を `$M/prompt-compare.md` に、出力を `$M/compared.md` に替える。
+<!-- end when -->
+
+出力を道具で読む。`check` の exit は 0 = 後退なし / 1 = 後退あり（後退の行を出す）/ 2 = 分類の節が無い・読めない行がある:
+
+```bash
+ops-kit review-compare check "$M/compared.md"; echo $?   # 2 なら一度だけやり直す（2 の「固まったとき」と同じ）。2 のままなら転記せず止まって報告する
+```
+
+転記は PR への 1 件のコメントで、**1 行目を `[<runner>] compare`**、続けて出力の全文。インラインにしない（`post_review` を使わない）。`[<runner>] review` で始めない（マージ判定が主レビューと数えてしまう。比較は全体を読んでいない）:
+
+```bash
+{ printf '[<runner>] compare\n\n'; cat "$M/compared.md"; } | gh pr comment $N --body-file -
+```
+
+`$M/compared.md` は 4 の見直しの材料として残す。後退の直しと要望への回し方は `review-triage-and-merge` の同じ節。
 
 ## 報告（利用者への返事の型）
 

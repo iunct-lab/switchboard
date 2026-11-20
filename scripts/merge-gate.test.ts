@@ -131,6 +131,14 @@ describe("merge-gate judge", () => {
     expect(j.verdict).toBe("stop");
   });
 
+  test("a compare comment is not a main review", () => {
+    // the first line the compare skill writes (`[<runner>] compare`) and a body that reads like a review: only the mark decides
+    const body = "[codex] compare\n\n### Compared with main\n- REGRESSION `a.ts:1` — x. main: ok HEAD: bad Conditions: any\n### Verdict versus main\nworse than main: one regression\n\n### Findings\n- none";
+    const j = judge(base({ headCommittedAt: "2026-09-24T12:00:00Z", reviewComments: [{ body, createdAt: "2026-09-24T13:00:00Z" }] }), off);
+    expect(j.verdict).toBe("stop");
+    expect(j.reasons).toEqual(["最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"]);
+  });
+
   test("a merge state other than CLEAN stops", () => {
     expect(judge(base({ mergeState: "BLOCKED" }), off).reasons).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
   });

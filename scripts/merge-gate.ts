@@ -56,7 +56,7 @@ const SECURITY_WORD_FILES = glob(["**/.env*", "**/.gitleaks.toml"]);
 export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "security:tests" | "security:words">, Bun.Glob[]> = {
   "security:lockfile": glob(["**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}", "**/requirements*.txt"]),
   "security:github": glob([".github/**"]),
-  // the gate and local CI decide merges like CI does, local-merge makes them and forge-resync pushes main:
+  // the gate and local CI decide merges like CI does, local-merge makes them and forge-resync pushes the sync branch that becomes a PR:
   // a small change to them is still the user's to approve
   "security:gates": glob(["scripts/merge-gate.ts", "scripts/merge-gate-limits.ts", "scripts/merge-gate-rules.ts", "ops-kit/reversibility.json", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
@@ -1050,7 +1050,8 @@ export const LOCAL_CHANGE_CI = "local-ci（ローカルで pass）";
  * read and nothing stored has them, so a PR known to exist (`threadsUnread`) or possibly existing (`threadsUnknown`)
  * stops the merge instead of counting as none. Every comment counts (only the app's API writes them: the person and
  * their Tasks, trusted on loopback — there is no author to tell apart, unlike MARK_AUTHORS on GitHub). The base
- * branch's protection on GitHub is not visible here: forge-resync reads it before it sends anything
+ * branch's protection on GitHub is not visible here: forge-resync never pushes to main directly, it always goes in
+ * through a sync PR, and the judgement applies to that PR
  * (docs/design/forge-integration.md lists every reason and how the local way evaluates it).
  */
 export async function readChange(d: ChangeDetail, root: string, records?: StoredRecords): Promise<PrFacts> {

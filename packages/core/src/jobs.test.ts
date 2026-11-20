@@ -343,6 +343,8 @@ describe("jobs", () => {
       expect(seen.codex).not.toContain("plan mode");
       expect(seen.claude).toContain("plan mode");
       expect(seen.claude).not.toContain("sandbox");
+      // the rules every review is told reach the runner whole, the use of a comparison with main included
+      for (const text of Object.values(seen)) expect(text).toContain("`_review/compared.md`");
     });
   });
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { BACKLOG_USAGE, readRecords, repoName, repoTop, runBacklog, triageUsage } from "./backlog-client.ts";
 import { JOB_USAGE, runJob } from "./job-client.ts";
@@ -14,6 +14,7 @@ import { createGitlabMr, gitlabMrDiscussions, resolveGitlabDiscussion, runGlab, 
 import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { parseWaitArgs, runWait, WAIT_USAGE } from "./wait.ts";
+import { checkCompared, comparePrompt, leftoverRequests, parseCompared } from "./review-compare.ts";
 import { isReviewer, REVIEW_RULES, REVIEWER_NOTE, type Reviewer } from "./review-note.ts";
 import { addedLines, handledFindings, oldPathHits, oldPathsItem, oldPathsReport, type Hit, type InlineComment } from "./review-material.ts";
 import { formatLint, lint } from "./lint.ts";
@@ -133,6 +134,14 @@ ${DEPS_CHECK_USAGE}
       レビュアーとして起動するランナーに、レビューの指示の後ろに足す文（そのランナーの動き方: 読み取り専用のサンドボックス / plan モード。続けて、
       どのレビューにも共通の決まり: 指摘の重さの定義・処理済みの指摘の扱い・古い前提の一覧の使い方）を出す。rules は共通の決まりだけ（サブエージェントのレビュー用）。
       アプリに仕事として頼むレビューにはアプリが同じ文を足すので、直接走らせるときだけ使う。設定ファイルは要らない。exit 2 = 使い方の誤り
+  review-compare prompt
+  review-compare check <ファイル>
+  review-compare leftovers <ファイル> --source <経路> --out <ディレクトリ>
+      収束しないレビューで、残る指摘を 1 件ずつ main と読み比べる回のための道具。prompt は主レビュアーに渡す指示（5 つの分類 REGRESSION / NEW-FEATURE-GAP /
+      IMPROVED-BUT-INCOMPLETE / SAME / OWNER-DECIDED、1 指摘 1 行の形、末尾の判定）を出す。check は出力の「### Compared with main」の節を読み、
+      後退があれば後退の行を出して exit 1、無ければ exit 0、節が無い・分類の読めない行があれば exit 2（使い方の誤りも 2）。設定ファイルは要らない
+      leftovers は後退でない行を触る場所の領域ごとの要望の本文 <n>.md と題の一覧 titles.tsv にして --out に書く（Issue は作らない）。
+      --out が新しいか空のディレクトリでなければ（ファイルも）書かずに exit 2。後退でない行が無ければ何も書かず exit 0
   review-handled <PR> [--kind review|recheck]
       前の回までの指摘と、それぞれの処理（スレッドの返信と「## レビュー対応」の要約）を Markdown で出す。修正後の見直しと再チェックのレビュアーに渡す材料。
       処理した指摘がまだ無ければ何も出さない。--kind recheck は、前の再チェックの要約が PR にあるとき（2 回目以降）だけ出す。設定ファイルは要らない
@@ -335,6 +344,57 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     if (rest.length !== 1 || (rest[0] !== "rules" && !isReviewer(rest[0]))) return usage(err, "review-note <codex|claude|rules>", 2);
     out(rest[0] === "rules" ? REVIEW_RULES : REVIEWER_NOTE[rest[0] as Reviewer]);
     return 0;
+  }
+  if (command === "review-compare") {
+    const [sub, file, ...extra] = rest;
+    if (sub === "prompt" && !file) {
+      out(comparePrompt());
+      return 0;
+    }
+    const leftoversUsage = "review-compare leftovers <ファイル> --source <経路> --out <ディレクトリ>";
+    if (sub === "leftovers") {
+      const sourceAt = extra.indexOf("--source");
+      const outAt = extra.indexOf("--out");
+      const source = sourceAt < 0 ? undefined : extra[sourceAt + 1];
+      const outDir = outAt < 0 ? undefined : extra[outAt + 1];
+      if (!file || !source || !outDir || extra.length !== 4) return usage(err, leftoversUsage, 2);
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch (e) {
+        err((e as Error).message);
+        return 2;
+      }
+      const parsed = parseCompared(text);
+      if (parsed.bad.length) {
+        for (const b of parsed.bad) err(`unreadable: ${b}`);
+        return 2;
+      }
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const requests = leftoverRequests(parsed.rows, source, today);
+      if (!requests.length) return 0;
+      // a body left from an earlier run would be read as this run's
+      if (existsSync(outDir) && (!statSync(outDir).isDirectory() || readdirSync(outDir).length)) {
+        err(`${outDir} is not an empty directory: write into a new directory`);
+        return 2;
+      }
+      mkdirSync(outDir, { recursive: true });
+      requests.forEach((r, i) => writeFileSync(join(outDir, `${i + 1}.md`), r.body));
+      writeFileSync(join(outDir, "titles.tsv"), requests.map((r, i) => `${i + 1}\t${r.title}`).join("\n") + "\n");
+      return 0;
+    }
+    if (sub !== "check" || !file || extra.length) return usage(err, `review-compare prompt | review-compare check <ファイル> | ${leftoversUsage}`, 2);
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch (e) {
+      err((e as Error).message);
+      return 2;
+    }
+    const r = checkCompared(text);
+    for (const l of r.lines) (r.code === 2 ? err : out)(l);
+    return r.code;
   }
   if (command === "review-handled") {
     const kindAt = rest.indexOf("--kind");

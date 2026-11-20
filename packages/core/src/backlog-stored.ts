@@ -209,7 +209,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now);
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
-  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
+  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
   // a workspace whose Issues are a service's keeps its changes apart (changeSourceOf)
   const apart = changesApart(source);
   const changeIssues = apart ? shownRecords(db, localBacklogSource(ws.id)).flatMap((r) => (r.objectKind === "issue" && r.remote ? [r.remote as BacklogIssueData] : [])) : issues.values();
