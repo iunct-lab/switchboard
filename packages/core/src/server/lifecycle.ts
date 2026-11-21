@@ -1,4 +1,4 @@
-import { decidesNothing } from "../machine.ts";
+import { decidesNothing, isWorkMachine } from "../machine.ts";
 import { realpathSync } from "node:fs";
 import { basename, join } from "node:path";
 import { type CleanExit, endDaemonRun, daemonVersion, readBootId, readJournal, readReleaseHistory, startDaemonRun } from "../ops-stops.ts";
@@ -11,6 +11,7 @@ import { OpsLoadSampler } from "../ops-load.ts";
 import { AFTER_CHECK_MS, resumeDueAfters, resumeJobsOnTurnEnd } from "../depends-resume.ts";
 import { boundsOf, checkWaits, WAIT_CHECK_MS, waitsDirOf } from "../waits.ts";
 import { startWorktreeSweep } from "../worktree-sweep.ts";
+import { startSettleSweep } from "../task-settle.ts";
 import { writeConfigFiles } from "../workspace-config.ts";
 import { TURN_DONE } from "../task-status.ts";
 import { sweepPrivateTmps } from "../tasks/sessions.ts";
@@ -70,7 +71,7 @@ export const reloadRelease = (sc: Pick<ServerContext, "cfg" | "routing" | "prici
   return basename(root);
 };
 
-export const stopAll = async (sc: Pick<ServerContext, "adviceStop" | "adviceRunning" | "recheckTimer" | "uplinkTimer" | "leaseTimer" | "promotionTimer" | "afterTimer" | "waitTimer" | "stopWorktreeSweep" | "history" | "knowledge" | "scheduler" | "resumer" | "backlog" | "hostIdle" | "dockerdIdle" | "opsLoadSampler" | "runnerLogins" | "githubLogins" | "deviceAuths" | "selfdev" | "pty" | "mcp" | "tasks" | "runId" | "db" | "judgeStop" | "applying" | "server" | "apiRequestsTimer" | "snapshotTimer" | "stopped" | "flushApiRequests">, cleanExit: CleanExit = "shutdown") => {
+export const stopAll = async (sc: Pick<ServerContext, "adviceStop" | "adviceRunning" | "recheckTimer" | "uplinkTimer" | "leaseTimer" | "promotionTimer" | "afterTimer" | "waitTimer" | "stopWorktreeSweep" | "stopSettleSweep" | "history" | "knowledge" | "scheduler" | "resumer" | "backlog" | "hostIdle" | "dockerdIdle" | "opsLoadSampler" | "runnerLogins" | "githubLogins" | "deviceAuths" | "selfdev" | "pty" | "mcp" | "tasks" | "runId" | "db" | "judgeStop" | "applying" | "server" | "apiRequestsTimer" | "snapshotTimer" | "stopped" | "flushApiRequests">, cleanExit: CleanExit = "shutdown") => {
   sc.adviceStop.abort(new Error("the daemon is stopping"));
   await Promise.all(sc.adviceRunning);
   clearInterval(sc.recheckTimer);
@@ -80,6 +81,7 @@ export const stopAll = async (sc: Pick<ServerContext, "adviceStop" | "adviceRunn
   if (sc.afterTimer) clearInterval(sc.afterTimer);
   clearInterval(sc.waitTimer);
   sc.stopWorktreeSweep?.();
+  sc.stopSettleSweep?.();
   sc.history.stop();
   sc.knowledge.close();
   sc.scheduler.stop();
@@ -140,7 +142,7 @@ export const idleInput = (sc: Pick<ServerContextInit, "db" | "tasks" | "wsCount"
   nextWakeAt: sc.nextWakeAt(),
 });
 
-export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db" | "tasks" | "wsCount" | "pty" | "nextWakeAt" | "dockerdIdle" | "afterTimer" | "opts" | "waitsChecking" | "waitTimer" | "settings" | "broadcast" | "stopWorktreeSweep" | "restarting">): void {
+export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db" | "tasks" | "wsCount" | "pty" | "nextWakeAt" | "dockerdIdle" | "afterTimer" | "opts" | "waitsChecking" | "waitTimer" | "settings" | "broadcast" | "stopWorktreeSweep" | "stopSettleSweep" | "restarting">): void {
   // The stop command is this daemon's alone: runners, terminal shells and what they start must not inherit it. A
   // scratch daemon a Task boots with `loadConfig({ ...process.env, … })` would otherwise count only its own empty
   // database, and 20 minutes later stop the host under the Tasks this daemon is running.
@@ -181,6 +183,9 @@ export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db
   sc.waitTimer.unref();
   // the worktrees Tasks leave beside a repository go once nothing in them can be lost (all in the default branch, no change, a day old, unused), in every workspace's repository
   sc.stopWorktreeSweep = startWorktreeSweep({ candidate: !!sc.cfg.candidate, read: () => ({ workspaces: sc.db.listWorkspaces(), tasks: sc.db.listTasks() }) });
+  // a stopped Task whose wait is over (its Issue closed, a newer Task of the Issue or the schedule started) leaves 要対応 and 待ち. Not on a
+  // work machine (the instance settles the Tasks it takes in). A candidate does: it writes its own copy only, and shows what the version would
+  sc.stopSettleSweep = isWorkMachine(sc.cfg) ? null : startSettleSweep({ db: sc.db, tasks: sc.tasks });
   sc.restarting = false;
 }
 

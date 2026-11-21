@@ -18,5 +18,5 @@ packages/adapters/*/fixtures/*.txt
 packages/core/fixtures/*.jsonl
 packages/core/src/fixtures/flow/*.json
 
-# Generated from the installed Codex by `bun run codex:types` (typecheck runs it).
+# Generated from the pinned Codex (CODEX_VERSION in container/Dockerfile) by `bun run codex:types` (typecheck runs it).
 packages/adapters/codex/src/generated/

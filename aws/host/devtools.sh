@@ -11,7 +11,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 as_user() { sudo -u "$SB_HOST_USER" -H env HOME="$SB_HOST_HOME" PATH="$SB_HOST_HOME/.local/bin:$SB_HOST_HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin" "$@"; }
 
-# pinned from the downloads (2026-11-15); Docker publishes no checksums for its static tarballs, the others do
+# pinned by version and sha256 of the downloads: the distributor's published checksum where there is one, else the sha256 of the file itself
 DOCKER_VERSION=29.9.3
 DOCKER_SHA256=1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2
 DOCKER_ROOTLESS_SHA256=867bbb01a3df1566681ccf53da8255434d4ca2cc84a304111604b6ee6130c349

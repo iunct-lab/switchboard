@@ -5,9 +5,8 @@ import { type FlowWorkspace, FlowCache, flowScope, flowView } from "../flow.ts";
 import { enablingOf } from "../backlog-enable.ts";
 import { BacklogError, GithubBudgetCache, runGh } from "../backlog-gh.ts";
 import { isReplyWaiting } from "../backlog-pick.ts";
-import { workspaceSyncOf } from "../backlog-stored.ts";
+import { workspaceSyncOf, withStageTask } from "../backlog-stored.ts";
 import type { ReleaseState } from "../promotion.ts";
-import { reduceStops } from "../stops.ts";
 import { IN_FLIGHT, workPhase } from "../task-status.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
 import { join } from "node:path";
@@ -72,18 +71,10 @@ export const mockupsOf = (sc: Pick<ServerContext, "artifacts">, id: string) => s
 export const withActive = (sc: Pick<ServerContext, "db" | "activeStageTask" | "mockupsOf">, b: Backlog): Backlog => ({
   ...b,
   items: b.items.map((i) => {
-    const t = sc.db.lastStageTask(i.workspaceId, i.number);
-    // an 実装 started after the waits were written makes them old: it claimed, or it ended before it could —
-    // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared
-    const impl = i.waitsAt ? sc.db.lastStageTask(i.workspaceId, i.number, "complete") : null;
-    const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
     const item: BacklogItem = {
-      ...i,
+      ...withStageTask(sc.db, i),
       activeTaskId: sc.activeStageTask(i.workspaceId, i.number)?.id ?? null,
-      lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt, started: t.runnerSessionId !== null } : null,
-      stopSummary: reduceStops(sc.db.listStopRecords(sc.db.stageTaskIds(i.workspaceId, i.number)), { newestTaskId: t?.id ?? null }),
       mockups: i.mockupTask ? sc.mockupsOf(i.mockupTask) : [],
-      ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
     };
     return { ...item, replyWaiting: isReplyWaiting(item) };
   }),

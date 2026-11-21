@@ -76,6 +76,14 @@ export function githubSyncText(s: Pick<Backlog["syncs"][number], "backlog" | "en
   return syncLine(s.sync, fmt);
 }
 
+/**
+ * Whether a workspace's row shows the box that attaches a closed PBI's reports to its Issue: only where the sync is on
+ * and has a record of the Issues on GitHub (the daemon refuses it without one). One already on stays shown, to turn it off.
+ */
+export function issueArtifactsShown(s: Pick<Backlog["syncs"][number], "backlog" | "enabling" | "repository">, on: boolean): boolean {
+  return s.backlog === "github" && !s.enabling && (s.repository !== null || on);
+}
+
 /** One line's parts for a row or workspace: the state's word, when it was last read, what it waits for and why. */
 export function syncLine(s: BacklogSyncInfo, fmt: (ms: number) => string = jstDateTime): { state: BacklogSyncState; label: string; parts: string[] } {
   const parts: string[] = [s.lastSuccessfulSync === null ? t(m.lastSuccessNone) : t(m.lastSuccess, { time: fmt(s.lastSuccessfulSync) })];

@@ -88,7 +88,7 @@ export function findReusable(log: OffloadLog, key: string, hours: number, now: n
  */
 export const reusableOutput = (output: string): boolean => /^sb-offload: exit \d+$/m.test(output);
 
-/** 前のビルドの結果を使ったときの 1 行（test-changed と typecheck で同じ）。 */
+/** 前のビルドの結果を使ったときの 1 行（test-changed が出す）。 */
 export const reusedLine = (r: { build: string; at: string }): string => `外: 前のビルド ${r.build}（${r.at} に開始）の結果を使った。回し直すなら --force`;
 
 async function gitOut(cwd: string, args: string[], input?: string): Promise<string> {

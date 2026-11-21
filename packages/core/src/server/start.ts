@@ -152,7 +152,7 @@ export const startStage = async (sc: Pick<ServerContext, "startMetaTask" | "leas
   /** Why this candidate (backlog-next: `chooseProcess`'s); the buttons leave it out and are recorded as the button / the stage. */
   processReason?: string;
   extra?: Pick<Parameters<typeof sc.startMetaTask>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd">;
-}): Promise<{ task: Task } | { active: Task } | { error: string; status: number }> => {
+}): Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true }> => {
   const { ws, item, action } = input;
   // Two machines share work: the PBI's lease is taken before anything of it starts here (a check only reads and takes
   // none). Alone there is no lease and nothing is awaited, so the check below and the Task's creation stay together.
@@ -167,7 +167,8 @@ export const startStage = async (sc: Pick<ServerContext, "startMetaTask" | "leas
   if (leaseAt) {
     try {
       const got = await sc.leases!.acquire(leaseAt, item.number, true);
-      if (!got.ok) return { error: heldLine(item.number, got.holder, got.until), status: 409 };
+      // held: this PBI only, so a sweep goes on to the slot's next item
+      if (!got.ok) return { error: heldLine(item.number, got.holder, got.until), status: 409, held: true };
     } catch (e) {
       // not known who holds it: not started (the other machine may be at it)
       return { error: `PBI #${item.number} のリースを確かめられません: ${String((e as Error)?.message ?? e).slice(0, 200)}`, status: 409 };

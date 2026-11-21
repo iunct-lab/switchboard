@@ -120,6 +120,30 @@ describe("lease", () => {
   });
 });
 
+describe("lease and backlog-next", () => {
+  test("backlog-next does not start a PBI another machine holds: the reason (who, until when) is in the log, and the slot's next item is started instead", async () => {
+    // the renewal round is far off: the daemon has not seen the lease when it picks, so the refusal comes from the start itself
+    const { base, s3 } = await boot({ ...RECEIVE, SWITCHBOARD_LEASE_RENEW_S: "3600" });
+    // the fixtures' plan slot has a PBI to split into Tasks and a request to make PBIs of; the PBI is held elsewhere
+    const items = ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items;
+    const planned = items.find((i) => i.type === "pbi" && i.stage === "needs-tasks")!.number;
+    const request = items.find((i) => i.stage === "request")!.number;
+    const pc = new PbiLeases(s3, { machine: "pc1", ttlMs: 900_000 });
+    expect(await pc.acquire("acme/app", planned)).toEqual({ ok: true });
+    const r = await post(base, "/api/schedules", { title: "バックログを進める", cron: "0 */3 * * *", workspaceId: meta().id, runner: "claude", prompt: "", action: "backlog-next" });
+    expect(r.status).toBe(201);
+    const id = ((await r.json()) as { id: string }).id;
+    expect((await fetch(`${base}/api/schedules/${id}/run`, { method: "POST" })).status).toBe(201);
+    const started = core!.db.listTasks().flatMap((t) => (t.stage ? [[t.stage.issue, t.stage.action]] : []));
+    expect(started).not.toContainEqual([planned, "to-tasks"]);
+    expect(started.map(([n]) => n)).toContain(request);
+    expect(await stored(s3, planned)).toMatchObject({ machine: "pc1", state: "held" });
+    const log = ((await (await fetch(`${base}/api/schedules/log`)).json()) as string[]).join("\n");
+    expect(log).toContain(`#${planned} を始められない: PBI #${planned} は pc1 が `);
+    expect(log).toMatch(/ \d{4}-\d\d-\d\d \d\d:\d\d UTC まで持っている/);
+  });
+});
+
 describe("the renewal round with a request that never answers", () => {
   /** The `aws` CLI over an S3 kept in memory; a get of `stuckKey` is a `sleep` that ends only when the limit the caller passed kills it. */
   const emulated = (mem: ReturnType<typeof memoryS3>, stuck: { key: string | null }): AwsRun => async (args, opts) => {

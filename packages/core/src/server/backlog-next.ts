@@ -312,6 +312,8 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       }
       if ("error" in t) {
         skipped.push(`${ws.name}: #${next.item.number} を始められない: ${t.error}`);
+        // another machine holds this PBI: the slot's next item instead
+        if (t.held) continue;
         break;
       }
       if (again.item.flow && again.item.stage === "ready") flowStarted.add(again.item.number);

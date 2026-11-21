@@ -114,17 +114,18 @@ const reviewOnly = (n: number, pulls: StoredPull[], statuses: Map<number, string
  * only those, so a PBI that touches something else is not held. A PBI that cannot move now holds none, and gets its place
  * back with the same `since` once it can: not Ready / in progress (a question holds it), `on-hold`, waiting for a date,
  * a prerequisite not met, its stage Task only waiting for a planned resume (`parked`), or no mark for STALE_HOURS (a
- * session that died does not hold the line). A closed PBI is not an item, and a Task that no longer names the path gives none.
+ * session that died does not hold the line), or the queue does not resume it (`notResumed`: backlog-pick.ts — not moved since
+ * its last resume, waiting for a reply, failed with no update since, stopped the same way again). A closed PBI is not an item, and a Task that no longer names the path gives none.
  * `withOverlap` further leaves out the place of a PBI that cannot start for the places before its own.
  * `yieldsTo`: the PBIs of what it still waits for (an open PR's Tasks' parents, an open Task's parent), which its place
  * does not hold back: holding them back would keep the one it waits for from moving. Once that is closed, it holds them again.
  */
-export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssueData>, pulls: StoredPull[], statuses: Map<number, string | number | null>, commentsOf: (n: number) => Comment[], taskPaths: (n: number) => string[], now: number, parked: (pbi: number) => boolean = () => false): Turn[] {
+export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssueData>, pulls: StoredPull[], statuses: Map<number, string | number | null>, commentsOf: (n: number) => Comment[], taskPaths: (n: number) => string[], now: number, parked: (pbi: number) => boolean = () => false, notResumed: (i: BacklogItem) => boolean = () => false): Turn[] {
   const out: Turn[] = [];
   for (const i of items) {
     if (i.type !== "pbi" || (i.stage !== "ready" && i.stage !== "in-progress") || i.onHold || (!!i.waitsUntil && !i.waitsUntil.met) || i.prereqs.some((p) => p.state !== "met") || parked(i.number)) continue;
     const turn = overlapTurnOf(commentsOf(i.number));
-    if (!turn || now - Date.parse(turn.last) > STALE_HOURS * 3600_000) continue;
+    if (!turn || now - Date.parse(turn.last) > STALE_HOURS * 3600_000 || notResumed(i)) continue;
     const held = turn.waits.flatMap((n) => {
       const pr = pulls.find((p) => p.number === n);
       return pr ? pr.files ?? [] : [...taskPaths(n), ...pulls.filter((p) => p.closes.includes(n)).flatMap((p) => p.files ?? [])];
@@ -178,14 +179,14 @@ export function sessionOn(opts: { active?: (pbi: number) => boolean; commentsOf?
  *
  * Judged per Task the session would start: one that can start (`startable`) and is not `reviewOnly`. One free Task lets
  * the PBI go, and the free ones are kept in `freeTasks` for the prompt; with none that can start, the Tasks left to do as
- * one. A PBI with nothing left to start (every open Task in review) is not held. Returns the places it kept: `turnWorks`'
+ * one. A PBI with nothing left to start (every open Task in review) is not held. Returns the places it kept (a PBI the queue does not resume, `notResumed`, has none): `turnWorks`'
  * places in the order they yielded, less those of a PBI whose Tasks all overlap the places kept before its own (it
  * waits for one of them; other work, a PR or a Task, does not drop it). Such a PBI holds no place, so two PBIs that yielded to each other do not wait
  * for each other: the one the pick takes first starts, and its Tasks at work then hold the other (a place does not hold back
  * the PBIs it waits for, `yieldsTo`, so with each waiting for the other neither place decides). The place comes back with the same `since` once the PBI can start. The judgement of
  * every item and the list returned (the guard in the Task reads it) use the kept places only.
  */
-export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean; sharedFiles?: string[] } = {}): Turn[] {
+export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean; sharedFiles?: string[]; notResumed?: (i: BacklogItem) => boolean } = {}): Turn[] {
   const active = opts.active ?? (() => false);
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
   if (!mine.length) return [];
@@ -232,7 +233,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   // the place back with the same `since` once it can), so a PBI waiting for a place that is not held is not held back by it
   const turns: Turn[] = [];
   const byPbi = new Map<number, Turn[]>();
-  for (const t of opts.commentsOf ? turnWorks(items, issues, pulls, statuses, opts.commentsOf, taskPaths, now.getTime(), opts.parked) : []) byPbi.set(t.pbi, [...(byPbi.get(t.pbi) ?? []), t]);
+  for (const t of opts.commentsOf ? turnWorks(items, issues, pulls, statuses, opts.commentsOf, taskPaths, now.getTime(), opts.parked, opts.notResumed) : []) byPbi.set(t.pbi, [...(byPbi.get(t.pbi) ?? []), t]);
   for (const [pbi, own] of byPbi) {
     const item = mine.find((m) => m.number === pbi);
     const r = item ? judgeOf(item, turns, true) : null;

@@ -3,10 +3,11 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { Db } from "./db.ts";
 import { editStoredIssue } from "./backlog-edit.ts";
-import { readStoredIssue } from "./backlog-stored.ts";
+import { readStoredBacklog, readStoredIssue } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { conflictRevision } from "./backlog-merge.ts";
-import { S, answerStoredDecision, clock, fakeGithub, importsToo, makeSync, useSendDb } from "./api-test-harness.ts";
+import { isUnchanged } from "./backlog-pick.ts";
+import { S, answerStoredDecision, clock, commentStoredIssue, fakeGithub, importsToo, makeSync, useSendDb } from "./api-test-harness.ts";
 
 let dir: string;
 let db: Db;
@@ -268,4 +269,120 @@ test("BacklogSync: an edit held at the check before the write is offered with Gi
   await sync.send(ws);
   expect(readStoredIssue(db, ws, 12)!.held).toEqual([expect.objectContaining({ field: "body", status: "failed", reason: expect.stringContaining("403"), conflict: null })]);
   expect(g.issues.get(12)!.body).toBe("本文");
+});
+
+/** The fake GitHub's reads with Issue 12's comments as GitHub has them (their own time, the one it received them at), and the PBI In progress. */
+function readsWithComments(g: ReturnType<typeof fakeGithub>): GhRunner {
+  const reads = importsToo(g);
+  const patch = (n: { number: number; comments: unknown; projectItems: unknown }) => {
+    if (n.number !== 12) return;
+    n.comments = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: g.issues.get(12)!.comments.map((c) => ({ id: c.node_id, body: c.body, createdAt: c.created_at })) };
+    n.projectItems = { totalCount: 1, nodes: [{ id: "PVTI_I_12", project: { number: 1, owner: { login: "acme" } }, fieldValues: { totalCount: 1, nodes: [{ name: "In progress", field: { name: "Status" } }] } }] };
+  };
+  return async (args, cwd) => {
+    const r = await reads(args, cwd);
+    if (r.code !== 0 || !r.stdout.startsWith("{")) return r;
+    const data = JSON.parse(r.stdout).data?.repository;
+    for (const n of data?.issues?.nodes ?? []) patch(n);
+    for (const k of Object.keys(data ?? {})) if (/^w\d+$/.test(k)) patch(data[k]);
+    return { ...r, stdout: JSON.stringify({ data: { repository: data } }) };
+  };
+}
+
+test("BacklogSync: a comment written here keeps the written time after it is sent and after it is imported; one written on GitHub keeps GitHub's", async () => {
+  const g = fakeGithub();
+  g.issues.get(12)!.labels = ["type:pbi"];
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, readsWithComments(g), clock);
+  await sync.sync(ws);
+  const written = t - 60_000; // commentStoredIssue writes it as if its send window had passed
+  commentStoredIssue(db, S, 12, "手元のコメント");
+  await sync.send(ws);
+  const sent = db.listBacklogRecords(S, "comment").map((r) => r.remote as { body: string; createdAt: string });
+  expect(sent).toEqual([expect.objectContaining({ body: expect.stringContaining("手元のコメント"), createdAt: new Date(written).toISOString() })]);
+  // a teammate's comment, then an import a minute later reads both as GitHub dated them
+  g.issues.get(12)!.comments.push({ node_id: "IC_other", body: "あちらのコメント", created_at: "2026-10-09T00:00:00Z" });
+  t += 61_000;
+  await sync.sync(ws);
+  const byBody = Object.fromEntries(db.listBacklogRecords(S, "comment").map((r) => [(r.remote as { body: string }).body.split("\n")[0]!, r]));
+  expect(g.issues.get(12)!.comments[0]!.created_at).toBe("2026-10-08T00:00:00Z"); // what GitHub has for it
+  for (const col of ["remote", "base"] as const) expect((byBody["手元のコメント"]![col] as { createdAt: string }).createdAt).toBe(new Date(written).toISOString());
+  expect((byBody["あちらのコメント"]!.remote as { createdAt: string }).createdAt).toBe("2026-10-09T00:00:00Z");
+});
+
+test("BacklogSync: a comment whose operation is dated after the service received it (a clock running ahead) keeps the service's time", async () => {
+  const g = fakeGithub();
+  g.issues.get(12)!.labels = ["type:pbi"];
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, readsWithComments(g), clock);
+  await sync.sync(ws);
+  t = Date.parse("2026-10-08T00:03:00Z"); // the fake GitHub dates what it receives 2026-10-08T00:00:00Z
+  commentStoredIssue(db, S, 12, "先の時計のコメント", t - 60_000);
+  await sync.send(ws);
+  t += 61_000;
+  await sync.sync(ws);
+  const [rec] = db.listBacklogRecords(S, "comment");
+  for (const col of ["remote", "base"] as const) expect((rec![col] as { createdAt: string }).createdAt).toBe("2026-10-08T00:00:00Z");
+});
+
+test("BacklogSync: a comment GitHub dates to the second it was written in (the time cut to the second) keeps its written time", async () => {
+  const g = fakeGithub();
+  g.issues.get(12)!.labels = ["type:pbi"];
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, readsWithComments(g), clock);
+  await sync.sync(ws);
+  t = Date.parse("2026-10-08T00:02:00.400Z"); // its operation is dated a send window before (00:00:00.400); the fake GitHub dates what it receives 2026-10-08T00:00:00Z
+  commentStoredIssue(db, S, 12, "同じ秒のコメント", t - 60_000);
+  await sync.send(ws);
+  t += 61_000;
+  await sync.sync(ws);
+  const [rec] = db.listBacklogRecords(S, "comment");
+  for (const col of ["remote", "base"] as const) expect((rec![col] as { createdAt: string }).createdAt).toBe("2026-10-08T00:00:00.400Z");
+});
+
+test("BacklogSync: a release written after its claim still waits after the claim is sent", async () => {
+  const g = fakeGithub();
+  g.issues.get(12)!.labels = ["type:pbi"];
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, readsWithComments(g), clock);
+  await sync.sync(ws);
+  commentStoredIssue(db, S, 12, "<!-- pbi-complete:claim 1 -->");
+  await sync.send(ws); // only the claim is there to send
+  commentStoredIssue(db, S, 12, "<!-- pbi-complete:release overlap=40 -->", t + 5_000);
+  t += 5_000;
+  await sync.sync(ws); // reads the claim as GitHub received it (2026-10-08), which is after the release was written
+  const item = readStoredBacklog(db, ws).items.find((i) => i.number === 12)!;
+  expect(item.waits.map((w) => w.number)).toEqual([40]);
+});
+
+test("BacklogSync: a stage Task's own comment sent after it ended leaves the item unchanged; one written after the Task releases it", async () => {
+  const g = fakeGithub();
+  g.issues.get(12)!.labels = ["type:pbi"];
+  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
+  db.setWorkspaceBacklogSource(ws.id, S);
+  const sync = makeSync(db, readsWithComments(g), clock);
+  t = Date.parse("2026-09-30T12:00:00Z"); // before the Issue's updatedAt the fake GitHub reports (2026-10-01)
+  await sync.sync(ws);
+  const start = t;
+  // the Task writes its comment while it runs (written start + 10 s) and ends a minute after it started
+  commentStoredIssue(db, S, 12, "<!-- pbi-complete:claim 1 -->", start + 70_000);
+  db.insertTask({ id: "t_12", workspaceId: ws.id, title: "t", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 12, action: "complete" }, statusAt: start + 60_000, createdAt: start, updatedAt: start + 60_000 });
+  // the comment reaches GitHub after the Task ended, and is read back
+  t = start + 180_000;
+  await sync.send(ws);
+  await sync.sync(ws);
+  const lastTask = () => {
+    const r = db.lastStageTask(ws.id, 12)!;
+    return { id: r.id, status: r.status, statusAt: r.statusAt, createdAt: r.createdAt, updatedAt: r.updatedAt, action: r.stage?.action ?? null, outcome: r.outcome, reviewedAt: r.reviewedAt, resumeAt: r.resumeAt, started: false };
+  };
+  // the fake reads put Issue 12 In progress; `isUnchanged` judges the stages Ready and before, so the item is read as the Ready one it was
+  const read = () => ({ ...readStoredBacklog(db, ws).items.find((i) => i.number === 12)!, stage: "ready" as const, lastTask: lastTask() });
+  expect(isUnchanged(read())).toBe(true);
+  // a comment written after the Task ended (written start + 120 s) counts, sent or not
+  commentStoredIssue(db, S, 12, "Task の後に書いたコメント", start + 180_000);
+  expect(isUnchanged(read())).toBe(false);
 });

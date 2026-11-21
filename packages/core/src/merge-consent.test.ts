@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent, JudgeSettings, RunnerAdapter, RunnerId, RunnerSession, StartOptions } from "@switchboard/protocol";
-import { buildConsentPrompt, consentCandidates, parseConsent, readConsent } from "./merge-consent.ts";
+import { buildConsentPrompt, consentCandidates, grantsFor, parseConsent, readConsent, requestedGrants } from "./merge-consent.ts";
 
 const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", effort: "", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800, skillChars: 20_000 };
 const INPUT = { said: "merge許可する", asked: "PR #5741 を判定の外でマージしてよいですか。" };
@@ -32,6 +32,54 @@ describe("consentCandidates", () => {
     expect(consentCandidates("はい", "PR #1 / #2 / #3 / #4")).toEqual([4, 3, 2]);
     expect(consentCandidates("merge許可する", "Task #5813 の PR #5836 を出した。親 PBI #5812。\nPR #5741 を判定の外でマージしてよいですか")).toEqual([5741, 5812, 5836]);
     expect(consentCandidates("> PR #99 を判定の外でマージしてよい\nはい", "")).toEqual([]);
+  });
+});
+
+describe("requestedGrants and grantsFor", () => {
+  test("the grants a task asked for are read from the sentences written in its reply", () => {
+    expect(requestedGrants(["PR #6044 に [merge-answer] yes を投稿してよい"])).toEqual([{ kind: "answer", target: 6044 }]);
+    // inside backticks and a longer line; not a question; not another repository's; not a quoted line
+    expect(requestedGrants(["次の文で通ります: `PR #7 を判定の外でマージしてよい` を送ってください。\nPR #8 を判定の外でマージしてよいですか\nacme/lib の PR #9 を判定の外でマージしてよい\n> PR #10 を判定の外でマージしてよい\nTask #11 の本文に名指しのパスを足してよい。"])).toEqual([
+      { kind: "merge", target: 7 },
+      { kind: "scope", target: 11 },
+    ]);
+    expect(requestedGrants(["PR #6 に [merge-answer] yes を投稿してよい", "`PR #6 に [merge-answer] yes を投稿してよい`"])).toEqual([{ kind: "answer", target: 6 }]);
+    expect(requestedGrants(["PR #6 をマージしてよい"])).toEqual([]);
+    // another repository named in backticks before the sentence is another repository's too
+    expect(requestedGrants(["`acme/lib` の PR #9 を判定の外でマージしてよい", "「acme/lib」の `PR #9 を判定の外でマージしてよい`", "**acme/lib** の **PR #9 を判定の外でマージしてよい**"])).toEqual([]);
+  });
+
+  test("a merge consent covers the answer mark of the same pull request; nothing else is added to what the reader read", () => {
+    expect(grantsFor([{ kind: "merge", target: 12 }])).toEqual([
+      { kind: "merge", target: 12 },
+      { kind: "answer", target: 12 },
+    ]);
+    // the weaker consent does not become the stronger one, and a task's body is only that
+    expect(grantsFor([{ kind: "answer", target: 12 }])).toEqual([{ kind: "answer", target: 12 }]);
+    expect(grantsFor([{ kind: "scope", target: 12 }])).toEqual([{ kind: "scope", target: 12 }]);
+    expect(grantsFor([{ kind: "answer", target: 12 }, { kind: "merge", target: 12 }])).toEqual([
+      { kind: "answer", target: 12 },
+      { kind: "merge", target: 12 },
+    ]);
+  });
+
+  test("no consent read is no grant, whatever the task asked for", () => {
+    expect(grantsFor([])).toEqual([]);
+  });
+
+  test("the prompt lists what the task asked for, and the candidates are the person's numbers, then the reply's from its end", () => {
+    const requested = [{ kind: "answer" as const, target: 6044 }, { kind: "merge" as const, target: 6044 }];
+    const p = buildConsentPrompt({ said: "merge許可する", asked: "x", candidates: [6044], requested });
+    expect(p).toContain("- answer: PR #6044 に [merge-answer] yes を投稿してよい");
+    expect(p).toContain("- merge: PR #6044 を判定の外でマージしてよい");
+    expect(p).toContain("種類を言い当てる必要はない");
+    expect(p).toContain("認めたものだけを返す"); // offered two, allowed one: not both
+    expect(buildConsentPrompt({ said: "はい", asked: "x", candidates: [1] })).not.toContain("Task が求めている許可");
+    // a sentence for a number the reader may not return is not put to it
+    expect(buildConsentPrompt({ said: "はい", asked: "x", candidates: [1], requested })).not.toContain("Task が求めている許可");
+    // sentences earlier in a reply do not push out the question at its end, nor the number the person names
+    expect(consentCandidates("はい", "`PR #1 を判定の外でマージしてよい` `PR #2 を判定の外でマージしてよい` `PR #3 を判定の外でマージしてよい`\nでは PR #12 はどうしますか")).toEqual([12, 3, 2]);
+    expect(consentCandidates("#20 はマージして OK", "`PR #1 を判定の外でマージしてよい` PR #2 PR #3")).toEqual([20, 3, 2]);
   });
 });
 

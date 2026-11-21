@@ -111,6 +111,8 @@ Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること�
 ## 完了条件 (DoD)     - [ ] テスト追加（既存への追加・軽い階層を先に検討） - [ ] typecheck / test green - [ ] 実構成で確認 - [ ] 結果コメント
 ```
 
+満たす条件が `（マージの後: …）` の行なら、「実構成で確認」は PBI の行に回る（Task はマージで閉じる）。
+
 ### 5. PBI を Ready にする
 
 本文は `ops-kit backlog view <PBI> --fresh --json | jq -r .issue.body > "$W/pbi.md"` で取り（`--fresh` で GitHub の新しい本文を読む）、書き足して `ops-kit backlog edit <PBI> --body-file "$W/pbi.md"` で戻す（`.body` は `null` になる）。

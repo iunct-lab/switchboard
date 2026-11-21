@@ -122,8 +122,10 @@ export const BacklogItem = z.object({
   priority: z.string().nullable(),
   storyPoints: z.number().nullable(),
   createdAt: z.string(),
+  /** The newest written time (ISO) of the Issue's own comments; null when it has none. The "nothing since the last Task" judgments read this, not `updatedAt`. */
+  commentedAt: z.string().nullable(),
   /**
-   * Sub-issues (Tasks) of a PBI; null for a request. `doneAt` = the newest `updatedAt` of the closed sub-issues (ISO), null
+   * Sub-issues (Tasks) of a PBI; null for a request. `doneAt` = the newest closed time (`closedAt`) of the closed sub-issues (ISO), null
    * when none is closed.
    */
   tasks: z.object({ total: z.number(), done: z.number(), doneAt: z.string().nullable() }).nullable(),

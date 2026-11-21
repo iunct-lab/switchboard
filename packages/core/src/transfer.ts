@@ -45,7 +45,7 @@ function packageDirs(cfg: CoreConfig) {
  * snapshot is staged, and no more than one read chunk is held at once, so the history never sits in memory or in a
  * copy as a whole (a 3.8 GB host was oom-killed doing that).
  */
-export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryptTo?: string } = {}): Promise<Manifest> {
+export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryptTo?: string; /** tests: called before each file is opened */ beforePack?: (path: string) => void } = {}): Promise<Manifest> {
   const ageBin = opts.encryptTo ? ageBinary() : null;
   // wx: never overwrite (a mistyped <out> must not replace the database or a previous export); 0600: transcripts are private.
   const fd = openSync(out, "wx", 0o600);
@@ -73,9 +73,19 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
     const files: Manifest["files"] = {};
     const modes: Manifest["modes"] = {};
     const emptyDirs: string[] = [];
-    /** One file into the tar: its size and mode from the open file, then its bytes, hashed as they are written. */
-    const pack = async (name: string, path: string) => {
-      const f = openSync(path, "r");
+    /**
+     * One file into the tar: its size and mode from the open file, then its bytes, hashed as they are written. A file
+     * removed after the walk listed it (a runner deleting its own session log meanwhile) is left out: false.
+     */
+    const pack = async (name: string, path: string): Promise<boolean> => {
+      opts.beforePack?.(path);
+      let f: number;
+      try {
+        f = openSync(path, "r");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw e;
+      }
       try {
         const st = fstatSync(f);
         await write(tarHeader(name, st.size));
@@ -93,6 +103,7 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
         await write(new Uint8Array(tarPad(st.size)));
         files[name] = hash.digest("hex");
         modes[name] = st.mode & 0o777;
+        return true;
       } finally {
         closeSync(f);
       }
@@ -108,14 +119,15 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
         db.close();
       }
       counts.tasks = countTasks(join(stage, DB_ENTRY));
-      await pack(DB_ENTRY, join(stage, DB_ENTRY));
+      if (!(await pack(DB_ENTRY, join(stage, DB_ENTRY)))) throw new Error(`the database snapshot ${join(stage, DB_ENTRY)} is gone`);
     }
     for (const [key, { entry, source }] of Object.entries(packageDirs(cfg)) as Array<[keyof typeof counts, { entry: string; source: string }]>) {
       if (!existsSync(source)) continue;
       const found = walk(source, entry, written);
-      for (const [name, path] of found.files) await pack(name, path);
+      let packed = 0;
+      for (const [name, path] of found.files) if (await pack(name, path)) packed++;
       emptyDirs.push(...found.emptyDirs);
-      counts[key] = found.files.length;
+      counts[key] = packed;
     }
     const manifest: Manifest = { version: 1, host: hostname(), home: homedir(), createdAt: new Date().toISOString(), counts, files, modes, emptyDirs };
     const json = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -245,17 +257,28 @@ export function sweepExportStages(home: string): string[] {
 /**
  * Regular files (package name → source path) and empty folders under `source`, named under `entry`. Links are
  * followed: a linked folder (or a link inside one) is carried as its contents, so every file is in the manifest.
- * `skip` (the package being written) is left out.
+ * `skip` (the package being written) is left out, and so is an entry removed between listing its folder and reading it.
  */
 function walk(source: string, entry: string, skip: { dev: number; ino: number }): { files: Array<[string, string]>; emptyDirs: string[] } {
   const out: { files: Array<[string, string]>; emptyDirs: string[] } = { files: [], emptyDirs: [] };
   const visit = (path: string, name: string) => {
-    const st = statSync(path);
+    const st = statSync(path, { throwIfNoEntry: false });
+    if (!st) {
+      if (lstatSync(path, { throwIfNoEntry: false })) throw new Error(`${path} is a link to nothing`); // not a removal: fail as before
+      return; // removed after its folder was listed
+    }
     if (st.isFile()) {
       if (st.dev !== skip.dev || st.ino !== skip.ino) out.files.push([name, path]);
     } else if (st.isDirectory()) {
       const before = out.files.length + out.emptyDirs.length;
-      for (const c of readdirSync(path)) visit(join(path, c), `${name}/${c}`);
+      let children: string[];
+      try {
+        children = readdirSync(path);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // removed after it was found
+        throw e;
+      }
+      for (const c of children) visit(join(path, c), `${name}/${c}`);
       if (out.files.length + out.emptyDirs.length === before) out.emptyDirs.push(name); // empty, or holding only `skip`
     } else throw new Error(`${path} is not a regular file or folder`);
   };

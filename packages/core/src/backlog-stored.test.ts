@@ -70,9 +70,9 @@ test("a comment made here keeps its seq across the send", () => {
   expect(before["1 件目"]!).toBeLessThan(before["2 件目"]!);
   expect(before["取り込んだだけ"]).toBeNull();
 
-  // GitHub's node id, and a time after the second comment's local one
+  // GitHub's node id, and a time after the second comment's local one (which the record does not take: it keeps the time it was written)
   db.setBacklogOperationResult(first, { status: "done", remoteId: "IC_sent", record: { externalId: "IC_sent", remote: { issue: 12, body: "1 件目", createdAt: "2026-10-03T00:05:00Z" } } });
-  expect(readStoredIssue(db, ws, 12)!.comments.find((c) => c.body === "1 件目")).toMatchObject({ id: "IC_sent", createdAt: "2026-10-03T00:05:00Z" });
+  expect(readStoredIssue(db, ws, 12)!.comments.find((c) => c.body === "1 件目")).toMatchObject({ id: "IC_sent", createdAt: "2026-10-03T00:00:00.000Z" });
   expect(seqs()).toEqual(before);
 
   // sent again when GitHub is turned on on a backlog kept here: a comment made in between does not come before it
@@ -103,6 +103,26 @@ test("stages, Project fields of the workspace's Project and Task counts come fro
   expect(got.items.map((i) => [i.number, i.stage])).toEqual([[5, "in-progress"], [4, "needs-tasks"], [3, "ready"], [1, "request"]]);
   expect(got.items.find((i) => i.number === 3)).toMatchObject({ priority: "P1", storyPoints: 5, kind: "bug", projectStatus: "Ready", tasks: { total: 2, done: 1 }, workspaceId: ws.id, workspaceName: "app" });
   expect(got.items.find((i) => i.number === 4)).toMatchObject({ projectStatus: null, priority: null, kind: null });
+});
+
+test("doneAt is when the Task closed, not when a later comment moved the Task's updatedAt", () => {
+  const ws = imported([
+    issue(3, ["type:pbi"], { subIssues: [30, 31] }), item(3, { Status: "In progress" }),
+    issue(30, ["type:task"], { state: "CLOSED", closedAt: "2026-10-03T00:00:00Z", updatedAt: "2026-10-09T00:00:00Z" }),
+    issue(31, ["type:task"], { state: "CLOSED", closedAt: "2026-10-05T00:00:00Z", updatedAt: "2026-10-06T00:00:00Z" }),
+  ]);
+  expect(byNumber(ws)[3]!.tasks).toMatchObject({ total: 2, done: 2, doneAt: "2026-10-05T00:00:00Z" });
+});
+
+test("commentedAt is the newest written time of the Issue's own comments, null when it has none", () => {
+  const ws = imported([
+    issue(3, ["type:pbi"]), comment(3, "IC_a", "一つ目", "2026-10-03T00:00:00Z"), comment(3, "IC_b", "二つ目", "2026-10-04T00:00:00Z"),
+    issue(4, ["type:pbi"]),
+  ]);
+  expect([byNumber(ws)[3]!.commentedAt, byNumber(ws)[4]!.commentedAt]).toEqual(["2026-10-04T00:00:00Z", null]);
+  // a written time with milliseconds and GitHub's to the second are compared as times
+  const same = imported([issue(5, ["type:pbi"]), comment(5, "IC_c", "書いた", "2026-10-04T00:00:00.500Z"), comment(5, "IC_d", "GitHub", "2026-10-04T00:00:00Z")]);
+  expect(byNumber(same)[5]!.commentedAt).toBe("2026-10-04T00:00:00.500Z");
 });
 
 test("questions, reports and answers are read from every stored comment, a Task's question holding its PBI", () => {
@@ -593,6 +613,54 @@ describe("pickNext overlap", () => {
     expect(others.some((o) => o.turn === 3)).toBe(false);
   });
 
+  test("a place of a PBI the queue does not resume does not block the guard", async () => {
+    // P (2) is In progress and yielded to a merged PR; B (3) names P's path. P's place holds B back, until P's last stage Task failed with no update to the Issue since
+    const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
+    const ws = imported([
+      issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress" }), task(20, 2, "src/a.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
+      pr(90, ["src/a.ts"], { state: "MERGED" }),
+      comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
+    ]);
+    const guardRefs = async () => {
+      const read = readStoredBacklog(db, ws);
+      return (await readOthers(30, storedMaterial({ ...readStoredRecords(db, ws)!, turns: read.turns }, 30))).others.map((o) => o.turn);
+    };
+    // no stage Task on record: it keeps its place, in the app and in the guard
+    expect(readStoredBacklog(db, ws).turns!.map((t) => t.pbi)).toEqual([2]);
+    expect(await guardRefs()).toEqual([2]);
+    // its last stage Task failed after the release and nothing was written since: the queue does not resume it, so it holds no place
+    endedStage(ws, 2, ago(2), ago(1));
+    const read = readStoredBacklog(db, ws);
+    expect(read.turns).toEqual([]);
+    expect(read.items.find((i) => i.number === 3)!.overlap).toBeNull();
+    expect(await guardRefs()).toEqual([]);
+    // a stage Task that runs on it holds the place whatever its last Task
+    expect(readStoredBacklog(db, ws, { active: (n) => n === 2 }).turns!.map((t) => t.pbi)).toEqual([2]);
+    // an update to the Issue after the Task ended lets the queue resume it: the same place, the same since
+    db.putBacklogSnapshot(SOURCE, { records: [comment(2, "c2b", "回答", ago(0.5))], cursor: null, syncedAt: 6000 });
+    expect(readStoredBacklog(db, ws).turns).toEqual([{ pbi: 2, since: readStoredBacklog(db, ws, { active: (n) => n === 2 }).turns![0]!.since, task: 20, paths: ["src/a.ts"] }]);
+    expect(await guardRefs()).toEqual([2]);
+  });
+
+  test("a PBI with no stage Task on record keeps its place, even when its ## 状況 says it did not move", async () => {
+    // P (2) still waits for the PR it yielded to, and has a resume's ## 状況 whose tasks-done mark equals its closed Tasks,
+    // but this daemon has no stage Task of it
+    const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
+    const ws = imported([
+      issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress" }), task(20, 2, "src/a.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
+      pr(90, ["src/a.ts"]),
+      comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
+      comment(2, "c2s", "## 状況\n進んでいない\n<!-- tasks-done: 0 -->", ago(2)),
+    ]);
+    const read = readStoredBacklog(db, ws);
+    expect(read.items.find((i) => i.number === 2)!.report).not.toBeNull();
+    expect(read.turns!.map((t) => t.pbi)).toEqual([2]);
+    const others = (await readOthers(30, storedMaterial({ ...readStoredRecords(db, ws)!, turns: read.turns }, 30))).others;
+    expect(others.some((o) => o.turn === 2)).toBe(true);
+  });
+
   test("a Task whose body changed is read for its paths again", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts")]);
     const hits = () => readStoredBacklog(db, ws, { active: (n) => n === 1 }).items.find((i) => i.number === 2)!.overlap;
@@ -1067,6 +1135,16 @@ describe("questions the work goes on from with their recommendation", () => {
     const nodes = [{ body: GO, createdAt: q1 }, { body: GO, createdAt: q2 }, { body: confirm, createdAt: "2026-10-05T00:00:00Z" }];
     expect(proceedingAnswer(nodes, { at: q1 })?.at).toBe("2026-10-05T00:00:00Z");
     expect(proceedingAnswer(nodes, { at: q2 })).toBeNull();
+    // an answer made while the question carried the time the service received it (a send delay after it was written)
+    const written = [{ body: GO, createdAt: "2026-10-03T00:00:00.000Z" }, { body: GO, createdAt: "2026-10-04T00:00:00.000Z" }];
+    const named = (at: string) => ({ body: `## 回答\n\n${proceedAnswerLine({ at, recommended: "A" }, { same: false, choice: "B" })}`, createdAt: "2026-10-05T00:00:00Z" });
+    expect(proceedingAnswer([...written, named("2026-10-03T00:01:00Z")], { at: written[0]!.createdAt })?.at).toBe("2026-10-05T00:00:00Z");
+    expect(proceedingAnswer([...written, named("2026-10-03T00:01:00Z")], { at: written[1]!.createdAt })).toBeNull();
+    expect(proceedingAnswer([...written, named("2026-10-04T00:01:00Z")], { at: written[0]!.createdAt })).toBeNull();
+    expect(proceedingAnswer([...written, named("2026-10-04T00:01:00Z")], { at: written[1]!.createdAt })?.at).toBe("2026-10-05T00:00:00Z");
+    // a question sent at once: GitHub's time is its written time cut to the second
+    const atOnce = [{ body: GO, createdAt: "2026-10-03T00:00:00.300Z" }];
+    expect(proceedingAnswer([...atOnce, named("2026-10-03T00:00:00Z")], { at: atOnce[0]!.createdAt })?.at).toBe("2026-10-05T00:00:00Z");
     const hand = [...nodes.slice(0, 2), { body: "## 回答\nB で", createdAt: "2026-10-05T00:00:00Z" }];
     expect(proceedingAnswer(hand, { at: q1 })).toBeNull();
     expect(proceedingAnswer(hand, { at: q2 })?.body).toBe("## 回答\nB で");

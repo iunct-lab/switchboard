@@ -7,7 +7,7 @@
  * GitHub out of reach → a new Issue (with its Project field), edits of the title, the body (three times) and a Project
  * field, an answer → a backup (snapshotTo) → the daemon stops → it starts
  * on the backup → GitHub answers again: everything arrives once, in order. Then a reply lost after GitHub posted (found by
- * its marker, not posted again) and a post whose result is unknown and not found (never posted again).
+ * its marker, not posted again) and a post whose result is unknown and not found (made again once, with the same marker).
  * The other fields (labels, state, milestone, parent, membership) are each sent by backlog-send.test.ts.
  * The reads after a write are answered with an empty history: the overwrite checks are backlog-send-history.test.ts's.
  * Prints a JSON of pass / fail per case and counts; exit 1 when one fails.
@@ -156,6 +156,8 @@ async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Pro
   throw new Error(`timed out: ${what}`);
 }
 
+/** A comment waits a minute before it is sent (SEND_DELAY_MS): the wait is over, as asks-e2e.ts's windowOver. */
+const WINDOW_OVER = "UPDATE backlog_operations SET retry_at = NULL WHERE kind = 'comment' AND status = 'pending' AND attempt = 0";
 let core: CoreServer | null = null;
 if (MODE_API) try {
   let { core: c, base } = await boot(homes[0]!);
@@ -191,10 +193,11 @@ if (MODE_API) try {
   const before = queued.map((o) => [o.id, o.kind, o.field]);
   await core.stop();
   core = null;
-  // the wait the outage left (one minute) has passed by the time the daemon starts again
+  // the wait the outage left (one minute) and the answer's send window (SEND_DELAY_MS, one minute) have passed by the time the daemon starts again
   const { Database } = await import("bun:sqlite");
   const restored = new Database(join(homes[1]!, "switchboard.db"));
   restored.exec("UPDATE backlog_repositories SET retry_at = NULL");
+  restored.exec(WINDOW_OVER);
   check("the backup has every operation", JSON.stringify((restored.query("SELECT id, kind, field FROM backlog_operations WHERE status != 'done' ORDER BY seq").all() as Array<{ id: string; kind: string; field: string | null }>).map((o) => [o.id, o.kind, o.field])) === JSON.stringify(before));
   restored.close();
   down = false;
@@ -215,22 +218,25 @@ if (MODE_API) try {
   await fetch(`${base}/api/backlog?refresh=1`);
   fail = { match: (a) => a[1] === "repos/acme/app/issues/12/comments" && a.includes("POST"), after: true };
   await api("POST", "/api/backlog/12/answer", { text: "A で" });
+  // its send window has passed: sent at the next run
+  core.db.sqlite.exec(WINDOW_OVER);
+  await fetch(`${base}/api/backlog?refresh=1`);
   await until(() => core!.db.listPendingBacklogOperations().some((o) => o.status === "unknown"), "the answer is unknown");
   check("the label waits for an unknown answer", g12.labels.includes("needs-decision"), g12.labels);
   await fetch(`${base}/api/backlog?refresh=1`);
   await until(() => core!.db.listPendingBacklogOperations().length === 0, "the unknown answer found");
   check("a lost reply is found by its marker: one comment", g12.comments.filter((x) => x.body.startsWith("## 回答\n\nA で")).length === 1 && !g12.labels.includes("needs-decision"), g12.comments);
 
-  // 4. a post whose result is unknown and not found on GitHub: never posted again by itself
+  // 4. a post whose result is unknown and not found on GitHub (every page read): made again once, with the same marker
   fail = { match: (a) => a[1] === "repos/acme/app/issues" && a.includes("POST"), after: false };
   const issuesBefore = github.size;
+  const listsBefore = lists;
   await api("POST", "/api/backlog", { title: "PBI: 結果不明" });
   await until(() => core!.db.listPendingBacklogOperations().some((o) => o.status === "unknown"), "the create is unknown");
-  const listsBefore = lists;
-  for (let k = 0; k < 3; k++) await fetch(`${base}/api/backlog?refresh=1`);
-  // each send after an import looked for the marker, and posted nothing
-  await until(() => lists >= listsBefore + 3, "the marker looked for after each import");
-  check("unknown and not found: looked for, no post again", github.size === issuesBefore && core.db.listPendingBacklogOperations().map((o) => o.status).join() === "unknown", { size: github.size, lists: lists - listsBefore, ops: core.db.listPendingBacklogOperations().map((o) => o.status) });
+  await fetch(`${base}/api/backlog?refresh=1`);
+  await until(() => core!.db.listPendingBacklogOperations().length === 0, "the unknown create made again");
+  const remade = [...github.values()].filter((i) => i.title === "PBI: 結果不明");
+  check("unknown and not found: looked for, made again once", github.size === issuesBefore + 1 && remade.length === 1 && remade[0]!.body.includes("<!--") && lists > listsBefore, { size: github.size, lists: lists - listsBefore, remade });
 } catch (e) {
   check("ran to the end", false, { error: String((e as Error)?.message ?? e), waiting: core?.db.listPendingBacklogOperations().map((o) => [o.kind, o.field, o.status, o.error]), posts });
 } finally {

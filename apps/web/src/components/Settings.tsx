@@ -19,7 +19,7 @@ import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../mod
 import { countriesUrl } from "../login.ts";
 import { forgetPresets, presetRow } from "../presets.ts";
 import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
-import { githubSyncText } from "../backlogSync.ts";
+import { githubSyncText, issueArtifactsShown } from "../backlogSync.ts";
 import { Knowledge } from "./Knowledge.tsx";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
@@ -637,8 +637,8 @@ export function GithubSync() {
             <button className={to === "github" ? "pri" : "ghost"} disabled={busy !== null} onClick={() => void press(w, to, local)}>
               {s.enabling ? t(settings.syncContinue) : to === "github" ? t(settings.turnOn) : t(settings.turnOff)}
             </button>
-            {/* only where the sync is on: with it off there is no Issue on GitHub to attach to */}
-            {s.backlog === "github" && !s.enabling && (
+            {/* only where the sync is on and has read GitHub: otherwise there is no Issue on GitHub to attach to */}
+            {issueArtifactsShown(s, w.issueArtifacts) && (
               <label className="hint" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                 <input type="checkbox" checked={w.issueArtifacts} disabled={busy !== null} onChange={(e) => void attach(w, e.target.checked)} />
                 {t(settings.issueArtifacts)}

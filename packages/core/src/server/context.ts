@@ -189,7 +189,7 @@ export interface ServerContext {
   readonly startRequestTask: (input: { text: string; screen?: string; attachmentIds?: string[]; workspaceId?: string; source?: FeedbackInput["source"]; auto?: boolean; }) => Promise<{ task: Task; } | { upstream: { url: string | null; text: string; }; } | { error: string; status: number; }>;
   readonly completeTaskModelFor: (runner?: RunnerId) => string;
   readonly activeStageTask: (workspaceId: string, n: number) => Task | null;
-  readonly startStage: (input: { ws: Workspace; meta: Workspace; item: BacklogItem; action: BacklogAction; resume?: { tasksDone: number }; processReason?: string; extra?: Pick<Parameters<ServerContext["startMetaTask"]>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd"> }) => Promise<{ task: Task } | { active: Task } | { error: string; status: number }>;
+  readonly startStage: (input: { ws: Workspace; meta: Workspace; item: BacklogItem; action: BacklogAction; resume?: { tasksDone: number }; processReason?: string; extra?: Pick<Parameters<ServerContext["startMetaTask"]>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd"> }) => Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true }>;
   readonly ghLoginRefused: (ws: Workspace) => boolean;
   readonly authStopHeld: (ws: Workspace) => string | null;
   readonly notSettled: (e: unknown) => string;
@@ -301,6 +301,7 @@ export interface ServerContext {
   waitsChecking: boolean;
   readonly waitTimer: NodeJS.Timeout;
   readonly stopWorktreeSweep: (() => void) | null;
+  readonly stopSettleSweep: (() => void) | null;
   readonly isMeta: (t: { workspaceId: string | null; }) => boolean;
   restarting: boolean;
   readonly judgeStop: AbortController;
@@ -347,6 +348,8 @@ export interface ServerContext {
   stopped: boolean;
   readonly snapshotting: Set<string>;
   readonly snapshotAgain: Set<string>;
+  /** The read of a person's free-form reply for a merge consent that is still running, by Task id (`noteConsent`); the check in front of `gh` waits for it. */
+  readonly pendingConsent: Map<string, Promise<void>>;
   readonly snapshotEvents: Map<string, { seq: number; events: EventEnvelope[]; }>;
   readonly snapshotTaskDiff: (taskId: string) => Promise<void>;
   readonly snapshotTimer: NodeJS.Timeout;
@@ -355,7 +358,7 @@ export interface ServerContext {
   readonly originRepoOf: (dir: string) => string | null;
   readonly grantHeadOf: (task: { workspaceId?: string | null; cwd: string }, repo: string, target: number) => Promise<string | null>;
   readonly grantSource: (req: Request, srv: Peer, sender?: string) => Promise<{ sender?: string; via: "screen" | "api" }>;
-  readonly noteMergeGrant: (taskId: string, text: string, from?: { sender?: string; source?: string; via?: "screen" | "api"; }) => Promise<void>;
+  readonly noteMergeGrant: (taskId: string, text: string, from?: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean }) => Promise<void>;
   readonly guard: (h: AnyHandler | Record<string, AnyHandler>) => AnyHandler | Record<string, AnyHandler>;
   readonly opsLoadSampler: OpsLoadSampler | null;
   runId: number | null;

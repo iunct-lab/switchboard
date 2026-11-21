@@ -100,7 +100,7 @@ export function parseReads(src: string): string[] {
   return reads;
 }
 
-const matchesRead = (path: string, read: string) => read === "./" || (read.endsWith("/") ? path.startsWith(read) : path === read);
+export const matchesRead = (path: string, read: string) => read === "./" || (read.endsWith("/") ? path.startsWith(read) : path === read);
 
 /** テストがリポジトリを読みうる印。ファイルを読む道具と、外のプロセス、文字列でない動的 import。 */
 const READS_FILES = /\b(readFile|readFileSync|readdir|readdirSync|existsSync|statSync|lstatSync|copyFileSync|cpSync|spawn|spawnSync|execSync|execFileSync)\b|\bBun\.(file|Glob|\$)|\$`|\bimport\((?!["'])/;

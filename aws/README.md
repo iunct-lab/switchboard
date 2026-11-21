@@ -187,6 +187,11 @@ sb-offload 'nproc; free -m'                                                   # 
 
 Once no container has run and no `docker` process has existed for 10 minutes (the default; `SWITCHBOARD_DOCKERD_IDLE_MIN` sets the minutes), the daemon stops `sb-dockerd` with SIGTERM to free its memory. The next `docker` call starts it again.
 
+## Uplink bucket (a work machine beside the instance)
+
+The stack makes a bucket of its own for it (`Uplink`, name in `/switchboard/uplink-bucket`; never the data bucket) with the policies of `docs/design/work-machine.md` section 1. A work machine's role exists only when both `UplinkMachineName` (the machine's `SWITCHBOARD_MACHINE`; never the instance's own name, `InstanceMachineName`, default `instance` — set that to the instance's `SWITCHBOARD_MACHINE` when it is not the default, or the instance's lease proofs are refused) and `UplinkWriterPrincipalArns` (who may assume it) are set; it writes new keys under its own prefixes only and deletes nothing. On the machine, a profile in `~/.aws/config` with `role_arn` set to that role (the stack's `UplinkWriterRole`) and `source_profile` set to the profile of an allowed principal.
+Neither instance nor launch template changes; check the change set before executing it. The template's permissions are not checked against a real bucket in this version.
+
 ## Deploys that replace the instance
 
 What this is: a deploy whose change set modifies `LaunchTemplate` or replaces `Instance` — a new `ImageId`, UserData, `GitHubRepo`, `HostUser` / `HostHome` / `ReposDir`, `InstanceType`, `Market`, the disk.

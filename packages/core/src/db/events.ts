@@ -210,4 +210,11 @@ export class EventQueries extends TaskQueries {
       .get(taskId, ends[1]!.seq, ends[0]!.seq) as { text: string | null } | null;
     return { firstRequest, lastRequest: said?.text ?? null, previousReply: ends[1]!.summary };
   }
+
+  /** The summary of the task's last `session.end` (the reply a person's next text answers), or null when it has none. */
+  lastReplyText(taskId: string): string | null {
+    const end = '{"t":"session.end",';
+    const row = this.sqlite.query("SELECT json_extract(json, '$.summary') AS summary FROM events WHERE task_id = ? AND substr(json, 1, length(?)) = ? ORDER BY seq DESC LIMIT 1").get(taskId, end, end) as { summary: string | null } | null;
+    return row?.summary ?? null;
+  }
 }

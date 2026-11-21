@@ -325,9 +325,8 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           const n = now.issue.number;
           if (env.BACKLOG_URL && n && now.issue.labels.includes("type:task") && body !== now.issue.body && mergeGateOf(opts.cwd) !== null && addedPaths(now.issue.body ?? "", body, repoTop(opts.cwd)).length) {
             // the stop is the repository's whose Task this is: the workspace written to
-            const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo: (await workspace()).repository ?? "", issue: String(n) });
-            const s = (await appRoot(env, opts.fetch ?? fetch)("GET", `/api/merge-grants/scope-stop?${q}`).catch(() => null)) as { stopped?: unknown; granted?: unknown } | null;
-            if (s?.stopped === true && s.granted !== true) throw new Refused(`backlog edit: 保存しません — merge-gate が名指しの外のファイルで止めたあとの、#${n} の本文への名指しのパスの追加には利用者の許可が要ります。利用者が Task の会話に「Task #${n} の本文に名指しのパスを足してよい」と 1 行書いたあとに保存します`);
+            const s = await scopeStopOf(env, (await workspace()).repository ?? "", n, opts.fetch ?? fetch);
+            if (s?.stopped === true && s.granted !== true) throw new Refused(`backlog edit: 保存しません — merge-gate が名指しの外のファイルで止めたあとの、#${n} の本文への名指しのパスの追加には利用者の許可が要ります。利用者が Task の会話で #${n} の本文への名指しのパスの追加を認めると保存できます（言い方は自由。読めなかったときは「Task #${n} の本文に名指しのパスを足してよい」の 1 文でも通ります）`);
           }
         }
         const input: Record<string, unknown> = {
@@ -364,7 +363,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           // head the mark names: the grant holds for the head the PR had when it was given
           const repo = direct ? null : await workspace().then((w) => w.repository, () => null);
           const granted = await answerGranted(env, repo, number(ref), yesHeads, opts.fetch ?? fetch);
-          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話に「PR #${number(ref)} に [merge-answer] yes を投稿してよい」と 1 行書いたあとに投稿します`);
+          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話で PR #${number(ref)} への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #${number(ref)} に [merge-answer] yes を投稿してよい」の 1 文でも通ります。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通ります）`);
         }
         if (direct) {
           await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);
@@ -660,28 +659,49 @@ export async function syncedRepositories(env: Record<string, string | undefined>
   }
 }
 
-/** The app's API from its origin (BACKLOG_URL ends in `/api/backlog`; the merge-grant routes are beside it), answering within 5 seconds. */
-function appRoot(env: Record<string, string | undefined>, f: Fetch) {
+/**
+ * The app's API from its origin (BACKLOG_URL ends in `/api/backlog`; the merge-grant routes are beside it), answering
+ * within `waitMs` (5 seconds unless the call waits on a read of the person's words).
+ */
+function appRoot(env: Record<string, string | undefined>, f: Fetch, waitMs = 5_000) {
   const base = env.BACKLOG_URL ? new URL(env.BACKLOG_URL).origin : env.BACKLOG_URL;
-  return client({ ...env, BACKLOG_URL: base }, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(5_000) }));
+  return client({ ...env, BACKLOG_URL: base }, (url, init) => f(url, { ...init, signal: AbortSignal.timeout(waitMs) }));
 }
+
+/**
+ * How long the merge-grant read waits for the app. The app holds a GET /api/merge-grants while the person's words are
+ * being read, for at most `CONSENT_WAIT_CAP_MS` (packages/core/src/server/merge-consent.ts, 110 seconds), and cannot be
+ * asked for its settings here, so this is fixed above that (a test ties the two). With
+ * nothing being read the app answers at once.
+ */
+export const GRANT_WAIT_MS = 150_000;
 
 /**
  * Whether the app has a record of the person's merge grant (`kind`: merge / answer / scope) to this Task for `target` of
  * `repo`, the repository about to be written to (GET /api/merge-grants). A merge or answer grant holds for the head the
  * PR had when it was given: `head` is the head about to be merged or named by the mark, and a grant of another head does
  * not answer (a scope grant has no head). Null when the app cannot be asked (no BACKLOG_URL or task id, not reached,
- * 4xx / 5xx, no answer in 5 seconds). The Task is the one OPS_KIT_TASK_ID names: this keeps a slip from passing, it is
+ * 4xx / 5xx, no answer in `GRANT_WAIT_MS`). The Task is the one OPS_KIT_TASK_ID names: this keeps a slip from passing, it is
  * no fence (docs/design/permission-modes.md, "Merge grants").
  */
 export async function mergeGranted(env: Record<string, string | undefined>, repo: string, kind: string, target: number, f: Fetch = fetch, head?: string): Promise<boolean | null> {
   try {
     const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo, kind, target: String(target), ...(head !== undefined ? { head } : {}) });
-    const a = (await appRoot(env, f)("GET", `/api/merge-grants?${q}`)) as { granted?: unknown } | null;
+    const a = (await appRoot(env, f, GRANT_WAIT_MS)("GET", `/api/merge-grants?${q}`)) as { granted?: unknown } | null;
     return typeof a?.granted === "boolean" ? a.granted : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether the merge gate stopped on a file the Task `issue` of `repo` does not name, and whether the person's scope grant
+ * came after (GET /api/merge-grants/scope-stop). Waits up to `GRANT_WAIT_MS` like `mergeGranted`: the person's own
+ * words may still be being read. Null when the app cannot be asked.
+ */
+export async function scopeStopOf(env: Record<string, string | undefined>, repo: string, issue: number, f: Fetch = fetch): Promise<{ stopped?: unknown; granted?: unknown } | null> {
+  const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo, issue: String(issue) });
+  return ((await appRoot(env, f, GRANT_WAIT_MS)("GET", `/api/merge-grants/scope-stop?${q}`).catch(() => null)) as { stopped?: unknown; granted?: unknown } | null) ?? null;
 }
 
 /**

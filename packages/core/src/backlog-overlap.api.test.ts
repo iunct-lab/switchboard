@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { BacklogIssueData, BacklogItem } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
 import { buildStartPrompt } from "./backlog-prompt.ts";
-import { pickNext } from "./backlog-pick.ts";
+import { pickNext, notResumed } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine } from "./backlog-overlap.ts";
 import { judge as guardJudge } from "../../../scripts/parallel-guard.ts";
@@ -303,11 +303,11 @@ describe("overlap turn", () => {
 
   // X (`#1`, PR 90 on src/a.ts) is what P (`#2`) yielded to; Y (`#3`) came later and names the same path; Z (`#4`) names another
   const world = () => overlapWorld({ 1: { 11: "src/a.ts" }, 2: { 21: "src/a.ts src/p.ts" }, 3: { 31: "src/a.ts" }, 4: { 41: "src/z.ts" } });
-  const judgeAll = (w: ReturnType<typeof world>, opts: { xOpen: boolean; p?: Partial<BacklogItem>; comments?: Record<number, { body: string; createdAt: string }[]>; parked?: (n: number) => boolean; pClosed?: boolean }) => {
+  const judgeAll = (w: ReturnType<typeof world>, opts: { xOpen: boolean; p?: Partial<BacklogItem>; comments?: Record<number, { body: string; createdAt: string }[]>; parked?: (n: number) => boolean; pClosed?: boolean; notResumed?: (i: BacklogItem) => boolean }) => {
     const pulls = [w.pr(90, [11], ["src/a.ts"], { state: opts.xOpen ? "OPEN" : "MERGED" })];
     const comments = opts.comments ?? { 2: [mark(releaseBody("重なり", [90], true), 0)] };
     const items = [...(opts.pClosed ? [] : [item({ number: 2, stage: "ready", ...opts.p })]), item({ number: 3, stage: "ready" }), item({ number: 4, stage: "ready" })];
-    const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [31]], [4, [41]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [], parked: opts.parked });
+    const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [31]], [4, [41]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [], parked: opts.parked, notResumed: opts.notResumed });
     return { turns, of: (n: number) => items.find((i) => i.number === n)?.overlap ?? null };
   };
   const turnHit = { hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null };
@@ -399,6 +399,64 @@ describe("overlap turn", () => {
       const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [32]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [] });
       expect(turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
       expect(items[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+    } finally {
+      w.done();
+    }
+  });
+
+  // the reasons the queue does not resume P: each is what a stored PBI carries once its last stage Task is read
+  const lastTask = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}): NonNullable<BacklogItem["lastTask"]> => ({ id: "tsk_p", status: "done", statusAt: T0 + 60_000, createdAt: T0, updatedAt: T0 + 60_000, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null, started: true, ...over });
+  const waitingStop: BacklogItem["stopSummary"][number] = { key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
+  const inProgress = { stage: "in-progress" as const, tasks: { total: 2, done: 1, doneAt: null } };
+  const reasons: [string, Partial<BacklogItem>][] = [
+    ["not moved since its last resume", { ...inProgress, lastTask: lastTask() }],
+    ["waiting for a reply", { ...inProgress, lastTask: lastTask({ outcome: "needs_action" }), commentedAt: at(-1) }],
+    ["its last Task failed with no update since", { ...inProgress, lastTask: lastTask({ status: "error" }), commentedAt: at(-1) }],
+    ["stopped the same way again", { ...inProgress, lastTask: lastTask({ outcome: "finished" }), commentedAt: at(120), stopSummary: [waitingStop] }],
+  ];
+
+  test.each(reasons)("a PBI the queue does not resume holds no place: %s", (_name, p) => {
+    const w = world();
+    try {
+      expect(notResumed(item({ number: 2, ...p }))).toBe(true);
+      const held = judgeAll(w, { xOpen: false, p });
+      expect(held.of(3)).toEqual(turnHit);
+      const free = judgeAll(w, { xOpen: false, p, notResumed });
+      expect(free.turns).toEqual([]);
+      expect(free.of(3)).toBeNull();
+    } finally {
+      w.done();
+    }
+  });
+
+  test.each(reasons)("the place comes back with the same since once the PBI can be resumed: %s", (_name, p) => {
+    const w = world();
+    try {
+      // a ## 回答 after its last Task: it is resumed again
+      const answered = { ...p, answeredAt: at(150) };
+      expect(notResumed(item({ number: 2, ...answered }))).toBe(false);
+      const back = judgeAll(w, { xOpen: false, p: answered, notResumed });
+      expect(back.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(back.of(3)).toEqual(turnHit);
+    } finally {
+      w.done();
+    }
+  });
+
+  // a failed last Task lets go once a Task of the PBI closes after it, or once the Issue is written on
+  const failed = { ...inProgress, lastTask: lastTask({ status: "error" }), commentedAt: at(-1) };
+  const moved: [string, Partial<BacklogItem>][] = [
+    ["a Task closed after its failed Task", { ...failed, tasks: { total: 2, done: 1, doneAt: at(150) } }],
+    ["the Issue written on after its failed Task", { ...failed, commentedAt: at(150) }],
+  ];
+  test.each(moved)("the place comes back with the same since once the PBI can be resumed: %s", (_name, p) => {
+    const w = world();
+    try {
+      expect(notResumed(item({ number: 2, ...failed }))).toBe(true);
+      expect(notResumed(item({ number: 2, ...p }))).toBe(false);
+      const back = judgeAll(w, { xOpen: false, p, notResumed });
+      expect(back.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(back.of(3)).toEqual(turnHit);
     } finally {
       w.done();
     }
