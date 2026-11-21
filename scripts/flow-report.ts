@@ -6,6 +6,8 @@
  * budget is under 500; none when no GitHub repository is known: the PR stages are unknown), and the Switchboard DB (SWITCHBOARD_HOME, read-only) for each PBI's Tasks.
  * `--repo` chooses the workspace whose stored values are read and the repository whose PRs are read; a repository the app
  * has not imported finds no workspace (exit 2). A backlog kept in the app only has no repository to name: leave it out.
+ * After the Story Points table comes the review-rounds table (scripts/review-rounds.ts) and its candidates for review; when it
+ * cannot be read, one line says why and the exit code does not change. `--json` has it as `reviews: { rows, candidates }`.
  * Exit 0 = printed / 1 = stopped (FlowError: budget low, a read over 100 points, gh failed…) / 2 = bad arguments, or the stored values could
  * not be read (no BACKLOG_URL — outside the app's Task —, the app not reached, not imported, no workspace for `--repo`).
  */
@@ -18,6 +20,8 @@ import { runGh } from "../packages/core/src/backlog-gh.ts";
 import { actualsByStoryPoints, backlogGrowth, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
 import { deferredTasksSince } from "../packages/core/src/db.ts";
 import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { spawnRun } from "./merge-audit.ts";
+import { format as formatRounds, formatCandidates, readTable, reviewCandidates, type Candidate, type TableRow } from "./review-rounds.ts";
 
 const dur = (ms: number | null): string => {
   if (ms === null) return "不明";
@@ -85,8 +89,20 @@ async function main(): Promise<number> {
     const range = (s: Spread, f: (n: number) => string) => (s.p50 === null ? "-" : `${f(s.p50)} (${f(s.p25!)}〜${f(s.p75!)})`);
     console.log("\nSP\t件数\tTask の数 p50 (p25〜p75)\t費用 p50 (p25〜p75)\t稼働時間 p50 (p25〜p75)");
     for (const a of bySp) console.log(`${a.storyPoints}\t${a.count}\t${range(a.taskIssues, String)}\t${range(a.costUsd, (n) => `$${n.toFixed(2)}`)}\t${range(a.runMs, dur)}`);
+    // the review rounds of the same period: a failure here is one line, never the exit code
+    let reviews: { rows: TableRow[]; candidates: Candidate[] } | null = null;
+    try {
+      if (!repo) throw new Error("GitHub のリポジトリが無い");
+      const { rows } = await readTable(days, repo, now, spawnRun);
+      reviews = { rows, candidates: reviewCandidates(rows) };
+      console.log();
+      for (const line of formatRounds(rows)) console.log(line);
+      for (const line of formatCandidates(reviews.candidates)) console.log(line);
+    } catch (e) {
+      console.log(`\nレビューと再チェック: 読めなかった（${(e as Error).message.split("\n")[0]}）`);
+    }
     const json = arg("--json");
-    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, bySp, weeks }, null, 2));
+    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, bySp, weeks, reviews }, null, 2));
     return 0;
   } catch (e) {
     if (!(e instanceof FlowError)) throw e;

@@ -56,13 +56,14 @@ test("db.ts contains no statement that removes or renames a table or column", ()
   expect(files.filter((f) => f.startsWith("db/migrations/")).flatMap((f) => settingGone(readFileSync(join(import.meta.dir, f), "utf8")).map((m) => `${f}: ${m}`))).toEqual([]);
 });
 
-/** Tables (with their columns), indexes and `user_version` of a database file. */
-function shapeOf(path: string): { tables: Record<string, string[]>; indexes: string[]; userVersion: number } {
+/** Tables (with their columns), indexes (name and the statement that made it) and `user_version` of a database file. */
+function shapeOf(path: string): { tables: Record<string, string[]>; indexes: Array<{ name: string; sql: string | null }>; userVersion: number } {
   const raw = new Database(path, { readonly: true });
   try {
     const names = (type: string) => (raw.query("select name from sqlite_master where type = ? and name not like 'sqlite_%' order by name").all(type) as Array<{ name: string }>).map((r) => r.name);
     const tables = Object.fromEntries(names("table").map((t) => [t, (raw.query(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => c.name).sort()]));
-    return { tables, indexes: names("index"), userVersion: (raw.query("PRAGMA user_version").get() as { user_version: number }).user_version };
+    const indexes = raw.query("select name, sql from sqlite_master where type = 'index' and name not like 'sqlite_%' order by name").all() as Array<{ name: string; sql: string | null }>;
+    return { tables, indexes, userVersion: (raw.query("PRAGMA user_version").get() as { user_version: number }).user_version };
   } finally {
     raw.close();
   }
@@ -75,6 +76,14 @@ test("a database made before db.ts was cut into files opens to the schema and us
     const old = new Database(join(dir, "old.db"), { create: true });
     for (const sql of beforeSplit.statements) old.exec(sql);
     old.exec(`PRAGMA user_version = ${beforeSplit.userVersion}`);
+    // one row each in the tables the migrations after that version rewrite or fill, with the columns the old database had.
+    // Run on a database at this version (the order is db/migrate.ts): outcome-done-renamed-finished moves `done` to `finished`
+    // in tasks.outcome and tasks.judged_result; ui-layers-schedule-prompt turns a schedule of action `ui-layers` into a prompt one
+    // with its prompt filled in. (outcome-kept-by-status leaves a done Task's outcome; ledger-billing and ledger-reported-total
+    // add columns this database already has, so they do nothing to the ledger row.)
+    old.exec("INSERT INTO tasks (id, title, runner, cwd, scope, status, outcome, judged_result, status_at, created_at, updated_at) VALUES ('t1', 'old task', 'claude', '/x', '[]', 'done', 'done', 'done', 5, 4, 6)");
+    old.exec("INSERT INTO ledger (task_id, runner, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, billed_usd, source, ts, billing) VALUES ('t1', 'claude', 'm', 10, 20, 30, 40, 1.5, 1.5, 'reported', 7, 'api')");
+    old.exec("INSERT INTO schedules (id, title, cron, workspace_id, runner, prompt, enabled, action, created_at) VALUES ('s1', 'monthly', '0 9 1 * *', 'ws_x', 'claude', '', 1, 'ui-layers', 8)");
     old.close();
     const before = shapeOf(join(dir, "old.db"));
     new Db(join(dir, "old.db")).close();
@@ -85,6 +94,22 @@ test("a database made before db.ts was cut into files opens to the schema and us
     for (const [table, columns] of Object.entries(before.tables)) expect(opened.tables[table], table).toEqual(expect.arrayContaining(columns));
     expect(opened.indexes).toEqual(expect.arrayContaining(before.indexes));
     expect(opened.userVersion).toBeGreaterThanOrEqual(before.userVersion);
+    // the rows are all still there; what a migration rewrites has its new value and the rest is as it was put in
+    const raw = new Database(join(dir, "old.db"), { readonly: true });
+    try {
+      expect(raw.query("SELECT id, title, runner, cwd, scope, status, outcome, judged_result, status_at, created_at, updated_at FROM tasks").all()).toEqual([
+        { id: "t1", title: "old task", runner: "claude", cwd: "/x", scope: "[]", status: "done", outcome: "finished", judged_result: "finished", status_at: 5, created_at: 4, updated_at: 6 },
+      ]);
+      expect(raw.query("SELECT task_id, runner, model, input_tokens, output_tokens, cache_read, cache_write, cost_usd, billed_usd, source, billing, ts FROM ledger").all()).toEqual([
+        { task_id: "t1", runner: "claude", model: "m", input_tokens: 10, output_tokens: 20, cache_read: 30, cache_write: 40, cost_usd: 1.5, billed_usd: 1.5, source: "reported", billing: "api", ts: 7 },
+      ]);
+      const schedule = raw.query("SELECT id, title, cron, workspace_id, runner, enabled, action, prompt, created_at FROM schedules").all() as Array<{ action: string; prompt: string }>;
+      expect(schedule).toHaveLength(1);
+      expect(schedule[0]).toMatchObject({ id: "s1", title: "monthly", cron: "0 9 1 * *", workspace_id: "ws_x", runner: "claude", enabled: 1, action: "prompt", created_at: 8 });
+      expect(schedule[0]!.prompt).toContain("docs/design/ui-layers.md");
+    } finally {
+      raw.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentEvent, EventEnvelope, PendingApproval } from "@switchboard/protocol";
-import { applyApprovalEvent, mergeFetched, summarize } from "./approvals.ts";
+import { applyApprovalEvent, mcpHintLabel, mergeFetched, summarize } from "./approvals.ts";
 
 const env = (taskId: string, ev: AgentEvent, ts = 1): EventEnvelope => ({ taskId, seq: ts, ts, ev });
 const ask = (id: string): AgentEvent => ({ t: "permission.ask", id, kind: "write", tool: "Write", input: { file_path: "src/a.ts" }, detail: "write src/a.ts\nsecond\nthird" });
@@ -33,4 +33,12 @@ test("a fetched list replaces what the stream built, keeping asks that arrived a
 test("summarize keeps the first two lines", () => {
   expect(summarize({ detail: "a\nb\nc", input: {} })).toBe("a\nb");
   expect(summarize({ detail: "", input: { command: "ls" } })).toBe('{"command":"ls"}');
+});
+
+test("mcp hint label: the four claims read as their marks, and an ask without a claim gets none", () => {
+  expect(["read-only", "destructive", "write", "unknown"].map((h) => mcpHintLabel(h as "unknown"))).toEqual(["読むだけ", "壊す", "書く（壊さない）", "不明"]);
+  expect(mcpHintLabel(undefined)).toBeNull();
+  const row = applyApprovalEvent([], env("t1", { ...(ask("p1") as Extract<AgentEvent, { t: "permission.ask" }>), mcpHint: "destructive" }))[0]!;
+  expect(mcpHintLabel(row.mcpHint)).toBe("壊す");
+  expect(mcpHintLabel(applyApprovalEvent([], env("t1", ask("p2")))[0]!.mcpHint)).toBeNull();
 });

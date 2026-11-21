@@ -218,6 +218,12 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .perm b { margin-right: 8px; }
 .perm .tool-name { font-family: var(--mono); font-size: 11px; margin-right: 8px; color: var(--ink2); }
 .perm code { background: var(--panel); padding: 1px 6px; border-radius: 3px; font-size: 11.5px; word-break: break-all; }
+.mcp-mark { display: inline-block; font-size: 11px; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink3); white-space: nowrap; margin-right: 8px; vertical-align: baseline; }
+.t + .mcp-mark { margin-left: 6px; }
+.mcp-mark.mcp-read-only { color: var(--green); border-color: var(--green); }
+.mcp-mark.mcp-destructive { color: var(--red); border-color: var(--red); }
+.mcp-mark.mcp-write { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+.mcp-mark.mcp-unknown { color: var(--ink2); border-color: var(--ink3); }
 .perm.device-auth .hint { margin-left: 8px; }
 .perm.device-auth .runner-login { margin: 8px 0 4px; }
 .perm.device-auth div.hint { margin-left: 0; }
@@ -789,6 +795,9 @@ table.evals-table td button.open { font: inherit; color: inherit; padding: 0; te
 .preset-target input { min-width: 0; width: 100%; box-sizing: border-box; }
 .preset-suggest .hint { padding: 2px 10px 4px; }
 .preset-target .hint { padding: 0; min-height: 1.2em; }
+.slash-suggest { max-height: min(50vh, 320px); overflow-y: auto; }
+.slash-opt { flex: none; }
+.slash-arg { font-weight: 400; color: var(--ink3); }
 @media (max-width: 767px) { .preset-opt { display: grid; gap: 1px; min-height: 44px; } .preset-name { max-width: none; } }
 /* Settings の目的別のまとまり: the group's title above its cards */
 .settings-group { margin: 12px 0 -4px; font-size: 13px; font-weight: 600; color: var(--ink2); }

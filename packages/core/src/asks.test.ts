@@ -1124,6 +1124,37 @@ describe("noticeAsks", () => {
     expect(more.asks).toEqual([expect.objectContaining({ state: "open", question: "作業場 pc1 から届いたもの 1 件を取り込まなかった", reason: "backlog/pc1/000000000007.json: pc1 is not registered for acme/secret" })]);
   });
 
+  test("noticeAsks: a host CLI version not put in is told per runner with the reason in words — closed by dismiss for that version, open again for a newer one, resolved once one went in", () => {
+    const t0 = 1_000_000;
+    const c1 = { runner: "claude", version: "2.5.0", reason: "mismatch: 2.5.0: the checksum for linux-arm64 is not a sha256", current: "2.4.0", at: t0 };
+    const first = noticeAsks({ unusable: [], cliRefused: [c1], now: t0 }, {});
+    expect(first.asks).toEqual([expect.objectContaining({ id: `notice:cli:claude@${t0}`, kind: "notice", needs: "person", state: "open", question: "claude 2.5.0 を入れませんでした（checksum が配布元と合わない）", reason: "checksum が配布元と合わない: 2.5.0: the checksum for linux-arm64 is not a sha256\n拒んだときの版: 2.4.0", answers: ["dismiss"] })]);
+    expect(first.asks[0]!.next).toContain("新しい版が通れば自動で入り、この知らせは解消済みになる");
+    // a reason in words already (not one of the four codes) is shown as it is
+    expect(noticeAsks({ unusable: [], cliRefused: [{ ...c1, reason: "置けなかった: disk full" }], now: t0 }, {}).asks[0]!.reason).toBe("置けなかった: disk full\n拒んだときの版: 2.4.0");
+    const again = noticeAsks({ unusable: [], cliRefused: [c1], now: t0 + 1000 }, first.record);
+    expect(again.record).toBe(first.record);
+    // closed: the same version is not told again
+    const key = "cli:claude";
+    const closed = { ...again.record, [key]: { ...again.record[key]!, dismissed: closedHits(again.record[key]!), closed: true, resolvedAt: t0 + 2000 } };
+    const quiet = noticeAsks({ unusable: [], cliRefused: [c1], now: t0 + 3000 }, closed);
+    expect(quiet.asks).toEqual([]);
+    expect(quiet.record).toBe(closed);
+    // a newer version refused: open again
+    const more = noticeAsks({ unusable: [], cliRefused: [{ ...c1, version: "2.6.0", at: t0 + 4000 }], now: t0 + 4000 }, quiet.record);
+    expect(more.asks).toEqual([expect.objectContaining({ state: "open", question: "claude 2.6.0 を入れませんでした（checksum が配布元と合わない）" })]);
+    // one went in after it (the caller leaves the refusal out): resolved, shown for a day; a closed one just goes
+    const gone = noticeAsks({ unusable: [], now: t0 + 5000 }, more.record);
+    expect(gone.asks).toEqual([expect.objectContaining({ state: "resolved", question: "claude 2.6.0 を入れませんでした（checksum が配布元と合わない）", answers: [] })]);
+    expect(noticeAsks({ unusable: [], now: t0 + 6000 }, closed).asks).toEqual([]);
+    // a refusal before the name could be read ("unknown") closed for one reason does not hide one for another reason
+    const u1 = { runner: "claude", version: "unknown", reason: "not-official: https://evil.example/x is not on an official host", current: "2.4.0", at: t0 };
+    const u = noticeAsks({ unusable: [], cliRefused: [u1], now: t0 }, {});
+    const uClosed = { ...u.record, [key]: { ...u.record[key]!, dismissed: closedHits(u.record[key]!), closed: true, resolvedAt: t0 + 1 } };
+    expect(noticeAsks({ unusable: [], cliRefused: [u1], now: t0 + 2 }, uClosed).asks).toEqual([]);
+    expect(noticeAsks({ unusable: [], cliRefused: [{ ...u1, reason: "withdrawn: gone" }], now: t0 + 3 }, uClosed).asks).toEqual([expect.objectContaining({ state: "open", question: "claude unknown を入れませんでした（配布元が取り下げた）" })]);
+  });
+
   test("noticeAsks: an unusable workspace is open until it is fixed, then resolved", () => {
     const t0 = 1_000_000;
     const first = noticeAsks({ unusable: [{ workspace: ws, why }], now: t0 }, {});

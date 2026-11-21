@@ -219,6 +219,27 @@ export const ReleaseSettings = z
   .prefault({});
 export type ReleaseSettings = z.infer<typeof ReleaseSettings>;
 
+/** How the host's Claude Code and Codex CLIs are brought up to date (docs/design/cli-update.md): how often the distributor is read, how long a version is let age, what to do with one that has no checksum or signature, and how far it is tried. */
+const cliUpdateFields = {
+  /** How often the daemon reads the distributors' newest versions. */
+  checkMinutes: z.number().int().min(1).max(1440),
+  /** How many hours a version must have been out before it is taken (0 = at once). */
+  waitHours: z.number().int().min(0).max(720),
+  /** What to do with a version whose checksum or signature the distributor does not publish: `refuse` = keep it out, `allow` = take it after the other checks. A checksum or signature that does not match is always refused. */
+  missingSignature: z.enum(["refuse", "allow"]),
+  /** What a new version must pass before the link moves: `turn` = `--version` and one read-only turn, `version` = `--version` only. */
+  smoke: z.enum(["turn", "version"]),
+};
+export const CliUpdateSettings = z
+  .object({
+    checkMinutes: cliUpdateFields.checkMinutes.default(60),
+    waitHours: cliUpdateFields.waitHours.default(0),
+    missingSignature: cliUpdateFields.missingSignature.default("refuse"),
+    smoke: cliUpdateFields.smoke.default("turn"),
+  })
+  .prefault({});
+export type CliUpdateSettings = z.infer<typeof CliUpdateSettings>;
+
 export const QuotaAndResumeSettings = z
   .object({
     backlogQuotaLimit: quotaAndResumeFields.backlogQuotaLimit.default(0.8),
@@ -311,6 +332,8 @@ export const Settings = z.object({
   newDefaults: NewDefaultsSettings.prefault({}),
   /** The interval of the check for a new version, how far it goes by itself, and the limit of the wait before a promotion. */
   release: ReleaseSettings.prefault({}),
+  /** How the host's Claude Code and Codex CLIs are updated: the interval, the wait, and the two checks. */
+  cliUpdate: CliUpdateSettings.prefault({}),
   /**
    * runner → region of Amazon Bedrock. Absent = the runner runs on its own login (the Claude account). Only
    * what the user chose is saved: no key, no profile; the CLI reads AWS credentials its own way (docs/design/bedrock.md).
@@ -420,6 +443,7 @@ export const SettingsPatch = z.object({
   judgeAndChoice: z.object(judgeAndChoiceFields).partial().nullable().optional(),
   newDefaults: z.object(newDefaultsFields).partial().nullable().optional(),
   release: z.object(releaseFields).partial().nullable().optional(),
+  cliUpdate: z.object(cliUpdateFields).partial().nullable().optional(),
   /** model → price row; null removes the row (back to pricing.json's row, if any). */
   prices: z.record(z.string(), SettingsPrice.nullable()).nullable().optional(),
 });

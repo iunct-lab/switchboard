@@ -50,9 +50,11 @@ export class LlmSuggester implements Suggester {
 export type SuggestionTurnOptions = Pick<LlmSuggesterOptions, "adapter" | "cwd" | "model" | "effort" | "permissionMode" | "onUsage" | "log">;
 
 /** One turn of the runner, collected as text. The session is always closed, including when the caller gives up. */
-export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: string, signal: AbortSignal): Promise<string> {
+export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: string, signal: AbortSignal, strict = false): Promise<string> {
   let out = "";
   let failure: string | null = null;
+  /** An error, or an end that is not ok — not an ask: plan mode makes Claude reach for ExitPlanMode after answering. */
+  let turnFailed: string | null = null;
   let done!: () => void;
   const finished = new Promise<void>((r) => (done = r));
   // not saved: these turns run hundreds of times a day and would fill the 200 sessions `/insights` reads and
@@ -65,8 +67,11 @@ export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: str
     // question the person never started. Same for a mid-turn error. Neither voids text that already arrived:
     // `failure` is only reported when there is nothing to parse.
     else if (ev.t === "permission.ask") (failure ??= "the suggestion turn asked for a permission"), done();
-    else if (ev.t === "error") (failure ??= ev.message), done();
-    else if (ev.t === "session.end") done();
+    else if (ev.t === "error") (failure ??= ev.message), (turnFailed ??= ev.message), done();
+    else if (ev.t === "session.end") {
+      if (ev.status !== "ok") turnFailed ??= `the turn ended ${ev.status}`;
+      done();
+    }
   });
   const onAbort = () => done();
   signal.addEventListener("abort", onAbort, { once: true });
@@ -74,6 +79,8 @@ export async function runSuggestionTurn(opts: SuggestionTurnOptions, prompt: str
     await Promise.race([finished, session.exited]);
     if (signal.aborted) throw new Error(String((signal.reason as Error)?.message ?? "aborted"));
     if (!out.trim()) throw new Error(failure ?? `${opts.adapter.id} answered nothing`);
+    // a turn that has to come back whole (the check of a new CLI) fails on an error or an end that is not ok, text or not
+    if (strict && turnFailed) throw new Error(turnFailed);
     return out;
   } finally {
     signal.removeEventListener("abort", onAbort);

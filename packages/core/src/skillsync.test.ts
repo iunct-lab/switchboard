@@ -710,7 +710,9 @@ describe("the kit's skills as a Task reads them", () => {
     // machine's lease means and what its exit codes ask for, in pbi-complete (the only skill that owns the claim).
     // Raised to 262,601 (+5,247 bytes over 257,354): the comparison with main when review findings do not converge, once in
     // cross-runner-review (how to run and post it) and once in review-triage-and-merge (when to run it and how to sort its output).
-    expect(bytes).toBeLessThanOrEqual(262_601);
+    // Raised to 263,961 (+1,360 bytes over 262,601): a PBI that raises or lowers a review rule carries the row of the repository's rounds table,
+    // said in request-to-backlog (how to write it), pbi-to-tasks (the design check that stops it) and issue-workflow (what the repository holds).
+    expect(bytes).toBeLessThanOrEqual(263_961);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

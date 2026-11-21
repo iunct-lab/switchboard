@@ -45,11 +45,12 @@ const TYPED_MIN = 2;
 
 /**
  * The presets offered over a box: the most used in this scene first (the last 14 days), then the latest used, then the latest
- * edited. A box with nothing in it offers the first 3; typed text (trimmed) of 2 or more characters keeps those whose name or text holds it (any case), 3 at most; blanks only or 1 character offers nothing. Text that
+ * edited. A box with nothing in it offers the first 3; typed text (trimmed) of 2 or more characters keeps those whose name or text holds it (any case), 3 at most; blanks only or 1 character offers nothing. Text that starts with "/" offers nothing (it is for the runner's commands and skills). Text that
  * has a line break or is over 40 characters is a request being written, not a name being looked for: nothing is offered.
  */
 export function suggestPresets(list: Preset[], uses: PresetUse[], scene: PresetScene, text: string): Preset[] {
   if (text.includes("\n") || text.length > TYPED_MAX) return [];
+  if (text.startsWith("/")) return []; // the runner's commands and skills lie there (SlashPicker): two lists never overlap
   const q = text.trim().toLowerCase();
   if (text && q.length < TYPED_MIN) return []; // blanks only, or 1 character: not yet a name being looked for (Tab out of the box must not replace it)
   const by = new Map(uses.map((u) => [u.id, u]));

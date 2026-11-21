@@ -89,3 +89,10 @@ test("loadPresets reads once and reuses it; a failed read and forgetPresets read
   expect(reads).toBe(3);
   forgetPresets();
 });
+
+test("suggestPresets: a text starting with / offers no preset", () => {
+  const list = [preset("a", "pbi を進める", "/pbi-complete 12 して", 1)];
+  expect(suggestPresets(list, [], "home", "/")).toEqual([]);
+  expect(suggestPresets(list, [], "task", "/pbi")).toEqual([]);
+  expect(names(suggestPresets(list, [], "task", "pbi"))).toEqual(["pbi を進める"]); // the same text without the slash still matches
+});

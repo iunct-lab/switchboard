@@ -551,6 +551,15 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   expect(isReplyWaiting({ ...asked, lastTask: last({ status: "running", outcome: "unknown" }) })).toBe(false);
 });
 
+test("awaitingReply: a last stage Task still in background is not waiting for a reply even when its outcome is needs_action; the same Task done is", () => {
+  const at = "2026-09-28T00:00:00Z";
+  const last = (status: "background" | "done") => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, started: true });
+  const base = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, updatedAt: at });
+  expect(awaitingReply({ ...base, lastTask: last("background") })).toBe(false);
+  expect(isReplyWaiting({ ...base, lastTask: last("background") })).toBe(false);
+  expect(awaitingReply({ ...base, lastTask: last("done") })).toBe(true);
+});
+
 test("a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, started: true };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({

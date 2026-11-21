@@ -10,6 +10,7 @@ import { askWithdrawnPrereqs, mergePrereqs, prereqOf } from "./backlog-waits.ts"
 import { isUnblocked, overlapIn, pickNext, heldIn } from "./backlog-pick.ts";
 import { readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
 import { asksFromBacklog } from "./asks.ts";
+import { overlapLine } from "./backlog-overlap.ts";
 import { readOthers, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
@@ -319,6 +320,85 @@ test("waiting: a waits= pull request closed unmerged holds the PBI as withdrawn;
   expect(pickNext([items[20]!, items[21]!], "implement")).toMatchObject({ item: { number: 21 }, action: "complete" });
 });
 
+/** A stage Task of the PBI that left its slot (an error) between `from` and `to`. */
+const endedStage = (ws: { id: string }, pbiNo: number, from: string, to: string) => db.insertTask({ id: `t_${pbiNo}_${from}`, workspaceId: ws.id, title: "t", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "error", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: pbiNo, action: "complete" }, statusAt: Date.parse(to), createdAt: Date.parse(from), updatedAt: Date.parse(to) });
+
+describe("overlap wait on a Task", () => {
+  // PBI 21 waits on Task 14 (open), whose PBI is 30
+  const world = (marks: string[], withParent = true, parentRead: BacklogSnapshotEntry["fetchState"] = "fetched") => imported([
+    issue(21, ["type:pbi"]), item(21, { Status: "Ready" }), comment(21, "c2", "<!-- pbi-complete:release overlap=14 -->", "2026-10-02T00:00:00Z"),
+    issue(14, ["type:task"], withParent ? { parent: 30 } : {}), { ...issue(30, ["type:pbi"], { subIssues: [14] }), fetchState: parentRead },
+    ...marks.map((m, k) => comment(30, `c30_${k}`, m, `2026-10-03T0${k}:00:00Z`)),
+  ]);
+  const waits = (ws: { id: string; name: string; path: string }, active?: (n: number) => boolean) => {
+    const items = readStoredBacklog(db, ws, active ? { active } : {}).items;
+    return { wait: items.find((i) => i.number === 21)!, items };
+  };
+
+  test("an overlap wait on a Task of a PBI no session works on is met", () => {
+    for (const marks of [[], ["<!-- pbi-complete:claim t1 -->", "<!-- pbi-complete:release -->"]]) {
+      const { wait, items } = waits(world(marks));
+      expect(wait.waits).toEqual([{ number: 14, kind: "issue", open: false, state: "met", reason: "overlap", pbi: { number: 30, title: "#30" } }]);
+      expect(pickNext(items, "implement")).toMatchObject({ item: { number: 21 }, action: "complete" });
+    }
+  });
+
+  test("an overlap wait on a Task of a PBI a session works on still waits", () => {
+    const pending = (r: ReturnType<typeof waits>) => {
+      expect(r.wait.waits).toMatchObject([{ number: 14, state: "pending", open: true }]);
+      expect(pickNext(r.items, "implement")).toBeNull();
+    };
+    // first: a later world's marks stay stored for a PBI whose next read is not complete
+    pending(waits(world([], true, "unavailable")));
+    pending(waits(world([]), (n) => n === 30));
+    pending(waits(world(["<!-- pbi-complete:claim t1 -->"])));
+    pending(waits(world([], false)));
+    pending(waits(world(["<!-- pbi-complete:claim t1 -->", "<!-- pbi-complete:release -->", "<!-- pbi-complete:takeover t2 -->"])));
+  });
+
+  test("a claim left by a stage Task that ended does not count as work on the PBI", () => {
+    // the claim of PBI 30 (2026-10-03T00:00Z) was written while its stage Task ran, and the Task ended without a release
+    const ws = world(["<!-- pbi-complete:claim t1 -->"]);
+    expect(waits(ws).wait.waits).toMatchObject([{ number: 14, state: "pending" }]);
+    endedStage(ws, 30, "2026-10-02T23:00:00Z", "2026-10-03T01:00:00Z");
+    const { wait, items } = waits(ws);
+    expect(wait.waits).toEqual([{ number: 14, kind: "issue", open: false, state: "met", reason: "overlap", pbi: { number: 30, title: "#30" } }]);
+    expect(pickNext(items, "implement")).toMatchObject({ item: { number: 21 }, action: "complete" });
+    // its place does not hold the PBI either, and a stage Task that runs again makes it work again
+    expect(waits(ws, (n) => n === 30).wait.waits).toMatchObject([{ number: 14, state: "pending" }]);
+    // a resume only planned (parked) keeps the claim as work
+    expect(readStoredBacklog(db, ws, { parked: (n) => n === 30 }).items.find((i) => i.number === 21)!.waits).toMatchObject([{ number: 14, state: "pending" }]);
+    expect(readStoredBacklog(db, ws).unheld).toEqual([30]);
+    // a later stage Task that wrote no claim (a check) ends after it: the claim was still left by the earlier one
+    endedStage(ws, 30, "2026-10-03T02:00:00Z", "2026-10-03T03:00:00Z");
+    expect(waits(ws).wait.waits).toMatchObject([{ number: 14, state: "met" }]);
+    expect(readStoredBacklog(db, ws).unheld).toEqual([30]);
+  });
+
+  test("a claim written after the stage Task ended still counts", () => {
+    const ws = world(["<!-- pbi-complete:claim t1 -->"]);
+    endedStage(ws, 30, "2026-10-02T21:00:00Z", "2026-10-02T22:00:00Z");
+    expect(waits(ws).wait.waits).toMatchObject([{ number: 14, state: "pending", open: true }]);
+    expect(readStoredBacklog(db, ws).unheld).toEqual([]);
+  });
+
+  test("a claim left by an ended stage Task does not hold the guard", async () => {
+    const task = (n: number, parent: number, over: Partial<BacklogIssueData> = {}) => issue(n, ["type:task"], { body: "触る場所: `src/a.ts`", parent, ...over });
+    const ws = imported([
+      issue(21, ["type:pbi"], { subIssues: [22] }), item(21, { Status: "Ready" }), task(22, 21),
+      issue(30, ["type:pbi"], { subIssues: [14] }), item(30, { Status: "In progress" }), task(14, 30, { updatedAt: new Date().toISOString() }), item(14, { Status: "In progress" }),
+      comment(30, "c30", "<!-- pbi-complete:claim t1 -->", "2026-10-03T00:00:00Z"),
+    ]);
+    const others = async () => {
+      const read = readStoredBacklog(db, ws);
+      return (await readOthers(22, storedMaterial({ ...readStoredRecords(db, ws)!, turns: read.turns, unheld: read.unheld }, 22))).others.map((o) => o.ref);
+    };
+    expect(await others()).toEqual(["Task #14"]);
+    endedStage(ws, 30, "2026-10-02T23:00:00Z", "2026-10-03T01:00:00Z");
+    expect(await others()).toEqual([]);
+  });
+});
+
 test("the Project owner is compared without case; changing the workspace's Project variable forgets the stored source", () => {
   const ws = imported([issue(3, ["type:pbi"]), item(3, { Status: "Ready" }, "Acme")]);
   expect(byNumber(ws)[3]!.stage).toBe("ready");
@@ -475,6 +555,42 @@ describe("pickNext overlap", () => {
       const ws = imported([...two(issue(10, ["type:task"], { body: "パスの名指し無し", parent: 1 }), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), pr(51, null)]);
       expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
     }
+  });
+
+  // marks a few hours old: the places are read from release marks, which stop holding after 72 hours
+  const ago = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
+
+  test("backlog-next overlap: two PBIs that yielded to each other: one starts", () => {
+    // PBI 1 (P0) and 2 (P1) name one path; each released naming the other's Task, 1 first. No stage Task, no claim: each waits for the other, so its place does not hold the other back
+    const ws = imported([
+      ...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts"),
+      comment(1, "c1", "<!-- pbi-complete:release overlap=20 -->", ago(3)),
+      comment(2, "c2", "<!-- pbi-complete:release overlap=10 -->", ago(2)),
+    ]);
+    const items = byNumber(ws);
+    expect(items[1]!.overlap).toBeNull();
+    expect(items[2]!.overlap).toBeNull();
+    expect(pick(ws)).toBe(1);
+  });
+
+  test("a place of a PBI that cannot start does not block the guard", async () => {
+    // P (2) and Q (3) yielded to merged PRs; Q's Task names P's path too, so Q waits for P's place and holds none; R (4) names what Q's place would hold
+    const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
+    const ws = imported([
+      issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "Ready" }), task(20, 2, "src/a.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts", "src/q.ts"),
+      issue(4, ["type:pbi"], { subIssues: [40] }), item(4, { Status: "Ready" }), task(40, 4, "src/q.ts"),
+      pr(90, ["src/a.ts"], { state: "MERGED" }), pr(91, ["src/q.ts"], { state: "MERGED" }),
+      comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
+      comment(3, "c3", "<!-- pbi-complete:release overlap=91 -->", ago(2)),
+    ]);
+    const { turns } = readStoredBacklog(db, ws);
+    expect(turns!.map((t) => t.pbi)).toEqual([2]);
+    expect(byNumber(ws)[4]!.overlap).toBeNull();
+    // the guard in R's Task reads the same list: Q's place is not among the others, so R is not put behind it
+    const { others } = await readOthers(40, storedMaterial({ ...readStoredRecords(db, ws)!, turns }, 40));
+    expect(others.map((o) => o.ref)).toEqual(["Task #20"]);
+    expect(others.some((o) => o.turn === 3)).toBe(false);
   });
 
   test("a Task whose body changed is read for its paths again", () => {

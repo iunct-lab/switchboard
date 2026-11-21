@@ -108,6 +108,18 @@ describe("LlmSuggester (recorded Claude replay)", () => {
     expect(starts[0]!.persistSession).toBe(false);
   });
 
+  test("a strict turn (the check of a new CLI) fails on an error even after text arrived", async () => {
+    const events: AgentEvent[] = [{ t: "message.delta", role: "assistant", text: "OK" }, { t: "error", message: "boom" }];
+    const sig = new AbortController().signal;
+    expect(await runSuggestionTurn({ adapter: replayAdapter(events), cwd: "/tmp/h" }, "p", sig)).toBe("OK");
+    await expect(runSuggestionTurn({ adapter: replayAdapter(events), cwd: "/tmp/h" }, "p", sig, true)).rejects.toThrow("boom");
+    const failedEnd: AgentEvent[] = [{ t: "message.delta", role: "assistant", text: "OK" }, { t: "session.end", status: "error" }];
+    await expect(runSuggestionTurn({ adapter: replayAdapter(failedEnd), cwd: "/tmp/h" }, "p", sig, true)).rejects.toThrow("ended error");
+    // an ask after the answer (plan mode) is not a failure of the CLI
+    const asked: AgentEvent[] = [{ t: "message.delta", role: "assistant", text: "OK" }, { t: "permission.ask", id: "p1", kind: "other", tool: "ExitPlanMode", detail: "計画" }];
+    expect(await runSuggestionTurn({ adapter: replayAdapter(asked), cwd: "/tmp/h" }, "p", sig, true)).toBe("OK");
+  });
+
   test("a runner that never answers is given up on when the caller aborts", async () => {
     const ac = new AbortController();
     const s = new LlmSuggester({ adapter: replayAdapter([], { never: true }), cwd: "/tmp/h", examples: () => [] });

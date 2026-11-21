@@ -47,7 +47,11 @@ export const priorityRank = (p: string | null) => (p && /^P[0-3]$/.test(p) ? Num
  */
 export const isAnswered = (i: BacklogItem) => i.stage === "in-progress" && !!i.answeredAt && !!i.lastTask && Date.parse(i.answeredAt) > i.lastTask.updatedAt;
 
-// TERMINAL, not TURN_ENDED: a Task in `background` is still working, so its item is not stopped.
+// TERMINAL, not TURN_ENDED: a Task in `background` is still working, so its item is not stopped. A stop it recorded that
+// needs the person still shows on the row (the stop mark and the person's stop rows read the stop records, not the
+// status), and a pending tool approval is listed whatever the status. What waits for the background to end: this
+// reply-waiting mark (the row says "moving", `activeTaskId`) and a question-tool question (`personWait` counts
+// `background` as at work); both show once the Task is `done`.
 const isFinished = (t: NonNullable<BacklogItem["lastTask"]>) => TERMINAL.has(t.status);
 /** The newest stop series (by `lastAt`) of the item's last stage Task; only that one decides. */
 const lastStopOf = (i: BacklogItem) => (i.lastTask ? i.stopSummary.filter((x) => x.work.taskId === i.lastTask!.id).sort((a, b) => b.lastAt - a.lastAt)[0] : undefined);
@@ -113,7 +117,7 @@ const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome 
  * the Task (then activeTaskId holds the item), a ## 回答 on the Issue or marking the Task reviewed lets it be picked again;
  * on a Ready or in-progress PBI an unrelated update to the Issue (a label, the Project's Status, another Task's comment)
  * does not. The row's
- * `replyWaiting` is the same judgment.
+ * `replyWaiting` is the same judgment. A Task in `background` is not finished (`isFinished`), so it never counts here.
  */
 export const awaitingReply = (i: BacklogItem) => !!i.lastTask && isFinished(i.lastTask) && personWait(i.lastTask) === "needs" && !(answersRead(i) ? answeredSince(i) : touchedSince(i));
 /** A `## 回答` on the Issue since its last stage Task: what lets a Task that waits for the person go (an unrelated update does not). */

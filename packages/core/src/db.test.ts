@@ -926,6 +926,20 @@ test("stage: lastEndedStageTask picks the stage Task that left its slot last, no
   db.close();
 });
 
+test("endedStageRanAt: whether a stage Task of the Issue that left its slot ran at the time, any of them; a running one and another workspace's are not read", () => {
+  const db = new Db(join(dir, "switchboard.db"));
+  const mk = (id: string, ws: string, issue: number, status: "done" | "error" | "running", createdAt: number, statusAt: number) => db.insertTask({ id, workspaceId: ws, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status, runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue, action: "complete" }, statusAt, createdAt, updatedAt: statusAt });
+  mk("t_a", "ws", 5, "done", 10, 20);
+  mk("t_b", "ws", 5, "error", 30, 40); // the last to end
+  mk("t_c", "ws", 5, "done", 1, 15); // ended earlier
+  mk("t_d", "ws", 6, "running", 50, 50); // still running: not read
+  mk("t_e", "other", 7, "done", 1, 2);
+  expect([12, 35, 18, 2].map((at) => db.endedStageRanAt("ws", 5, at))).toEqual([true, true, true, true]);
+  expect([25, 41].map((at) => db.endedStageRanAt("ws", 5, at))).toEqual([false, false]);
+  expect([db.endedStageRanAt("ws", 6, 50), db.endedStageRanAt("ws", 7, 1), db.endedStageRanAt("other", 7, 1)]).toEqual([false, false, true]);
+  db.close();
+});
+
 test("stage: a database from before the stage columns takes the Issue and stage of a stage Task from its title once, and four lookups read the columns", () => {
   const path = join(dir, "switchboard.db");
   new Db(path).close();

@@ -127,9 +127,10 @@ function pbiOf(n: number, t: WaitTarget, issues: Map<number, BacklogIssueData>):
 
 /**
  * Gives each waiting item its waits with their states, why it waits and the PBI that moves each forward
- * (`pbiOf`). A number with no known state stays, with `open: null`: not taken as closed.
+ * (`pbiOf`). A number with no known state stays, with `open: null`: not taken as closed. `worked` tells whether a session
+ * works on a PBI: an overlap wait on an open Task whose PBI none works on is met.
  */
-export function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<number, WaitTarget>, issues: Map<number, BacklogIssueData>, now: number): void {
+export function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<number, WaitTarget>, issues: Map<number, BacklogIssueData>, now: number, worked: (pbi: number) => boolean = () => true): void {
   for (const [i, w] of waiting) {
     const reason = w.overlap ? ("overlap" as const) : ("prerequisite" as const);
     i.waits = w.numbers.flatMap((n): BacklogItem["waits"] => {
@@ -139,8 +140,10 @@ export function withWaits(waiting: Map<BacklogItem, PbiWait>, targets: Map<numbe
       // These PRs are deliberately parked, not prerequisites that must be completed first.
       if (t.kind === "pr" && (t.isDraft || decision)) return [];
       if (w.overlap && t.kind === "issue" && decision) return [];
-      // an overlap is over once the other side closes; a prerequisite only once it is done
-      const state = w.overlap ? (t.state === "OPEN" ? "pending" : "met") : prereqState(t, t.kind === "pr" ? "merged" : "done", () => null);
+      // an overlap is over once the other side closes, or once it is a Task whose PBI no session works on (nothing of it
+      // changes while none does); a prerequisite only once it is done
+      const idle = t.kind === "issue" && t.state === "OPEN" && ((p) => p !== null && !worked(p))(issues.get(n)?.parent ?? null);
+      const state = w.overlap ? (t.state === "OPEN" && !idle ? "pending" : "met") : prereqState(t, t.kind === "pr" ? "merged" : "done", () => null);
       return [{ number: n, kind: t.kind, open: openOf(state), state, reason, pbi: pbiOf(n, t, issues) }];
     });
     i.waitsAt = w.at;

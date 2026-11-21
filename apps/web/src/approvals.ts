@@ -1,4 +1,6 @@
 import type { EventEnvelope, PendingApproval } from "@switchboard/protocol";
+import { t } from "./i18n.ts";
+import { task as m } from "./i18n/task.ts";
 
 /**
  * The approvals list kept current from the event stream: an ask adds a row, its answer (permission.resolved)
@@ -9,7 +11,7 @@ export function applyApprovalEvent(list: PendingApproval[], env: EventEnvelope):
   const ev = env.ev;
   if (ev.t === "permission.ask") {
     if (list.some((a) => a.taskId === env.taskId && a.id === ev.id)) return list;
-    const row: PendingApproval = { taskId: env.taskId, taskTitle: env.taskId, workspace: null, id: ev.id, kind: ev.kind, tool: ev.tool, input: ev.input, detail: ev.detail, askedAt: env.ts };
+    const row: PendingApproval = { taskId: env.taskId, taskTitle: env.taskId, workspace: null, id: ev.id, kind: ev.kind, tool: ev.tool, input: ev.input, detail: ev.detail, mcpHint: ev.mcpHint, askedAt: env.ts };
     return [row, ...list];
   }
   if (ev.t === "permission.resolved") return list.filter((a) => !(a.taskId === env.taskId && a.id === ev.id));
@@ -31,4 +33,15 @@ export function mergeFetched(fetched: PendingApproval[], current: PendingApprova
 export function summarize(a: Pick<PendingApproval, "detail" | "input">, lines = 2): string {
   const text = a.detail.trim() || JSON.stringify(a.input ?? "");
   return text.split("\n").slice(0, lines).join("\n");
+}
+
+/** The mark after an MCP tool name: the server's own claim about the call, in words; none when the ask carried no claim. */
+export function mcpHintLabel(hint: PendingApproval["mcpHint"]): string | null {
+  switch (hint) {
+    case "read-only": return t(m.mcpReadOnly);
+    case "destructive": return t(m.mcpDestructive);
+    case "write": return t(m.mcpWrite);
+    case "unknown": return t(m.mcpUnknown);
+    default: return null;
+  }
 }

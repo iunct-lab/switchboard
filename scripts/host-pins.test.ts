@@ -8,7 +8,7 @@ import { latestOf, outdatedPins, PinsUnreadable, readPins, readPinsOutdated, typ
 const repo = join(import.meta.dir, "..");
 const nodeSh = readFileSync(join(repo, "aws/host/node.sh"), "utf8");
 const devtoolsSh = readFileSync(join(repo, "aws/host/devtools.sh"), "utf8");
-const NAMES = ["NODE_VERSION", "DOCKER_VERSION", "COMPOSE_VERSION", "UV_VERSION", "GITLEAKS_VERSION", "SAM_VERSION", "PLAYWRIGHT_VERSION", "PLAYWRIGHT_MCP_VERSION", "GH_STACK_VERSION"];
+const NAMES = ["NODE_VERSION", "DOCKER_VERSION", "COMPOSE_VERSION", "UV_VERSION", "GITLEAKS_VERSION", "SAM_VERSION", "COSIGN_VERSION", "PLAYWRIGHT_VERSION", "PLAYWRIGHT_MCP_VERSION", "GH_STACK_VERSION"];
 
 const answers = (table: Record<string, unknown>): FetchText => async (url) => {
   const a = Object.entries(table).find(([k]) => url.includes(k));
@@ -94,12 +94,13 @@ describe("readPinsOutdated", () => {
     "astral-sh/uv": rel("0.0.1"),
     "gitleaks/gitleaks": rel("v0.0.1"),
     "aws/aws-sam-cli": rel("v0.0.1"),
+    "sigstore/cosign": rel("v0.0.1"),
     "playwright/latest": { version: "0.0.1" },
     "@playwright/mcp/latest": { version: "0.0.1" },
     "github/gh-stack": rel("v0.0.1"),
   };
 
-  test("all nine read: what is behind", async () => {
+  test("all ten read: what is behind", async () => {
     expect(await readPinsOutdated(answers(distributors))).toEqual([{ name: "NODE_VERSION", pinned: nodePinned!, latest: `${nodeMajor}.999.0`, security: true }]);
   });
 

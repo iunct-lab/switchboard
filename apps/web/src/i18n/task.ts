@@ -347,6 +347,11 @@ export const task = msgs({
   permExec: { ja: "コマンド実行の許可", en: "Permission to run a command" },
   permWrite: { ja: "書き込みの許可", en: "Permission to write" },
   permNetwork: { ja: "ネットワークアクセスの許可", en: "Permission for network access" },
+  mcpReadOnly: { ja: "読むだけ", en: "Read only" },
+  mcpDestructive: { ja: "壊す", en: "Destructive" },
+  mcpWrite: { ja: "書く（壊さない）", en: "Writes (not destructive)" },
+  mcpUnknown: { ja: "不明", en: "Unknown" },
+  mcpHintNote: { ja: "印は MCP サーバーの申告。Switchboard はこの印で承認を省かない", en: "The mark is the MCP server's own claim. Switchboard does not skip an approval because of it" },
   permOther: { ja: "ツール実行の許可", en: "Permission to run a tool" },
 
   // Approvals.tsx: a question tool's questions on a card

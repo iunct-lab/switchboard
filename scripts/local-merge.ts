@@ -27,7 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { client, runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
 import { sh } from "./local-ci.ts";
-import { judge, noteScopeStop, readChange, readChangeDetail, readChangeRecords } from "./merge-gate.ts";
+import { judge, readChange, readChangeDetail, readChangeRecords } from "./merge-gate.ts";
 import type { StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
 import { landedTip, landingRef } from "../packages/core/src/landing.ts";
@@ -221,10 +221,7 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") {
-    await noteScopeStop(facts, j, records, n, o);
-    return 1;
-  }
+  if (j.verdict !== "merge") return 1;
   // a workspace whose Issues are a service's numbers its changes apart: the change's own number may be a Task's there
   const apart = records.service !== "switchboard";
 

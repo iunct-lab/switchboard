@@ -1,14 +1,28 @@
-import type { RunnerId } from "@switchboard/protocol";
+import { CliUpdateRunner, type RunnerId } from "@switchboard/protocol";
 import type { Routes, ServerContext } from "../server/context.ts";
 import { RunnerCommandsError, runnerCommands } from "../server/runner-commands.ts";
 
 /** The routes under /api/runners. */
-export function runnersRoutes(sc: Pick<ServerContext, "adapters" | "db" | "runnerLogins" | "json" | "bad" | "loginTarget" | "logoutTarget" | "runnerCliEnv" | "loginExpired" | "loginCheck" | "loginCheckedAt" | "refreshLogins">): Routes {
+export function runnersRoutes(sc: Pick<ServerContext, "adapters" | "db" | "runnerLogins" | "json" | "bad" | "loginTarget" | "logoutTarget" | "runnerCliEnv" | "loginExpired" | "loginCheck" | "loginCheckedAt" | "refreshLogins" | "cliUpdateState" | "requestCliRollback" | "strong">): Routes {
   return {
     // Settings the UI can change. A saved default mode must be one the runner offers and must not skip
     // approvals (danger modes are a per-task choice, never a default — schedules run unattended on the default);
     // null clears it, also for a runner that is no longer detected.
     // A runner's own login, from the screen. The pasted code goes to the CLI's stdin only.
+    // The host CLIs' versions: where each stands, and the record of what was put in, kept out or put back.
+    "/api/runners/updates": {
+      GET: () => sc.json(sc.cliUpdateState()),
+    },
+    // Puts the CLI back to the version rollbackTarget names (done when no Task runs; 202 = it waits for that). Recorded as a
+    // person's, so it takes the same fresh check as the Settings PATCH.
+    "/api/runners/:id/rollback": {
+      POST: sc.strong(async (req) => {
+        const runner = CliUpdateRunner.safeParse(req.params.id);
+        if (!runner.success) return sc.bad(`runner "${req.params.id}" has no CLI to put back`, 404);
+        const r = await sc.requestCliRollback(runner.data);
+        return sc.json(r.body, r.status);
+      }),
+    },
     "/api/runners/:id/login": {
       GET: (req) => {
         const v = sc.runnerLogins.get(req.params.id as RunnerId);

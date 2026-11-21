@@ -11,6 +11,15 @@ function Marked(props: { text: string; query: string }) {
   return <>{a}{m && <mark>{m}</mark>}{b}</>;
 }
 
+/** True when the list `el` does not fit above `box` inside its scrolling area: it lies over what is under the box instead. */
+export function overlayBelow(box: HTMLElement, el: HTMLElement): boolean {
+  let top = 0;
+  for (let n = box.parentElement; n; n = n.parentElement) {
+    if (/(auto|scroll|hidden)/.test(getComputedStyle(n).overflowY)) { top = n.getBoundingClientRect().top; break; }
+  }
+  return box.getBoundingClientRect().top - top < el.offsetHeight + 8;
+}
+
 /**
  * 定型の指示 over the request and reply boxes: it wraps the box (`children` is its textarea) and adds nothing around it.
  * When the box takes the cursor, the 3 presets sent most in this scene lie over the top of the box (nothing below moves);
@@ -48,11 +57,7 @@ export function PresetPicker(props: { scene: PresetScene; taskId?: string; works
   useLayoutEffect(() => {
     const el = over.current;
     if (!el || !box.current) return;
-    let top = 0;
-    for (let n = box.current.parentElement; n; n = n.parentElement) {
-      if (/(auto|scroll|hidden)/.test(getComputedStyle(n).overflowY)) { top = n.getBoundingClientRect().top; break; }
-    }
-    setBelow(box.current.getBoundingClientRect().top - top < el.offsetHeight + 8);
+    setBelow(overlayBelow(box.current, el));
   }, [shown, asking, list.length, error]);
   const close = () => {
     setHidden(true);

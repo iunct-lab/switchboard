@@ -356,6 +356,66 @@ describe("approval batches", () => {
     }
   });
 
+  // ended: the last background process ended (device-auth: the person logged in). lost: the runner process exited with it still running
+  test.each(["ended", "lost"] as const)("sso batch: the rest wait while the logging-in Task's background process runs; it %s", async (how) => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-batch-bg-"));
+    // the script is read live: the background mark is put before session.end after the Tasks' first turns
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask");
+    // by prompt: each Task's first process, whatever order they start in
+    const runs = new Map<string, { emit: (e: AgentEvent) => void; exit: (code: number) => void }>();
+    const inner = fakeAdapter(script, { lingers: true, slowMs: 50 });
+    const adapter = {
+      ...inner,
+      start: (o: StartOptions, emit: (e: AgentEvent) => void) => {
+        let exit!: (code: number) => void;
+        const crashed = new Promise<number>((r) => (exit = r));
+        if (!runs.has(o.prompt)) runs.set(o.prompt, { emit, exit });
+        const session = inner.start(o, emit);
+        return { ...session, exited: Promise.race([session.exited, crashed]) };
+      },
+    };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [adapter], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const a = c.tasks.create({ cwd: h, title: "task 0", prompt: "p0", runner: "claude" });
+      const b2 = c.tasks.create({ cwd: h, title: "task 1", prompt: "p1", runner: "claude" });
+      await waitFor(async () => [a, b2].every((t) => c.db.getTask(t.id)!.status === "done"));
+      const said = (t: Task) => c.db.listEvents(t.id, 0).flatMap((e) => (e.ev.t === "message.delta" && e.ev.role === "user" ? [e.ev.text] : []));
+      const batches = async () => ((await fetch(`${b}/api/asks`).then(j)) as AskList).batches;
+      c.tasks.recordStop(a.id, report({ id: "sso" }));
+      c.tasks.recordStop(b2.id, report({ id: "sso" }));
+      script.splice(script.length - 1, 0, { t: "background", count: 1 });
+      const r = await post(b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } }).then(j);
+      expect(r).toMatchObject({ sent: [a.id], already: false });
+      // device-auth puts its code while the turn runs (the fake runner is slow); the turn's end does not take it off the card
+      const code = await post(b, `/api/tasks/${a.id}/device-auth`, { url: "https://device.example/login", code: "XXXX-XXXX", command: "aws sso login", expiresInSec: 600 });
+      expect(code.status).toBe(200);
+      // the turn ended ok with device-auth left behind: it is the login still going on
+      await waitFor(async () => c.db.getTask(a.id)!.status === "background");
+      await Bun.sleep(100);
+      expect(said(b2)).not.toContain(SSO_REST_TEXT);
+      expect((await batches())[0]).toMatchObject({ loggingIn: { taskId: a.id }, asks: [{ taskId: b2.id }] });
+      expect(await post(b, "/api/asks/answer", { id: "batch:sso", answer: { kind: "allow" } }).then(j)).toMatchObject({ sent: [], already: true });
+      expect((await batches())[0]).toMatchObject({ loggingIn: { taskId: a.id }, deviceAuth: { code: "XXXX-XXXX" } });
+      if (how === "ended") {
+        // the last background process is gone: the Task is done, the rest are sent on, the card is gone
+        runs.get("p0")!.emit({ t: "background", count: 0 });
+        await waitFor(async () => said(b2).includes(SSO_REST_TEXT));
+        await waitFor(async () => (await batches()).length === 0);
+      } else {
+        // the runner took device-auth with it: the login did not finish. The rest stay in the batch, nobody is logging in
+        runs.get("p0")!.exit(1);
+        await waitFor(async () => c.db.getTask(a.id)!.status === "done" && c.db.getTask(a.id)!.background === null);
+        await waitFor(async () => (await batches())[0]?.loggingIn === null);
+        expect(said(b2)).not.toContain(SSO_REST_TEXT);
+        expect((await batches())[0]).toMatchObject({ asks: [{ taskId: b2.id }] });
+      }
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("approval window through the daemon: a fired approval-window schedule is one notice of the batch in 判断待ち until none waits", async () => {
     const x = await boot(2);
     const [a, b2] = x.ts as [Task, Task];

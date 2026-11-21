@@ -305,6 +305,8 @@ export interface StoredBacklog {
   error: string | null;
   /** What the owner has to do about `error`; null with no error. */
   errorKind: BacklogErrorKind | null;
+  /** The PBIs with a claim of /pbi-complete that this read does not count as work (a stage Task that ended left it; readStoredBacklog); absent where none are read. */
+  unheld?: number[];
 }
 
 /**

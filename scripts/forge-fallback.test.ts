@@ -292,16 +292,13 @@ test("(e) a change that stands in for a PR is kept and commented, but not merged
   expect((await s.view(5)).detail.issue.state).toBe("OPEN");
 });
 
-test("(f) a file the Task does not name stops the local merge as it stops a PR: main and the app stay as they were", async () => {
+test("(f) a file the Task does not name does not stop the local merge: the gate merges and lists it in notes", async () => {
   const s = await setup({ task: "触る場所: `b.txt`" });
   expect((await s.run(FAILS.outage)).code).toBe(3);
   await s.mark();
   const g = await s.gate();
-  expect(g.code).toBe(1);
-  expect(g.out).toContain("Task #5 の本文に名指しの無いファイル: c.txt");
-  expect((await s.merge()).code).toBe(1);
-  expect(s.subjects()).toEqual(["a"]);
-  expect((await s.view(1, true)).detail.issue.state).toBe("OPEN");
+  expect(g.code).toBe(0);
+  expect(g.out).toContain("Task #5 の名指しの外: c.txt");
 });
 
 test("usage (2): a missing Task, PBI, branch or gh command", async () => {
