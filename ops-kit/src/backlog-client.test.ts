@@ -732,6 +732,7 @@ test("scope: a Task body that names more paths is saved only when the gate's sto
     // the gate stopped and no scope sentence stands: refused, and nothing is sent
     const stopped = await edit(more, { scope: { stopped: true, granted: false } });
     expect([stopped.code, stopped.patched, stopped.asked, stopped.err]).toEqual([1, false, ["http://app/api/merge-grants/scope-stop?taskId=t1&repo=acme%2Fapp&issue=3"], expect.stringContaining("Task #3 の本文に名指しのパスを足してよい")]);
+    expect(stopped.err).toContain("利用者が Task の会話で #3 の本文への名指しのパスの追加を認めると保存できます（言い方は自由。");
     for (const plain of [`${STORED}ops-kit/src/foo.ts も直す\n`, `${STORED}\`bun test ops-kit/src/x.test.ts\` で確かめる\n`]) {
       const r = await edit(plain, { scope: { stopped: true, granted: false } });
       expect([r.code, r.patched]).toEqual([1, false]);

@@ -71,6 +71,25 @@ Parameters:
     Default: ''
     AllowedPattern: '(arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=.@/-]+)?'
     Description: Additional role ARNs the host may assume, comma separated; empty grants none
+  UplinkMachineName:
+    Type: String
+    Default: ''
+    AllowedPattern: '([A-Za-z0-9][A-Za-z0-9_-]*)?'
+    Description: >-
+      The name of the one work machine that may write to the uplink bucket (the SWITCHBOARD_MACHINE of that machine; never
+      InstanceMachineName, which is this host's own — the rule UplinkMachineIsNotTheHost refuses it). Empty, or with UplinkWriterPrincipalArns empty, makes no role for it
+  InstanceMachineName:
+    Type: String
+    Default: instance
+    AllowedPattern: '[A-Za-z0-9][A-Za-z0-9_-]*'
+    Description: >-
+      This host's own machine name in the uplink bucket (its SWITCHBOARD_MACHINE; the daemon's default is `instance`).
+      The host may write its lease proofs under lease-proof/<this name>/ only
+  UplinkWriterPrincipalArns:
+    Type: CommaDelimitedList
+    Default: ''
+    AllowedPattern: '(arn:aws:iam::[0-9]{12}:(role|user)/[A-Za-z0-9_+=.@/-]+)?'
+    Description: The principals that may assume the work machine's uplink role, comma separated; empty makes no role
   HostUser:
     Type: String
     Default: switchboard
@@ -117,7 +136,16 @@ Parameters:
     Description: >-
       The one Lambda function (DAK's) the host may invoke, as a function ARN (optionally with a version or alias).
       Empty = the host gets no Lambda permission. The function's own resource-based policy must also allow the host role
+Rules:
+  # the work machine's role must not write the host's own lease proofs (docs/design/work-machine.md, section 7)
+  UplinkMachineIsNotTheHost:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref UplinkMachineName, !Ref InstanceMachineName]]
+        AssertDescription: UplinkMachineName must differ from InstanceMachineName
 Conditions:
+  HasUplinkWriter: !And
+    - !Not [!Equals [!Ref UplinkMachineName, '']]
+    - !Not [!Equals [!Join ['', !Ref UplinkWriterPrincipalArns], '']]
   HasHostAssumeRoles: !Not [!Equals [!Join ['', !Ref HostAssumeRoleArns], '']]
   HasGeo: !Not [!Equals [!Join ['', !Ref AllowedCountries], '']]
   HasWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
@@ -155,6 +183,103 @@ Resources:
     Properties:
       LogGroupName: /switchboard/host
       RetentionInDays: 90
+  # ---------- the uplink bucket: a work machine beside the instance (docs/design/work-machine.md) ----------
+  # Not the data bucket: the work machine's credentials never reach Data. Versioning is on and nothing deletes: the
+  # records expire by lifecycle only. The bucket and its keys are the instance's record of what a work machine sent
+  Uplink:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      LifecycleConfiguration:
+        Rules:
+          - { Id: uplink, Status: Enabled, Prefix: uplink/, ExpirationInDays: 90 }
+          - { Id: backlog, Status: Enabled, Prefix: backlog/, ExpirationInDays: 90 }
+          # a lease is overwritten at every renewal: the old versions go after a week
+          - { Id: old-versions, Status: Enabled, NoncurrentVersionExpiration: { NoncurrentDays: 7 }, ExpiredObjectDeleteMarker: true }
+  UplinkPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Uplink
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # a key under these prefixes is written once: a put without If-None-Match: * is refused for everyone
+          - Sid: WriteOnce
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: [!Sub '${Uplink.Arn}/uplink/*', !Sub '${Uplink.Arn}/backlog/*', !Sub '${Uplink.Arn}/backlog-refused/*']
+            Condition: { StringNotEquals: { 's3:if-none-match': '*' } }
+          # a lease is taken (If-None-Match) or renewed (If-Match), never put over blind
+          - Sid: LeaseConditional
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${Uplink.Arn}/lease/*'
+            Condition: { 'Null': { 's3:if-none-match': 'true', 's3:if-match': 'true' } }
+          # no delete from the instance or from a work machine, even by mistake in a policy
+          - Sid: NoDelete
+            Effect: Deny
+            Principal:
+              AWS:
+                - !GetAtt InstanceRole.Arn
+                - !If [HasUplinkWriter, !GetAtt UplinkWriterRole.Arn, !Ref AWS::NoValue]
+            Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+            Resource: !Sub '${Uplink.Arn}/*'
+  # One work machine's credentials, only for the machine named in UplinkMachineName: its own prefixes, new keys only
+  UplinkWriterRole:
+    Type: AWS::IAM::Role
+    Condition: HasUplinkWriter
+    Properties:
+      PermissionsBoundary: !Ref Boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { AWS: !Ref UplinkWriterPrincipalArns }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: uplink
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # its records and its backlog edits, each key once
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: [!Sub '${Uplink.Arn}/uplink/${UplinkMachineName}/*', !Sub '${Uplink.Arn}/backlog/${UplinkMachineName}/*']
+                Condition: { StringEquals: { 's3:if-none-match': '*' } }
+              # a backlog edit it finds taken is read back, and what the instance refused of them
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: [!Sub '${Uplink.Arn}/backlog/${UplinkMachineName}/*', !Sub '${Uplink.Arn}/backlog-refused/${UplinkMachineName}/*']
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Uplink.Arn
+                Condition: { StringLike: { 's3:prefix': ['lease/*', !Sub 'backlog-refused/${UplinkMachineName}/*'] } }
+              # leases: taken with If-None-Match, renewed and given back with If-Match; proofs of who wrote one are read, and its own written
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: [!Sub '${Uplink.Arn}/lease/*', !Sub '${Uplink.Arn}/lease-proof/*']
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease/*'
+                Condition: { StringEquals: { 's3:if-none-match': '*' } }
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease/*'
+                Condition: { 'Null': { 's3:if-match': 'false' } }
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease-proof/${UplinkMachineName}/*'
+  # the daemon reads the bucket's name here, so UserData does not change (a change would replace the instance)
+  UplinkBucketParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /switchboard/uplink-bucket
+      Type: String
+      Value: !Ref Uplink
   # ---------- the instance ----------
   # One group per port: CloudFront's origin-facing prefix list weighs about 55 rules, so two references in one group
   # exceed the default 60 rules per group (RulesPerSecurityGroupLimitExceeded, seen on the first deploy).
@@ -196,6 +321,11 @@ Resources:
             Effect: Allow
             Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
             Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
+          # the uplink bucket: no delete in any role (the maximum of the work machine's role and the instance's)
+          - Sid: UplinkBucket
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
+            Resource: [!GetAtt Uplink.Arn, !Sub '${Uplink.Arn}/*']
           - Sid: Wake
             Effect: Allow
             Action: [scheduler:CreateSchedule, scheduler:UpdateSchedule, scheduler:GetSchedule, scheduler:DeleteSchedule]
@@ -364,6 +494,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/session-public-key'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/starter-url'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/uplink-bucket'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/web-url'
               # writes only where the host itself produces data: the sqlite replica (Litestream also prunes it) and the
               # daily archives. Releases are read-only here: an agent that could rewrite one would get it run later.
@@ -383,6 +514,36 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub '${Data.Arn}/releases/*'
+              # the uplink bucket (docs/design/work-machine.md section 1): what the instance takes in and the leases. No
+              # delete, and no write over a key a work machine put. The bucket policy refuses the same on its side
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub '${Uplink.Arn}/uplink/*'
+                  - !Sub '${Uplink.Arn}/backlog/*'
+                  - !Sub '${Uplink.Arn}/lease/*'
+                  - !Sub '${Uplink.Arn}/lease-proof/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Uplink.Arn
+                Condition: { StringLike: { 's3:prefix': ['uplink/*', 'backlog/*', 'lease/*'] } }
+              # a lease is taken with If-None-Match and renewed or given back with If-Match
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease/*'
+                Condition: { StringEquals: { 's3:if-none-match': '*' } }
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease/*'
+                Condition: { 'Null': { 's3:if-match': 'false' } }
+              # its own proofs of a lease (overwritten when a lease is given back), and what it refused of a work machine's edits (once)
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/lease-proof/${InstanceMachineName}/*'
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/backlog-refused/*'
+                Condition: { StringEquals: { 's3:if-none-match': '*' } }
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Data.Arn
@@ -819,7 +980,7 @@ Resources:
                   StringNotEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': !Ref AWS::StackName }
               - Effect: Allow
                 Action: s3:*
-                Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
+                Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*', !GetAtt Uplink.Arn, !Sub '${Uplink.Arn}/*']
               - Effect: Allow
                 Action: cloudfront:*
                 Resource:
@@ -876,6 +1037,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-image-repo'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/offload-ci-project'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/distribution-id'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/uplink-bucket'
               # the Starter's 5-minute schedule: a SAM Schedule event is a rule on the default bus
               - Effect: Allow
                 Action: [events:PutRule, events:DescribeRule, events:DeleteRule, events:PutTargets, events:RemoveTargets]
@@ -1289,6 +1451,8 @@ Outputs:
     Value: !Ref Instance
   DataBucket:
     Value: !Ref Data
+  UplinkBucket:
+    Value: !Ref Uplink
   StartPageBucket:
     Value: !Ref StartPage
   StarterUrl:

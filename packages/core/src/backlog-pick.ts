@@ -84,15 +84,18 @@ export const stopHeld = (i: BacklogItem) => {
 /** A request / 分解待ち / Ready item whose last stage Task was this stage's (from a button too). */
 const triedThisStage = (i: BacklogItem) => STAGE_ORDER.includes(i.stage) && !!i.lastTask && i.lastTask.action === ACTION_FOR_STAGE[i.stage];
 
-/**
- * Nothing changed since backlog-next last worked on it: its last stage Task was this stage's, it has finished (in any
- * way), and the Issue has not been updated since — a comment, ## 回答, body or label counts, whoever wrote it (one account).
- * In-progress PBIs are left to the rule for a stalled PBI (close it when it can be closed, else resume it). A Task that ended asking the person and was marked reviewed does not hold it.
- */
-export const isUnchanged = (i: BacklogItem) => triedThisStage(i) && isFinished(i.lastTask!) && !releasedByReview(i.lastTask!) && Date.parse(i.updatedAt) <= i.lastTask!.updatedAt;
+/** A comment was written on the Issue after `since` (ms): `commentedAt` is the newest written time (`BacklogItem.commentedAt`), not the time GitHub saw the Issue change. */
+const commentedSince = (i: BacklogItem, since: number) => !!i.commentedAt && Date.parse(i.commentedAt) > since;
 
 /**
- * Its last stage Task failed (error / aborted) and the Issue was not updated since. A runner that could not run at
+ * Nothing changed since backlog-next last worked on it: its last stage Task was this stage's, it has finished (in any
+ * way), and no comment was written on the Issue since it ended (`commentedAt`; a ## 回答 is a comment, whoever wrote it). Labels, body and Status do not count.
+ * In-progress PBIs are left to the rule for a stalled PBI (close it when it can be closed, else resume it). A Task that ended asking the person and was marked reviewed does not hold it.
+ */
+export const isUnchanged = (i: BacklogItem) => triedThisStage(i) && isFinished(i.lastTask!) && !releasedByReview(i.lastTask!) && !commentedSince(i, i.lastTask!.updatedAt);
+
+/**
+ * Its last stage Task failed (error / aborted) and no comment was written on the Issue since. A runner that could not run at
  * all (the usage limit, an organization's setting) ends the Task in seconds and leaves no mark on the Issue — not the
  * ## 状況 mark of a resume either — so without this an in-progress PBI was resumed every firing (26 times in 30 hours). Any stage. A Task closed since releases it too (`tasks.doneAt`), which asking the person (`awaitingReply`) does not.
  */
@@ -100,10 +103,10 @@ export const failedSince = (i: BacklogItem) =>
   !!i.lastTask && (i.lastTask.status === "error" || i.lastTask.status === "aborted") && !touchedSince(i) && !(i.tasks?.doneAt && Date.parse(i.tasks.doneAt) > i.lastTask.updatedAt);
 
 /**
- * Something happened on the Issue since its last stage Task ended: the Issue itself was updated, or a ## 回答 came
- * on it or on one of its Tasks (`answeredAt`, which a child's answer sets without touching the parent's `updatedAt`).
+ * Something happened on the Issue since its last stage Task ended: a comment was written on it, or a ## 回答 came
+ * on one of its Tasks (`answeredAt`, which a child's answer sets without a comment on the parent).
  */
-const touchedSince = (i: BacklogItem) => !!i.lastTask && (Date.parse(i.updatedAt) > i.lastTask.updatedAt || (!!i.answeredAt && Date.parse(i.answeredAt) > i.lastTask.updatedAt));
+const touchedSince = (i: BacklogItem) => !!i.lastTask && (commentedSince(i, i.lastTask.updatedAt) || (!!i.answeredAt && Date.parse(i.answeredAt) > i.lastTask.updatedAt));
 
 /** The person read the Task that ended asking them and marked it reviewed: that releases the item in every stage. */
 const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome === "needs_action" && t.reviewedAt !== null;
@@ -111,11 +114,11 @@ const releasedByReview = (t: NonNullable<BacklogItem["lastTask"]>) => t.outcome 
 /**
  * Its last stage Task, finished, waits for the person (`personWait` = needs: approval open, or the outcome `needs_action`, which
  * the Task's stop records set when they are written) and no ## 回答 came since (`answersRead`; for an item whose answers are
- * not read, no update to the Issue). An operational
+ * not read, no comment on the Issue). An operational
  * question is asked in the Task, not on the Issue (CLAUDE.md), so the Issue shows nothing; starting the stage again stops at
  * the same question (two PBIs that asked to merge, and the queue started their 実装 again within a second). A reply resumes
  * the Task (then activeTaskId holds the item), a ## 回答 on the Issue or marking the Task reviewed lets it be picked again;
- * on a Ready or in-progress PBI an unrelated update to the Issue (a label, the Project's Status, another Task's comment)
+ * on a Ready or in-progress PBI an unrelated change to the Issue (a label, the Project's Status)
  * does not. The row's
  * `replyWaiting` is the same judgment. A Task in `background` is not finished (`isFinished`), so it never counts here.
  */
@@ -309,23 +312,24 @@ export const heldIn = (items: BacklogItem[], slot: Slot) =>
  * Left when its last stage Task was a 閉じる that finished with no update to the Issue since, so a 閉じる that
  * failed is not started again every firing.
  */
-const isClosable = (i: BacklogItem) =>
-  i.closable && !(i.lastTask?.action === "close" && isFinished(i.lastTask) && !releasedByReview(i.lastTask) && Date.parse(i.updatedAt) <= i.lastTask.updatedAt);
+export const isClosable = (i: BacklogItem) =>
+  i.closable && !(i.lastTask?.action === "close" && isFinished(i.lastTask) && !releasedByReview(i.lastTask) && !commentedSince(i, i.lastTask.updatedAt));
 
 /** An in-progress PBI with Tasks left and nothing it waits on: backlog-next resumes it (`complete`). */
 const isStalled = (i: BacklogItem) => i.stage === "in-progress" && !!i.tasks && i.tasks.done < i.tasks.total;
 
 /**
  * A resume that ended before writing its ## 状況 mark: the last stage Task is a finished 実装, and neither the
- * Issue (`updatedAt`), a Task closed since (`tasks.doneAt`) nor a ## 回答 is newer than that Task's start. A resume writes
- * its marked ## 状況 first, and a 実装 started from Ready writes the decision log of its start first, so either one that
- * got that far moved the Issue past the Task.
+ * Issue (a comment written, `commentedAt`), a Task closed since (`tasks.doneAt`) nor a ## 回答 is newer than that Task's start. A resume writes
+ * its marked ## 状況 first, and a 実装 started from Ready in a repository with the parallel guard writes its claim comment
+ * first, so either one that got that far wrote a comment after the Task started. Without the guard the 実装 writes only
+ * its decision log (the body), which does not count (only comments do), so it is not resumed from this rule.
  */
-const endedUnmarked = (i: BacklogItem) => {
+export const endedUnmarked = (i: BacklogItem) => {
   const t = i.lastTask;
   if (!t || t.action !== "complete" || !isFinished(t)) return false;
   const newer = (at: string | null | undefined) => !!at && Date.parse(at) > t.createdAt;
-  return !newer(i.updatedAt) && !newer(i.tasks?.doneAt) && !newer(i.answeredAt);
+  return !newer(i.commentedAt) && !newer(i.tasks?.doneAt) && !newer(i.answeredAt);
 };
 
 /**
@@ -337,6 +341,14 @@ const isSpinning = (i: BacklogItem) =>
   isStalled(i) &&
   ((tasksDoneMark(i.report) === i.tasks!.done && !(i.answeredAt && Date.parse(i.answeredAt) > Date.parse(i.report!.at))) || endedUnmarked(i)) &&
   !(i.lastTask && releasedByReview(i.lastTask));
+
+/**
+ * A PBI the queue does not resume: it did not move since its last resume (stalled and spinning), it waits for a reply, its
+ * last Task failed with no update to the Issue since, or it stopped the same way again (`stopHeld`). A PBI that is unblocked
+ * is resumed, so it is not one. `candidates` leaves these out, and so does the place a PBI yielded with on an overlap
+ * (backlog-overlap.ts `turnWorks`): a place that nothing resumes would hold the others until a person looks.
+ */
+export const notResumed = (i: BacklogItem) => !isUnblocked(i) && (failedSince(i) || awaitingReply(i) || stopHeld(i) || (isStalled(i) && !isClosable(i) && !isAnswered(i) && isSpinning(i)));
 
 /** The stalled PBIs backlog-next leaves because they did not move since their last resume. */
 export const spinningIn = (items: BacklogItem[], slot: Slot) =>
@@ -385,7 +397,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
   // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
-  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || (!isUnchanged(i) && !failedSince(i) && !awaitingReply(i) && !stopHeld(i))) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || !isUnchanged(i)) && !notResumed(i) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
   // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
   // the queue's order instead when there is one

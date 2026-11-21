@@ -712,7 +712,14 @@ describe("the kit's skills as a Task reads them", () => {
     // cross-runner-review (how to run and post it) and once in review-triage-and-merge (when to run it and how to sort its output).
     // Raised to 263,961 (+1,360 bytes over 262,601): a PBI that raises or lowers a review rule carries the row of the repository's rounds table,
     // said in request-to-backlog (how to write it), pbi-to-tasks (the design check that stops it) and issue-workflow (what the repository holds).
-    expect(bytes).toBeLessThanOrEqual(263_961);
+    // Raised to 265,807 (+1,846 bytes over 263,961): the after-merge mark on an acceptance line and the checking state it
+    // gives a PBI, said once in issue-workflow (how to write the mark and what checking means) and pointed to from
+    // pbi-to-tasks, pbi-complete and request-to-backlog.
+    // Raised to 266,009 (+202 bytes over 265,807): in pbi-complete, which In progress Tasks the parallel guard counts as a counterpart (none of a PBI no session works on) and why.
+    // Raised to 266,462 (+453 bytes over 266,009): the places in a Task body whose paths the overlap check reads as references
+    // (the check and done-criteria sections, the design-check line, the old-assumption list, a "same as" parenthesis), said once
+    // in issue-workflow's Task granularity check, next to the rule they narrow.
+    expect(bytes).toBeLessThanOrEqual(266_462);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

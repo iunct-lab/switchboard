@@ -171,6 +171,54 @@ test("heavy: --memory-only starts beside a held slot, waits only for memory, tak
   });
 });
 
+test("heavy: minFreeMb of the options replaces the floor of heavy.json, up and down", async () => {
+  await scratch(async (home) => {
+    mkdirSync(join(home, ".config", "ops-kit"), { recursive: true });
+    writeFileSync(heavyConfigPath(home), JSON.stringify({ max: 1, minFreeMb: 1536 }));
+    const base = { home, pollMs: 10, memoryOnly: true };
+    // 1000 MB is below the file's floor but above the override: no wait, no line
+    const lines: string[] = [];
+    let ran = false;
+    await withHeavySlot("a", async () => void (ran = true), { ...base, mem: () => 1000, minFreeMb: 512, log: (l) => lines.push(l) });
+    expect(ran).toBe(true);
+    expect(lines).toEqual([]);
+    // 1000 MB is above a lowered file but below a raised override: it waits and names the override's floor
+    let free = 1000;
+    const waits: string[] = [];
+    let started = false;
+    const p = withHeavySlot("b", async () => void (started = true), { ...base, mem: () => free, minFreeMb: 2000, log: (l) => waits.push(l) });
+    await Bun.sleep(60);
+    expect(started).toBe(false);
+    expect(waits[0]).toContain("下限 2000 MB");
+    free = 2500;
+    await p;
+    expect(started).toBe(true);
+  });
+});
+
+test("heavy: floors[name] of heavy.json wins over the caller's minFreeMb, for that name only", async () => {
+  await scratch(async (home) => {
+    mkdirSync(join(home, ".config", "ops-kit"), { recursive: true });
+    writeFileSync(heavyConfigPath(home), JSON.stringify({ minFreeMb: 1536, floors: { typecheck: 900 } }));
+    const base = { home, pollMs: 10, memoryOnly: true, minFreeMb: 512 };
+    let free = 700;
+    const waits: string[] = [];
+    let started = false;
+    // 700 MB is above the caller's 512 but below the machine's floors.typecheck 900: it waits on 900
+    const p = withHeavySlot("typecheck", async () => void (started = true), { ...base, mem: () => free, log: (l) => waits.push(l) });
+    await Bun.sleep(60);
+    expect(started).toBe(false);
+    expect(waits[0]).toContain("下限 900 MB");
+    free = 1000;
+    await p;
+    expect(started).toBe(true);
+    // another name keeps the caller's 512
+    let other = false;
+    await withHeavySlot("other", async () => void (other = true), { ...base, mem: () => 700, log: () => {} });
+    expect(other).toBe(true);
+  });
+});
+
 test("heavy: the CLI reads --memory-only and --name in either order", async () => {
   await scratch(async (home) => {
     configure(home, { minFreeMb: 0 });
@@ -218,7 +266,7 @@ test("heavy: two different working directories share the machine's slots", async
 test("heavy: an invalid config stops with an error", async () => {
   await scratch(async (home) => {
     expect(heavyConfig(home)).toEqual({ max: 1, minFreeMb: 1536 });
-    for (const bad of [{ max: 0 }, { max: 1.5 }, { max: "2" }, { minFreeMb: -1 }, [2]]) {
+    for (const bad of [{ max: 0 }, { max: 1.5 }, { max: "2" }, { minFreeMb: -1 }, [2], { floors: 5 }, { floors: { typecheck: -1 } }, { floors: { typecheck: "512" } }]) {
       configure(home, bad);
       expect(() => heavyConfig(home)).toThrow(heavyConfigPath(home));
     }

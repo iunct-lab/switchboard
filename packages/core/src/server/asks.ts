@@ -489,7 +489,7 @@ export const answerTask = async (sc: Pick<ServerContext, "tasks" | "noteMergeGra
     if (!ask.grant) return { status: 409, body: { error: "許可文がありません" } };
     try {
       // `via`: whether the request looked like the screen's (routes/asks.ts); the sentence itself is the one the Task wrote in its stop
-      await sc.noteMergeGrant(taskId, ask.grant, { via });
+      await sc.noteMergeGrant(taskId, ask.grant, { via, taskWrote: true });
       const t = await sc.tasks.send(taskId, ask.grant);
       return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
     } catch (e) {

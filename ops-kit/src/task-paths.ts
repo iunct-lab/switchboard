@@ -42,15 +42,54 @@ function touchLines(text: string): string {
 }
 
 /**
+ * The body without the places that name a file only as a reference: a section headed 検証 or 完了条件 (up to the next `#`-`###`
+ * heading outside a code block), a line that starts with 設計チェック, the list under 古い前提を持つ既存の箇所 (the line and the indented or bulleted lines
+ * after it), and a parenthesis on one line that says と同じ / を参照 / のとおり.
+ */
+export function withoutReferences(body: string): string {
+  const out: string[] = [];
+  let skipSection = false;
+  let inList = false;
+  let fence = ""; // the opening fence of the code block we are in, or ""
+  for (const line of body.split("\n")) {
+    // CommonMark: a fence closes on the same character at least as long with nothing after it; a backtick fence's info
+    // string has no backtick, so a one-line ```a``` is inline code and opens nothing.
+    const mark = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (mark) {
+      const [, run, rest] = mark as unknown as [string, string, string];
+      if (!fence) { if (!(run[0] === "`" && rest.includes("`"))) fence = run; }
+      else if (run[0] === fence[0] && run.length >= fence.length && rest.trim() === "") fence = "";
+    }
+    // A Markdown heading needs a space after its `#`s; `#123` or a `#` comment in a code block is not one, and `####` stays inside.
+    if (!fence && /^#{1,3}\s/.test(line)) {
+      skipSection = /^#{2,3}\s+(?:検証|完了条件)/.test(line);
+      inList = false;
+    }
+    if (skipSection) continue;
+    const rest = line.replace(/^\s*(?:[-*+]|\d+[.)])?\s*/, "");
+    if (rest.startsWith("設計チェック")) { inList = false; continue; }
+    if (rest.startsWith("古い前提を持つ既存の箇所")) { inList = true; continue; }
+    if (inList) {
+      if (/^(?:\s+\S|[-*]\s)/.test(line)) continue;
+      inList = false;
+    }
+    out.push(line);
+  }
+  return out.join("\n").replace(/[（(][^（）()\n]*(?:と同じ|を参照|のとおり)[^（）()\n]*[）)]/g, " ");
+}
+
+/**
  * Repository paths named in an Issue body. `top` is the repository's root (plus what open PRs add to it): its
  * directories start a path anywhere in the body. A name without a directory (a root file such as `package.json`, or a backticked
  * word that ends in a file extension, so a file no branch has yet is still seen) counts only on `touchLines`.
  * `path:line` loses the line; a directory keeps its trailing slash. For overlaps, a glob (`docs/design/*.md`, `docs/a-*.md`) is
  * not a path, nor the directory before its wildcard, and a backticked span that starts with a command word and has a space
- * (`bun test scripts/a.test.ts`) names what is checked or searched, not touched. `scope` (merge-gate's) keeps both, as before.
+ * (`bun test scripts/a.test.ts`) names what is checked or searched, not touched. Nor are the places `withoutReferences` drops: the
+ * 検証 and 完了条件 sections, a 設計チェック line, the 古い前提を持つ既存の箇所 list, and a parenthesis that says と同じ / を参照 /
+ * のとおり. `scope` (merge-gate's) keeps all of these, as before.
  */
 export function pathsIn(body: string, top: { name: string; dir: boolean }[], { scope = false }: { scope?: boolean } = {}): string[] {
-  const text = scope ? body : body.replace(/`[^`\n]*`/g, (span) => (isCommand(span.slice(1, -1)) ? " " : span));
+  const text = scope ? body : withoutReferences(body).replace(/`[^`\n]*`/g, (span) => (isCommand(span.slice(1, -1)) ? " " : span));
   const dirs = top.filter((t) => t.dir).map((t) => esc(t.name));
   const files = top.filter((t) => !t.dir).map((t) => esc(t.name));
   const touch = touchLines(text);

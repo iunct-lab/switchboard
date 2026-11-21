@@ -1,64 +1,37 @@
 #!/usr/bin/env bun
 // Task の中で回す型検査。root の `bun run typecheck`（codex:types を含む）と同じ結果と終了コードを返す。
-// 使い方: bun scripts/typecheck.ts [--local] [--force]
-// sb-offload があるホストでは外の 1 本のビルドで回し（local-ci と同じ runBuild / ciScript / parseBuild。ビルドの image に Codex CLI が
-// ある。codex:types は PR の CI と同じくその Codex で作るので、ホストの Codex と版が違うときは --local。docs/design/local-ci-offload.md）、ホストの重い処理の枠は取らない。外が失敗・時間切れ・中断してもホストで回し直さない。
-// 重い処理の枠を取ってホストで回すのは、--local を付けたときと、sb-offload が無いホストだけ。SWITCHBOARD_SUPERVISED は抜かない。
-// 外のビルドは、入力の鍵（作業ツリーの全ファイル）がまったく同じビルドが 24 時間以内にあれば新しく始めず、そのビルドの結果を受け取る
-// （走っていれば終わるのを待つ）。--force はその 1 回を回し直す。幅は SWITCHBOARD_OFFLOAD_REUSE_HOURS（0 で使い回さない）。
+// 使い方: bun scripts/typecheck.ts [--local]
+// いつもこのマシンで回し、外のビルドは使わない（sb-offload があっても同じ。`--local` は受け付けて同じ動き）。1 回は数秒・最大 RSS 200 MB 弱なので
+// 重い処理の枠は取らず、空きメモリが型検査だけの床（既定 512 MB、heavy.json の floors.typecheck で変える。minFreeMb ではない）を下回る間だけ待つ。Codex の型は pin の版で作る（scripts/codex_types.ts）。
+// SWITCHBOARD_SUPERVISED は抜かない。docs/design/local-ci-offload.md
 import { join } from "node:path";
-import { withHeavySlot } from "../ops-kit/src/heavy.ts";
-import { type Deps, type Offload, parseBuild, runBuild } from "./local-ci.ts";
-import { reusedLine, reuseHours } from "./offload-record.ts";
-import { currentRepo } from "./repo.ts";
-import { offloadFor } from "./tag-ci.ts";
+import { type HeavyOptions, withHeavySlot } from "../ops-kit/src/heavy.ts";
 
 const ROOT = join(import.meta.dir, "..");
-const RUN = "bun run typecheck";
 
 export interface TypecheckDeps {
   /** ホストでコマンドを回す（出力は引き継ぐ）。コードを返す。 */
   spawnHost: (cmd: string[]) => Promise<number>;
-  /** 外のビルド。無ければホストで回す。 */
-  offload?: Offload;
-  /** 重い処理の枠を取って `fn` を回す。 */
-  slot: Deps["slot"];
-  /** owner/name。外の作業ツリーに origin として足す（local-ci と同じ）。 */
-  repo?: string;
-  /** 同じ入力の鍵の外のビルドを使い回す時間の幅。無いか 0 なら使い回さない（`--force`、`SWITCHBOARD_OFFLOAD_REUSE_HOURS=0`）。 */
-  reuseHours?: number;
-  log: (line: string) => void;
+  /** 重い処理を回す入口。`fn` を回して結果を返す。 */
+  slot: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
 }
 
-/** 型検査を回し、終了コードを返す。外が非 0 ならホストで回し直さない。 */
+/** 1 回の最大 RSS は 180 MB 弱なので、heavy.json の床（既定 1536 MB）ではなくこの値を床にする。マシンごとには heavy.json の `floors.typecheck` で変える。 */
+export const TYPECHECK_MIN_FREE_MB = 512;
+
+/** 空きメモリが型検査の床を下回る間だけ待ち、枠は取らずに `fn` を回す。 */
+export const typecheckSlot = <T>(name: string, fn: () => Promise<T>, heavy: HeavyOptions = {}): Promise<T> => withHeavySlot(name, fn, { ...heavy, memoryOnly: true, minFreeMb: TYPECHECK_MIN_FREE_MB });
+
+/** 型検査をこのマシンで 1 回回し、終了コードを返す。 */
 export async function runTypecheck(d: TypecheckDeps): Promise<number> {
-  if (!d.offload) return await d.slot("typecheck", () => d.spawnHost(["bun", "run", "typecheck"]));
-  const steps = [{ name: "typecheck", run: RUN }];
-  // the type check reads no recordings: the build gets none (hostOffload adds them where the host has them)
-  const { fixtures: _, ...offload } = d.offload;
-  const { code, output, reused } = await runBuild(offload, steps, ROOT, { caller: "typecheck", ...(d.repo ? { repo: d.repo } : {}), host: { names: [], accountIds: [] }, ...(d.reuseHours ? { reuse: { hours: d.reuseHours } } : {}) }).catch((e) => ({ code: 1, output: `sb-offload: ${e instanceof Error ? e.message : String(e)}`, reused: undefined }));
-  if (reused) d.log(reusedLine(reused));
-  let failed = 0;
-  for (const r of parseBuild(output, steps, code)) {
-    if (r.code === 0) continue;
-    failed ||= r.code;
-    d.log(r.output.trimEnd());
-  }
-  failed ||= code;
-  if (!failed) d.log("typecheck: 外で通った");
-  return failed;
+  return await d.slot("typecheck", () => d.spawnHost(["bun", "run", "typecheck"]));
 }
 
 if (import.meta.main) {
-  const offload = offloadFor(process.argv.slice(2).includes("--local"));
   process.exit(
     await runTypecheck({
-      ...(process.argv.slice(2).includes("--force") ? {} : { reuseHours: reuseHours(process.env) }),
       spawnHost: async (cmd) => await Bun.spawn(cmd, { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exited,
-      ...(offload ? { offload } : {}),
-      slot: (name, fn) => withHeavySlot(name, fn),
-      ...(() => { try { return { repo: currentRepo(ROOT) }; } catch { return {}; } })(),
-      log: (l) => console.log(l),
+      slot: typecheckSlot,
     }),
   );
 }

@@ -34,12 +34,12 @@
 ## テスト
 
 ```bash
-bun scripts/typecheck.ts        # 型検査。外のビルドで回り枠を取らない。--local はそのマシンの枠の中
+bun scripts/typecheck.ts        # 型検査。このマシンで回り（外のビルドは使わない）、枠は待たない（空きメモリが型検査だけの床（既定 512 MB）を下回る間だけ待つ）。--local は同じ動き
 bun scripts/test-changed.ts     # <関係するテスト>。Task の中はこれ（枠はスクリプトが取る。SWITCHBOARD_SUPERVISED はスクリプトが抜く）
 env -u SWITCHBOARD_SUPERVISED bun test <file> -t "<name>"     # 変数を継承すると selfdev の dry-run テストが落ちる
 ```
 
-型検査（`bun scripts/typecheck.ts`）も `test-changed` と同じく、入口が枠を要るときだけ自分で取る（`ops-kit heavy` で包まない。外のビルドが無いマシンと `--local` はそのマシンの枠の中。上限・置き場・足し方はキットの README の「Heavy-process slots」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるマシンでは選んだテストを（録画を読むものも）全部外のビルドで回し、枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。足したテストは実装を 1 か所壊して赤を見る。壊し方は PR 本文に（`task-to-pr` の「足す前に」）。
+型検査（`bun scripts/typecheck.ts`）はこのマシンで回り、外のビルドを使わず、重い処理の枠を取らない（`ops-kit heavy` で包まない。空きメモリが型検査だけの床を下回る間だけ待つ。床は既定 512 MB で、heavy.json の `minFreeMb` ではなく、マシンごとに `~/.config/ops-kit/heavy.json` の `floors.typecheck` で変える。枠の仕組みはキットの README の「Heavy-process slots」）。`test-changed`（一式に広がることがある）は枠を自分で取る（`ops-kit heavy` で包まない）。`sb-offload` があるマシンでは選んだテストを（録画を読むものも）全部外のビルドで回し、枠を持たない。1 ファイルの `bun test` は包まない。ローカル CI（`bun scripts/local-ci.ts`）は自分で枠を取るので `ops-kit heavy` で包まない。一式（`ops-kit heavy -- env -u SWITCHBOARD_SUPERVISED bun test`）は Task の中で手では回さない（`bun scripts/test-changed.ts` が判定できない変更は、スクリプトが自分で一式に広げる）。PR の CI は差分の決まった head で 1 回回り（Actions は全テスト、`bun scripts/local-ci.ts` は影響範囲に絞る）、全テストの安全網はタグの CI。足したテストは実装を 1 か所壊して赤を見る。壊し方は PR 本文に（`task-to-pr` の「足す前に」）。
 
 変更ごとのテストの型（軽い順。上の行で足りるなら下の行へ行かない。足す前の検討は `task-to-pr` の「足す前に」）:
 

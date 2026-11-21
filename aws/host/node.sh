@@ -4,7 +4,7 @@
 # there, so without this a Node security release reached a running host only with 作り直す. A different version in place
 # is replaced; the same one is left alone. SB_NODE_DIR and SB_NODE_BIN are for the tests.
 set -euo pipefail
-# pinned from https://nodejs.org/dist/v<version>/SHASUMS256.txt (2026-11-14: the 2026-11-10 security release of 24.x)
+# pinned from https://nodejs.org/dist/v<version>/SHASUMS256.txt
 NODE_VERSION=24.22.3
 NODE_SHA256=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c
 DIR="${SB_NODE_DIR:-/usr/local/lib/nodejs}"

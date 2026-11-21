@@ -7,7 +7,8 @@ import { appendFileSync, linkSync, mkdirSync, readdirSync, readFileSync, renameS
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type HeavyConfig = { max: number; minFreeMb: number };
+/** `floors`: a job name's own free-memory floor (MB), over the one its caller passes and over `minFreeMb`. */
+export type HeavyConfig = { max: number; minFreeMb: number; floors?: Record<string, number> };
 export const HEAVY_DEFAULTS: HeavyConfig = { max: 1, minFreeMb: 1536 };
 
 export const heavyConfigPath = (home: string) => join(home, ".config", "ops-kit", "heavy.json");
@@ -15,7 +16,7 @@ export const heavyStateDir = (home: string) => join(home, ".local", "state", "op
 export const heavyHistoryPath = (home: string) => join(heavyStateDir(home), "history.jsonl");
 
 /**
- * The machine's limits from `~/.config/ops-kit/heavy.json` (`{ "max": 2, "minFreeMb": 1536 }`, both optional). No file, or
+ * The machine's limits from `~/.config/ops-kit/heavy.json` (`{ "max": 2, "minFreeMb": 1536, "floors": { "typecheck": 768 } }`, all optional). No file, or
  * one that cannot be read, gives the defaults. A file that says something wrong stops with an error: falling back to the
  * defaults would quietly run another number of jobs than the one written.
  */
@@ -34,10 +35,15 @@ export function heavyConfig(home: string): HeavyConfig {
     throw new Error(`${path}: JSON として読めません（${(e as Error).message}）`);
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path}: オブジェクト（{ "max": 1, "minFreeMb": 1536 }）ではありません`);
-  const { max = HEAVY_DEFAULTS.max, minFreeMb = HEAVY_DEFAULTS.minFreeMb } = raw as Record<string, unknown>;
+  const { max = HEAVY_DEFAULTS.max, minFreeMb = HEAVY_DEFAULTS.minFreeMb, floors } = raw as Record<string, unknown>;
   if (typeof max !== "number" || !Number.isInteger(max) || max < 1) throw new Error(`${path}: max は 1 以上の整数にしてください（${JSON.stringify(max)}）`);
   if (typeof minFreeMb !== "number" || !Number.isFinite(minFreeMb) || minFreeMb < 0) throw new Error(`${path}: minFreeMb は 0 以上の数にしてください（${JSON.stringify(minFreeMb)}）`);
-  return { max, minFreeMb };
+  if (floors === undefined) return { max, minFreeMb };
+  if (!floors || typeof floors !== "object" || Array.isArray(floors)) throw new Error(`${path}: floors は名前と MB のオブジェクトにしてください（${JSON.stringify(floors)}）`);
+  for (const [k, v] of Object.entries(floors)) {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) throw new Error(`${path}: floors.${k} は 0 以上の数にしてください（${JSON.stringify(v)}）`);
+  }
+  return { max, minFreeMb, floors: floors as Record<string, number> };
 }
 
 /** Linux's MemAvailable in MB; undefined where /proc/meminfo is not there (the number of slots alone decides). */
@@ -342,7 +348,7 @@ export function readHeavyHistory(home: string): HeavyHistoryEntry[] {
   return out.slice(-HEAVY_HISTORY_KEEP);
 }
 
-export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null; memoryOnly?: boolean };
+export type HeavyOptions = { home?: string; mem?: () => number | undefined; pollMs?: number; log?: (line: string) => void; taskId?: string | null; memoryOnly?: boolean; minFreeMb?: number };
 
 /**
  * Runs `fn` holding one of the machine's slots. Waits, polling every `pollMs`, while every slot is held or the free memory
@@ -354,7 +360,7 @@ export type HeavyOptions = { home?: string; mem?: () => number | undefined; poll
  * slot: the job runs in the outer one, says so in one line and is added to the history as `<name> (入れ子)`. The holder is
  * found by its pid among the caller's ancestors, not by the environment (local-ci runs its steps under `env -i`).
  * With `memoryOnly`, it takes no slot and does not wait for one: it waits (listed as `memory`) only while the free memory
- * is below the floor, then runs beside the jobs holding the slots, and is added to the history as any other job.
+ * is below the floor (`floors[name]` of `heavy.json`, else `minFreeMb` of the options, else `minFreeMb` of `heavy.json`), then runs beside the jobs holding the slots, and is added to the history as any other job.
  */
 export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: HeavyOptions = {}): Promise<T> {
   const home = o.home ?? homedir();
@@ -362,6 +368,7 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
   const pollMs = o.pollMs ?? 2000;
   const log = o.log ?? ((line: string) => console.error(line));
   const cfg = heavyConfig(home);
+  const floorMb = cfg.floors?.[name] ?? o.minFreeMb ?? cfg.minFreeMb;
   const dir = heavyStateDir(home);
   const taskId = o.taskId !== undefined ? o.taskId : (process.env.OPS_KIT_TASK_ID || null);
   const me: Holder = { pid: process.pid, name, cwd: process.cwd(), taskId, queuedAt: new Date().toISOString(), startedAt: "", procStart: procStart(process.pid), token: crypto.randomUUID() };
@@ -392,8 +399,8 @@ export async function withHeavySlot<T>(name: string, fn: () => Promise<T>, o: He
     outer = up.size ? holders(dir).find((h) => up.has(h.pid)) : undefined;
     for (; !outer; ) {
       const free = mem();
-      if (free !== undefined && free < cfg.minFreeMb) {
-        say("memory", `空きメモリ ${free} MB < 下限 ${cfg.minFreeMb} MB`, "memory");
+      if (free !== undefined && free < floorMb) {
+        say("memory", `空きメモリ ${free} MB < 下限 ${floorMb} MB`, "memory");
       } else if (o.memoryOnly) {
         me.startedAt = new Date().toISOString();
         if (!waited) me.queuedAt = me.startedAt;

@@ -16,6 +16,8 @@ import { type BacklogWorkspace, localBacklogSource, syncsGithub, changesApart } 
 import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
 import { holder } from "../../../scripts/parallel-guard.ts";
 import { sessionOn, withOverlap } from "./backlog-overlap.ts";
+import { notResumed } from "./backlog-pick.ts";
+import { reduceStops } from "./stops.ts";
 import { type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
 import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
@@ -188,12 +190,14 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       labels: { nodes: labelsOf(i).map((name) => ({ name })) },
       subIssuesSummary: {
         total: i.subIssues.length, completed: closedSubs.length,
-        doneAt: closedSubs.map((n) => issues.get(n)!.updatedAt).sort().at(-1) ?? null,
+        doneAt: closedSubs.map((n) => issues.get(n)!.closedAt ?? issues.get(n)!.updatedAt).sort().at(-1) ?? null,
       },
       projectItems: { nodes: fields.get(i.number) ?? [] },
     };
     const item = toItem(raw, source.project.number, ws);
     if (!item) continue;
+    // as times: GitHub's `…:00Z` and a written `…:00.500Z` do not sort as text
+    item.commentedAt = commentsOf(i.number).reduce<string | null>((a, c) => (a === null || Date.parse(c.createdAt) > Date.parse(a) ? c.createdAt : a), null);
     const read = readOf.get(i.number);
     const family = familyOf(read?.externalId, i.subIssues, ids);
     item.sync = syncOf(db, ops.filter((o) => family.has(o.issue)), { lastSuccessfulSync: freshAt(repoSync?.lastSuccessfulSync ?? null, read), retryAt: repoSync?.retryAt ?? null, fetchState: read?.fetchState, importFailed: opts.importFailed, now });
@@ -212,7 +216,12 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now, sessionOn({ active: opts.active, commentsOf, unread, ended }));
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
-  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
+  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, notResumed: (i) => {
+    // a PBI whose stage Tasks are not on record (`lastTask` null) keeps its place: nothing says the queue left it
+    if (opts.active?.(i.number)) return false;
+    const s = withStageTask(db, i);
+    return s.lastTask !== null && notResumed({ ...s, activeTaskId: null });
+  }, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
   // the PBIs with a claim the app does not count as work: the guard in a Task counts the same
   const worked = sessionOn({ active: opts.active, commentsOf, unread, ended });
   const unheld = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:pbi")).map((t) => t.number).filter((n) => !worked(n) && holder(commentsOf(n).map((c, k) => ({ id: k, body: c.body }))) !== null);
@@ -220,6 +229,25 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   const apart = changesApart(source);
   const changeIssues = apart ? shownRecords(db, localBacklogSource(ws.id)).flatMap((r) => (r.objectKind === "issue" && r.remote ? [r.remote as BacklogIssueData] : [])) : issues.values();
   return { fetchedAt, items, changes: changesOf(ws.id, changeIssues, apart), turns, unheld, proceeding: proceedingOf(ws, issues, commentsOf, now, refuses) };
+}
+
+/**
+ * An item with its last stage Task (`lastTask`), the record of how its stage Tasks stopped (`stopSummary`), and its waits
+ * dropped when an 実装 started after they were written: the part of server/backlog-read.ts `withActive` that reads only the
+ * stage Tasks' rows, which `readStoredBacklog` needs before it judges the places (`notResumed`).
+ */
+export function withStageTask(db: Db, i: BacklogItem): BacklogItem {
+  const t = db.lastStageTask(i.workspaceId, i.number);
+  // an 実装 started after the waits were written makes them old: it claimed, or it ended before it could —
+  // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared
+  const impl = i.waitsAt ? db.lastStageTask(i.workspaceId, i.number, "complete") : null;
+  const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
+  return {
+    ...i,
+    lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt, started: t.runnerSessionId !== null } : null,
+    stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number)), { newestTaskId: t?.id ?? null }),
+    ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
+  };
 }
 
 /**

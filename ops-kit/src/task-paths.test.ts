@@ -73,6 +73,57 @@ test("task-paths pathsIn: a backticked path counts even when no branch has it ye
   expect(pathsIn("触る: `new-config.json:10-20`、`tools/gen.ts:3`、`gh stack add`、`readOthers`、`Bun.serve`、`.env`、`turn/completed`、`origin/main`、`@scope/protocol`", top)).toEqual(["tools/gen.ts", "new-config.json"]);
 });
 
+describe("task-paths pathsIn: a place that only names a file as a reference", () => {
+  test("a path in the done criteria is not touched", () => {
+    const body = [
+      "## やること", "1. `packages/core/src/server/merge-consent.ts`: 足す",
+      "## 手順", "1. `apps/web/src/a.ts`: 直す",
+      "## 検証", "- 既存の `packages/core/src/asks-answer.test.ts`・`packages/core/src/asks.test.ts`・`packages/core/src/asks.api.test.ts` が pass",
+      "## 完了条件 (DoD)", "- [ ] `docs/design/x.md` を直した",
+      "### 完了条件 (DoD)", "- [ ] `aws/template.yaml` を直した",
+    ].join("\n");
+    expect(pathsIn(body, top)).toEqual(["packages/core/src/server/merge-consent.ts", "apps/web/src/a.ts"]);
+    expect(scopeIn(body, top)).toContain("packages/core/src/asks-answer.test.ts");
+  });
+
+  test("a skipped section ends at the next heading, not at a deeper heading, an issue number or a code comment", () => {
+    const body = [
+      "## 検証", "#### 昇格の後", "- `packages/core/src/asks.test.ts` が pass",
+      "#5814 の行", "```sh", "# run", "bun test packages/core/src/flow.test.ts", "```", "- `docs/design/x.md` を読む",
+      "## 手順", "1. `apps/web/src/a.ts`: 直す",
+    ].join("\n");
+    expect(pathsIn(body, top)).toEqual(["apps/web/src/a.ts"]);
+    const step = ["## 手順", "1. `apps/web/src/b.ts`: 直す"];
+    expect(pathsIn(["## 検証", "```bun test packages/core/src/a.test.ts```", ...step].join("\n"), top)).toEqual(["apps/web/src/b.ts"]);
+    expect(pathsIn(["## 検証", "```", "~~~", "```", ...step].join("\n"), top)).toEqual(["apps/web/src/b.ts"]);
+  });
+
+  test("a path named as a model in the design check is a reference", () => {
+    const body = [
+      "## やること",
+      "設計チェック: 週報が API を読む口は Task に渡る `BACKLOG_URL` の origin と `BACKLOG_TOKEN_FILE`（`aws/promote.ts` と同じ）にし、新しい口を作らない。`docs/design/evals.md` に条件を足すだけ",
+      "## 手順",
+      "1. `apps/web/a.ts`: 直す（`packages/core/b.ts` を参照）。`docs/c.md`（`aws/d.ts` のとおり）も読む。`docs/e.md`(`aws/f.ts` と同じ)",
+    ].join("\n");
+    expect(pathsIn(body, top)).toEqual(["apps/web/a.ts", "docs/c.md", "docs/e.md"]);
+    expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["aws/promote.ts", "docs/design/evals.md", "packages/core/b.ts", "aws/d.ts", "aws/f.ts"]));
+  });
+
+  test("a path in the old-assumption list is not touched, and stays in the merge gate's scope", () => {
+    const body = [
+      "古い前提を持つ既存の箇所（`ops-kit old-paths list HEAD \"c.createdAt\"` の項目。PR で 1 行ずつ確かめる）:",
+      "- `packages/core/src/backlog-waits.ts:34`（`waitsOf` の `at`）、`packages/core/src/flow.ts:53`",
+      "- `apps/web/src/changes.ts:26`、`apps/web/src/components/Backlog.tsx:430`（画面に出る時刻）",
+      "",
+      "## 手順",
+      "1. `packages/core/src/flow.ts`: 直す",
+      "2. `docs/design/backlog.md` の節に書く",
+    ].join("\n");
+    expect(pathsIn(body, top)).toEqual(["packages/core/src/flow.ts", "docs/design/backlog.md"]);
+    expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["packages/core/src/backlog-waits.ts", "apps/web/src/changes.ts", "apps/web/src/components/Backlog.tsx", "packages/core/src/flow.ts"]));
+  });
+});
+
 describe("addedPaths", () => {
   test("addedPaths agrees with the difference of scopeIn", () => {
     const kit = [...top, { name: "ops-kit", dir: true }];

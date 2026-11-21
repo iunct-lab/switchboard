@@ -1,6 +1,6 @@
 /** The stored backlog: the records read from the service, and the edits waiting to be sent. */
 
-import type { BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource } from "@switchboard/protocol";
+import type { BacklogCommentData, BacklogObjectKind, BacklogRecord, BacklogRepositoryKey, BacklogRepositorySync, BacklogSource } from "@switchboard/protocol";
 import { backlogFieldValue, conflictRevision, mergeBacklogField, sameBacklogValue } from "../backlog-merge.ts";
 import { WorkspaceQueries } from "./workspaces.ts";
 
@@ -134,12 +134,13 @@ export class BacklogQueries extends WorkspaceQueries {
        ON CONFLICT (service, host, repository, object_kind, external_id) DO UPDATE SET fetch_state = excluded.fetch_state`,
     );
     this.sqlite.transaction(() => {
-      for (const r of snap.records) {
+      const stored = snap.records.map((r) => (r.fetchState === "fetched" && r.remote && r.objectKind === "comment" ? { ...r, remote: this.writtenComment(key, r.externalId, r.remote as BacklogCommentData) } : r));
+      for (const r of stored) {
         if (r.fetchState !== "fetched") marked.run(...key, r.objectKind, r.externalId, r.fetchState);
         else if (!r.remote) throw new Error(`a fetched ${r.objectKind} ${r.externalId} has no value`);
         else fetched.run(...key, r.objectKind, r.externalId, JSON.stringify(r.remote), JSON.stringify(r.remote), snap.syncedAt);
       }
-      for (const r of snap.records) if (r.fetchState === "fetched") this.mergeBacklogRecord(repo, r.objectKind, r.externalId, r.remote, snap.syncedAt);
+      for (const r of stored) if (r.fetchState === "fetched") this.mergeBacklogRecord(repo, r.objectKind, r.externalId, r.remote, snap.syncedAt);
       // an edit waiting to be sent shows on top of what was read: the fields it does not change follow the service
       for (const r of this.sqlite.query("SELECT object_kind, external_id FROM backlog_records r WHERE service = ?1 AND host = ?2 AND repository = ?3 AND remote IS NOT NULL AND (local IS NOT NULL OR EXISTS (SELECT 1 FROM backlog_operations o WHERE o.service = ?1 AND o.host = ?2 AND o.repository = ?3 AND o.target_kind = r.object_kind AND o.target = r.external_id AND o.kind = 'set' AND o.status != 'done'))").all(...key) as Array<{ object_kind: BacklogObjectKind; external_id: string }>)
         this.rebaseBacklogRecord(repo, r.object_kind, r.external_id);
@@ -404,13 +405,30 @@ export class BacklogQueries extends WorkspaceQueries {
           this.sqlite.query("UPDATE backlog_operations SET target = ? WHERE service = ? AND host = ? AND repository = ? AND target_kind = ? AND target = ?").run(to, ...key, op.targetKind, op.target);
           if (op.targetKind === "issue") this.sqlite.query("UPDATE backlog_operations SET issue = ? WHERE service = ? AND host = ? AND repository = ? AND issue = ?").run(to, ...key, op.target);
         }
+        const remote = op.targetKind === "comment" ? this.writtenComment(key, to, result.record.remote as BacklogCommentData) : result.record.remote;
         this.sqlite
           .query("UPDATE backlog_records SET remote = ?1, base = ?1, fetched_at = ?2, fetch_state = 'fetched' WHERE service = ?3 AND host = ?4 AND repository = ?5 AND object_kind = ?6 AND external_id = ?7")
-          .run(JSON.stringify(result.record.remote), now, ...key, op.targetKind, to);
+          .run(JSON.stringify(remote), now, ...key, op.targetKind, to);
         this.rebaseBacklogRecord(op, op.targetKind, to);
       }
       if (result.follow?.length) this.applyBacklogEdit(op, { records: [], operations: result.follow }, now);
     })();
+  }
+
+  /**
+   * A comment the app wrote keeps the time it was written (the time its `comment` operation was made) as its `createdAt`,
+   * whichever way the service's value reaches the record: the service's time is when it received the comment, a send
+   * delay later, and that would order it after what was written after it. `externalId` = the id the comment is stored
+   * under (before its send: the id the operation names; after: the service's, which the operation follows to). A comment
+   * no operation names was written elsewhere and keeps the service's time, and so does one whose operation is dated a second or more after it.
+   */
+  private writtenComment(key: readonly [string, string, string], externalId: string, remote: BacklogCommentData): BacklogCommentData {
+    const op = this.sqlite
+      .query("SELECT created_at FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND target_kind = 'comment' AND target = ? AND kind = 'comment' ORDER BY seq LIMIT 1")
+      .get(...key, externalId) as { created_at: number } | null;
+    // not past the service's time, which GitHub gives to the second (a comment sent at once is dated up to a second
+    // before it was written): an operation made on a work machine whose clock runs ahead is dated by that clock
+    return op && op.created_at < Date.parse(remote.createdAt) + 1000 ? { ...remote, createdAt: new Date(op.created_at).toISOString() } : remote;
   }
 
   /**

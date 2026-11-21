@@ -8,12 +8,13 @@ export { USED_ANSWERS_KEPT, USED_ANSWERS_KEY };
 /** Grants and scope stops of Tasks. One link of the chain of classes that ends in `Db` (db.ts): the methods are reached as `db.<method>()`. */
 export class GrantQueries extends AskAnswerQueries {
   /**
-   * Records one grant (the table's comment says what each field is); a repeat moves its time and its head. `head`: the
+   * Records one grant (the table's comment says what each field is); a repeat moves its time and its head, unless the
+   * record already holds a later time (a read of the person's words that ends after a later sentence keeps that sentence's). `head`: the
    * head the PR had when a merge / answer grant was given, '' when it could not be read (the grant then answers for no head).
    */
   recordMergeGrant(g: { taskId: string; repo: string; kind: string; target: number; by: string; source?: string; head?: string }, at = Date.now()): void {
     this.sqlite
-      .query("INSERT INTO task_grants (task_id, repo, kind, target, by, source, at, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, repo, kind, target, by, source) DO UPDATE SET at = excluded.at, head = excluded.head")
+      .query("INSERT INTO task_grants (task_id, repo, kind, target, by, source, at, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, repo, kind, target, by, source) DO UPDATE SET at = excluded.at, head = excluded.head WHERE excluded.at >= task_grants.at")
       .run(g.taskId, g.repo.toLowerCase(), g.kind, g.target, g.by, g.source ?? "", at, g.head ?? "");
   }
 

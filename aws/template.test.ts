@@ -353,17 +353,19 @@ describe("aws/template.yaml", () => {
 
   /** Read on the host by a program outside this repository (DAK's agent/ssm_exec.py), not by a script here. */
   const EXTERNAL_PARAMS = ["anthropic-api-key"];
+  /** Read by the daemon itself (packages/core/src/s3.ts), not by a host script; it is here so that UserData does not change. */
+  const DAEMON_PARAMS = ["uplink-bucket"];
 
   test("the names the host's scripts read + the one DAK reads = the instance role's SSM resources", async () => {
     const read = await scriptParams();
     for (const p of EXTERNAL_PARAMS) expect(read.has(p)).toBe(false); // it is DAK's, not a script's: the list below is the only place it is named
-    expect([...read, ...EXTERNAL_PARAMS].sort()).toEqual([...hostParams()].sort());
+    expect([...read, ...EXTERNAL_PARAMS, ...DAEMON_PARAMS].sort()).toEqual([...hostParams()].sort());
   });
 
   test("the host permits only the named Anthropic parameter in addition to existing script parameters", async () => {
     const scripts = await scriptParams();
     const extra = [...hostParams()].filter((p) => !scripts.has(p));
-    expect(extra).toEqual(["anthropic-api-key"]);
+    expect(extra).toEqual(["anthropic-api-key", ...DAEMON_PARAMS]);
     for (const p of ["*", "register-code", "session-signing-key"]) expect(hostParams().has(p)).toBe(false);
     // hostParams() reads exact names only: look at the statement's text for a pattern (anthropic-*, sw*) that it would skip
     expect(hostSsmStatement()).not.toMatch(/parameter\/switchboard\/[^'\n]*[*?]/);
@@ -491,7 +493,7 @@ describe("aws/template.yaml memory alarms", () => {
     expect(deploy).not.toMatch(/cloudwatch:\*|sns:\*|PutMetricData/);
     // nothing else in the boundary changed: its statements are the ones before plus OffloadImage and EcrAuthToken, OffloadCi, Countries, AgentMetrics and HostLogs, CostRead and BudgetRead, BedrockMantle
     const sids = resource("Boundary").split("- Sid: ").slice(1).map((x) => x.split("\n")[0]);
-    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "OffloadImage", "OffloadCi", "EcrAuthToken", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
+    expect(sids).toEqual(["Parameters", "RegisterCode", "Buckets", "UplinkBucket", "Wake", "ThisInstance", "RootReplacement", "Describe", "Stack", "Bedrock", "BedrockMantle", "CostRead", "BudgetRead", "OwnRoles", "Countries", "AgentMetrics", "OwnLogs", "HostLogs", "Offload", "OffloadImage", "OffloadCi", "EcrAuthToken", "HostAssumeRoles", "DakFunction", "ManagedKeysThroughServices"]);
   });
 });
 
@@ -835,5 +837,126 @@ describe("aws/template.yaml offload CI", () => {
     expect(ci).toContain("log-group:/aws/codebuild/${AWS::StackName}-offload-ci:*'");
     expect(ci).not.toMatch(/!GetAtt|codebuild:\*|logs:\*/);
     expect(resource("DeployRole")).toContain("parameter/switchboard/offload-ci-project'");
+  });
+});
+
+/** The statements of a policy text, one per `- Effect:` / `- Sid:` item. */
+const statements = (block: string) =>
+  block
+    .split(/\n\s+- (?=Effect:|Sid:)/)
+    .slice(1)
+    .map((st) => st.replace(/\n\s*#[^\n]*/g, "").trim());
+/** The statements of `block` that name `needle`. */
+const touching = (block: string, needle: string) => statements(block).filter((st) => st.includes(needle));
+
+describe("aws/template.yaml uplink bucket", () => {
+  const COND_NEW = "Condition: { StringEquals: { 's3:if-none-match': '*' } }";
+  const COND_MATCH = "Condition: { 'Null': { 's3:if-match': 'false' } }";
+
+  test("Uplink is its own bucket, encrypted, private and versioned, kept on delete; the records expire after 90 days", () => {
+    const b = resource("Uplink");
+    expect(b).toContain("DeletionPolicy: Retain");
+    expect(b).toContain("UpdateReplacePolicy: Retain");
+    expect(b).toContain("VersioningConfiguration: { Status: Enabled }");
+    expect(b).toContain("SSEAlgorithm: AES256");
+    expect(b).toContain("BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true");
+    expect(b).toContain("{ Id: uplink, Status: Enabled, Prefix: uplink/, ExpirationInDays: 90 }");
+    expect(b).toContain("{ Id: backlog, Status: Enabled, Prefix: backlog/, ExpirationInDays: 90 }");
+    expect(resource("Data")).not.toContain("uplink");
+  });
+
+  test("the work machine's role exists only with both a machine name and principals, and is trusted by those principals only", () => {
+    expect(text).toContain("  UplinkMachineName:\n    Type: String\n    Default: ''");
+    expect(text).toContain("  UplinkWriterPrincipalArns:\n    Type: CommaDelimitedList\n    Default: ''");
+    expect(text).toMatch(/HasUplinkWriter: !And\n +- !Not \[!Equals \[!Ref UplinkMachineName, ''\]\]\n +- !Not \[!Equals \[!Join \['', !Ref UplinkWriterPrincipalArns\], ''\]\]/);
+    const role = resource("UplinkWriterRole");
+    expect(role).toContain("Condition: HasUplinkWriter");
+    expect(role).toContain("PermissionsBoundary: !Ref Boundary");
+    expect(role).toContain("Principal: { AWS: !Ref UplinkWriterPrincipalArns }");
+    // no ARN of the owner in the template
+    expect(text).not.toMatch(/arn:aws:iam::[0-9]{12}:/);
+  });
+
+  test("the work machine's role: new keys only under its own uplink/ and backlog/, reads and writes of leases, no delete, no other machine's prefix, no data bucket", () => {
+    const role = resource("UplinkWriterRole");
+    expect(role).not.toMatch(/Delete|PutObjectVersionTagging|s3:\*|Action: '\*'|Data\.Arn|\$\{Data/);
+    const puts = statements(role).filter((st) => st.includes("s3:PutObject"));
+    const put = (key: string) => puts.filter((st) => st.includes(key));
+    // every put, by prefix: what is written, and under which condition
+    expect(puts.flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)\*?/g)].map((m) => m[1])).sort()).toEqual(["backlog/${UplinkMachineName}/", "lease-proof/${UplinkMachineName}/", "lease/", "lease/", "uplink/${UplinkMachineName}/"]);
+    expect(put("uplink/${UplinkMachineName}/*")[0]).toContain(COND_NEW);
+    expect(put("backlog/${UplinkMachineName}/*")[0]).toContain(COND_NEW);
+    expect(put("backlog/${UplinkMachineName}/*")[0]).toBe(put("uplink/${UplinkMachineName}/*")[0]); // the same statement: one condition for both
+    expect(put("lease/*").map((st) => st.includes(COND_NEW) || st.includes(COND_MATCH)).sort()).toEqual([true, true]);
+    expect(put("lease-proof/${UplinkMachineName}/*")[0]).not.toContain("Condition"); // a proof is overwritten when a lease is given back
+    // reads: its own backlog edits and refusals, the leases and the proofs of everyone; the list only by prefix
+    const reads = touching(role, "s3:GetObject").join("\n");
+    for (const k of ["backlog/${UplinkMachineName}/*", "backlog-refused/${UplinkMachineName}/*", "lease/*", "lease-proof/*"]) expect(reads).toContain(k);
+    expect(reads).not.toMatch(/uplink\/|backlog\/\*|backlog-refused\/\*/);
+    const list = touching(role, "s3:ListBucket")[0]!;
+    expect(list).toContain("'s3:prefix': ['lease/*', !Sub 'backlog-refused/${UplinkMachineName}/*']");
+    // nothing names another machine, and a put never reaches backlog-refused/ (only the instance writes it)
+    expect(role).not.toMatch(/PrincipalTag|instance\//);
+    expect(puts.join("")).not.toContain("backlog-refused");
+  });
+
+  test("the bucket policy refuses a put over an existing key, a lease put with neither condition, and any delete by the instance or the work machine", () => {
+    const pol = resource("UplinkPolicy");
+    const once = statements(pol).find((st) => st.includes("Sid: WriteOnce"))!;
+    expect(once).toContain("Effect: Deny");
+    for (const k of ["uplink/*", "backlog/*", "backlog-refused/*"]) expect(once).toContain(`\${Uplink.Arn}/${k}'`);
+    expect(once).not.toContain("lease");
+    expect(once).toContain("Condition: { StringNotEquals: { 's3:if-none-match': '*' } }");
+    const lease = statements(pol).find((st) => st.includes("Sid: LeaseConditional"))!;
+    expect(lease).toContain("Effect: Deny");
+    expect(lease).toContain("Resource: !Sub '${Uplink.Arn}/lease/*'");
+    expect(lease).toContain("Condition: { 'Null': { 's3:if-none-match': 'true', 's3:if-match': 'true' } }"); // both absent
+    const del = statements(pol).find((st) => st.includes("Sid: NoDelete"))!;
+    expect(del).toContain("Effect: Deny");
+    expect(del).toContain("[s3:DeleteObject, s3:DeleteObjectVersion]");
+    expect(del).toContain("!GetAtt InstanceRole.Arn");
+    expect(del).toContain("!If [HasUplinkWriter, !GetAtt UplinkWriterRole.Arn, !Ref AWS::NoValue]");
+    expect(pol.match(/Effect: Allow/g)).toBeNull();
+  });
+
+  test("the instance role reads the uplink prefixes, writes leases only conditionally, its own proofs, and refusals once; no delete, nothing else", () => {
+    const sts = statements(resource("InstanceRole")).filter((st) => st.includes("Uplink.Arn"));
+    const withKey = (k: string, action: string) => sts.filter((st) => st.includes(`\${Uplink.Arn}/${k}`) && st.includes(action));
+    expect(sts.join("")).not.toMatch(/Delete|Effect: Deny|s3:\*/);
+    const get = withKey("uplink/*", "s3:GetObject")[0]!;
+    for (const k of ["uplink/*", "backlog/*", "lease/*", "lease-proof/*"]) expect(get).toContain(`\${Uplink.Arn}/${k}'`);
+    expect(sts.find((st) => st.includes("s3:ListBucket"))).toContain("'s3:prefix': ['uplink/*', 'backlog/*', 'lease/*']");
+    expect(withKey("lease/*", "s3:PutObject").map((st) => st.includes(COND_NEW) || st.includes(COND_MATCH)).sort()).toEqual([true, true]);
+    expect(withKey("lease-proof/${InstanceMachineName}/*", "s3:PutObject")[0]).not.toContain("Condition");
+    expect(withKey("backlog-refused/*", "s3:PutObject")[0]).toContain(COND_NEW);
+    // every put it has on the bucket, by prefix: it never writes uplink/ or backlog/ (a work machine's)
+    expect(sts.filter((st) => st.includes("s3:PutObject")).flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)/g)].map((m) => m[1])).sort()).toEqual(["backlog-refused/", "lease-proof/${InstanceMachineName}/", "lease/", "lease/"]);
+  });
+
+  test("the host's proof prefix is its machine name, and the work machine may not take that name", () => {
+    expect(text).toMatch(/\n  InstanceMachineName:\n    Type: String\n    Default: instance\n/);
+    const rules = text.slice(text.indexOf("\nRules:\n"), text.indexOf("\nConditions:\n"));
+    expect(rules).toContain("Assert: !Not [!Equals [!Ref UplinkMachineName, !Ref InstanceMachineName]]");
+  });
+
+  test("the boundary allows the same range without delete, the deploy role may make the bucket, and the name is in Parameter Store", () => {
+    const b = resource("Boundary");
+    const st = statements(b).find((x) => x.includes("Sid: UplinkBucket"))!;
+    expect(st).toContain("Action: [s3:GetObject, s3:PutObject, s3:ListBucket]");
+    expect(st).not.toContain("Delete");
+    expect(b).not.toMatch(/Uplink\.Arn[^\n]*\n[^\n]*Delete/);
+    expect(resource("DeployRole")).toContain("!GetAtt Uplink.Arn, !Sub '${Uplink.Arn}/*'");
+    expect(resource("DeployRole")).toContain("parameter/switchboard/uplink-bucket'");
+    expect(resource("UplinkBucketParam")).toContain("Name: /switchboard/uplink-bucket");
+    expect(resource("UplinkBucketParam")).toContain("Value: !Ref Uplink");
+  });
+
+  test("UserData and the instance are untouched by this: the bucket's name is read from Parameter Store, and the instance is not replaced", () => {
+    const lt = resource("LaunchTemplate");
+    expect(lt).not.toMatch(/uplink|Uplink/);
+    expect(resource("Instance")).not.toMatch(/uplink|Uplink/);
+    // the line that hands the host its values is the one it was: a new name there would replace the instance
+    expect(lt).toContain("SB_DATA_BUCKET='${Data}' SB_SCHEDULER_ROLE_ARN='${SchedulerRole.Arn}' bash /opt/switchboard-host/aws/host/bootstrap.sh");
+    expect(lt).toContain("SB_HOST_USER='${HostUser}' SB_HOST_HOME='${HostHome}' SB_REPOS_DIR='${ReposDir}' SB_GITHUB_REPO='${GitHubRepo}' SB_DATA_BUCKET='${Data}'");
   });
 });

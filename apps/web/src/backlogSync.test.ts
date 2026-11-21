@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, issueArtifactsShown, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -236,6 +236,15 @@ test("githubSyncText says off, moving and on", () => {
   expect(githubSyncText(row({ enabling: { total: 3, done: 3 }, sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "body", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "GitHub に移しています", parts: ["3 / 3", "競合 1 件"] });
   expect(githubSyncText(row({ enabling: { total: 3, done: 2 }, sync: info({ state: "error", reason: "failed" }) }), fmt).parts).toEqual(["2 / 3", "GitHub が編集を受け付けませんでした"]);
   expect(githubSyncText(row({ sync: info({ state: "conflict", pendingCount: 1, conflicts: [{ operation: "o", field: "title", reason: null }] as never }) }), fmt)).toEqual({ state: "conflict", label: "競合", parts: ["最終成功: t1000", "未送信 1 件", "競合 1 件"] });
+});
+
+test("issueArtifactsShown hides the box where the sync has no record of GitHub yet", () => {
+  const row = (over: object) => ({ backlog: "github" as const, enabling: null, repository: "o/r", ...over });
+  expect(issueArtifactsShown(row({}), false)).toBe(true);
+  expect(issueArtifactsShown(row({ repository: null }), false)).toBe(false);
+  expect(issueArtifactsShown(row({ repository: null }), true)).toBe(true); // already on: kept to turn it off
+  expect(issueArtifactsShown(row({ backlog: "switchboard" }), false)).toBe(false);
+  expect(issueArtifactsShown(row({ enabling: { total: 1, done: 0 } }), false)).toBe(false);
 });
 
 describe("in English", () => {

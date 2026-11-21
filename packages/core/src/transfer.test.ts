@@ -200,6 +200,27 @@ describe("export streams", () => {
       writer.kill();
     }
   });
+  test("export leaves out a session log a runner deletes after the walk listed it, and the package still imports", async () => {
+    const { cfg } = fakeHistory(join(tmp, "rm"));
+    const dir = join(cfg.claudeProjectsDir, "-Users-dev-repo-suggest");
+    mkdirSync(dir, { recursive: true });
+    const gone = join(dir, "gone.jsonl");
+    writeFileSync(gone, '{"type":"user"}\n');
+    const out = join(tmp, "rm.tar.zst");
+    // The runner removes its own log between the walk and the export's turn to read it.
+    const m = await exportHistory(cfg, out, { beforePack: (p) => p === gone && unlinkSync(gone) });
+    expect(Object.keys(m.files)).not.toContain("claude/projects/-Users-dev-repo-suggest/gone.jsonl");
+    expect(m.counts.claudeSessions).toBe(1);
+    const back = await importHistory(emptyHome(join(tmp, "rm-in")), out); // checks every file and count in the manifest
+    expect(back.counts.claudeSessions).toBe(1);
+  });
+  test("export still fails on a link whose target is missing, instead of leaving it out", async () => {
+    const { cfg } = fakeHistory(join(tmp, "dl"));
+    symlinkSync(join(cfg.knowledgeDir, "missing.md"), join(cfg.knowledgeDir, "dangling.md"));
+    const out = join(tmp, "dl.tar.zst");
+    await expect(exportHistory(cfg, out)).rejects.toThrow("is a link to nothing");
+    expect(existsSync(out)).toBe(false);
+  });
 });
 
 describe("export stage", () => {

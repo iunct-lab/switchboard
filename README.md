@@ -154,7 +154,7 @@ bun run dev               # core on :47831, web on :5173; open http://localhost:
 bun test                  # recorded-replay tests for adapters + daemon lifecycle tests
 bun run typecheck
 bun run licenses:check    # every dependency's license against scripts/licenses.allow.json
-bun run codex:types       # typecheck runs it: generate the Codex protocol types from the installed Codex
+bun run codex:types       # typecheck runs it: generate the Codex protocol types from the pinned Codex (`CODEX_VERSION` in `container/Dockerfile`)
 bun run core              # daemon only, with --watch
 bun run web               # UI only
 ```

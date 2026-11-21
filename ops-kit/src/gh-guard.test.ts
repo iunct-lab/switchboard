@@ -617,7 +617,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
   // a fake app that answers the grant of PR 12 only, and records what it was asked
   // the head the person saw when they gave the grant of PR 12, and the head the PR has now (the fake gh's answer to `pr view`)
   const GRANTED_HEAD = "a".repeat(40);
-  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false, config: object = {}, headNow: string | null = GRANTED_HEAD) {
+  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false, config: object = {}, headNow: string | null = GRANTED_HEAD, headLater?: string) {
     const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.merge."));
     const asked: string[] = [];
     const app = appDown ? null : Bun.serve({ port: 0, fetch: (req) => { const u = new URL(req.url); asked.push(u.pathname + u.search); return Response.json({ granted: u.searchParams.get("target") === "12" && u.searchParams.get("kind") === "merge" && u.searchParams.get("taskId") === "t1" && u.searchParams.get("repo") === "acme/app" && u.searchParams.get("head") === GRANTED_HEAD }); } });
@@ -626,7 +626,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
       mkdirSync(fake);
       const calls = join(tree, "calls.jsonl");
       // the read of the PR's head is answered and kept apart: `ran` is whether anything else reached gh
-      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { ${headNow === null ? "process.exit(1);" : `console.log(${JSON.stringify(headNow)}); process.exit(0);`} }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
+      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { ${headNow === null ? "process.exit(1);" : headLater === undefined ? `console.log(${JSON.stringify(headNow)}); process.exit(0);` : `const f = ${JSON.stringify(join(tree, "reads"))}; const fs = require("node:fs"); const n = fs.existsSync(f) ? 1 : 0; fs.writeFileSync(f, "x"); console.log(n ? ${JSON.stringify(headLater)} : ${JSON.stringify(headNow)}); process.exit(0);`} }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
       chmodSync(join(fake, "gh"), 0o755);
       writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? config : { ...config, mergeGate }));
       const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -669,6 +669,20 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     expect(ok.calls).toEqual([["pr", "merge", "--match-head-commit", GRANTED_HEAD, "12", "--rebase"]]);
     const no = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "14"]);
     expect([no.code, no.ran]).toEqual([1, false]);
+  });
+
+  test("a merge that cannot carry the head reads it again after the check: a commit pushed while the check waited is not merged", async () => {
+    const moved = "b".repeat(40);
+    for (const argv of [["stack", "merge", "12"], ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge"]]) {
+      const r = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv, false, {}, GRANTED_HEAD, moved);
+      expect([argv, r.code, r.ran, r.err]).toEqual([argv, 1, false, expect.stringContaining(`head が確かめた ${GRANTED_HEAD.slice(0, 7)} から動きました`)]);
+      // the head still the same: it goes through
+      const same = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv, false, {}, GRANTED_HEAD, GRANTED_HEAD);
+      expect([argv, same.code, same.ran]).toEqual([argv, 0, true]);
+    }
+    // `gh pr merge` is held to the head by --match-head-commit and is not read twice
+    const pr = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12"], false, {}, GRANTED_HEAD, moved);
+    expect([pr.code, pr.calls]).toEqual([0, [["pr", "merge", "--match-head-commit", GRANTED_HEAD, "12"]]]);
   });
 
   test("the grant holds for the head the PR had when it was given: a commit pushed after it asks again", async () => {

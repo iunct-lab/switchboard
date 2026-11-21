@@ -61,7 +61,7 @@ if (answer) {
   const granted = answer.pr === null || repo === null ? false : await answerGranted(process.env, repo, answer.pr, texts.flatMap(mergeAnswerYesHeads));
   if (granted !== true) {
     console.error(`gh-guard: アプリの Task の中では、利用者の許可文の記録なしに [merge-answer] yes を投稿できません（${answer.pr === null ? "既存のコメントの編集と、PR の番号が読めない書き方は、許可文があっても通りません。PR の番号を付けた新しいコメントで投稿します" : repo === null ? NO_GRANT_REPO : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `${repo} の PR #${answer.pr} の head ${granted === false ? "" : granted.head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`}）`);
-    if (answer.pr !== null) console.error("利用者が Task の会話に「PR #<番号> に [merge-answer] yes を投稿してよい」と 1 行書いたあとに投稿します（許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は文の頭に「<owner/name> の 」を付ける）");
+    if (answer.pr !== null) console.error("利用者が Task の会話で PR #<番号> への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #<番号> に [merge-answer] yes を投稿してよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）");
     process.exit(1);
   }
 }
@@ -112,11 +112,19 @@ if (merge && !(merge.pr !== null && process.env.OPS_MERGE_GATE_PR === String(mer
     head = p.exitCode === 0 && /^[0-9a-f]{40}$/.test(p.stdout.toString().trim()) ? p.stdout.toString().trim() : null;
     if (head !== null && held.at !== null) pin = { at: held.at, head };
   }
-  const granted = repo === null || head === null ? false : await mergeGranted(process.env, repo, "merge", merge.pr!, fetch, head);
+  let granted = repo === null || head === null ? false : await mergeGranted(process.env, repo, "merge", merge.pr!, fetch, head);
+  // a merge that names no head and cannot carry one (`gh stack merge`, `gh api`): the check may have waited for the
+  // person's words to be read, so the head is read again, and a commit pushed meanwhile is not merged on the old grant
+  let moved: false | "moved" | "unread" = false;
+  if (granted && held.head === null && pin === undefined) {
+    const p = Bun.spawnSync([real, "pr", "view", String(merge.pr), "-R", repo!, "--json", "headRefOid", "-q", ".headRefOid"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    moved = p.exitCode !== 0 ? "unread" : p.stdout.toString().trim() !== head ? "moved" : false;
+    if (moved) granted = false;
+  }
   if (!granted) {
-    const why = merge.pr === null ? "PR の番号が読めない書き方は通りません" : !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${merge.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `${repo} の PR #${merge.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
+    const why = merge.pr === null ? "PR の番号が読めない書き方は通りません" : !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${merge.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : moved === "unread" ? `${repo} の PR #${merge.pr} の head を確かめた後に読み直せませんでした` : moved ? `${repo} の PR #${merge.pr} の head が確かめた ${head.slice(0, 7)} から動きました。${NEW_HEAD}` : `${repo} の PR #${merge.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
-    console.error(`判定の外でマージするには、利用者が Task の会話に「PR #<番号> を判定の外でマージしてよい」と 1 行で書く（許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は文の頭に「<owner/name> の 」を付ける）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack）`);
+    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack）`);
     process.exit(1);
   }
 }

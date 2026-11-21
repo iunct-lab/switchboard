@@ -2,6 +2,7 @@ import { otherMachineOf } from "../machine.ts";
 import { githubRepoOfRemote } from "../claude-cloud.ts";
 import { capSnapshot, collectTaskDiff, mergeSnapshot, WRITE_TOOLS } from "../taskdiff.ts";
 import { API, OWNER, parseMergeGrants } from "../merge-grants.ts";
+import { noteConsent, ownReposOf } from "./merge-consent.ts";
 import { runGh } from "../backlog-gh.ts";
 import { branchTip } from "../backlog-local.ts";
 import { readStoredIssue } from "../backlog-stored.ts";
@@ -112,26 +113,28 @@ export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Re
  * sender was named (`grantSource` decides it for a request) — "screen" (a request that looked like the web UI's) is
  * recorded as the person's, "api" (a bare call, and the default: a caller that does not say is not the person) is not. Only a record marked the person's answers a check. None of this proves who
  * typed the text: see merge-grants.ts. `source`: the screen answer the text is, which gives its grants once.
- * Resolves once every grant is recorded with its head: a caller that sends the text to the task afterwards awaits it,
- * so the task does not check before the record is whole.
+ * `taskWrote`: the text is a sentence a Task wrote (the grant of its stop) that the person only pressed.
+ * A fixed sentence resolves once every grant is recorded with its head: a caller that sends the text to the task
+ * afterwards awaits it, so the task does not check before the record is whole. A text with none resolves at once; the
+ * person's own words are then read in the background (`noteConsent`), and only the check in front of `gh` waits for
+ * that read. A screen answer with a `source` and a sentence the Task wrote are not read: a read that ends after another
+ * start, or that finds nothing, would not spend the answer once, and a Task's own words are no grant.
  */
-export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api" } = {}): Promise<void> => {
+export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts" | "grantHeadOf" | "adapterMap" | "settings" | "runnerChoice" | "suggestDir" | "judgeStop" | "tasks" | "pendingConsent" | "pricingTable" | "loginKindOf">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean } = {}): Promise<void> => {
   // (every caller passes what `grantSource` said of its request; the start of a stage passes "screen" for an answer that route marked)
   const grants = parseMergeGrants(text);
-  if (!grants.length) return;
   const task = sc.db.getTask(taskId);
+  const by = from.sender ? `task:${from.sender}` : (from.via ?? "api") === "screen" ? OWNER : API;
   // a Task of another machine gets no grant here: this instance neither answers for it nor merges for it
   if (otherMachineOf(task)) return;
-  // the task's own: the name its workspace's backlog goes by (what the kit's backlog commands and the merge gate ask with;
-  // a backlog kept here only has a name of its own), and — where that is not a GitHub repository — the directory's origin
+  if (!grants.length) {
+    // no fixed sentence: the person's own words are read for one, without the caller waiting (the check in front of `gh` does)
+    if (by === OWNER && task && !from.source && !from.taskWrote) void noteConsent(sc, task, text);
+    return;
+  }
+  // the task's own repositories: the ones its workspace's backlog and its directory's origin name
   let own: string[] | undefined;
-  const ownRepos = (): string[] => {
-    if (own || !task) return own ?? [];
-    const source = task.workspaceId ? sc.db.getWorkspaceBacklogSource(task.workspaceId) : null;
-    const origin = source && source.service !== "switchboard" ? null : sc.originRepoOf(task.cwd);
-    return (own = [...new Set([source?.repository, origin].flatMap((r) => (r ? [r.toLowerCase()] : [])))]);
-  };
-  const by = from.sender ? `task:${from.sender}` : (from.via ?? "api") === "screen" ? OWNER : API;
+  const ownRepos = (): string[] => (own ??= task ? ownReposOf(sc, task) : []);
   const at = Date.now();
   const rows = grants.flatMap((g) => (g.repo ? [g.repo] : ownRepos()).map((repo) => ({ taskId, repo, kind: g.kind, target: g.target, by, source: from.source })));
   // every row is there before anything is waited for (a source is spent from here on: two starts cannot both take one
@@ -145,7 +148,8 @@ export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoO
   }));
 };
 
-export function setupTurnEndHooks(sc: Pick<ServerContextInit, "trustedSkills" | "tasks" | "bedrockTasks" | "loginExpired" | "detected" | "isMeta" | "selfdev" | "checksOn" | "restarting" | "countRules" | "db" | "cfg" | "artifacts" | "judgeStop" | "lastJudgingAt" | "applyPolicies" | "batchAnswers" | "settings" | "judgeReply" | "titling" | "pricingTable" | "loginKindOf" | "runnerChoice" | "opts" | "adapterMap" | "suggestDir" | "broadcast" | "rubric" | "rubricSeqNext" | "rubricSeq" | "judgeEvals">): void {
+export function setupTurnEndHooks(sc: Pick<ServerContextInit, "pendingConsent" | "trustedSkills" | "tasks" | "bedrockTasks" | "loginExpired" | "detected" | "isMeta" | "selfdev" | "checksOn" | "restarting" | "countRules" | "db" | "cfg" | "artifacts" | "judgeStop" | "lastJudgingAt" | "applyPolicies" | "batchAnswers" | "settings" | "judgeReply" | "titling" | "pricingTable" | "loginKindOf" | "runnerChoice" | "opts" | "adapterMap" | "suggestDir" | "broadcast" | "rubric" | "rubricSeqNext" | "rubricSeq" | "judgeEvals">): void {
+  sc.pendingConsent = new Map<string, Promise<void>>();
   sc.tasks.onTurnEnd((taskId, t, turn) => {
     // A turn on Amazon Bedrock says nothing about the Claude account's login, either way
     if (sc.bedrockTasks.has(taskId)) return;

@@ -299,6 +299,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     storyPoints: field(raw, project, "Story Points")?.number ?? null,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
+    commentedAt: null,
     tasks,
     decision: null,
     activeTaskId: null,

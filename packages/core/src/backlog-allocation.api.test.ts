@@ -129,7 +129,7 @@ describe("flow-improvement limit", () => {
     expect(flowRunning(all)).toBe(0);
     expect(pickNext(all, "implement", undefined, limit(1, all))).toMatchObject({ item: { number: 2 } });
     // an answered one resumes (`pickNext` takes it), so it counts: the firing that resumes it starts no Ready flow PBI past the limit
-    const answered = { ...checking, updatedAt: "2026-09-28T01:00:00Z", answeredAt: "2026-09-28T01:00:00Z", lastTask: { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: 1, action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true } };
+    const answered = { ...checking, commentedAt: "2026-09-28T01:00:00Z", answeredAt: "2026-09-28T01:00:00Z", lastTask: { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: 1, action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true } };
     expect(pickNext([answered], "implement")).toMatchObject({ item: { number: 1 } });
     expect(flowCounted([answered, next]).map((i) => i.number)).toEqual([1]);
     expect(pickNext([next], "implement", undefined, limit(1, [answered, next]))).toBeNull();
@@ -162,7 +162,7 @@ describe("flow-improvement limit", () => {
   // an in-progress flow PBI backlog-next leaves (a reply, decision or wait it is stuck on) does not use the limit
   const at = "2026-09-28T00:00:00Z";
   const asked = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true };
-  const progress = { stage: "in-progress" as const, projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: at };
+  const progress = { stage: "in-progress" as const, projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: at };
 
   test("flow: a flow PBI in progress that waits for a reply, a decision or a dependency is not counted, so a Ready flow PBI is taken", () => {
     const next = flowItem({ number: 2, priority: "P1" });
@@ -173,7 +173,7 @@ describe("flow-improvement limit", () => {
       key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
       count: 1, state: "exhausted", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
     };
-    const free = flowItem({ number: 11, ...progress, lastTask: decided, updatedAt: "2026-09-29T00:00:00Z" }); // moved since the Task
+    const free = flowItem({ number: 11, ...progress, lastTask: decided, commentedAt: "2026-09-29T00:00:00Z" }); // moved since the Task
     expect(flowRunning([free])).toBe(1);
     const decide = { ...free, stopSummary: [ask] };
     const waiting = flowItem({ number: 12, ...progress, waits: [wait(778, "pr", true)] });
@@ -245,7 +245,7 @@ describe("flow-improvement limit", () => {
     const at = "2026-09-30T00:00:00Z";
     const decided = { id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, started: true };
     // in progress, its wait resolved (moved since its last Task): backlog-next would resume it
-    const outside = flowItem({ number: 1, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, lastTask: decided, updatedAt: "2026-10-01T00:00:00Z" });
+    const outside = flowItem({ number: 1, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, lastTask: decided, commentedAt: "2026-10-01T00:00:00Z" });
     const next = flowItem({ number: 2, priority: "P1" });
 
     test("flow: a resumable flow PBI outside the queue is not counted, so the queue's Ready flow PBI starts", () => {
@@ -320,7 +320,7 @@ describe("pickNext allocation", () => {
     expect(pickNext([held], "implement", undefined, undefined, [], new Set(), { flowShare: { actual: 0.1, limit: 0.25 } })).toMatchObject({ item: { number: 1 } });
     expect(pickNext([held], "implement")).toMatchObject({ item: { number: 1 } });
     // an in-progress flow PBI goes on (its resume is not a new start)
-    const going = flowItem({ number: 4, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, updatedAt: "2026-09-05T00:00:00Z" });
+    const going = flowItem({ number: 4, stage: "in-progress", projectStatus: "In progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: "2026-09-05T00:00:00Z" });
     expect(flowShareHeldIn([going], "implement", over)).toEqual([]);
   });
 

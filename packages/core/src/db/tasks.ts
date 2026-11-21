@@ -330,6 +330,23 @@ export class TaskQueries extends GrantQueries {
     return this.sqlite.query("SELECT * FROM tasks WHERE updated_at >= ? AND machine IS NULL AND archived_at IS NULL AND reviewed_at IS NULL AND outcome IN ('waits', 'needs_action')").all(since).map(rowToTask);
   }
 
+  /**
+   * This machine's Tasks that 要対応 or 待ち may still hold: not reviewed, not archived, the stored outcome
+   * needs_action / unknown / waits. What the settle sweep looks at; whether one is at work is the reader's to ask (`personWait`).
+   */
+  listSettleCandidates(): Task[] {
+    return this.sqlite.query("SELECT * FROM tasks WHERE machine IS NULL AND archived_at IS NULL AND reviewed_at IS NULL AND outcome IN ('needs_action', 'unknown', 'waits')").all().map(rowToTask);
+  }
+
+  /**
+   * Whether the Task has a `status` event at or after `since` whose text starts with `prefix` (`t` and `text` are written
+   * in that order). The time is compared first, so only the events since then have their json read.
+   */
+  hasStatusRecordSince(id: string, prefix: string, since: number): boolean {
+    const head = `{"t":"status","text":${JSON.stringify(prefix).slice(0, -1)}`;
+    return !!this.sqlite.query("SELECT 1 FROM events WHERE task_id = ? AND ts >= ? AND substr(json, 1, ?) = ? LIMIT 1").get(id, since, head.length, head);
+  }
+
   setTaskBackground(id: string, background: Task["background"]) {
     this.sqlite.query("UPDATE tasks SET background = ?, updated_at = MAX(updated_at, ?) WHERE id = ?").run(background ? JSON.stringify(background) : null, Date.now(), id);
   }

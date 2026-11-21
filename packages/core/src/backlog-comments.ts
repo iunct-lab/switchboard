@@ -46,11 +46,17 @@ export const latestAnswer = (comments: Comment[]) => latestHeading(comments.filt
 
 /**
  * The `## 回答` to the proceeding question asked at `q.at` among its Issue's comments (oldest first): the first one after
- * it that names it (`— 問い <time>`), or that names none while no later `## 判断待ち` has been asked (an answer written by
+ * it that names it (`— 問い <time>`, a time at or after it and before the next `## 判断待ち`), or that names none while no later `## 判断待ち` has been asked (an answer written by
  * hand answers the newest question before it). null = not answered.
  */
 export function proceedingAnswer(comments: Comment[], q: { at: string }): { at: string; body: string } | null {
   const t = Date.parse(q.at);
+  // the question a time names is the newest one written at or before it: an answer made before comments kept their
+  // written time names the time the service received the question, which is a send delay after it was written. A next
+  // question written within that delay takes such an old answer instead (docs/design/asks.md)
+  // GitHub gives its time to the second, so a question sent at once is named by the start of the second it was written in
+  const second = Math.floor(t / 1000) * 1000;
+  const next = Math.min(...comments.filter((c) => Date.parse(c.createdAt) > t && c.body.trimStart().startsWith(DECISION_HEADING)).map((c) => Date.parse(c.createdAt)));
   let newest = true;
   for (const c of comments) {
     if (Date.parse(c.createdAt) <= t) continue;
@@ -59,7 +65,7 @@ export function proceedingAnswer(comments: Comment[], q: { at: string }): { at: 
     else if (head.startsWith(ANSWER_HEADING)) {
       const named = PROCEED_NAMED.exec(c.body)?.[1];
       // GitHub writes `…:00Z`, a comment kept here `…:00.000Z`: compared as times, not as text
-      if (named ? Date.parse(named) === t : newest) return { at: c.createdAt, body: c.body };
+      if (named ? Date.parse(named) >= second && Date.parse(named) < next : newest) return { at: c.createdAt, body: c.body };
     }
   }
   return null;
