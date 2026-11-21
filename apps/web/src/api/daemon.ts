@@ -1,4 +1,4 @@
-import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
+import type { RunnerCommand, RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { type LoginMode } from "../login.ts";
 import type { PromotionDrain, ReleaseStatus } from "../release.ts";
 import { loginPath } from "../loginRow.ts";
@@ -60,6 +60,8 @@ export const daemonApi = {
   runnerLoginState: (runner: string) => req<RunnerLoginView>(loginPath(runner)),
   runnerLoginCode: (runner: string, code: string) => req<RunnerLoginView>(`/api/runners/${runner}/login/code`, { method: "POST", body: JSON.stringify({ code }) }),
   runnerLoginCancel: (runner: string) => req<RunnerLoginView>(loginPath(runner), { method: "DELETE" }),
+  /** What a request or reply box offers after "/": the runner's own commands and skills (`workspaceId` null = the daemon's home directory). */
+  runnerCommands: (runner: string, workspaceId: string | null) => req<{ commands: RunnerCommand[] }>(`/api/runners/${runner}/commands${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
   /** gh's login on this machine: `none` until someone logs in (a machine without the cloud host's stored token). */
   githubStatus: () => req<GithubStatus>("/api/github/status"),
   githubLogout: () => req<{ ok: boolean }>("/api/github/logout", { method: "POST" }),

@@ -16,6 +16,7 @@ import { Artifacts } from "./Artifacts.tsx";
 import { artifactsLabel } from "../artifacts.ts";
 import { AttachButton, AttachmentBar, AttachmentGallery, useAttachments, useDropZone } from "./Attachments.tsx";
 import { PresetPicker } from "./PresetPicker.tsx";
+import { SlashPicker } from "./SlashPicker.tsx";
 import { PresetReplies } from "./PresetReplies.tsx";
 import { repliesFor } from "../presetReplies.ts";
 import { jstDateTime, jstTime } from "../time.ts";
@@ -28,6 +29,7 @@ import { KIND_LABEL, STATE_LABEL, taskAsks } from "../asks.ts";
 import { diffRows, diffTag } from "../diffView.ts";
 import { abortNote } from "../runners.ts";
 import { canFork } from "../fork.ts";
+import { mcpHintLabel } from "../approvals.ts";
 import { t } from "../i18n.ts";
 import { task as m } from "../i18n/task.ts";
 import { home } from "../i18n/home.ts";
@@ -468,7 +470,9 @@ export function TaskView(props: {
             <div>
               <b>{permLabel(p.kind)}</b>
               <span className="tool-name">{p.tool}</span>
+              {mcpHintLabel(p.mcpHint) && <span className={"mcp-mark mcp-" + p.mcpHint}>{mcpHintLabel(p.mcpHint)}</span>}
               <code>{p.detail}</code>
+              {p.mcpHint && <div className="hint">{t(m.mcpHintNote)}</div>}
               {p.rule && (
                 <div className="hint">
                   {p.rule.source.startsWith("policy:") ? t(m.rulePolicy) : t(m.ruleRule)} <span className="mono">{p.rule.source.replace(/^policy:/, "")}</span>{t(m.ruleMatched, { pattern: p.rule.pattern, mode: p.rule.mode === "confirm" ? t(m.modeConfirm) : t(m.modeAllow) })}
@@ -495,17 +499,19 @@ export function TaskView(props: {
       {!cloud && <div className="composer">
         <div className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...drop.handlers}>
           <PresetPicker scene="task" taskId={props.task.id} workspaceId={props.task.workspaceId} text={text} onText={(s) => setText(s)} onError={props.onError}>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onPaste={drop.onPaste}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
-              }}
-              rows={2}
-              disabled={readOnly !== null}
-              placeholder={readOnly !== null ? t(m.placeholderMachine, { machine: props.task.machine! }) : `${t(home.presetHint)}${busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}`}
-            />
+            <SlashPicker runner={props.task.origin === "terminal" ? null : props.task.runner} workspaceId={props.task.workspaceId} text={text} onText={setText}>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onPaste={drop.onPaste}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
+                }}
+                rows={2}
+                disabled={readOnly !== null}
+                placeholder={readOnly !== null ? t(m.placeholderMachine, { machine: props.task.machine! }) : `${t(home.presetHint)}${busy ? t(m.placeholderBusy) : props.task.origin === "terminal" ? t(m.placeholderTerminal) : t(m.placeholderReply)}`}
+              />
+            </SlashPicker>
           </PresetPicker>
           <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
         </div>

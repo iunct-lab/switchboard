@@ -167,7 +167,17 @@ export function setupTurnEndHooks(sc: Pick<ServerContextInit, "trustedSkills" | 
     // second, concurrent check run on the same tree.
     if (t.shadowOf) return;
     sc.selfdev.invalidate(); // the tree changed: earlier runs no longer vouch for it
-    if (TURN_DONE.has(t.status) && sc.checksOn && !sc.restarting) void sc.selfdev.run(taskId).catch(() => undefined);
+    // a turn that left a background process (`background`) is not the end of the writing: the check waits for it to empty
+    if (t.status === "done" && sc.checksOn && !sc.restarting) void sc.selfdev.run(taskId).catch(() => undefined);
+  });
+  // The last background process of a meta task is gone: it may have written the tree since the turn ended, so a run kept
+  // from then no longer vouches for it. The check runs now, as it would have at a turn that ended `done` — not when the
+  // processes went with the runner (`lost`: it exited, or the daemon is stopping and has cancelled its checks already).
+  sc.tasks.onBackgroundEmpty((taskId, lost) => {
+    const t = sc.db.getTask(taskId);
+    if (!t || !sc.isMeta(t) || t.shadowOf) return;
+    sc.selfdev.invalidate();
+    if (!lost && t.status === "done" && sc.checksOn && !sc.restarting) void sc.selfdev.run(taskId).catch(() => undefined);
   });
 
   // Evals: the rule counts of every finished turn. Synchronous and cheap; a failure must not stop the turn's end.
@@ -219,7 +229,9 @@ export function setupTurnEndHooks(sc: Pick<ServerContextInit, "trustedSkills" | 
   // a saved policy may answer what this Task's turn left open
   sc.tasks.onTurnEnd(() => void sc.applyPolicies());
   // the Task sent on to log in for an SSO batch: once it went on, the rest go on
-  sc.tasks.onTurnEnd((taskId) => void sc.batchAnswers.turnEnded(taskId).catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
+  sc.tasks.onTurnEnd((taskId, t) => void sc.batchAnswers.turnEnded(taskId, t.status === "error" || t.status === "aborted").catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
+  // its background processes (device-auth runs until the person has logged in) may outlast the turn: judged again when they are gone
+  sc.tasks.onBackgroundEmpty((taskId, lost) => void sc.batchAnswers.turnEnded(taskId, lost).catch((e) => console.warn(`sso batch: ${String((e as Error).message ?? e)}`)));
   sc.tasks.onTurnEnd((taskId, t, turn) => {
     const lastReply = turn.end.summary?.trim() ?? "";
     if (t.executionMode === "cloud" || !sc.settings().judge.enabled || !TURN_DONE.has(t.status) || t.shadowOf || t.outcome !== "unknown" || !lastReply) return;

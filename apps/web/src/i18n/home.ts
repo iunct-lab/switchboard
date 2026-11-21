@@ -157,6 +157,10 @@ export const home = msgs({
   presetTarget: { ja: "対象: Issue / PR を選ぶ", en: "Target: choose an Issue / PR" },
   presetNoTarget: { ja: "対象なし", en: "No target" },
 
+  // SlashPicker.tsx
+  slashFailed: { ja: "コマンドの一覧を読めませんでした", en: "Could not read the command list" },
+  slashLabel: { ja: "コマンドとスキル", en: "Commands and skills" },
+
   // ModelSelect.tsx, EffortSelect.tsx, modelOptions.ts, effortOptions.ts
   setByRunner: { ja: "{label}: {runner} 側の設定で決まる", en: "{label}: set on the {runner} side" },
   typePlaceholder: { ja: "{label}を手入力（Enter で確定）", en: "Type the {label} (Enter to confirm)" },

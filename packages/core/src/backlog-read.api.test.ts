@@ -475,7 +475,7 @@ test("GET /api/backlog/records: lint and the parallel guard read the stored reco
   const asked = fake.calls.length;
   expect(await readRecords(env, { fresh: false })).toEqual(fresh);
   // what the guard in a Task judges with besides the records: the checkout's shared files (the meta workspace is this checkout) and the places the app's own judgement counts
-  expect(fresh).toMatchObject({ shared: expect.arrayContaining(["packages/core/src/server/context.ts"]), turns: [] });
+  expect(fresh).toMatchObject({ shared: expect.arrayContaining(["packages/core/src/server/context.ts"]), turns: [], unheld: [] });
   // the kit's lint: no GitHub call at all (the kit's gh throws on any), a finished check (0 or 1), never "could not check"
   const kitGh = fakeKitGh([]);
   const lines: string[] = [];

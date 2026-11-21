@@ -101,7 +101,13 @@ export const currentNotices = (sc: Pick<ServerContext, "db" | "opts" | "NOTICES_
   const tagCi = { note: tagCiNote(sc.promotionHold), workspace: drain.workspace };
   // what a work machine put and this instance passed over (none without registered machines)
   const refused = [...listRefusedDeltas(sc.db), ...listRefused(sc.db).flatMap((r) => (r.machine ? [{ machine: r.machine, key: r.key, reason: r.reason }] : []))];
-  const noticed = noticeAsks({ unusable, scans, windows, promotions, drain, tagCi, refused, now }, had);
+  // a host CLI's version not put in; a version that went in after it settles it (the notice resolves), `untested` and `waiting` are not told
+  const cliRefused = (["claude", "codex"] as const).flatMap((runner) => {
+    const r = sc.db.lastCliUpdate(runner, "refused");
+    const done = sc.db.lastCliUpdate(runner, "installed");
+    return r && !(done && done.id > r.id) ? [{ runner, version: r.toVersion, reason: r.reason, current: r.fromVersion, at: r.at }] : [];
+  });
+  const noticed = noticeAsks({ unusable, scans, windows, promotions, drain, tagCi, refused, cliRefused, now }, had);
   if (noticed.record !== had) sc.db.setSetting(sc.NOTICES_KEY, noticed.record);
   return noticed.asks;
 };

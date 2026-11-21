@@ -994,3 +994,20 @@ test("skills: what keeps a review from going round — the conditions decided wh
   // waiting goes through the kit's command
   expect(read("issue-workflow")).toContain("**待つのは `ops-kit wait` で、素のループで待たない**");
 });
+
+test("skills: a PBI that raises or lowers a review rule carries the rounds table row, and no number means no Ready (往復の表)", () => {
+  const section = (name: string, heading: string) => {
+    const text = readFileSync(join(skills, name, "SKILL.md"), "utf8");
+    const start = text.indexOf(heading);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = text.indexOf("\n### ", start + 1);
+    return text.slice(start, end < 0 ? undefined : end);
+  };
+  for (const [name, heading] of [["request-to-backlog", "### 3. PBI を書く"], ["pbi-to-tasks", "### 3. 設計チェック"]] as const) {
+    const s = section(name, heading);
+    for (const word of ["往復の表", "安全の側なので", "念のため"]) expect({ name, word, has: s.includes(word) }).toEqual({ name, word, has: true });
+  }
+  const rules = readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8");
+  const owned = rules.slice(rules.indexOf("## 使う側のリポジトリが持つもの"), rules.indexOf("\n## ", rules.indexOf("## 使う側のリポジトリが持つもの") + 1));
+  expect(owned).toContain("往復の表");
+});

@@ -13,6 +13,7 @@ import { staleDraft } from "../presets.ts";
 import { isAdkRunner, listedRunners, runnerLabel } from "../runners.ts";
 import { homeEmptyLabel, initialChoice } from "../runnerSettings.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
+import { SlashPicker } from "./SlashPicker.tsx";
 import { PresetReplies } from "./PresetReplies.tsx";
 import { repliesFor } from "../presetReplies.ts";
 import { titleToSend } from "../taskTitle.ts";
@@ -396,20 +397,22 @@ export function Home(props: {
             }}
             onError={props.onError}
           >
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onPaste={cloud ? undefined : drop.onPaste}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  if (busy) return;
-                  if (e.shiftKey) void submit();
-                }
-              }}
-              rows={6}
-              placeholder={`${t(home.presetHint)}${cloud ? t(home.promptCloud) : t(home.promptLocal)}`}
-            />
+            <SlashPicker runner={cloud ? null : runner} workspaceId={ws?.id ?? null} text={prompt} onText={setPrompt}>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onPaste={cloud ? undefined : drop.onPaste}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    if (busy) return;
+                    if (e.shiftKey) void submit();
+                  }
+                }}
+                rows={6}
+                placeholder={`${t(home.presetHint)}${cloud ? t(home.promptCloud) : t(home.promptLocal)}`}
+              />
+            </SlashPicker>
           </PresetPicker>
           {!cloud && <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />}
         </div>

@@ -146,7 +146,7 @@ export abstract class TaskEvents extends TaskManagerState {
       const task = this.db.getTask(taskId);
       if (!task) continue;
       const workspace = task.workspaceId ? (this.db.getWorkspace(task.workspaceId)?.name ?? null) : null;
-      for (const [id, { ask, at }] of live.pendingPermissions) out.push({ taskId, taskTitle: task.title, workspace, id, kind: ask.kind, tool: ask.tool, input: ask.input, detail: ask.detail, askedAt: at });
+      for (const [id, { ask, at }] of live.pendingPermissions) out.push({ taskId, taskTitle: task.title, workspace, id, kind: ask.kind, tool: ask.tool, input: ask.input, detail: ask.detail, mcpHint: ask.mcpHint, askedAt: at });
     }
     return out.sort((a, b) => b.askedAt - a.askedAt);
   }

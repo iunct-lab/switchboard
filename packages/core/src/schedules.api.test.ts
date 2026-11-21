@@ -14,28 +14,39 @@ useCoreDaemon();
 describe("core daemon", () => {
   test("schedules API: create, validate, run manually, and list; queue reflects the result", async () => {
     const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const ws = await fetch(`${base}/api/workspaces`).then(j);
-    const wsId = ws.find((w: { kind: string }) => w.kind === "meta").id; // the brief test above registers a repo workspace, which sorts first
-    const bad = await post("/api/schedules", { title: "x", cron: "nonsense", workspaceId: wsId, runner: "claude", prompt: "p" });
-    expect(bad.status).toBe(400);
-    const s = await post("/api/schedules", { title: "nightly", cron: "@nightly", workspaceId: wsId, runner: "claude", prompt: "run the nightly check" }).then(j);
-    expect(s.enabled).toBe(true);
-    expect(s.nextRunAt).toBeGreaterThan(Date.now());
-    const list = await fetch(`${base}/api/schedules`).then(j);
-    expect(list.some((x: { id: string }) => x.id === s.id)).toBe(true);
-    const ran = await post(`/api/schedules/${s.id}/run`, {}).then(j);
-    expect(ran.scheduleId).toBe(s.id);
-    await waitFor(async () => (await getTask(ran.id)).task.status === "waiting");
-    const ask = (await getTask(ran.id)).events.map((e: { ev: AgentEvent }) => e.ev).find((e: AgentEvent) => e.t === "permission.ask");
-    await post(`/api/tasks/${ran.id}/permission`, { id: ask.id, decision: "allow" });
-    await waitFor(async () => (await getTask(ran.id)).task.status === "done");
-    const q = await fetch(`${base}/api/queue`).then(j);
-    expect(q.scheduled.some((x: { taskId: string }) => x.taskId === ran.id)).toBe(true);
-    const patched = await fetch(`${base}/api/schedules/${s.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) }).then(j);
-    expect(patched.enabled).toBe(false);
-    const del = await fetch(`${base}/api/schedules/${s.id}`, { method: "DELETE" });
-    expect(del.status).toBe(200);
-    expect((await fetch(`${base}/api/schedules/${s.id}`)).status).toBe(404);
+    // a repo workspace is registered too, and it sorts before the meta one (kind DESC), so the meta one is picked by its kind
+    const repoDir = mkdtempSync(join(tmpdir(), "switchboard-sched-repo-"));
+    core.db.upsertWorkspace({ id: "ws_sched_repo", name: "sched-repo", path: repoDir, kind: "repo" });
+    try {
+      const ws = await fetch(`${base}/api/workspaces`).then(j);
+      expect(ws[0].kind).toBe("repo");
+      const meta = ws.find((w: { kind: string }) => w.kind === "meta");
+      const wsId = meta.id;
+      const bad = await post("/api/schedules", { title: "x", cron: "nonsense", workspaceId: wsId, runner: "claude", prompt: "p" });
+      expect(bad.status).toBe(400);
+      const s = await post("/api/schedules", { title: "nightly", cron: "@nightly", workspaceId: wsId, runner: "claude", prompt: "run the nightly check" }).then(j);
+      expect(s.enabled).toBe(true);
+      expect(s.nextRunAt).toBeGreaterThan(Date.now());
+      const list = await fetch(`${base}/api/schedules`).then(j);
+      expect(list.some((x: { id: string }) => x.id === s.id)).toBe(true);
+      const ran = await post(`/api/schedules/${s.id}/run`, {}).then(j);
+      expect(ran.scheduleId).toBe(s.id);
+      expect(ran.workspaceId).toBe(meta.id); // the run is on the meta workspace, not the repo one that sorts first
+      await waitFor(async () => (await getTask(ran.id)).task.status === "waiting");
+      const ask = (await getTask(ran.id)).events.map((e: { ev: AgentEvent }) => e.ev).find((e: AgentEvent) => e.t === "permission.ask");
+      await post(`/api/tasks/${ran.id}/permission`, { id: ask.id, decision: "allow" });
+      await waitFor(async () => (await getTask(ran.id)).task.status === "done");
+      const q = await fetch(`${base}/api/queue`).then(j);
+      expect(q.scheduled.some((x: { taskId: string }) => x.taskId === ran.id)).toBe(true);
+      const patched = await fetch(`${base}/api/schedules/${s.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) }).then(j);
+      expect(patched.enabled).toBe(false);
+      const del = await fetch(`${base}/api/schedules/${s.id}`, { method: "DELETE" });
+      expect(del.status).toBe(200);
+      expect((await fetch(`${base}/api/schedules/${s.id}`)).status).toBe(404);
+    } finally {
+      core.db.deleteWorkspace("ws_sched_repo");
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   test("schedules API: stuck is set when the newest Tasks of a schedule stopped the same way, null otherwise", async () => {

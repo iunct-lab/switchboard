@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, sharedMoved, loadReversibility, localCiOf, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, localCiOf, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
 import { resultComment } from "./local-ci";
 import { execFileSync } from "node:child_process";
@@ -841,18 +841,19 @@ describe("task scope", () => {
   const file = (path: string) => ({ path, additions: 1, deletions: 0 });
   const task = (named: string[], siblings: { number: number; paths: string[] }[] = []) => ({ numbers: [2346], named, siblings });
 
-  test("outside the task: stops and lists every outside path in the PR's order; a directory covers what is under it", () => {
+  test("outside the task: does not stop, lists every outside path in the PR's order in notes; a directory covers what is under it", () => {
     const files = ["z.ts", "ops-kit/src/x.ts", "scripts/a.ts", "b.ts", "scripts/c.test.ts"].map(file);
     const j = judge(base({ files, task: task(["ops-kit/", "scripts/a.ts"]) }), off);
-    expect(j.verdict).toBe("stop");
+    expect(j.verdict).toBe("merge");
     expect(j.impact).toBe("small");
-    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: z.ts, b.ts, scripts/c.test.ts"]);
+    expect(j.reasons).toEqual([]);
+    expect(j.notes).toEqual(["Task #2346 の名指しの外: z.ts, b.ts, scripts/c.test.ts"]);
   });
 
-  test("outside the task: nothing outside adds no reason; two Tasks are both named", () => {
+  test("outside the task: nothing outside adds no note; two Tasks are both named", () => {
     expect(judge(base({ files: [file("a.ts")], task: task(["a.ts"]) }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
-    expect(judge(base({ files: [file("b.ts")], task: { numbers: [1, 2], named: ["a.ts"], siblings: [] } }), off).reasons)
-      .toEqual(["Task #1, #2 の本文に名指しの無いファイル: b.ts"]);
+    expect(judge(base({ files: [file("b.ts")], task: { numbers: [1, 2], named: ["a.ts"], siblings: [] } }), off).notes)
+      .toEqual(["Task #1, #2 の名指しの外: b.ts"]);
   });
 
   test("named by a sibling: the Tasks that name it follow the path, the smaller number first", () => {
@@ -860,15 +861,38 @@ describe("task scope", () => {
       files: ["packages/core/src/policies.ts", "b.ts"].map(file),
       task: task(["a.ts"], [{ number: 2352, paths: ["packages/"] }, { number: 2351, paths: ["packages/core/src/policies.ts"] }, { number: 2353, paths: ["c.ts"] }]),
     }), off);
-    expect(j.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: packages/core/src/policies.ts（Task #2351、Task #2352 が名指し）, b.ts"]);
+    expect(j.notes).toEqual(["Task #2346 の名指しの外: packages/core/src/policies.ts（Task #2351、Task #2352 が名指し）, b.ts"]);
   });
 
-  test("allow-large keeps the reason, as an unresolved thread; naming the path in the Task lifts it", () => {
+  test("scopeMaterial: a PR with a file outside lists its path and the Task that names it; nothing outside, no Task, or no path read is empty", () => {
+    const f = base({
+      files: ["a.ts", "packages/core/src/policies.ts", "a.test.ts"].map(file),
+      task: task(["a.ts"], [{ number: 2351, paths: ["packages/core/src/policies.ts"] }]),
+    });
+    const m = scopeMaterial(f);
+    expect(m).toContain("# Task の名指しの外のファイル");
+    expect(m).toContain("Task #2346");
+    expect(m).toContain("- packages/core/src/policies.ts（Task #2351 が名指し）");
+    expect(m).toContain("付いてくるファイル（名指しは要らない）: a.test.ts");
+    expect(m).not.toContain("- a.ts");
+    expect(scopeMaterial(base({ files: [file("a.ts"), file("a.test.ts")], task: task(["a.ts"]) }))).toBe("");
+    expect(scopeMaterial(base({ files: [file("b.ts")] }))).toBe("");
+    expect(scopeMaterial(base({ files: [file("b.ts")], task: task([]) }))).toBe("");
+  });
+
+  test("a file outside the Task's names that is security-relevant by its path still asks: the scope check lifts nothing else", () => {
+    const f = base({ files: [file("scripts/merge-gate.ts")], task: task(["a.ts"]) });
+    const j = judge(f, off);
+    expect(j.verdict).toBe("stop");
+    expect(j.ask.length).toBeGreaterThan(0);
+    expect(j.reasons.some((r) => r.startsWith("[聞く]"))).toBe(true);
+    expect(j.notes).toEqual(["Task #2346 の名指しの外: scripts/merge-gate.ts"]);
+  });
+
+  test("allow-large with a yes lifts the large reason, and the file outside is only a note", () => {
     const files = [file("rescue/x.ts")];
-    const kept = judge(yes("rescue", { files, task: task(["a.ts"]) }), { allowLarge: true });
-    expect(kept).toMatchObject({ verdict: "stop", impact: "large" });
-    expect(kept.reasons).toEqual(["Task #2346 の本文に名指しの無いファイル: rescue/x.ts"]);
-    expect(judge(yes("rescue", { files, task: task(["a.ts", "rescue/x.ts"]) }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
+    const lifted = judge(yes("rescue", { files, task: task(["a.ts"]) }), { allowLarge: true });
+    expect(lifted).toMatchObject({ verdict: "merge", impact: "large", reasons: [], notes: ["Task #2346 の名指しの外: rescue/x.ts"] });
   });
 
   test("no task: a PR without one judges as before; a Task with no path does not stop and says so in notes", () => {
@@ -881,8 +905,8 @@ describe("task scope: companion files", () => {
   const file = (path: string, more: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, ...more });
   const task = (named: string[]) => ({ numbers: [2346], named, siblings: [] });
   const named = task(["packages/core/src/x.ts"]);
-  const STOP = "Task #2346 の本文に名指しの無いファイル: ";
-  const scope = (r: string[]) => r.filter((x) => x.includes("名指しの無いファイル"));
+  const STOP = "Task #2346 の名指しの外: ";
+  const scope = (j: ReturnType<typeof judge>) => (j.notes ?? []).filter((x) => x.includes("の名指しの外:"));
 
   test("the test next to a named file and a design document pass without being named, and the notes list them", () => {
     const j = judge(base({ files: ["packages/core/src/x.ts", "packages/core/src/x.test.ts", "docs/design/y.md"].map((p) => file(p)), task: named }), off);
@@ -890,15 +914,14 @@ describe("task scope: companion files", () => {
     expect(judge(base({ files: [file("apps/web/src/V.test.tsx")], task: task(["apps/web/src/V.tsx"]) }), off).reasons).toEqual([]);
   });
 
-  test("code elsewhere, a test of a file not named, scripts, workflows and rescue stop as before, next to the companions' note", () => {
+  test("code elsewhere, a test of a file not named, scripts, workflows and rescue are listed as outside, next to the companions' note", () => {
     const outside = ["packages/core/src/z.ts", "packages/core/src/z.test.ts", "scripts/w.ts", ".github/workflows/ci.yml", "rescue/x.ts", "docs/other.md", "scripts/perf-budget.json", "ops.config.json"];
     const j = judge(base({ files: ["packages/core/src/x.test.ts", ...outside].map((p) => file(p)), task: named }), off);
-    expect(scope(j.reasons)).toEqual([STOP + outside.join(", ")]);
-    expect(j.notes).toEqual(["付いてくるファイル: packages/core/src/x.test.ts"]);
+    expect(j.notes).toEqual([STOP + outside.join(", "), "付いてくるファイル: packages/core/src/x.test.ts"]);
   });
 
   test("ops.config.json passes only when it lists the PR's own files for the public copy and changes nothing else", () => {
-    const run = (configScope: PrFacts["configScope"], files = [file("docs/design/y.md", { status: "added" }), file("ops.config.json", { status: "modified" })]) => scope(judge(base({ files, task: named, configScope }), off).reasons);
+    const run = (configScope: PrFacts["configScope"], files = [file("docs/design/y.md", { status: "added" }), file("ops.config.json", { status: "modified" })]) => scope(judge(base({ files, task: named, configScope }), off));
     expect(run({ added: ["docs/design/y.md"], removed: [], other: false })).toEqual([]);
     // another line of the file (the merge gate's own setting), a path the PR does not add, a path it does not remove
     expect(run({ added: ["docs/design/y.md"], removed: [], other: true })).toEqual([STOP + "ops.config.json"]);
@@ -1196,11 +1219,10 @@ describe("merge-gate readPr", () => {
       const f = await readPr(1, withConfig(["docs/design/y.md"]));
       expect(f.configScope).toEqual({ added: ["docs/design/y.md"], removed: [], other: false });
       expect(f.files.map((x) => x.status)).toEqual(["modified", "added", "modified"]);
-      expect(judge(f, off).reasons.filter((r) => r.includes("名指しの無いファイル"))).toEqual([]);
       expect(judge(f, off).notes).toEqual(["付いてくるファイル: docs/design/y.md, ops.config.json"]);
       // a directory listed for the public copy is not a file the PR adds
       const wide = await readPr(1, withConfig(["docs/"]));
-      expect(judge(wide, off).reasons.filter((r) => r.includes("名指しの無いファイル"))).toEqual(["Task #5 の本文に名指しの無いファイル: ops.config.json"]);
+      expect(judge(wide, off).notes).toEqual(["Task #5 の名指しの外: ops.config.json", "付いてくるファイル: docs/design/y.md"]);
     });
 
     test("Closes #N and the branch sb/<n>- name the same Task once; the PR's new top directory starts a path", async () => {
@@ -1222,27 +1244,26 @@ describe("merge-gate readPr", () => {
       expect(seen.some((a) => a.some((x) => x.includes("issue(number")))).toBe(false);
     });
 
-    test("a stop for a file no Task names records it in the app for each Task, and does not change the output; another stop records nothing", async () => {
-      const posts: Array<{ url: string; body: unknown }> = [];
-      const fetchApp = async (url: string, init?: RequestInit) => { posts.push({ url, body: JSON.parse(String(init?.body)) }); return Response.json({ recorded: true }); };
+    test("a file no Task names is a note, not a reason, and nothing is recorded in the app; --scope prints the material and judges nothing", async () => {
+      const posts: string[] = [];
+      const fetchApp = async (url: string) => { posts.push(url); return Response.json({ recorded: true }); };
       const env = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", OPS_KIT_TASK_ID: "t1" };
-      const stop = async (path: string, e: Record<string, string | undefined>, f: typeof fetchApp | (() => never) = fetchApp) => {
+      const run = async (path: string, extra: string[] = []) => {
         const g = gate({ body: "Closes #5", headRefName: "sb/5-a" });
         const out: string[] = [];
-        const code = await main(["12", "--repo", REPO], async (a) => (a[0] === "pr" && a[1] === "view" ? JSON.stringify({ ...JSON.parse(await g(a)), files: [{ path, additions: 1, deletions: 0 }] }) : g(a)), (l) => out.push(l), () => {}, () => REPO, undefined, process.cwd(), { env: e, fetch: f as typeof fetchApp });
+        const code = await main(["12", "--repo", REPO, ...extra], async (a) => (a[0] === "pr" && a[1] === "view" ? JSON.stringify({ ...JSON.parse(await g(a)), files: [{ path, additions: 1, deletions: 0 }] }) : g(a)), (l) => out.push(l), () => {}, () => REPO, undefined, process.cwd(), { env, fetch: fetchApp as unknown as typeof fetch });
         return { code, out: out.join("\n") };
       };
-      const outside = await stop("zzz/other.ts", env);
-      expect(outside.code).toBe(1);
-      expect(outside.out).toContain("の本文に名指しの無いファイル: zzz/other.ts");
-      expect(posts).toEqual([{ url: "http://127.0.0.1:1/api/merge-grants/scope-stop", body: { taskId: "t1", repo: REPO, issue: 5, pr: 12 } }]);
-      // the app failing or absent leaves the output as it is
-      const failing = await stop("zzz/other.ts", env, () => { throw new Error("down"); });
-      expect(failing).toEqual(outside);
-      expect(await stop("zzz/other.ts", {})).toEqual(outside);
-      // a file a Task names is not a scope stop
-      posts.length = 0;
-      await stop("scripts/a.ts", env);
+      const outside = await run("zzz/other.ts");
+      expect(outside.out).toContain("Task #5 の名指しの外: zzz/other.ts");
+      expect(outside.out).not.toContain("名指しの無いファイル");
+      const named = await run("scripts/a.ts");
+      expect(named.out).not.toContain("名指しの外");
+      const material = await run("zzz/other.ts", ["--scope"]);
+      expect(material.code).toBe(0);
+      expect(material.out).toContain("- zzz/other.ts");
+      expect(material.out).not.toContain("verdict");
+      expect((await run("scripts/a.ts", ["--scope"])).out).toBe("");
       expect(posts).toEqual([]);
     });
 
@@ -1950,6 +1971,12 @@ describe("GitLab MR", () => {
       expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ resolved: false }).sh, dir)).toBe(1);
       expect(await main(["7", "--merge-stack"], noGh, quiet, quiet, () => undefined, g.sh, dir)).toBe(2);
       expect(await main(["7"], noGh, quiet, quiet, () => undefined, gitlab({ status: "checking" }).sh, dir)).toBe(2);
+      // --scope on an MR prints the review material only: no judgement and no merge, even with --merge
+      const scoped = gitlab();
+      const out: string[] = [];
+      expect(await main(["7", "--scope", "--merge"], noGh, (s) => out.push(s), quiet, () => undefined, scoped.sh, dir)).toBe(0);
+      expect(scoped.calls.some((c) => c.at(-1) === `${M}/merge`)).toBe(false);
+      expect(out.join("\n")).not.toContain("verdict");
     } finally {
       require("node:fs").rmSync(dir, { recursive: true, force: true });
     }
@@ -2201,7 +2228,7 @@ describe("local change", () => {
     expect([g.code, g.j.verdict, g.j.reasons]).toEqual([0, "merge", []]);
   });
 
-  test("github workspace (b): a file the Task does not name stops, as a PR's does, and the stop is kept for the Task", async () => {
+  test("github workspace (b): a file the Task does not name does not stop, as a PR's does not, and nothing is kept for the Task", async () => {
     const r = fresh();
     r.git("checkout", "-q", "sb/5-x");
     writeFileSync(join(r.dir, "a.ts"), "a\nmore\n");
@@ -2209,9 +2236,17 @@ describe("local change", () => {
     r.git("commit", "-q", "-m", "outside");
     r.git("checkout", "-q", "main");
     const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
-    expect(g.code).toBe(1);
-    expect(g.j.reasons).toEqual(["Task #5 の本文に名指しの無いファイル: a.ts（Task #6 が名指し）"]);
-    expect(g.posts).toEqual([{ path: "/api/merge-grants/scope-stop", body: { taskId: "task_1", repo: "acme/app", issue: 5, pr: 7 } }]);
+    expect(g.code).toBe(0);
+    expect(g.j.reasons).toEqual([]);
+    expect(g.j.notes).toEqual(["Task #5 の名指しの外: a.ts（Task #6 が名指し）"]);
+    expect(g.posts).toEqual([]);
+    // --change <n> --scope prints the same list as the review material, not a judgement
+    const a = app(r, [REVIEW, pass(r)], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
+    const out: string[] = [];
+    const fail = async () => { throw new Error("gh or glab called"); };
+    expect(await main(["--change", "7", "--scope"], fail, (s) => out.push(s), () => undefined, () => undefined, fail, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: a.fetch })).toBe(0);
+    expect(out.join("\n")).toContain("a.ts（Task #6 が名指し）");
+    expect(out.join("\n")).not.toContain("verdict");
   });
 
   test("github workspace (c): no review, no local-ci, a pass of an older head, a conflict — each stops", async () => {

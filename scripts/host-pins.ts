@@ -24,6 +24,7 @@ const DEVTOOLS_PINS: Record<string, Source> = {
   UV_VERSION: { kind: "github", repo: "astral-sh/uv" },
   GITLEAKS_VERSION: { kind: "github", repo: "gitleaks/gitleaks" },
   SAM_VERSION: { kind: "github", repo: "aws/aws-sam-cli" },
+  COSIGN_VERSION: { kind: "github", repo: "sigstore/cosign" },
   PLAYWRIGHT_VERSION: { kind: "npm", pkg: "playwright" },
   PLAYWRIGHT_MCP_VERSION: { kind: "npm", pkg: "@playwright/mcp" },
   GH_STACK_VERSION: { kind: "github", repo: "github/gh-stack" },

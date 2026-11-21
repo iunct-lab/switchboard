@@ -285,7 +285,7 @@ export abstract class TaskManagerState {
   private drainTimer: ReturnType<typeof setInterval> | undefined;
 
   protected endListeners = new Set<(taskId: string, task: Task) => void>();
-  private backgroundEmptyListeners = new Set<(taskId: string) => void>();
+  private backgroundEmptyListeners = new Set<(taskId: string, lost: boolean) => void>();
   protected turnEndListeners = new Set<(taskId: string, task: Task, turn: TurnEnd) => void>();
   /** Told whenever a task's planned resume is forgotten, or a person starts a turn (a plan still being made must be dropped too). */
   protected planForgottenListeners = new Set<(taskId: string) => void>();
@@ -415,17 +415,20 @@ export abstract class TaskManagerState {
     return () => this.stopRecordedListeners.delete(l);
   }
 
-  /** Called when the last background job of a task is gone (its count went from some to 0). */
-  onBackgroundEmpty(l: (taskId: string) => void): () => void {
+  /**
+   * Called when the last background job of a task is gone (its count went from some to 0). `lost` = they did not end
+   * but went with the runner process (it exited, or was closed on purpose).
+   */
+  onBackgroundEmpty(l: (taskId: string, lost: boolean) => void): () => void {
     this.backgroundEmptyListeners.add(l);
     return () => this.backgroundEmptyListeners.delete(l);
   }
 
-  protected notifyBackgroundEmpty(taskId: string) {
+  protected notifyBackgroundEmpty(taskId: string, lost = false) {
     // one listener's failure must not skip the others
     for (const l of this.backgroundEmptyListeners) {
       try {
-        l(taskId);
+        l(taskId, lost);
       } catch (e) {
         console.error(`task ${taskId}: background-empty listener failed:`, e);
       }

@@ -472,6 +472,37 @@ describe("backlog-next prerequisite", () => {
     }
   });
 
+  test("GET /api/backlog/records: the places the guard reads count a released （リリース） prerequisite as the start does, so a place kept out for an earlier one stays out", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
+    withProcesses(repo);
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "the prerequisite (#450)");
+    const merged = git("rev-parse", "HEAD");
+    const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/api/status" ? Response.json({ current: merged, previous: null, state: "running", busy: null, lastError: null, history: [] }) : new Response("no", { status: 404 })) });
+    // 401 (released prerequisite) yielded first and 403 later, both on src/a.ts that the open Task 4041 of 404 names: 403 cannot
+    // start for 401's place, so it holds none, and 402 is free of places
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+    const task = (number: number) => ({ number, state: "OPEN", body: "触る場所: `src/a.ts`" });
+    const gh = prereqGh({
+      401: { priority: "P0", body: "**前提**: #450（リリース）", comments: [[releaseBody("後回し", [4041], true), ago(2)]], tasks: [task(4011)] },
+      402: { priority: "P1", tasks: [task(4021)] },
+      403: { priority: "P2", comments: [[releaseBody("後回し", [4041], true), ago(1)]], tasks: [task(4031)] },
+      404: { priority: "P3", tasks: [task(4041)] },
+    }, { w450: { __typename: "PullRequest", state: "MERGED", mergeCommit: { oid: merged } } });
+    try {
+      const base = await boot(gh, holdingClaude().adapter, { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` });
+      const items = (await refreshed(base, false)).items;
+      expect(items.find((i) => i.number === 401)!.prereqs).toMatchObject([{ number: 450, state: "met" }]);
+      expect(items.find((i) => i.number === 402)!.overlap?.hits.some((h) => h.turn !== undefined) ?? false).toBe(true);
+      const { turns } = (await (await fetch(`${base}/api/backlog/records?workspaceId=${metaId()}`)).json()) as { turns: Array<{ pbi: number; task: number }> };
+      expect(turns.map((t) => [t.pbi, t.task])).toEqual([[401, 4011]]);
+    } finally {
+      rescue.stop(true);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test("withdrawn / missing / cycle: each is logged as 進められない, and the independent Ready starts", async () => {
     const pbis: Record<number, Pbi> = {
       401: { priority: "P0", body: "**前提**: #402" }, 404: { priority: "P0", body: "**前提**: #499" },

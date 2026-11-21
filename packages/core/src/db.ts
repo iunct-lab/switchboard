@@ -8,7 +8,7 @@ import { IN_FLIGHT } from "./task-status.ts";
 import { migrate } from "./db/migrate.ts";
 import { SCHEMA } from "./db/schema.ts";
 import { rowToTask } from "./db/tasks.ts";
-import { OpsQueries } from "./db/ops.ts";
+import { CliUpdateQueries } from "./db/cli-updates.ts";
 
 export { newId } from "./db/util.ts";
 export { CUSTOM_RUNNERS_KEY } from "./db/core.ts";
@@ -100,7 +100,7 @@ export async function snapshotBeforeMigrate(path: string, home: string, now = ne
  * class extends the one before it (`DbCore` in `db/core.ts` first, `Db` here last), so a method's `this` and its types are
  * the plain class's, with no cast. A new query goes into the file of its feature and nowhere else.
  */
-export class Db extends OpsQueries {}
+export class Db extends CliUpdateQueries {}
 
 /**
  * Tasks still marked running / waiting when a daemon starts belonged to a daemon that is gone: no process can

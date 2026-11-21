@@ -1,27 +1,35 @@
 # CLI update
 
-`scripts/update-clis.ts` keeps the host's `claude` and `codex` CLIs on npm's latest, checks that the new one still works through Switchboard's adapter, and puts the old one back when it does not. It runs first in the daily `check-models` schedule ([check-models.md](check-models.md)), so check-models always reads the updated version.
+The daemon keeps the host's `claude` and `codex` CLIs current: it takes a new version only from the distributor the installers use, checks what it fetched, places it beside the version in use, tries it, and moves the link only when no Task is running. Every decision is a row of `cli_updates`, read with `GET /api/runners/updates`, and the version before can be put back (`POST /api/runners/:id/rollback`).
 
-## What it does, per runner
+## Where versions come from
 
-1. Reads the installed version (`<bin> --version`) and npm's `latest` (`PACKAGES` and `hostVersions` of `scripts/check-models.ts`; one GET, no key). Same or newer installed: `<runner> version: <v>（最新）`, nothing else.
-2. Older: remembers where the CLI's symlink points (`LINKS`: claude `~/.local/bin/claude` → `versions/<v>`, codex `~/.codex/packages/standalone/current` → `releases/<v>-<triple>`), then runs the CLI's own `update` (5 min limit). Each `update` installs the new version beside the old and flips that symlink; the old files stay.
-3. Re-reads `--version` (it must have moved), then runs one turn through the adapter: `runSuggestionTurn` (the same path as the routing judge), read-only mode, the CLI's default model, an empty temporary directory, 180 s. Any non-empty answer passes; the content is not looked at.
-4. Passes: `<runner> updated: <old> → <new>（確認 ok）`. Fails at any step: the symlink is flipped back to the remembered target (a temporary link in the same directory, then rename — the path never disappears), `--version` is checked to be `<old>` again, and `<runner> rolled back: <new> → <old>（確認 失敗: <reason>）` is printed. If it cannot be put back: `<runner> 戻せなかった: …`.
-5. The turn stopped by the runner's usage limit (`isLimitText` of `packages/core/src/ratelimit.ts`) says nothing about the new version: it is rolled back the same way, printed as `<runner> rolled back: <new> → <old>（確認 できない: 使用上限で …）`, and counts as "cannot tell" (exit 2), so no request is filed. The next day tries again.
+- Claude Code: `https://downloads.claude.ai/claude-code-releases/latest` names the newest version; that version's `manifest.json` lists a sha256 per platform and is signed (`manifest.json.sig`, GPG). The signing key's fingerprint is the one Anthropic's setup page prints (`CLAUDE_RELEASE_KEY_FINGERPRINT` in `packages/core/src/cli-update-source.ts`).
+- Codex: the redirect of `https://github.com/openai/codex/releases/latest` names the newest release; its JSON gives the package's digest, and the release carries `codex-package_SHA256SUMS` and a sigstore bundle per package. The bundle is checked with `cosign verify-blob`, holding the certificate to the release workflow at that version's tag. `cosign` is pinned in `aws/host/devtools.sh`.
+- Every download, and every redirect on the way, must stay on those hosts (`OFFICIAL_HOSTS`). A version the distributor no longer offers, or one older than its newest, is withdrawn.
 
-CLI missing, registry unreadable, or the symlink unreadable: `<runner> latest / version: 分からない（…）`; nothing is changed.
+The distributors are fixed, not a setting: a setting that moved them would move the line this guards.
 
-Exit 0 = up to date or updated and checked / 1 = rolled back, could not roll back, or `update` failed / 2 = cannot tell (including a check stopped by the usage limit).
+## When, and what is checked
 
-## Where the result is read
+`checkCliUpdates` (`packages/core/src/server/cli-update.ts`) runs every `Settings.cliUpdate.checkMinutes`, and once shortly after the daemon starts. It first reads only the newest version's name; only when that is newer than the version in use does it read the release, wait until it has been out `waitHours`, download it, and check it:
 
-The schedule's Task (scheduled list in the schedules view → its conversation) keeps the printed lines. On exit 1, `--file-request` files a request Issue titled `CLI 更新の失敗: <runner> <old> → <new> / …` through `scripts/file-request.ts`, with the `## 要望` and `## 出典` sections the filing entry requires (`## 出典` starts with `- 誰の言葉: 定期の検査`); the same failure has the same title, so an open request is not filed twice.
+1. Distributor: every hop on an official host, else `not-official`.
+2. Checksum: the file's sha256 is the published one, else `mismatch`. A published checksum that is not a sha256 is `mismatch`, not "none".
+3. Signature: GPG for Claude, cosign for Codex, else `mismatch`. No checksum or no signature published: `unsigned`, unless `Settings.cliUpdate.missingSignature` is `allow`.
+4. Placing: the file goes where the installer puts versions (`~/.local/share/claude/versions/<v>`, `~/.codex/packages/standalone/releases/<v>-<target>`). Files already there under that name are run only when they are the checked bytes; the version kept to go back to is never replaced.
+5. Trying: `--version` must name the version, and with `Settings.cliUpdate.smoke` at `turn` one read-only turn must come back with no error. A turn stopped by the usage limit records `untested` and is tried again later.
 
-## Decisions
+A version that fails is recorded as `refused` with the reason, once per version and settings, and is not fetched again until a setting changes. A version that passes waits for no Task to run (the same count and signals as promotion), and is checked again right before the link moves: the settings, the wait and the distributor must still say yes.
 
-- Running Tasks keep the files they started with; only Tasks started later use the new CLI. Replacing a running Task's CLI is out of scope.
-- No state is kept for a rolled-back version. The next day it is tried again (update → fail → roll back) and the open request stands, until the adapter is fixed or a newer version passes.
-- Old versions are not cleaned up here: they are the rollback targets, and each CLI's `update` owns them.
-- Each run costs one flat-rate turn per outdated CLI; an up-to-date host costs none.
-- The model list and price table are not updated here: a new model in the updated CLI shows up as `unseen` in check-models as before.
+## Moving the link, and going back
+
+The link (`~/.local/bin/claude`, `~/.codex/packages/standalone/current`) is moved by a temporary link and a rename, so the path never disappears. Through the moved link `--version` is read again; when it does not answer as the version, the link goes back at once. Running Tasks keep the files they started with; only Tasks started later use the new CLI.
+
+Two versions are kept: the one in use and the one a rollback goes to. The rollback target is the version installed here before the one in use, leaving out any version a person went back from. A rollback (`POST /api/runners/:id/rollback`) waits, like an install, until no Task runs. A version a person went back from is not brought in again by itself; a newer one is.
+
+A host without the installers' link, a candidate daemon and a work machine change nothing.
+
+## What this does not guard
+
+A version the distributor itself publishes and signs with bad intent passes; `waitHours` only gives time to notice. A Task runs as the same OS user and can run an installer itself, outside these checks.

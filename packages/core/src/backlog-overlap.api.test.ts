@@ -316,7 +316,7 @@ describe("overlap turn", () => {
     const w = world();
     try {
       const open = judgeAll(w, { xOpen: true });
-      expect(open.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(open.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"], yieldsTo: [1] }]);
       const closed = judgeAll(w, { xOpen: false });
       expect(closed.of(2)).toBeNull();
       expect(closed.of(3)).toEqual(turnHit);
@@ -337,6 +337,68 @@ describe("overlap turn", () => {
       expect(judgeAll(w, { xOpen: false, comments: { 2: [mark(releaseBody("重なり", [90], true), 0), mark(releaseBody("完了"), 5)] } }).of(3)).toBeNull();
       w.issues.set(21, { ...w.issues.get(21)!, body: "触る場所: `src/p.ts`" });
       expect(judgeAll(w, { xOpen: false }).turns).toEqual([]);
+    } finally {
+      w.done();
+    }
+  });
+
+  test("a PBI that cannot start for an earlier place holds no place; it gets the place back with the same since once it can", () => {
+    // P (`#2`) and Q (`#3`) yielded to merged PRs. Q names P's path too, so while P holds its place Q cannot start; R (`#4`) names what Q's place would hold
+    const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: { 31: "src/a.ts src/q.ts" }, 4: { 41: "src/q.ts" } });
+    try {
+      const pulls = [w.pr(90, [], ["src/a.ts"], { state: "MERGED" }), w.pr(91, [], ["src/q.ts"], { state: "MERGED" })];
+      const comments = { 2: [mark(releaseBody("重なり", [90], true), 0)], 3: [mark(releaseBody("重なり", [91], true), 5)] };
+      const run = (pClosed: boolean) => {
+        const items = [...(pClosed ? [] : [item({ number: 2, stage: "ready" })]), item({ number: 3, stage: "ready" }), item({ number: 4, stage: "ready" })];
+        const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [31]], [4, [41]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n as 2 | 3] ?? [] });
+        return { turns, of: (n: number) => items.find((i) => i.number === n)?.overlap ?? null };
+      };
+      const first = run(false);
+      expect(first.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(first.of(2)).toBeNull();
+      expect(first.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+      // Q holds no place: R is not held back by it
+      expect(first.of(4)).toBeNull();
+      // P is closed: Q starts, and its place is back with the same since, so R waits for it
+      const closed = run(true);
+      expect(closed.turns).toEqual([{ pbi: 3, since: at(5), task: 31, paths: ["src/q.ts"] }]);
+      expect(closed.of(3)).toBeNull();
+      expect(closed.of(4)).toEqual({ hits: [{ ref: "Task #31", path: "src/q.ts", working: false, turn: 3 }], unknown: null });
+    } finally {
+      w.done();
+    }
+  });
+
+  // P (`#2`, Task 21 on src/a.ts) waits for PR 90 that closes Task 31 of Y (`#3`); Y's other Task 32 names src/a.ts too
+  test("a place does not hold back the PBI whose open PR it waits for", () => {
+    const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: { 31: "src/b.ts", 32: "src/a.ts" } });
+    try {
+      const run = (state: string) => {
+        const pulls = [w.pr(90, [31], ["src/a.ts"], { state })];
+        const items = [item({ number: 2, stage: "ready" }), item({ number: 3, stage: "ready" })];
+        const comments: Record<number, { body: string; createdAt: string }[]> = { 2: [mark(releaseBody("重なり", [90], true), 0)] };
+        const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [32]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [] });
+        return { turns, of: (n: number) => items.find((i) => i.number === n)?.overlap ?? null };
+      };
+      const open = run("OPEN");
+      expect(open.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"], yieldsTo: [3] }]);
+      expect(open.of(3)).toBeNull();
+      // P itself is still held by the open PR it waits for
+      expect(open.of(2)?.hits.some((h) => h.ref === "PR #90")).toBe(true);
+    } finally {
+      w.done();
+    }
+  });
+
+  test("a place holds back the PBI once what it waited for is closed", () => {
+    const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: { 31: "src/b.ts", 32: "src/a.ts" } });
+    try {
+      const pulls = [w.pr(90, [31], ["src/a.ts"], { state: "MERGED" })];
+      const items = [item({ number: 2, stage: "ready" }), item({ number: 3, stage: "ready" })];
+      const comments: Record<number, { body: string; createdAt: string }[]> = { 2: [mark(releaseBody("重なり", [90], true), 0)] };
+      const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [32]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [] });
+      expect(turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(items[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
     } finally {
       w.done();
     }

@@ -3,7 +3,7 @@ import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingAp
 import { api } from "../api/index.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
-import { summarize } from "../approvals.ts";
+import { mcpHintLabel, summarize } from "../approvals.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
@@ -439,6 +439,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
       <button className="ghost link t" onClick={() => props.onOpenTask(a.taskId)}>
         {a.taskTitle}
       </button>
+      {mcpHintLabel(a.mcpHint) && <span className={"mcp-mark mcp-" + a.mcpHint} title={t(tm.mcpHintNote)}>{mcpHintLabel(a.mcpHint)}</span>}
       <pre className="approval-detail">{summarize(a)}</pre>
       {/* one tap, before the facts: on a phone the buttons stay in the first screenful */}
       {buttons && <div className="approval-actions">

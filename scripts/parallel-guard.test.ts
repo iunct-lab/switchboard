@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, waitConditions, waitsOnlyForCheck, type Work } from "./parallel-guard";
+import { afterTime, appBoard, claim, ghBoard, ghMaterial, holder, judge, lastClaim, overlap, readOthers, release, releaseArgs, releaseBody, STALE_HOURS, storedMaterial, turnsAhead, waitConditions, waitsOnlyForCheck, type Work } from "./parallel-guard";
 import { linkedIssues } from "./task-paths";
 import { pathsIn } from "../ops-kit/src/task-paths";
 import type { StoredRecords } from "../ops-kit/src/backlog-client";
@@ -1030,6 +1030,14 @@ describe("parallel-guard overlap turn", () => {
     expect((await run(r, 21, true)).v.verdict).toBe("go");
     // no place kept: as before
     expect((await run(records([]), 31, true)).v.verdict).toBe("go");
+  });
+
+  test("turnsAhead leaves out a place that yields to the PBI", async () => {
+    const turn = { ...first, yieldsTo: [30] };
+    expect(turnsAhead([turn], 30)).toEqual([]);
+    expect(turnsAhead([turn], 40).map((w) => w.turn)).toEqual([20]);
+    expect(turnsAhead([turn], null).map((w) => w.turn)).toEqual([20]);
+    expect((await run(records([turn]), 31, true)).v.verdict).toBe("go");
   });
 
   test("of two PBIs that both yielded, the earlier goes and the later yields", async () => {

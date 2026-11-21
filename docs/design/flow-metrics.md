@@ -60,10 +60,11 @@ W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 3
 ```
 
 - It reads the PBIs (`type:pbi`) closed in the period from the app's stored values (`readRecords`, the same as `ops-kit lint`; it runs only inside an app Task and only when `BACKLOG_URL` is set; with none, unreachable, or before the import, it prints the reason and exits 2). Merged PRs are read from GitHub. The repository to read PRs from is `--repo`; if none, the backlog's repository; for an app-only backlog, the cwd's `origin` (the same `prRepoOf` as the screen; with none of these, it reads no PRs and the PR stages are unknown). The workspace whose stored values are read is chosen the same way as `ops-kit lint` (`--repo` if given, otherwise `GH_REPO`, then `BACKLOG_WORKSPACE` (an app-only backlog), then `origin`)
-- There are 4 tables. The first is "median / p90 / count" per stage (unknown ones are not counted), plus the number of PBIs closed in the period, the sum of Story Points and the stage with the largest median. The second is, per PBI, "each stage / waiting for a reply / review rounds / Tasks / cost". `--json` holds `stages` (p50 / p90 / count per stage), `pbis`, `cutPbis` and others
+- There are 5 tables. The first is "median / p90 / count" per stage (unknown ones are not counted), plus the number of PBIs closed in the period, the sum of Story Points and the stage with the largest median. The second is, per PBI, "each stage / waiting for a reply / review rounds / Tasks / cost". `--json` holds `stages` (p50 / p90 / count per stage), `pbis`, `cutPbis` and others
 - **Switchboard's Tasks**: from the DB (`switchboard.db` in `SWITCHBOARD_HOME`, read-only), among the Tasks of the workspace whose stored values were read, it counts those that are process Tasks (`stage_issue` is the number of a PBI or a Task) or whose title begins with `#<the number of a PBI or a Task> `. Count, running time (from creation to the last event, not counting trailing `status` events such as the container cleanup note after `done`; the same as `routingLog`) and cost (the total of the ledger). Issue numbers overlap across repositories, so it narrows by workspace. When there is no DB, the Task columns are not printed. For each PBI it also counts how many times an implementation (`stage_action` is `complete`; a resume counts once) was launched among the process Tasks with that PBI number (`pbis[].tasks.implementLaunches` in `--json`), and prints 2 lines after the table: `実装を 3 回以上起動した PBI: <n>/<number of PBIs whose Tasks could be read>（<%>）` (`不明` when no PBI could be read) and `段 wait の中央値`. These are the numbers for seeing whether the improvement to the wait (resuming implementation once the other PBI's merge is in) worked
 - The 3rd table is, per week, `PBI 起票 / PBI 閉鎖 / 要望 起票 / 要望 閉鎖 / 純増 / 先送り Task / そこからの起票` ("Backlog net growth and deferrals" above). When there is no DB, the two deferral columns are `-`. `weeks` in `--json`
 - The 4th table is the actuals per Story Points: `SP / 件数 / Task の数 / 費用 / 稼働時間` (`actualsByStoryPoints`; smaller SP first; PBIs without SP are not included). Task count, cost and running time are p50 (p25 to p75) (p25 and p75 are nearest-rank). Task count = the number of the PBI's Task Issues (sub-issues) (`pbis[].taskIssues`; if the list was cut it shows fewer; Tasks closed after being withdrawn also count), cost and running time = the total of Switchboard's Tasks (`tasks` above); a PBI whose DB cannot be read is not included in cost and running time. `bySp` in `--json`. It is not shown on `GET /api/flow` or on the screen
+- The 5th is the table of "Review rounds" below for the same `--days` and `--repo`, followed by one line `見直しの候補: <rule>（<counts>）` per rule that needs a second look (`見直しの候補: なし` when none). A rule is named when at least 3 PRs went through it in the period, the median of its rounds per PR is at least 2, and its fixes per round are under 1 (fixes come only from the `## レビュー対応` triage tables, so a rule whose PRs post no table counts 0 fixes and can be named for that alone; `CANDIDATE_MIN_PRS`, `CANDIDATE_MIN_ROUNDS` and `CANDIDATE_MAX_FIXES_PER_ROUND` in `scripts/review-rounds.ts`; constants, not settings). The line only names it: whether to change the rule is a person's call over the whole table, and nothing is filed from it. When the table cannot be read (the REST budget is low, `gh` fails, no GitHub repository) one line `レビューと再チェック: 読めなかった（<reason>）` is printed instead and the exit code is not changed. `reviews: { rows, candidates }` in `--json` (`null` when not read); the keys above are unchanged
 - To get the table for your own repository, run `bun scripts/flow-report.ts --days 30` inside an app Task that looks at that clone, and it comes out first
 - How to read it is in "How to read the numbers" below
 
@@ -88,15 +89,49 @@ At the very bottom of the Backlog screen there is a section `流れ（直近 30 
 
 ## Review rounds
 
-`bun scripts/review-rounds.ts [--days 30] [--repo <owner/name>] [--json <file>]` prints one tab-separated row per rule: each recheck kind of the merge gate (the kinds only a user's answer lifts have no row, since no recheck runs for them), `review` (the main review route) and `direct` (merged with no main review). The PRs are the merged PRs of the period that `scripts/merge-audit.ts` reads, and the counting is that script's (`tally`, `auditRows`); nothing is counted a second way. Exit 0 = printed, 2 = could not read or bad arguments.
+`bun scripts/review-rounds.ts [--days 30] [--repo <owner/name>] [--json <file>] [--pages-per-day 14]` prints one tab-separated row per rule: each recheck kind of the merge gate (the kinds only a user's answer lifts have no row, since no recheck runs for them), `review` (the main review route) and `direct` (merged with no main review). Nothing is stored; every call counts from the PR comments. Exit 0 = printed, 1 = the REST budget is too low to read (nothing is read), 2 = could not read or bad arguments. `--json` holds all rows, each with its `afterMerge` and `rounds` parts (`null` when the rule has none).
 
-The columns sit under the group `拾った問題` (problems caught). These columns are what is known after the merge:
+The columns are in two groups.
+
+**`拾った問題` (problems caught)** has what is known after the merge and what the reviews found:
 
 - **`自動マージ`** (recheck-kind rows only): PRs merged with that kind lifted by a recheck of the merged head and no user answer
 - **`戻された`** (same rows): of those, the PRs a revert on main took back
 - **`監査の抜き取り` / `監査の finding` / `finding の率`**: PRs whose latest `[post-audit]` mark in the period exists, and those it found something in. For a recheck kind the PRs are the auto-merged ones of that kind; for `review` and `direct` they are the PRs of that route. A rule with nothing sampled shows a rate of `-`
+- **`blocker` / `should-fix` / `nit` / `question`**: the findings of the rounds of the period, by severity
+- **`修正` / `Issue 化` / `対処不要` / `回答`**: what the triage summaries of the period say became of them
 
-For a recheck kind only the PRs merged in the period count, while `review` and `direct` count every PR audited in the period (this is how `merge-audit` counts each). A high rate in a rule with few sampled PRs is a clue, not a verdict (see "How to read the numbers").
+For a recheck kind the after-merge PRs are only those merged in the period, while `review` and `direct` count every PR audited in the period (this is how `merge-audit` counts each); the counting is that script's (`tally`, `auditRows`) and is not done a second way.
+
+**`掛かった往復` (rounds it took)**:
+
+- **`PR`**: PRs with a round of the rule in the period. **`往復の中央値` / `往復の最大`**: the rounds per such PR
+- **`同じ場所への再指摘`**: findings of the 2nd round or later on a `path` that an earlier round of the same PR and rule already named
+- **`合格までの分の中央値`**: minutes from the first comment of the PR's first round to the pass. For a recheck, the pass is the first `[recheck] <kind> pass` mark after that; a PR with none yet is left out. For `review`, it is the summary of the last round
+
+A rule with no rounds in the period shows `0` for the round counts and `-` for the medians. The triage columns (`修正` and the others) count the triage tables posted in the period on their own, so a round summarized before the period and triaged inside it adds to them while its rule shows `PR 0`. The time until the pass also ends inside the period: for a recheck, a pass mark after its end is not used and such a PR has no time in that period; for `review`, the last summary before its end closes the time.
+
+### How a round is counted
+
+- A round is closed by a summary comment whose first line is `[<runner>] review` or `[<runner>] recheck <kinds>`; a recheck of several kinds is one round of each kind. A word that is not a kind of the merge gate is not a kind
+- A finding is a comment whose first line is `` [<runner>] - [blocker|should-fix|nit|question] `<path>:<line>` `` , either a general comment or the top of an inline thread (replies are not findings). It goes to the first summary of the same runner at or after its time; a finding with no summary yet is not counted. Because a recheck of several kinds posts one summary and its findings are not told apart by kind, each kind's round counts them all
+- Only comments by `MARK_AUTHORS` count, as in the merge gate. The runner's reply to a review and the fixes are not read, only the triage table of `## レビュー対応` (one row per reviewer cell: `claude` and `claude（修正の見直し…）` are `review`, `codex（recheck responsibility、2 回目）` is that kind)
+- The period is cut by the time of the summary (and of the triage summary). The round number and the repeats count from the PR's first round that was read, so a PR that began before the period is counted from where it began
+- The findings are not judged: whether one was a real problem is not decided here, only the table and the marks are counted
+
+### Limits
+
+- The wait before the first comment is not included: when the review was asked is not on the PR, so the time runs from the first comment of the first round (its first finding, or its summary), and the time the reviewer took before that is not measured. The time is the median over the PRs, to a tenth of a minute
+- A finding counts only with a line (`` `path:line` ``), and `review` is a summary merge-gate counts as the main review (Codex or Claude); a DAK review summary and a `dak` triage cell are not counted as `review`
+- Only the comments from 7 days before the period are read (`LOOKBACK_DAYS`; `since` is by update). For a PR whose rounds began earlier than that, the round number, the repeats on a path and the time until the pass start from its first round that was read
+- A recheck that posts no review summary (`migration`, which runs tests, and `security:lockfile`, which runs the install and the license check) has no rounds: its row shows its after-merge side only
+- The time until the pass ends at the last summary or the first pass mark before the end of the period
+- A recheck's findings are not told apart by kind when it ran several kinds at once (above)
+- A high number in a rule with few PRs is a clue, not a verdict (see "How to read the numbers")
+
+### Load
+
+It reads the comment streams of the whole repository since the period, not one call per PR: `issues/comments` and `pulls/comments` with `since` and `--paginate`, with `merge-audit`'s reading of the marks beside them. The check below assumes 14 REST calls (pages of 100 comments) per day read (`PAGES_PER_DAY`; the period and the 7 days before it); the real count grows with the comments of the repository, and `--pages-per-day` sets the estimate for a repository with more or fewer comments. It is meant for a manual run and a periodic report. `merge-audit`'s reading of the after-merge side is not counted by the check below: its search for the merged PRs, its scan of the comments for marks, one call per candidate PR for its comments (merged in the period, or carrying a mark) and one more per PR with a mark (the PR itself). Before reading it checks the REST `core` budget (`gh api rate_limit`) and, when fewer than twice the expected calls of the comment streams remain, reads nothing and exits 1; a run that the after-merge side takes over the budget stops partway and exits 2.
 
 ## How to read the numbers
 

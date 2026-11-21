@@ -37,7 +37,7 @@ export function requestEvalTarget(db: Db, workspaceId: string | null, raw: strin
 }
 
 /** The routes under /api/backlog. */
-export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
+export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "storedBacklogReleased" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
   return {
     /**
      * Open requests and PBIs of every registered workspace's repository and the stage each is at, as the
@@ -172,12 +172,16 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
       },
     },
     "/api/backlog/records": {
-      GET: (req) => {
+      GET: async (req) => {
         const ws = sc.db.getWorkspace(new URL(req.url).searchParams.get("workspaceId") ?? "");
         if (!ws) return sc.bad("workspace not found", 404);
         const records = readStoredRecords(sc.db, ws);
-        // the places the app's own overlap judgement counts: the guard in a Task yields to the same ones
-        return records ? sc.json({ ...records, turns: sc.storedBacklog(ws).turns ?? [] }) : sc.bad("まだ GitHub から取り込んでいません", 409);
+        // the places the app's own overlap judgement counts: the guard in a Task yields to the same ones. Read with the
+        // release's answers as the start reads them (storedBacklogReleased): without them a PBI waiting on a （リリース）
+        // prerequisite holds no place, a place it kept out comes back, and the guard stops what the app just started
+        // `unheld`: the PBIs whose claim the app does not count as work (a stage Task that ended left it); the guard counts the same
+        const read = records ? await sc.storedBacklogReleased(ws) : null;
+        return records ? sc.json({ ...records, turns: read?.turns ?? [], unheld: read?.unheld ?? [] }) : sc.bad("まだ GitHub から取り込んでいません", 409);
       },
     },
     /**

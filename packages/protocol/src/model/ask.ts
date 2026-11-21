@@ -16,6 +16,8 @@ export const PendingApproval = z.object({
   tool: z.string(),
   input: z.unknown().optional(),
   detail: z.string(),
+  /** The MCP server's own claim about the tool, copied from the ask (`permission.ask`, same values); absent for every other approval. */
+  mcpHint: z.enum(["read-only", "destructive", "write", "unknown"]).optional(),
   askedAt: z.number(),
 });
 export type PendingApproval = z.infer<typeof PendingApproval>;

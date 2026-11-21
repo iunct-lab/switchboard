@@ -73,6 +73,7 @@ import { setupWorkspaceMcp } from "./server/mcp.ts";
 import { setupBacklog } from "./server/backlog-read.ts";
 import { setupAsks } from "./server/asks.ts";
 import { setupPromotion, setupPromotionCheck } from "./server/promotion.ts";
+import { setupCliUpdate } from "./server/cli-update.ts";
 import { setupScheduler } from "./server/backlog-next.ts";
 import { setupQueue } from "./server/queue.ts";
 import { setupUplink } from "./server/lease.ts";
@@ -175,6 +176,8 @@ export interface StartServerOptions {
   promotionAskedPollMs?: number;
   /** How soon the ask at the first moment no Task would be cut is tried again when it could not decide; tests shorten it. Unset = 10 s. */
   promotionIdleRetryMs?: number;
+  /** The host CLIs' update: the distributors and the install steps it runs against (tests give a fake distributor and the home to put versions in) and how soon the first and each next read of the distributors comes. Unset = the real ones and `settings.cliUpdate.checkMinutes`. */
+  cliUpdate?: { source?: import("./cli-update-source.ts").CliSourceDeps; install?: Partial<import("./cli-update-install.ts").InstallDeps>; checkMs?: number };
   /** Overrides how the tag CI's result of a tag is read (the tag's Release, through gh); tests answer by hand. */
   tagCi?: (tag: string, sha: string) => Promise<"pass" | "fail" | "none">;
   /** How often the daemon looks for a depends stop whose date has passed (`resumeDueAfters`); tests shorten it. Unset = AFTER_CHECK_MS. */
@@ -216,6 +219,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
   setupSockets(sc);
   setupUplink(sc);
   setupPromotionCheck(sc);
+  setupCliUpdate(sc);
   setupTimers(sc);
   setupTurnEndHooks(sc);
 

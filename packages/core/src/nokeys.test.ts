@@ -39,8 +39,8 @@ describe("no keys", () => {
 
   test("only these files build a path into ~/.claude or ~/.codex, and only for what they say", () => {
     // config.ts: ~/.claude/projects (terminal history) and ~/.codex (its sessions/, for the history export).
-    // adapters: settings.json / config.toml, the CLI's own default model. materializer.ts: a repository's .claude/commands. config.ts / claude-cloud.ts name a repository's .claude/worktrees. runner-config.ts: a foreign repository's own config (.codex, relative to the clone) (the continuation worktree and its info/exclude line).
-    const allowed = ["packages/adapters/claude/src/index.ts", "packages/adapters/codex/src/index.ts", "packages/core/src/claude-cloud.ts", "packages/core/src/config.ts", "packages/core/src/materializer.ts", "packages/core/src/runner-config.ts"];
+    // adapters: settings.json / config.toml, the CLI's own default model. materializer.ts: a repository's .claude/commands. config.ts / claude-cloud.ts name a repository's .claude/worktrees. runner-config.ts: a foreign repository's own config (.codex, relative to the clone) (the continuation worktree and its info/exclude line). cli-update-install.ts: where the installers put a version of the CLI (the files it runs, no credentials).
+    const allowed = ["packages/adapters/claude/src/index.ts", "packages/adapters/codex/src/index.ts", "packages/core/src/claude-cloud.ts", "packages/core/src/cli-update-install.ts", "packages/core/src/config.ts", "packages/core/src/materializer.ts", "packages/core/src/runner-config.ts"];
     // A quoted ".claude" segment or a path continuing into it (`${home}/.claude`). A prompt naming the repository's own
     // `.claude/skills/…` (backlog-prompt.ts, feedback.ts) is text for the agent. Strings the UI shows are text too.
     const users = SOURCES.filter((f) => /["'`]\.(?:claude|codex)["'`]|[/}]\.(?:claude|codex)\b/.test(code(f)));

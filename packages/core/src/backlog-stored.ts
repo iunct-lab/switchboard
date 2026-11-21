@@ -14,7 +14,8 @@ import { readdirSync } from "node:fs";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { type BacklogWorkspace, localBacklogSource, syncsGithub, changesApart } from "./backlog-gh.ts";
 import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
-import { withOverlap } from "./backlog-overlap.ts";
+import { holder } from "../../../scripts/parallel-guard.ts";
+import { sessionOn, withOverlap } from "./backlog-overlap.ts";
 import { type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
 import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
@@ -127,7 +128,7 @@ export function storedProceedRefusal(db: Db, ws: Pick<BacklogWorkspace, "id" | "
  * the last complete import was stored. A workspace never imported answers `fetchedAt: null` and no items — never an
  * empty list as if read.
  */
-export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; importFailed?: boolean; now?: number; active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean } = {}): { fetchedAt: number | null; items: BacklogItem[]; changes: Backlog["changes"]; turns?: Turn[]; proceeding?: ProceedingQuestion[] } {
+export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; importFailed?: boolean; now?: number; active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean } = {}): { fetchedAt: number | null; items: BacklogItem[]; changes: Backlog["changes"]; turns?: Turn[]; unheld?: number[]; proceeding?: ProceedingQuestion[] } {
   const source = db.getWorkspaceBacklogSource(ws.id);
   const fetchedAt = source ? db.getBacklogRepository(source)?.lastSuccessfulSync ?? null : null;
   if (!source || fetchedAt === null) return { fetchedAt: null, items: [], changes: [] };
@@ -206,14 +207,19 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       const t = issues.get(m);
       return t ? [{ number: m, state: t.state, labels: { nodes: labelsOf(t).map((name) => ({ name })) }, comments: { nodes: commentsOf(m) } }] : [];
     });
-  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now);
+  // a claim left by a stage Task that ended is no session at work (`sessionOn`), unless the PBI's Task only waits for a planned resume
+  const ended = (n: number, at: number) => !opts.parked?.(n) && db.endedStageRanAt(ws.id, n, at);
+  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now, sessionOn({ active: opts.active, commentsOf, unread, ended }));
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
-  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
+  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
+  // the PBIs with a claim the app does not count as work: the guard in a Task counts the same
+  const worked = sessionOn({ active: opts.active, commentsOf, unread, ended });
+  const unheld = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:pbi")).map((t) => t.number).filter((n) => !worked(n) && holder(commentsOf(n).map((c, k) => ({ id: k, body: c.body }))) !== null);
   // a workspace whose Issues are a service's keeps its changes apart (changeSourceOf)
   const apart = changesApart(source);
   const changeIssues = apart ? shownRecords(db, localBacklogSource(ws.id)).flatMap((r) => (r.objectKind === "issue" && r.remote ? [r.remote as BacklogIssueData] : [])) : issues.values();
-  return { fetchedAt, items, changes: changesOf(ws.id, changeIssues, apart), turns, proceeding: proceedingOf(ws, issues, commentsOf, now, refuses) };
+  return { fetchedAt, items, changes: changesOf(ws.id, changeIssues, apart), turns, unheld, proceeding: proceedingOf(ws, issues, commentsOf, now, refuses) };
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { Ask, AskBatch, AskBatchResult, DeviceAuthView, StopRecord, Task } from "@switchboard/protocol";
-import { IN_FLIGHT, TURN_DONE } from "./task-status.ts";
+import { IN_FLIGHT, TERMINAL } from "./task-status.ts";
 import { stopKey } from "./stops.ts";
 
 /**
@@ -94,7 +94,8 @@ type Answered = { status: number; body: AskBatchResult | { error: string } };
 
 /**
  * The answers to a batch. sso: one click sends the batch's oldest Task on to log in, and once its turn ends
- * without a new login stop the rest are sent on — the wait for that is `pendingSso`, memory only (a restart forgets it;
+ * without a new login stop the rest are sent on. A background process left (`device-auth` runs behind the turn until
+ * the person has logged in) is still the login going on, so the wait covers it too — the wait is `pendingSso`, memory only (a restart forgets it;
  * the rest stay in the batch, and one more click starts again). deploy: each Task the person chose is sent its approval
  * once; the others wait. Nothing is saved as a policy, and nothing is sent that the person did not press.
  */
@@ -114,7 +115,7 @@ export class BatchAnswers {
   private async answerNow(id: string, taskIds: string[] | undefined): Promise<Answered> {
     const batch = (await this.deps.batches()).find((b) => b.id === id);
     if (id === "batch:sso") {
-      if (this.pendingSso) return { status: 200, body: { sent: [], already: true, batch: batch ?? null } };
+      if (this.pendingSso && !this.dropIfGone()) return { status: 200, body: { sent: [], already: true, batch: batch ?? null } };
       if (!batch || batch.asks.length === 0) return { status: 409, body: { error: "SSO のログイン待ちの Task はもうありません" } };
       const [first, ...rest] = batch.asks.map((a) => a.taskId);
       const p = (this.pendingSso = { first: first!, rest, at: Date.now() });
@@ -140,30 +141,68 @@ export class BatchAnswers {
   }
 
   /**
-   * A Task's turn ended: when it is the one sent to log in, the wait is over. It went on (done, no login stop since it
-   * was sent) → the rest still in the batch are sent on; still stopped on the login, or failed → nothing (they stay).
+   * A Task's turn ended, or its last background process is gone: when it is the one sent to log in and it is finished
+   * (done, error, aborted), the wait is over. It went on (done, no login stop since it was sent) → the rest still in the
+   * batch are sent on; still stopped on the login, or failed → nothing (they stay). While background processes are left
+   * (`background`, or `running` again for their notification) the wait stays: `device-auth` runs behind the turn until the
+   * person has logged in, and the rest are not sent on before; the empty background calls this again. `stopped` = the
+   * login did not finish, whatever the Task does next: its background processes went with the runner (it exited, or was
+   * closed), or its turn ended failed (a notification may start the next turn before the judgment reads the status). The
+   * wait is over and nothing is sent (the rest stay in the batch).
    */
-  async turnEnded(taskId: string): Promise<string[]> {
+  async turnEnded(taskId: string, stopped = false): Promise<string[]> {
     const p = this.pendingSso;
     if (!p || p.first !== taskId) return [];
-    // the batch says who logs in until the rest are sent: the screen reads it again only while it does
-    try {
-      const status = this.deps.task(taskId)?.status;
-      if (!status || !TURN_DONE.has(status) || loginStopSince(this.deps.stopRecords(taskId), p.at)) return [];
-      const waiting = new Set((await this.deps.batches()).find((b) => b.id === "batch:sso")?.asks.map((a) => a.taskId) ?? []);
-      const sent: string[] = [];
-      for (const t of p.rest.filter((x) => waiting.has(x))) {
-        // one that fails to send stays in the batch; the others still go on
-        await this.deps.send(t, SSO_REST_TEXT).then(() => sent.push(t), () => {});
-      }
-      return sent;
-    } finally {
-      if (this.pendingSso === p) this.pendingSso = null;
+    if (stopped) {
+      this.pendingSso = null;
+      return [];
     }
+    // one judgment at a time, after the answers before it: a turn's end and an empty background that come together judge once
+    const run = this.queue.then(() => this.judgeLogin(p, taskId));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * The rest are read first; everything after is decided at once, against the state as it is then: the wait still the
+   * same (no lost background, no other judgment, no drop meanwhile), the Task finished (a background mark that came after
+   * its turn's end puts it back to `background`: the wait stays), and no login stop since it was sent. The wait is taken
+   * before the sends, so nothing else sends on from it.
+   */
+  private async judgeLogin(p: NonNullable<BatchAnswers["pendingSso"]>, taskId: string): Promise<string[]> {
+    const batches = await this.deps.batches();
+    if (this.pendingSso !== p) return [];
+    const status = this.deps.task(taskId)?.status;
+    if (status && !TERMINAL.has(status)) return [];
+    // the batch says who logs in until the rest are sent: the screen reads it again only while it does
+    this.pendingSso = null;
+    if (status !== "done" || loginStopSince(this.deps.stopRecords(taskId), p.at)) return [];
+    const waiting = new Set(batches.find((b) => b.id === "batch:sso")?.asks.map((a) => a.taskId) ?? []);
+    const sent: string[] = [];
+    for (const t of p.rest.filter((x) => waiting.has(x))) {
+      // one that fails to send stays in the batch; the others still go on
+      await this.deps.send(t, SSO_REST_TEXT).then(() => sent.push(t), () => {});
+    }
+    return sent;
+  }
+
+  /**
+   * The Task sent to log in was stopped (aborted, or failed) without a turn's end or an empty background telling this —
+   * an abort of its reply still queued for a slot, say: the wait is over, and the rest stay in the batch. true = dropped.
+   */
+  private dropIfGone(): boolean {
+    const p = this.pendingSso;
+    if (!p) return false;
+    // only a stop since it was sent: a Task that had failed before the click is the one being sent on, not one stopped
+    const t = this.deps.task(p.first);
+    if (t && ((t.status !== "aborted" && t.status !== "error") || t.statusAt < p.at)) return false;
+    this.pendingSso = null;
+    return true;
   }
 
   /** The batches with the SSO login going on: who logs in and its device code (kept while that Task's turn runs). */
   decorate(batches: AskBatch[]): AskBatch[] {
+    this.dropIfGone();
     const p = this.pendingSso;
     if (!p) return batches;
     const loggingIn = { taskId: p.first, title: this.deps.task(p.first)?.title ?? p.first };

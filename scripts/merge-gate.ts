@@ -6,7 +6,7 @@ import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { linkedIssues } from "./task-paths.ts";
 import { overlaps, scopeIn } from "../ops-kit/src/task-paths.ts";
-import { client, recordScopeStop, runBacklog, type Detail, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { client, runBacklog, type Detail, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../ops-kit/src/config.ts";
 import { mergeAnswerOf } from "../ops-kit/src/gh-guard.ts";
 import { LIMIT_FILES, limitsRaisedOf } from "./merge-gate-limits.ts";
@@ -472,9 +472,6 @@ function countsTowardSize(path: string): boolean {
   return !matches(DOCS, path);
 }
 
-/** The reason's words for a file no Task names (main reads the reasons for them). */
-const SCOPE_STOP = "の本文に名指しの無いファイル";
-
 /**
  * A PR's change to ops.config.json for the scope check: the paths it adds to and takes out of `publicSync.include` /
  * `publicSync.exclude`, and whether anything else in the file differs (`other`).
@@ -524,25 +521,48 @@ function companion(path: string, f: PrFacts, named: string[]): boolean {
 }
 
 /**
- * The Task-scope reason, or a note: that it could not be checked, or which files passed as companions. The files of
- * the PR no path of its Tasks covers and that are no `companion`, in the PR's order.
+ * What the Task scope says of a PR, never a reason to stop: `notes` (that the Tasks' paths could not be read, which
+ * files are outside what they name, which passed as companions), and the parts the review material is made of. The
+ * files of the PR no path of its Tasks covers and that are no `companion` are `outside`, in the PR's order, each with
+ * the sibling Tasks that name it.
  */
-function taskScope(f: PrFacts): { reason?: string; note?: string } {
-  if (!f.task) return {};
+function taskScope(f: PrFacts): { notes: string[]; tasks: string; outside: string[]; along: string[] } {
+  if (!f.task) return { notes: [], tasks: "", outside: [], along: [] };
   const { numbers, named, siblings } = f.task;
   const tasks = numbers.map((n) => `#${n}`).join(", ");
-  if (named.length === 0) return { note: `Task ${tasks} の本文からパスが読めない（範囲の検査をしていない）` };
+  if (named.length === 0) return { notes: [`Task ${tasks} の本文からパスが読めない（範囲の検査をしていない）`], tasks, outside: [], along: [] };
   const unnamed = f.files.map((x) => x.path).filter((p) => !named.some((q) => overlaps(p, q)));
   const along = unnamed.filter((p) => companion(p, f, named));
-  const outside = unnamed.filter((p) => !along.includes(p));
-  const note = along.length ? { note: `付いてくるファイル: ${along.join(", ")}` } : {};
-  if (outside.length === 0) return note;
+  const outsidePaths = unnamed.filter((p) => !along.includes(p));
   const owners = (p: string) => siblings.filter((s) => s.paths.some((q) => overlaps(p, q))).map((s) => s.number).sort((a, b) => a - b);
-  const listed = outside.map((p) => {
+  const outside = outsidePaths.map((p) => {
     const by = owners(p);
     return by.length > 0 ? `${p}（${by.map((n) => `Task #${n}`).join("、")} が名指し）` : p;
   });
-  return { reason: `Task ${tasks} ${SCOPE_STOP}: ${listed.join(", ")}`, ...note };
+  const notes = [
+    ...(outside.length ? [`Task ${tasks} の名指しの外: ${outside.join(", ")}`] : []),
+    ...(along.length ? [`付いてくるファイル: ${along.join(", ")}`] : []),
+  ];
+  return { notes, tasks, outside, along };
+}
+
+/**
+ * The material the main review gets of the Task scope: the files the Tasks do not name, for the reviewer to tell a
+ * change the Task's purpose needs from one mixed in from another Task. Empty when there is no Task, its paths could not
+ * be read, or every file is named or comes along.
+ */
+export function scopeMaterial(f: PrFacts): string {
+  const s = taskScope(f);
+  if (s.outside.length === 0) return "";
+  return [
+    "# Task の名指しの外のファイル",
+    "",
+    `Task ${s.tasks} の本文が名指ししていないファイル。ファイルごとに、Task の目的に要る変更か、別の Task の変更の混入かを見る。`,
+    "",
+    ...s.outside.map((p) => `- ${p}`),
+    ...(s.along.length ? ["", `付いてくるファイル（名指しは要らない）: ${s.along.join(", ")}`] : []),
+    "",
+  ].join("\n");
 }
 
 /** --allow-large lifts the large reasons only with a `[merge-answer] yes` of the head that names every kind left. */
@@ -620,7 +640,6 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   // for that answer. Not lifted by --allow-large or a [merge-answer]: it is answered where the change is shown (判断待ち)
   if (f.held?.pending) reasons.push(`[聞く] Switchboard の側の設定（workspace ${f.held.workspace}）に、利用者が確かめていない変更がある（キー: ${f.held.pending.keys.join(", ") || "不明"}）。アプリの判断待ちで確認するか断ってから判定し直す（--allow-large では外れない）`);
   const scope = taskScope(f);
-  if (scope.reason) reasons.push(scope.reason);
   if (f.checks.length === 0) reasons.push("CI のチェックが 1 つも無い");
   for (const c of f.checks) {
     if (c.conclusion !== "SUCCESS" && c.conclusion !== "SKIPPED") {
@@ -641,7 +660,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
-  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.note || f.held ? { notes: [...(scope.note ? [scope.note] : []), ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}) };
+  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}) };
 }
 
 /** The line a judgement names the settings it was made with: the workspace and the version the person confirmed. */
@@ -1191,15 +1210,6 @@ export function standsInFor(d: ChangeDetail, records: StoredRecords): number | u
   return records.pulls.filter((p) => p.state === "OPEN" && p.closes.some((n) => linked.has(n))).map((p) => p.number).sort((a, b) => a - b)[0];
 }
 
-/**
- * A stop for a file no Task names is kept by the app, as a PR's is: an edit of the Task's body that adds paths after
- * it then waits for the person's scope sentence (the kit's `backlog edit`). The place is the PR the change stands in for, else the change's number.
- */
-export async function noteScopeStop(facts: PrFacts, j: Judgement, records: StoredRecords, change: number, backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }): Promise<void> {
-  if (!facts.task || !j.reasons.some((r) => r.includes(SCOPE_STOP))) return;
-  await Promise.all(facts.task.numbers.map((issue) => recordScopeStop(backlog.env, records.repository, issue, facts.threadsUnread ?? change, backlog.fetch)));
-}
-
 /** GitLab's Developer: the access level whose notes count as marks (as MARK_AUTHORS on GitHub). */
 export const GITLAB_MARK_LEVEL = 30;
 /** GitLab is still working the MR's merge status out: nothing to judge by yet. */
@@ -1281,7 +1291,7 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   await run(["stack", "merge", String(n), "--rebase", "-y"], marked);
 }
 
-const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]";
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)";
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
 export async function main(args: string[], run: Run = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
@@ -1314,13 +1324,13 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
+  if (args.includes("--scope")) {
+    log(scopeMaterial(facts));
+    return 0;
+  }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") {
-    // a stop for a file no Task names: the app keeps it, so that the person's scope grant after it is told from one before
-    if (facts.task && j.reasons.some((r) => r.includes(SCOPE_STOP))) await Promise.all(facts.task.numbers.map((issue) => recordScopeStop(backlog.env, repo, issue, n, backlog.fetch)));
-    return 1;
-  }
+  if (j.verdict !== "merge") return 1;
   const mode = modes[0];
   if (!mode) return 0;
   try {
@@ -1339,7 +1349,7 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
 async function changeMain(args: string[], at: number, log: (s: string) => void, err: (s: string) => void, cwd: string, backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }): Promise<number> {
   const value = args[at + 1] ?? "";
   const rest = args.filter((_, i) => i !== at && i !== at + 1);
-  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--allow-large")) {
+  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--allow-large" && a !== "--scope")) {
     err(USAGE);
     return 2;
   }
@@ -1354,9 +1364,12 @@ async function changeMain(args: string[], at: number, log: (s: string) => void, 
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
+  if (args.includes("--scope")) {
+    log(scopeMaterial(facts));
+    return 0;
+  }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") await noteScopeStop(facts, j, records, Number(value), backlog);
   return j.verdict === "merge" ? 0 : 1;
 }
 
@@ -1372,6 +1385,10 @@ async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes:
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
+  }
+  if (args.includes("--scope")) {
+    log(scopeMaterial(facts));
+    return 0;
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));

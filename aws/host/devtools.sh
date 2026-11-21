@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # devtools — what a runner on the host needs to develop as on the Mac: Stacked PRs (gh-stack), the E2E scripts'
-# headless Chrome, a Python project's tests (uv and Python 3.11+, docker, gitleaks), an AWS SAM template's lint, sqlite3 for the skills.
+# headless Chrome, a Python project's tests (uv and Python 3.11+, docker, gitleaks), an AWS SAM template's lint, sqlite3 for the skills,
+# and cosign for the daemon's check of a new Codex CLI.
 # Run by bootstrap.sh as root after gh is logged in, with the same SB_HOST_USER / SB_HOST_HOME / SB_REPOS_DIR; running it
 # again skips what is there. Last it applies the owner's Claude settings patch, read first from private/ of the development
 # clone under SB_REPOS_DIR (unset: the clone "switchboard" under /), else from private/ of this clone. The user gets no
@@ -22,6 +23,10 @@ GITLEAKS_VERSION=8.30.1
 GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
 SAM_VERSION=1.172.1
 SAM_SHA256=fcfc7cd414a75cc17a00c81110b2955ab52b6fae1dd8b7415d637ca95ca931df
+# sigstore's verifier: the daemon checks the signature of a new Codex CLI with it (cli-update-source.ts). Pinned 2026-11-19
+# (the release's asset digest and cosign_checksums.txt agree)
+COSIGN_VERSION=3.1.4
+COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
 PLAYWRIGHT_VERSION=1.65.0
 PLAYWRIGHT_MCP_VERSION=0.0.85
 GH_STACK_VERSION=v0.3.0
@@ -63,6 +68,12 @@ bash "$HERE/node.sh"
   unzip -q "$DL/sam.zip" -d "$DL/sam"
   "$DL/sam/install" --install-dir /usr/local/aws-sam-cli --bin-dir /usr/local/bin --update
 }
+# a failed cosign download leaves the rest of the setup to run: without cosign the daemon only retries the Codex check
+# the verifier is the pinned one or none: a cosign already there with other bytes is replaced
+echo "$COSIGN_SHA256  /usr/local/bin/cosign" | sha256sum -c --quiet - 2>/dev/null || {
+  fetch "https://github.com/sigstore/cosign/releases/download/v$COSIGN_VERSION/cosign-linux-arm64" "$COSIGN_SHA256" "$DL/cosign" &&
+    install -m 755 "$DL/cosign" /usr/local/bin/cosign
+} || echo "devtools: cosign was not installed; the daemon cannot check a new Codex CLI until it is" >&2
 install -m 755 "$HERE/chromium.sh" /usr/local/bin/chromium
 install -m 755 "$HERE/docker.sh" /usr/local/bin/docker
 install -m 755 "$HERE/dockerd-up.sh" /usr/local/bin/dockerd-up

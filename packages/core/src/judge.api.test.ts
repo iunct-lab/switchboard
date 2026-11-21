@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, RunnerAdapter, RunnerId, Task } from "@switchboard/protocol";
+import type { AgentEvent, RunnerAdapter, RunnerId, StartOptions, Task } from "@switchboard/protocol";
 import { StopRecord } from "@switchboard/protocol";
 import { Database } from "bun:sqlite";
 import { loadConfig } from "./config.ts";
@@ -162,24 +162,83 @@ describe("automatic judgement", () => {
     }
   });
 
-  test("selfdev: a meta Task's turn that ended with a background process left (status background) runs the checks like a done one", async () => {
+  /** A meta checkout whose typecheck passes at once, and a daemon whose fake runner ends its turn with one background process left. */
+  const metaWithBackground = async (selfdevChecks: boolean) => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-selfdev-bg-"));
-    // the meta checkout: a typecheck that passes at once
     const repo = join(h, "repo");
     mkdirSync(repo);
     writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "repo", scripts: { typecheck: "true" } }));
     const { judge } = handJudge();
     const withBackground = [...ok.slice(0, -1), { t: "background", count: 1 } as AgentEvent, ok[ok.length - 1]!];
-    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_REPO_ROOT: repo, ...NO_HISTORY }), [fakeAdapter(withBackground, { lingers: true })], { port: 0, selfdevChecks: true, judge });
+    const emits: Array<(e: AgentEvent) => void> = [];
+    // ends the runner process as a crash would (its background process goes with it)
+    const exits: Array<(code: number) => void> = [];
+    const inner = fakeAdapter(withBackground, { lingers: true });
+    const adapter = {
+      ...inner,
+      start: (o: StartOptions, emit: (e: AgentEvent) => void) => {
+        emits.push(emit);
+        const session = inner.start(o, emit);
+        return { ...session, exited: Promise.race([session.exited, new Promise<number>((r) => exits.push(r))]) };
+      },
+    };
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_REPO_ROOT: repo, ...NO_HISTORY }), [adapter], { port: 0, selfdevChecks, dryRunRestart: true, judge });
     const b = `http://127.0.0.1:${c.server.port}`;
+    const meta = c.db.listWorkspaces().find((w) => w.kind === "meta")!;
+    const t = (await post(`${b}/api/tasks`, { cwd: repo, workspaceId: meta.id, title: "bg checked", prompt: "依頼文", runner: "claude" }).then(j)) as Task;
+    await waitFor(async () => c.db.getTask(t.id)!.status === "background");
+    const restart = () => post(`${b}/api/daemon/restart`, { taskId: t.id });
+    return { h, c, b, t, emits, exits, restart };
+  };
+
+  test("selfdev: a meta Task's turn that ended with a background process left (status background) does not run the checks until the process is gone", async () => {
+    const x = await metaWithBackground(true);
     try {
-      const meta = c.db.listWorkspaces().find((w) => w.kind === "meta")!;
-      const t = (await post(`${b}/api/tasks`, { cwd: repo, workspaceId: meta.id, title: "bg checked", prompt: "依頼文", runner: "claude" }).then(j)) as Task;
-      await waitFor(async () => c.db.getCheckRun(t.id) !== null);
-      expect(c.db.getTask(t.id)!.status).toBe("background");
+      await Bun.sleep(300); // a check started at the turn's end would be done by now (the typecheck is `true`)
+      expect(x.c.db.getCheckRun(x.t.id)).toBeNull();
+      x.emits[0]!({ t: "background", count: 0 });
+      await waitFor(async () => x.c.db.getCheckRun(x.t.id) !== null);
+      expect(x.c.db.getTask(x.t.id)!.status).toBe("done");
+      expect(x.c.db.getCheckRun(x.t.id)!.ok).toBe(true);
     } finally {
-      await c.stop();
-      rmSync(h, { recursive: true, force: true });
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
+    }
+  });
+
+  test("selfdev: a meta Task's background process lost with its runner does not run the checks, and the restart gate stays closed", async () => {
+    const x = await metaWithBackground(true);
+    try {
+      x.exits[0]!(1);
+      await waitFor(async () => x.c.db.getTask(x.t.id)!.status === "done" && x.c.db.getTask(x.t.id)!.background === null);
+      await Bun.sleep(300); // a check started when the background emptied would be done by now (the typecheck is `true`)
+      expect(x.c.db.getCheckRun(x.t.id)).toBeNull();
+      expect((await x.restart()).status).toBe(409);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
+    }
+  });
+
+  test("selfdev: a check that passed while a meta Task's background process still ran does not open the restart gate once the process is gone", async () => {
+    const x = await metaWithBackground(false);
+    try {
+      // run by hand during the background: the process may still be writing, but the run is newer than the turn's end
+      await post(`${x.b}/api/tasks/${x.t.id}/checks`);
+      await waitFor(async () => x.c.db.getCheckRun(x.t.id) !== null);
+      expect(x.c.db.getCheckRun(x.t.id)!.ok).toBe(true);
+      await Bun.sleep(2); // a run saved in the same millisecond as the invalidation counts as after it
+      x.emits[0]!({ t: "background", count: 0 });
+      await waitFor(async () => x.c.db.getTask(x.t.id)!.status === "done");
+      const r = await x.restart();
+      expect(r.status).toBe(409);
+      expect(await r.text()).toContain("the tree changed since these checks ran");
+      // a run after the process is gone is current again
+      await post(`${x.b}/api/tasks/${x.t.id}/checks`);
+      await waitFor(async () => (await x.restart()).status === 200);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
     }
   });
 

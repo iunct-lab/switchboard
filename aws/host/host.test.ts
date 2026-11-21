@@ -888,7 +888,11 @@ describe("aws/host devtools", () => {
   test("every download has a pinned version and checksum and goes through the checksum check", () => {
     const dev = read("devtools.sh");
     expect(read("node.sh")).toMatch(/\nNODE_SHA256=[0-9a-f]{64}\n/);
-    for (const name of ["DOCKER", "DOCKER_ROOTLESS", "COMPOSE", "UV", "GITLEAKS", "SAM"]) expect(dev).toMatch(new RegExp(`\\n${name}_SHA256=[0-9a-f]{64}\\n`));
+    for (const name of ["DOCKER", "DOCKER_ROOTLESS", "COMPOSE", "UV", "GITLEAKS", "SAM", "COSIGN"]) expect(dev).toMatch(new RegExp(`\\n${name}_SHA256=[0-9a-f]{64}\\n`));
+    // a cosign already there is kept only when it is the pinned bytes
+    expect(dev).toContain(`echo "$COSIGN_SHA256  /usr/local/bin/cosign" | sha256sum -c --quiet - 2>/dev/null || {`);
+    // cosign may fail without stopping the rest of the setup, but it is installed only after its checksum passed
+    expect(dev).toMatch(/fetch "[^"]*cosign-linux-arm64" "\$COSIGN_SHA256" "\$DL\/cosign" &&\n\s+install -m 755 "\$DL\/cosign"/);
     expect(dev).toContain('sha256sum -c --quiet -');
     // every curl is the checksummed fetch; the rest comes from dnf or a pinned npm / gh package
     expect(dev.match(/curl /g)?.length).toBe(1);

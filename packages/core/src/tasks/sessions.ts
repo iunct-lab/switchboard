@@ -346,7 +346,7 @@ export abstract class TaskSessions extends TaskEvents {
                 })
                 .immediate();
               this.broadcast({ type: "task.updated", task: this.db.getTask(task.id)! });
-              this.notifyBackgroundEmpty(task.id);
+              this.notifyBackgroundEmpty(task.id, true);
             } catch (e) {
               console.error(`task ${task.id}: the lost background jobs were not recorded:`, e); // the mark stays: the next start reports them
             }
@@ -368,7 +368,7 @@ export abstract class TaskSessions extends TaskEvents {
           if (this.db.getTask(task.id)?.status === "background") this.transition(task.id, "done");
           const cur = this.db.getTask(task.id);
           if (cur) this.broadcast({ type: "task.updated", task: cur });
-          this.notifyBackgroundEmpty(task.id);
+          this.notifyBackgroundEmpty(task.id, true);
         } catch (e) {
           console.error(`task ${task.id}: background mark not cleared:`, e); // the next start clears it
         }

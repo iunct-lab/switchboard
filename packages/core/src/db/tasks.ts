@@ -161,6 +161,15 @@ export class TaskQueries extends GrantQueries {
     return new Set(rows.map((r) => r.stage_issue));
   }
 
+  /**
+   * Whether a stage Task of an Issue that left its place (not activeStage, whatever its outcome) ran at `at` (milliseconds,
+   * as the columns): started at or before it and ended at or after it. Asked only for a PBI with a claim of /pbi-complete, one
+   * read each. An Issue whose stage Task runs now can be in it with an earlier Task too, so the caller asks `active` first.
+   */
+  endedStageRanAt(workspaceId: string, issue: number, at: number): boolean {
+    return !!this.sqlite.query(`SELECT 1 FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND created_at <= ? AND status_at >= ? AND NOT ${activeStage("dedupe")} LIMIT 1`).get(workspaceId, issue, at, at);
+  }
+
   /** The newest-created stage Task of a backlog Issue, of `action` only when given. */
   lastStageTask(workspaceId: string, issue: number, action?: BacklogAction): Task | null {
     const r = action

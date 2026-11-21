@@ -6,7 +6,7 @@ import type { Routes, ServerContext } from "../server/context.ts";
 import { SETTINGS_KEY } from "../server/helpers.ts";
 
 /** The routes under /api/settings. */
-export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "savedModels" | "settings" | "json" | "runnerInfo" | "settingsDefaults" | "strong" | "bad" | "tasks" | "db" | "logOp" | "armPromotionCheck">): Routes {
+export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "savedModels" | "settings" | "json" | "runnerInfo" | "settingsDefaults" | "strong" | "bad" | "tasks" | "db" | "logOp" | "armPromotionCheck" | "armCliUpdateCheck">): Routes {
   return {
     // 「CLI の表を読む」: read only when asked (the claude executable is about 240 MB), never at boot or on a timer
     "/api/settings/model-candidates": {
@@ -255,8 +255,9 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
           }
         }
         // The tunables: a partial patch over the saved group. Read on every use, so the next use takes the new value without a restart.
-        const { quotaAndResume: qr, judgeAndChoice: jc, newDefaults: nd, release: rel } = data;
+        const { quotaAndResume: qr, judgeAndChoice: jc, newDefaults: nd, release: rel, cliUpdate: cu } = data;
         if (rel !== undefined) next.release = { ...next.release, ...rel };
+        if (cu !== undefined) next.cliUpdate = { ...next.cliUpdate, ...cu };
         if (qr !== undefined) next.quotaAndResume = { ...next.quotaAndResume, ...qr };
         const fallbackRunnerChanged = jc?.judgeFallbackRunner !== undefined && jc.judgeFallbackRunner !== next.judgeAndChoice.judgeFallbackRunner;
         const taskRunnerChanged = nd?.taskRunner !== undefined && nd.taskRunner !== next.newDefaults.taskRunner;
@@ -293,6 +294,8 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
         if (parsed.data.maxRunners !== undefined) sc.tasks.drain();
         // the next check of the newest tag comes after the saved interval, counted from now
         if (parsed.data.release !== undefined) sc.armPromotionCheck();
+        // … and the next read of the CLI distributors, as saved
+        if (parsed.data.cliUpdate !== undefined) sc.armCliUpdateCheck();
         return sc.json({ ...next, runners: sc.runnerInfo(), defaults: sc.settingsDefaults() });
       }),
     },

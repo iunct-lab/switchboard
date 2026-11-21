@@ -488,14 +488,17 @@ export interface StoredRecords {
   comments: Array<{ issue: number; body: string; createdAt: string }>;
   /** Issues whose last read was not complete (404 / 403 / not read yet): what is stored of them is not current. */
   unread: number[];
+  /** PBIs with a claim of /pbi-complete that the app does not count as work (a stage Task that ended left it): the guard counts none of their Tasks as at work. An older answer has none. */
+  unheld?: number[];
   pulls: Array<{ number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; labels: string[]; closes: number[]; mergeCommit: string | null; updatedAt: string; files: string[] | null }>;
   /** The checkout's `sharedFiles` (ops.config.json): an overlap only on these holds no one back. Absent = none. */
   shared?: string[];
   /**
    * The places of the PBIs that yielded on an overlap and can move now, as the app's own judgement before a start reads
-   * them: `paths` of the PBI's Task `task` are kept for it since `since`. Absent = none.
+   * them: `paths` of the PBI's Task `task` are kept for it since `since`. Absent = none. `yieldsTo`: the PBIs of what the
+   * PBI waits for now (an open PR's Tasks, an open Task); the place does not hold those back. Absent = none known.
    */
-  turns?: Array<{ pbi: number; since: string; task: number; paths: string[] }>;
+  turns?: Array<{ pbi: number; since: string; task: number; paths: string[]; yieldsTo?: number[] }>;
 }
 
 /**

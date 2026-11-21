@@ -88,14 +88,15 @@ export interface Verdict { verdict: "go" | "defer"; blocking: Hit[]; stale: Hit[
  * The place of a PBI that yielded on an overlap: `paths` of its Task `task` are kept for it since `since` (when it first
  * yielded), ahead of every PBI that has no place or a later one. The app reads them from the occupancy marks and leaves
  * out a PBI that cannot move now (packages/core/src/backlog-overlap.ts `turnWorks`); the guard reads the app's list.
+ * `yieldsTo` names the PBIs of what the place's PBI waits for now: the place is not ahead of those.
  */
 export type Turn = NonNullable<StoredRecords["turns"]>[number];
 
-/** The places ahead of `pbi`'s own, as other work: every other PBI's when it has none, else the ones taken earlier (the same time: the smaller number). */
+/** The places ahead of `pbi`'s own, as other work: every other PBI's when it has none, else the ones taken earlier (the same time: the smaller number). Not one that yields to `pbi`. */
 export function turnsAhead(turns: Turn[], pbi: number | null): Work[] {
   const mine = turns.find((t) => t.pbi === pbi);
   return turns
-    .filter((t) => t.pbi !== pbi && (!mine || t.since < mine.since || (t.since === mine.since && t.pbi < mine.pbi)))
+    .filter((t) => t.pbi !== pbi && !(pbi !== null && t.yieldsTo?.includes(pbi)) && (!mine || t.since < mine.since || (t.since === mine.since && t.pbi < mine.pbi)))
     .map((t) => ({ ref: `Task #${t.task}`, task: t.task, paths: t.paths, updatedAt: t.since, turn: t.pbi }));
 }
 /** A prerequisite: `sibling` = a Task of the same PBI (its order is the stack's, so it does not wait). */
@@ -453,7 +454,7 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     prs,
     // a Task whose PBI waits for a date still ahead holds no file until then; nor does one whose PBI no session holds.
     // A PBI whose last read was not complete may have a claim not stored yet: it counts as held, as the app counts it
-    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && (t.parent === null || r.unread.includes(t.parent) || holder(r.comments.filter((c) => c.issue === t.parent).map((c, k) => ({ id: k, body: c.body }))) !== null) && !waitsOnlyForCheck(t.number, linked)),
+    working: r.issues.filter((t) => t.state === "OPEN" && t.labels.includes("type:task") && !t.labels.includes("needs-decision") && t.fields?.Status === "In progress" && !(t.parent !== null && waitsForDate(r.comments.filter((c) => c.issue === t.parent), now)) && (t.parent === null || r.unread.includes(t.parent) || (!r.unheld?.includes(t.parent) && holder(r.comments.filter((c) => c.issue === t.parent).map((c, k) => ({ id: k, body: c.body }))) !== null)) && !waitsOnlyForCheck(t.number, linked)),
     shared: r.shared ?? [],
     turns: r.turns ?? [],
     // an Issue first, as the app reads a number stored as both (a workspace kept only here numbers its own)
