@@ -130,7 +130,7 @@ describe("rate limit: recognising the stop and its reset time", () => {
 });
 
 /** A runner whose turns are scripted per start/send (the last script repeats); records what it was asked; can be made to refuse a send. */
-function fakeAdapter(turns: AgentEvent[][], starts: StartOptions[], sends: string[], ctl: { failSend?: boolean } = {}): RunnerAdapter {
+function fakeAdapter(turns: AgentEvent[][], starts: StartOptions[], sends: string[], ctl: { failSend?: boolean; failStart?: boolean } = {}): RunnerAdapter {
   let n = 0;
   return {
     id: "claude",
@@ -138,6 +138,10 @@ function fakeAdapter(turns: AgentEvent[][], starts: StartOptions[], sends: strin
       return { available: true };
     },
     start(opts, emit) {
+      if (ctl.failStart) {
+        ctl.failStart = false;
+        throw new Error("process did not start");
+      }
       starts.push(opts);
       let resolveExit!: (c: number | null) => void;
       const exited = new Promise<number | null>((r) => (resolveExit = r));
@@ -178,7 +182,7 @@ describe("rate limit: RateLimitResumer", () => {
   let now: number;
   let enabled: boolean;
   let resumer: RateLimitResumer;
-  const ctl: { failSend?: boolean } = {};
+  const ctl: { failSend?: boolean; failStart?: boolean } = {};
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const statuses = (id: string) => db.listEvents(id).map((e) => e.ev).filter((e): e is Extract<AgentEvent, { t: "status" }> => e.t === "status").map((e) => e.text);
 
@@ -197,6 +201,7 @@ describe("rate limit: RateLimitResumer", () => {
     now = STOP_TS;
     enabled = true;
     ctl.failSend = false;
+    ctl.failStart = false;
   });
   afterEach(async () => {
     resumer.stop();
@@ -354,6 +359,104 @@ describe("rate limit: RateLimitResumer", () => {
     expect(await resumer.tick()).toEqual([t.id]);
     await settle();
     expect(sends).toEqual([RESUME_PROMPT]);
+  });
+
+  test("実行枠待ち: 自動再開が待ち列に入っても失敗の記録は解決済みにならず、枠が空いて起動に失敗すれば再試行の予定に戻り、起動が通れば解決済みになる", async () => {
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: () => undefined });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    await tasks.releaseAndWait(t.id); // no process: a resume starts one, and that takes a slot
+    now = db.getTask(t.id)!.resumeAt! + 1;
+    ctl.failStart = true; // a first failure: the stop is on record and waiting
+    expect(await resumer.tick()).toEqual([]);
+    expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ state: "waiting" });
+    now += LATE_RETRY_MS + 1;
+    const other = tasks.create({ cwd: home, title: "other", prompt: "hold", runner: "claude" });
+    await settle();
+    db.updateTask(other.id, { status: "running" }); // the only slot is taken
+    // the tick saw a free slot a moment before another turn took it: the turn goes to the queue (the race, made by hand)
+    const queueResume = async () => {
+      const real = tasks.freeSlots.bind(tasks);
+      tasks.freeSlots = () => 1;
+      try {
+        expect(await resumer.tick()).toEqual([t.id]);
+      } finally {
+        tasks.freeSlots = real;
+      }
+    };
+    await queueResume();
+    expect(db.getTask(t.id)).toMatchObject({ status: "idle", resumeAt: null });
+    expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+    expect(db.isQueuedResume(t.id)).toBe(true);
+    expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ state: "waiting", actions: expect.arrayContaining([expect.objectContaining({ what: "実行枠待ちに入れた" })]) });
+    // a slot frees, the start throws: the resume is planned again, like a send that threw
+    ctl.failStart = true;
+    db.updateTask(other.id, { status: "done" });
+    tasks.drain();
+    expect(db.getTask(t.id)).toMatchObject({ status: "error", resumeAt: now + LATE_RETRY_MS, resumeReason: "limit" });
+    expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ state: "waiting", conditions: [{ key: "resumeAt", met: false }] });
+    expect(statuses(t.id).at(-1)).toContain("再試行します");
+    // the retry waits in the queue again and starts: the stop is resolved only now
+    now += LATE_RETRY_MS + 1;
+    db.updateTask(other.id, { status: "running" });
+    await queueResume();
+    expect(tasks.stopOf(t.id, "resume-send")!.state).not.toBe("resolved");
+    sends.length = 0;
+    db.updateTask(other.id, { status: "done" });
+    tasks.drain();
+    await settle();
+    expect(starts.at(-1)!.prompt).toBe(RESUME_PROMPT);
+    expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ state: "resolved" });
+  });
+
+  test("実行枠待ち: 待ち列から始まる daemon のターンの起動の失敗は、自動再開の再試行にしない", async () => {
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter([OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), { idleMs: -1, maxRunners: () => 1 });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: () => undefined });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    await tasks.releaseAndWait(t.id);
+    const other = tasks.create({ cwd: home, title: "other", prompt: "hold", runner: "claude" });
+    await settle();
+    db.updateTask(other.id, { status: "running" }); // the only slot is taken
+    await tasks.send(t.id, "job done", { daemon: true });
+    expect(db.isQueuedResume(t.id)).toBe(true);
+    ctl.failStart = true;
+    db.updateTask(other.id, { status: "done" });
+    tasks.drain();
+    expect(db.getTask(t.id)!.resumeAt).toBeNull();
+    expect(tasks.stopOf(t.id, "resume-send")).toBeFalsy();
+  });
+
+  test("実行枠待ち: 保留の経路で待ち列に入り、送る途中で起動に失敗した自動再開は解決済みにせず再試行の予定に戻す", async () => {
+    let holdOnce = false;
+    tasks = new TaskManager(db, new Map([["claude", fakeAdapter([LIMIT_TURN, OK_TURN], starts, sends, ctl)]]), (m) => broadcasts.push(m), {
+      idleMs: -1,
+      maxRunners: () => 1,
+      // the hold is on when the send looks, and lifted by the time the queue is drained (it lifted while the process closed)
+      admissionHold: () => (holdOnce ? ((holdOnce = false), { wait: "昇格のため待機", detail: "test" }) : null),
+    });
+    resumer = new RateLimitResumer(db, tasks, { enabled: () => enabled, now: () => now, log: () => undefined });
+    resumer.start(3_600_000);
+    const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude" });
+    await settle();
+    now = db.getTask(t.id)!.resumeAt! + 1;
+    holdOnce = true;
+    ctl.failStart = true;
+    // the tick saw no hold a moment before it came on (made by hand, as in the test above)
+    const real = tasks.freeSlots.bind(tasks);
+    tasks.freeSlots = () => 1;
+    try {
+      await resumer.tick();
+    } finally {
+      tasks.freeSlots = real;
+    }
+    await settle();
+    expect(holdOnce).toBe(false); // the send went through the hold path
+    expect(db.getTask(t.id)).toMatchObject({ resumeAt: now + LATE_RETRY_MS, resumeReason: "limit" });
+    expect(tasks.stopOf(t.id, "resume-send")).toMatchObject({ state: "waiting" });
   });
 
   test("no free run slot: two Tasks due and one slot — a tick sends one, the other waits for the next tick", async () => {

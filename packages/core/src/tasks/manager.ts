@@ -340,6 +340,12 @@ export class TaskManager extends TaskSettings {
       this.setResumeAt(shadow.id, null);
       this.record(shadow.id, { t: "status", text: "並走元が中断されたので、予定していた自動再開を取り消しました（返信すれば続けられます）" });
     }
+    // the same for an automatic resume already waiting for a run slot (its plan was cleared when it joined the queue); a person's reply in the wait keeps it
+    if (shadow && shadow.queuedAt !== null && this.db.isQueuedResume(shadow.id) && this.db.takeQueued(shadow.id) !== null) {
+      this.broadcast({ type: "task.updated", task: this.mustGet(shadow.id) });
+      this.record(shadow.id, { t: "status", text: "並走元が中断されたので、実行枠待ちの自動再開を取り消しました（返信すれば続けられます）" });
+      for (const l of this.planForgottenListeners) l(shadow.id);
+    }
     // 中断 cancels a planned retry: the stop waits for the person again.
     this.moveOpenStops(taskId, (s) => (s.state === "retrying" ? { ...s, state: "waiting", actions: [...s.actions, { attempt: Math.max(0, ...s.actions.map((a) => a.attempt)), at: Date.now(), what: "中断で再試行を取り消し", ok: false }].slice(-20) } : null));
     // A task waiting on background jobs is stopped like a running one: aborted, not released (its jobs go with the process)

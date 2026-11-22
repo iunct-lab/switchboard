@@ -175,7 +175,7 @@ describe("scheduler", () => {
     const started = await sc.tick();
     db.updateTask(started[0]!.id, { status: "running" });
     db.updateTask(started[0]!.id, { status: "idle" });
-    db.setQueued(started[0]!.id, "p", now);
+    db.setQueued(started[0]!.id, "p", now, []);
     now = Date.parse("2026-09-07T03:00:00");
     expect(await sc.tick()).toHaveLength(0);
     expect(sc.recentLog().at(-1)).toContain("is still queued");
@@ -311,15 +311,15 @@ describe("scheduler", () => {
     db.insertTask(mk("tsk_q_late", 1));
     db.insertTask(mk("tsk_q_early", 2));
     db.insertTask(mk("tsk_q_none", 3));
-    db.setQueued("tsk_q_late", "second", 2000);
-    db.setQueued("tsk_q_early", "first", 1000);
+    db.setQueued("tsk_q_late", "second", 2000, []);
+    db.setQueued("tsk_q_early", "first", 1000, []);
     const sc = new Scheduler(db, tasks, () => now);
     expect(sc.queue().queued).toEqual([
       { taskId: "tsk_q_early", title: "tsk_q_early", runner: "claude", since: 1000, position: 1 },
       { taskId: "tsk_q_late", title: "tsk_q_late", runner: "claude", since: 2000, position: 2 },
     ]);
     expect(db.getTask("tsk_q_early")!.queuedAt).toBe(1000);
-    expect(db.takeQueued("tsk_q_early")).toBe("first");
+    expect(db.takeQueued("tsk_q_early")).toEqual({ prompt: "first", attachmentIds: [], resume: false });
     expect(db.takeQueued("tsk_q_early")).toBeNull();
     expect(db.takeQueued("tsk_q_none")).toBeNull();
     expect(sc.queue().queued).toEqual([{ taskId: "tsk_q_late", title: "tsk_q_late", runner: "claude", since: 2000, position: 1 }]);

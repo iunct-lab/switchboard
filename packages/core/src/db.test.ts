@@ -1517,15 +1517,16 @@ test("migrate: a database without queued_at / queued_prompt gets both columns ad
   const path = join(dir, "switchboard.db");
   new Db(path).close();
   const raw = new Database(path);
-  raw.exec("ALTER TABLE tasks DROP COLUMN queued_at; ALTER TABLE tasks DROP COLUMN queued_prompt");
+  raw.exec("ALTER TABLE tasks DROP COLUMN queued_at; ALTER TABLE tasks DROP COLUMN queued_prompt; ALTER TABLE tasks DROP COLUMN queued_attachments");
   raw.exec("INSERT INTO tasks (id, title, runner, cwd, scope, status, created_at, updated_at, status_at) VALUES ('t_old', 'old', 'claude', '/x', '[]', 'idle', 1, 1, 1)");
   raw.close();
   const db = new Db(path);
   const cols = (db.sqlite.query("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((c) => c.name);
   expect(cols).toContain("queued_at");
   expect(cols).toContain("queued_prompt");
+  expect(cols).toContain("queued_attachments");
   expect(db.getTask("t_old")!.queuedAt).toBeNull();
-  db.setQueued("t_old", "p", 5);
+  db.setQueued("t_old", "p", 5, []);
   expect(db.getTask("t_old")!.queuedAt).toBe(5);
   db.close();
   const again = new Db(path); // idempotent, and the wait survives a reopen
@@ -1542,10 +1543,29 @@ test("queued_at / queued_prompt are written only by setQueued / takeQueued, and 
   expect(db.getTask("t_in")!.queuedAt).toBeNull();
   expect(db.listQueuedTasks()).toEqual([]);
   db.insertTask({ ...base, id: "t_q" });
-  db.setQueued("t_q", "p", 5);
+  db.setQueued("t_q", "p", 5, []);
   expect(db.updateTask("t_q", { title: "renamed" })!.queuedAt).toBe(5); // another patch keeps the wait
   expect(prompt("t_q")).toBe("p");
+  db.queueReply("t_q", "again", 6, ["att_a"], { resume: false });
+  db.queueReply("t_q", "more", 7, ["att_b"], { resume: false });
+  expect(db.takeQueued("t_q")).toEqual({ prompt: "p\n\nagain\n\nmore", attachmentIds: ["att_a", "att_b"], resume: false }); // ids follow the replies, the four columns are cleared
+  expect(db.takeQueued("t_q")).toBeNull();
+  // an automatic wait stays automatic only while every turn in it is: a person's reply makes it theirs
+  db.queueReply("t_q", "auto", 8, [], { resume: true });
+  expect(db.isQueuedResume("t_q")).toBe(true);
+  db.queueReply("t_q", "auto 2", 9, [], { resume: true });
+  expect(db.isQueuedResume("t_q")).toBe(true);
+  db.queueReply("t_q", "person", 10, [], { resume: false });
+  expect(db.isQueuedResume("t_q")).toBe(false);
+  db.queueReply("t_q", "auto 3", 11, [], { resume: true });
+  expect(db.isQueuedResume("t_q")).toBe(false);
+  expect(db.takeQueued("t_q")).toMatchObject({ resume: false });
+  db.queueReply("t_q", "auto", 12, [], { resume: true });
+  expect(db.takeQueued("t_q")).toMatchObject({ resume: true });
+  expect(db.isQueuedResume("t_q")).toBe(false);
+  db.setQueued("t_q", "p", 5, ["att_x"]);
   expect(db.updateTask("t_q", { status: "running" })!.queuedAt).toBeNull(); // started without takeQueued: the wait is gone
+  expect((db.sqlite.query("SELECT queued_attachments FROM tasks WHERE id = 't_q'").get() as { queued_attachments: string | null }).queued_attachments).toBeNull();
   expect(db.getTask("t_q")!.queuedAt).toBeNull();
   expect(prompt("t_q")).toBeNull();
   db.updateTask("t_q", { status: "idle" }); // back to idle later: it does not come back into the queue

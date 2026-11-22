@@ -50,6 +50,6 @@ describe("parseMergeGrants", () => {
       expect({ line, grants: grants.length }).toEqual({ line, grants: 1 });
       return grants[0]!.kind;
     }));
-    expect([...kinds].sort()).toEqual(["answer", "merge", "scope"]);
+    expect([...kinds].sort()).toEqual(["answer", "merge"]);
   });
 });

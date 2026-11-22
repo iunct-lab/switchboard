@@ -93,7 +93,7 @@ export abstract class TaskSending extends TaskAdmission {
     this.recordAttachments(taskId, atts);
     text = withAttachments(text, atts);
     const before = this.db.nextSeq(taskId);
-    const task = await this.dispatch(taskId, text, atts);
+    const task = await this.dispatch(taskId, text, atts, !!(opts.asResume || opts.daemon));
     // The person's turn answers the task's open stops, by its user message (none echoed = nothing recorded).
     if (!opts.asResume && !opts.daemon) {
       // a reply put in the queue echoes no message yet (it is sent when the Task starts): the status line that says so is the answer
@@ -126,7 +126,7 @@ export abstract class TaskSending extends TaskAdmission {
    */
   private async sendOne(taskId: string, text: string, opts: { asResume?: boolean; atts?: Attachment[] } = {}): Promise<Task> {
     await this.preflight(taskId, opts);
-    return this.dispatch(taskId, text, opts.atts ?? []);
+    return this.dispatch(taskId, text, opts.atts ?? [], !!opts.asResume);
   }
 
   /** The checks that can refuse a turn, before anything is moved or recorded. Throws; returns the task as it stands. */
@@ -183,8 +183,8 @@ export abstract class TaskSending extends TaskAdmission {
    * A reply that cannot start a process now waits in the queue (the row stays `idle` with `queued_at`, so a restart
    * keeps it). A Task already waiting gets the reply after its prompt; drain() starts it with --resume.
    */
-  private queueReply(task: Task, text: string, block: ReturnType<TaskManager["slotBlock"]>): Task {
-    this.db.queueReply(task.id, text, Date.now());
+  private queueReply(task: Task, text: string, block: ReturnType<TaskManager["slotBlock"]>, atts: Attachment[], resume: boolean): Task {
+    this.db.queueReply(task.id, text, Date.now(), atts.map((a) => a.id), { resume });
     const position = this.db.listQueuedTasks().findIndex((t) => t.id === task.id) + 1;
     // the whole reply: the input box is cleared, and this line is where the text stays in the log until the Task starts
     this.record(task.id, { t: "status", text: `${REPLY_QUEUED}（${block?.wait ?? "待ち列にいます"}${block ? `、${block.detail}` : ""}、待ち ${position} 番目）: 「${text.trim()}」` });
@@ -195,16 +195,16 @@ export abstract class TaskSending extends TaskAdmission {
   }
 
   /**
-   * Hand the text to the runner: the live process, or a restart with --resume. `atts` = the turn's attachments: the
+   * Hand the text to the runner: the live process, or a restart with --resume. `auto` = a turn nobody asked for (a resume, a daemon turn): if it waits in the queue it is marked so. `atts` = the turn's attachments: the
    * scope must cover their folders, and the adapter gets them with the text (DAK sends the contents).
    */
-  private async dispatch(taskId: string, text: string, atts: Attachment[]): Promise<Task> {
+  private async dispatch(taskId: string, text: string, atts: Attachment[], auto: boolean): Promise<Task> {
     let task = this.mustGet(taskId);
     const dirs = Array.from(new Set(atts.map((a) => dirname(a.path))));
     let widened = false;
     if (dirs.length) ({ task, widened } = this.widenScope(task, dirs));
     // a Task still in the queue starts from drain() with its first prompt: the reply goes after it
-    if (task.queuedAt !== null) return this.queueReply(task, text, this.startBlock(task));
+    if (task.queuedAt !== null) return this.queueReply(task, text, this.startBlock(task), atts, auto);
     const live = this.live.get(taskId);
     // a new turn is a new start: under the hold a process left open after its turn is closed and the reply waits (a turn
     // in flight is sent to as before). A process still running background jobs keeps them: the reply waits on it
@@ -222,7 +222,7 @@ export abstract class TaskSending extends TaskAdmission {
     if (live && !IN_FLIGHT.has(task.status)) {
       const hold = this.holdBlock();
       if (hold && (await this.release(taskId))) {
-        this.queueReply(this.mustGet(taskId), text, hold);
+        this.queueReply(this.mustGet(taskId), text, hold, atts, auto);
         this.drain(); // the hold may have lifted while the process closed
         return this.mustGet(taskId);
       }
@@ -245,7 +245,7 @@ export abstract class TaskSending extends TaskAdmission {
     task = this.mustGet(taskId); // the release above was awaited: a model or mode chosen meanwhile is the one to start with
     // no process, and no slot for a new one (preflight saw a live process that a release above may have closed): wait in the queue
     const block = this.startBlock(task);
-    if (block !== null) return this.queueReply(task, text, block);
+    if (block !== null) return this.queueReply(task, text, block, atts, auto);
     const { resume, preamble } = this.resumeArgs(task);
     const warning = this.memoryWarning(task);
     if (warning) this.record(taskId, { t: "status", text: warning });
@@ -271,6 +271,6 @@ export abstract class TaskSending extends TaskAdmission {
       return;
     }
     if (task.resumeAt !== null) this.setResumeAt(taskId, null);
-    this.dispatch(taskId, texts.join("\n\n"), []).catch((e) => this.record(taskId, { t: "error", message: `保留した返信を渡せませんでした: ${String((e as Error).message ?? e)}` }));
+    this.dispatch(taskId, texts.join("\n\n"), [], false).catch((e) => this.record(taskId, { t: "error", message: `保留した返信を渡せませんでした: ${String((e as Error).message ?? e)}` }));
   }
 }

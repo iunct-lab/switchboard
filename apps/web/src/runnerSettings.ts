@@ -5,7 +5,7 @@ import { settings } from "./i18n/settings.ts";
 import { isAdkRunner } from "./runners.ts";
 
 /** The kinds of Task that start by themselves, in the order of the card: the feedback modes, then the backlog stages. */
-export const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo], ["adopt-repo", settings.kindAdoptRepo], ["baseline", settings.kindBaseline]];
+export const AUTO_START_KINDS: Array<[AutoStartKind, Msg]> = [["fix", settings.kindFix], ["request", settings.kindRequest], ["to-pbi", settings.kindToPbi], ["to-tasks", settings.kindToTasks], ["complete", settings.kindComplete], ["check", settings.kindCheck], ["close", settings.kindClose], ["new-repo", settings.kindNewRepo], ["adopt-repo", settings.kindAdoptRepo], ["baseline", settings.kindBaseline], ["bundle", settings.kindBundle]];
 
 /** The rows of a runner's card: the same ones, in the same order, for every runner. */
 export const RUNNER_ROWS = ["model", "effort", "permissionMode", "subagentModel", "subagentEffort", "autoResume", "models"] as const;

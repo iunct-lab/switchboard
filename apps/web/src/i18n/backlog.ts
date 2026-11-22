@@ -136,7 +136,7 @@ export const backlog = msgs({
   noReview: { ja: "レビューなし", en: "No review" },
   noCi: { ja: "local-ci なし", en: "No local-ci" },
   rechecks: { ja: " · 再チェック {list}", en: " · Rechecks {list}" },
-  mergedPair: { ja: " · マージ済み: レビューした head → main のコミット {pair}", en: " · Merged: reviewed head → commit on main {pair}" },
+  mergedPair: { ja: " · マージ済み: レビューした head → {base} のコミット {pair}", en: " · Merged: reviewed head → commit on {base} {pair}" },
   noBody: { ja: "（本文なし）", en: "(no body)" },
   changes: { ja: "変更", en: "Changes" },
   closedChanges: { ja: "閉じた変更 {n}", en: "Closed changes {n}" },

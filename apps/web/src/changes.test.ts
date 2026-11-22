@@ -1,6 +1,8 @@
 // test-reads: scripts/merge-gate.ts
 import { expect, test } from "bun:test";
 import { changeMarks, changeStateLabel, mergedPair, LOCAL_CI_RESULT, RECHECK_PASS, REVIEW } from "./changes.ts";
+import { t } from "./i18n.ts";
+import { backlog as m } from "./i18n/backlog.ts";
 import { LOCAL_CI_RESULT as SCRIPT_LOCAL_CI } from "../../../scripts/local-ci.ts";
 import { RECHECK_PASS as SCRIPT_RECHECK } from "../../../scripts/merge-gate.ts";
 
@@ -44,4 +46,11 @@ test("mergedPair: reviewed → merged in 7 digits, なし for one merged before 
   expect(mergedPair({ mergeCommit: B, reviewedHead: H })).toBe("aaaaaaa → bbbbbbb");
   expect(mergedPair({ mergeCommit: B, reviewedHead: null })).toBe("なし → bbbbbbb");
   expect(mergedPair({ mergeCommit: null, reviewedHead: null })).toBeNull();
+});
+
+test("mergedPair names the change's base", () => {
+  const text = t(m.mergedPair, { pair: "aaaaaaa → bbbbbbb", base: "release" });
+  expect(text).toContain("release");
+  expect(text).not.toContain("main");
+  expect(text).toContain("aaaaaaa → bbbbbbb");
 });

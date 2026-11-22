@@ -170,6 +170,12 @@ export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { loc
   return `${skillPathsFor(`${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}`, opts.runner ?? "claude")}${saidOf(opts.answer)}`;
 }
 
+/** The first prompt of a 束: the `bundle` entry of the `p3-bundle` candidate with the PBIs to put in together and who reviews. */
+export function buildBundlePrompt(pbis: number[], opts: { review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p3-bundle")): string {
+  const body = renderEntry(def, "bundle", { pbis: pbis.map((n) => "#" + n).join(", "), reviewer: REVIEWER_WORDS[opts.review ?? "other"] });
+  return skillPathsFor(body, opts.runner ?? "claude");
+}
+
 /** The mark a resume of a stalled PBI ends its ## 状況 with: how many of its Tasks were closed then. */
 export const TASKS_DONE_MARK = (n: number) => `<!-- tasks-done: ${n} -->`;
 

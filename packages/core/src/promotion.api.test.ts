@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BacklogSource } from "@switchboard/protocol";
+import { BUNDLE_HOLD_KEY, type BacklogSource } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
 import { Db } from "./db.ts";
 import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
@@ -1089,6 +1089,75 @@ describe("release settings: the interval of the check and how far a new version 
       expect(r.promoted).toEqual([r.sha]);
     } finally {
       stop(r);
+    }
+  }, 30_000);
+});
+
+describe("a bundle's hold on promotion", () => {
+  test("promotionStep waits on a hold, as a wait that no Task's end lifts", () => {
+    const held = { action: "wait", reason: "束の作業中（Task tsk_9）", bundle: true } as const;
+    expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, bundle: { taskId: "tsk_9" } })).toEqual(held);
+    expect(promotionStep({ status: released(), latest: v2, busyTasks: 2, bundle: { taskId: "tsk_9" } })).toEqual(held);
+    // whatever `auto` says, and before a diff check is started or waited on: the reason is the hold's
+    for (const auto of ["off", "review"] as const) expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, auto, bundle: { taskId: "tsk_9" } })).toEqual(held);
+    expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, review: "start", bundle: { taskId: "tsk_9" } })).toEqual(held);
+    expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, review: { state: "running" } as never, bundle: { taskId: "tsk_9" } })).toEqual(held);
+    expect(promotionStep({ status: released(), latest: v2, busyTasks: 0, bundle: null })).toEqual({ action: "promote", tag: "v0.2.0", sha: "bbb" });
+  });
+
+  test("bundle hold lifts a drain that was holding new starts", async () => {
+    const r = await releasedDaemon();
+    const claude = endableClaude();
+    const health = async (base: string) => ((await (await fetch(`${base}/api/health`)).json()) as { promotionDrain: unknown }).promotionDrain;
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, CHECK);
+      expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+      await claude.started(1);
+      // the newest tag waits on the running Task, and new starts are held for it
+      for (const t0 = Date.now(); (await health(base)) === null && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
+      expect(await health(base)).toMatchObject({ tag: "v0.2.0", tasks: 1 });
+      core!.db.setSetting(BUNDLE_HOLD_KEY, { taskId: "tsk_9", since: Date.now(), schedules: [], base: "old" });
+      // no promotion can come while the hold stands, so the next check does not keep new starts held
+      for (const t0 = Date.now(); (await health(base)) !== null && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
+      expect(await health(base)).toBeNull();
+      expect(await releaseHold(base)).toMatchObject({ reason: "束の作業中（Task tsk_9）", tasks: false });
+      expect(r.asks).toEqual([]);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("bundle hold blocks every way in", async () => {
+    const r = await releasedDaemon();
+    const claude = endableClaude();
+    const promote = (base: string, body: object) => fetch(`${base}/api/daemon/promote`, { method: "POST", body: JSON.stringify(body) });
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, { ...CHECK, promotionIdleRetryMs: 50 });
+      core!.db.setSetting(BUNDLE_HOLD_KEY, { taskId: "tsk_9", since: Date.now(), schedules: [], base: "old" });
+      // backlog-next, the interval check (50 ms: it runs several times in the wait below) and a Task's end
+      expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+      await claude.started(1);
+      claude.end(0);
+      await settle(() => core!.db.listTasksByStatus("running").length === 0);
+      // fired with no Task running: nothing but the hold keeps it from asking
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      await Bun.sleep(300);
+      // by hand, with and without `force`
+      for (const body of [{ commit: r.sha }, { commit: r.sha, force: true }]) {
+        const res = await promote(base, body);
+        expect([res.status, await res.json()]).toEqual([409, { error: "束の作業中（Task tsk_9）。止めを解いてから昇格する", commit: r.sha }]);
+      }
+      expect(r.asks).toEqual([]);
+      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, tasks: false, reason: "束の作業中（Task tsk_9）" });
+      // the hold released: the same check asks
+      core!.db.setSetting(BUNDLE_HOLD_KEY, null);
+      await settle(() => r.asks.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+    } finally {
+      r.rescue.stop(true);
+      rmSync(r.repo, { recursive: true, force: true });
     }
   }, 30_000);
 });

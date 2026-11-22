@@ -57,7 +57,7 @@ export type PromotionStep =
   | { action: "promote"; tag: string; sha: string; ifNoRestart?: true }
   | { action: "review" }
   /** `drain`: it waits for the Tasks a restart would cut, and nothing new starts meanwhile (the caller holds new starts). `ci`: held by the tag CI's result, not by Tasks. */
-  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview; drain?: true; ci?: true };
+  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview; drain?: true; ci?: true; bundle?: true };
 
 /**
  * The one decision about the newest tag, for the interval check, a backlog-next firing and a turn's end alike: bring
@@ -67,7 +67,7 @@ export type PromotionStep =
  * is the person's call, not a failure of the version. `latestInCurrent`: the tag's commit is already part of what runs
  * (a newer commit was promoted by hand) — going back to the tag would undo that.
  * `auto` (default `promote`): `off` leaves a new tag alone and `review` stops after the check of its diff; neither holds
- * the backlog, and a failed tag still does.
+ * the backlog, and a failed tag still does. A bundle's hold (`bundle`) waits whatever `auto` says and holds the backlog.
  * `ci` (given for a development origin only): the tag CI's result. A tag that failed it is never brought in by itself;
  * one without a result is brought in as any tag is (`requireCi` `no-fail`, the default: a promotion does not wait for
  * the tag CI) unless `requireCi` is `pass`. Neither wait holds the backlog, and each is told to the person (`tagCiNote`).
@@ -76,13 +76,16 @@ export type PromotionStep =
  * can switch without ever restarting (`promoteKeepsTasks`), that is asked for (`ifNoRestart`); `needsRestart` =
  * sb-rescue answered that this tag cannot go in that way, so it waits until none is left (`drain`).
  */
-export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; needsRestart?: boolean; ci?: TagCi; requireCi?: "pass" | "no-fail" }): PromotionStep {
+export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; needsRestart?: boolean; bundle?: { taskId: string } | null; ci?: TagCi; requireCi?: "pass" | "no-fail" }): PromotionStep {
   const { status, latest } = s;
   if (!status.managed || !latest || latest.sha === status.current || s.latestInCurrent) return { action: "pick" };
   const failure = status.history.find((h) =>
     (h.to === latest.sha && !h.ok && h.action === "rejected") ||
     (h.from === latest.sha && h.action === "auto-rollback"));
   if (failure) return { action: "wait", reason: `昇格に失敗した版のまま: ${latest.tag}`, failed: { tag: latest.tag, sha: latest.sha, reason: failure.reason } };
+  // a bundle of work is under way: nothing is brought in (nor a diff check started) until its hold is released, whatever
+  // `auto` says, and no Task ending releases it (the backlog stays held: nothing outside the bundle starts)
+  if (s.bundle) return { action: "wait", reason: `束の作業中（Task ${s.bundle.taskId}）`, bundle: true };
   const auto = s.auto ?? "promote";
   if (auto === "off") return { action: "pick" };
   // a public copy's clone (the caller passed `review`): the tag is asked for only once its diff was checked and found ok

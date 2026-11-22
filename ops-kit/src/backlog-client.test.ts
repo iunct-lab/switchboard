@@ -703,7 +703,7 @@ test("merge-answer: backlog comment posts a [merge-answer] yes only when the gra
   }
 });
 
-test("scope: a Task body that names more paths is saved only when the gate's stop has no scope grant missing", async () => {
+test("scope: a Task body that names more paths is saved without a grant, and the app is not asked about the gate's stop", async () => {
   const dir = mkdtempSync(join(tmpdir(), "backlog-client-scope-"));
   const bare = mkdtempSync(join(tmpdir(), "backlog-client-scope-nogate-"));
   const STORED = "## やること\n`a/b.ts` を直す\n";
@@ -729,25 +729,17 @@ test("scope: a Task body that names more paths is saved only when the gate's sto
     Bun.spawnSync(["git", "add", "."], { cwd: dir });
     Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init"], { cwd: dir });
     const more = `${STORED}\`c/d.ts\` も直す\n`;
-    // the gate stopped and no scope sentence stands: refused, and nothing is sent
-    const stopped = await edit(more, { scope: { stopped: true, granted: false } });
-    expect([stopped.code, stopped.patched, stopped.asked, stopped.err]).toEqual([1, false, ["http://app/api/merge-grants/scope-stop?taskId=t1&repo=acme%2Fapp&issue=3"], expect.stringContaining("Task #3 の本文に名指しのパスを足してよい")]);
-    expect(stopped.err).toContain("利用者が Task の会話で #3 の本文への名指しのパスの追加を認めると保存できます（言い方は自由。");
-    for (const plain of [`${STORED}ops-kit/src/foo.ts も直す\n`, `${STORED}\`bun test ops-kit/src/x.test.ts\` で確かめる\n`]) {
-      const r = await edit(plain, { scope: { stopped: true, granted: false } });
-      expect([r.code, r.patched]).toEqual([1, false]);
-      // run from a subdirectory of the clone: the top is still the clone's top
-      const sub = await edit(plain, { scope: { stopped: true, granted: false }, cwd: join(dir, "ops-kit") });
-      expect([sub.code, sub.patched]).toEqual([1, false]);
-    }
-    // the sentence stands: saved
-    expect((await edit(more, { scope: { stopped: true, granted: true } })).patched).toBe(true);
-    // the gate has not stopped, or the app cannot be reached: the edit is not held up
-    expect([(await edit(more)).patched, (await edit(more, { scope: "down" })).patched]).toEqual([true, true]);
-    // no more paths named (a line number on a named path is the same path), an Issue that is not a Task, no gate in the config,
-    // an Issue with no number yet (no PR can have stopped on it): the app is not asked
+    // the gate stopped and no scope sentence stands: still saved, and the stop is not asked
     const stop = { scope: { stopped: true, granted: false } };
-    for (const r of [await edit(`${STORED}説明を足す\n`, stop), await edit(`${STORED}\`a/b.ts:273\` の行\n`, stop), await edit(`${STORED}\`a/b.ts:273-280\` の範囲\n`, stop), await edit(more, { ...stop, labels: ["type:pbi"] }), await edit(more, { ...stop, cwd: bare }), await edit(more, { ...stop, ref: "loc_abc", number: null })]) {
+    for (const body of [more, `${STORED}ops-kit/src/foo.ts も直す\n`, `${STORED}\`bun test ops-kit/src/x.test.ts\` で確かめる\n`]) {
+      const r = await edit(body, stop);
+      expect([r.code, r.patched, r.asked, r.err]).toEqual([0, true, [], ""]);
+      // run from a subdirectory of the clone
+      const sub = await edit(body, { ...stop, cwd: join(dir, "ops-kit") });
+      expect([sub.code, sub.patched, sub.asked]).toEqual([0, true, []]);
+    }
+    // no gate in the config, an Issue that is not a Task, an Issue with no number yet: saved too
+    for (const r of [await edit(`${STORED}説明を足す\n`, stop), await edit(more, { ...stop, labels: ["type:pbi"] }), await edit(more, { ...stop, cwd: bare }), await edit(more, { ...stop, ref: "loc_abc", number: null })]) {
       expect([r.patched, r.asked]).toEqual([true, []]);
     }
   } finally {

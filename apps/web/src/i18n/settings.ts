@@ -91,6 +91,7 @@ export const settings = msgs({
   kindNewRepo: { ja: "新しいリポジトリ", en: "New repository" },
   kindAdoptRepo: { ja: "取り込み", en: "Adopt" },
   kindBaseline: { ja: "立ち上げ", en: "Launch" },
+  kindBundle: { ja: "まとめて入れる", en: "Bundle" },
   // the runner rows and the job rows (`runnerSettings.ts`): the same rows for every runner, the same three items for every job
   rowModel: { ja: "モデル", en: "Model" },
   rowEffort: { ja: "思考の深さ", en: "Thinking effort" },

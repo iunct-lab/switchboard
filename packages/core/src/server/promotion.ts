@@ -97,7 +97,10 @@ export const releaseStatus = async (sc: Pick<ServerContext, "cfg" | "askRescue">
 };
 
 /** sb-rescue builds, checks on a spare port, switches and rolls back by itself; this only asks (202 = started). */
-export const requestPromote = async (sc: Pick<ServerContext, "askRescue">, commit: string, expectSha?: string, ifNoRestart = false): Promise<{ status: number; body: object }> => {
+export const requestPromote = async (sc: Pick<ServerContext, "askRescue" | "bundleHold">, commit: string, expectSha?: string, ifNoRestart = false): Promise<{ status: number; body: object }> => {
+  // every way in ends here, so the hold of a bundle of work is checked here: nothing is asked of sb-rescue while it stands
+  const held = sc.bundleHold();
+  if (held) return { status: 409, body: { error: `束の作業中（Task ${held.taskId}）。止めを解いてから昇格する` } };
   // `expectSha`: from an update source the release is asked for by its tag, with the commit that was checked; a tag moved since is not built
   // `ifNoRestart`: only a switch that keeps the Tasks; sb-rescue refuses (409, `restart: true`) a release that needs a restart
   const r = await sc.askRescue("/api/promote", { method: "POST", body: JSON.stringify({ commit, ...(expectSha ? { expectSha } : {}), ...(ifNoRestart ? { ifNoRestart: true } : {}) }) });
@@ -169,7 +172,7 @@ export const latestOfSource = async (sc: Pick<ServerContext, "sourceLatest" | "a
 };
 
 /** Before picking: bring the app up to the newest tag, or hold everything while that tag failed to start. */
-export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "latestOfSource" | "git" | "cfg" | "releaseReviewFor" | "drainBusy" | "db" | "settings" | "requestPromote" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "startReleaseReview" | "heldSince" | "promotionHold" | "drainHold" | "setDrain" | "promotionDrain" | "promotionAsked" | "opts" | "backlog" | "tagCi" | "watchAsked">, meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
+export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "latestOfSource" | "git" | "cfg" | "releaseReviewFor" | "drainBusy" | "db" | "settings" | "requestPromote" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "startReleaseReview" | "heldSince" | "promotionHold" | "drainHold" | "setDrain" | "promotionDrain" | "promotionAsked" | "opts" | "backlog" | "tagCi" | "watchAsked" | "bundleHold">, meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
   const status = await sc.releaseStatus();
   if (!status.managed) return null;
   // an update source (sb-rescue builds from tarballs, no git): the newest release comes from it, and it is a public copy by being the source
@@ -193,7 +196,7 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   const foreign = askedInFlight(sc.promotionDrain, !!(status as RescueStatus).busy, Date.now(), 2 * askedPollMs(sc));
   const settle = (tag: string | null, mode: Parameters<typeof nextDrain>[2]) => { if (!foreign) sc.setDrain(nextDrain(sc.promotionDrain, tag, mode, Date.now())); };
   // counted after the last await before each decision: a Task that ends while git runs either counts as ended here or finds the hold set
-  const decide = (needsRestart = false) => promotionStep({ status: status as ReleaseState, latest, busyTasks: sc.drainBusy(), latestInCurrent, review, auto, needsRestart, ci, requireCi: sc.settings().release.tagCi });
+  const decide = (needsRestart = false) => promotionStep({ status: status as ReleaseState, latest, busyTasks: sc.drainBusy(), latestInCurrent, review, auto, needsRestart, bundle: sc.bundleHold(), ci, requireCi: sc.settings().release.tagCi });
   const send = async (p: Extract<PromotionStep, { action: "promote" }>): Promise<{ status: number; restart: boolean; heavy: boolean; error: string }> => {
     try {
       const r = await (source ? sc.requestPromote(p.tag, p.sha, !!p.ifNoRestart) : sc.requestPromote(p.sha, undefined, !!p.ifNoRestart));
@@ -232,7 +235,7 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   // the drain after this decision (a restart that was asked for has set its own above); no await since the last count
   if (step.action === "pick") settle(null, "done");
   else if (step.action === "review") settle(latest!.tag, "off");
-  else if (step.action === "wait") settle(latest!.tag, step.drain ? "drain" : step.failed ? "done" : step.review || step.ci ? "off" : "keep");
+  else if (step.action === "wait") settle(latest!.tag, step.drain ? "drain" : step.failed ? "done" : step.review || step.ci || step.bundle ? "off" : "keep");
   else if (step.ifNoRestart) settle(latest!.tag, accepted ? "done" : "keep");
   let reviewNote: string | null = null;
   if (step.action === "review") {

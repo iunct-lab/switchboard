@@ -5,7 +5,6 @@ import { mergeGateOf, projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
 import { bodyLoss } from "./lint.ts";
-import { scopeIn } from "./task-paths.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
 import { mergeAnswerYesHeads } from "./gh-guard.ts";
@@ -319,15 +318,6 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           const sections = own && opts.pbiSections ? opts.pbiSections() : [];
           const lost = bodyLoss(now.issue.body, body, now.issue.labels.includes("type:pbi"), sections);
           if (lost) throw new Refused(`backlog edit: 保存しません — ${lost}。本文は ops-kit backlog view ${ref.replace(/^#/, "")}${explicit !== undefined ? ` --workspace ${explicit}` : ""} --json | jq -r .issue.body で取る`);
-          // a Task's body that names more paths than it did, after the merge gate stopped on a file it does not name, waits for the person's scope sentence
-          // an Issue that has no number yet (only sent later) cannot have been named by a stopped PR. Its `number` is null then,
-          // although Detail types it as a number, so keep the `n &&` below
-          const n = now.issue.number;
-          if (env.BACKLOG_URL && n && now.issue.labels.includes("type:task") && body !== now.issue.body && mergeGateOf(opts.cwd) !== null && addedPaths(now.issue.body ?? "", body, repoTop(opts.cwd)).length) {
-            // the stop is the repository's whose Task this is: the workspace written to
-            const s = await scopeStopOf(env, (await workspace()).repository ?? "", n, opts.fetch ?? fetch);
-            if (s?.stopped === true && s.granted !== true) throw new Refused(`backlog edit: 保存しません — merge-gate が名指しの外のファイルで止めたあとの、#${n} の本文への名指しのパスの追加には利用者の許可が要ります。利用者が Task の会話で #${n} の本文への名指しのパスの追加を認めると保存できます（言い方は自由。読めなかったときは「Task #${n} の本文に名指しのパスを足してよい」の 1 文でも通ります）`);
-          }
         }
         const input: Record<string, unknown> = {
           ...(title !== undefined && { title }),
@@ -720,12 +710,6 @@ export async function answerGranted(env: Record<string, string | undefined>, rep
   return true;
 }
 
-/** The paths the merge gate counts as named (`scopeIn`) that `after` has and `before` does not. */
-export function addedPaths(before: string, after: string, top: { name: string; dir: boolean }[]): string[] {
-  const had = new Set(scopeIn(before, top));
-  return scopeIn(after, top).filter((x) => !had.has(x));
-}
-
 /** The names at the top of the clone's HEAD (`dir` for a directory), from any directory of the clone; empty when git cannot read it. */
 export function repoTop(cwd?: string): { name: string; dir: boolean }[] {
   // --full-tree: from a subdirectory, ls-tree would list that directory instead of the top
@@ -735,17 +719,6 @@ export function repoTop(cwd?: string): { name: string; dir: boolean }[] {
     const m = /^\d+ (\w+) \S+\t(.+)$/.exec(l);
     return m ? [{ name: m[2]!, dir: m[1] === "tree" }] : [];
   });
-}
-
-/** Records that the merge gate stopped PR `pr` of `repo` for a file the Task `issue` does not name (POST /api/merge-grants/scope-stop). Best effort: false when it was not recorded. */
-export async function recordScopeStop(env: Record<string, string | undefined>, repo: string, issue: number, pr: number, f: Fetch = fetch): Promise<boolean> {
-  if (!env.BACKLOG_URL || !env.OPS_KIT_TASK_ID) return false;
-  try {
-    await appRoot(env, f)("POST", "/api/merge-grants/scope-stop", { taskId: env.OPS_KIT_TASK_ID, repo, issue, pr });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** The repository the backlog commands act on: GH_REPO, else origin; GitHub is never asked for it. */
