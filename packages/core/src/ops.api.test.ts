@@ -184,8 +184,8 @@ describe("ops resources task waits", () => {
       const t0 = Date.parse("2026-11-13T10:00:00.000Z");
       db.insertTask(queued("t_second", "二つ目", t0 + 1000, h)); // inserted first, queued later
       db.insertTask(queued("t_first", "一つ目", t0, h));
-      db.setQueued("t_second", "p", t0 + 1000);
-      db.setQueued("t_first", "p", t0);
+      db.setQueued("t_second", "p", t0 + 1000, []);
+      db.setQueued("t_first", "p", t0, []);
       const at = t0 + 60_000;
       const read = (queueWait?: () => "slot" | "memory" | null) => OpsResources.parse(opsResources(db, { home: h, procRoot: proc, now: at, queueWait }));
       // (a) a memory wait: both queued Tasks in the queue's order, the valve from heavy.json

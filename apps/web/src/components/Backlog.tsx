@@ -422,7 +422,7 @@ function ChangeDetail(props: { workspaceId: string; number: number }) {
         {" · "}
         {marks.localCi ? ci[marks.localCi] : t(m.noCi)}
         {marks.rechecks.length > 0 && t(m.rechecks, { list: marks.rechecks.join(", ") })}
-        {merged && t(m.mergedPair, { pair: merged })}
+        {merged && t(m.mergedPair, { pair: merged, base: detail.issue.change!.base })}
       </div>
       <pre className="wrap">{detail.issue.body || t(m.noBody)}</pre>
       {detail.comments.map((c) => (

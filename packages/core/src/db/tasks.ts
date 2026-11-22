@@ -80,36 +80,45 @@ export class TaskQueries extends GrantQueries {
     return this.sqlite.query(`SELECT * FROM tasks WHERE ${QUEUED_SQL} ORDER BY queued_at, created_at`).all().map(rowToTask);
   }
 
-  /** Put a Task in the wait for a run slot with the prompt it will start with. */
-  setQueued(id: string, prompt: string, at: number): void {
-    this.sqlite.query("UPDATE tasks SET queued_at = ?, queued_prompt = ?, updated_at = ? WHERE id = ?").run(at, prompt, Date.now(), id);
+  /** Put a Task in the wait for a run slot with the prompt and the attachment ids it will start with. */
+  setQueued(id: string, prompt: string, at: number, attachmentIds: string[]): void {
+    this.sqlite.query("UPDATE tasks SET queued_at = ?, queued_prompt = ?, queued_attachments = ?, queued_resume = 0, updated_at = ? WHERE id = ?").run(at, prompt, attachmentIds.length ? JSON.stringify(attachmentIds) : null, Date.now(), id);
   }
 
   /**
    * A reply to a Task whose process is closed, waiting for a run slot: the queue is the idle rows with `queued_at`, so a
    * done / error / aborted row moves to idle through updateTask (the transition table applies, and it shows again if
    * archived). A new turn is coming, so the outcome is written as a start would (unknown, 確認済み and the judgement off).
-   * A row already waiting gets the reply after its prompt and keeps its place.
+   * A row already waiting gets the reply after its prompt and keeps its place. `resume` = the reply is an automatic turn:
+   * the wait is marked automatic only while every turn in it is (`queued_resume`), so a person's reply makes it theirs.
    */
-  queueReply(id: string, text: string, at: number): void {
+  queueReply(id: string, text: string, at: number, attachmentIds: string[], opts: { resume: boolean }): void {
     const cur = this.getTask(id);
     if (!cur) return;
     if (cur.queuedAt !== null) {
-      this.sqlite.query("UPDATE tasks SET queued_prompt = COALESCE(queued_prompt, '') || char(10) || char(10) || ?, updated_at = ? WHERE id = ?").run(text, at, id);
+      const row = this.sqlite.query("SELECT queued_attachments FROM tasks WHERE id = ?").get(id) as { queued_attachments: string | null };
+      const ids = [...(row.queued_attachments ? JSON.parse(row.queued_attachments) as string[] : []), ...attachmentIds];
+      this.sqlite.query("UPDATE tasks SET queued_prompt = COALESCE(queued_prompt, '') || char(10) || char(10) || ?, queued_attachments = ?, queued_resume = queued_resume AND ?, updated_at = ? WHERE id = ?").run(text, ids.length ? JSON.stringify(ids) : null, opts.resume ? 1 : 0, at, id);
       return;
     }
     this.sqlite.transaction(() => {
       this.updateTask(id, { status: "idle", outcome: "unknown", reviewedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, updatedAt: at });
-      this.setQueued(id, text, at);
+      this.setQueued(id, text, at, attachmentIds);
+      if (opts.resume) this.sqlite.query("UPDATE tasks SET queued_resume = 1 WHERE id = ?").run(id);
     })();
   }
 
-  /** Take a Task out of the wait: returns the prompt it was queued with (null = it was not waiting) and clears both columns. */
-  takeQueued(id: string): string | null {
-    const row = this.sqlite.query("SELECT queued_at, queued_prompt FROM tasks WHERE id = ?").get(id) as { queued_at: number | null; queued_prompt: string | null } | null;
+  /** The Task is waiting for a run slot and every turn in the wait is automatic (see queueReply). */
+  isQueuedResume(id: string): boolean {
+    return (this.sqlite.query("SELECT 1 AS x FROM tasks WHERE id = ? AND queued_at IS NOT NULL AND queued_resume = 1").get(id) as { x: number } | null) !== null;
+  }
+
+  /** Take a Task out of the wait: returns the prompt and the attachment ids it was queued with (null = it was not waiting) and clears the four columns. */
+  takeQueued(id: string): { prompt: string; attachmentIds: string[]; resume: boolean } | null {
+    const row = this.sqlite.query("SELECT queued_at, queued_prompt, queued_attachments, queued_resume FROM tasks WHERE id = ?").get(id) as { queued_at: number | null; queued_prompt: string | null; queued_attachments: string | null; queued_resume: number } | null;
     if (!row || row.queued_at === null) return null;
-    this.sqlite.query("UPDATE tasks SET queued_at = NULL, queued_prompt = NULL, updated_at = ? WHERE id = ?").run(Date.now(), id);
-    return row.queued_prompt;
+    this.sqlite.query("UPDATE tasks SET queued_at = NULL, queued_prompt = NULL, queued_attachments = NULL, queued_resume = 0, updated_at = ? WHERE id = ?").run(Date.now(), id);
+    return { prompt: row.queued_prompt ?? "", attachmentIds: row.queued_attachments ? JSON.parse(row.queued_attachments) as string[] : [], resume: row.queued_resume === 1 };
   }
 
   /** Tasks that count as working for `purpose` (task-status.ts `isWorking`, in SQL): a turn, an open approval, a wait on background jobs, and for `dedupe` a planned resume. */
@@ -294,7 +303,7 @@ export class TaskQueries extends GrantQueries {
     // statusAt moves only when the status does: a title, outcome or 確認済み change keeps when the task came to it
     // a new turn shows the Task again: only a stopped one stays archived
     const shown = moves && (IN_FLIGHT.has(patch.status!) || patch.status === "idle") ? { archivedAt: null } : {};
-    // The wait for a run slot is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt too),
+    // The wait for a run slot is written only by setQueued / takeQueued; a status that leaves idle ends it (prompt and attachment ids too),
     // so a Task started some other way does not come back into the queue when it is idle again
     const queuedAt = moves && patch.status !== "idle" ? null : cur.queuedAt;
     const status = patch.status ?? cur.status;
@@ -304,8 +313,8 @@ export class TaskQueries extends GrantQueries {
     const next: Task = { ...cur, ...rule, ...patch, ...shown, queuedAt, updatedAt, statusAt: moves ? updatedAt : cur.statusAt, outcome: outcomeOf(status, stored) };
     this.validateCloudSource(next, cur);
     this.sqlite
-      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, deferred_prompt = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
-      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.deferredPrompt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), stored, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
+      .query("UPDATE tasks SET status = ?, runner_session_id = ?, model = ?, title = ?, title_pending = ?, budget_usd = ?, permission_mode = ?, effort = ?, resume_at = ?, resume_reason = ?, resume_window = ?, resume_since = ?, resume_planned_at = ?, queued_at = ?, queued_prompt = CASE WHEN ? IS NULL THEN NULL ELSE queued_prompt END, queued_attachments = CASE WHEN ? IS NULL THEN NULL ELSE queued_attachments END, queued_resume = CASE WHEN ? IS NULL THEN 0 ELSE queued_resume END, deferred_prompt = ?, shadow_stopped = ?, scope = ?, outcome = ?, reviewed_at = ?, archived_at = ?, judged_result = ?, judged_reason = ?, judged_by = ?, judging_at = ?, updated_at = ?, status_at = ?, cloud_session = ?, source_cloud_task_id = ? WHERE id = ?")
+      .run(next.status, next.runnerSessionId, next.model, next.title, next.titlePending ? 1 : 0, next.budgetUsd, next.permissionMode, next.effort, next.resumeAt, next.resumeReason, next.resumeWindow, next.resumeSince, next.resumePlannedAt, next.queuedAt, next.queuedAt, next.queuedAt, next.queuedAt, next.deferredPrompt, next.shadowStopped ? 1 : 0, JSON.stringify(next.scope), stored, next.reviewedAt, next.archivedAt, next.judgedResult, next.judgedReason, next.judgedBy, next.judgingAt, next.updatedAt, next.statusAt, next.cloudSession ? JSON.stringify(next.cloudSession) : null, next.sourceCloudTaskId, id);
     return next;
   }
 

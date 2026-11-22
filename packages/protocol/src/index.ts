@@ -6,6 +6,7 @@ export * from "./model/backlog-edit.ts";
 export * from "./model/backlog-records.ts";
 export * from "./model/backlog.ts";
 export * from "./model/balance.ts";
+export * from "./model/bundle.ts";
 export * from "./model/checks.ts";
 export * from "./model/cli-update.ts";
 export * from "./model/evals.ts";

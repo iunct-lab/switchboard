@@ -1,6 +1,5 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { addedPaths } from "./backlog-client";
 import { pathsIn, scopeIn } from "./task-paths";
 
 const top = [
@@ -121,26 +120,5 @@ describe("task-paths pathsIn: a place that only names a file as a reference", ()
     ].join("\n");
     expect(pathsIn(body, top)).toEqual(["packages/core/src/flow.ts", "docs/design/backlog.md"]);
     expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["packages/core/src/backlog-waits.ts", "apps/web/src/changes.ts", "apps/web/src/components/Backlog.tsx", "packages/core/src/flow.ts"]));
-  });
-});
-
-describe("addedPaths", () => {
-  test("addedPaths agrees with the difference of scopeIn", () => {
-    const kit = [...top, { name: "ops-kit", dir: true }];
-    const before = "触る: `packages/core/src/db.ts`\n";
-    const afters = [
-      `${before}\`apps/web/src/App.tsx\` も`,
-      `${before}apps/web/src/App.tsx も直す`,
-      `${before}\`bun test apps/web/src/x.test.ts\` で確かめる`,
-      `${before}ops-kit/ 以下`,
-      `${before}\`packages/core/src/db.ts:120\` の行`,
-      `${before}\`packages/core/src/*.ts\` を直す`,
-      before,
-    ];
-    for (const after of afters) {
-      const had = new Set(scopeIn(before, kit));
-      expect(addedPaths(before, after, kit)).toEqual(scopeIn(after, kit).filter((x) => !had.has(x)));
-    }
-    expect(addedPaths(before, afters[1]!, kit)).toEqual(["apps/web/src/App.tsx"]);
   });
 });

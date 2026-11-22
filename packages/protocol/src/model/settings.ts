@@ -74,7 +74,7 @@ export type TitlesSettings = z.infer<typeof TitlesSettings>;
  * The kinds of Task that start by themselves: the feedback modes (`FeedbackInput.mode`) and the backlog stages
  * (`BacklogAction`), under their own names.
  */
-export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync", "adopt-repo", "baseline"]);
+export const AutoStartKind = z.enum(["fix", "request", "to-pbi", "to-tasks", "complete", "check", "close", "direct", "new-repo", "upstream-sync", "adopt-repo", "baseline", "bundle"]);
 export type AutoStartKind = z.infer<typeof AutoStartKind>;
 
 /**
@@ -110,6 +110,7 @@ export const AutoStartSettings = z
         "upstream-sync": AutoStartChoice.optional(),
         "adopt-repo": AutoStartChoice.optional(),
         baseline: AutoStartChoice.optional(),
+        bundle: AutoStartChoice.optional(),
       })
       .prefault({}),
     /**
@@ -423,6 +424,7 @@ export const SettingsPatch = z.object({
           "upstream-sync": autoStartChoicePatch,
           "adopt-repo": autoStartChoicePatch,
           baseline: autoStartChoicePatch,
+          bundle: autoStartChoicePatch,
         })
         .partial(),
       /** Replaces the whole order. */

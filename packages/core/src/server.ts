@@ -38,6 +38,7 @@ import { tasksRoutes } from "./routes/tasks.ts";
 import { mcpRoutes } from "./routes/mcp.ts";
 import { otelRoutes } from "./routes/otel.ts";
 import { workspacesRoutes } from "./routes/workspaces.ts";
+import { bundleRoutes } from "./routes/bundle.ts";
 import { backlogRoutes } from "./routes/backlog.ts";
 import { interventionsRoutes } from "./routes/interventions.ts";
 import { balanceRoutes } from "./routes/balance.ts";
@@ -254,6 +255,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       mcpRoutes(sc),
       otelRoutes(sc),
       workspacesRoutes(sc),
+      bundleRoutes(sc),
       backlogRoutes(sc),
       interventionsRoutes(sc),
       balanceRoutes(sc),

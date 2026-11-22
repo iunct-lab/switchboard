@@ -731,7 +731,7 @@ describe("pickNext overlap", () => {
       expect(overlapOf(ws, 1)).toBeNull();
       // waiting for a run slot
       stage("t_queued", 2, { status: "idle" });
-      db.setQueued("t_queued", "続き", 5);
+      db.setQueued("t_queued", "続き", 5, []);
       expect(overlapOf(ws, 1)).toEqual(hit);
       db.updateTask("t_queued", { status: "running" });
       db.updateTask("t_queued", { status: "done" });

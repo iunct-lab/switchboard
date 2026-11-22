@@ -91,7 +91,7 @@ export abstract class TaskAdmission extends TaskSessions {
       this.startOrFail(task, prompt, atts);
       return "started";
     }
-    this.db.setQueued(task.id, prompt, Date.now());
+    this.db.setQueued(task.id, prompt, Date.now(), atts.map((a) => a.id));
     const position = this.db.listQueuedTasks().findIndex((t) => t.id === task.id) + 1;
     this.record(task.id, { t: "status", text: `${block.wait}（${block.detail}、待ち ${position} 番目）` });
     this.broadcast({ type: "task.updated", task: this.mustGet(task.id) });
@@ -141,28 +141,42 @@ export abstract class TaskAdmission extends TaskSessions {
         });
         if (!next) break;
         this.refusalNoted.delete(next.id);
-        const prompt = this.db.takeQueued(next.id);
-        if (prompt === null) continue;
+        const taken = this.db.takeQueued(next.id);
+        if (taken === null) continue;
+        const { prompt } = taken;
         for (const [id] of this.live) {
           if (this.live.size < this.maxRunners()) break;
           const st = this.db.getTask(id)?.status;
           if (st && !IN_FLIGHT.has(st)) void this.release(id); // takes the entry out of `live` at once
         }
         this.record(next.id, { t: "status", text: "実行枠が空いたので開始" });
-        // the files this prompt names: the first prompt's, or the queued replies' (an earlier turn's files are not sent again)
-        const atts = (this.attachments?.listForTask(next.id) ?? []).filter((a) => prompt.includes(a.path));
+        // the files the queued turns were sent with, by id (an earlier turn's files are not sent again; a shadow's are its source's)
+        const atts = taken.attachmentIds.flatMap((id) => this.attachments?.get(id) ?? []);
         const task = this.mustGet(next.id);
         const warning = this.memoryWarning(task);
         if (warning) this.record(task.id, { t: "status", text: warning });
         try {
           const { resume, preamble } = this.resumeArgs(task); // a queued reply continues the session the Task had
           this.startOrFail(this.withResolvedMode(task), prompt, atts, resume, preamble);
-        } catch {
+          this.notifyQueuedStart(next.id, { ok: true }, taken.resume);
+        } catch (e) {
           // startOrFail wrote the error on the row; the next one may still start
+          this.notifyQueuedStart(next.id, { ok: false, message: String((e as Error).message ?? e) }, taken.resume);
         }
       }
     } finally {
       this.draining = false;
+    }
+  }
+
+  /** One listener's failure must not skip the others or the drain. */
+  private notifyQueuedStart(taskId: string, r: { ok: true } | { ok: false; message: string }, resume: boolean): void {
+    for (const l of this.queuedStartListeners) {
+      try {
+        l(taskId, r, resume);
+      } catch (e) {
+        console.error(`task ${taskId}: queued-start listener failed:`, e);
+      }
     }
   }
 

@@ -1,6 +1,6 @@
 import type { ReleaseReview } from "../release-review.ts";
 import type { ServerWebSocket } from "bun";
-import type { AutoStartKind, FeedbackInput, LoginKind, RunnerId, Settings, AgentEvent, EventEnvelope, AnswerPolicy, Ask, AskAnswer, AskAnswerResult, AskBatch, Backlog, BacklogAllocation, McpServerConfig, BacklogQueue, BacklogAction, BacklogItem, PolicyInput, PolicySubject, Task, TaskEvals, TeleportProgress, TerminalStatus, LlmRoutingSettings, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerInfo, ServerMessage, ScanCursors, Workspace, BacklogSyncInfo, BacklogSyncState, BacklogIssueData, CustomRunner, Artifact } from "@switchboard/protocol";
+import type { AutoStartKind, FeedbackInput, LoginKind, RunnerId, Settings, AgentEvent, EventEnvelope, AnswerPolicy, Ask, AskAnswer, AskAnswerResult, AskBatch, Backlog, BacklogAllocation, McpServerConfig, BacklogQueue, BacklogAction, BacklogItem, PolicyInput, PolicySubject, Task, TaskEvals, TeleportProgress, TerminalStatus, LlmRoutingSettings, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerInfo, ServerMessage, ScanCursors, Workspace, BacklogSyncInfo, BacklogSyncState, BacklogIssueData, CustomRunner, Artifact, BundleHold } from "@switchboard/protocol";
 import type { CoreConfig, UplinkConfig } from "../config.ts";
 import type { Db, ApiRequestRow } from "../db.ts";
 import type { OpsLoadSampler } from "../ops-load.ts";
@@ -223,6 +223,9 @@ export interface ServerContext {
   readonly answerWithPolicy: (id: string, answer: AskAnswer, input: PolicyInput) => Promise<{ status: number; body: object; }>;
   readonly answerTask: (id: string, ask: Ask, answer: AskAnswer, by?: AnswerPolicy | null, via?: "screen" | "api") => Promise<{ status: number; body: object; }>;
   readonly releaseStatus: () => Promise<RescueStatus | { managed: false; error?: string; }>;
+  readonly bundleHold: () => BundleHold | null;
+  readonly holdForBundle: (taskId: string, base: string | null) => BundleHold;
+  readonly releaseBundle: () => { released: boolean; restored: string[]; };
   readonly requestPromote: (commit: string, expectSha?: string, ifNoRestart?: boolean) => Promise<{ status: number; body: object; }>;
   readonly busyTasks: () => number;
   readonly drainBusy: () => number;

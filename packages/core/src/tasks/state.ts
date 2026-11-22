@@ -289,6 +289,7 @@ export abstract class TaskManagerState {
   protected turnEndListeners = new Set<(taskId: string, task: Task, turn: TurnEnd) => void>();
   /** Told whenever a task's planned resume is forgotten, or a person starts a turn (a plan still being made must be dropped too). */
   protected planForgottenListeners = new Set<(taskId: string) => void>();
+  protected queuedStartListeners = new Set<(taskId: string, r: { ok: true } | { ok: false; message: string }, resume: boolean) => void>();
   protected stopRecordedListeners = new Set<(taskId: string, stop: StopRecord, prev: StopRecord | undefined) => void>();
 
   constructor(
@@ -403,6 +404,12 @@ export abstract class TaskManagerState {
   onPlanForgotten(l: (taskId: string) => void): () => void {
     this.planForgottenListeners.add(l);
     return () => this.planForgottenListeners.delete(l);
+  }
+
+  /** Called when drain() started a Task that waited for a run slot: how the start went, and whether every turn in the wait was automatic (`resume`). */
+  onQueuedStart(l: (taskId: string, r: { ok: true } | { ok: false; message: string }, resume: boolean) => void): () => void {
+    this.queuedStartListeners.add(l);
+    return () => this.queuedStartListeners.delete(l);
   }
 
   /**

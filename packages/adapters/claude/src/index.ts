@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, ModelOption, PermissionDecision, PermissionModeOption, RunnerAdapter, RunnerDetection, LoginKind, RunnerLogin, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
+import { listClaudeCommands } from "./commands.ts";
 import { createClaudeParser, initializeLine, interruptLine, permissionResponseLine, setPermissionModeLine, userMessageLine } from "./parse.ts";
 
 export * from "./parse.ts";
@@ -290,6 +291,12 @@ export function claudeSessionExists(sessionId: string, claudeHome = process.env.
   return dirs.some((d) => existsSync(join(projects, d, `${sessionId}.jsonl`)));
 }
 
+/** How long reading the "/" list may take: `SWITCHBOARD_RUNNER_COMMANDS_TIMEOUT_MS`, 15 s when unset or not a positive number (a name shared by the runners that read a list). */
+export function commandsTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWITCHBOARD_RUNNER_COMMANDS_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 15_000;
+}
+
 export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerAdapter {
   const bin = options.bin ?? "claude";
   return {
@@ -307,6 +314,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
     loginHosts: ["claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com"],
     cliDefaultModel: () => cliDefaultModelFromSettings(options.claudeHome),
     hasSession: (id) => claudeSessionExists(id, options.claudeHome),
+    listCommands: (cwd) => listClaudeCommands(bin, cwd, commandsTimeoutMs(), childEnv(), options.extraArgs ?? []),
     async detect(): Promise<RunnerDetection> {
       try {
         const which = Bun.which(bin);

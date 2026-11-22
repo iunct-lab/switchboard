@@ -8,6 +8,7 @@ import * as routing from "./routing.ts";
 import * as teleport from "./teleport.ts";
 import * as mcp from "./mcp.ts";
 import * as promotion from "./promotion.ts";
+import * as bundle from "./bundle.ts";
 import * as cliUpdate from "./cli-update.ts";
 import * as lease from "./lease.ts";
 import * as evals from "./evals.ts";
@@ -42,6 +43,7 @@ export function bindFunctions(sc: ServerContextInit): void {
   bind(sc, teleport);
   bind(sc, mcp);
   bind(sc, promotion);
+  bind(sc, bundle);
   bind(sc, cliUpdate);
   bind(sc, lease);
   bind(sc, evals);

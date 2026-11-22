@@ -259,6 +259,124 @@ describe("core daemon", () => {
       }
     }, 20000);
 
+    test("maxRunners 添付: 待ち列から始まる返信は、返信に付けた添付 id のファイルだけを渡す（名前の前半が同じ別の添付は渡さない）", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-att-"));
+      const starts: StartOptions[] = [];
+      const db = new Db(join(home, "t.sqlite"));
+      const store = new AttachmentStore(db, join(home, "attachments"));
+      const hold = new Promise<never>(() => undefined);
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { lingers: true, starts })],
+        ["codex", fakeAdapter(SCRIPT, { id: "codex", lingers: true, gate: hold })],
+      ]);
+      const tm = new TaskManager(db, adapters, () => undefined, { maxRunners: () => 2, attachments: store });
+      const upload = (name: string) => store.save({ name, bytes: new TextEncoder().encode(name) }).id;
+      try {
+        const input = (title: string, runner: RunnerId, attachmentIds?: string[]) => ({ cwd: home, title, prompt: title, runner, attachmentIds });
+        const t1 = tm.create(input("t1", "claude", [upload("report.txt")]));
+        await waitFor(async () => !["running", "waiting"].includes(db.getTask(t1.id)!.status));
+        await tm.releaseAndWait(t1.id);
+        const busy1 = tm.create(input("busy1", "codex"));
+        tm.create(input("busy2", "codex"));
+        await tm.send(t1.id, "see the bak", { attachmentIds: [upload("report.txt.bak")] });
+        const bak = store.listForTask(t1.id).find((a) => a.name === "report.txt.bak")!;
+        expect(bak.path.startsWith(store.listForTask(t1.id).find((a) => a.name === "report.txt")!.path)).toBe(true); // the path match would take both
+        await tm.abort(busy1.id);
+        await waitFor(async () => starts.length === 2);
+        expect(starts[1]!.attachments?.map((a) => a.name)).toEqual(["report.txt.bak"]);
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
+    test("maxRunners 並走: 添付付きで始めた並走が待ち列に入ると、枠が空いて始まるとき並走元の Task の下の添付が渡る", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-shadow-"));
+      const claudeStarts: StartOptions[] = [];
+      const codexStarts: StartOptions[] = [];
+      const db = new Db(join(home, "t.sqlite"));
+      const store = new AttachmentStore(db, join(home, "attachments"));
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { starts: claudeStarts })],
+        ["codex", fakeAdapter(SCRIPT.filter((e) => e.t !== "permission.ask"), { id: "codex", starts: codexStarts })],
+      ]);
+      const tm = new TaskManager(db, adapters, () => undefined, { maxRunners: () => 1, attachments: store });
+      try {
+        const a = store.save({ name: "spec.txt", bytes: new TextEncoder().encode("spec") });
+        const primary = tm.create({ cwd: home, title: "p", prompt: "p", runner: "claude", attachmentIds: [a.id], shadowRunner: "codex" });
+        const shadow = db.shadowTaskOf(primary.id)!;
+        expect(db.getTask(shadow.id)!.queuedAt).not.toBeNull(); // the one slot is the primary's
+        expect(store.listForTask(shadow.id)).toEqual([]); // its attachment row is the primary's, so a lookup by the shadow's id finds nothing
+        await waitFor(async () => codexStarts.length === 1);
+        expect(codexStarts[0]!.attachments?.map((x) => x.name)).toEqual(["spec.txt"]);
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
+    test("並走元の中断: 実行枠待ちの並走側の自動再開は取り消し、人の返信の写しで待つ並走側は取り消さない", async () => {
+      const home = mkdtempSync(join(tmpdir(), "switchboard-test-queue-abort-shadow-"));
+      const shadowStarts: StartOptions[] = [];
+      const db = new Db(join(home, "t.sqlite"));
+      const hold = new Promise<never>(() => undefined);
+      const quick = SCRIPT.filter((e) => e.t !== "permission.ask");
+      const adapters = new Map<RunnerId, RunnerAdapter>([
+        ["claude", fakeAdapter(SCRIPT, { lingers: true, gate: hold })], // its turn stays in flight: it holds a slot
+        ["codex", fakeAdapter(quick)],
+        ["dak", fakeAdapter(quick, { id: "dak", starts: shadowStarts })],
+      ]);
+      let max = 4;
+      const tm = new TaskManager(db, adapters, () => undefined, { maxRunners: () => max });
+      try {
+        // each case: a primary and its shadow, both finished and closed; every slot taken; a resume of the shadow joins the queue
+        const setup = async (title: string) => {
+          max = 4;
+          const primary = tm.create({ cwd: home, title, prompt: title, runner: "codex", shadowRunner: "dak" });
+          const shadow = db.shadowTaskOf(primary.id)!;
+          await waitFor(async () => ![primary.id, shadow.id].some((id) => ["running", "waiting"].includes(db.getTask(id)!.status)));
+          await tm.releaseAndWait(primary.id);
+          await tm.releaseAndWait(shadow.id);
+          const busy = [tm.create({ cwd: home, title: "busy", prompt: "busy", runner: "claude" }), tm.create({ cwd: home, title: "busy", prompt: "busy", runner: "claude" })];
+          max = busy.length;
+          tm.setResumeAt(shadow.id, Date.now() + 1000);
+          await tm.send(shadow.id, "auto resume", { asResume: true });
+          expect(db.getTask(shadow.id)).toMatchObject({ resumeAt: null }); // the plan went when it joined the queue: 中断 no longer finds it
+          expect(db.getTask(shadow.id)!.queuedAt).not.toBeNull();
+          return { primary, shadow, busy };
+        };
+        // (a) only automatic turns wait: 中断 of the primary takes the shadow's resume out, and a free slot starts nothing
+        const a = await setup("a");
+        expect(db.isQueuedResume(a.shadow.id)).toBe(true);
+        const startsBefore = shadowStarts.length;
+        await tm.abort(a.primary.id);
+        expect(db.getTask(a.shadow.id)!.queuedAt).toBeNull();
+        expect(db.listEvents(a.shadow.id).some((e) => e.ev.t === "status" && e.ev.text.includes("実行枠待ちの自動再開を取り消しました"))).toBe(true);
+        await tm.abort(a.busy[0]!.id);
+        tm.drain();
+        expect(shadowStarts).toHaveLength(startsBefore);
+        await tm.abort(a.busy[1]!.id);
+        // (b) a person's reply to the primary is copied to the shadow, which makes its wait theirs: it is not taken out
+        const b = await setup("b");
+        await tm.send(b.primary.id, "person's reply"); // the primary waits for a slot as well; the shadow gets the copy
+        await waitFor(async () => !db.isQueuedResume(b.shadow.id)); // the copy is sent without waiting for it
+        expect(db.getTask(b.shadow.id)!.queuedAt).not.toBeNull();
+        const before = shadowStarts.length;
+        await tm.abort(b.primary.id);
+        expect(db.getTask(b.shadow.id)!.queuedAt).not.toBeNull();
+        await tm.abort(b.busy[0]!.id);
+        await waitFor(async () => shadowStarts.length === before + 1);
+        expect(shadowStarts.at(-1)!.prompt).toContain("auto resume");
+        expect(shadowStarts.at(-1)!.prompt).toContain("person's reply");
+      } finally {
+        await tm.shutdown();
+        db.close();
+        rmSync(home, { recursive: true, force: true });
+      }
+    }, 20000);
+
     test("maxRunners (f) 上限を上げると待っていた Task がすぐ始まる", async () => {
       const starts: StartOptions[] = [];
       const { c, home, b } = await boot([fakeAdapter(SCRIPT, { lingers: true, starts })]);

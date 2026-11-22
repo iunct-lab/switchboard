@@ -321,6 +321,10 @@ export class RateLimitResumer {
   private probing = new Map<string, number>();
   /** Tasks whose follow-up is being sent, so a tick during the await cannot send twice. */
   private sending = new Set<string>();
+  /** Resume turns waiting in the run-slot queue, with the Task as it was when the resume was planned (its plan was cleared on joining the queue). */
+  private queuedResumes = new Map<string, Task>();
+  /** A queued resume turn that started (or failed to) inside its own send (the hold path drains at once): resume() settles it after the send returns. */
+  private startedInSend = new Map<string, { ok: true } | { ok: false; message: string }>();
   /**
    * The turns whose GitHub plan waits for the budget read, as `task#n` with n counting the task's turn ends
    * here: forgetting the task's plan (a reply, 中断, a cancel — `TaskManager.onPlanForgotten`) takes them out, and the
@@ -329,6 +333,7 @@ export class RateLimitResumer {
   private githubPending = new Set<string>();
   private turnEnds = new Map<string, number>();
   private unsubscribeForget: (() => void) | null = null;
+  private unsubscribeQueued: (() => void) | null = null;
   private unsubscribeStops: (() => void) | null = null;
   /** The reported usage-limit stop each task's standing plan came from: a repeat of it while the plan stands is not a second stop. */
   private reportedPlans = new Map<string, string>();
@@ -372,6 +377,7 @@ export class RateLimitResumer {
   /** Subscribe to turn ends and start the ticker. */
   start(intervalMs = 30_000) {
     if (!this.unsubscribe) this.unsubscribe = this.tasks.onTurnEnd((taskId, task, turn) => this.onTurnEnd(taskId, task, turn));
+    if (!this.unsubscribeQueued) this.unsubscribeQueued = this.tasks.onQueuedStart((taskId, r, resume) => this.queuedStarted(taskId, r, resume));
     if (!this.unsubscribeForget) this.unsubscribeForget = this.tasks.onPlanForgotten((taskId) => this.forgetPlan(taskId));
     if (!this.unsubscribeStops) this.unsubscribeStops = this.tasks.onStopRecorded((taskId, stop, prev) => this.planReported(taskId, stop, prev));
     if (this.timer) return;
@@ -386,6 +392,8 @@ export class RateLimitResumer {
     this.unsubscribe = null;
     this.unsubscribeForget?.();
     this.unsubscribeForget = null;
+    this.unsubscribeQueued?.();
+    this.unsubscribeQueued = null;
     this.unsubscribeStops?.();
     this.unsubscribeStops = null;
   }
@@ -603,6 +611,7 @@ export class RateLimitResumer {
 
   /** A reply, 中断, 今すぐ再開 or a cancel ended the wait: a plan on the old turn goes, and the disk stop with it. */
   private forgetPlan(taskId: string): void {
+    this.queuedResumes.delete(taskId);
     this.dropPending(taskId);
     this.resolveDiskStop(taskId, this.diskFree(), "待ちを打ち切った");
   }
@@ -758,11 +767,24 @@ export class RateLimitResumer {
       // up if a reply, 中断 or a cancel landed while a release was awaited.
       // A turn the daemon's own stop cut (interrupted.ts) shares the plan column; its follow-up says what happened.
       const prompt = lastStopWasDaemon(this.db.listEvents(t.id).map((e) => e.ev)) ? STOP_RESUME_PROMPT : this.followUp(t);
+      this.startedInSend.delete(t.id);
       await this.tasks.send(t.id, prompt, { asResume: true });
       this.log(`ratelimit: resumed ${t.id}`);
-      // the failures before this one were the same stop; it is over
-      const failed = this.tasks.stopOf(t.id, RESUME_STOP);
-      if (failed && failed.state !== "resolved") this.tasks.recordStop(t.id, resumeStop({ evidence: failed.evidence, state: "resolved", actions: [...failed.actions, { attempt: failed.actions.length, at: this.now(), what: "再開を送れた", ok: true }].slice(-20) }));
+      // The turn joined the queue and drain() already started it within the send: settle it by that start's result.
+      const started = this.startedInSend.get(t.id);
+      if (started) {
+        this.startedInSend.delete(t.id);
+        this.settleQueuedStart(t, started);
+        return started.ok;
+      }
+      // No free run slot: the turn waits in the queue and has not been sent. Its start settles the stop (onQueuedStart).
+      if ((this.db.getTask(t.id)?.queuedAt ?? null) !== null) {
+        this.queuedResumes.set(t.id, t);
+        const failed = this.tasks.stopOf(t.id, RESUME_STOP);
+        if (failed && failed.state !== "resolved") this.tasks.recordStop(t.id, resumeStop({ evidence: failed.evidence, state: failed.state, conditions: failed.conditions, actions: [...failed.actions, { attempt: failed.actions.length, at: this.now(), what: "実行枠待ちに入れた", ok: true }].slice(-20) }));
+        return true;
+      }
+      this.resolveResumeStop(t.id, "再開を送れた");
       return true;
     } catch (e) {
       this.resumedByUs.delete(t.id);
@@ -771,30 +793,72 @@ export class RateLimitResumer {
         this.log(`ratelimit: ${t.id} ${e.message}`);
         return false;
       }
-      // A passing failure (the process exited under us, a spawn error): keep the plan, try again in a while; the same
-      // cap as repeated stops bounds it.
       const msg = String((e as Error).message ?? e);
-      const count = (this.stops.get(t.id) ?? 0) + 1;
-      this.stops.set(t.id, count);
-      // The same stop as the task's other failed sends: this path's own cap and timer, recorded — never a second retry.
-      const prev = this.tasks.stopOf(t.id, RESUME_STOP);
-      const tried = [...(prev && prev.state !== "resolved" ? prev.actions : []), { attempt: count, at: this.now(), what: "再開を送れなかった", ok: false }].slice(-20);
-      if (count > this.tunables().maxLimitStops) {
-        this.tasks.setResumeAt(t.id, null);
-        this.tasks.record(t.id, { t: "status", text: `自動再開できませんでした（${msg}）。${count - 1} 回続けて失敗したので、これ以上は再開しません。返信すると再開します` });
-        this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "exhausted", actions: tried }));
-      } else {
-        const at = this.now() + LATE_RETRY_MS;
-        // the same wait as before (a GitHub one stays one); only a report after this failure resumes it early, so the
-        // report that was just used does not cut the retry's delay short
-        this.tasks.setResumeAt(t.id, at, t.resumeReason ?? "limit", { window: t.resumeWindow, since: t.resumeWindow !== null ? this.now() : null, plannedAt: t.resumePlannedAt });
-        this.tasks.record(t.id, { t: "status", text: `自動再開できませんでした（${msg}）。${fmtTime(at, this.now())} に再試行します` });
-        this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "waiting", conditions: [{ key: "resumeAt", value: new Date(at).toISOString(), met: false }], actions: tried }));
-      }
+      this.planRetry(t, msg);
       this.log(`ratelimit: resume of ${t.id} failed: ${msg}`);
       return false;
     } finally {
       this.sending.delete(t.id);
+      this.startedInSend.delete(t.id);
+    }
+  }
+
+  /** A resume turn that waited in the run-slot queue has started (settles the stop) or failed to start (the same retry plan as a send that threw). */
+  private queuedStarted(taskId: string, r: { ok: true } | { ok: false; message: string }, resume: boolean): void {
+    if (!resume) {
+      this.queuedResumes.delete(taskId);
+      return;
+    }
+    // still inside this resumer's send (the hold path drains at once): resume() settles it when the send returns
+    if (this.sending.has(taskId)) {
+      this.startedInSend.set(taskId, r);
+      return;
+    }
+    // only a resume turn this resumer queued; another automatic turn (a daemon turn) is not a resume to settle or retry
+    const t = this.queuedResumes.get(taskId);
+    if (!t) return;
+    this.queuedResumes.delete(taskId);
+    this.settleQueuedStart(t, r);
+  }
+
+  /** A resume turn that waited in the queue started (the stop is over) or failed to start (the retry plan). */
+  private settleQueuedStart(t: Task, r: { ok: true } | { ok: false; message: string }): void {
+    if (r.ok) {
+      this.resolveResumeStop(t.id, "再開を送れた");
+      return;
+    }
+    this.resumedByUs.delete(t.id);
+    this.probing.delete(t.id);
+    this.planRetry(t, r.message);
+    this.log(`ratelimit: resume of ${t.id} failed to start from the queue: ${r.message}`);
+  }
+
+  /** The failures before a resume that went through were the same stop; it is over. */
+  private resolveResumeStop(taskId: string, what: string): void {
+    const failed = this.tasks.stopOf(taskId, RESUME_STOP);
+    if (failed && failed.state !== "resolved") this.tasks.recordStop(taskId, resumeStop({ evidence: failed.evidence, state: "resolved", actions: [...failed.actions, { attempt: failed.actions.length, at: this.now(), what, ok: true }].slice(-20) }));
+  }
+
+  /** A resume turn that did not start: keep the plan and try again in a while, bounded by `maxLimitStops` (the same for a send that threw and a queued turn that failed to start). */
+  private planRetry(t: Task, msg: string): void {
+    // A passing failure (the process exited under us, a spawn error): keep the plan, try again in a while; the same
+    // cap as repeated stops bounds it.
+    const count = (this.stops.get(t.id) ?? 0) + 1;
+    this.stops.set(t.id, count);
+    // The same stop as the task's other failed sends: this path's own cap and timer, recorded — never a second retry.
+    const prev = this.tasks.stopOf(t.id, RESUME_STOP);
+    const tried = [...(prev && prev.state !== "resolved" ? prev.actions : []), { attempt: count, at: this.now(), what: "再開を送れなかった", ok: false }].slice(-20);
+    if (count > this.tunables().maxLimitStops) {
+      this.tasks.setResumeAt(t.id, null);
+      this.tasks.record(t.id, { t: "status", text: `自動再開できませんでした（${msg}）。${count - 1} 回続けて失敗したので、これ以上は再開しません。返信すると再開します` });
+      this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "exhausted", actions: tried }));
+    } else {
+      const at = this.now() + LATE_RETRY_MS;
+      // the same wait as before (a GitHub one stays one); only a report after this failure resumes it early, so the
+      // report that was just used does not cut the retry's delay short
+      this.tasks.setResumeAt(t.id, at, t.resumeReason ?? "limit", { window: t.resumeWindow, since: t.resumeWindow !== null ? this.now() : null, plannedAt: t.resumePlannedAt });
+      this.tasks.record(t.id, { t: "status", text: `自動再開できませんでした（${msg}）。${fmtTime(at, this.now())} に再試行します` });
+      this.tasks.recordStop(t.id, resumeStop({ evidence: msg, state: "waiting", conditions: [{ key: "resumeAt", value: new Date(at).toISOString(), met: false }], actions: tried }));
     }
   }
 }

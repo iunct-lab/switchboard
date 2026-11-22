@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL,
   scope TEXT NOT NULL, status TEXT NOT NULL, runner_session_id TEXT, model TEXT, routing TEXT, budget_usd REAL, schedule_id TEXT,
-  permission_mode TEXT, effort TEXT, subagent_effort TEXT, subagent_model TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, deferred_prompt TEXT, shadow_of TEXT, fork_of TEXT, fork_seq INTEGER, fork_turn TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
+  permission_mode TEXT, effort TEXT, subagent_effort TEXT, subagent_model TEXT, origin TEXT NOT NULL DEFAULT 'switchboard', resume_at INTEGER, resume_reason TEXT, resume_window TEXT, resume_since INTEGER, resume_planned_at INTEGER, queued_at INTEGER, queued_prompt TEXT, queued_attachments TEXT, deferred_prompt TEXT, shadow_of TEXT, fork_of TEXT, fork_seq INTEGER, fork_turn TEXT, shadow_stopped INTEGER NOT NULL DEFAULT 0, workspace_reason TEXT,
   outcome TEXT NOT NULL DEFAULT 'unknown', reviewed_at INTEGER, archived_at INTEGER, judged_result TEXT, judged_reason TEXT, judged_by TEXT, judging_at INTEGER, stage_issue INTEGER, stage_action TEXT,
   status_at INTEGER NOT NULL, title_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, provenance TEXT
 );
