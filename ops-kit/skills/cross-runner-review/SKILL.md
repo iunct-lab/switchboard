@@ -139,6 +139,14 @@ ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"; [ -s "$M/handled.md"
 ( cd "$R" && ops-kit old-paths check "origin/$BASE_REF" "$M/pr.md" ) > "$M/old-paths.md"   # PR 本文の「古い前提を持つ既存の箇所」の語で探し直した箇所（exit 1 でも続ける）
 ```
 
+<!-- when mergeGate=on -->
+マージ判定が名指しの外のファイルを数えるリポジトリでは、その一覧も材料にする（`<マージ判定>` は CLAUDE.md のコマンド。空なら作らない。ローカルの変更では `--change <変更> --scope`）:
+
+```bash
+<マージ判定> $N --scope > "$M/scope.md"; grep -q . "$M/scope.md" || rm -f "$M/scope.md"
+```
+<!-- end when -->
+
 **ローカルの変更では**（`task-to-pr` の「ローカルの変更では」の workspace）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT`・`KIND`・`R=` の行は上のまま。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸だけ。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。main との比較（5）の材料の `handled.md` は同じく `ops-kit backlog view <変更> --fresh`、`DEFAULT=` と `git fetch` の行は飛ばし、`main.txt` は `git -C "$R" rev-parse "$BASE_REF" > "$M/main.txt"`（`origin/` を付けない）、転記は `ops-kit backlog comment <変更> --body-file <ファイル>` で、1 行目を `[<runner>] compare` にして全文を 1 件。`handled.md` は見直しの前に `ops-kit backlog view <変更> --fresh > "$M/handled.md"`（変更へのコメントに振り分けの表がある。`ops-kit review-handled` は呼ばない）、`old-paths.md` は上の行の `origin/$BASE_REF` を `$BASE_REF` にして作る。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
@@ -150,7 +158,7 @@ cat > "$M/prompt.md" <<'PROMPT'
 You are reviewing a pull request in this repository with no prior context. Do not assume anything about the author's intent
 beyond what the files below say. Read, in this order, under `_review/`: `pr.md` (the PR description), `task.md` (the Task
 issue it closes), `pbi.md` (the parent PBI: user story, acceptance criteria, out of scope, decision log), `design-rules.md`
-(the repository's design rules), `handled.md` and `old-paths.md` when they exist, then `diff.patch`. Then read the surrounding code in the working tree (this checkout is the
+(the repository's design rules), `handled.md`, `old-paths.md` and `scope.md` when they exist, then `diff.patch`. Then read the surrounding code in the working tree (this checkout is the
 PR's head branch) and any `docs/design/*.md` that covers the touched area (`_review/design-docs.txt` lists them). Do not skim.
 Do not install dependencies (no `bun install` / `npm install`): review without `node_modules`.
 
@@ -158,6 +166,7 @@ Judge the PR on these, in this order:
 1. Intent: does the diff do what the Task's 手順 and the PBI's acceptance criteria ask — no less, and nothing beyond it?
    Name anything the PR does that no criterion asks for, and any criterion the PR claims but does not meet.
    Check that every point where the PR departs from the Task's 手順 or the acceptance criteria is written in the PR body's 逸脱 item and in a comment on the Task, and that every change the Task does not list is named in the PR body; report one that is not written as a finding.
+   For each file `_review/scope.md` lists (outside the Task's named paths), say whether the Task's purpose needs it or it is a mix-in from another Task; a mix-in or incidental change is `[should-fix]`.
    If the diff changes design documents (e.g. `docs/design/*.md`), say whether each change is within the PBI's acceptance criteria and the original request (`pbi.md`); list out-of-scope edits as `[should-fix]`.
 2. Design consistency: contradictions with `design-rules.md`, the relevant `docs/design/*.md`, the PBI's スコープ外 and
    決定ログ, or the existing shape of neighbouring code. Flag compatibility layers, one-use abstractions,

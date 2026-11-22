@@ -28,6 +28,9 @@ const readsWorkspace = (developSelf: () => boolean, ws: Pick<Workspace, "kind">)
 // the flow of the closed PBIs: the stored backlog, and GitHub for the merged PRs, so an hour is held; the repository is the import's, as for the backlog
 export const flowWorkspaces = (sc: Pick<ServerContext, "db">): FlowWorkspace[] => sc.db.listWorkspaces().map((w) => ({ id: w.id, name: w.name, path: w.path, repository: sc.db.getWorkspaceBacklogSource(w.id)?.repository ?? null }));
 
+/** When this daemon started: a version that was promoted into is the running one from then (stage-start-gate.ts `release:`). */
+const STARTED_AT = Date.now();
+
 /**
  * A workspace's stored backlog, without waiting for GitHub. One never imported and not tried yet gets its import asked
  * for, once: a failed one is asked again by 再読込, the daemon's boot or the scheduled sweep, not by every look.
@@ -40,10 +43,10 @@ export const storedBacklog = (sc: Pick<ServerContext, "db" | "leasedElsewhere" |
   // one whose stage Task only has a resume planned cannot move before that time: its place after an overlap is passed over until then
   const stage = sc.db.activeStageIssues(ws.id);
   const parked = (n: number) => !active(n) && stage.has(n);
-  const stored = sc.backlog.read(ws, { released, active, parked });
+  const stored = sc.backlog.read(ws, { released, active, parked, runningSince: STARTED_AT });
   if (stored.fetchedAt !== null || stored.error || stored.syncing) return stored;
   sc.backlog.request(ws);
-  return sc.backlog.read(ws, { released, active, parked });
+  return sc.backlog.read(ws, { released, active, parked, runningSince: STARTED_AT });
 };
 
 /** What `storedBacklog` answers apart from the items (no record read); a workspace never imported and not tried yet gets its import asked for, as there. */
@@ -71,8 +74,11 @@ export const mockupsOf = (sc: Pick<ServerContext, "artifacts">, id: string) => s
 export const withActive = (sc: Pick<ServerContext, "db" | "activeStageTask" | "mockupsOf">, b: Backlog): Backlog => ({
   ...b,
   items: b.items.map((i) => {
+    const stage = withStageTask(sc.db, i);
     const item: BacklogItem = {
-      ...withStageTask(sc.db, i),
+      ...stage,
+      // the person's check of the last stage Task is an event too; it is on the Task's row, which the stored read does not have
+      events: stage.lastTask?.reviewedAt != null ? [...i.events, { key: `reviewed:${stage.lastTask.id}`, at: stage.lastTask.reviewedAt }] : i.events,
       activeTaskId: sc.activeStageTask(i.workspaceId, i.number)?.id ?? null,
       mockups: i.mockupTask ? sc.mockupsOf(i.mockupTask) : [],
     };

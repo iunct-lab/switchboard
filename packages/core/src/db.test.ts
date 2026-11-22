@@ -1103,15 +1103,18 @@ test("migration: grants and scope stops move under their task's repository as th
     { task_id: "", repo: "", kind: "spent", target: 0, by: "owner", source: "op_1", at: 0 },
     { task_id: "", repo: "", kind: "spent", target: 0, by: "owner", source: "op_2", at: 0 },
   ]);
-  // a merge grant from before grants had a head answers for no head (the person is asked again); a scope grant has none to hold to
+  // a merge grant from before grants had a head answers for no head (the person is asked again); the table keeps the old scope row, which nothing reads
   const H = "a".repeat(40);
   expect([db.hasMergeGrant("t_a", "O/A", "merge", 12, H), db.hasMergeGrant("t_a", "O/A", "merge", 12), db.hasMergeGrant("t_a", "o/b", "merge", 12, H), db.hasMergeGrant("t_none", "o/a", "merge", 12, H)]).toEqual([false, false, false, false]);
-  expect(db.mergeGrantAt("t_a", "O/A", "scope", 7)).toBe(300);
   // a grant recorded with the head answers for that head of that repository only, whatever case the sha is asked in
   db.recordMergeGrant({ taskId: "t_a", repo: "O/A", kind: "merge", target: 12, by: "owner", head: H }, 100);
   expect([db.hasMergeGrant("t_a", "O/A", "merge", 12, H.toUpperCase()), db.hasMergeGrant("t_a", "o/a", "merge", 12, "b".repeat(40)), db.hasMergeGrant("t_a", "o/b", "merge", 12, H)]).toEqual([true, false, false]);
-  expect([db.scopeStopOf("t_a", "o/a", 7), db.scopeStopOf("t_none", "o/a", 7)]).toEqual([{ pr: 12, at: 200 }, null]);
+  // the stop record is moved too and stays, unread (a rolled-back release reads it)
+  expect(db.sqlite.query("SELECT task_id, pr, at FROM task_scope_stops WHERE repo = 'o/a' AND issue = 7").all()).toEqual([{ task_id: "t_a", pr: 12, at: 200 }]);
   expect([db.mergeGrantSourceSpent("op_1"), db.mergeGrantSourceSpent("op_3")]).toEqual([true, false]);
+  // an old scope row is not read: an answer that only it names is not spent
+  db.sqlite.query("INSERT INTO task_grants (task_id, repo, kind, target, by, source, at) VALUES ('t_a', 'o/a', 'scope', 8, 'owner', 'op_s', 400)").run();
+  expect(db.mergeGrantSourceSpent("op_s")).toBe(false);
   // the setting stays where a rolled-back release reads it: that release must still know the answers it already used
   expect(db.getSetting<unknown>("mergeGrantAnswers", null)).toEqual(["op_1", "op_2"]);
   // a grant another Task's text left does not answer, and does not hide the person's
@@ -1149,7 +1152,7 @@ test("start: every answer the grants' table knows as spent is in the list the re
   const pre = new Db(path);
   expect(list(pre)).toBeNull(); // nothing spent: no list is made
   for (const [id, at] of [["op_b", 2_000], ["op_a", 1_000]] as const) for (const target of [12, 13]) pre.recordMergeGrant({ taskId: "t1", repo: "o/a", kind: "merge", target, by: "owner", source: id, head: H }, at);
-  pre.recordMergeGrant({ taskId: "t1", repo: "o/a", kind: "scope", target: 7, by: "owner" }, 500); // a grant no answer gave names no id
+  pre.recordMergeGrant({ taskId: "t1", repo: "o/a", kind: "answer", target: 7, by: "owner" }, 500); // a grant no answer gave names no id
   expect(list(pre)).toBeNull();
   expect(olderReleaseWouldGrant(pre, "op_a")).toBe(true); // the state a rollback would have met
   pre.close();
@@ -1429,7 +1432,7 @@ test("delegated model note migration: the （試験） tail of the status note i
   expect(ruleMetrics(evs).delegatedModel).toBe("claude-sonnet-5-5");
   expect(JSON.stringify(evs[1]!.ev)).toContain(oldNote);
   expect(evs[2]!.ev).toEqual({ t: "status", text: "Task ごとの実装は  に任せます（試験）" });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
   again.close();
 });
 
@@ -1447,7 +1450,7 @@ test("human answer migration: extra none becomes complexity and detour none, ext
   expect(again.getEval("a", "human")!.json).toEqual({ rating: 1, comment: "c", intent: "wrong", complexity: "none", detour: "none", value: "unused", by: "user", ts: 1 });
   expect(again.getEval("b", "human")!.json).toEqual({ rating: 3, comment: "", by: "user", ts: 2 });
   expect(again.getEval("c", "human")!.json).toEqual({ rating: 4, comment: "", by: "user", ts: 3 });
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
   again.close();
 });
 
@@ -1473,7 +1476,7 @@ test("repeated thinking status is folded once at open", () => {
   expect(kinds(again, "b")).toEqual(["thinking", "使用上限で止まりました", "使用上限で止まりました"]);
   // the task's last row stays: its last seq and ts do not move
   expect(again.listEvents("a").at(-1)!.seq).toBe(9);
-  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(8);
+  expect((again.sqlite.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
   // once: a run written after it (an old daemon's copy restored, say) is not read again at the next open
   again.appendEvent("a", thinking);
   again.close();
@@ -1899,6 +1902,33 @@ test("ledgerSummary: quota rows carry a short account name, never the stored one
   expect([s.todayUsd, s.weekUsd]).toEqual([5, 10]); // the totals are every machine's
   expect(JSON.stringify(s)).not.toContain("aaaaaaaaaaaaaaaa");
   db.close();
+});
+
+test("migration stage-auto-history: the stage Tasks there before the first recorded automatic start count as automatic starts, once; a button's start stays 0", () => {
+  const raw = new Database(":memory:");
+  try {
+    raw.exec(SCHEMA);
+    const columns = columnsOf(raw);
+    for (const m of MIGRATIONS) if (m.number < 55) m.run(raw, columns);
+    const add = (id: string, issue: number | null, at = 1, auto = 0) => raw.query("INSERT INTO tasks (id, title, runner, cwd, scope, status, created_at, updated_at, status_at, stage_issue, stage_action, stage_auto) VALUES (?, ?, 'claude', '/w', '[]', 'done', ?, ?, ?, ?, ?, ?)").run(id, id, at, at, at, issue, issue === null ? null : "complete", auto);
+    add("old_stage", 5);
+    add("old_plain", null);
+    // the entries were promoted before this: an automatic start they recorded, and a button's start after it (0 by design)
+    add("first_auto", 6, 10, 1);
+    add("button_before", 6, 20);
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 8 });
+    const m55 = MIGRATIONS.find((m) => m.number === 55)!;
+    m55.run(raw, columns);
+    const autoOf = () => Object.fromEntries((raw.query("SELECT id, stage_auto AS a FROM tasks").all() as { id: string; a: number }[]).map((r) => [r.id, r.a]));
+    expect(autoOf()).toEqual({ old_stage: 1, old_plain: 0, first_auto: 1, button_before: 0 });
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 9 });
+    // a start by the button after it (0) is not turned into an automatic one by the next start of the daemon
+    add("button", 5);
+    m55.run(raw, columns);
+    expect(autoOf()).toEqual({ old_stage: 1, old_plain: 0, first_auto: 1, button_before: 0, button: 0 });
+  } finally {
+    raw.close();
+  }
 });
 
 test("migration numbers: no two migrations carry the same number or the same user_version, and the list is the directory in order", () => {

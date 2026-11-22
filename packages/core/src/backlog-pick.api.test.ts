@@ -303,39 +303,31 @@ test("pickNext stalled: the implement slot's order is 回答済みの実装中 �
   expect(pickNext([{ ...stalled, waits: [wait(778, "pr", true)] }, ready], "implement")).toMatchObject({ item: { number: 1 } });
 });
 
-test("pickNext unchanged: an item whose last stage Task of the same stage finished with no update since is left; one updated since goes after the untried of its Priority", () => {
+test("pickNext tried: an item whose last stage Task is of the same stage is picked after the untried of its Priority, however it ended and whatever was written since; the gate, not the pick, decides whether it starts again", () => {
   const last = (action: BacklogAction, at = "2026-09-28T00:00:00Z", status: TaskStatus = "done") => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true });
   const updated = "2026-09-28T01:00:00Z"; // after the last Task finished
-  const unchangedReady = item({ number: 1, stage: "ready", priority: "P0", lastTask: last("complete") });
+  const triedReady = item({ number: 1, stage: "ready", priority: "P0", lastTask: last("complete") });
   const freshReady = item({ number: 2, stage: "ready", priority: "P3" });
-  // 1: unchanged (done, failed or aborted alike) is left; the untried one goes on; unchanged alone → null
-  expect(pickNext([unchangedReady, freshReady], "implement")).toMatchObject({ item: { number: 2 }, action: "complete" });
-  expect(pickNext([unchangedReady], "implement")).toBeNull();
-  expect(pickNext([{ ...unchangedReady, lastTask: last("complete", undefined, "error") }], "implement")).toBeNull();
-  expect(pickNext([{ ...unchangedReady, lastTask: last("complete", undefined, "aborted") }], "implement")).toBeNull();
+  // 1: tried (done, failed or aborted alike) with nothing written since is still a candidate: the untried goes first within a Priority, the tried one alone is picked
+  expect(pickNext([triedReady, freshReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" }); // P0 before P3
+  expect(pickNext([triedReady, { ...freshReady, priority: "P0" }], "implement")).toMatchObject({ item: { number: 2 } });
+  expect(pickNext([triedReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
+  // a Task that failed is held by `failedSince` (kept: the flow count and the overlap places read it too), not by the gate
+  expect(pickNext([{ ...triedReady, lastTask: last("complete", undefined, "error") }], "implement")).toBeNull();
   // the same for 分解待ち and 要望 in the plan slot
-  const unchangedTasks = item({ number: 3, stage: "needs-tasks", priority: "P0", lastTask: last("to-tasks") });
-  const unchangedRequest = item({ number: 4, stage: "request", type: "request", priority: "P0", lastTask: last("to-pbi") });
-  const freshRequest = item({ number: 5, stage: "request", type: "request", priority: "P3" });
-  expect(pickNext([unchangedTasks, unchangedRequest, freshRequest], "plan")).toMatchObject({ item: { number: 5 }, action: "to-pbi" });
-  expect(pickNext([unchangedTasks, unchangedRequest], "plan")).toBeNull();
-  expect(unchangedIn([unchangedReady, freshReady, unchangedTasks, unchangedRequest, freshRequest], "plan").map((i) => i.number)).toEqual([3, 4]);
-  // an Issue updated at the very time its Task finished is not newer
-  expect(pickNext([{ ...unchangedReady, commentedAt: "2026-09-28T00:00:00Z" }], "implement")).toBeNull();
-  // 2: a last Task of another stage (split into Tasks, now Ready) is not worked on at this stage yet
-  expect(pickNext([item({ number: 6, stage: "ready", lastTask: last("to-tasks") })], "implement")).toMatchObject({ item: { number: 6 } });
-  // a running one is not finished: activeTaskId holds it, and it is not listed as unchanged
-  expect(unchangedIn([{ ...unchangedReady, lastTask: last("complete", undefined, "running") }], "implement")).toEqual([]);
-  // 3: updated since → picked, before the untried of a lower Priority and after the untried of its own; alone it goes on
-  const updatedReady = { ...unchangedReady, commentedAt: updated };
-  expect(pickNext([updatedReady, freshReady], "implement")).toMatchObject({ item: { number: 1 } });
-  expect(pickNext([updatedReady, { ...freshReady, priority: "P0" }], "implement")).toMatchObject({ item: { number: 2 } });
-  expect(pickNext([updatedReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
-  expect(pickNext([{ ...unchangedTasks, commentedAt: updated }, freshRequest], "plan")).toMatchObject({ item: { number: 3 } });
-  expect(pickNext([{ ...unchangedTasks, commentedAt: updated }, { ...freshRequest, priority: "P0" }], "plan")).toMatchObject({ item: { number: 5 } });
+  const triedTasks = item({ number: 3, stage: "needs-tasks", priority: "P0", lastTask: last("to-tasks") });
+  const triedRequest = item({ number: 4, stage: "request", type: "request", priority: "P0", lastTask: last("to-pbi") });
+  const freshRequest = item({ number: 5, stage: "request", type: "request", priority: "P0" });
+  expect(pickNext([triedTasks, triedRequest, freshRequest], "plan")).toMatchObject({ item: { number: 5 }, action: "to-pbi" });
+  expect(pickNext([triedTasks, triedRequest], "plan")).toMatchObject({ item: { number: 3 }, action: "to-tasks" });
+  // nothing is listed as unchanged for them: that line is for a repeated stop and a 閉じる that did not close
+  expect(unchangedIn([triedReady, freshReady, triedTasks, triedRequest, freshRequest], "plan")).toEqual([]);
+  expect(unchangedIn([triedReady], "implement")).toEqual([]);
+  // 2: a last Task of another stage (split into Tasks, now Ready) is not worked on at this stage yet: it goes with the untried
+  expect(pickNext([item({ number: 6, stage: "ready", lastTask: last("to-tasks") }), { ...triedReady, number: 7, priority: item({}).priority }], "implement")).toMatchObject({ item: { number: 6 } });
   // an answered in-progress PBI stays first
-  const answered = item({ number: 7, stage: "in-progress", priority: "P3", answeredAt: updated, commentedAt: updated, lastTask: last("complete") });
-  expect(pickNext([updatedReady, freshReady, answered], "implement")).toMatchObject({ item: { number: 7 }, action: "complete" });
+  const answered = item({ number: 8, stage: "in-progress", priority: "P3", answeredAt: updated, commentedAt: updated, lastTask: last("complete") });
+  expect(pickNext([triedReady, freshReady, answered], "implement")).toMatchObject({ item: { number: 8 }, action: "complete" });
 });
 
 test("pickNext priority: a Ready P0 worked on before goes before an untried Ready P3; a resume or a close of an in-progress PBI still goes first", () => {
@@ -382,7 +374,7 @@ test("pickNext failed: an item whose last stage Task failed with no update to th
   const closable = item({ number: 2, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, commentedAt: at, lastTask: failed() });
   expect(pickNext([closable], "implement")).toBeNull();
   expect(pickNext([{ ...closable, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toMatchObject({ item: { number: 2 } });
-  // a Ready item too (as 前回から更新が無い already does), and the plan slot's stages
+  // a Ready item too, and the plan slot's stages
   expect(pickNext([item({ number: 3, stage: "ready", commentedAt: at, lastTask: failed() })], "implement")).toBeNull();
   expect(pickNext([item({ number: 4, stage: "needs-tasks", commentedAt: at, lastTask: { ...failed(), action: "to-tasks" } })], "plan")).toBeNull();
   // listed for the log by slot; a running one or one waiting for a PR is not
@@ -493,7 +485,7 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([request], "plan")).toBeNull();
   // a request's ## 回答 is not read: any update to it still lets it go, as before
   expect(pickNext([{ ...request, commentedAt: "2026-09-28T01:00:00Z" }], "plan")).toMatchObject({ item: { number: 3 } });
-  // listed for the log by slot, apart from the failed ones (前回から更新が無い still lists the Ready one; the firing filters it)
+  // listed for the log by slot, apart from the failed ones
   expect(replyWaitingIn([stalled, ready, request], "implement").map((i) => i.number)).toEqual([1, 2]);
   expect(replyWaitingIn([stalled, ready, request], "plan").map((i) => i.number)).toEqual([3]);
   expect(failedIn([{ ...stalled, lastTask: asked({ status: "error" }) }], "implement")).toEqual([]);
@@ -503,7 +495,7 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   const childAnswered = { ...stalled, answeredAt: "2026-09-28T01:00:00Z" };
   expect(pickNext([childAnswered], "implement")).toMatchObject({ action: "complete" });
   expect(replyWaitingIn([childAnswered], "implement")).toEqual([]);
-  // reviewed releases a Ready item and a closable one too, which 前回から更新が無い / 前回の再開から進んでいない would otherwise hold until the Issue changes
+  // reviewed releases a Ready item and a closable one too, which 前回の再開から進んでいない would otherwise hold until the Issue changes
   const reviewed = asked({ reviewedAt: Date.parse("2026-09-28T02:00:00Z") });
   expect(pickNext([{ ...ready, lastTask: reviewed }], "implement")).toMatchObject({ item: { number: 2 }, action: "complete" });
   expect(unchangedIn([{ ...ready, lastTask: reviewed }], "implement")).toEqual([]);
@@ -514,8 +506,8 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   expect(pickNext([{ ...spun, lastTask: reviewed }], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(spinningIn([{ ...spun, lastTask: reviewed }], "implement")).toEqual([]);
   expect(pickNext([{ ...spun, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
-  // one that ended done (nothing asked) and was marked reviewed is still 前回から更新が無い
-  expect(pickNext([{ ...ready, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
+  // one that ended done (nothing asked) and was marked reviewed is picked like any tried one; the gate decides whether it starts again
+  expect(pickNext([{ ...ready, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toMatchObject({ item: { number: 2 } });
 });
 
 test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingReply, read from the last stage Task's outcome alone", () => {
@@ -524,7 +516,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, started: true, ...over });
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
-    count: 1, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+    count: 1, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
   });
   const asked = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, commentedAt: at, lastTask: last() });
   const stopped = { ...asked, lastTask: last({ outcome: "unknown" }), stopSummary: [stopOf()] };
@@ -564,7 +556,7 @@ test("a stop that came again with nothing changed holds the item through an unre
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, started: true };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
     key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
-    count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
+    count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
   });
   const touched = "2026-09-12T00:00:00Z"; // the Issue was updated after the Task ended
   const base = item({ number: 3, stage: "ready", lastTask: last, commentedAt: touched, stopSummary: [stopOf()] });

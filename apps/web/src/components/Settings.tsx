@@ -12,6 +12,7 @@ import { LoginSettings } from "./LoginSettings.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
 import { ReleaseAutoFields } from "./ReleaseAutoFields.tsx";
 import { PolicySettings } from "./PolicySettings.tsx";
+import { CliUpdateSettings } from "./CliUpdateSettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
@@ -171,7 +172,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
           );
         })}
       </section>
-
       <SettingsCard title={t(settings.jobsCard)} className="jobs">
         <div className="muted">{t(settings.jobsHint)}</div>
         <div className="muted">{t(settings.autoStartHint)}</div>
@@ -245,7 +245,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         </div>
         {reset.jobsCard}
       </SettingsCard>
-
       <CustomRunnersSection onError={props.onError} />
 
       {(listed.includes("dak") || s.shadowRunner === "dak") && (
@@ -259,6 +258,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         {reset.dakDefault}
       </SettingsCard>
       )}
+      <CliUpdateSettings value={s.cliUpdate} def={d.cliUpdate} disabled={saving} Field={NumberField} onSave={(v) => save({ cliUpdate: v })} onError={props.onError} />
 
       <SettingsGroupHeading id="settings-auto" />
       <SettingsCard title={t(settings.developSelfCard)}>
@@ -903,7 +903,7 @@ function FlowLimitState(props: { limit: number; workspaces: Workspace[] }) {
  * stays local until then, so a half-typed value is never saved; a value the daemon refuses (400) is shown as an error
  * and the box goes back to the saved one.
  */
-function NumberField(props: { label: string; unit?: string; scale?: number; step?: number; min?: number; max?: number; hint?: string; value: number; def: number; disabled: boolean; onSave: (v: number) => Promise<void> }) {
+export function NumberField(props: { label: string; unit?: string; scale?: number; step?: number; min?: number; max?: number; hint?: string; value: number; def: number; disabled: boolean; onSave: (v: number) => Promise<void> }) {
   const scale = props.scale ?? 1;
   const shown = (v: number) => String(v / scale);
   const [text, setText] = useState<string | null>(null);

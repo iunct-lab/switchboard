@@ -12,6 +12,7 @@ given in words.
 Rules for every sample:
 
 - The Task changes no file of a repository and no schedule. What it produces is a report, a request, or a comment.
+  The one exception is "Checking PBIs in one pass", which also writes the PBIs it checks (see its section).
 - Work files go under `W=$(mktemp -d)`.
 - No secret, no value that can be used to authenticate (token, key, account id, a link's secret, the name of a profile
   or a login session) and no raw output of a Task's conversation goes into a report, an Issue or a comment.
@@ -192,6 +193,62 @@ Reads the AWS bill of the account this instance runs in and reports where the mo
 - **Report**: an HTML report registered with the title `AWS の費用の週報 <today>`: the three main points, the
   breakdown, the 7-day difference, budgets and forecast, why it grew, ways to spend less.
 - The account id, the name of a profile and the name of a login session appear neither in the report nor in the Issue.
+
+### Checking PBIs in one pass
+
+Checks, in one run, the lines that only a look after the merge can tick, in the PBIs of this workspace that are being
+checked. It closes a PBI whose lines are all met, and sends a PBI with an unmet line back to be fixed. This is the one
+sample that writes a PBI: its body (the ticks), its comments and its Status, through `ops-kit backlog` and the
+steps of the `pbi-complete` skill, and a repair Task for a line that failed. It changes no file of the repository.
+
+- **Collect**: `GET /api/backlog` (`api /api/backlog`, as above). Keep the items with `workspaceId == WS` and
+  `progress.checking == true`: the PBI is built, every Task is closed, and the unchecked criteria are after-merge
+  lines, besides any user-check lines (those stay the person's). Of each, `postMerge` lists those lines as `{n, text, kind, after}`: `n` is the number of the criterion (from
+  1, over every checkbox line of the PBI's body), `text` the line after `- [ ] `, `kind` one of `画面`, `E2E`,
+  `実ランナー`, `観測`, and `after` the time of a `観測` line's `期日 … 以降` (null for the others, or when no date
+  could be read).
+  ```bash
+  api /api/backlog | jq --arg ws "$WS" '[.items[] | select(.workspaceId == $ws and .progress.checking)
+    | {number, title, lines: [.postMerge[] | {n, kind, after, text}]}]' > "$W/checking.json"
+  ```
+  With no item, report that nothing is being checked and end. A line that also carries a user-check mark is not in
+  `postMerge` (it is the person's to answer), and a PBI that is not `checking` is not touched.
+- **Check each line by the command of its own check** (the part of the line after `検証:`), never by a script written
+  for the run. Read the PBI's body (`ops-kit backlog view <n> --workspace "$WS" --fresh`) for the rest of the line.
+  A line whose check names no command cannot be checked: leave it (see "A line that could not be checked").
+- **Prepare once for each kind**, and only for the kinds that have a line to check. All the lines of one kind are
+  checked on that one preparation, whichever PBI they belong to:
+  - **`画面`**: build the web app once, then take the screens once. The screens to take are the union of the screens
+    the lines name, each taken once at both widths the repository's own instructions ask for. Look at each picture
+    yourself before ticking a line, and upload each as the repository's instructions say for images. A line whose
+    screen cannot be taken is left.
+  - **`E2E`**: start one candidate daemon (the way the repository's own instructions give for a live check, on a copy
+    of the data and a free port) and run every `E2E` line against it. Stop it, and remove its work files, when the
+    last line is done.
+  - **`実ランナー`**: check the usage limits of the runners once before the first such line (the `quota` table, or the
+    way the repository's instructions give). When the runner a line needs is near its limit, do not run it: the line
+    is left. Lines of one runner are run one after another on that one check.
+  - **`観測`**: only the lines whose `after` is past (`after` earlier than now, compared as instants, whatever the
+    zone it is written in) are checked: for these, read what the line says to read (a table, a count, a log) and tick
+    it only when the reading shows what the line asks. A line with a later `after` is not looked at and is not
+    reported as left. A line with no `after` (no date, or one that could not be read) cannot be checked: it is left,
+    with that reason, so the report names it on every run until its date is fixed.
+- **A met line** is ticked (`- [x]`) in the PBI's body, with the proof at the end of the line: the command and its
+  output, the URL of the picture. Only a line with proof is ticked. A PBI whose criteria are all ticked and which has
+  no user check left is closed by step 6 of `pbi-complete`; one with a user check left is set to In review (if it
+  is not already) and stays open. The PBI's
+  `## 結果` is written as that step says.
+- **An unmet line** is not ticked. Write a comment `## 確認の結果` on the PBI: what was done and how it differed from
+  what the line asks. Cut a Task that fixes it (`pbi-to-tasks`) and set the PBI's Status back to In progress. The new
+  open Task takes the PBI out of "checking", so the backlog's own run goes on with the implementation.
+- **A line that could not be checked** — the preparation failed, the runner's limit was too near, the check named no
+  command, a `観測` line has no readable date — is left as it is: the PBI is not changed for it, and no stop report is made. The reason goes into the result
+  of this run, and the next run takes the line again. A line whose date has not come is not "left" in this sense.
+- **Untouched**: a PBI that is not `checking`, a `観測` line before its date, a user check. Nothing else of a PBI is
+  written but what the steps above name.
+- **Report** (in the Task's final reply; no Issue and no HTML): a table with one row per line checked or left, in the
+  columns PBI / line / kind / closed, sent back or left / reason, and below it how many times each kind was prepared
+  (each is 0 or 1). A PBI that was closed has the place of its proof named in the row. With no row, say why.
 
 ## Samples for every workspace
 

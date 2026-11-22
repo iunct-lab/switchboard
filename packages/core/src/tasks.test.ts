@@ -648,6 +648,34 @@ describe("skills by runner and review setting", () => {
     await sleep(0);
     expect(read(".claude/skills")).toContain("同じランナーの新しいセッションに頼む");
   });
+
+  test("a Task's environment carries OPS_KIT_RECHECK_RUNNER and the skills are rendered with the recheck setting now (absent = other)", async () => {
+    const meta = join(home, "meta");
+    const repo = join(home, "repo");
+    for (const d of [meta, repo]) {
+      mkdirSync(d, { recursive: true });
+      spawnSync("git", ["init", "-q"], { cwd: d });
+    }
+    mkdirSync(join(meta, "ops-kit/skills/demo"), { recursive: true });
+    writeFileSync(join(meta, "ops-kit/skills/demo/SKILL.md"), ["# demo", "<!-- when recheck=other -->", "再チェックは別", "<!-- end when -->", "<!-- when recheck=same -->", "再チェックは同じ", "<!-- end when -->", ""].join("\n"));
+    db.upsertWorkspace({ name: "meta", path: meta, kind: "meta" });
+    const wsId = db.upsertWorkspace({ name: "w", path: repo, kind: "repo" }).id;
+    let recheck: "other" | "same" | undefined;
+    let env: Record<string, string> | undefined;
+    const claude = fakeAdapter([]);
+    const m = new TaskManager(db, new Map<RunnerId, RunnerAdapter>([["claude", { ...claude, start: (opts, emit) => ((env = opts.env), claude.start(opts, emit)) }]]), () => undefined, { idleMs: IDLE_MS, recheckRunner: () => recheck ?? "other" });
+    const read = () => readFileSync(join(repo, ".claude/skills/demo/SKILL.md"), "utf8");
+    m.create({ workspaceId: wsId, cwd: repo, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    expect(env?.OPS_KIT_RECHECK_RUNNER).toBe("other");
+    expect(read()).toContain("再チェックは別");
+    recheck = "same";
+    m.create({ workspaceId: wsId, cwd: repo, title: "t2", prompt: "p", runner: "claude" });
+    await sleep(0);
+    expect(env?.OPS_KIT_RECHECK_RUNNER).toBe("same");
+    expect(read()).toContain("再チェックは同じ");
+    expect(read()).not.toContain("再チェックは別");
+  });
 });
 
 describe("kitPath", () => {

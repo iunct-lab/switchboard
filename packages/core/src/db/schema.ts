@@ -139,7 +139,7 @@ CREATE INDEX IF NOT EXISTS task_grants_source ON task_grants (source) WHERE sour
 -- the link pointed at before, sha256 the checksum the file was checked against (NULL = none was published)
 CREATE TABLE IF NOT EXISTS cli_updates (id INTEGER PRIMARY KEY, runner TEXT NOT NULL, at INTEGER NOT NULL, from_version TEXT, to_version TEXT NOT NULL, outcome TEXT NOT NULL, sha256 TEXT, reason TEXT NOT NULL, by TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS cli_updates_runner ON cli_updates (runner, id);
--- the merge gate stopped a PR for a file the task's body does not name (the grant for adding the path counts only after this)
+-- not read any more; kept because a rolled-back release reads it (like merge_scope_stops)
 CREATE TABLE IF NOT EXISTS task_scope_stops (task_id TEXT NOT NULL, repo TEXT NOT NULL, issue INTEGER NOT NULL, pr INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, repo, issue));
 -- every change asked of a workspace's settings kept here (workspaces.config), whoever asked: what the settings were
 -- (before) and what was asked (after; NULL = none), the top-level keys that differ (keys, a JSON array), how the request

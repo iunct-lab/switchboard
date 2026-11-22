@@ -262,6 +262,54 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
       await x.c.stop();
     }
   });
+  test("実行枠待ち: a grant sent while every run slot is busy is queued, and the asks list reads it running once the slot frees and it starts", async () => {
+    const fence = "```switchboard-stop\n" + JSON.stringify({ id: "sched", op: "POST /api/schedules", target: "sch_x", reason: "permission", evidence: "auto mode denied", grant: GRANT }) + "\n```";
+    const h = mkdtempSync(join(tmpdir(), "switchboard-grant-slot-"));
+    const other = mkdtempSync(join(tmpdir(), "switchboard-grant-slot-other-"));
+    const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
+    const script: AgentEvent[] = [
+      { t: "session.start", runner: "claude", runnerSessionId: "sess-slot", cwd: "/tmp" },
+      { t: "message.delta", role: "assistant", text: `登録が拒まれました。\n${fence}\n`, messageId: "m1" },
+      { t: "session.end", status: "ok", summary: "refused" },
+    ];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const starts: StartOptions[] = [];
+    const sends: string[] = [];
+    const plain = fakeAdapter(script, { starts, sends });
+    // the Task named "busy" is held open by the test: it is what fills the only slot
+    const held = fakeAdapter(script, { gate });
+    // the grant's own run is held too, so the test can read the list while it is running
+    let finish!: () => void;
+    const resumed = fakeAdapter(script, { gate: new Promise<void>((r) => (finish = r)) });
+    const adapter = { ...plain, start: (o: StartOptions, emit: Parameters<typeof plain.start>[1]) => (o.prompt === "busy" ? held : o.prompt === GRANT ? resumed : plain).start(o, emit) };
+    const c = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    try {
+      const t = c.tasks.create({ cwd: h, title: "grant", prompt: "p", runner: "claude" });
+      await waitFor(async () => c.db.getTask(t.id)!.status === "done");
+      const [stop] = await asksOf(b, t.id);
+      expect(stop).toMatchObject({ kind: "stop", grant: GRANT });
+      await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 1 }) });
+      const busy = c.tasks.create({ cwd: other, title: "busy", prompt: "busy", runner: "claude" });
+      await waitFor(async () => c.db.getTask(busy.id)!.status === "running");
+      const res = await post(b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } });
+      expect(res.status).toBe(200);
+      expect(c.db.getTask(t.id)!.queuedAt).not.toBeNull();
+      expect(((await res.json()) as { ask: { resume: unknown } }).ask.resume).toMatchObject({ state: "queued", reason: "実行枠待ち", taskId: t.id });
+      release();
+      await waitFor(async () => c.db.getTask(busy.id)!.status === "done");
+      await waitFor(async () => c.db.getTask(t.id)!.queuedAt === null);
+      await waitFor(async () => c.db.getTask(t.id)!.status === "running");
+      const listed = ((await fetch(`${b}/api/asks`).then(j)) as AskList).asks.find((a) => a.id === stop!.id);
+      expect(listed).toMatchObject({ state: "answered", resume: { state: "running", taskId: t.id } });
+    } finally {
+      release();
+      finish();
+      await c.stop();
+    }
+  });
+
   test("merge grants: a grant sentence the person picks in a choice or answers a refused stop with is recorded for the guard", async () => {
     const MERGE = "o/a の PR #12 を判定の外でマージしてよい";
     const question = "PR #12 をマージしてよいか";
@@ -489,7 +537,7 @@ describe("merge grants", () => {
   // the head every PR has in these tests until a test moves it, and the head a check asks with
   const HEAD = "a".repeat(40);
   const heads = { now: HEAD as string | null };
-  const granted = (b: string, taskId: string, kind: string, target: number, repo = "o/a", head: string | null = kind === "scope" ? null : HEAD) => fetch(`${b}/api/merge-grants?taskId=${taskId}&repo=${encodeURIComponent(repo)}&kind=${kind}&target=${target}${head ? `&head=${head}` : ""}`).then((r) => r.json()) as Promise<{ granted: boolean }>;
+  const granted = (b: string, taskId: string, kind: string, target: number, repo = "o/a", head: string | null = HEAD) => fetch(`${b}/api/merge-grants?taskId=${taskId}&repo=${encodeURIComponent(repo)}&kind=${kind}&target=${target}${head ? `&head=${head}` : ""}`).then((r) => r.json()) as Promise<{ granted: boolean }>;
   /** A daemon on a fake runner and one finished Task in a clone whose origin is GitHub's o/a; `sent`: every text the runner was given. */
   const boot = async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-merge-grants-"));
@@ -508,7 +556,7 @@ describe("merge grants", () => {
     return { h, c, b, t, sent };
   };
 
-  test("a grant sentence sent to a task is recorded for that PR of the task's repository only; the scope stop is granted only by a later scope grant", async () => {
+  test("a grant sentence sent to a task is recorded for that PR of the task's repository only", async () => {
     const { h, c, b, t } = await boot();
     try {
       expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: false });
@@ -529,21 +577,12 @@ describe("merge grants", () => {
       await post(b, `/api/tasks/${t.id}/send`, { text: "> PR #15 を判定の外でマージしてよい\nと言われましたが、まだです" });
       expect(await granted(b, t.id, "merge", 15)).toEqual({ granted: false });
 
-      const stop = (issue = 4372, repo = "o/a") => fetch(`${b}/api/merge-grants/scope-stop?taskId=${t.id}&repo=${encodeURIComponent(repo)}&issue=${issue}`).then((r) => r.json());
-      expect(await stop()).toEqual({ stopped: false, granted: false });
-      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: 4372, pr: 99 })).status).toBe(200);
-      expect(await stop()).toEqual({ stopped: true, granted: false });
-      expect(await stop(4372, "o/b")).toEqual({ stopped: false, granted: false });
-      await Bun.sleep(5);
-      await post(b, `/api/tasks/${t.id}/send`, { text: "Task #4372 の本文に名指しのパスを足してよい" });
-      expect(await stop()).toEqual({ stopped: true, granted: true });
-      // a scope grant that came before the stop does not count for it
-      await post(b, `/api/tasks/${t.id}/send`, { text: "Task #4400 の本文に名指しのパスを足してよい" });
-      await Bun.sleep(5);
-      await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: 4400, pr: 100 });
-      expect(await stop(4400)).toEqual({ stopped: true, granted: false });
-      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: "x", pr: 1 })).status).toBe(400);
-      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, issue: 1, pr: 1 })).status).toBe(400);
+      // the sentence that let a Task add a path to its body and its stop record are gone: not recorded, and the routes are not there
+      await post(b, `/api/tasks/${t.id}/send`, { text: "Task #4372 の本文に" + "名指しのパスを" + "足してよい" });
+      expect((await fetch(`${b}/api/merge-grants?taskId=${t.id}&repo=o/a&kind=scope&target=4372`)).status).toBe(400);
+      expect(c.db.sqlite.query("SELECT COUNT(*) AS n FROM task_grants WHERE task_id = ? AND kind = 'scope'").get(t.id)).toEqual({ n: 0 });
+      expect((await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: 4372, pr: 99 })).status).toBe(404);
+      expect((await fetch(`${b}/api/merge-grants/scope-stop?taskId=${t.id}&repo=o/a&issue=4372`)).status).toBe(404);
       expect((await fetch(`${b}/api/merge-grants?taskId=${t.id}&repo=o/a&kind=nope&target=1`)).status).toBe(400);
       expect((await fetch(`${b}/api/merge-grants?taskId=${t.id}&kind=merge&target=1`)).status).toBe(400); // no repository: not answered
       expect((await fetch(`${b}/api/merge-grants?taskId=${t.id}&repo=o/a&kind=merge&target=12&head=abc`)).status).toBe(400); // a head that is no sha
@@ -590,9 +629,8 @@ describe("merge grants", () => {
     const n0 = sent.length;
     try {
       // what a Task's curl sends when it forgets `from`: the text reaches the runner, the grant answers no check
-      expect((await bare(b, `/api/tasks/${t.id}/send`, { text: "PR #12 を判定の外でマージしてよい\nTask #7 の本文に名指しのパスを足してよい" })).status).toBe(200);
+      expect((await bare(b, `/api/tasks/${t.id}/send`, { text: "PR #12 を判定の外でマージしてよい" })).status).toBe(200);
       await waitFor(async () => sent.length > n0);
-      await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: 8, pr: 12 });
       expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: false });
       expect(c.db.sqlite.query("SELECT DISTINCT by FROM task_grants WHERE task_id = ?").all(t.id)).toEqual([{ by: "api" }]);
       // a page of another origin is not the screen either
@@ -611,20 +649,16 @@ describe("merge grants", () => {
 
   test("from: a text another Task sent is never the person's grant, and goes to the runner under the sender's line", async () => {
     const { h, c, b, t, sent } = await boot();
-    const SENTENCES = "PR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\nTask #7 の本文に名指しのパスを足してよい\no/b の PR #12 を判定の外でマージしてよい";
+    const SENTENCES = "PR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\no/b の PR #12 を判定の外でマージしてよい";
     const none = async () => {
-      for (const [kind, target, repo] of [["merge", 12, "o/a"], ["answer", 12, "o/a"], ["scope", 7, "o/a"], ["merge", 12, "o/b"]] as const) expect([kind, repo, await granted(b, t.id, kind, target, repo)]).toEqual([kind, repo, { granted: false }]);
+      for (const [kind, target, repo] of [["merge", 12, "o/a"], ["answer", 12, "o/a"], ["merge", 12, "o/b"]] as const) expect([kind, repo, await granted(b, t.id, kind, target, repo)]).toEqual([kind, repo, { granted: false }]);
     };
     const n0 = sent.length; // what the runner got before: the Task's first prompt
     try {
-      // the gate's stop came first, so only a scope grant after it would let the path through
-      await post(b, "/api/merge-grants/scope-stop", { taskId: t.id, repo: "o/a", issue: 7, pr: 12 });
-      await Bun.sleep(5);
       expect((await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCES, from: "task_sender" })).status).toBe(200);
       await waitFor(async () => sent.length > n0);
       expect(sent.slice(n0)).toEqual([`（Task task_sender からの返信）\n\n${SENTENCES}`]);
       await none();
-      expect(await fetch(`${b}/api/merge-grants/scope-stop?taskId=${t.id}&repo=o/a&issue=7`).then((r) => r.json())).toEqual({ stopped: true, granted: false });
       // who sent it stays on the record, which is why it does not answer
       expect(c.db.sqlite.query("SELECT DISTINCT by FROM task_grants WHERE task_id = ?").all(t.id)).toEqual([{ by: "task:task_sender" }]);
       // a sender that calls itself the person is still a sender
@@ -640,7 +674,7 @@ describe("merge grants", () => {
       expect((await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCES })).status).toBe(200);
       await waitFor(async () => sent.length > n0 + 2);
       expect(sent.slice(n0 + 2)).toEqual([SENTENCES]);
-      for (const [kind, target, repo] of [["merge", 12, "o/a"], ["answer", 12, "o/a"], ["scope", 7, "o/a"], ["merge", 12, "o/b"]] as const) expect([kind, repo, await granted(b, t.id, kind, target, repo)]).toEqual([kind, repo, { granted: true }]);
+      for (const [kind, target, repo] of [["merge", 12, "o/a"], ["answer", 12, "o/a"], ["merge", 12, "o/b"]] as const) expect([kind, repo, await granted(b, t.id, kind, target, repo)]).toEqual([kind, repo, { granted: true }]);
       // and a later text of another Task does not take the person's grant away
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
       await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCES, from: "task_sender" });

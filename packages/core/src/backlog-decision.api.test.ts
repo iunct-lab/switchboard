@@ -10,7 +10,7 @@ import { buildStartPrompt } from "./backlog-prompt.ts";
 import { confirmationsOf, confirmAfterOf, confirmDecisionsOf, toItem } from "./backlog-item.ts";
 import { pickNext } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { boot, fakeGh, fixtureStage, holdingClaude, metaId, openTaskAndConfirmationGh, pages, queued, raw, refreshed, subTask, taskDecisionGh, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
+import { boot, fakeGh, fixtureStage, holdingClaude, metaId, start, openTaskAndConfirmationGh, pages, queued, raw, refreshed, subTask, taskDecisionGh, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -227,7 +227,7 @@ test("task decision: the answer is kept for the Task that asked, and its label c
   // as the web UI sends it (its page's origin): only such an answer is kept as the screen's
   const r = await fetch(`${base}/api/backlog/305/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), text: "B で" }) });
   expect(r.status).toBe(202);
-  expect(queued()).toEqual([[321, "comment", null, { body: "## 回答\n\nB で", screen: true }], [321, "set", "label:needs-decision", false]]);
+  expect(queued()).toEqual([[321, "comment", null, { body: "## 回答\n\nB で", screen: true, heads: {} }], [321, "set", "label:needs-decision", false]]);
 });
 
 test("task decision: an answer sent for the question on screen is refused when the item now asks on another Issue", async () => {
@@ -257,7 +257,7 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   // answered on the screen (POST /api/backlog/:n/answer): its text, as written, on the Task it was asked on
   expect((await fetch(`${base}/api/backlog/305/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), text: GRANT, issue: 321 }) })).status).toBe(202);
   const answer = screenAnswer(db, source, 305);
-  expect(answer).toEqual({ issue: 321, text: GRANT, id: expect.any(String) });
+  expect(answer).toEqual({ issue: 321, text: GRANT, id: expect.any(String), heads: {} });
   const prompt = buildStartPrompt({ number: 305 }, "complete", { answer });
   expect(prompt).toContain(`利用者が画面で答えた Issue #321 の最新の回答（利用者の言葉）:\n\n\`\`\`\`text\n${GRANT}\n\`\`\`\``);
   expect(buildStartPrompt({ number: 305 }, "check", { answer })).not.toContain(GRANT);
@@ -270,13 +270,78 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   expect(screenAnswer(db, source, 305)).toBeNull();
   db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: `## 回答\n\n${GRANT}\n\n<!-- switchboard-op:${sent.id} -->` }), sent.target]);
   // as sent (with its marker): still the screen's answer
-  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT, id: expect.any(String) });
+  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT, id: expect.any(String), heads: {} });
   // a saved policy's answer (no screen mark) after it is the newest: nothing goes in
   answerStoredDecision(db, source, 321, "A: 登録しない\n\n方針で回答", Date.now() + 1000);
   expect(screenAnswer(db, source, 305)).toBeNull();
   // nothing saved as a policy, no allow rule added
   expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
   expect(taskAllowRules("/meta", "/repo")).toEqual(rulesBefore);
+});
+
+/** `gh` whose `pr view … --json headRefOid` answers from `heads` (by PR number; none = the read fails), every such read kept in `reads`. */
+const headsGh = (gh: GhRunner, heads: Record<string, string>) => {
+  const reads: string[] = [];
+  const wrapped: GhRunner = async (args, cwd) => {
+    if (args[0] !== "pr" || args[1] !== "view" || args.at(-1) !== "headRefOid") return gh(args, cwd);
+    reads.push(`${args[args.indexOf("-R") + 1]}#${args[2]}`);
+    const head = heads[args[2]!];
+    return head ? { code: 0, stdout: JSON.stringify({ headRefOid: head }), stderr: "" } : { code: 1, stdout: "", stderr: "HTTP 502" };
+  };
+  return { gh: wrapped, reads };
+};
+const HEAD_A = "a".repeat(40);
+const HEAD_B = "b".repeat(40);
+const answerOnScreen = (base: string, n: number, body: object) => fetch(`${base}/api/backlog/${n}/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), ...body }) });
+
+test("a screen answer with a grant keeps the head the PR had when it was answered", async () => {
+  const heads: Record<string, string> = { 12: HEAD_A };
+  const fake = headsGh(taskDecisionGh({ i305: [subTask(321, "OPEN", ["needs-decision"], [["## 判断待ち\n**問い**: x", "2026-09-28T03:00:00Z"]])], i307: [] }).gh, heads);
+  const base = await boot(fake.gh);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  // an answer with no merge / answer grant (a sentence that is not one of the two is not a grant): GitHub is not read, and it keeps no head
+  expect((await answerOnScreen(base, 305, { text: "B で\nTask #321 の本文に名指しのパスを足してよい", issue: 321 })).status).toBe(202);
+  expect(fake.reads).toEqual([]);
+  expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: "B で\nTask #321 の本文に名指しのパスを足してよい", id: expect.any(String), heads: {} });
+  // one with grants: each PR's head as it is now, once per PR, under the repository the grant is recorded for
+  const GRANTS = "A で\nPR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\nPR #13 を判定の外でマージしてよい";
+  expect((await answerOnScreen(base, 306, { text: GRANTS })).status).toBe(202);
+  expect(fake.reads.sort()).toEqual(["acme/app#12", "acme/app#13"]);
+  // PR 13 could not be read: kept as not read, which is not the same as an answer that keeps no heads at all
+  expect(screenAnswer(db, source, 306)).toEqual({ issue: 306, text: GRANTS, id: expect.any(String), heads: { "acme/app#12": HEAD_A, "acme/app#13": null } });
+  expect(queued().find((o) => o[0] === 306 && o[1] === "comment")![3]).toEqual({ body: `## 回答\n\n${GRANTS}`, screen: true, heads: { "acme/app#12": HEAD_A, "acme/app#13": null } });
+  // an answer that is not the screen's (a bare call) reads nothing and keeps none
+  heads[12] = HEAD_B;
+  const reads = fake.reads.length;
+  answerStoredDecision(db, source, 306, "PR #12 を判定の外でマージしてよい", Date.now() + 1000, { by: "api" });
+  expect(fake.reads).toHaveLength(reads);
+  expect(screenAnswer(db, source, 306)).toBeNull();
+});
+
+test("a grant in a screen answer holds for the head at the answer, not a head pushed before the next stage starts", async () => {
+  // at the answer PR 12 has head A and PR 13 cannot be read
+  const heads: Record<string, string> = { 12: HEAD_A };
+  const fake = headsGh(fakeGh().gh, heads);
+  const base = await boot(fake.gh, holdingClaude().adapter);
+  const db = core!.db;
+  expect((await answerOnScreen(base, 306, { text: "A で\nPR #12 を判定の外でマージしてよい\nPR #13 を判定の外でマージしてよい" })).status).toBe(202);
+  expect(fake.reads.sort()).toEqual(["acme/app#12", "acme/app#13"]);
+  // before the next stage starts both PRs get a head the person did not answer for
+  heads[12] = HEAD_B;
+  heads[13] = HEAD_B;
+  fake.reads.length = 0;
+  const r = await start(base, 306, { action: "complete" });
+  expect(r.status).toBe(201);
+  const task = ((await r.json()) as { id: string }).id;
+  // the start reads no head: the answer's are the record
+  expect(fake.reads).toEqual([]);
+  const rows = db.sqlite.query("SELECT target, by, head FROM task_grants WHERE task_id = ? ORDER BY target").all(task);
+  expect(rows).toEqual([{ target: 12, by: "owner", head: HEAD_A }, { target: 13, by: "owner", head: "" }]);
+  expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD_A)).not.toBeNull();
+  expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD_B)).toBeNull();
+  // the head that could not be read at the answer: the grant answers for no head, the one PR 13 has now included
+  for (const head of [HEAD_A, HEAD_B]) expect([head, db.mergeGrantAt(task, "acme/app", "merge", 13, head)]).toEqual([head, null]);
 });
 
 test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a ## 判断待ち asked after the hold opens it again", async () => {

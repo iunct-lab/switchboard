@@ -20,7 +20,7 @@ export interface ConsentGrant {
 /** How much of each part goes into the prompt (characters), as `JUDGE_CHARS` does for a judgement. */
 export const CONSENT_CHARS = { said: 1200, asked: 2000 } as const;
 
-const KINDS: readonly string[] = ["merge", "answer", "scope"];
+const KINDS: readonly string[] = ["merge", "answer"];
 const MAX_CANDIDATES = 3;
 
 function numbersOf(text: string): number[] {
@@ -75,7 +75,6 @@ export function consentCandidates(said: string, asked: string): number[] {
 const SENTENCE: Record<MergeGrantKind, (n: number) => string> = {
   merge: (n) => `merge: PR #${n} を判定の外でマージしてよい`,
   answer: (n) => `answer: PR #${n} に [merge-answer] yes を投稿してよい`,
-  scope: (n) => `scope: Task #${n} の本文に名指しのパスを足してよい`,
 };
 
 /** The prompt: only the person's text consents; the reply before it says what "それ" or "はい" points at. All of it is capped, not trusted. */
@@ -83,11 +82,10 @@ export function buildConsentPrompt(input: ConsentInput & { candidates: number[] 
   // only what the reader may return: a sentence for a number outside the candidates is not put to it
   const requested = (input.requested ?? []).filter((r) => input.candidates.includes(r.target));
   return [
-    "あなたは、利用者がエージェントに送った文が、次の 3 つの許可のどれかを与えているかを読みます。JSON だけを返してください。",
-    'ほかの文章・コードブロック・前置きは書かないこと。形式: {"grants":[{"kind":"merge|answer|scope","target":<番号>}]}（許可が無ければ grants を空の配列にする）',
+    "あなたは、利用者がエージェントに送った文が、次の 2 つの許可のどれかを与えているかを読みます。JSON だけを返してください。",
+    'ほかの文章・コードブロック・前置きは書かないこと。形式: {"grants":[{"kind":"merge|answer","target":<番号>}]}（許可が無ければ grants を空の配列にする）',
     "- merge: 判定の外で PR #target をマージしてよい",
     "- answer: PR #target に [merge-answer] yes を投稿してよい",
-    "- scope: Task #target の本文に名指しのパスを足してよい",
     "",
     ...(requested.length
       ? [
@@ -113,7 +111,7 @@ export function buildConsentPrompt(input: ConsentInput & { candidates: number[] 
   ].join("\n");
 }
 
-/** The grants of the first JSON object with a `grants` list; one of a kind outside the three, or of a number outside `candidates`, is dropped. Nothing readable is no grant. */
+/** The grants of the first JSON object with a `grants` list; one of a kind outside the two, or of a number outside `candidates`, is dropped. Nothing readable is no grant. */
 export function parseConsent(text: string, candidates: number[]): ConsentGrant[] {
   return grantsOf(text, candidates) ?? [];
 }

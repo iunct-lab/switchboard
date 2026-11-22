@@ -246,7 +246,7 @@ export abstract class TaskSessions extends TaskEvents {
         const backlog = (root: string) => (root === metaRoot ? meta.backlog : (own ?? workspaces.find((w) => realpathOr(w.path) === root))?.backlog) ?? "github";
         // the settings kept on Switchboard's side decide the copies' conditions when the repository has no file of its own
         const savedConfig = (root: string) => savedConfigFile((root === metaRoot ? meta : own ?? workspaces.find((w) => realpathOr(w.path) === root))?.id);
-        sync = { metaPath: meta.path, cwd: task.cwd, runner: task.runner, review: this.reviewRunner?.() ?? "other", backlog, savedConfig };
+        sync = { metaPath: meta.path, cwd: task.cwd, runner: task.runner, review: this.reviewRunner?.() ?? "other", recheck: this.recheckRunner?.() ?? "other", backlog, savedConfig };
         for (const s of syncSkills(sync).skipped) {
           this.record(task.id, { t: "status", text: `スキル ${s.name} はリポジトリにあるもの（${s.path}）を使います。Switchboard の正本は置いていません` });
         }
@@ -286,7 +286,7 @@ export abstract class TaskSessions extends TaskEvents {
     // OPS_KIT_REVIEW_RUNNER: the review setting at this start or resume. The skills placed now carry the setting in their
     // text and do not read it; a skill folder an earlier release left in the checkout (one this release does not replace)
     // still does, and would otherwise fall back to the other runner whatever the setting says
-    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id, OPS_KIT_REVIEW_RUNNER: this.reviewRunner?.() ?? "other", ...(this.workMachine ? { [FORGE_READ_ONLY_ENV]: "1" } : {}) };
+    const env = { ...path, ...deviceAuth, ...this.dockerEnv?.(task.id), SWITCHBOARD_TASK_ID: task.id, OPS_KIT_TASK_ID: task.id, OPS_KIT_REVIEW_RUNNER: this.reviewRunner?.() ?? "other", OPS_KIT_RECHECK_RUNNER: this.recheckRunner?.() ?? "other", ...(this.workMachine ? { [FORGE_READ_ONLY_ENV]: "1" } : {}) };
     // The stop for writes to fixed names right under /tmp (docs/design/shared-tmp-guard.md): the kit's hook
     const guards = meta ? [shellQuote(join(meta.path, "ops-kit/bin/deny-shared-tmp"))] : undefined;
     const allow = meta ? taskAllowRules(meta.path, task.cwd) : undefined;

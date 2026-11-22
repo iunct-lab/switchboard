@@ -20,7 +20,8 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   checks: [{ name: "test", conclusion: "SUCCESS" }],
   unresolvedThreads: 0,
   mergeState: "CLEAN",
-  reviewComments: [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }],
+  // the attacking review is read only for a PR that needs one (attackPaths); the tests of that rule leave it out with `noAttack`
+  reviewComments: [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }, { body: "[codex] attack\n\n### Breaking the change", createdAt: "2026-09-24T11:00:00Z" }],
   ...over,
 });
 const off = { allowLarge: false };
@@ -149,17 +150,18 @@ describe("merge-gate judge", () => {
       { path: "ops.config.json", additions: 1, deletions: 0 },
     ];
     expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: ops.config.json"]);
-    expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"] });
+    expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"], attack: ["src/auth/session.ts"] });
   });
 
   test("--allow-large lifts every large reason, not the others", () => {
     const files = [{ path: "rescue/src/server.ts", additions: 400, deletions: 0 }];
-    expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: ["size", "rescue"] });
+    expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: ["size", "rescue"], attack: ["rescue/src/server.ts"] });
     const j = judge(yes("rescue,size", { files, headCommittedAt: "2026-09-24T12:30:00Z" }), { allowLarge: true });
     expect(j.verdict).toBe("stop");
     expect(j.impact).toBe("large");
-    expect(j.reasons).toHaveLength(1);
-    expect(j.reasons[0]).toStartWith("最後のコミット");
+    // the main review and the attacking review are both older than the head: --allow-large lifts neither
+    expect(j.reasons).toHaveLength(2);
+    expect(j.reasons.every((r) => r.startsWith("最後のコミット"))).toBe(true);
   });
 
   test("allow-large needs merge-answer", () => {
@@ -193,13 +195,79 @@ describe("merge-gate judge", () => {
     expect(judge(said("no", "yes"), allow).verdict).toBe("merge");
     // by time, not by the order of the list
     const newestFirst = said("no", "yes");
-    newestFirst.reviewComments[1]!.createdAt = "2026-09-24T13:00:00Z";
+    newestFirst.reviewComments[2]!.createdAt = "2026-09-24T13:00:00Z";
     expect(judge(newestFirst, allow).verdict).toBe("stop");
     // a recheck kind already marked is not asked of the yes
     expect(judge(yes("security:words", { files, rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
     // nothing large: the flag does nothing and asks for no mark
     expect(judge(base(), allow)).toMatchObject({ verdict: "merge", impact: "small", reasons: [] });
     expect(judge(base({ files: [files[1]!], rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", impact: "large", reasons: [] });
+  });
+});
+
+describe("attack review", () => {
+  const REVIEW_ONLY = [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }];
+  const noAttack = (files: PrFacts["files"], over: Partial<PrFacts> = {}) => base({ files, reviewComments: REVIEW_ONLY, ...over });
+  const touch = (path: string, over: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, status: "modified" as const, ...over });
+  const attackReasons = (j: ReturnType<typeof judge>) => j.reasons.filter((r) => r.includes("攻める側のレビュー"));
+
+  test("attack is required for each security group and the added paths", () => {
+    for (const path of ["src/auth.ts", "bun.lock", ".github/workflows/ci.yml", "scripts/merge-gate.ts", "aws/host/sb-host-update.sh", "packages/core/src/promotion.ts", "packages/core/src/server/promotion.ts", "scripts/promote.ts", "rescue/src/server.ts", "packages/core/src/uplink-in.ts", ".claude/settings.json", "ops-kit/bin/gh"]) {
+      const j = judge(noAttack([touch(path)]), { allowLarge: true });
+      expect([path, attackReasons(j)]).toEqual([path, [`最後のコミット（2026-09-24T10:00:00Z）より新しい攻める側のレビュー（[codex] attack / [claude] attack）が無い: ${path}`]]);
+      expect([path, j.attack]).toEqual([path, [path]]);
+      expect(j.verdict).toBe("stop");
+    }
+  });
+
+  test("a PR that needs none has no attack field and no reason", () => {
+    const j = judge(noAttack([touch("packages/core/src/tasks/manager.ts")]), off);
+    expect(j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
+  });
+
+  test("a stale attack mark does not count", () => {
+    const stale = noAttack([touch("scripts/promote.ts")], { reviewComments: [...REVIEW_ONLY, { body: "[claude] attack", createdAt: "2026-09-24T09:59:00Z" }] });
+    expect(attackReasons(judge(stale, off))).toHaveLength(1);
+    const later = noAttack([touch("scripts/promote.ts")], { headCommittedAt: "2026-09-24T12:00:00Z", reviewComments: [{ body: "[claude] attack", createdAt: "2026-09-24T11:00:00Z" }] });
+    expect(attackReasons(judge(later, off))).toHaveLength(1);
+  });
+
+  test("a fresh attack mark lifts only the attack reason", () => {
+    const files = [touch("scripts/merge-gate.ts")];
+    const j = judge(noAttack(files, { reviewComments: [...REVIEW_ONLY, { body: "[claude] attack\n\n### x", createdAt: "2026-09-24T11:30:00Z" }] }), off);
+    expect(attackReasons(j)).toEqual([]);
+    expect(j.reasons).toEqual(["[聞く] セキュリティ（security:gates）: scripts/merge-gate.ts"]);
+    expect(j.attack).toEqual(["scripts/merge-gate.ts"]);
+  });
+
+  test("a yes of the user does not lift the attack reason", () => {
+    const f = noAttack([touch("rescue/src/x.ts")], { head: HEAD, reviewComments: [...REVIEW_ONLY, { body: `[merge-answer] yes rescue ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }] });
+    expect(judge(f, { allowLarge: true })).toMatchObject({ verdict: "stop", reasons: [expect.stringContaining("攻める側のレビュー")] });
+  });
+
+  test("security:tests alone needs no attack review", () => {
+    expect(judge(noAttack([touch("src/auth.test.ts")]), off).attack).toBeUndefined();
+    expect(attackReasons(judge(noAttack([touch("src/auth.test.ts"), touch("aws/host/fixtures/x.sh")]), off))).toEqual([]);
+    expect(attackReasons(judge(noAttack([touch("docs/design/secret-guard.md")]), off))).toEqual([]);
+  });
+
+  test("a renamed file is judged by its old path too", () => {
+    const j = judge(noAttack([touch("aws/fixtures/auth.ts", { status: "renamed", previous: "aws/auth.ts" })]), off);
+    expect(j.attack).toEqual(["aws/fixtures/auth.ts"]);
+    const added = judge(noAttack([touch("docs/promote-notes.md", { status: "renamed", previous: "scripts/promote.ts" })]), off);
+    expect(added.attack).toEqual(["docs/promote-notes.md"]);
+    expect(attackReasons(added)[0]).toEndWith("docs/promote-notes.md（改名前: scripts/promote.ts）");
+    expect(fileSecurityKinds(touch("aws/fixtures/auth.ts", { status: "renamed", previous: "aws/auth.ts" }))).toContain("security:words");
+  });
+
+  test("an attack comment is not a main review", () => {
+    const f = base({ files: [touch("scripts/promote.ts")], reviewComments: [{ body: "[codex] attack\n\n### x", createdAt: "2026-09-24T11:00:00Z" }] });
+    expect(judge(f, off).reasons).toEqual(["最後のコミット（2026-09-24T10:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"]);
+  });
+
+  test("a main review is not an attack review", () => {
+    expect(attackReasons(judge(noAttack([touch("scripts/promote.ts")]), off))).toHaveLength(1);
+    expect(attackReasons(judge(noAttack([touch("scripts/promote.ts")], { reviewComments: [{ body: "[codex] attacker", createdAt: "2026-09-24T11:00:00Z" }] }), off))).toHaveLength(1);
   });
 });
 
@@ -561,8 +629,8 @@ describe("approved security sub-kind rechecks", () => {
     ["docs/design/secret-guard.md", "security:docs"],
     ["bun.lock", "security:lockfile"],
   ] as const)("%s alone: [再チェック %s] stops, its mark of the head lifts it", (path, kind) => {
-    expect(marked([path], [])).toEqual({ verdict: "stop", impact: "large", reasons: [`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`], ask: [], recheck: [kind] });
-    expect(marked([path], [kind])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    expect(marked([path], [])).toEqual({ verdict: "stop", impact: "large", reasons: [`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`], ask: [], recheck: [kind], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
+    expect(marked([path], [kind])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
     // another kind's mark does not lift it
     expect(marked([path], ["size"]).verdict).toBe("stop");
   });
@@ -581,6 +649,7 @@ describe("approved security sub-kind rechecks", () => {
       reasons: ["[聞く] セキュリティ（security:gates）: scripts/merge-gate.ts"],
       ask: ["security:gates"],
       recheck: [],
+      attack: ["bun.lock", "scripts/merge-gate.ts"],
     });
   });
 });
@@ -762,7 +831,7 @@ describe("recheck", () => {
     ["db.ts only", one("packages/core/src/db.ts"), ["[再チェック migration] 保護するパスに触れている: packages/core/src/db.ts"], [], ["migration"]],
   ] as const)("%s: the reason's head, ask and recheck", (_, files, reasons, ask, recheck) => {
     const j = judge(base({ files: [...files], designRulesTouched: files[0]!.path === "README.md" || undefined }), off);
-    expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck] });
+    expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck], ...(["src/auth.ts", "rescue/src/server.ts"].includes(files[0]!.path) ? { attack: [files[0]!.path] } : {}) });
   });
 
   test("an asked security group stays asked: a mark does not lift it, --allow-large does", () => {
@@ -780,7 +849,7 @@ describe("recheck", () => {
   test("rescue is a recheck kind: its mark lifts it, another kind's or none does not", () => {
     const files = one("rescue/src/x.ts");
     expect(judge(base({ files }), off)).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: ["rescue"], reasons: ["[再チェック rescue] rescue: rescue/src/x.ts"] });
-    expect(marked(files, ["rescue"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    expect(marked(files, ["rescue"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], attack: ["rescue/src/x.ts"] });
     expect(marked(files, ["size"]).reasons).toEqual(["[再チェック rescue] rescue: rescue/src/x.ts"]);
     // an instruction file inside rescue is rescue and instructions; a security one there says セキュリティ
     expect(marked(one("rescue/CLAUDE.md"), ["rescue"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] 指示のファイル: rescue/CLAUDE.md"], recheck: [] });
@@ -1815,17 +1884,18 @@ describe("merge command merges only on verdict merge", () => {
   test("--allow-large merges only after a [merge-answer] yes of the head", async () => {
     const large = { files: [{ path: "rescue/run.sh", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
     const review = { body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" };
+    const attack = { body: "[codex] attack", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" };
     const answer = (sha: string, yes = "yes") => ({ body: `[merge-answer] ${yes} rescue ${sha}`, createdAt: "2026-09-24T12:00:00Z", authorAssociation: "MEMBER" });
     expect(await gate(["7", "--merge", "--allow-large"], view(large))).toMatchObject({ code: 1, merges: [] });
     expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer("f".repeat(40))] }))).toMatchObject({ code: 1, merges: [] });
     expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer(SHA, "no")] }))).toMatchObject({ code: 1, merges: [] });
-    expect((await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer(SHA)] }))).merges).toHaveLength(1);
+    expect((await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, attack, answer(SHA)] }))).merges).toHaveLength(1);
     // a yes about another kind does not lift this one
     const security = { files: [{ path: "packages/core/src/auth.ts", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
     expect(await gate(["7", "--merge", "--allow-large"], view({ ...security, comments: [review, answer(SHA)] }))).toMatchObject({ code: 1, merges: [] });
     // the marks of an author who is not a member do not count, and the judgement alone asks for the mark too
     expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, { ...answer(SHA), authorAssociation: "NONE" }] }))).toMatchObject({ code: 1, merges: [] });
-    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, answer(SHA)] }))).toMatchObject({ code: 0, merges: [] });
+    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, attack, answer(SHA)] }))).toMatchObject({ code: 0, merges: [] });
   });
 
   test("a failed merge is exit 1 with gh's first line", async () => {
@@ -2003,6 +2073,7 @@ describe("local change", () => {
   }
   type Repo = ReturnType<typeof repo>;
   const REVIEW = { body: "[claude] review\n\n### Intent and design", createdAt: "2026-01-02T00:00:00Z" };
+  const ATTACK = { body: "[claude] attack\n\n### Breaking the change", createdAt: "2026-01-02T00:00:00Z" };
   /** The app's answers: the workspace list, and change `#7` with these comments and the tips of `r` now. */
   type Stored = { number: number; labels: string[]; body: string; parent: number | null };
   /** `github`: the workspace's Issues are GitHub's (`issues`, as last imported) and the change is numbered apart from them; `pr`: the PR it stands in for. */
@@ -2276,12 +2347,29 @@ describe("local change", () => {
     r.git("commit", "-q", "-m", "gate");
     r.git("checkout", "-q", "main");
     const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/merge-gate.ts`") };
-    const g = await gate(r, [REVIEW, pass(r)], [], "OPEN", w);
+    const g = await gate(r, [REVIEW, ATTACK, pass(r)], [], "OPEN", w);
     expect(g.code).toBe(1);
     expect(g.j).toMatchObject({ impact: "large", ask: ["security:gates"], reasons: [expect.stringMatching(/^\[聞く\] セキュリティ（security:gates）: scripts\/merge-gate\.ts/)] });
     const forced = await gate(r, [REVIEW, pass(r)], ["--allow-large"], "OPEN", w);
     expect(forced.code).toBe(1);
     expect(forced.j.reasons.join("\n")).toContain("[merge-answer] yes が無い: security:gates");
+  });
+
+  test("attack is required for a local change too", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    mkdirSync(join(r.dir, "scripts"));
+    writeFileSync(join(r.dir, "scripts", "promote.ts"), "x\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "promote");
+    r.git("checkout", "-q", "main");
+    const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/promote.ts`") };
+    const without = await gate(r, [REVIEW, pass(r)], [], "OPEN", w);
+    expect(without.code).toBe(1);
+    expect(without.j.attack).toEqual(["scripts/promote.ts"]);
+    expect(without.j.reasons.join("\n")).toContain("攻める側のレビュー（[codex] attack / [claude] attack）が無い: scripts/promote.ts");
+    const withIt = await gate(r, [REVIEW, ATTACK, pass(r)], [], "OPEN", w);
+    expect(withIt.j.reasons.join("\n")).not.toContain("攻める側のレビュー");
   });
 
   test("github workspace (e): a change that stands in for a PR is not merged here — its review threads cannot be read", async () => {

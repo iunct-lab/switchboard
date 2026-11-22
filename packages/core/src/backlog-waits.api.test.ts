@@ -503,6 +503,58 @@ describe("backlog-next prerequisite", () => {
     }
   });
 
+  /** The setup the guard's test above uses, as the start and the answer read it: 401 holds a released （リリース） prerequisite and yielded first, 403 later on the same path. */
+  const releasedPrereqSetup = (decision: boolean) => {
+    const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
+    withProcesses(repo);
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "the prerequisite (#450)");
+    const merged = git("rev-parse", "HEAD");
+    const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/api/status" ? Response.json({ current: merged, previous: null, state: "running", busy: null, lastError: null, history: [] }) : new Response("no", { status: 404 })) });
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+    const task = (number: number) => ({ number, state: "OPEN", body: "触る場所: `src/a.ts`" });
+    const gh = prereqGh({
+      401: { priority: "P0", body: "**前提**: #450（リリース）", labels: decision ? ["needs-decision"] : [], comments: [[releaseBody("後回し", [4041], true), ago(3)], ...(decision ? [["## 判断待ち\n**問い**: x\n**進め方**: 止めて待つ", ago(2)] as [string, string]] : [])], tasks: [task(4011)] },
+      402: { priority: "P1", tasks: [task(4021)] },
+      403: { priority: "P2", comments: [[releaseBody("後回し", [4041], true), ago(1)]], tasks: [task(4031)] },
+      404: { priority: "P3", tasks: [task(4041)] },
+    }, { w450: { __typename: "PullRequest", state: "MERGED", mergeCommit: { oid: merged } } });
+    const env = { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` };
+    return { gh, env, done: () => { rescue.stop(true); rmSync(repo, { recursive: true, force: true }); } };
+  };
+
+  test("POST /api/backlog/:number/start counts a released （リリース） prerequisite as the guard does, so the PBI that yielded first starts and is not refused for the later one's place", async () => {
+    const s = releasedPrereqSetup(false);
+    try {
+      const base = await boot(s.gh, holdingClaude().adapter, s.env);
+      await refreshed(base, false);
+      const r = await fetch(`${base}/api/backlog/401/start`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), action: "complete" }) });
+      expect(await r.text()).toContain("401");
+      expect(r.status).toBe(201);
+    } finally {
+      s.done();
+    }
+  });
+
+  test("POST /api/asks/answer: the work an answer goes on with is decided by the same released-answer read, so it starts and is not queued for the later one's place", async () => {
+    const s = releasedPrereqSetup(true);
+    try {
+      const base = await boot(s.gh, holdingClaude().adapter, s.env);
+      await refreshed(base, false);
+      const asks = (await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; kind: string; state: string; pbi: { number: number } | null }> };
+      const ask = asks.asks.find((a) => a.pbi?.number === 401 && a.kind === "decision")!;
+      expect(ask.state).toBe("open");
+      const r = await fetch(`${base}/api/asks/answer`, { method: "POST", body: JSON.stringify({ id: ask.id, answer: { kind: "text", text: "B で" } }) });
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as { ask: { resume: { state: string; taskId: string | null; reason: string | null } | null } };
+      expect(body.ask.resume).toMatchObject({ state: "running" });
+      expect(body.ask.resume?.taskId).toBeTruthy();
+    } finally {
+      s.done();
+    }
+  });
+
   test("withdrawn / missing / cycle: each is logged as 進められない, and the independent Ready starts", async () => {
     const pbis: Record<number, Pbi> = {
       401: { priority: "P0", body: "**前提**: #402" }, 404: { priority: "P0", body: "**前提**: #499" },

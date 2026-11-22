@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task } from "@switchboard/protocol";
+import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, AskQuestion, PolicySubject, Backlog, BacklogItem, EventEnvelope, PendingApproval, RunnerAdapter, RunnerId, RunnerSession, StopRecord, StopSummary, Task, WaitRecord } from "@switchboard/protocol";
 import { importing } from "../fixtures/github-import.ts";
 import type { Ask, ProceedingQuestion } from "@switchboard/protocol";
 import { PROCEED_SETTLED, proceedingAsks, withGone, type GoneFacts } from "./asks.ts";
@@ -24,7 +24,7 @@ const turnOf = (question: string | null, options: Array<string | [string, string
   question === null ? null : { questions: [{ header: null, question, options: options.map((o) => (typeof o === "string" ? { label: o, description: null } : { label: o[0], description: o[1] })), multiSelect: false }], seq: 9, askedAt };
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
-  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null, checking: false }, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: `${ISSUES}/${over.number ?? 1}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, progress: { closableByApi: false, closesOnAnswer: null, checking: false }, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], events: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 /** The last stage Task of an item whose stop asks the person: the Task's outcome (written from its stop records) is what opens the question. */
@@ -33,7 +33,7 @@ const stageTask = (outcome: NonNullable<BacklogItem["lastTask"]>["outcome"] = "n
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
   key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
-  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
+  safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, contentAt: NOW - 3_600_000, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
 });
 
 const DECISION = ["## 判断待ち", "**問い**: どちらの読みで作るか", "**選択肢**:", "- A: 既存の画面を置き換える — 影響: URL はそのまま", "- B: 新しい画面 — 影響: Rail が増える", "**推奨**: A — 画面を増やさない", "**止めた場所**: Task #9"].join("\n");
@@ -166,10 +166,11 @@ describe("answers", () => {
     }
   });
 
-  test("resume task: the usage limit queues, running runs, error fails; no reply is null", () => {
-    const t = (over: Partial<Task>) => ({ id: "tk_1", status: "idle", resumeAt: null, updatedAt: NOW, ...over }) as Task;
+  test("resumeOfTask: the usage limit and a run-slot wait queue, running runs, error fails; no reply is null", () => {
+    const t = (over: Partial<Task>) => ({ id: "tk_1", status: "idle", resumeAt: null, queuedAt: null, updatedAt: NOW, ...over }) as Task;
     expect(resumeOfTask({ task: t({}), repliedAt: null, failure: null })).toBeNull();
     expect(resumeOfTask({ task: t({ status: "waiting", resumeAt: Date.parse("2026-10-07T15:00:00Z") }), repliedAt: NOW - 1, failure: null })).toMatchObject({ state: "queued", reason: "使用上限の解除待ち（2026-10-07T15:00:00.000Z）" });
+    expect(resumeOfTask({ task: t({ status: "idle", queuedAt: NOW - 5 }), repliedAt: NOW - 1, failure: null })).toEqual({ state: "queued", reason: "実行枠待ち", taskId: "tk_1", at: NOW - 5 });
     expect(resumeOfTask({ task: t({ status: "running" }), repliedAt: NOW - 1, failure: null })).toMatchObject({ state: "running", taskId: "tk_1" });
     expect(resumeOfTask({ task: t({ status: "error" }), repliedAt: NOW - 1, failure: null })).toMatchObject({ state: "failed", reason: "Task が error" });
     expect(resumeOfTask({ task: t({ status: "idle" }), repliedAt: NOW - 1, failure: { at: NOW, reason: "送れなかった" } })).toMatchObject({ state: "failed", reason: "送れなかった" });
@@ -228,6 +229,19 @@ describe("lastReply", () => {
     for (const outcome of ["waits", "unknown"] as const) expect(of(outcome)).toMatchObject({ kind: "stop", needs: "auto", state: "open" });
   });
 
+  test("a depends stop the app does not resume asks the person while the Task's outcome is needs_action", () => {
+    const of = (outcome: NonNullable<BacklogItem["lastTask"]>["outcome"], conditions: StopSummary["conditions"]) =>
+      asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(outcome), stopSummary: [stop({ reason: "depends", next: "wait", conditions })] })], NOW)[0]!;
+    // no condition, and one the app cannot watch: nothing continues them but the person
+    for (const conditions of [[], [{ key: "subagent#1", value: "running", met: false }]]) {
+      expect(of("needs_action", conditions)).toMatchObject({ kind: "stop", needs: "person", state: "open" });
+      expect(of("failed", conditions)).toMatchObject({ kind: "stop", needs: "person", state: "open" });
+      expect(of("finished", conditions)).toMatchObject({ kind: "stop", needs: "auto", state: "resolved" });
+    }
+    // a PR the app watches: it goes on by itself, whatever the Task's outcome
+    expect(of("needs_action", [{ key: "pr#12", value: "open", met: false }])).toMatchObject({ kind: "stop", needs: "auto", state: "open" });
+  });
+
   test("a reply over the limit is cut to LAST_REPLY_MAX characters and an ellipsis; one at the limit is whole", () => {
     expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX))).toBe("あ".repeat(LAST_REPLY_MAX));
     expect(lastReplyOf("あ".repeat(LAST_REPLY_MAX + 1))).toBe(`${"あ".repeat(LAST_REPLY_MAX)}…`);
@@ -270,10 +284,28 @@ describe("grants", () => {
     const [none] = fromTasks(task({ outcome: "needs_action" }), [refused()], null);
     expect(none).toMatchObject({ grant: null, answers: [] });
     expect(none!.blockers.map((b) => b.kind)).toEqual(["runner"]);
-    // only a permission stop's grant counts: an auth refusal stays the runner's
+    // only a permission stop's grant lifts the blocker: an auth refusal stays the runner's, though its grant is carried to the ask
     expect(blockersOf({ waits: [], stops: [refused({ reason: "auth", grant: GRANT })], approvalPending: false }).map((b) => b.kind)).toEqual(["runner"]);
     const [auth] = fromTasks(task({ outcome: "needs_action" }), [refused({ reason: "auth", grant: GRANT })], null);
-    expect(auth!.grant).toBeNull();
+    expect(auth!.grant).toBe(GRANT);
+  });
+
+  test("a person's stop with a grant takes the grant whatever its reason", () => {
+    const [d] = fromTasks(task({ outcome: "needs_action" }), [refused({ reason: "decision", grant: GRANT })], null);
+    expect(d).toMatchObject({ kind: "stop", needs: "person", state: "open", grant: GRANT });
+    expect(d!.answers).toContain("grant");
+    // a reason a person does not answer carries none
+    const [t] = fromTasks(task({ outcome: "needs_action" }), [refused({ reason: "transient", grant: GRANT })], null);
+    expect(t?.grant ?? null).toBeNull();
+  });
+
+  test("a stop re-reported with a new reason after a reply is open and answerable by its grant", () => {
+    const rec = (over: Partial<StopRecord>): StopRecord => ({ id: "merge-ask", op: "gh pr merge", target: "PR #1", reason: "decision", evidence: "x", safety: "unknown", state: "waiting", conditions: [], actions: [], grant: GRANT, answer: null, at: 1000, work: { workspaceId: null, issue: null, taskId: "tk_g" }, ...over }) as StopRecord;
+    const reply = { ref: "seq:7", at: 2000 };
+    const summaries = reduceStops([rec({}), rec({ answer: reply, at: 2500 }), rec({ reason: "permission", answer: reply, at: 3000 })]);
+    const [g] = fromTasks(task({ outcome: "needs_action" }), summaries, null);
+    expect(g).toMatchObject({ kind: "stop", state: "open", grant: GRANT });
+    expect(g!.answers).toContain("grant");
   });
 
   test("permission stop grant: folded into the Task's check, the grant stays answerable and is not saved as a policy", () => {
@@ -322,7 +354,7 @@ describe("asksFromBacklog", () => {
     expect(wait).toMatchObject({ id: "wait:ws_meta#6@2026-10-07T09:00:00Z", reason: "PR #70 の完了待ち" });
     expect(wait.conditions).toEqual([{ key: "pr#70", value: "open", met: false }, { key: "issue#71", value: "closed", met: true }]);
     const limit = auto.find((a) => a.kind === "stop")!;
-    expect(limit).toMatchObject({ id: "stop:ws_meta#5|codex exec||usage-limit|", reason: "usage-limit: 5h window", task: { id: "tk_5" }, conditions: [{ key: "resetsAt" }] });
+    expect(limit).toMatchObject({ id: `stop:ws_meta#5|codex exec||usage-limit|@${NOW - 3_600_000}`, reason: "usage-limit: 5h window", task: { id: "tk_5" }, conditions: [{ key: "resetsAt" }] });
   });
 
   test("after: a depends stop with a date is an auto wait that names the date in its reason", () => {
@@ -347,7 +379,7 @@ describe("asksFromBacklog", () => {
 
   test("stops: a stop that asks is the person's when its failed Task is the item's newest stage Task, not when a later stage Task took the work over", () => {
     const gaveUp = stop({ state: "exhausted", next: "decide" });
-    const failed = { id: "tk_5", outcome: "failed", status: "aborted", resumeAt: null, updatedAt: NOW } as Task;
+    const failed = { id: "tk_5", outcome: "failed", status: "aborted", resumeAt: null, queuedAt: null, updatedAt: NOW } as Task;
     const of = (lastTask: NonNullable<BacklogItem["lastTask"]>) => asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask, stopSummary: [gaveUp] })], NOW, { taskOf: (id) => (id === "tk_5" ? failed : null) }).find((a) => a.kind === "stop");
     expect(of(stageTask("failed", "tk_5"))).toMatchObject({ needs: "person", state: "open" });
     expect(of(stageTask("unknown", "tk_6"))).toMatchObject({ needs: "auto", state: "open" });
@@ -359,7 +391,7 @@ describe("asksFromBacklog", () => {
     expect(answered).toMatchObject({ kind: "stop", needs: "person", state: "answered", changedAt: answer.at });
     // a first stop answered in its Task stays `decide` (no earlier stop shows the answer as a change): answered by its own `answered`, going on as the Task does
     const replied = item({ number: 5, stopSummary: [stop({ answered: true, lastAnswer: answer })] });
-    const task = { id: "tk_5", status: "running", resumeAt: null, updatedAt: NOW } as Task;
+    const task = { id: "tk_5", status: "running", resumeAt: null, queuedAt: null, updatedAt: NOW } as Task;
     expect(asksFromBacklog([replied], NOW, { taskOf: () => task })[0]).toMatchObject({ state: "answered", changedAt: answer.at, resume: { state: "running", taskId: "tk_5" } });
     expect(asksFromBacklog([replied], NOW, { taskOf: () => ({ ...task, status: "error" }) })[0]!.resume).toMatchObject({ state: "failed", reason: "Task が error" });
     // a reply the Task refused leaves the stop open with the failure
@@ -447,7 +479,7 @@ describe("proceedingAsks", () => {
 });
 
 describe("withGone", () => {
-  const none: GoneFacts = { endOf: () => null, newerStageDone: () => null };
+  const none: GoneFacts = { endOf: () => null, newerStageDone: () => null, jobEnded: () => null, laterRunDone: () => null };
   const decision = () => asksFromBacklog([item({ number: 5, stage: "needs-decision", decision: { body: DECISION.replace("Task #9", "PR #12"), at: "2026-10-07T00:00:00Z", issue: 51 } })], NOW)[0]!;
   const stopped = (conditions: StopSummary["conditions"] = []) => asksFromBacklog([item({ number: 5, stage: "in-progress", lastTask: stageTask(), stopSummary: [stop({ conditions })] })], NOW)[0]!;
   const open = (list: Ask[]) => list.filter((a) => a.needs === "person" && (a.state === "open" || a.state === "held")).length;
@@ -480,10 +512,94 @@ describe("withGone", () => {
   });
 
   test("a question going on by its recommendation, and a tool approval, are never taken off this way", () => {
-    const all: GoneFacts = { endOf: () => ({ kind: "issue", state: "CLOSED", at: NOW }), newerStageDone: () => NOW };
+    const all: GoneFacts = { endOf: () => ({ kind: "issue", state: "CLOSED", at: NOW }), newerStageDone: () => NOW, jobEnded: () => NOW, laterRunDone: () => NOW };
     const going = proceedingAsks([{ workspaceId: "ws_meta", workspaceName: "meta", issue: { number: 51, url: `${ISSUES}/51` }, pbi: { number: 5, title: "PBI", url: `${ISSUES}/5`, open: true }, body: DECISION, at: "2026-10-07T00:00:00Z", answer: null, closedAt: null, stopped: null }], NOW);
     const approval = { ...decision(), id: "approval:tk_1:p1", kind: "approval" as const };
     expect(withGone([...going, approval], all, NOW).map((a) => a.state)).toEqual(["open", "open"]);
+  });
+
+  // a wait past its limit, as asksFromTasks makes it of a stopped Task's stored waits
+  const overWait = (kind: WaitRecord["kind"], key: string, over: Partial<Task> = {}): Ask => {
+    const t = { id: "tk_w", workspaceId: "ws_meta", title: "t", status: "done", outcome: "waits", reviewedAt: null, resumeAt: null, queuedAt: null, stage: null, statusAt: NOW - 5 * 86_400_000, createdAt: NOW - 5 * 86_400_000, updatedAt: NOW - 5 * 86_400_000, waits: [{ kind, key, label: key, since: NOW - 4 * 86_400_000, until: NOW - 3_600_000 }], ...over } as Task;
+    return asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => null, permissionEvents: () => [], stops: () => [], workspaceName: () => "meta", now: NOW }).find((a) => a.id.startsWith("waitover:"))!;
+  };
+
+  test("a wait past its limit says which wait it is, and stays open while what it waits for is still there", () => {
+    expect(overWait("depends", "pr#12")).toMatchObject({ id: `waitover:tk_w:pr#12@${NOW - 3_600_000}`, kind: "wait", needs: "person", state: "open", wait: { kind: "depends", key: "pr#12" } });
+    const asks = [overWait("depends", "pr#12"), overWait("depends", "issue#7"), overWait("job", "job#3"), overWait("resume", "resume", { workspaceId: null })];
+    expect(withGone(asks, none, NOW).map((a) => a.state)).toEqual(["open", "open", "open", "open"]);
+  });
+
+  test("a wait past its limit of a stage Task whose Issue closed is resolved", () => {
+    const closed: GoneFacts = { ...none, endOf: (w, n) => (w === "ws_meta" && n === 5 ? { kind: "issue", state: "CLOSED", at: NOW - 60_000 } : null) };
+    const out = withGone([overWait("stop", "tk_w/s1:ci", { stage: { issue: 5, action: "complete" } })], closed, NOW);
+    expect(out).toMatchObject([{ kind: "wait", state: "resolved", reason: "#5 が閉じた（対象が無くなった）", changedAt: NOW - 60_000, answers: [] }]);
+    expect(open(out)).toBe(0);
+    // another Task's Issue is not this one's
+    expect(withGone([overWait("stop", "tk_w/s1:ci", { stage: { issue: 6, action: "complete" } })], closed, NOW)[0]!.state).toBe("open");
+  });
+
+  test("a wait past its limit for a PR that was merged or closed, or an Issue that closed, is resolved", () => {
+    const ended: GoneFacts = { ...none, endOf: (_w, n) => (n === 12 ? { kind: "pr", state: "MERGED", at: NOW - 60_000 } : n === 13 ? { kind: "pr", state: "CLOSED", at: NOW } : n === 7 ? { kind: "issue", state: "CLOSED", at: NOW - 1000 } : null) };
+    expect(withGone([overWait("depends", "pr#12")], ended, NOW)).toMatchObject([{ state: "resolved", reason: "PR #12 がマージされた（対象が無くなった）", changedAt: NOW - 60_000 }]);
+    expect(withGone([overWait("depends", "pr#13")], ended, NOW)[0]!.reason).toBe("PR #13 が閉じた（対象が無くなった）");
+    expect(withGone([overWait("depends", "issue#7")], ended, NOW)).toMatchObject([{ state: "resolved", reason: "#7 が閉じた（対象が無くなった）", changedAt: NOW - 1000 }]);
+    // a number that is a PR's is not the Issue waited for, and the other way round
+    expect(withGone([overWait("depends", "issue#12"), overWait("depends", "pr#7")], ended, NOW).map((a) => a.state)).toEqual(["open", "open"]);
+  });
+
+  test("a wait past its limit for a job is resolved once the job ended, however it ended — with no workspace too; a running job's stays open", () => {
+    const jobs: GoneFacts = { ...none, jobEnded: (id) => (id === 3 ? NOW - 2000 : null) };
+    expect(withGone([overWait("job", "job#3", { workspaceId: null })], jobs, NOW)).toMatchObject([{ state: "resolved", reason: "job#3 が終わった（対象が無くなった）", changedAt: NOW - 2000 }]);
+    expect(withGone([overWait("job", "job#3")], jobs, NOW)[0]!.state).toBe("resolved");
+    expect(withGone([overWait("job", "job#4")], jobs, NOW)[0]!.state).toBe("open");
+  });
+
+  test("a wait past its limit of a schedule's Task is resolved once a later run of the schedule finished; while that run goes on it stays open", () => {
+    const later: GoneFacts = { ...none, laterRunDone: (id) => (id === "tk_w" ? NOW - 3000 : null) };
+    expect(withGone([overWait("resume", "resume", { workspaceId: null, scheduleId: "sch_1" })], later, NOW)).toMatchObject([{ state: "resolved", reason: "同じ定期実行の後の回が終わった（対象が無くなった）", changedAt: NOW - 3000 }]);
+    expect(withGone([overWait("resume", "resume", { workspaceId: null, scheduleId: "sch_1" })], none, NOW)[0]!.state).toBe("open");
+  });
+
+  test("a wait past its limit of a Task at work (a command, the runner's output, a run slot, the person) is the turn's own: a closed Issue or a later run does not end it", () => {
+    const all: GoneFacts = { ...none, endOf: () => ({ kind: "issue", state: "CLOSED", at: NOW }), laterRunDone: () => NOW, jobEnded: () => NOW };
+    // (a wait for the person is not asked about here at all: it is the person's own question)
+    const own: Array<[WaitRecord["kind"], string]> = [["output", "output"], ["command", "tk_w/w1"], ["queue", "queue"]];
+    for (const [kind, key] of own) {
+      const a = overWait(kind, key, { status: "running", stage: { issue: 5, action: "complete" }, scheduleId: "sch_1" });
+      expect([kind, a?.wait?.kind, a && withGone([a], all, NOW)[0]!.state]).toEqual([kind, kind, "open"]);
+    }
+    expect(withGone([overWait("output", "output", { status: "running", workspaceId: null, scheduleId: "sch_1" })], all, NOW)[0]!.state).toBe("open");
+  });
+
+  test("a wait past its limit whose key has no fixed form is not read: it stays open whatever ended", () => {
+    const all: GoneFacts = { ...none, endOf: (_w, n) => ({ kind: n === 1 ? "pr" : "issue", state: "CLOSED", at: NOW }), jobEnded: () => NOW };
+    expect(withGone([overWait("stop", "task_x/tag-ci-v1:tag#v1")], all, NOW)[0]!.state).toBe("open");
+  });
+});
+
+describe("answersOf: a wait past its limit", () => {
+  const overWait = (kind: WaitRecord["kind"], key: string, status: Task["status"] = "done"): Ask => {
+    const t = { id: "tk_w", workspaceId: null, title: "t", status, outcome: "waits", reviewedAt: null, resumeAt: null, queuedAt: null, stage: null, statusAt: NOW - 5 * 86_400_000, createdAt: NOW - 5 * 86_400_000, updatedAt: NOW - 5 * 86_400_000, waits: [{ kind, key, label: key, since: NOW - 4 * 86_400_000, until: NOW - 3_600_000 }] } as Task;
+    return asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => null, permissionEvents: () => [], stops: () => [], workspaceName: () => null, now: NOW, policy: { policies: [], pbiOpen: () => true, approval: () => ({ subject: null, confirmHit: null }), confirm: () => null } }).find((a) => a.id.startsWith("waitover:"))!;
+  };
+
+  test("a wait that comes from a stop of a Task whose turn is over takes 止める / 待ち続ける, never saved as a policy", () => {
+    const fromStops: Array<[WaitRecord["kind"], string]> = [["depends", "pr#12"], ["depends", "issue#7"], ["job", "job#3"], ["date", "after:2026-11-12T00:00:00Z"], ["stop", "tk_w/s1:ci"], ["stop", "tk_w/s1"], ["resume", "runner#codex"]];
+    for (const [kind, key] of fromStops)
+      expect(overWait(kind, key)).toMatchObject({ kind: "wait", needs: "person", state: "open", wait: { kind, key }, choices: ["止める", "待ち続ける"], answers: ["choice"], next: "止める: この待ちを片づけ、相手が片づいても再開しない / 待ち続ける: 上限をいまから数え直す", policy: { scopes: [], note: null } });
+  });
+
+  test("a wait of a Task at work (a command, the queue, the runner's output), a planned resume, and a stop's wait once the Task is in a turn again take no answer", () => {
+    const own: Array<[WaitRecord["kind"], string]> = [["command", "command:1"], ["queue", "queue"], ["output", "output"], ["resume", "resume"]];
+    for (const [kind, key] of own) expect(overWait(kind, key)).toMatchObject({ kind: "wait", wait: { kind, key }, choices: [], answers: [] });
+    for (const status of ["running", "waiting", "background"] as const) expect(overWait("depends", "pr#12", status)).toMatchObject({ choices: [], answers: [] });
+    expect(overWait("queue", "queue").next).toBe("Task を開いて、待ち続けるか・相手を進めるか・止めるかを決める");
+  });
+
+  test("answersOf itself: the choices of a person's open wait, none without choices, for an automatic wait or once it is answered", () => {
+    const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "wait", needs: "person", state: "open", choices: ["止める", "待ち続ける"], questions: [], blockers: [], grant: null, ...over });
+    expect([a({}), a({ choices: [] }), a({ needs: "auto" }), a({ state: "answered" }), a({ state: "resolved" })]).toEqual([["choice"], [], [], [], []]);
   });
 });
 
@@ -1062,7 +1178,8 @@ describe("approvalBatches", () => {
     const d = task("tk_d", { workspaceId: "ws_1", createdAt: NOW - 600_000 });
     const [e, f, g, h] = [task("tk_e"), task("tk_f", { status: "running" }), task("tk_g"), task("tk_h")];
     const entries = [
-      { task: c, records: [rec(c, { op: "POST /api/daemon/promote", target: "main", reason: "permission", at: NOW - 30_000 })] },
+      // reported again with a grant: the same stop since NOW - 30_000, its question the one of its present grant
+      { task: c, records: [rec(c, { op: "POST /api/daemon/promote", target: "main", reason: "permission", at: NOW - 30_000 }), rec(c, { op: "POST /api/daemon/promote", target: "main", reason: "permission", grant: "main を昇格することだけ許可します", at: NOW - 20_000 })] },
       { task: b, records: [sso(b, NOW - 40_000)] },
       // the newest stop counts: a's login came after its merge question
       { task: a, records: [rec(a, { id: "tk_a/m", op: "gh pr merge", target: "PR #1", at: NOW - 90_000 }), sso(a, NOW - 50_000)] },
@@ -1087,14 +1204,15 @@ describe("approvalBatches", () => {
     expect(batches.map((x) => x.id)).toEqual(["batch:sso", "batch:deploy"]);
     // oldest Task first, across workspaces; each one's question as listed (a needs_action Task with no question tool question has no check, so its stop stays its own)
     expect(batches[0]!.asks).toEqual([
-      { askId: "stop:task:tk_a|aws sso login||auth|", taskId: "tk_a", title: "title tk_a", workspaceId: "ws_1", op: "aws sso login", at: NOW - 50_000 },
-      { askId: "stop:task:tk_b|aws sso login||auth|", taskId: "tk_b", title: "title tk_b", workspaceId: "ws_2", op: "aws sso login", at: NOW - 40_000 },
-      { askId: "stop:task:tk_j|aws sso login||auth|", taskId: "tk_j", title: "title tk_j", workspaceId: null, op: "aws sso login", at: NOW - 9_000 },
+      { askId: `stop:task:tk_a|aws sso login||auth|@${NOW - 50_000}`, taskId: "tk_a", title: "title tk_a", workspaceId: "ws_1", op: "aws sso login", at: NOW - 50_000 },
+      { askId: `stop:task:tk_b|aws sso login||auth|@${NOW - 40_000}`, taskId: "tk_b", title: "title tk_b", workspaceId: "ws_2", op: "aws sso login", at: NOW - 40_000 },
+      { askId: `stop:task:tk_j|aws sso login||auth|@${NOW - 9_000}`, taskId: "tk_j", title: "title tk_j", workspaceId: null, op: "aws sso login", at: NOW - 9_000 },
       // asked and answered before
-      { askId: "stop:task:tk_h|aws sso login||auth|", taskId: "tk_h", title: "title tk_h", workspaceId: null, op: "aws sso login", at: NOW - 5_000 },
+      { askId: `stop:task:tk_h|aws sso login||auth|@${NOW - 5_000}`, taskId: "tk_h", title: "title tk_h", workspaceId: null, op: "aws sso login", at: NOW - 5_000 },
     ]);
-    expect(batches[1]!.asks.map((x) => [x.taskId, x.op, x.workspaceId])).toEqual([["tk_c", "POST /api/daemon/promote", "ws_3"]]);
-    expect(batches[0]!.asks.every((x) => asks.some((q) => q.id === x.askId))).toBe(true);
+    expect(batches[1]!.asks).toEqual([{ askId: `stop:task:tk_c|POST /api/daemon/promote|main|permission|@${NOW - 20_000}`, taskId: "tk_c", title: "title tk_c", workspaceId: "ws_3", op: "POST /api/daemon/promote", at: NOW - 30_000 }]);
+    // each names its stop's question as listed, whose id carries the time the stop took its present content
+    expect(batches.flatMap((x) => x.asks).map((x) => asks.find((q) => q.id === x.askId)?.task?.id)).toEqual(["tk_a", "tk_b", "tk_j", "tk_h", "tk_c"]);
     // a kind with no Task has no batch
     expect(approvalBatches(entries.slice(1, 3), asks).map((x) => x.kind)).toEqual(["sso"]);
     expect(approvalBatches([], [])).toEqual([]);

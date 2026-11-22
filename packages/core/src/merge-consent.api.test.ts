@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, StartOptions, Task } from "@switchboard/protocol";
-import { GRANT_WAIT_MS, mergeGranted, scopeStopOf } from "../../../ops-kit/src/backlog-client.ts";
+import { GRANT_WAIT_MS, mergeGranted } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { noteMergeGrant } from "./server/task-hooks.ts";
 import { CONSENT_WAIT_CAP_MS } from "./server/merge-consent.ts";
@@ -21,7 +21,7 @@ describe("a reply in the person's own words as a merge grant", () => {
   // as the screen sends it: this origin and Sec-Fetch-Site; a bare call has neither
   const post = (b: string, path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
   const bare = (b: string, path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  const grantedAt = (b: string, taskId: string, kind: string, target: number, head: string | null = kind === "scope" ? null : HEAD) =>
+  const grantedAt = (b: string, taskId: string, kind: string, target: number, head: string | null = HEAD) =>
     fetch(`${b}/api/merge-grants?taskId=${taskId}&repo=o%2Fa&kind=${kind}&target=${target}${head ? `&head=${head}` : ""}`).then(j) as Promise<{ granted: boolean }>;
   const statuses = async (b: string, taskId: string): Promise<string[]> => ((await fetch(`${b}/api/tasks/${taskId}`).then(j)).events as Array<{ ev: AgentEvent }>).flatMap((e) => (e.ev.t === "status" ? [e.ev.text] : []));
 
@@ -74,12 +74,11 @@ describe("a reply in the person's own words as a merge grant", () => {
     }
   });
 
-  test("answer and scope grants are read the same way", async () => {
-    const x = await boot(reads({ kind: "answer", target: 12 }, { kind: "scope", target: 12 }));
+  test("answer grants are read the same way", async () => {
+    const x = await boot(reads({ kind: "answer", target: 12 }));
     try {
-      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "#12 は [merge-answer] yes で進めて。本文のパスも足してよい" });
+      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "#12 は [merge-answer] yes で進めて" });
       expect(await grantedAt(x.b, x.t.id, "answer", 12)).toEqual({ granted: true });
-      expect(await grantedAt(x.b, x.t.id, "scope", 12)).toEqual({ granted: true });
       expect(await grantedAt(x.b, x.t.id, "merge", 12)).toEqual({ granted: false }); // only what the reader gave
     } finally {
       await x.stop();
@@ -134,17 +133,15 @@ describe("a reply in the person's own words as a merge grant", () => {
 
   test("the kit's check waits for the reader", async () => {
     let open!: () => void;
-    const x = await boot(reads({ kind: "merge", target: 12 }, { kind: "scope", target: 7 }), new Promise<void>((r) => (open = r)));
+    const x = await boot(reads({ kind: "merge", target: 12 }), new Promise<void>((r) => (open = r)));
     try {
-      expect((await post(x.b, "/api/merge-grants/scope-stop", { taskId: x.t.id, repo: "o/a", issue: 7, pr: 12 })).status).toBe(200);
-      expect((await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "merge許可する。Task #7 のパスも足していいよ" })).status).toBe(200);
-      // the reader is still running: the kit's own checks (`gh` and `backlog edit`), against this daemon, with the kit's real timeout
+      expect((await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "merge許可する" })).status).toBe(200);
+      // the reader is still running: the kit's own check (`gh`), against this daemon, with the kit's real timeout
       const timer = setTimeout(() => open(), 6_000);
       const t0 = Date.now();
       const env = { BACKLOG_URL: `${x.b}/api/backlog`, OPS_KIT_TASK_ID: x.t.id };
-      const [merge, scope] = await Promise.all([mergeGranted(env, "o/a", "merge", 12, fetch, HEAD), scopeStopOf(env, "o/a", 7)]);
+      const merge = await mergeGranted(env, "o/a", "merge", 12, fetch, HEAD);
       expect(merge).toBe(true);
-      expect(scope).toEqual({ stopped: true, granted: true });
       expect(Date.now() - t0).toBeGreaterThan(5_500); // it outlasted the 5 s of the kit's other calls
       clearTimeout(timer);
     } finally {
@@ -169,60 +166,6 @@ describe("a reply in the person's own words as a merge grant", () => {
       open();
       expect(await grantedAt(x.b, x.t.id, "merge", 12, HEAD)).toEqual({ granted: true });
       expect(await grantedAt(x.b, x.t.id, "merge", 12, MOVED)).toEqual({ granted: false });
-    } finally {
-      open();
-      await x.stop();
-    }
-  });
-
-  test("the check of a scope stop waits for the reader too", async () => {
-    let open!: () => void;
-    const x = await boot(reads({ kind: "scope", target: 7 }), new Promise<void>((r) => (open = r)));
-    try {
-      const scopeStop = () => fetch(`${x.b}/api/merge-grants/scope-stop?taskId=${x.t.id}&repo=o%2Fa&issue=7`).then(j) as Promise<{ stopped: boolean; granted: boolean }>;
-      expect((await post(x.b, "/api/merge-grants/scope-stop", { taskId: x.t.id, repo: "o/a", issue: 7, pr: 12 })).status).toBe(200);
-      expect(await scopeStop()).toEqual({ stopped: true, granted: false });
-      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "Task #7 のパスも足していいよ" });
-      let answered = false;
-      const check = scopeStop().then((r) => ((answered = true), r));
-      await Bun.sleep(150);
-      expect(answered).toBe(false); // `ops-kit backlog edit` asks here, and is not told "no grant" before the read ends
-      open();
-      expect(await check).toEqual({ stopped: true, granted: true });
-    } finally {
-      open();
-      await x.stop();
-    }
-  });
-
-  test("a scope grant read from a reply is as old as the reply: a scope stop recorded while it was read is not let through by it", async () => {
-    let open!: () => void;
-    const x = await boot(reads({ kind: "scope", target: 7 }), new Promise<void>((r) => (open = r)));
-    try {
-      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "Task #7 のパスも足していいよ" });
-      await Bun.sleep(20);
-      // the gate stops on the Task after the person replied, while the reader is still answering
-      expect((await post(x.b, "/api/merge-grants/scope-stop", { taskId: x.t.id, repo: "o/a", issue: 7, pr: 12 })).status).toBe(200);
-      open();
-      expect(await fetch(`${x.b}/api/merge-grants/scope-stop?taskId=${x.t.id}&repo=o%2Fa&issue=7`).then(j)).toEqual({ stopped: true, granted: false });
-    } finally {
-      open();
-      await x.stop();
-    }
-  });
-
-  test("a read that ends late does not undo a fixed sentence sent after it", async () => {
-    let open!: () => void;
-    const x = await boot(reads({ kind: "scope", target: 7 }), new Promise<void>((r) => (open = r)));
-    try {
-      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "Task #7 のパスも足していいよ" });
-      await Bun.sleep(20);
-      expect((await post(x.b, "/api/merge-grants/scope-stop", { taskId: x.t.id, repo: "o/a", issue: 7, pr: 12 })).status).toBe(200);
-      await Bun.sleep(5);
-      // the person answers the newer stop with the fixed sentence while the first reply is still being read
-      await post(x.b, `/api/tasks/${x.t.id}/send`, { text: "Task #7 の本文に名指しのパスを足してよい" });
-      open();
-      expect(await fetch(`${x.b}/api/merge-grants/scope-stop?taskId=${x.t.id}&repo=o%2Fa&issue=7`).then(j)).toEqual({ stopped: true, granted: true });
     } finally {
       open();
       await x.stop();
@@ -292,11 +235,11 @@ describe("a reply in the person's own words as a merge grant", () => {
     } finally {
       await x.stop();
     }
-    // a consent about the task's body is not a consent to the pull request's merge, whatever number they share
+    // a kind of grant the reader may no longer give is dropped: it grants nothing, whatever number it shares
     const y = await boot(reads({ kind: "scope", target: 12 }), undefined, both);
     try {
       await post(y.b, `/api/tasks/${y.t.id}/send`, { text: "Task #12 のパスは足していいよ" });
-      expect(await grantedAt(y.b, y.t.id, "scope", 12)).toEqual({ granted: true });
+      await waitFor(async () => y.readerStarts.length > 0);
       expect(await grantedAt(y.b, y.t.id, "merge", 12)).toEqual({ granted: false });
       expect(await grantedAt(y.b, y.t.id, "answer", 12)).toEqual({ granted: false });
     } finally {

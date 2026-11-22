@@ -6,7 +6,7 @@ import { editStoredIssue } from "./backlog-edit.ts";
 import { readStoredBacklog, readStoredIssue } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { conflictRevision } from "./backlog-merge.ts";
-import { isUnchanged } from "./backlog-pick.ts";
+import { failedSince } from "./backlog-pick.ts";
 import { S, answerStoredDecision, clock, commentStoredIssue, fakeGithub, importsToo, makeSync, useSendDb } from "./api-test-harness.ts";
 
 let dir: string;
@@ -359,7 +359,7 @@ test("BacklogSync: a release written after its claim still waits after the claim
   expect(item.waits.map((w) => w.number)).toEqual([40]);
 });
 
-test("BacklogSync: a stage Task's own comment sent after it ended leaves the item unchanged; one written after the Task releases it", async () => {
+test("BacklogSync: a stage Task's own comment sent after it ended leaves a failed item held (`failedSince`); one written after the Task releases it", async () => {
   const g = fakeGithub();
   g.issues.get(12)!.labels = ["type:pbi"];
   const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
@@ -377,12 +377,12 @@ test("BacklogSync: a stage Task's own comment sent after it ended leaves the ite
   await sync.sync(ws);
   const lastTask = () => {
     const r = db.lastStageTask(ws.id, 12)!;
-    return { id: r.id, status: r.status, statusAt: r.statusAt, createdAt: r.createdAt, updatedAt: r.updatedAt, action: r.stage?.action ?? null, outcome: r.outcome, reviewedAt: r.reviewedAt, resumeAt: r.resumeAt, started: false };
+    return { id: r.id, status: "error" as const, statusAt: r.statusAt, createdAt: r.createdAt, updatedAt: r.updatedAt, action: r.stage?.action ?? null, outcome: r.outcome, reviewedAt: r.reviewedAt, resumeAt: r.resumeAt, started: false };
   };
-  // the fake reads put Issue 12 In progress; `isUnchanged` judges the stages Ready and before, so the item is read as the Ready one it was
-  const read = () => ({ ...readStoredBacklog(db, ws).items.find((i) => i.number === 12)!, stage: "ready" as const, lastTask: lastTask() });
-  expect(isUnchanged(read())).toBe(true);
+  // the Task is read as one that failed: `failedSince` holds it until a comment is written after it ended
+  const read = () => ({ ...readStoredBacklog(db, ws).items.find((i) => i.number === 12)!, lastTask: lastTask() });
+  expect(failedSince(read())).toBe(true);
   // a comment written after the Task ended (written start + 120 s) counts, sent or not
   commentStoredIssue(db, S, 12, "Task の後に書いたコメント", start + 180_000);
-  expect(isUnchanged(read())).toBe(false);
+  expect(failedSince(read())).toBe(false);
 });

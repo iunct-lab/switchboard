@@ -3,7 +3,7 @@ import { isWorkingStatus, type TaskStopMark, type TaskSummary, type TerminalStat
 import { MachineTag, OriginTag, BackgroundTag, ResumeTag, ShadowTag, WaitTag } from "./ui.tsx";
 import { attentionGroups, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
-import { filterTasks, PAGE, STATUS_FILTERS, type StatusFilter } from "../taskList.ts";
+import { dotClass, filterTasks, PAGE, STATUS_FILTERS, taskDot, waitTitle, type StatusFilter } from "../taskList.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
 import { listTitle } from "../taskTitle.ts";
@@ -20,16 +20,22 @@ function TerminalMark(props: { status: TerminalStatus | undefined }) {
   return mark && <span className={mark.className}>{mark.text}</span>;
 }
 
-const dotClass = (s: TaskSummary["status"]) => (s === "running" || s === "background" ? "run" : s === "waiting" ? "wait" : s === "error" ? "err" : "idle");
-
 export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; /** opens that Workspace's shell with no Task; absent = this daemon cannot open a shell */ onOpenTerminal?: (workspaceId: string) => void; terminalWorkspaceId?: string; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
   // the Tasks group: searched and filtered in what the page holds, drawn PAGE rows at a time
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [archived, setArchived] = useState(false);
+  const [wsFilter, setWsFilter] = useState<string | null>(null);
   const [shown, setShown] = useState(PAGE);
-  useEffect(() => setShown(PAGE), [q, status, archived]);
-  const rows = filterTasks(props.tasks, { q, status, archived });
+  useEffect(() => setShown(PAGE), [q, status, archived, wsFilter]);
+  const wsName = new Map(props.workspaces.map((w) => [w.id, w.name]));
+  const rowTitle = (x: TaskSummary) => {
+    const wait = taskDot(x) === "hold" ? (waitTitle(props.stopMarks?.[x.id]) ?? outcomeLabel(x.outcome)) : null;
+    return [x.title, wsName.get(x.workspaceId ?? ""), wait, timesLine(x), x.cwd, x.origin === "terminal" ? t(home.terminalImported) : null].filter(Boolean).join("\n");
+  };
+  // a filter on a Workspace that was removed since shows everything again
+  const wsId = props.workspaces.some((w) => w.id === wsFilter) ? wsFilter : null;
+  const rows = filterTasks(props.tasks, { q, status, archived, workspaceId: wsId });
   // the groups above and the counts leave the archived ones out
   const live = props.tasks.filter((t) => t.archivedAt === null);
   const byWs = new Map<string | null, TaskSummary[]>();
@@ -80,13 +86,13 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
       )}
       <div className="grp">Workspace</div>
       {props.workspaces.map((w) => (
-        <div key={w.id} className={`it ${props.terminalWorkspaceId === w.id ? "on" : ""}`} title={w.path}>
+        <div key={w.id} role="button" tabIndex={0} aria-pressed={wsFilter === w.id} className={`it ${props.terminalWorkspaceId === w.id || wsFilter === w.id ? "on" : ""}`} title={w.path} onClick={() => setWsFilter(wsFilter === w.id ? null : w.id)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setWsFilter(wsFilter === w.id ? null : w.id); } }}>
           <span className="t">
             {w.name}
             {w.kind === "meta" && <span className="tag">{t(home.selfTag)}</span>}
           </span>
           {props.onOpenTerminal && (
-            <button className="ghost rail-term" title={t(home.wsTerminalTitle, { path: w.path })} onClick={() => props.onOpenTerminal!(w.id)}>
+            <button className="ghost rail-term" title={t(home.wsTerminalTitle, { path: w.path })} onClick={(e) => { e.stopPropagation(); props.onOpenTerminal!(w.id); }}>
               {t(home.wsTerminal)}
             </button>
           )}
@@ -119,7 +125,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
       {props.tasks.length === 0 && <div className="it muted">{t(home.noTasks)}</div>}
       {props.tasks.length > 0 && rows.length === 0 && <div className="it muted">{t(home.noMatch)}</div>}
       {rows.slice(0, shown).map((x) => (
-        <button key={x.id} className={`it ${props.currentTaskId === x.id ? "on" : ""}`} onClick={() => props.onOpenTask(x.id)} title={`${x.title}\n${timesLine(x)}\n${x.cwd}${x.origin === "terminal" ? `\n${t(home.terminalImported)}` : ""}`}>
+        <button key={x.id} className={`it ${props.currentTaskId === x.id ? "on" : ""}`} onClick={() => props.onOpenTask(x.id)} title={rowTitle(x)}>
           <span className="t">{listTitle(x.title)}</span>
           {/* Two tags leave the title no room in this width; while a resume is planned that tag matters more (the tooltip still says Terminal). */}
           {x.resumeAt === null && <OriginTag origin={x.origin} />}
@@ -129,7 +135,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
           <WaitTag task={x} compact />
           {x.resumeAt === null && <ShadowTag task={x} />}
           <TerminalMark status={props.terminals[x.id]} />
-          <span className={`dot ${dotClass(x.status)}`} />
+          <span className={`dot ${taskDot(x)}`} />
         </button>
       ))}
       {rows.length > shown && (

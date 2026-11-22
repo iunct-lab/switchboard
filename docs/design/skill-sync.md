@@ -80,7 +80,7 @@ A Task is told only what holds for it. The app decides when it builds the text; 
 
 - **The runner is known late.** A Task that starts by itself may start on another runner when the first one is at its limit, so `startMetaTask` takes the prompt as a function of the runner and calls it once the runner is decided. The same function writes the text again for a shadow on another runner (`promptFor`); a prompt a person typed is copied as it is.
 - **Where the skills are.** The app's texts name the kit's skills by Claude Code's place; `skillPathsFor` (`packages/core/src/skillsync.ts`) rewrites those paths to the place of the Task's runner, which is the only place that Task's copies are in. A person's words inside the prompt (a request, an answer) are never rewritten.
-- **Fixed grant sentences.** The stop report says that three operations (a merge outside the gate, posting `[merge-answer]`, adding a named path to a Task's body) pass only with the sentence the refusing side prints, so a Task copies that sentence instead of writing its own.
+- **Fixed grant sentences.** The stop report says that two operations (a merge outside the gate, posting `[merge-answer]`) pass only with the sentence the refusing side prints, so a Task copies that sentence instead of writing its own.
 - **Measuring.** `bun scripts/task-input.ts <task id>` prints what a Claude Code Task was given at its start, by route, in characters: the app's preamble, the request, the workspace's rules, each instruction file, the skill listing, the other attachments, and the first skill loaded.
 
 ### One way to say an operation
@@ -125,6 +125,7 @@ The branches of the form "if CLAUDE.md names it … otherwise …" are kept: wha
 | `task+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `$N --runner claude --c` | `in+claude` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `request が出す `job#<id>` と JSON を止まりの報告に書き` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `アプリの Task の外では直接走らせる。読` | `out` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `mergeGate` | `ops-kit/skills/cross-runner-review/SKILL.md` | `マージ判定が名指しの外のファイルを数える` | `on` | split | the list of files outside the Task's named paths comes from the merge gate, which only a repository that names one has |
 | `extra` | `ops-kit/skills/cross-runner-review/SKILL.md` | `が名指しし、有効の条件を満たしていれば、ど` | `on` | split | steps for the extra reviewer |
 | `task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `主レビュアーを仕事に頼んだらそこでターンを終` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task+extra` | `ops-kit/skills/cross-runner-review/SKILL.md` | `）は枠を通さないので仕事にしない。主レビュア` | `in+on` | split | steps for the extra reviewer |
@@ -174,7 +175,6 @@ The branches of the form "if CLAUDE.md names it … otherwise …" are kept: wha
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `ops-kit job request re` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `アプリの Task の外では Bash の` | `out` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `ops-kit job request lo` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
-| `mergeGate+task` | `ops-kit/skills/pbi-complete/SKILL.md` | `判定が名指しの外のファイルで止めた後の名指し` | `on+in` | split | the check in front of `gh` exists only where a merge gate is named |
 | `mergeGate+task` | `ops-kit/skills/pbi-complete/SKILL.md` | `PR #<n> に [merge-answe` | `on+in` | split | the check in front of `gh` exists only where a merge gate is named |
 | `mergeGate+task` | `ops-kit/skills/pbi-complete/SKILL.md` | `があるリポジトリのアプリの Task）。通` | `on+in` | split | the check in front of `gh` exists only where a merge gate is named |
 | `runner` | `ops-kit/skills/pbi-complete/SKILL.md` | `上の形のままで通る` | `codex` | split | only a Codex Task cannot write under /tmp; the form of the command is the same for both |

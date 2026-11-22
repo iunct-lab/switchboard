@@ -13,7 +13,7 @@ import { buildStartPrompt } from "./backlog-prompt.ts";
 import { pickNext, onHoldIn } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import type { RawBacklogIssue } from "./backlog-item.ts";
-import { DECOMPOSED_READY, FAKE_ORIGIN, backlogNextSchedule, boot, budgetGh, closeTried, decisions, decomposedGh, fakeGh, fixtureStage, holdingClaude, item, metaId, metaName, moreReadyGh, pages, refreshed, runSchedule, scheduleLog, scheduleLogAll, shutdown, start, startedTasks, subTask, sweepAll, taskDecisionGh, threeWorkspaces, useBacklogDaemon } from "./api-test-harness.ts";
+import { DECOMPOSED_READY, FAKE_ORIGIN, backlogNextSchedule, boot, budgetGh, closeTried, commentingGh, decisions, decomposedGh, fakeGh, fixtureStage, holdingClaude, item, metaId, metaName, moreReadyGh, pages, refreshed, runSchedule, scheduleLog, scheduleLogAll, shutdown, start, startedTasks, subTask, sweepAll, taskDecisionGh, threeWorkspaces, useBacklogDaemon } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -198,7 +198,7 @@ describe("on-hold", () => {
   });
 
   test("a firing logs 保留: #N on that line only, starts the next item, and the row's button still starts it", async () => {
-    // Issue 304 (Ready) also had an 実装 finish with no update since, which alone would log it as 前回から更新が無い
+    // Issue 304 (Ready) also had an 実装 finish with no update since: the 保留 line is the reason it gives, never 前回から更新が無い
     const base = await boot(onHoldGh(304, 303).gh, holdingClaude().adapter);
     const now = Date.now();
     core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
@@ -242,18 +242,19 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
 });
 
-test("backlog-next unchanged: a Ready PBI whose 実装 finished with no update since is not started and the log names it; its button still starts it", async () => {
+test("backlog-next held: a Ready PBI whose last 実装 was started by itself and nothing happened since is not started and the log names the gate's line; the 閉じる that did not close keeps the unchanged line; the button still starts it", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   // Issue 304 (updated 2026-09-20) had an 実装 that finished after that
   const now = Date.now();
-  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#304 実装: PBI: Ready の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.insertTask({ id: "tsk_last304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { ...fixtureStage("#304 実装: PBI: Ready の PBI")!, auto: true }, statusAt: now, createdAt: now, updatedAt: now });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old Issue 304 実装
   const log = await scheduleLogAll(base);
-  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回から更新が無い: #304 #307`)); // Issue 307: closeTried's 閉じる
-  expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められる項目が無い`));
+  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: #304（前回 tsk_last304）`));
+  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回から更新が無い: #307`)); // Issue 307: closeTried's 閉じる; 304 is not on this line
+  expect(log).not.toContainEqual(expect.stringContaining("前回から更新が無い: #304"));
   // the row's button is not held by it
   const r = await start(base, 304, { action: "complete" });
   expect(r.status).toBe(201);
@@ -639,7 +640,7 @@ test("backlog-next picks a local Ready PBI with gh throwing", async () => {
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   const t = startedTasks().find((x) => x.workspaceId === ws.id);
-  expect(t?.stage).toEqual({ issue: 1, action: "complete" });
+  expect(t?.stage).toEqual({ issue: 1, action: "complete", auto: true });
   for (let i = 0; !claude.starts.length && i < 200; i++) await Bun.sleep(10);
   expect(claude.starts.map((s) => s.prompt).join("\n")).toContain("PBI #1 を完了させてください");
   expect((await scheduleLogAll(base)).filter((l) => l.includes("local: GitHub"))).toEqual([]);
@@ -759,7 +760,7 @@ describe("backlog-next auth", () => {
     await fetch(`${base}/api/backlog`, { method: "POST", body: JSON.stringify({ workspaceId: ws.id, title: "PBI: ローカル", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1" } }) });
     const id = await backlogNextSchedule(base);
     expect((await runSchedule(base, id)).status).toBe(201);
-    expect(startedTasks().find((x) => x.workspaceId === ws.id)?.stage).toEqual({ issue: 1, action: "complete" });
+    expect(startedTasks().find((x) => x.workspaceId === ws.id)?.stage).toEqual({ issue: 1, action: "complete", auto: true });
     expect((await scheduleLogAll(base)).filter((l) => l.includes("local: ") && l.includes("認証切れ"))).toEqual([]);
   });
 
@@ -980,4 +981,23 @@ test("backlog-next slots: a workspace whose GitHub cannot be read goes on with w
   expect(tasks).toHaveLength(4);
   expect(tasks.filter((t) => t.workspaceId === ids.lib)).toHaveLength(0);
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("飛ばした (manual): lib: GitHub と照合できない（保存データで進める）: gh repo view: HTTP 404"));
+});
+
+test("backlog-next held without a new event is logged and the button still starts it", async () => {
+  const c = commentingGh();
+  const base = await boot(c.gh, holdingClaude().adapter);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  const first = startedTasks().find((t) => t.stage?.issue === 307)!;
+  expect(first.stage).toEqual({ issue: 307, action: "close", auto: true });
+  core!.db.updateTask(first.id, { status: "done" });
+  await Bun.sleep(5);
+  // the Task's own plain comment, after it ended: the older check lets the PBI pass, and no event came
+  c.on.v = true;
+  await refreshed(base);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === 307)).toHaveLength(1);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: #307（前回 ${first.id}）`));
+  expect((await start(base, 307, { action: "close" })).status).toBe(201);
+  expect(startedTasks().filter((t) => t.stage?.issue === 307)).toHaveLength(2);
 });

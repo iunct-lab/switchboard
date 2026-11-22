@@ -150,6 +150,14 @@ const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;
 const TESTS = ["**/*.test.ts", "scripts/*-e2e.ts"].map((p) => new Bun.Glob(p));
 const DOCS = ["docs/**", "**/*.md"].map((p) => new Bun.Glob(p));
 export const REVIEW = /^\[(codex|claude)\] review/;
+/** The mark of the attacking review (a reviewer told to break the change): not a main review, and `REVIEW` does not match it. */
+export const ATTACK = /^\[(codex|claude)\] attack\b/;
+/**
+ * Paths that need an attacking review besides the security groups they may not be in: what moves a release, the rescue,
+ * the way in from outside and what a Task may run. Switchboard's own paths, applied to every --repo as they are (like
+ * `security:host`): another repository with the same paths also needs the attacking review.
+ */
+export const ATTACK_PATHS = glob(["packages/core/src/promotion.ts", "packages/core/src/server/promotion.ts", "scripts/promote.ts", "rescue/**", "packages/core/src/uplink-in.ts", ".claude/settings.json", "ops-kit/bin/**"]);
 /** Only these comment authors' marks count (review, [local-ci], [recheck]): on a public --repo anyone can comment. */
 export const MARK_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
 
@@ -222,6 +230,8 @@ export interface Judgement {
   notes?: string[];
   /** The main review was not asked for: a direct PR with no large reason (mergePr marks it). Absent = it was asked for. */
   reviewSkipped?: true;
+  /** The paths that need an attacking review (`attackPaths`); absent = none. Whether a fresh mark is there is in `reasons`. */
+  attack?: string[];
 }
 
 const matches = (globs: Bun.Glob[], path: string) => globs.some((g) => g.match(path));
@@ -257,6 +267,18 @@ export function fileSecurityKinds(x: PrFacts["files"][number]): SecurityKind[] {
   const all = [...new Set([...now, ...securityKinds(x.previous)])];
   const hard = all.filter((k) => k !== "security:docs" && k !== "security:tests");
   return hard.length > 0 ? hard : all;
+}
+
+const ATTACK_KINDS: SecurityKind[] = ["security:words", "security:lockfile", "security:github", "security:gates", "security:host"];
+
+/**
+ * The changed files that need an attacking review: those in a security group other than documents and tests (a file is
+ * judged by its path before a rename too, `fileSecurityKinds`) and those of `ATTACK_PATHS` (also by the path before a rename).
+ */
+export function attackPaths(f: PrFacts): string[] {
+  return f.files
+    .filter((x) => fileSecurityKinds(x).some((k) => ATTACK_KINDS.includes(k)) || matches(ATTACK_PATHS, x.path) || (x.previous !== undefined && matches(ATTACK_PATHS, x.previous)))
+    .map((x) => x.path);
 }
 
 /** A here-document's word after `<<`: an optional `-`, then a quoted or a plain word, ended by a blank or an operator. */
@@ -654,13 +676,19 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   if (!reviewSkipped && !f.reviewComments.some((c) => REVIEW.test(c.body) && Date.parse(c.createdAt) > head)) {
     reasons.push(`最後のコミット（${f.headCommittedAt}）より新しい主レビュー（[codex] review / [claude] review）が無い`);
   }
+  // not lifted by --allow-large or a [merge-answer]: the answer is about the change, the attacking review looks for what is wrong with it
+  const attack = attackPaths(f);
+  if (attack.length > 0 && !f.reviewComments.some((c) => ATTACK.test(c.body) && Date.parse(c.createdAt) > head)) {
+    const named = f.files.filter((x) => attack.includes(x.path)).map((x) => (x.previous && x.previous !== x.path ? `${x.path}（改名前: ${x.previous}）` : x.path));
+    reasons.push(`最後のコミット（${f.headCommittedAt}）より新しい攻める側のレビュー（[codex] attack / [claude] attack）が無い: ${named.join(", ")}`);
+  }
   const unstableForLocalCi = f.mergeState === "UNSTABLE" && f.localCi === true;
   if (f.mergeState === "BLOCKED" && f.localCi) {
     // the local pass is a PR comment: a required status check or review of the base branch is not met by it
     reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
-  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}) };
+  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}), ...(attack.length > 0 ? { attack } : {}) };
 }
 
 /** The line a judgement names the settings it was made with: the workspace and the version the person confirmed. */

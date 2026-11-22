@@ -1,4 +1,4 @@
-export type MergeGrantKind = "merge" | "answer" | "scope";
+export type MergeGrantKind = "merge" | "answer";
 /** One grant sentence as written: `repo` is the repository the sentence itself names, null when it names none (the task's own is meant). */
 export interface MergeGrant {
   kind: MergeGrantKind;
@@ -25,14 +25,13 @@ export const USED_ANSWERS_KEPT = 200;
 
 export const API = "api";
 
-// The three fixed sentences a person sends in a task's conversation to let one refused step through.
+// The two fixed sentences a person sends in a task's conversation to let one refused step through.
 // A sentence ends its line (a closing full stop is fine); a different verb or a longer clause does not match.
 // It may start with `<owner/name> の ` to name another repository than the task's.
 const REPO = String.raw`(?:(?<![\w./-])([\w.-]+\/[\w.-]+) の )?`;
 const BODIES: Array<{ kind: MergeGrantKind; body: string }> = [
   { kind: "merge", body: String.raw`PR #(\d+) を判定の外でマージしてよい` },
   { kind: "answer", body: String.raw`PR #(\d+) に \[merge-answer\] yes を投稿してよい` },
-  { kind: "scope", body: String.raw`Task #(\d+) の本文に名指しのパスを足してよい` },
 ];
 const FORMS: Array<{ kind: MergeGrantKind; re: RegExp }> = BODIES.map((f) => ({ kind: f.kind, re: new RegExp(String.raw`${REPO}${f.body}[。.]?\s*$`) }));
 
@@ -56,7 +55,21 @@ export function findGrantSentences(text: string): MergeGrant[] {
 }
 
 /**
- * Reads every grant sentence in `text`, one per line; empty when no line is one of the three forms. A quoted line (one
+ * The heads of the PRs the merge / answer grants of a screen answer name, read once when the answer was taken and kept
+ * with the answer's operation: by `grantHeadKey`, null = not read then. The record of the grant reads them and never
+ * the PR again; a grant with no head here answers for none.
+ */
+export type GrantHeads = Record<string, string | null>;
+export const grantHeadKey = (repo: string, target: number): string => `${repo.toLowerCase()}#${target}`;
+/** `GrantHeads` as kept in an operation's payload: undefined = the operation keeps none; anything that is not a full sha is not read (null). */
+export function grantHeadsOf(kept: unknown): GrantHeads | undefined {
+  if (kept === undefined) return undefined;
+  if (!kept || typeof kept !== "object" || Array.isArray(kept)) return {};
+  return Object.fromEntries(Object.entries(kept).map(([k, v]) => [k, typeof v === "string" && /^[0-9a-f]{40}$/.test(v) ? v : null]));
+}
+
+/**
+ * Reads every grant sentence in `text`, one per line; empty when no line is one of the two forms. A quoted line (one
  * that starts with `>`) is not read: a quote repeats someone's words, it is not a grant given in this text.
  */
 export function parseMergeGrants(text: string): MergeGrant[] {

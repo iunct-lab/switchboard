@@ -21,7 +21,7 @@ import { type Suggester } from "./routing.ts";
 import { TaskManager } from "./tasks/manager.ts";
 import { HistoryImporter } from "./history.ts";
 import { type GitConfigRunner } from "./github-login.ts";
-import type { ServerContextInit, Peer } from "./server/context.ts";
+import type { ServerContext, ServerContextInit, Peer } from "./server/context.ts";
 import { joinRoutes } from "./routes/shared.ts";
 import { healthRoutes } from "./routes/health.ts";
 import { runnersRoutes } from "./routes/runners.ts";
@@ -109,6 +109,8 @@ export interface CoreServer {
   token: string;
   /** Terminal tab; null when no PTY can be opened here. */
   pty: PtyManager | null;
+  /** The one place a stage Task starts (server/start.ts `startStage`), for a test that starts one the way the queue does. */
+  startStage: ServerContext["startStage"];
   /** Read the Web UI and the shipped defaults again from `<home>/releases/current` (SIGHUP, under sb-rescue). The version's sha, or null when there is no `current`. */
   reloadRelease(): string | null;
   stop(): Promise<void>;
@@ -297,6 +299,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
     selfdev: sc.selfdev,
     history: sc.history,
     pty: sc.pty,
+    startStage: sc.startStage,
     reloadRelease: sc.reloadRelease,
     stop: () => sc.stopAll(),
   };

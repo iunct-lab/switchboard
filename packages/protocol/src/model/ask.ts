@@ -5,6 +5,7 @@ import { Artifact } from "./artifact.ts";
 import { Backlog } from "./backlog.ts";
 import { AnswerPolicy, AskPolicy, PolicyInput, PolicySubject } from "./policy.ts";
 import { DeviceAuthView } from "./task.ts";
+import { WaitKind } from "./waits.ts";
 
 /** One unanswered permission.ask across all tasks: answered with POST /api/tasks/:taskId/permission { id }. */
 export const PendingApproval = z.object({
@@ -114,6 +115,8 @@ export const Ask = z.object({
    * looks at it afterwards — confirmed (one by one, or a Workspace's at once) or overturned by another answer.
    */
   proceeding: z.boolean().optional(),
+  /** Only a question for a wait past its limit (`waitover:`): which wait of the Task it is — its kind and its key (`pr#12`, `job#3`, …). */
+  wait: z.object({ kind: WaitKind, key: z.string() }).optional(),
 });
 export type Ask = z.infer<typeof Ask>;
 

@@ -1,5 +1,6 @@
 import type { Ask, AskBatch, AskBatchResult, DeviceAuthView, StopRecord, Task } from "@switchboard/protocol";
 import { IN_FLIGHT, TERMINAL } from "./task-status.ts";
+import { askIdBase, stopAskId } from "./asks.ts";
 import { stopKey } from "./stops.ts";
 
 /**
@@ -67,8 +68,9 @@ export function approvalBatches(entries: { task: Task; records: StopRecord[] }[]
     const newest = waitingStop(records);
     const kind = newest ? batchKindOf(newest.stop) : null;
     if (!newest || !kind) continue;
-    const id = `stop:${stopKey(newest.stop).replaceAll("\u0000", "|")}`;
-    const shown = asks.find((a) => a.id === id) ?? asks.find((a) => a.task?.id === task.id && a.state === "open" && (a.kind === "stop" || a.kind === "check"));
+    // the stop's question as listed, found by its id up to the time (the list knows when the stop took its present content)
+    const id = askIdBase(stopAskId({ key: stopKey(newest.stop), contentAt: 0 }));
+    const shown = asks.find((a) => a.kind === "stop" && a.task?.id === task.id && askIdBase(a.id) === id) ?? asks.find((a) => a.task?.id === task.id && a.state === "open" && (a.kind === "stop" || a.kind === "check"));
     lists[kind].push({ askId: shown?.id ?? id, taskId: task.id, title: task.title, workspaceId: task.workspaceId, op: newest.stop.op, at: newest.at });
   }
   return (["sso", "deploy"] as const).filter((k) => lists[k].length > 0).map((k) => ({ id: `batch:${k}` as const, kind: k, asks: lists[k], loggingIn: null, deviceAuth: null }));

@@ -63,14 +63,14 @@ test("samples: one that cannot be added is not recorded, so the next call tries 
   expect(addSamples(db, scheduler, metaId, TWO).map((s) => s.title)).toEqual(["（サンプル）一つ目"]);
 });
 
-test("samples: the list is the monthly check and the ten general ones, with ids and titles of their own", () => {
+test("samples: the list is the monthly check and the eleven general ones, with ids and titles of their own", () => {
   expect(SCHEDULE_SAMPLES.map((s) => s.title)).toEqual([
     "床・天井・壁の点検", "評価の週報", "レビュー指摘の傾向", "動向からの案", "依存の更新", "公開リポジトリへの同期",
-    "止まった理由", "バックログの棚卸し", "定期実行の見直し", "ルーブリックの校正", "AWS の費用の週報",
+    "止まった理由", "バックログの棚卸し", "定期実行の見直し", "ルーブリックの校正", "AWS の費用の週報", "確認中の PBI をまとめて確かめる",
   ]);
   expect(new Set(SCHEDULE_SAMPLES.map((s) => s.id)).size).toBe(SCHEDULE_SAMPLES.length);
   const added = addSamples(db, scheduler, metaId);
-  expect(added).toHaveLength(11);
+  expect(added).toHaveLength(12);
   expect(added.every((s) => !s.enabled && s.title.startsWith(SAMPLE_TITLE_PREFIX) && s.action === "prompt")).toBe(true);
 });
 
@@ -86,7 +86,7 @@ test("samples: the section a prompt names is a heading of the samples' document,
   const doc = readFileSync(join(import.meta.dir, "../../..", SAMPLES_DOC), "utf8");
   const headings = new Set([...doc.matchAll(/^#{2,3} (.+)$/gm)].map((m) => m[1]!));
   const named = SCHEDULE_SAMPLES.filter((s) => s.section);
-  expect(named).toHaveLength(10);
+  expect(named).toHaveLength(11);
   for (const s of named) {
     expect(headings.has(s.section!)).toBe(true);
     expect(s.prompt).toContain(`「${s.section}」`);
@@ -110,7 +110,7 @@ test("samples: an instance from before the list (the old flag in its settings) i
   scheduler = newScheduler();
   expect(addSamples(db, scheduler, metaId, SCHEDULE_SAMPLES.slice(0, SAMPLES_BEFORE_THE_LIST.length))).toEqual([]);
   // a sample the list gets later goes in here as on any instance; a second open changes nothing
-  expect(addSamples(db, scheduler, metaId, [...SCHEDULE_SAMPLES, ...ONE]).map((s) => s.title)).toEqual(["（サンプル）一つ目"]);
+  expect(addSamples(db, scheduler, metaId, [...SCHEDULE_SAMPLES.slice(0, SAMPLES_BEFORE_THE_LIST.length), ...ONE]).map((s) => s.title)).toEqual(["（サンプル）一つ目"]);
   db.close();
   db = new Db(file);
   expect(db.getSetting<string[]>(SAMPLES_KEY, [])).toEqual([...SAMPLES_BEFORE_THE_LIST, "one"]);

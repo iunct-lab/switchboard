@@ -78,7 +78,7 @@ describe("schedule samples", () => {
       const first = await samples(c);
       const meta = ((await fetch(`http://127.0.0.1:${c.server.port}/api/workspaces`).then(j)) as Workspace[]).find((w) => w.kind === "meta")!;
       expect(first.map((s) => s.title).sort()).toEqual(SCHEDULE_SAMPLES.map((s) => `（サンプル）${s.title}`).sort());
-      expect(first).toHaveLength(11);
+      expect(first).toHaveLength(12);
       for (const s of first) expect(s).toMatchObject({ action: "prompt", workspaceId: meta.id, enabled: false });
       const check = first.find((s) => s.title === "（サンプル）床・天井・壁の点検")!;
       expect(check).toMatchObject({ cron: "0 9 1 * *", prompt: UI_LAYERS_CHECK_PROMPT, runner: "claude" });
@@ -187,7 +187,8 @@ describe("schedule samples", () => {
       before.setSetting("uiLayers.seeded", true);
       before.close();
       const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT)], { port: 0, selfdevChecks: false, gh: NO_GH });
-      expect(await samples(c)).toHaveLength(0);
+      // only a sample the list got after that time goes in, disabled, as on any instance
+      expect((await samples(c)).map((s) => [s.title, s.enabled])).toEqual([["（サンプル）確認中の PBI をまとめて確かめる", false]]);
       expect(c.db.getSetting<unknown>("uiLayers.seeded", null)).toBe(true);
       await c.stop();
     } finally {

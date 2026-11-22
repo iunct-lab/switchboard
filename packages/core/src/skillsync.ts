@@ -120,9 +120,9 @@ function renderedFile(sourceDir: string, rel: string, conds: Conditions): Uint8A
 }
 
 /** The conditions of a repository's copies besides the runner: the review setting, and what the repository's `ops.config.json` and workspace say. */
-function conditionsOf(root: string, runner: "claude" | "codex", review: "same" | "other", backlog: "github" | "switchboard", saved: string): Conditions {
+function conditionsOf(root: string, runner: "claude" | "codex", review: "same" | "other", recheck: "same" | "other", backlog: "github" | "switchboard", saved: string): Conditions {
   // `saved`: the settings kept on Switchboard's side, read when the repository has no `ops.config.json` ("" = none; never the daemon's own environment)
-  return { runner, review, reviewer: primaryReviewer(runner, review)!, task: "in", backlog: backlog === "github" ? "github" : "app", mergeGate: mergeGateOf(root, saved) ? "on" : "off", extra: extraReviewerOf(root, saved) ? "on" : "off" };
+  return { runner, review, recheck, reviewer: primaryReviewer(runner, review)!, task: "in", backlog: backlog === "github" ? "github" : "app", mergeGate: mergeGateOf(root, saved) ? "on" : "off", extra: extraReviewerOf(root, saved) ? "on" : "off" };
 }
 
 /** A copy Switchboard placed: a real folder with the marker. */
@@ -139,6 +139,8 @@ export interface SkillSyncOptions {
   runner?: string;
   /** The review setting now (default `other`). */
   review?: "same" | "other";
+  /** The recheck and audit setting now (default `other`). */
+  recheck?: "same" | "other";
   /** Where the backlog of the repository at `root` is kept (default `github`); asked for the Task's repository and for the meta checkout. */
   backlog?: (root: string) => "github" | "switchboard";
   /** The saved settings' file of the workspace of the repository at `root` (default none): `mergeGate` and `extraReviewer` are read from it when the repository has no `ops.config.json`. */
@@ -146,7 +148,7 @@ export interface SkillSyncOptions {
 }
 
 export function syncSkills(opts: SkillSyncOptions): SkillSyncResult {
-  const { metaPath, cwd, runner, review = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
+  const { metaPath, cwd, runner, review = "other", recheck = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
   const result: SkillSyncResult = { linked: [], unchanged: [], removed: [], skipped: [] };
   const top = git(cwd, "rev-parse", "--show-toplevel");
   if (top === null) return result;
@@ -178,7 +180,7 @@ export function syncSkills(opts: SkillSyncOptions): SkillSyncResult {
   const mine = (Object.entries(SKILL_TARGET_OF) as Array<["claude" | "codex", string]>).filter(([r]) => runner === undefined || r === runner);
   for (const [targetRunner, target] of mine) {
     const dir = join(root, target);
-    const conds = conditionsOf(root, targetRunner, review, backlog(root), savedConfig(root));
+    const conds = conditionsOf(root, targetRunner, review, recheck, backlog(root), savedConfig(root));
     // A target that is the source directory itself (a link to it): nothing to place, and nothing there to remove
     if (existsSync(dir) && realpathSync(dir) === source) continue;
     for (const name of names) {
@@ -250,7 +252,7 @@ export function syncSkills(opts: SkillSyncOptions): SkillSyncResult {
  * of Switchboard's. It throws when the source cannot be rendered — the copies are then not verified.
  */
 export function skillCopiesCurrent(opts: SkillSyncOptions): boolean {
-  const { metaPath, cwd, runner, review = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
+  const { metaPath, cwd, runner, review = "other", recheck = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
   const top = git(cwd, "rev-parse", "--show-toplevel");
   if (top === null) return true;
   const root = realpathSync(top);
@@ -259,7 +261,7 @@ export function skillCopiesCurrent(opts: SkillSyncOptions): boolean {
     if (runner !== undefined && targetRunner !== runner) continue;
     const dir = join(root, target);
     if (!existsSync(dir) || realpathSync(dir) === source) continue;
-    const conds = conditionsOf(root, targetRunner, review, backlog(root), savedConfig(root));
+    const conds = conditionsOf(root, targetRunner, review, recheck, backlog(root), savedConfig(root));
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
       if (!isCopy(p)) continue;

@@ -11,6 +11,7 @@ import { savedConfigFile } from "../workspace-config.ts";
 import { syncsGithub } from "../backlog-gh.ts";
 import { buildDirectPrompt, buildStartPrompt, subagentModelAlias, startTitle } from "../backlog-prompt.ts";
 import { screenAnswer } from "../backlog-edit.ts";
+import { autoStartHeld } from "../stage-start-gate.ts";
 import { otherRepo } from "./helpers.ts";
 import type { ServerContext } from "./context.ts";
 
@@ -138,12 +139,19 @@ export const completeTaskModelFor = (sc: Pick<ServerContext, "settings" | "decid
 /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
 export const activeStageTask = (sc: Pick<ServerContext, "db">, workspaceId: string, n: number) => sc.db.activeStageTask(workspaceId, n);
 
+/** The one place that applies the rule of stage-start-gate.ts to an item: null = an automatic start may go, otherwise the previous automatic Task it is held for. */
+export const autoHeldOf = (sc: Pick<ServerContext, "db">, ws: Workspace, item: BacklogItem, action: BacklogAction): { previousTaskId: string } | null => {
+  const prev = sc.db.lastAutoStageTask(ws.id, item.number, action);
+  const running = prev ? sc.db.activeStageTask(ws.id, item.number)?.id === prev.id : false;
+  return autoStartHeld(item.events, prev && { id: prev.id, createdAt: prev.createdAt, endedAt: running ? null : prev.statusAt });
+};
+
 /**
  * Starts one stage Task of an Issue: the button, backlog-next and the resume after an answer all come here, so
  * the same Issue never has two. A running / waiting one is answered instead of a second; nothing awaits between that
  * check and the Task's creation in startMetaTask, so a second start of the same Issue always finds the first one.
  */
-export const startStage = async (sc: Pick<ServerContext, "startMetaTask" | "leaseRepository" | "leases" | "activeStageTask" | "db" | "noteMergeGrant" | "settings" | "completeTaskModelFor">, input: {
+export const startStage = async <A extends true | undefined = undefined>(sc: Pick<ServerContext, "startMetaTask" | "leaseRepository" | "leases" | "activeStageTask" | "db" | "noteMergeGrant" | "settings" | "completeTaskModelFor">, input: {
   ws: Workspace;
   meta: Workspace;
   item: BacklogItem;
@@ -151,9 +159,21 @@ export const startStage = async (sc: Pick<ServerContext, "startMetaTask" | "leas
   resume?: { tasksDone: number };
   /** Why this candidate (backlog-next: `chooseProcess`'s); the buttons leave it out and are recorded as the button / the stage. */
   processReason?: string;
+  /**
+   * A start the app makes by itself (the queue, the schedule, the resume after an answer). Only this one is held when nothing
+   * happened once since the last automatic start of the same stage (stage-start-gate.ts), and only this one is recorded as
+   * such: the buttons leave it out, are never held and do not count as the last automatic start.
+   */
+  auto?: A;
   extra?: Pick<Parameters<typeof sc.startMetaTask>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd">;
-}): Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true }> => {
+}): Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true } | (A extends true ? { held: { previousTaskId: string } } : never)> => {
   const { ws, item, action } = input;
+  // before the lease, so a held start takes nothing and gives nothing back
+  if (input.auto) {
+    const held = autoHeldOf(sc, ws, item, action);
+    if (held) return { held } as never; // typed by `A`: the union has `held` only for a start made with `auto`
+  }
+  const stage = { issue: item.number, action, ...(input.auto ? { auto: true as const } : {}) };
   // Two machines share work: the PBI's lease is taken before anything of it starts here (a check only reads and takes
   // none). Alone there is no lease and nothing is awaited, so the check below and the Task's creation stay together.
   // a request's stage makes PBIs: two machines at it would make them twice, so it takes the lease of its number too
@@ -195,16 +215,16 @@ export const startStage = async (sc: Pick<ServerContext, "startMetaTask" | "leas
   // that id: an answer whose id stands in a record is spent, however many starts came in between. "The screen answer" is
   // one an answer route marked because its request came in as the screen's (`grantSource`: it looked like the web UI's
   // and named no sending Task) — an answer a Task or a bare call posted carries no mark, so it is no answer here
-  // The grant's head is the one the PR has at this start, not the one it had when the answer was written (the answer
-  // carries no head): a head that moved in between is the head granted. Said so in permission-modes.md, "A grant is for
-  // the head recorded with it"
+  // The grant's head is the one the PR had when the answer was taken (the answer's `heads`), not the one it has at
+  // this start: a head pushed in between is not granted, and one that could not be read then is none. Said so in
+  // permission-modes.md, "A grant is for the head recorded with it"
   const granting = async (r: Awaited<ReturnType<typeof sc.startMetaTask>>) => {
-    if (answer && "task" in r && !sc.db.mergeGrantSourceSpent(answer.id)) await sc.noteMergeGrant(r.task.id, answer.text, { source: answer.id, via: "screen" });
+    if (answer && "task" in r && !sc.db.mergeGrantSourceSpent(answer.id)) await sc.noteMergeGrant(r.task.id, answer.text, { source: answer.id, via: "screen", heads: answer.heads });
     return r;
   };
-  if (action === "direct") return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: (runner) => buildDirectPrompt(item, { review: sc.settings().reviewRunner, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, runner }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra })));
+  if (action === "direct") return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildDirectPrompt(item, { review: sc.settings().reviewRunner, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, runner }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra })));
   const taskModel = action === "complete" ? sc.completeTaskModelFor(input.extra?.runner) : "";
-  return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage: { issue: item.number, action }, prompt: (runner) => buildStartPrompt(item, action, { review: sc.settings().reviewRunner, other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, taskModel, runner }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra })));
+  return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildStartPrompt(item, action, { review: sc.settings().reviewRunner, other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, taskModel, runner }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra })));
 };
 
 // the login GitHub refused (the import's failure kind): a stage is not started on it, a stored edit could not be sent either

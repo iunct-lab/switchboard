@@ -12,6 +12,15 @@ export function RunnerPill(props: { runner: RunnerId }) {
   return <span className={`pill ${props.runner}`}>{runnerLabel(props.runner)}</span>;
 }
 
+/** The Workspace a row belongs to; nothing when `name` is null (a single Workspace). */
+export function WorkspaceTag(props: { name: string | null }) {
+  return props.name === null ? null : (
+    <span className="tag ws" title={props.name}>
+      {props.name}
+    </span>
+  );
+}
+
 /** "04:11", or "9/12 04:11" when not today — JST, like every other time the UI shows. */
 export const fmtClock = jstClock;
 

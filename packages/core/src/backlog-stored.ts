@@ -20,6 +20,7 @@ import { notResumed } from "./backlog-pick.ts";
 import { reduceStops } from "./stops.ts";
 import { type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
 import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
+import { eventsOf } from "./stage-start-gate.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
 
 /**
@@ -130,7 +131,7 @@ export function storedProceedRefusal(db: Db, ws: Pick<BacklogWorkspace, "id" | "
  * the last complete import was stored. A workspace never imported answers `fetchedAt: null` and no items — never an
  * empty list as if read.
  */
-export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; importFailed?: boolean; now?: number; active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean } = {}): { fetchedAt: number | null; items: BacklogItem[]; changes: Backlog["changes"]; turns?: Turn[]; unheld?: number[]; proceeding?: ProceedingQuestion[] } {
+export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "name" | "path">, opts: { released?: (oid: string) => boolean | null; runningSince?: number | null; importFailed?: boolean; now?: number; active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean } = {}): { fetchedAt: number | null; items: BacklogItem[]; changes: Backlog["changes"]; turns?: Turn[]; unheld?: number[]; proceeding?: ProceedingQuestion[] } {
   const source = db.getWorkspaceBacklogSource(ws.id);
   const fetchedAt = source ? db.getBacklogRepository(source)?.lastSuccessfulSync ?? null : null;
   if (!source || fetchedAt === null) return { fetchedAt: null, items: [], changes: [] };
@@ -216,6 +217,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now, sessionOn({ active: opts.active, commentsOf, unread, ended }));
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
+  for (const i of items) i.events = eventsOf({ item: i, issues, pulls, commentsOf, now, runningSince: opts.runningSince ?? null });
   const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, notResumed: (i) => {
     // a PBI whose stage Tasks are not on record (`lastTask` null) keeps its place: nothing says the queue left it
     if (opts.active?.(i.number)) return false;

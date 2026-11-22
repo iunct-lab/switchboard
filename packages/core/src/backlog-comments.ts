@@ -37,10 +37,19 @@ export const ASK_HISTORY_MS = 24 * 60 * 60 * 1000;
 export const PROCEED_CONFIRMED = "**確定**: 推奨のまま";
 export const PROCEED_OVERTURNED = "**覆す**: 推奨";
 const PROCEED_NAMED = / — 問い (\S+)\s*$/m;
+/** A first line of a `## 回答` with the mark of the question it is to (asked at `at`): the one place the mark is written, as `PROCEED_NAMED` reads it. */
+const namedLine = (said: string, at: string): string => `${said} — 問い ${at}`;
 export const proceedAnswerLine = (q: { at: string; recommended: string }, said: { same: true; batch?: boolean } | { same: false; choice: string | null }): string =>
-  `${said.same ? `${PROCEED_CONFIRMED} ${q.recommended}${said.batch ? "（まとめて）" : ""}` : `${PROCEED_OVERTURNED} ${q.recommended} → ${said.choice ?? "自由文"}`} — 問い ${q.at}`;
+  namedLine(said.same ? `${PROCEED_CONFIRMED} ${q.recommended}${said.batch ? "（まとめて）" : ""}` : `${PROCEED_OVERTURNED} ${q.recommended} → ${said.choice ?? "自由文"}`, q.at);
+/**
+ * The first line of the `## 回答` the app writes to such a question that stopped and asked instead (its kind could not
+ * go on): nothing was confirmed or overturned, so the line only names the question (asked at `at`). Without it the
+ * answer reads as one to the newest question before it (`proceedingAnswer`), so with two such questions on an Issue an
+ * answer to the older one would count for the newer, and the older would stay open.
+ */
+export const stoppedAnswerLine = (at: string): string => namedLine("**止めて聞く問いへの回答**", at);
 /** A `## 回答` that only confirms a recommendation: nothing goes on from it, so it is not the answer a stage waits for. */
-const isConfirmation = (body: string) => body.split("\n").some((l) => l.trim().startsWith(PROCEED_CONFIRMED));
+export const isConfirmation = (body: string) => body.split("\n").some((l) => l.trim().startsWith(PROCEED_CONFIRMED));
 /** The newest `## 回答` that asks for work: one that only confirms a recommendation (`PROCEED_CONFIRMED`) is passed over. */
 export const latestAnswer = (comments: Comment[]) => latestHeading(comments.filter((c) => !isConfirmation(c.body)), ANSWER_HEADING);
 

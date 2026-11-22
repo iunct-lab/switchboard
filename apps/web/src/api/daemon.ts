@@ -1,4 +1,4 @@
-import type { RunnerCommand, RunnerId, RunnerInfo } from "@switchboard/protocol";
+import type { CliRollbackResult, CliUpdateRunner, CliUpdateState, RunnerCommand, RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { type LoginMode } from "../login.ts";
 import type { PromotionDrain, ReleaseStatus } from "../release.ts";
 import { loginPath } from "../loginRow.ts";
@@ -60,6 +60,10 @@ export const daemonApi = {
   runnerLoginState: (runner: string) => req<RunnerLoginView>(loginPath(runner)),
   runnerLoginCode: (runner: string, code: string) => req<RunnerLoginView>(`/api/runners/${runner}/login/code`, { method: "POST", body: JSON.stringify({ code }) }),
   runnerLoginCancel: (runner: string) => req<RunnerLoginView>(loginPath(runner), { method: "DELETE" }),
+  /** The host CLIs' versions and the record of what was put in, kept out or put back (read when Settings opens and after a rollback, not polled). */
+  cliUpdates: () => req<CliUpdateState>("/api/runners/updates"),
+  /** Puts the CLI back to the version before the current one; `waiting` = a Task runs, so it is done when none does. */
+  rollbackCli: (runner: CliUpdateRunner) => req<CliRollbackResult>(`/api/runners/${runner}/rollback`, { method: "POST" }),
   /** What a request or reply box offers after "/": the runner's own commands and skills (`workspaceId` null = the daemon's home directory). */
   runnerCommands: (runner: string, workspaceId: string | null) => req<{ commands: RunnerCommand[] }>(`/api/runners/${runner}/commands${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
   /** gh's login on this machine: `none` until someone logs in (a machine without the cloud host's stored token). */

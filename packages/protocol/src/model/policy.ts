@@ -66,7 +66,7 @@ export type PolicyPatch = z.infer<typeof PolicyPatch>;
  *   cannot be read); an answered one, whose question is gone from the records, is `decision:<workspaceId>#<PBI>@<answeredAt>`
  * - `confirm:<workspaceId>#<PBI>:<n>` (n = the criterion's number, BacklogItem.confirmations)
  * - `wait:<workspaceId>#<PBI>@<waitsAt>`
- * - `stop:<StopSummary.key with each \0 written as |>`
+ * - `stop:<StopSummary.key with each \0 written as |>@<StopSummary.contentAt>` (the time the stop took its present op, reason and grant)
  * - `notice:workspace:<workspaceId>`, `notice:scan:<scheduleId>@<first sight>`
  */
 /**

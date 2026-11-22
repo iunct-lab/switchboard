@@ -38,6 +38,8 @@ export const common = msgs({
   // taskList.ts: the rail's state filter
   filterAll: { ja: "全部", en: "All" },
   filterActive: { ja: "実行中・待ち", en: "Running · waiting" },
+  filterNeeds: { ja: "要対応", en: "Needs action" },
+  filterWaits: { ja: "待ち", en: "Waiting" },
   filterDone: { ja: "完了", en: "Done" },
   filterStopped: { ja: "エラー・中断", en: "Error · aborted" },
 

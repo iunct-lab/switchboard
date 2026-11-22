@@ -27,6 +27,7 @@ import { mergedSince, parseMarks, period, POST_AUDIT, routeOf, spawnRun, type Pr
 // the mark and the route live in merge-audit (its tally of the audit reads them too); re-exported so the audit side keeps one import
 export { POST_AUDIT, routeOf, type Route };
 import { currentRepo } from "./repo.ts";
+import { primaryReviewer } from "../ops-kit/src/conditions.ts";
 
 export type Auditor = "claude" | "codex";
 
@@ -36,9 +37,19 @@ export interface MergedPr extends PrRecord {
   audited: boolean;
 }
 
-/** The implementer is claude when a commit says `Co-Authored-By: Claude`; the audit is by the other runner. */
-export function auditorOf(commits: { message: string }[]): Auditor {
-  return commits.some((c) => /^Co-Authored-By: Claude/im.test(c.message)) ? "codex" : "claude";
+export type RunnerSetting = { review: "same" | "other"; recheck: "same" | "other" };
+
+/** The implementer is claude when a commit says `Co-Authored-By: Claude`. The audit is by the other runner, or with `recheck: "same"` by the implementer's main reviewer (`primaryReviewer` of the `review` setting). */
+export function auditorOf(commits: { message: string }[], setting: RunnerSetting = { review: "other", recheck: "other" }): Auditor {
+  const implementer = commits.some((c) => /^Co-Authored-By: Claude/im.test(c.message)) ? "claude" : "codex";
+  if (setting.recheck === "same") return primaryReviewer(implementer, setting.review)!;
+  return implementer === "claude" ? "codex" : "claude";
+}
+
+/** The two settings a Task carries in its environment; a missing or unknown value is `other` (today's behaviour). */
+export function settingFromEnv(env: Record<string, string | undefined>): RunnerSetting {
+  const side = (v: string | undefined): "same" | "other" => (v === "same" ? "same" : "other");
+  return { review: side(env.OPS_KIT_REVIEW_RUNNER), recheck: side(env.OPS_KIT_RECHECK_RUNNER) };
 }
 
 export interface Selected { pr: number; route: Route; mergeSha: string }
@@ -274,7 +285,7 @@ export async function main(args: string[], run: Run = spawnRun, now = Date.now()
     const withAuditor = [];
     for (const s of selected) {
       const commits = jsonLines<{ message: string }>(await run(["gh", "api", `repos/${repo}/pulls/${s.pr}/commits`, "--paginate", "-q", ".[] | {message: .commit.message}"]));
-      withAuditor.push({ pr: s.pr, route: s.route, auditor: auditorOf(commits), mergeSha: s.mergeSha });
+      withAuditor.push({ pr: s.pr, route: s.route, auditor: auditorOf(commits, settingFromEnv(env)), mergeSha: s.mergeSha });
     }
     console.log(JSON.stringify({ repo, period: p, selected: withAuditor, overflow }, null, 2));
     return 0;

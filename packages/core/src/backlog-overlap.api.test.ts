@@ -9,7 +9,7 @@ import { buildStartPrompt } from "./backlog-prompt.ts";
 import { pickNext, notResumed } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine } from "./backlog-overlap.ts";
-import { judge as guardJudge } from "../../../scripts/parallel-guard.ts";
+import { judge as guardJudge, turnsAhead } from "../../../scripts/parallel-guard.ts";
 import { overlapTurnOf } from "./backlog-overlap.ts";
 import { backlogNextSchedule, boot, closeTried, holdingClaude, item, metaId, metaName, overlapReadyGh, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, sweepAll, threeWorkspaces, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
 
@@ -369,6 +369,29 @@ describe("overlap turn", () => {
     }
   });
 
+  test("a PBI keeps its place once its Task is In progress, so the guard in that Task does not count a later place ahead of it", () => {
+    // P (`#2`) yielded first, Q (`#3`) later, both to merged PR 90 on src/a.ts; P's Task 21 is claimed (In progress)
+    const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: { 31: "src/a.ts" } });
+    try {
+      const pulls = [w.pr(90, [], ["src/a.ts"], { state: "MERGED" })];
+      const comments = { 2: [mark(releaseBody("重なり", [90], true), 0)], 3: [mark(releaseBody("重なり", [90], true), 10)] };
+      const run = (statuses: Map<number, string>) => {
+        const items = [item({ number: 2, stage: "in-progress" }), item({ number: 3, stage: "ready" })];
+        const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [31]]]), pulls, statuses, w.root, { commentsOf: (n) => comments[n as 2 | 3] ?? [] });
+        return { turns, of: (n: number) => items.find((i) => i.number === n)?.overlap ?? null };
+      };
+      const before = run(new Map());
+      const claimed = run(new Map([[21, "In progress"]]));
+      expect(claimed.turns).toEqual(before.turns);
+      expect(claimed.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      // the guard in Task 21 (`--claimed`) sees no place ahead of P's, as the app did when it started it
+      expect(turnsAhead(claimed.turns, 2)).toEqual([]);
+      expect(claimed.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+    } finally {
+      w.done();
+    }
+  });
+
   // P (`#2`, Task 21 on src/a.ts) waits for PR 90 that closes Task 31 of Y (`#3`); Y's other Task 32 names src/a.ts too
   test("a place does not hold back the PBI whose open PR it waits for", () => {
     const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: { 31: "src/b.ts", 32: "src/a.ts" } });
@@ -406,7 +429,7 @@ describe("overlap turn", () => {
 
   // the reasons the queue does not resume P: each is what a stored PBI carries once its last stage Task is read
   const lastTask = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}): NonNullable<BacklogItem["lastTask"]> => ({ id: "tsk_p", status: "done", statusAt: T0 + 60_000, createdAt: T0, updatedAt: T0 + 60_000, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null, started: true, ...over });
-  const waitingStop: BacklogItem["stopSummary"][number] = { key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
+  const waitingStop: BacklogItem["stopSummary"][number] = { key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
   const inProgress = { stage: "in-progress" as const, tasks: { total: 2, done: 1, doneAt: null } };
   const reasons: [string, Partial<BacklogItem>][] = [
     ["not moved since its last resume", { ...inProgress, lastTask: lastTask() }],

@@ -110,7 +110,8 @@ const reviewOnly = (n: number, pulls: StoredPull[], statuses: Map<number, string
 
 /**
  * The places of the PBIs that yielded on an overlap (`overlapTurnOf`), oldest first: for each, the paths its Tasks not
- * started yet name that what it yielded to touches (a PR's files, a Task's body and its PRs' files, closed ones too) —
+ * in review yet name that what it yielded to touches (an In progress one too: the PBI keeps its place once its Task is
+ * claimed, so the guard in the Task does not count every later place ahead of a PBI that has none and defer what the app started) (a PR's files, a Task's body and its PRs' files, closed ones too) —
  * only those, so a PBI that touches something else is not held. A PBI that cannot move now holds none, and gets its place
  * back with the same `since` once it can: not Ready / in progress (a question holds it), `on-hold`, waiting for a date,
  * a prerequisite not met, its stage Task only waiting for a planned resume (`parked`), or no mark for STALE_HOURS (a
@@ -136,7 +137,7 @@ export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssue
       return tasks.map((t) => issues.get(t)?.parent);
     }).filter((n): n is number => typeof n === "number" && n !== i.number))];
     for (const task of issues.get(i.number)?.subIssues ?? []) {
-      if (issues.get(task)?.state !== "OPEN" || statuses.get(task) === "In progress" || reviewOnly(task, pulls, statuses)) continue;
+      if (issues.get(task)?.state !== "OPEN" || reviewOnly(task, pulls, statuses)) continue;
       const paths = taskPaths(task).filter((p) => held.some((q) => overlaps(p, q)));
       if (paths.length) out.push({ pbi: i.number, since: turn.since, task, paths, ...(yieldsTo.length ? { yieldsTo } : {}) });
     }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { Db } from "./db.ts";
 import { type Conditions, renderConditions } from "../../../ops-kit/src/conditions.ts";
-import { SKILL_INCOMPLETE, SKILL_MARKER, SKILL_SOURCE, SKILL_TARGETS, setupScripts, skillHeader, skillPathsFor, syncSkills } from "./skillsync.ts";
+import { SKILL_INCOMPLETE, SKILL_MARKER, SKILL_SOURCE, SKILL_TARGETS, setupScripts, skillCopiesCurrent, skillHeader, skillPathsFor, syncSkills } from "./skillsync.ts";
 import { stopArmedQueues } from "./tasks/state.ts";
 import { TaskManager } from "./tasks/manager.ts";
 
@@ -535,6 +535,24 @@ describe("skills by runner and review setting", () => {
     expect(read(".claude/skills")).toContain("description: 同じランナーに頼む");
   });
 
+  test("recheck: each side of a recheck block stays alone, and a changed recheck setting renders the copy again", () => {
+    writeSkill("demo", ["# demo", "<!-- when recheck=same -->", "同じランナーで再チェック", "<!-- end when -->", "<!-- when recheck=other -->", "別のランナーで再チェック", "<!-- end when -->", ""].join("\n"));
+    expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "same" }).linked).toContain("demo");
+    expect(read(".claude/skills")).toContain("同じランナーで再チェック");
+    expect(read(".claude/skills")).not.toContain("別のランナーで再チェック");
+    expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "same" }).unchanged).toContain("demo");
+    expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude", recheck: "same" })).toBe(true);
+    expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude", recheck: "other" })).toBe(false);
+    expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "other" }).linked).toContain("demo");
+    expect(read(".claude/skills")).toContain("別のランナーで再チェック");
+    expect(read(".claude/skills")).not.toContain("同じランナーで再チェック");
+    // no setting = other
+    expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude" })).toBe(true);
+    expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude" }).unchanged).toContain("demo");
+    syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "same" });
+    expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude" })).toBe(false);
+  });
+
   test("the line that names the source comes right after the frontmatter", () => {
     writeSkill("demo", MARKED);
     syncSkills({ metaPath: meta, cwd: repo, runner: "claude" });
@@ -719,7 +737,11 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 266,462 (+453 bytes over 266,009): the places in a Task body whose paths the overlap check reads as references
     // (the check and done-criteria sections, the design-check line, the old-assumption list, a "same as" parenthesis), said once
     // in issue-workflow's Task granularity check, next to the rule they narrow.
-    expect(bytes).toBeLessThanOrEqual(266_462);
+    // Raised to 266,688 (+226 bytes over 266,462): in pbi-complete, how a sync PR of the return from a GitHub outage goes in
+    // (a Merge commit by the return script, also after the person's yes; never the gate's rebase merge, which would change the shas).
+    // Raised to 267,056 (+368 bytes over 266,688): in pbi-complete, the `ゲートの変更` heading of a question about a change to the merge gate's own files
+    // (which judgement gets stricter, looser or stays), written once in the branch that asks the person.
+    expect(bytes).toBeLessThanOrEqual(267_056);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });
