@@ -1,7 +1,7 @@
 /**
  * The selection: which item the scheduler starts next in a slot (`pickNext`), and why each of the others is not
- * started — answered or not, stopped, unchanged since the last try, waiting for a reply, held by the flow limit or the
- * allocation, spinning — with the lines the screens show for them.
+ * started — answered or not, stopped, waiting for a reply, held by the flow limit or the allocation, spinning — with the
+ * lines the screens show for them. Whether a start by itself repeats a previous one is not decided here: stage-start-gate.ts.
  */
 import type { BacklogAction, BacklogItem, BacklogStage, WorkspaceMode } from "@switchboard/protocol";
 import { FLOW_LIMIT_FIELD, personWait } from "@switchboard/protocol";
@@ -86,13 +86,6 @@ const triedThisStage = (i: BacklogItem) => STAGE_ORDER.includes(i.stage) && !!i.
 
 /** A comment was written on the Issue after `since` (ms): `commentedAt` is the newest written time (`BacklogItem.commentedAt`), not the time GitHub saw the Issue change. */
 const commentedSince = (i: BacklogItem, since: number) => !!i.commentedAt && Date.parse(i.commentedAt) > since;
-
-/**
- * Nothing changed since backlog-next last worked on it: its last stage Task was this stage's, it has finished (in any
- * way), and no comment was written on the Issue since it ended (`commentedAt`; a ## 回答 is a comment, whoever wrote it). Labels, body and Status do not count.
- * In-progress PBIs are left to the rule for a stalled PBI (close it when it can be closed, else resume it). A Task that ended asking the person and was marked reviewed does not hold it.
- */
-export const isUnchanged = (i: BacklogItem) => triedThisStage(i) && isFinished(i.lastTask!) && !releasedByReview(i.lastTask!) && !commentedSince(i, i.lastTask!.updatedAt);
 
 /**
  * Its last stage Task failed (error / aborted) and no comment was written on the Issue since. A runner that could not run at
@@ -272,12 +265,9 @@ export function checkingLine(items: BacklogItem[], slot: Slot): string | null {
   return held.length ? `確認中: ${held.map((i) => `#${i.number}`).join(" ")}` : null;
 }
 
-/** Worked on at this stage before and updated since: picked after the items of its slot not yet worked on. */
-const isTriedBefore = (i: BacklogItem) => triedThisStage(i) && !isUnchanged(i);
-
-/** The items of a slot backlog-next leaves because nothing changed since the last time; a 閉じる that did not close, too. */
+/** The items of a slot backlog-next leaves because it stopped the same way again (`stopHeld`), and a 閉じる that did not close. */
 export const unchangedIn = (items: BacklogItem[], slot: Slot) =>
-  items.filter((i) => (SLOT_STAGES[slot].includes(i.stage) && isUnchanged(i)) || (inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && stopHeld(i)) || (slot === "implement" && i.stage === "in-progress" && i.closable && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && !isClosable(i)));
+  items.filter((i) => (inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && stopHeld(i)) || (slot === "implement" && i.stage === "in-progress" && i.closable && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && !isClosable(i)));
 
 /**
  * A Ready / in-progress PBI with a wait or a prerequisite not met: still open, not read, withdrawn,
@@ -288,9 +278,8 @@ const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || 
 /**
  * A Ready / in-progress PBI whose waits closed or became deferred.
  * waitsAt also preserves the resumption trigger when all parked PRs are removed from the current wait list.
- * It stopped with a release that came before its 実装 finished, so
- * isUnchanged does not hold it. Taken once: the 実装 it starts is a stage Task started after the waits, which makes them
- * old (server/backlog-read.ts withActive), and it claims and releases the PBI again.
+ * It stopped with a release that came before its 実装 finished. Taken once: the 実装 it starts is a stage Task started after the waits, which makes them
+ * old (backlog-stored.ts withStageTask), and it claims and releases the PBI again.
  */
 export const isUnblocked = (i: BacklogItem) => (i.stage === "in-progress" || i.stage === "ready") && i.waitsAt !== null && !isWaiting(i);
 
@@ -357,11 +346,11 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
 /**
  * The one item backlog-next moves on in a slot: the PBIs to finish first (回答済みの実装中 →
  * 待ちが解けた Ready・実装中 → 閉じられる実装中 → 止まった実装中), then Priority (P0 first, none last), then within one Priority
- * the items not yet worked on before those worked on and updated since, then the stage (Ready → 分解待ち → 要望), then the
+ * the items not yet worked on at their stage before those worked on, then the stage (Ready → 分解待ち → 要望), then the
  * oldest. Items waiting for a decision or with a running stage Task are left alone. An answered in-progress PBI goes on with 実装
  * (`complete`), not the in-progress button's 状況確認; so does one whose waits all closed.
- * An item unchanged since its last stage Task of the same stage is left too, and one updated since goes after the
- * items of the same Priority not yet worked on (an answered in-progress PBI still first).
+ * An item worked on at its stage before goes after the items of the same Priority not yet worked on (an answered
+ * in-progress PBI still first); whether it starts again is the gate's (stage-start-gate.ts).
  * An item waiting for a PR / Issue still open is left, Ready or in progress.
  * A Ready PBI whose waits all closed takes the same place as such an in-progress one, its stopped Task reviewed or not.
  * Any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
@@ -390,14 +379,14 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   const resumed = (i: BacklogItem) =>
     isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
-  const tried = (i: BacklogItem) => (isTriedBefore(i) ? 1 : 0);
+  const tried = (i: BacklogItem) => (triedThisStage(i) ? 1 : 0);
   // a PBI of (or itself) an Issue a known failure's registry entry names, close to its end, goes before Priority
   const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
   // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
   // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
-  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && (isUnblocked(i) || !isUnchanged(i)) && !notResumed(i) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && !notResumed(i) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
   // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
   // the queue's order instead when there is one

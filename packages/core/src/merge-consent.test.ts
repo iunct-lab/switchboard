@@ -39,10 +39,7 @@ describe("requestedGrants and grantsFor", () => {
   test("the grants a task asked for are read from the sentences written in its reply", () => {
     expect(requestedGrants(["PR #6044 に [merge-answer] yes を投稿してよい"])).toEqual([{ kind: "answer", target: 6044 }]);
     // inside backticks and a longer line; not a question; not another repository's; not a quoted line
-    expect(requestedGrants(["次の文で通ります: `PR #7 を判定の外でマージしてよい` を送ってください。\nPR #8 を判定の外でマージしてよいですか\nacme/lib の PR #9 を判定の外でマージしてよい\n> PR #10 を判定の外でマージしてよい\nTask #11 の本文に名指しのパスを足してよい。"])).toEqual([
-      { kind: "merge", target: 7 },
-      { kind: "scope", target: 11 },
-    ]);
+    expect(requestedGrants(["次の文で通ります: `PR #7 を判定の外でマージしてよい` を送ってください。\nPR #8 を判定の外でマージしてよいですか\nacme/lib の PR #9 を判定の外でマージしてよい\n> PR #10 を判定の外でマージしてよい"])).toEqual([{ kind: "merge", target: 7 }]);
     expect(requestedGrants(["PR #6 に [merge-answer] yes を投稿してよい", "`PR #6 に [merge-answer] yes を投稿してよい`"])).toEqual([{ kind: "answer", target: 6 }]);
     expect(requestedGrants(["PR #6 をマージしてよい"])).toEqual([]);
     // another repository named in backticks before the sentence is another repository's too
@@ -54,9 +51,8 @@ describe("requestedGrants and grantsFor", () => {
       { kind: "merge", target: 12 },
       { kind: "answer", target: 12 },
     ]);
-    // the weaker consent does not become the stronger one, and a task's body is only that
+    // the weaker consent does not become the stronger one
     expect(grantsFor([{ kind: "answer", target: 12 }])).toEqual([{ kind: "answer", target: 12 }]);
-    expect(grantsFor([{ kind: "scope", target: 12 }])).toEqual([{ kind: "scope", target: 12 }]);
     expect(grantsFor([{ kind: "answer", target: 12 }, { kind: "merge", target: 12 }])).toEqual([
       { kind: "answer", target: 12 },
       { kind: "merge", target: 12 },
@@ -99,12 +95,13 @@ describe("buildConsentPrompt", () => {
 });
 
 describe("parseConsent", () => {
-  test("grants of the three kinds on a candidate number are read", () => {
-    expect(parseConsent('{"grants":[{"kind":"merge","target":5741},{"kind":"answer","target":5741},{"kind":"scope","target":5813}]}', [5741, 5813])).toEqual([
+  test("grants of the two kinds on a candidate number are read", () => {
+    expect(parseConsent('{"grants":[{"kind":"merge","target":5741},{"kind":"answer","target":5741}]}', [5741, 5813])).toEqual([
       { kind: "merge", target: 5741 },
       { kind: "answer", target: 5741 },
-      { kind: "scope", target: 5813 },
     ]);
+    // a kind that is not a grant any more is dropped
+    expect(parseConsent('{"grants":[{"kind":"scope","target":5813}]}', [5741, 5813])).toEqual([]);
   });
 
   test("a grant of a number outside the candidates is dropped", () => {

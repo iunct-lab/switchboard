@@ -1,7 +1,7 @@
 import { otherMachineOf } from "../machine.ts";
 import { githubRepoOfRemote } from "../claude-cloud.ts";
 import { capSnapshot, collectTaskDiff, mergeSnapshot, WRITE_TOOLS } from "../taskdiff.ts";
-import { API, OWNER, parseMergeGrants } from "../merge-grants.ts";
+import { API, OWNER, grantHeadKey, parseMergeGrants, type GrantHeads } from "../merge-grants.ts";
 import { noteConsent, ownReposOf } from "./merge-consent.ts";
 import { runGh } from "../backlog-gh.ts";
 import { branchTip } from "../backlog-local.ts";
@@ -67,7 +67,8 @@ export const originRepoOf = (_sc: unknown, dir: string): string | null => {
 const GRANT_HEAD_TIMEOUT_MS = 8_000;
 
 /**
- * The head a PR has now, read when a merge / answer grant of it is recorded: the grant then holds for that head only.
+ * The head a PR has now, read when a merge / answer grant of it is recorded — for a screen answer of an Issue when the
+ * answer is taken (`answerGrantHeads`), not at the later record: the grant then holds for that head only.
  * `repo` a backlog kept here (the task's workspace keeps its changes itself): the tip of the change's branch in the
  * workspace's checkout; else GitHub's (`gh pr view`). Null = not read (GitHub not reachable, no such PR or change, no
  * answer in time): the grant is recorded without a head and answers for none.
@@ -92,6 +93,30 @@ export const grantHeadOf = async (sc: Pick<ServerContext, "db" | "opts">, task: 
 };
 
 /**
+ * The repositories a grant sentence that names none is for, in a workspace (null = none) and a directory: the one rule
+ * of the record of a grant (`noteMergeGrant`) and of the heads read for a screen answer (`answerGrantHeads`), so an
+ * answer's heads are kept under the names its grants are recorded with.
+ */
+export const ownGrantRepos = (sc: Pick<ServerContext, "db" | "originRepoOf">, ws: { id: string } | null, cwd: string): string[] => ownReposOf(sc, { workspaceId: ws?.id ?? null, cwd });
+
+/**
+ * The head of every PR a merge / answer grant in `text` names, read now: what a screen answer of an Issue keeps with its
+ * operation, so the grant recorded at the start of the next stage Task is for the PR as it was when the person
+ * answered. null = not read (`grantHeadOf`): that grant answers for no head. A text with no such grant reads nothing.
+ * `checked` = what the answer was already checked against (the PR its question stopped at): a grant of that PR is
+ * for that head and the PR is not read again — null there (the check read no head) is kept as null, and the grant
+ * answers for none.
+ */
+export const answerGrantHeads = async (sc: Pick<ServerContext, "db" | "opts" | "originRepoOf">, ws: { id: string; path: string }, text: string, checked: GrantHeads = {}): Promise<GrantHeads> => {
+  const grants = parseMergeGrants(text);
+  if (!grants.length) return {};
+  const own = ownGrantRepos(sc, ws, ws.path);
+  const asked = new Map<string, { repo: string; target: number }>();
+  for (const g of grants) for (const repo of g.repo ? [g.repo] : own) asked.set(grantHeadKey(repo, g.target), { repo, target: g.target });
+  return Object.fromEntries(await Promise.all([...asked].map(async ([key, a]) => [key, key in checked ? (checked[key] ?? null) : await grantHeadOf(sc, { workspaceId: ws.id, cwd: ws.path }, a.repo, a.target).catch(() => null)] as const)));
+};
+
+/**
  * How a text that may carry the person's permission came in — the one rule of every route that can record a merge
  * grant or keep an answer as the person's words (a reply, a resume note, an answer to a question, an answer to an
  * Issue's ## 判断待ち). A request that names a sending Task is that Task's and never the person's; any other counts as
@@ -106,9 +131,11 @@ export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Re
  * repository the sentence names, else the task's own — its workspace's backlog repository, else its directory's origin,
  * which are what the checks ask with when the command names none (neither: not recorded — a grant for any repository
  * is not made). A merge / answer grant is recorded with the head the PR has now (`grantHeadOf`): it holds for what the
- * PR was when the grant was recorded (for a screen answer of an Issue that is the start of the next stage task, later
- * than the answer: a head that moved in between is the one recorded), and commits pushed after it ask again — also the rebase GitHub makes after a merge
- * below, as a `[merge-answer] yes` of an older head does not count either.
+ * PR was when the grant was recorded, and commits pushed after it ask again — also the rebase GitHub makes after a merge
+ * below, as a `[merge-answer] yes` of an older head does not count either. A screen answer of an Issue is recorded at the
+ * start of the next stage task, later than the answer: its heads are the ones read when the answer was taken (`heads`,
+ * `answerGrantHeads`), never read again here — a grant whose head is not among them is recorded without one and answers
+ * for none.
  * `sender`: the Task the send said it came from; the record then says `task:<id>`. `via`: how the text came in when no
  * sender was named (`grantSource` decides it for a request) — "screen" (a request that looked like the web UI's) is
  * recorded as the person's, "api" (a bare call, and the default: a caller that does not say is not the person) is not. Only a record marked the person's answers a check. None of this proves who
@@ -120,7 +147,7 @@ export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Re
  * that read. A screen answer with a `source` and a sentence the Task wrote are not read: a read that ends after another
  * start, or that finds nothing, would not spend the answer once, and a Task's own words are no grant.
  */
-export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts" | "grantHeadOf" | "adapterMap" | "settings" | "runnerChoice" | "suggestDir" | "judgeStop" | "tasks" | "pendingConsent" | "pricingTable" | "loginKindOf">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean } = {}): Promise<void> => {
+export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts" | "grantHeadOf" | "adapterMap" | "settings" | "runnerChoice" | "suggestDir" | "judgeStop" | "tasks" | "pendingConsent" | "pricingTable" | "loginKindOf">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean; heads?: GrantHeads } = {}): Promise<void> => {
   // (every caller passes what `grantSource` said of its request; the start of a stage passes "screen" for an answer that route marked)
   const grants = parseMergeGrants(text);
   const task = sc.db.getTask(taskId);
@@ -134,7 +161,7 @@ export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoO
   }
   // the task's own repositories: the ones its workspace's backlog and its directory's origin name
   let own: string[] | undefined;
-  const ownRepos = (): string[] => (own ??= task ? ownReposOf(sc, task) : []);
+  const ownRepos = (): string[] => (own ??= task ? ownGrantRepos(sc, task.workspaceId ? { id: task.workspaceId } : null, task.cwd) : []);
   const at = Date.now();
   const rows = grants.flatMap((g) => (g.repo ? [g.repo] : ownRepos()).map((repo) => ({ taskId, repo, kind: g.kind, target: g.target, by, source: from.source })));
   // every row is there before anything is waited for (a source is spent from here on: two starts cannot both take one
@@ -142,8 +169,9 @@ export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoO
   // answers nothing until its head is in
   sc.db.recordMergeGrants(rows, at, from.source);
   // only a record that can answer needs the head; a trace of another sender's text keeps none
-  await Promise.all(rows.filter((r) => r.kind !== "scope" && by === OWNER && task).map(async (r) => {
-    const head = await grantHeadOf(sc, task!, r.repo, r.target).catch(() => null);
+  await Promise.all(rows.filter((r) => by === OWNER && task).map(async (r) => {
+    // a screen answer's heads were read when it was taken: the PR is not read again, and a head not read then is none
+    const head = from.heads ? (from.heads[grantHeadKey(r.repo, r.target)] ?? null) : await grantHeadOf(sc, task!, r.repo, r.target).catch(() => null);
     if (head) sc.db.recordMergeGrant({ ...r, head }, at);
   }));
 };

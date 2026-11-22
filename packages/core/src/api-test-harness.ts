@@ -402,7 +402,7 @@ export function importedAs(n: number, over: Record<string, unknown>, fetchState:
 }
 
 const bareItem = (over: Partial<BacklogItem>): Omit<BacklogItem, "progress"> => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], events: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 /** A hand-built item with the answers `pbiProgress` gives for its stage and Tasks (what the daemon's read puts on it). */
@@ -450,6 +450,20 @@ export async function backlogNextSchedule(base: string, budgetUsd?: number, mode
 export function closeTried(...workspaceIds: string[]) {
   const now = Date.now();
   for (const workspaceId of workspaceIds.length ? workspaceIds : [metaId()]) backlogState.core!.db.insertTask({ id: `tsk_close307_${workspaceId}`, workspaceId, title: "#307 閉じる: PBI: Task が全部閉じた実装中の PBI", runner: "claude", cwd: backlogState.home!, scope: [backlogState.home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 閉じる: PBI: Task が全部閉じた実装中の PBI"), statusAt: now, createdAt: now, updatedAt: now });
+}
+
+/** fakeGh plus, once `on.v` is set, a plain `## 状況` comment on Issue 307 written at the time of each read: what a stage Task leaves on its Issue (no event). */
+export function commentingGh() {
+  const fake = fakeGh();
+  const on = { v: false };
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!on.v || !r.stdout.includes('"i307"')) return r;
+    const page = JSON.parse(r.stdout) as { data: { repository: { i307: { comments: { nodes: Array<{ body: string; createdAt: string }> } } } } };
+    page.data.repository.i307.comments.nodes.push({ body: "## 状況\n進めた", createdAt: new Date().toISOString() });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+  return { gh, on };
 }
 
 /** The Tasks but closeTried's. */

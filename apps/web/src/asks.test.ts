@@ -6,7 +6,7 @@ import { AnswerArea } from "./components/Approvals.tsx";
 import { t } from "./i18n.ts";
 import { task } from "./i18n/task.ts";
 import { confirmable, settledCount } from "./asks.ts";
-import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, waitersLine, waitingLine, workspaceChips, workspaceSections, type Answered } from "./asks.ts";
+import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, waitersLine, waitingLine, workspaceChips, workspaceSections, waitChoices, waitGroups, WAIT_KIND_LABEL, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -173,10 +173,10 @@ test("answerRoute: one line per question — an Issue's answer is written there,
   expect(answerRoute(ask({ kind: "decision", issue: { number: 9, url: "u" }, next: "#3 の続きの工程 Task" }))).toBe("答えは Issue #9 に書かれます。続き: #3 の続きの工程 Task");
   expect(answerRoute(ask({ kind: "check", task: { id: "tk", title: "書く Task" }, next: "Task が続く" }))).toBe("答えは Task「書く Task」に送られます。続き: Task が続く");
   expect(answerRoute(ask({ kind: "check", task: { id: "tk", title: "t" }, next: null }))).toContain("続き: 不明");
-  // a stage Task's stop that takes a grant: the grant is written on the stop's Issue, as its button sends it
+  // a stage Task's stop that takes a grant: the grant is sent to the stopped Task, as its button sends it
   const stop = ask({ kind: "stop", issue: { number: 42, url: "u" }, task: { id: "tk", title: "工程" }, answers: ["grant"], grant: "PR #1 をマージすることだけ許可します", next: "Task が続く" });
-  expect(answerRoute(stop)).toBe("答えは Issue #42 に書かれます。続き: Task が続く");
-  expect(answerButtons(stop)[0]!.target).toBe("Issue #42");
+  expect(answerRoute(stop)).toBe("答えは Task「工程」に送られます。続き: Task が続く");
+  expect(answerButtons(stop)[0]!.target).toBe("Task「工程」");
 });
 
 test("resumeLabel: answered, waiting to resume with its reason, running, failed with its reason; nothing before an answer", () => {
@@ -301,12 +301,12 @@ test("policy: the expiry day is the JST date, and it ends at 23:59:59 JST whatev
   expect(policyInput({ ...form, opened: true, scope: "repo" })!.expiresAt).toBe(Date.parse("2026-10-19T14:59:59Z"));
 });
 
-test("grant button: a stop with a grant gets この操作だけ許可して続ける first, sending the grant — to its Issue for a stage Task's", () => {
+test("grant button: a stop with a grant gets この操作だけ許可して続ける first, sending the grant — to the Task, a stage Task's too", () => {
   const GRANT = "定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
   const stop = ask({ kind: "stop", answers: ["grant", "text"], grant: GRANT, task: { id: "tk", title: "t" }, next: "Task「t」が続く" });
   const [b] = answerButtons(stop);
   expect(b).toMatchObject({ label: "この操作だけ許可して続ける", answer: { kind: "grant" }, send: GRANT, grant: GRANT, target: "Task「t」", primary: true });
-  expect(answerButtons({ ...stop, issue: { number: 306, url: "u" } })[0]!.target).toBe("Issue #306");
+  expect(answerButtons({ ...stop, issue: { number: 306, url: "u" } })[0]!.target).toBe("Task「t」");
   // a stop without one has no such button
   expect(answerButtons(ask({ kind: "stop", answers: ["text"] }))).toEqual([]);
 });
@@ -602,7 +602,7 @@ test("reply box: a stage Task's open stop shows its last reply, where the reply 
   expect(html).toContain("返信は Task「tk」に届き、その Task が続きます");
   expect(html).toContain("返信して続ける");
   expect(html).not.toContain("次回も使う");
-  // with a grant too: the route to the Issue sits under the grant's button, where the reply goes right above the box
+  // with a grant too: the route line (to the Task) sits under the grant's button, where the reply goes right above the box
   const both = renderToStaticMarkup(createElement(AnswerArea, { ask: { ...stop, answers: ["grant", "text"], grant: "git push だけ許可します" }, busy: false, onAnswer: () => undefined }));
   const at = (s: string) => both.indexOf(s);
   expect(at("ask-buttons")).toBeGreaterThan(-1);
@@ -631,4 +631,50 @@ test("proceeding: a question the work went on from is in its own group after the
   ]);
   // a waiting decision keeps its buttons: the recommended choice first, and 保留
   expect(answerButtons(going({ proceeding: false, needs: "person", answers: ["choice", "text", "hold"] })).map((b) => b.label)).toEqual(["A: 置き換える（推奨）", "B: 足す", "保留"]);
+});
+
+// a wait past its limit as the daemon gives it: answered with one of its two choices unless its Task is running (no `choice`)
+const waitAsk = (id: string, kind: NonNullable<Ask["wait"]>["kind"], over: Partial<Ask> = {}): Ask =>
+  ask({ id: `waitover:${id}`, kind: "wait", task: { id, title: `Task ${id}` }, reason: "待ちが上限を過ぎた: PR #5 を 4 日（上限 3 日） 待っている", wait: { kind, key: id }, choices: ["止める", "待ち続ける"], answers: ["choice"], route: "task", source: { label: "待ちの記録", url: null, taskId: id }, ...over });
+
+test("waitGroups: four waits of three kinds are three headings in the headings' order, each in the order given; a running Task's wait (no choice), an answered one and another kind of question are under none", () => {
+  const asks = [
+    waitAsk("s1", "stop"),
+    waitAsk("d1", "depends"),
+    waitAsk("j1", "job"),
+    waitAsk("d2", "depends"),
+    // a running Task's wait: no answer from the screen
+    waitAsk("c1", "command", { answers: [], choices: [] }),
+    // the choices alone do not make it answered here: what it takes (`answers`) does
+    waitAsk("d3", "depends", { answers: [] }),
+    waitAsk("d4", "depends", { state: "resolved" }),
+    ask({ id: "decision", kind: "decision", answers: ["choice"], choices: ["止める", "待ち続ける"] }),
+  ];
+  expect(waitGroups(asks).map((g) => [g.kind, g.label, g.asks.map((a) => a.id)])).toEqual([
+    ["depends", "PR・Issue", ["waitover:d1", "waitover:d2"]],
+    ["job", "頼んだ仕事", ["waitover:j1"]],
+    ["stop", "その他の条件", ["waitover:s1"]],
+  ]);
+  expect(waitGroups([])).toEqual([]);
+  expect(Object.entries(WAIT_KIND_LABEL)).toEqual([["depends", "PR・Issue"], ["job", "頼んだ仕事"], ["date", "期日"], ["resume", "使用上限"], ["stop", "その他の条件"]]);
+});
+
+test("waitGroups: a wait's row has 待ち続ける and 止める, sending the question's own choices whatever their order; a running Task's wait has no button; the Workspace's count is each wait and the rows without them", () => {
+  const w = waitAsk("d1", "depends");
+  expect(answerButtons(w).map((b) => [b.label, b.answer, b.primary])).toEqual([
+    ["待ち続ける", { kind: "choice", choice: "待ち続ける" }, false],
+    ["止める", { kind: "choice", choice: "止める" }, false],
+  ]);
+  expect(waitChoices(waitAsk("d1", "depends", { choices: ["待ち続ける", "止める"] }))).toEqual({ stop: "止める", keep: "待ち続ける" });
+  // choices that are not the two are not guessed at by position
+  expect(waitChoices(waitAsk("d1", "depends", { choices: ["A: 進める", "B: やめる"] }))).toBeNull();
+  expect(answerButtons(waitAsk("c1", "command", { answers: [], choices: [] }))).toEqual([]);
+  expect(answerButtons(waitAsk("d3", "depends", { answers: [] }))).toEqual([]);
+  expect(isQuick(w)).toBe(false);
+  // the card's reason is the row's title today too: the heading does not change it
+  expect(askRows([w])[0]!.lead).toBe("待ちが上限を過ぎた: PR #5 を 4 日（上限 3 日） 待っている");
+  // two waits of one Task are two cards under their headings, and its other question is still one row
+  const ws = { id: "w", name: "alpha" };
+  const t1 = { id: "t1", title: "Task 1" };
+  expect(workspaceChips([waitAsk("d1", "depends", { workspace: ws, task: t1 }), waitAsk("j1", "job", { workspace: ws, task: t1 }), ask({ id: "q", kind: "check", workspace: ws, task: t1, question: "q" })])).toEqual([{ key: "w", name: "alpha", count: 3 }]);
 });

@@ -86,6 +86,54 @@ and no screen works a wait out by itself.
   stopped: a silent Task may be working, and killing it is the person's call. The question goes away when the wait
   ends or the runner speaks again — the next event clears the silence at once, not at the next look.
 
+### A wait past its limit whose other side has ended
+
+The question carries which wait it is about (`Ask.wait`: the wait's `kind` and `key`); nothing reads it back out of
+the question's id. With that, the asks screen takes the question off by itself — `resolved`, with what ended as the
+reason, shown for a day — when what the Task waited for is over, the same way it does for any question whose target
+is gone (`withGone` in `packages/core/src/asks.ts`). This holds for the waits of a Task that is not at work (`depends`,
+`job`, `date`, `stop`, `resume`): a wait of a turn that still runs (`command`, `output`, `queue`, `person`) is that
+turn's own, and a closed Issue or a later run does not end it. Four things are looked at, in this order:
+
+1. The Issue the Task works on as a stage Task is closed.
+2. The wait's key is `pr#N` or `issue#N`, and that pull request is merged or closed, or that Issue is closed.
+3. The wait's key is `job#N`, and that job has ended, however it ended.
+4. The Task is a run of a schedule (and not a stage Task), and a later run of the same schedule has finished. While
+   the later run is still going, the question stays.
+
+A key of any other form — a tag, a commit, a CI run, whatever a Task wrote as its own condition — is not read: there
+is no rule for when it is over, and the question stays for the person. Only the question changes. The stored waits
+(`Task.waits`) and the tag on the Task list are left as they are.
+
+### Answering a wait past its limit
+
+A wait that comes from a stop of a Task whose turn is over — a pull request or an Issue, a job, a date, another
+runner's limit, any other condition of the stop — is answered on the asks screen with one of two choices, through the
+same `POST /api/asks/answer` as every other question:
+
+- `止める` resolves the Task's open stops that make that wait, and leaves `利用者が止めた: <key>` in their actions.
+  With no open stop the wait is gone, and so is the automatic resume: `resumeDepends` reads open stops only, so the
+  Task does not start again when the pull request, Issue or job ends later. Marking the Task reviewed would not do
+  this — the resume does not look at that mark.
+- `待ち続ける` leaves the stops open and adds `利用者が待ち続けると答えた: <key>` to their actions — written to the
+  record only, not as the stop reported again, so nothing that follows a report (a resume planned for another
+  runner's limit) runs. `waitsOf` takes
+  the later of the time the stop came and the last such action as the wait's `since`, so the limit — the same
+  setting, not a new one — counts again from the answer. A wait whose limit is a fixed time (a date, a runner's limit) gets one more limit
+  from the answer when that is later than its time, so it is not over again at once. If the wait is still there
+  past the new limit, it is asked about again. The Task is resumed as before when the other side ends.
+
+No reply is sent to the Task, and the answer is never saved as a policy: it is a judgement for that one time. Right
+after the answer the Task's waits are worked out again (`refreshTaskWaits`, the same step the look runs for each
+Task), so the question leaves the open ones at once instead of at the next look.
+
+Which stops make a wait is decided where the wait's key is made: one function in `packages/core/src/waits.ts` turns an
+open stop into its waits, and both `waitsOf` (the record) and `stopsOfWait` (the stops an answer moves) read it, so a
+key always leads back to the stops it came from.
+
+A wait of a Task that is at work — a command, the runner's output, a run slot — and a planned resume take no answer
+there. Ending one means cutting the turn, which stays the person's call in the Task itself.
+
 A Task that keeps giving events through a long turn is never silent. A Task that is quiet because it runs an
 `ops-kit wait` is not silent either while that wait is within its limit: the wait says what the quiet is for.
 
@@ -135,6 +183,11 @@ still asking goes on by nothing but the person.
 ## What is not done here
 
 - A silent Task is not stopped or killed.
+- A wait of a Task at work, or a planned resume, has no answer on the asks screen (above).
+- There is no answer that moves the other side on (merging the pull request, closing the Issue): that differs for
+  each thing waited for and is decided in the Task's conversation.
+- The limit's length is not changed by an answer, and there is no limit per wait: `待ち続ける` starts the same limit again.
+- A wait whose key has no fixed form is not taken off by itself when its other side ends.
 - Nothing forbids a Task from writing a bare loop; the skills and prompts tell it to use `ops-kit wait`.
 - The person's own waits have a limit in the record but are not asked about again when it passes: they are already
   where the person answers.

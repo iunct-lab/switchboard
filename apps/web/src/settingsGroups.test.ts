@@ -1,4 +1,4 @@
-// test-reads: apps/web/src/components/Settings.tsx apps/web/src/components/WorkspaceCard.tsx apps/web/src/components/PolicySettings.tsx apps/web/src/App.tsx
+// test-reads: apps/web/src/components/Settings.tsx apps/web/src/components/WorkspaceCard.tsx apps/web/src/components/PolicySettings.tsx apps/web/src/components/CliUpdateSettings.tsx apps/web/src/App.tsx
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { SETTINGS_GROUPS, settingsGroup } from "./settingsGroups.ts";
@@ -16,14 +16,14 @@ function groupBody(id: string): string {
   return body.slice(from, next === -1 ? undefined : next);
 }
 
-/** The screen in source order: a group's heading as "group:<id>", a card by its heading (the two cards drawn by their own component by name). */
+/** The screen in source order: a group's heading as "group:<id>", a card by its heading (the cards drawn by their own component by name). */
 function screenOrder(): string[] {
   const out: string[] = [];
-  for (const m of body.matchAll(/<SettingsGroupHeading id="([\w-]+)"|<h5>(.*?)<\/h5>|<SettingsCard title=\{t\(settings\.(\w+)\)\}|<(McpCard|WorkspaceCard|PolicySettings|CustomRunnersSection)\b/g)) {
+  for (const m of body.matchAll(/<SettingsGroupHeading id="([\w-]+)"|<h5>(.*?)<\/h5>|<SettingsCard title=\{t\(settings\.(\w+)\)\}|<(McpCard|WorkspaceCard|PolicySettings|CliUpdateSettings|CustomRunnersSection)\b/g)) {
     if (m[1]) out.push(`group:${m[1]}`);
     else if (m[2]) out.push(m[2].replace(/^\{t\(settings\.(\w+)\)\}$/, (_, k: keyof typeof settings) => settings[k].ja)); // a heading from the dictionary reads as its Japanese
     else if (m[3]) out.push(settings[m[3] as keyof typeof settings].ja); // a folded card by its title
-    else out.push(m[4] === "McpCard" ? "Workspace MCP" : m[4] === "WorkspaceCard" ? "Workspace" : m[4] === "CustomRunnersSection" ? settings.adk.ja : "回答の方針");
+    else out.push(m[4] === "McpCard" ? "Workspace MCP" : m[4] === "WorkspaceCard" ? "Workspace" : m[4] === "CustomRunnersSection" ? settings.adk.ja : m[4] === "CliUpdateSettings" ? settings.cliUpdate.ja : "回答の方針");
   }
   return out;
 }
@@ -117,7 +117,7 @@ describe("SETTINGS_GROUPS", () => {
     // the top-level keys of every save({ … }) in Settings.tsx: the regrouping into seven groups moved cards and changed none of them
     // (maxRunners was saved by its own component before and is a box of バックログを進める now)
     const keys = new Set([...source.matchAll(/save\(\{ ?(\w+):/g)].map((m) => m[1]));
-    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "release", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
+    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "cliUpdate", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "release", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
   });
 
   test("レビュー is a row of どの仕事をどのランナーで and saves reviewRunner with its two choices", () => {
@@ -139,7 +139,7 @@ describe("SETTINGS_GROUPS", () => {
     const runner = groupBody("settings-runner");
     for (const part of ["runnerOptions(", "<ModelSelect", "<EffortSelect"]) expect(runner).toContain(part);
     // the runner group holds every section it names, and the cards that moved are not in the groups they left
-    expect(settingsGroup("settings-runner").sections).toEqual(["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走（DAK）の既定"]);
+    expect(settingsGroup("settings-runner").sections).toEqual(["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走（DAK）の既定", "CLI の更新"]);
     expect(settingsGroup("settings-model").sections).toEqual(["モデルの価格", "予算"]);
   });
 

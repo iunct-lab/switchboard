@@ -127,6 +127,28 @@ test("cross-runner-review: an extra reviewer that can be off says its switch in 
   expect(text).toContain("`ops.config.json` の `extraReviewer` が名指しし、有効の条件を満たしていれば");
 });
 
+test("cross-runner-review: the material step lists the files outside the Task's named paths for a repository with a merge gate, and the prompt has the reviewer sort them", () => {
+  const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
+  const block = text.slice(text.indexOf("<!-- when mergeGate=on -->"), text.indexOf("<!-- end when -->", text.indexOf("<!-- when mergeGate=on -->")));
+  expect(block).toContain('<マージ判定> $N --scope > "$M/scope.md"; grep -q . "$M/scope.md" || rm -f "$M/scope.md"');
+  expect(block).toContain("--change <変更> --scope");
+  expect(text).toContain("`handled.md`, `old-paths.md` and `scope.md` when they exist");
+  const intent = text.slice(text.indexOf("1. Intent:"), text.indexOf("2. Design consistency"));
+  const line = intent.split("\n").find((l) => l.includes("`_review/scope.md`")) ?? "";
+  expect(line).toContain("mix-in from another Task");
+  expect(line).toContain("`[should-fix]`");
+});
+
+test("pbi-complete: a Task's body is not asked to be extended with named paths by a grant sentence", () => {
+  const text = readFileSync(join(skills, "pbi-complete", "SKILL.md"), "utf8");
+  expect(text).not.toContain(["名指しのパス", "を足してよい"].join(""));
+  expect(text).toContain("Task の結果コメントに逸脱として 1 行書く");
+  // the gate no longer stops for these files, so the step must stand where every gate result passes, not under "exit 1"
+  const gate = text.indexOf("**各 PR のマージ直前にマージ判定**");
+  const stop = text.indexOf("exit 1（stop）なら:", gate);
+  expect({ before: text.indexOf("Task の結果コメントに逸脱として 1 行書く", gate) < stop }).toEqual({ before: true });
+});
+
 test("cross-runner-review: step 4 appends the fix commits' diff to fix.range-diff after the range-diff (a fix commit added on top shows only as one line in range-diff)", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const step = text.slice(text.indexOf("## 4. 修正後の見直し"));
@@ -952,6 +974,11 @@ test("skills: the three flow skills say what to do while GitHub cannot be used a
   expect(read("task-to-pr")).toContain("`[merge-answer] yes` は変更に投稿できない");
   const complete = read("pbi-complete");
   for (const word of ["<GitHub への復帰> --pbi <PBI>", "<GitHub への復帰> --report", "リリースタグを打たない", "exit 4", "exit 5"]) expect(complete).toContain(word);
+  // the sync PR is the only way into GitHub's main: reviewed, then merged through the gate
+  expect(complete).toContain("`cross-runner-review` に通してから `<GitHub への復帰> --merge-sync <PR>`");
+  expect(complete).not.toContain("直接の push を受けず");
+  // a sync PR the person said yes to still goes in as a Merge commit, never by the gate's rebase merge
+  expect(complete).toContain("yes の後は `--allow-large` を足して同じく `--merge-sync`");
 });
 
 test("skills: what keeps a review from going round — the conditions decided when Tasks are cut, the lists a command makes, and going back to the policy", () => {

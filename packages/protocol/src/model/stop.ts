@@ -35,6 +35,8 @@ export const StopSummary = z.object({
   state: StopState,
   firstAt: z.number(),
   lastAt: z.number(),
+  /** When the newest stop took its present op + reason + grant: a stop reported again with another grant is another question. */
+  contentAt: z.number(),
   lastAnswer: StopRecord.shape.answer,
   /** The newest stop has the person's answer, given after it came (one the daemon saw them give, to this series): the person already acted on it. An answer carried over from an earlier stop is not one. */
   answered: z.boolean(),

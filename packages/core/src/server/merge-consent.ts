@@ -30,7 +30,6 @@ export const consentWaitMs = (sc: Pick<ServerContext, "settings">): number => Ma
 const SAID: Record<MergeGrantKind, (n: number) => string> = {
   merge: (n) => `PR #${n} を判定の外でマージ`,
   answer: (n) => `PR #${n} に [merge-answer] yes を投稿`,
-  scope: (n) => `Task #${n} の本文に名指しのパスを追加`,
 };
 
 /**
@@ -42,7 +41,7 @@ const SAID: Record<MergeGrantKind, (n: number) => string> = {
  */
 export function noteConsent(sc: ConsentContext, task: Task, text: string): Promise<void> {
   const asked = sc.db.lastReplyText(task.id) ?? "";
-  // the grant is given when the reply comes in, not when the reader answers: a scope stop recorded while it reads is newer than it
+  // the grant is given when the reply comes in, not when the reader answers
   const said = Date.now();
   // what the task asked for, to put to the reader: the fixed sentences in the reply this text answers. Stop records are not
   // read (which of them the person is answering cannot be told from them); a stop reported outside the reply's text leaves
@@ -71,13 +70,13 @@ export function noteConsent(sc: ConsentContext, task: Task, text: string): Promi
     }
     if (sc.judgeStop.signal.aborted || !grants.length) return;
     try {
-      const rows = await Promise.all(repos.flatMap((repo) => grants.map(async (g) => ({ taskId: task.id, repo, kind: g.kind, target: g.target, by: OWNER, head: g.kind === "scope" ? undefined : ((await heads.get(`${repo}#${g.target}`)) ?? undefined) }))));
+      const rows = await Promise.all(repos.flatMap((repo) => grants.map(async (g) => ({ taskId: task.id, repo, kind: g.kind, target: g.target, by: OWNER, head: (await heads.get(`${repo}#${g.target}`)) ?? undefined }))));
       // a merge / answer row whose head could not be read answers for no head, and written it would take the place of an
       // earlier grant of the same kind that has one: it is said in the line below and not recorded
-      sc.db.recordMergeGrants(rows.filter((r) => r.kind === "scope" || r.head), said);
+      sc.db.recordMergeGrants(rows.filter((r) => r.head), said);
       const lines = grants.map((g) => {
         const head = rows.find((r) => r.kind === g.kind && r.target === g.target)?.head;
-        return g.kind === "scope" ? SAID[g.kind](g.target) : `${SAID[g.kind](g.target)}（${head ? `head ${head.slice(0, 7)}` : "head を読めず、まだ通りません"}）`;
+        return `${SAID[g.kind](g.target)}（${head ? `head ${head.slice(0, 7)}` : "head を読めず、まだ通りません"}）`;
       });
       say(`返信を許可として記録しました: ${lines.join("、")}`);
     } catch (e) {

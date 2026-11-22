@@ -187,6 +187,20 @@ export class TaskQueries extends GrantQueries {
     return r ? rowToTask(r) : null;
   }
 
+  /** When the newest run of the same schedule created after Task `taskId` ended as done; null = none did, or the Task is not a schedule's or is a stage Task. */
+  laterScheduleTaskDone(taskId: string): number | null {
+    const r = this.sqlite
+      .query("SELECT updated_at FROM tasks WHERE schedule_id = (SELECT schedule_id FROM tasks WHERE id = ? AND stage_issue IS NULL) AND created_at > (SELECT created_at FROM tasks WHERE id = ?) AND status = 'done' ORDER BY created_at DESC LIMIT 1")
+      .get(taskId, taskId) as { updated_at: number } | null;
+    return r?.updated_at ?? null;
+  }
+
+  /** The newest-created stage Task of this Issue and action that started by itself, null when none did (a button's start is not one). */
+  lastAutoStageTask(workspaceId: string, issue: number, action: BacklogAction): Task | null {
+    const r = this.sqlite.query("SELECT * FROM tasks WHERE workspace_id = ? AND stage_issue = ? AND stage_action = ? AND stage_auto = 1 ORDER BY created_at DESC LIMIT 1").get(workspaceId, issue, action);
+    return r ? rowToTask(r) : null;
+  }
+
   /**
    * The stage Task of `actions` in a workspace that left its slot (not activeStage) last, of this machine's own: how one
    * ended says something of this machine (its login), and a Task taken in from a work machine ended there.
@@ -228,10 +242,10 @@ export class TaskQueries extends GrantQueries {
     this.sqlite.transaction(() => {
       this.sqlite
         .query(
-          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, subagent_model, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, fork_of, fork_seq, fork_turn, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, judging_at, status_at, title_pending, machine)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tasks (id, workspace_id, title, runner, cwd, scope, status, runner_session_id, model, routing, budget_usd, schedule_id, permission_mode, effort, subagent_effort, subagent_model, origin, resume_at, resume_reason, resume_window, resume_since, resume_planned_at, queued_at, deferred_prompt, shadow_of, fork_of, fork_seq, fork_turn, shadow_stopped, workspace_reason, outcome, reviewed_at, archived_at, judged_result, judged_reason, judged_by, created_at, updated_at, execution_mode, cloud_session, source_cloud_task_id, stage_issue, stage_action, stage_auto, judging_at, status_at, title_pending, machine)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.subagentModel ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, storedOutcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
+        .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.subagentModel ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, storedOutcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.stage?.auto ? 1 : 0, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
       if (t.routing) {
         const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
@@ -430,7 +444,7 @@ export function rowToTask(r: any): Task {
     judgedReason: r.judged_reason ?? null,
     judgedBy: r.judged_by ?? null,
     judgingAt: r.judging_at ?? null,
-    stage: r.stage_issue == null ? null : { issue: r.stage_issue, action: r.stage_action as BacklogAction },
+    stage: r.stage_issue == null ? null : { issue: r.stage_issue, action: r.stage_action as BacklogAction, ...(r.stage_auto ? { auto: true as const } : {}) },
     statusAt: r.status_at,
     titlePending: !!r.title_pending,
     machine: r.machine ?? null,

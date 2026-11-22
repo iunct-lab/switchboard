@@ -109,7 +109,7 @@ export const readFlowLimit = async (sc: Pick<ServerContext, "settings" | "db" | 
  * promoted, nothing starts anywhere. `only`: one workspace's implement slot and those items only, the waits
  * of which an import closed; the same checks hold.
  */
-export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" | "askPromotion" | "promotionHold" | "scheduler" | "db" | "activeAs" | "autoRunner" | "decidedRunner" | "settings" | "runnerInfo" | "applyPolicies" | "withActive" | "itemsToAdvance" | "backlogReads" | "backlog" | "notSettled" | "ghLoginRefused" | "readAllocation" | "authStopHeld" | "leftLines" | "storedBacklogReleased" | "startStage">, scheduleId: string, only?: { workspaceId: string; numbers: number[] }): Promise<BacklogNextResult> => {
+export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" | "askPromotion" | "promotionHold" | "scheduler" | "db" | "activeAs" | "autoRunner" | "decidedRunner" | "settings" | "runnerInfo" | "applyPolicies" | "withActive" | "itemsToAdvance" | "backlogReads" | "backlog" | "notSettled" | "ghLoginRefused" | "readAllocation" | "authStopHeld" | "leftLines" | "storedBacklogReleased" | "startStage" | "autoHeldOf">, scheduleId: string, only?: { workspaceId: string; numbers: number[] }): Promise<BacklogNextResult> => {
   const started: BacklogNextResult["started"] = [];
   const skipped: string[] = [];
   // a work machine chooses no PBI by itself, also when the schedule is fired by hand: there a PBI is started by its own button
@@ -212,9 +212,18 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
   // the flow limit and the week's holds of a workspace as read; `flowStarted` = the flow PBIs this firing started from Ready since
   const flowOfRead = (r: ReadOk, flowStarted: ReadonlySet<number> = new Set()): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...new Set([...r.flowCounted, ...flowStarted])], r.flowStopped);
   const holdOf = (ws: Workspace): AllocationHold => ({ flowShare: alloc.flow, mode: alloc.workspaces.find((w) => w.workspaceId === ws.id)?.mode });
-  // whether a turn would start something there: a slot is free (and the firing's, not the queue's) and has an item to pick
-  const hasWork = (r: ReadOk) => SLOTS.some((slot) => !(slot === "implement" && queued()) && busy(r.ws.id, slot).length < r.ws.sweep[slot]
-    && pickNext(r.items, slot, undefined, flowOfRead(r), defsFor(r.ws), dueSoon(r.ws), holdOf(r.ws)) !== null);
+  // whether a slot has an item a turn would start: the first picked that the gate (stage-start-gate.ts) does not hold, as the turn picks
+  const startableIn = (r: ReadOk, slot: (typeof SLOTS)[number]) => {
+    const held = new Set<number>();
+    for (;;) {
+      const next = pickNext(r.items.filter((i) => !held.has(i.number)), slot, undefined, flowOfRead(r), defsFor(r.ws), dueSoon(r.ws), holdOf(r.ws));
+      if (!next) return false;
+      if (!sc.autoHeldOf(r.ws, next.item, next.action)) return true;
+      held.add(next.item.number);
+    }
+  };
+  // whether a turn would start something there: a slot is free (and the firing's, not the queue's) and has an item to start
+  const hasWork = (r: ReadOk) => SLOTS.some((slot) => !(slot === "implement" && queued()) && busy(r.ws.id, slot).length < r.ws.sweep[slot] && startableIn(r, slot));
   // one workspace's turn: its slots, each filled while an item can start
   const sweepWorkspace = async (r: Read) => {
   const { ws } = r;
@@ -268,6 +277,12 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         skipped.push(`${ws.name}: #${next.item.number} を始めない: 候補の定義を読めません: ${defsError}`);
         continue;
       }
+      // held for the previous automatic start (stage-start-gate.ts): said before GitHub is read again, so a held item costs no read
+      const heldBefore = sc.autoHeldOf(ws, next.item, next.action);
+      if (heldBefore) {
+        skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の開始から出来事が増えていない: #${next.item.number}（前回 ${heldBefore.previousTaskId}）`);
+        continue;
+      }
       // read again right before the start: the sweep may have taken long since this workspace was read, and an
       // edit may have been kept meanwhile — GitHub when it can be reached, the stored data either way
       const late = await sc.backlog.settle(ws).then(() => null, (e) => sc.notSettled(e));
@@ -302,9 +317,13 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       }
       // Unattended: no shadow (like prompt schedules) and the schedule's budget applies to the stage Task.
       const t = await sc.startStage({
-        ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason,
+        ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason, auto: true,
         extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
       });
+      if ("held" in t && !("error" in t)) {
+        skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の開始から出来事が増えていない: #${next.item.number}（前回 ${t.held.previousTaskId}）`);
+        continue;
+      }
       // its stage Task started after GitHub was read (a button, an answer's resume): the slot's next item instead
       if ("active" in t) {
         skipped.push(`${ws.name}: #${next.item.number} は工程 Task が動いている`);

@@ -131,7 +131,7 @@ export const Task = z.object({
   /** When the judgement of the last reply began (ms); null = not judging, or done. A new turn clears it; a restart that cut it short has it judged again once at start. */
   judgingAt: z.number().nullable(),
   /** The backlog Issue and stage this Task runs (a button, a schedule or an answer's follow-up made it); null for any other Task. Set at creation, never changed. */
-  stage: z.object({ issue: z.number().int().positive(), action: BacklogAction }).nullable(),
+  stage: z.object({ issue: z.number().int().positive(), action: BacklogAction, /** Started by itself (the queue, the schedule, the resume after an answer), not by a button. Absent = by a button. */ auto: z.literal(true).optional() }).nullable(),
   /** When the task came to its current `status` (ms). Other changes (title, outcome, 確認済み…) leave it; `updatedAt` moves on any change. */
   statusAt: z.number(),
   createdAt: z.number(),

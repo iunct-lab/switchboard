@@ -328,7 +328,7 @@ test("decision: answering another workspace's Issue is kept for that repository"
   const r = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: lib.id, text: "A で" }) });
   expect(r.status).toBe(202);
   expect(core!.db.listPendingBacklogOperations().map((o) => o.repository)).toEqual(["acme/lib", "acme/lib"]);
-  expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nA で", screen: true }], [306, "set", "label:needs-decision", false]]);
+  expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nA で", screen: true, heads: {} }], [306, "set", "label:needs-decision", false]]);
   expect(fake.calls.filter((a) => a[0] === "issue")).toHaveLength(0);
 });
 

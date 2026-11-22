@@ -1,10 +1,11 @@
-import { isWorkMachine } from "../machine.ts";
+import { isWorkMachine, otherMachineOf } from "../machine.ts";
 import { existsSync } from "node:fs";
 import { configAsks } from "./workspace-config.ts";
 import { personWait, type Workspace, type AnswerPolicy, type Ask, type AskAnswer, type AskAnswerResult, type AskChanged, type AskBatch, type Backlog, type BacklogItem, type PolicyInput, type PolicySubject, choiceKey, isRecommendedChoice } from "@switchboard/protocol";
 import { subjectsOf } from "../approval.ts";
 import { unusableWorkspaces } from "../workspace-clone.ts";
-import { DECISION_HEADING, proceedAnswerLine } from "../backlog-comments.ts";
+import { grantHeadKey, type GrantHeads } from "../merge-grants.ts";
+import { DECISION_HEADING, proceedAnswerLine, stoppedAnswerLine } from "../backlog-comments.ts";
 import { storedEnds, storedProceedRefusal } from "../backlog-stored.ts";
 import { ACTION_FOR_STAGE } from "../backlog-item.ts";
 import { answerStoredConfirmation, answerStoredDecision, BacklogEditError, holdStoredDecision } from "../backlog-edit.ts";
@@ -13,8 +14,9 @@ import { drainNote, promotionNote, tagCiNote } from "../promotion.ts";
 import { runGh } from "../backlog-gh.ts";
 import { reduceStops } from "../stops.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "../approval-batch.ts";
-import { ASK_HISTORY_MS, ON_HOLD_RESUME, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, proceedingAsks, rankAsks, prFacts, questionsReply, resumeOfTask, withGone, type GoneFacts, type PolicyEnv, type PrFacts } from "../asks.ts";
+import { ASK_HISTORY_MS, ON_HOLD_RESUME, askIdBase, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, proceedingAsks, rankAsks, prFacts, questionsReply, resumeOfTask, withGone, type GoneFacts, type PolicyEnv, type PrFacts } from "../asks.ts";
 import { closedHits, noticeAsks, type NoticeRecord } from "../asks-notices.ts";
+import { boundsOf, readWaitFiles, refreshTaskWaits, stopsOfWait, WAIT_KEPT_ACTION, WAIT_STOP_CHOICE, WAIT_STOPPED_ACTION, waitAnswerAction, waitsDirOf } from "../waits.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "../policies.ts";
 import { listRefusedDeltas } from "../uplink-s3.ts";
 import { listRefused } from "../backlog-upbox.ts";
@@ -55,13 +57,12 @@ export const policyEnv = (sc: Pick<ServerContext, "db" | "approval">, b: Backlog
  */
 export const tieAnswers = (sc: Pick<ServerContext, "db">, all: Ask[]) => {
   const list = readPolicies(sc.db);
-  const base = (id: string) => id.split("@")[0]!;
   const claimed = new Set(list.flatMap((p) => p.uses.flatMap((u) => (u.answered ? [u.answered] : []))));
   const open = list.flatMap((p) => p.uses.filter((u) => !u.answered && u.askId.startsWith("decision:")).map((u) => ({ p, u }))).sort((x, y) => x.u.at - y.u.at);
   if (!open.length) return;
   let changed = false;
   for (const { p, u } of open) {
-    const found = all.filter((a) => a.state === "answered" && a.kind === "decision" && base(a.id) === base(u.askId) && !claimed.has(a.id) && a.changedAt >= u.at - 60_000).sort((x, y) => x.changedAt - y.changedAt)[0];
+    const found = all.filter((a) => a.state === "answered" && a.kind === "decision" && askIdBase(a.id) === askIdBase(u.askId) && !claimed.has(a.id) && a.changedAt >= u.at - 60_000).sort((x, y) => x.changedAt - y.changedAt)[0];
     if (!found) continue;
     claimed.add(found.id);
     u.answered = found.id;
@@ -143,6 +144,11 @@ export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" |
       const mine = sc.db.getTask(taskId);
       return last && mine && last.id !== taskId && last.createdAt > mine.createdAt && last.status === "done" && personWait(last) !== "needs" ? last.updatedAt : null;
     },
+    jobEnded: (id) => {
+      const j = sc.db.getJob(id);
+      return j && j.status !== "running" ? (j.endedAt ?? j.startedAt) : null;
+    },
+    laterRunDone: (id) => sc.db.laterScheduleTaskDone(id),
   };
   const all = rankAsks(dedupeAsks([...proceedingAsks(b.proceeding ?? [], now, { mockups: sc.mockupsOf }), ...withGone([...asksFromBacklog(b.items, now, { approvalPending: sc.approvalPendingOf(), resumeFailures: sc.failed, policy, mockups: sc.mockupsOf, startedBy: (w, n) => sc.db.askAnswer(`started:${w}#${n}`)?.result?.ask?.resume?.taskId ?? null, lastReply: (id) => sc.db.lastReply(id)?.text ?? null, taskOf: (id) => sc.db.getTask(id) }), ...fromTasks], gone, now)]), b.items);
   sc.tieAnswers(all);
@@ -163,25 +169,54 @@ export const approvalPendingOf = (sc: Pick<ServerContext, "tasks" | "db">) => {
 /** A Task's answer as it goes on now: its resume read again from the Task (running, the usage limit, failed). */
 export const nowOf = (sc: Pick<ServerContext, "db" | "failed">, r: AskAnswerResult): AskAnswerResult => {
   const a = r.ask;
-  // a stage Task's stop answered in words goes on as that Task; one answered by its grant goes on as the next stage Task (its stored resume)
-  const t = a && a.task && a.state === "answered" && (!a.issue || (a.kind === "stop" && a.resume?.taskId === a.task.id)) ? sc.db.getTask(a.task.id) : null;
+  // a stop of a Task, with an Issue or without, goes on as that Task, whether answered in words or by its grant
+  const t = a && a.task && a.state === "answered" && (!a.issue || a.kind === "stop") ? sc.db.getTask(a.task.id) : null;
   return t && a ? { ...r, ask: { ...a, resume: resumeOfTask({ task: t, repliedAt: a.changedAt, failure: sc.failed(a.id) }) } } : r;
 };
 
 // What an answer answered, by the question's id, is `ask_answers` for a day: a resend whose reply was lost gets it again, nothing written twice.
 
 /**
+ * Answers a question for a wait past its limit on the Task's own open stops that make that wait (`stopsOfWait`); no
+ * reply goes to the Task. 止める resolves them, so nothing resumes the Task when what it waited for ends; 待ち続ける
+ * leaves them open with an action the wait's limit counts again from. The Task's waits are worked out again at once,
+ * so the question is gone from the open ones. Nothing is written when the choice or the stops are no longer there (409).
+ */
+const answerWait = (sc: Pick<ServerContext, "db" | "tasks" | "settings" | "broadcast" | "cfg">, ask: Ask, answer: AskAnswer): { status: number; body: object } => {
+  const changed = (error: string, current: Ask | null) => ({ status: 409, body: { error, changes: [error], current } satisfies AskChanged });
+  if (answer.kind !== "choice" || !ask.answers.includes("choice") || !ask.choices.includes(answer.choice)) return changed("選択肢が変わりました", ask);
+  const task = ask.task ? sc.db.getTask(ask.task.id) : null;
+  const key = ask.wait?.key;
+  const stopping = answer.choice === WAIT_STOP_CHOICE;
+  // a stop being retried stays the daemon's to move: written again as it is, it would be taken for one more retry.
+  // Only a stop under the Task's own id is written again (`recordStop` names it `<task>/<id>`): another would become a new stop
+  const stops = task && key !== undefined ? stopsOfWait(sc.db.listStopRecords([task.id]), task.id, key).filter((s) => s.id.startsWith(`${task.id}/`) && (stopping || s.state !== "retrying")) : [];
+  if (!task || otherMachineOf(task) || key === undefined || !stops.length) return changed("問いがもうありません", null);
+  const now = Date.now();
+  for (const s of stops) {
+    const actions = [...s.actions, { attempt: s.actions.length + 1, at: now, what: waitAnswerAction(stopping ? WAIT_STOPPED_ACTION : WAIT_KEPT_ACTION, key), ok: true }].slice(-20);
+    const { id, work: _work, at: _at, answer: _answer, ...rest } = s;
+    // 止める is the stop reported again as resolved, so what follows a stop's end follows (a planned resume is taken back).
+    // 待ち続ける only adds its action to the record: reported again, a runner's limit would be planned again and the Task resumed
+    if (stopping) sc.tasks.recordStop(task.id, { ...rest, id: id.slice(task.id.length + 1), state: "resolved", actions });
+    else sc.tasks.recordStopEvent(task.id, { ...s, actions, at: now });
+  }
+  const after = sc.db.getTask(task.id) ?? task;
+  refreshTaskWaits({ db: sc.db, bounds: () => boundsOf(sc.settings().quotaAndResume), broadcastTask: (t) => sc.broadcast({ type: "task.updated", task: t }) }, after, { files: readWaitFiles(waitsDirOf(sc.cfg.home)).waiting.get(task.id) ?? [], lastEventAt: sc.tasks.lastEvents().get(task.id) ?? null, queue: sc.tasks.queueWait(), refusal: sc.tasks.queueRefusal(task.id) }, now);
+  return { status: 200, body: { ask: { ...ask, state: "answered", changedAt: now, answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
+};
+
+/**
  * Answers one question of the backlog: checked against the question now (changed → 409 and nothing written),
  * written where it was asked (kept here and sent to GitHub), then — only after that, and unless a hold or something
  * an answer does not take away stands in the way — the work goes on through startStage.
  */
-export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "NOTICES_KEY" | "answerTask" | "metaWorkspace" | "opts" | "UPSTREAM_FAILED" | "policyGone" | "storedBacklog" | "basisLine" | "backlog" | "withActive" | "approvalPendingOf" | "startStage">, id: string, answer: AskAnswer, pre: { pr: number; facts: PrFacts } | null = null, by: AnswerPolicy | null = null, batch = false, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
+export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "answerGrantHeads" | "NOTICES_KEY" | "answerTask" | "metaWorkspace" | "opts" | "UPSTREAM_FAILED" | "policyGone" | "storedBacklog" | "storedBacklogReleased" | "basisLine" | "backlog" | "withActive" | "approvalPendingOf" | "startStage" | "tasks" | "settings" | "broadcast" | "cfg">, id: string, answer: AskAnswer, pre: { pr: number; facts: PrFacts } | null = null, by: AnswerPolicy | null = null, batch = false, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
   const changed = (error: string, changes: string[], current: Ask | null) => ({ status: 409, body: { error, changes, current } satisfies AskChanged });
   const { asks } = await sc.currentAsks();
   const ask = asks.find((a) => a.id === id);
-  const prefix = (x: string) => x.split("@")[0];
   if (!ask || (ask.state !== "open" && ask.state !== "held")) {
-    const current = asks.find((a) => a.id !== id && prefix(a.id) === prefix(id) && (a.state === "open" || a.state === "held")) ?? null;
+    const current = asks.find((a) => a.id !== id && askIdBase(a.id) === askIdBase(id) && (a.state === "open" || a.state === "held")) ?? null;
     const why = ask ? "回答済みです" : current ? "問いが新しくなりました" : "問いがもうありません（対象の Issue が閉じたか、別の所で答えられました）";
     return changed(why, [why], current);
   }
@@ -199,12 +234,11 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
     // the question as it is after the answer: closed, so the screen keeps no button on it
     return { status: 200, body: { ask: { ...ask, state: "resolved", changedAt: Date.now(), answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
   }
-  // a stage Task's stop answered in words is a reply to that Task, as a Task's own stop is
-  if (ask.task && ((!ask.issue && (ask.kind === "approval" || ask.kind === "check" || ask.kind === "stop")) || (ask.kind === "stop" && answer.kind !== "grant"))) return sc.answerTask(id, ask, answer, by, via);
-  // what a stage Task's stop writes on its Issue is its grant only: the ## 回答 the next stage Task gets as the person's words
-  const granted = ask.kind === "stop" && answer.kind === "grant";
-  if (ask.kind !== "decision" && ask.kind !== "confirmation" && !granted) return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
-  if (granted && !ask.grant) return { status: 409, body: { error: "許可文がありません" } };
+  // a wait past its limit is answered on the stops that make the wait, with no reply to the Task
+  if (ask.kind === "wait") return answerWait(sc, ask, answer);
+  // a stop of a Task, with an Issue or without, is answered as a reply to that Task, in words or by its grant
+  if (ask.task && (ask.kind === "stop" || (!ask.issue && (ask.kind === "approval" || ask.kind === "check")))) return sc.answerTask(id, ask, answer, by, via);
+  if (ask.kind !== "decision" && ask.kind !== "confirmation") return { status: 422, body: { error: `${ask.kind} の問いにはここから答えられません` } };
   if (!ask.answers.includes(answer.kind) || (answer.kind === "choice" && !ask.choices.includes(answer.choice))) return changed("選択肢が変わりました", ["選択肢が変わりました"], ask);
   if (answer.kind === "confirm" && !answer.ok && !answer.text) return { status: 400, body: { error: "違うときは理由を書いてください" } };
   // one the work went on from: `confirm` (or the recommended choice) leaves the work as it is; any other answer overturns it
@@ -220,9 +254,14 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   // a choice may be the PR's approval: not given to a PR that moved since. A text still goes (asking to check again),
   // written with what moved, so the work that reads it knows the answer was to the PR before
   let moved: string[] = [];
+  // the head the answer is checked against: a grant of that PR in the answer is for this head (`answerGrantHeads`)
+  const checked: GrantHeads = {};
   if (ask.place?.pr && !ask.proceeding && (answer.kind === "choice" || answer.kind === "text")) {
     try {
-      moved = (pre?.pr === ask.place.pr ? pre.facts : await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at)).changes;
+      const facts = pre?.pr === ask.place.pr ? pre.facts : await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at);
+      moved = facts.changes;
+      // the head read now is the head at the answer, also when the PR moved since the question (the answer then says so in its text); none read is none
+      checked[grantHeadKey(source.repository, ask.place.pr)] = facts.head || null;
       if (moved.length && answer.kind === "choice") return changed("問いの後で対象の PR が変わりました。選択肢では答えられません。自由文で確かめ直しを頼むか、新しい問いを待ってください", moved, ask);
     } catch (e) {
       return { status: sc.UPSTREAM_FAILED, body: { error: `PR #${ask.place.pr} を確かめられない: ${String((e as Error).message ?? e)}` } };
@@ -238,16 +277,23 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
       const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" || answer.kind === "confirm" ? (answer.text ?? "") : "";
       const line = proceedAnswerLine({ at: new Date(ask.at).toISOString(), recommended: ask.recommendation ? choiceKey(ask.recommendation.choice) : "（記載なし）" }, same ? { same, batch } : { same, choice: answer.kind === "choice" ? choiceKey(answer.choice) : null });
       // a confirmation is not the person's words to the next stage Task (`screen`): nothing goes on from it; nor is an answer that did not come in as the screen's (`via`)
-      answerStoredDecision(sc.db, source, ask.issue!.number, same ? line : `${line}\n\n${said}`, Date.now(), { screen: !same && via === "screen" });
+      const written = same ? line : `${line}\n\n${said}`;
+      const screen = !same && via === "screen";
+      // the screen's answer keeps the heads its grant sentences are for, read now (`answerGrantHeads`)
+      answerStoredDecision(sc.db, source, ask.issue!.number, written, Date.now(), { screen, ...(screen ? { heads: await sc.answerGrantHeads(ws, written, checked) } : {}) });
     } else if (answer.kind === "confirm") {
       const n = Number(/:(\d+)$/.exec(id)?.[1]);
       const item = sc.storedBacklog(ws).items.find((i) => i.number === pbi);
       const c = item?.confirmations.find((x) => x.n === n);
       if (!c || !answerStoredConfirmation(sc.db, source, pbi, { ...c, ok: answer.ok, reason: answer.text ?? "" })) return changed("本文が変わりました", ["受け入れ条件の本文が変わりました"], null);
     } else {
-      const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : answer.kind === "grant" ? ask.grant! : "";
+      const said = answer.kind === "choice" ? `${answer.choice}${answer.note ? `\n\n${answer.note}` : ""}` : answer.kind === "text" ? answer.text : "";
       const text = moved.length ? `${said}\n\n（この回答は問いの時点の PR へのものです。回答の時点で: ${moved.join(" / ")}）` : said;
-      answerStoredDecision(sc.db, source, ask.issue!.number, by ? `${text}\n\n${sc.basisLine(by, ask.subject)}` : text, Date.now(), { screen: !by && via === "screen" });
+      // a question that stopped and asked (`proceed:` with no `proceeding`) is one of several its Issue may carry: the answer names it
+      const named = ask.id.startsWith("proceed:") ? `${stoppedAnswerLine(new Date(ask.at).toISOString())}\n\n${text}` : text;
+      const written = by ? `${named}\n\n${sc.basisLine(by, ask.subject)}` : named;
+      const screen = !by && via === "screen";
+      answerStoredDecision(sc.db, source, ask.issue!.number, written, Date.now(), { screen, ...(screen ? { heads: await sc.answerGrantHeads(ws, written, checked) } : {}) });
     }
   } catch (e) {
     if (e instanceof BacklogEditError) return { status: e.status, body: { error: e.message } };
@@ -262,7 +308,7 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   const done = (resume: Ask["resume"]): { status: number; body: AskAnswerResult } => ({ status: 200, body: { ask: { ...ask, state: answer.kind === "hold" ? "held" : "answered", changedAt: at, answers: [], resume }, already: false, changes: moved } });
   if (answer.kind === "hold") return done(null);
   // the work goes on from the item as stored now (the answer is in it): a hold or what an answer does not take away stops it here
-  const item = sc.withActive({ fetchedAt: 0, items: sc.storedBacklog(ws).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === pbi);
+  const item = sc.withActive({ fetchedAt: 0, items: (await sc.storedBacklogReleased(ws)).items, errors: [], changes: [], syncs: [] }).items.find((i) => i.number === pbi);
   if (!item) return done(null);
   const blockers = blockersOf({ waits: item.waits, stops: item.stopSummary, approvalPending: sc.approvalPendingOf()(item) });
   if (blockers.length) return done({ state: "queued", reason: blockers.map((b) => b.detail).join("・"), taskId: null, at });
@@ -273,7 +319,9 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   // an 実装 whose files other work touches is not started by an answer either, as backlog-next's pickNext leaves it;
   // one already running is the running answer below, not a refusal
   if (action === "complete" && !item.activeTaskId && isOverlapped(item)) return done({ state: "queued", reason: overlapLine([item]).join("・"), taskId: null, at });
-  const r = await sc.startStage({ ws, meta: meta ?? ws, item, action });
+  const r = await sc.startStage({ ws, meta: meta ?? ws, item, action, auto: true });
+  // nothing happened since the last automatic start of this stage (an answer older than it): the card stays 再開待ち; the button still starts it
+  if ("held" in r && !("error" in r)) return done({ state: "queued", reason: `前回の開始から出来事が増えていない（前回 ${r.held.previousTaskId}）`, taskId: null, at });
   // the Task the answer started is its resume even when GitHub's comment time (answeredAt after the next sync) is later than its start
   const started = (taskId: string) => {
     const d = done({ state: "running", reason: null, taskId, at });
@@ -309,11 +357,18 @@ export const basisLine = (_sc: unknown, p: AnswerPolicy, subject: PolicySubject 
  * One answer, once: a resend gets the first one's result, a second at the same time waits for the first. The
  * screen's POST and a saved policy's application both come through here.
  */
-export const submitAnswer = async (sc: Pick<ServerContext, "db" | "nowOf" | "answering" | "answerWithPolicy" | "answerAsk">, id: string, answer: AskAnswer, policy?: PolicyInput, by: AnswerPolicy | null = null, pre: { pr: number; facts: PrFacts } | null = null, batch = false, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
+export const submitAnswer = async (sc: Pick<ServerContext, "db" | "nowOf" | "answering" | "answerWithPolicy" | "answerAsk" | "currentAsks">, id: string, answer: AskAnswer, policy?: PolicyInput, by: AnswerPolicy | null = null, pre: { pr: number; facts: PrFacts } | null = null, batch = false, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
   // no await from here until the answer is in `answering`: a second one for the same question waits for it
   sc.db.pruneAskAnswers(Date.now() - ASK_HISTORY_MS);
   const had = sc.db.askAnswer(id)?.result;
-  if (had) return { status: 200, body: { ...sc.nowOf(had), already: true } satisfies AskAnswerResult };
+  if (had) {
+    // a stop reported again with other content (its grant) is another question under another id: the answer kept for
+    // the old id is not this one's, so the old id is told the question is new instead of "answered"
+    // (said from the one read that found the newer question: nothing is written on this path)
+    const newer = id.startsWith("stop:") ? (await sc.currentAsks()).asks.find((a) => a.id !== id && askIdBase(a.id) === askIdBase(id) && (a.state === "open" || a.state === "held")) : undefined;
+    if (!newer) return { status: 200, body: { ...sc.nowOf(had), already: true } satisfies AskAnswerResult };
+    return { status: 409, body: { error: "問いが新しくなりました", changes: ["問いが新しくなりました"], current: newer } satisfies AskChanged };
+  }
   const first = sc.answering.get(id);
   if (first) {
     const r = await first;
@@ -462,8 +517,8 @@ export const stopForRefusedProceed = (sc: Pick<ServerContext, "db" | "tasks">, w
 };
 
 /**
- * Answers one question of a Task: a tool approval through the Task's pending permission, a check or a stop of a
- * Task with no Issue as the person's reply — the reply is its record and its resume. A Task's question reads no PR: the
+ * Answers one question of a Task: a tool approval through the Task's pending permission, a check of a Task with no Issue or a stop of
+ * any Task as the person's reply — the reply is its record and its resume. A Task's question reads no PR: the
  * Task checks what it stopped at again when it goes on (a merge goes through merge-gate again). A reply the Task refuses
  * (its budget) is not sent: the question stays open, its resume failed.
  */
@@ -490,7 +545,8 @@ export const answerTask = async (sc: Pick<ServerContext, "tasks" | "noteMergeGra
     try {
       // `via`: whether the request looked like the screen's (routes/asks.ts); the sentence itself is the one the Task wrote in its stop
       await sc.noteMergeGrant(taskId, ask.grant, { via, taskWrote: true });
-      const t = await sc.tasks.send(taskId, ask.grant);
+      // the person allowed this Task's own refused operation: not copied to a shadow running alongside it
+      const t = await sc.tasks.send(taskId, ask.grant, { mirror: false });
       return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
     } catch (e) {
       const failure = { at, reason: String((e as Error).message ?? e) };

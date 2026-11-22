@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fakeGh } from "../ops-kit/src/gh.ts";
 import { loadConfig } from "../ops-kit/src/config.ts";
 import { lint } from "../ops-kit/src/lint.ts";
-import { auditorOf, main, parseVerdict, pbiFor, pbiTitle, POST_AUDIT, prepare, promptFor, record, routeOf, select, VIEWPOINTS, type MergedPr } from "./post-audit";
+import { auditorOf, main, settingFromEnv, parseVerdict, pbiFor, pbiTitle, POST_AUDIT, prepare, promptFor, record, routeOf, select, VIEWPOINTS, type MergedPr } from "./post-audit";
 import type { Run } from "./merge-audit";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -37,6 +37,17 @@ describe("auditorOf", () => {
   test("実装が claude なら codex、無ければ claude", () => {
     expect(auditorOf([{ message: "feat: x\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" }])).toBe("codex");
     expect(auditorOf([{ message: "feat: x" }])).toBe("claude");
+  });
+  test("auditorOf: the recheck setting same names the implementer's main reviewer; an unknown or missing environment value is other", () => {
+    const byClaude = [{ message: "feat: x\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" }];
+    const byCodex = [{ message: "feat: x" }];
+    expect(auditorOf(byClaude, { review: "same", recheck: "same" })).toBe("claude");
+    expect(auditorOf(byClaude, { review: "other", recheck: "same" })).toBe("codex");
+    expect(auditorOf(byCodex, { review: "same", recheck: "same" })).toBe("codex");
+    expect(auditorOf(byCodex, { review: "other", recheck: "same" })).toBe("claude");
+    expect(auditorOf(byClaude, { review: "same", recheck: "other" })).toBe("codex");
+    expect(settingFromEnv({})).toEqual({ review: "other", recheck: "other" });
+    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same", OPS_KIT_RECHECK_RUNNER: "bogus" })).toEqual({ review: "same", recheck: "other" });
   });
 });
 
@@ -112,6 +123,9 @@ describe("main", () => {
       expect(await main(["select", "--repo", "o/r"], gh(), now, { SWITCHBOARD_POST_AUDIT_MAX: "x" })).toBe(2);
       // 値の無い --repo は今のリポジトリに落ちず exit 2
       expect(await main(["select", "--repo"], gh(), now, {})).toBe(2);
+      // the Task's settings reach the auditor: Claude implemented, recheck same + review other → the main reviewer is Codex; review same → Claude
+      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, { OPS_KIT_RECHECK_RUNNER: "same" })).toBe(0);
+      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, { OPS_KIT_RECHECK_RUNNER: "same", OPS_KIT_REVIEW_RUNNER: "same" })).toBe(0);
     } finally {
       console.log = log;
     }
@@ -123,6 +137,8 @@ describe("main", () => {
     const capped = JSON.parse(out[1]!);
     expect(capped.selected).toEqual([]);
     expect(capped.overflow).toBe(1);
+    expect(JSON.parse(out[2]!).selected[0].auditor).toBe("codex");
+    expect(JSON.parse(out[3]!).selected[0].auditor).toBe("claude");
   });
 });
 

@@ -187,6 +187,8 @@ export interface TaskManagerOptions {
   dockerEnv?: (taskId: string) => Record<string, string>;
   /** The review setting (`settings.reviewRunner`): the skills placed at a start or resume are rendered with it. Absent = "other". */
   reviewRunner?: () => "other" | "same";
+  /** The recheck and post-merge audit setting: rendered into the skills and passed as `OPS_KIT_RECHECK_RUNNER`. Absent = "other". */
+  recheckRunner?: () => "other" | "same";
   /** How many daemon stops in a row a turn is resumed after (`quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
   maxStopResumes?: () => number;
   /** The MCP servers a Task's runner gets (`mcp.yaml` `servers`). Absent = none. */
@@ -273,6 +275,7 @@ export abstract class TaskManagerState {
   protected dockerEnv: TaskManagerOptions["dockerEnv"];
   protected maxStopResumes: () => number;
   protected reviewRunner: TaskManagerOptions["reviewRunner"];
+  protected recheckRunner: TaskManagerOptions["recheckRunner"];
   protected mcpServers: TaskManagerOptions["mcpServers"];
   protected bedrock: TaskManagerOptions["bedrock"];
   protected maxRunners: () => number;
@@ -324,6 +327,7 @@ export abstract class TaskManagerState {
     this.dockerEnv = opts.dockerEnv;
     this.maxStopResumes = opts.maxStopResumes ?? (() => MAX_STOP_RESUMES);
     this.reviewRunner = opts.reviewRunner;
+    this.recheckRunner = opts.recheckRunner;
     this.mcpServers = opts.mcpServers;
     this.bedrock = opts.bedrock;
     this.maxRunners = opts.maxRunners ?? (() => Infinity);

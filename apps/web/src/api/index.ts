@@ -16,6 +16,7 @@ import { routingApi } from "./routing.ts";
 import { ledgerApi } from "./ledger.ts";
 import { opsApi } from "./ops.ts";
 import { evalsApi } from "./evals.ts";
+import { bundleApi } from "./bundle.ts";
 
 export const api = {
   ...daemonApi,
@@ -35,4 +36,5 @@ export const api = {
   ...ledgerApi,
   ...opsApi,
   ...evalsApi,
+  ...bundleApi,
 };

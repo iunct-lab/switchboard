@@ -13,6 +13,7 @@ import { syncsGithub } from "./backlog-gh.ts";
 import { criteria, confirmationsOf } from "./backlog-item.ts";
 import { DECISION_HEADING, ANSWER_HEADING, HOLD_HEADING } from "./backlog-comments.ts";
 import { shown, projectItemOf, issueRecord, shownRecords } from "./backlog-stored.ts";
+import { grantHeadsOf, type GrantHeads } from "./merge-grants.ts";
 
 /* ---------- edits kept here and sent to GitHub later ---------- */
 
@@ -284,14 +285,16 @@ function comment(issue: BacklogRecord, n: number, body: string, now: number, ext
 
 /**
  * `## 回答` + text on Issue n, then the needs-decision label off, kept here and sent in that order.
- * `screen` = the person gave it on the app's screen: its comment's operation keeps the mark screenAnswer reads.
+ * `screen` = the person gave it on the app's screen: its comment's operation keeps the mark screenAnswer reads, and
+ * `heads`, the heads of the PRs its grant sentences name as read when it was taken (`answerGrantHeads`) — the one record
+ * of what the answer's grants are for.
  * `by` = who else gave it (`task:<id>`, `api`): kept with the operation as a trace, and never read as the person's.
  */
-export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: { screen?: boolean; by?: string } = {}): void {
+export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: { screen?: boolean; by?: string; heads?: GrantHeads } = {}): void {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
   if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してから回答してください` : `#${n} は保存されていません`, rec ? 409 : 404);
-  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now, opts.screen ? { screen: true } : opts.by ? { by: opts.by } : {});
+  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now, opts.screen ? { screen: true, ...(opts.heads ? { heads: opts.heads } : {}) } : opts.by ? { by: opts.by } : {});
   // a question the work went on from has no label to take off
   const labelled = (shown(rec) as BacklogIssueData).labels.includes("needs-decision");
   db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, ...(labelled ? [{ issue: rec.externalId, targetKind: "issue" as const, target: rec.externalId, kind: "set" as const, field: "label:needs-decision", payload: false, base: true }] : [])] }, now);
@@ -301,8 +304,9 @@ export function answerStoredDecision(db: Db, source: BacklogSource, n: number, t
  * The newest `## 回答` of Issue n and its sub-issues (a PBI and its Tasks) when the person gave it on the app's screen: its comment
  * was made here with the `screen` mark. null = there is none, or the newest came from GitHub (written there, or imported
  * only), from a saved policy, or was edited after it was given — only the screen's answer is the person's words to the next stage Task.
+ * `heads`: the heads its grants are for (answerStoredDecision); absent on an answer taken before answers kept them.
  */
-export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string; id: string } | null {
+export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string; id: string; heads?: GrantHeads } | null {
   const records = shownRecords(db, source);
   const item = records.find((r) => r.objectKind === "issue" && (r.remote as BacklogIssueData | null)?.number === n)?.remote as BacklogIssueData | undefined;
   const want = new Set([n, ...(item?.subIssues ?? [])]);
@@ -318,7 +322,10 @@ export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue:
   // never an operation taken in from a work machine, whatever it carries: the screen meant is this instance's
   const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && o.target === last.id && machineOfOperation(o.id) === null && (o.payload as { screen?: unknown } | null)?.screen === true);
   const given = (sent?.payload as { body?: unknown } | undefined)?.body;
-  return typeof given === "string" && given.trim() === last.body.trim() ? { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id } : null;
+  if (typeof given !== "string" || given.trim() !== last.body.trim()) return null;
+  // the heads its grants are for, as kept when it was taken; none kept = an answer taken before answers kept them
+  const heads = grantHeadsOf((sent!.payload as { heads?: unknown }).heads);
+  return { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id, ...(heads ? { heads } : {}) };
 }
 
 /** `## 保留` + text on Issue n, kept here and sent later: the needs-decision label stays (an answer would take it off). */

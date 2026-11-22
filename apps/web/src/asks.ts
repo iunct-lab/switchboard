@@ -1,4 +1,4 @@
-import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope } from "@switchboard/protocol";
+import type { Ask, AskAnswer, AskBatch, PolicyInput, PolicyScope, WaitKind } from "@switchboard/protocol";
 import { choiceKey, isRecommendedChoice } from "@switchboard/protocol";
 import { issueHref } from "./backlogSync.ts";
 import { jstClock, jstDay } from "./time.ts";
@@ -70,8 +70,42 @@ export function workspaceSections(asks: Ask[]): Array<{ key: string; name: strin
 export const workspaceChips = (asks: Ask[]) =>
   workspaceSections(asks).map((s) => {
     const mine = s.asks.filter((a) => groupKeyOf(a) === "person");
-    return { key: s.key, name: s.name, count: askRows(mine).filter((r) => r.open).length + mine.filter((a) => a.kind === "approval").length };
+    // a wait past its limit that is answered here is a card of its own under its kind's heading, not part of a row
+    const waits = new Set(waitGroups(mine).flatMap((g) => g.asks));
+    return { key: s.key, name: s.name, count: askRows(mine.filter((a) => !waits.has(a))).filter((r) => r.open).length + mine.filter((a) => a.kind === "approval").length + waits.size };
   });
+
+/** The headings the waits past their limit are put under, in the screen's order: what each kind of wait is called. A kind not here has no heading (a running Task's wait is not answered here). */
+export const WAIT_KIND_LABEL: Partial<Record<WaitKind, string>> = {
+  depends: t(pm.waitKindDepends),
+  job: t(pm.waitKindJob),
+  date: t(pm.waitKindDate),
+  resume: t(pm.waitKindResume),
+  stop: t(pm.waitKindStop),
+};
+
+// the two choices of a wait past its limit, as the daemon writes them: found by their value in the question's own `choices`
+// (never by position), and that value is what is sent back — the buttons' wording is the dictionary's
+const WAIT_CHOICE = { stop: "止める", keep: "待ち続ける" } as const;
+
+/**
+ * The two answers of a wait past its limit — the question's own choices, sent as they are; null = it is not answered
+ * here (not open, a running Task's wait with no `choice`, or choices that are not the two). The one place that tells
+ * which choice stops and which keeps waiting.
+ */
+export function waitChoices(a: Pick<Ask, "kind" | "state" | "answers" | "choices" | "wait">): { stop: string; keep: string } | null {
+  if (a.kind !== "wait" || !a.wait || a.state !== "open" || !a.answers.includes("choice")) return null;
+  const stop = a.choices.find((c) => c === WAIT_CHOICE.stop);
+  const keep = a.choices.find((c) => c === WAIT_CHOICE.keep);
+  return stop !== undefined && keep !== undefined ? { stop, keep } : null;
+}
+
+/** The waits past their limit that are answered here, under one heading per kind of wait in WAIT_KIND_LABEL's order; a kind with none has no heading, and each keeps the order it was given. */
+export function waitGroups(asks: Ask[]): Array<{ kind: WaitKind; label: string; asks: Ask[] }> {
+  return (Object.keys(WAIT_KIND_LABEL) as WaitKind[])
+    .map((kind) => ({ kind, label: WAIT_KIND_LABEL[kind]!, asks: asks.filter((a) => a.wait?.kind === kind && waitChoices(a) !== null) }))
+    .filter((g) => g.asks.length > 0);
+}
 
 /** One line of the 判断待ち screen: the questions of one Workspace that wait on the same PBI (else the same Task). */
 export interface AskRow {
@@ -206,9 +240,8 @@ export function choiceParts(choice: string): { head: string; impact: string | nu
   return { head: rest.slice(0, hit.index).trim(), impact: impact || null, grant };
 }
 
-/** Whether a question's answer is written on an Issue: a decision's or a confirmation's, and a stage Task's stop that takes a grant (its grant goes on the stop's Issue). */
-const answersOnIssue = (a: Pick<Ask, "kind" | "issue" | "answers" | "grant">) =>
-  a.kind === "decision" || a.kind === "confirmation" || (a.kind === "stop" && !!a.issue && !!a.grant && a.answers.includes("grant"));
+/** Whether a question's answer is written on an Issue: a decision's or a confirmation's. */
+const answersOnIssue = (a: Pick<Ask, "kind">) => a.kind === "decision" || a.kind === "confirmation";
 
 /** The one line of a question that says where its answer goes and what goes on after it: the same target its buttons send to. */
 export function answerRoute(a: Ask): string {
@@ -219,7 +252,7 @@ export function answerRoute(a: Ask): string {
 
 /**
  * The buttons of a question, from what it takes (`answers`), its choices and its recommendation: a stop's grant
- * (この操作だけ許可して続ける, on the stop's Issue for a stage Task's), an approval's 承認して続行 / 拒否, one per choice (its head, the recommended one first with （推奨）), 確認した, a notice's 誤検知として閉じる, and 保留. None when it takes
+ * (この操作だけ許可して続ける), an approval's 承認して続行 / 拒否, one per choice (its head, the recommended one first with （推奨）; a wait past its limit: 待ち続ける / 止める), 確認した, a notice's 誤検知として閉じる, and 保留. None when it takes
  * no answer; free text (and a confirmation's 違う) is the card's text box.
  */
 export function answerButtons(a: Ask): AnswerButton[] {
@@ -227,7 +260,7 @@ export function answerButtons(a: Ask): AnswerButton[] {
   const target = answerTarget(a);
   const next = a.next ?? t(m.unknown);
   const out: AnswerButton[] = [];
-  if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target: a.issue ? `Issue #${a.issue.number}` : target, next, sub: null, primary: true });
+  if (takes.has("grant") && a.grant) out.push({ label: t(m.btnGrant), answer: { kind: "grant" }, send: a.grant, grant: a.grant, target, next, sub: null, primary: true });
   if (takes.has("allow")) {
     // `send` (here and below) is sent to the daemon as the answer: it stays Japanese in either language
     // ui-strings: value "ツール" — part of the answer sent to the daemon
@@ -246,7 +279,12 @@ export function answerButtons(a: Ask): AnswerButton[] {
     }
     return out;
   }
-  if (takes.has("choice")) {
+  // a wait past its limit: 待ち続ける then 止める, neither the recommended one; what is sent is the question's own choice
+  const wait = waitChoices(a);
+  if (wait) {
+    out.push({ label: t(pm.waitKeep), answer: { kind: "choice", choice: wait.keep }, send: wait.keep, grant: null, target, next, sub: null, primary: false });
+    out.push({ label: t(pm.waitStop), answer: { kind: "choice", choice: wait.stop }, send: wait.stop, grant: null, target, next, sub: null, primary: false });
+  } else if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;
     const choices = [...a.choices].sort((x, y) => Number(choiceKey(y) === rec) - Number(choiceKey(x) === rec));
     for (const c of choices) {

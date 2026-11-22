@@ -171,7 +171,7 @@ describe("flow-improvement limit", () => {
     const decided = { ...asked, outcome: "finished" as const };
     const ask: BacklogItem["stopSummary"][number] = {
       key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
-      count: 1, state: "exhausted", firstAt: 1, lastAt: 2, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
+      count: 1, state: "exhausted", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
     };
     const free = flowItem({ number: 11, ...progress, lastTask: decided, commentedAt: "2026-09-29T00:00:00Z" }); // moved since the Task
     expect(flowRunning([free])).toBe(1);
@@ -410,6 +410,24 @@ test("backlog-next allocation: a workspace skipped for its share still gets its 
   expect((await runSchedule(idle.base, await backlogNextSchedule(idle.base))).status).toBe(201);
   expect(firedTasks().map((t) => t.workspaceId)).not.toContain(idle.ids.app!);
   expect((await scheduleLogAll(idle.base)).some((l) => l.includes("飛ばした: app: 取り分"))).toBe(false);
+  await shutdown();
+  // app is over its share and each item it could pick was started automatically before, with nothing happened since: the gate holds them all
+  const held = await threeWorkspaces(holdingClaude().adapter);
+  closeTried(...Object.values(held.ids));
+  expect((await shareOf(held.base, held.ids.app!, 0.2)).status).toBe(200);
+  expect((await shareOf(held.base, held.ids.lib!, 0.5)).status).toBe(200);
+  spendIn("tsk_alloc_app4", held.ids.app!, 60);
+  spendIn("tsk_alloc_lib4", held.ids.lib!, 20);
+  const later = Date.now() + 60_000;
+  // every Issue of the fixtures (300 to 320) and every stage
+  for (let n = 300; n <= 320; n++) for (const action of ["to-pbi", "to-tasks", "complete", "check", "close", "direct"] as const) {
+    const i = { number: n };
+    const id = `tsk_held_${n}_${action}`;
+    core!.db.insertTask({ id, workspaceId: held.ids.app!, title: id, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: i.number, action, auto: true }, statusAt: later, createdAt: later, updatedAt: later });
+  }
+  expect((await runSchedule(held.base, await backlogNextSchedule(held.base))).status).toBe(201);
+  expect(firedTasks().filter((t) => !t.id.startsWith("tsk_held_")).map((t) => t.workspaceId)).not.toContain(held.ids.app!);
+  expect((await scheduleLogAll(held.base)).some((l) => l.includes("飛ばした: app: 取り分"))).toBe(false);
 });
 
 test("allocation API flow limit: the PBIs counted against the limit and the Ready ones it holds, per workspace", async () => {

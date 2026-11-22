@@ -6,8 +6,9 @@ import { ASK_HISTORY_MS, PROCEED_CONFIRMED } from "./backlog-comments.ts";
 import { isAnswered, isUnblocked, priorityRank } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
-import { issueOf, NEEDS_PERSON, spanText } from "./stops.ts";
+import { issueOf, NEEDS_PERSON, resumableDepends, spanText, WAIT_KEY } from "./stops.ts";
 import { IN_FLIGHT, TURN_ENDED } from "./task-status.ts";
+import { answerableWait, WAIT_ANSWER_NEXT, WAIT_KEEP_CHOICE, WAIT_STOP_CHOICE } from "./waits.ts";
 
 /**
  * The questions waiting on the user, built from the records each time they are read — the
@@ -129,7 +130,7 @@ export function resumeOfIssue(input: {
 
 /**
  * How a Task goes on after the person's reply: the reply is its record and its resume, so it is the Task's state —
- * waiting for the usage limit, running, failed (in error, or a send that failed after the reply). null = no reply, or it
+ * waiting for the usage limit or for a run slot, running, failed (in error, or a send that failed after the reply). null = no reply, or it
  * went on and stopped again by itself (idle / done: resolved).
  */
 export function resumeOfTask(input: { task: Task; repliedAt: number | null; failure: { at: number; reason: string } | null }): AskResume | null {
@@ -137,6 +138,7 @@ export function resumeOfTask(input: { task: Task; repliedAt: number | null; fail
   if (repliedAt === null) return null;
   if (failure && failure.at >= repliedAt) return { state: "failed", reason: failure.reason, taskId: t.id, at: failure.at };
   if (t.resumeAt !== null) return { state: "queued", reason: `使用上限の解除待ち（${new Date(t.resumeAt).toISOString()}）`, taskId: t.id, at: t.updatedAt };
+  if (t.queuedAt !== null) return { state: "queued", reason: "実行枠待ち", taskId: t.id, at: t.queuedAt };
   if (IN_FLIGHT.has(t.status)) return { state: "running", reason: null, taskId: t.id, at: repliedAt };
   if (t.status === "error" || t.status === "aborted") return { state: "failed", reason: `Task が ${t.status}`, taskId: t.id, at: t.updatedAt };
   return null;
@@ -166,6 +168,9 @@ export function answersOf(a: Pick<Ask, "kind" | "needs" | "state" | "choices" | 
       return ["confirm"];
     case "stop":
       return a.needs === "person" ? (a.grant ? ["grant", "text"] : ["text"]) : [];
+    case "wait":
+      // a wait past its limit that has the two answers (止める / 待ち続ける); a PBI's wait for PRs / Issues has no choices
+      return a.needs === "person" ? choice : [];
     default:
       return [];
   }
@@ -265,9 +270,9 @@ export function policyOf(ask: Ask, input: { policies: AnswerPolicy[]; confirmHit
   // a grant allows one operation once: saved as a policy it would allow the same again
   const granted = ask.grant !== null || ask.grants.some((g) => g !== null);
   const [scopes, note]: [AskPolicy["scopes"], string | null] =
-    // a check is made of a question tool's questions only: a plain card, answered once and never a policy;
+    // a check is made of a question tool's questions only: a plain card, answered once and never a policy (so is a wait past its limit: each answer is that time's);
     // one the work went on from is looked at by the person afterwards, never answered by a saved policy
-    ask.answers.length === 0 || refused || ask.kind === "check" || ask.proceeding
+    ask.answers.length === 0 || refused || ask.kind === "check" || ask.kind === "wait" || ask.proceeding
       ? [[], refused ? "ランナー側の拒否は保存した方針では解除できません" : null]
       : granted
         ? [[], GRANT_NOTE]
@@ -338,18 +343,25 @@ export function lastReplyOf(text: string | null): string | null {
   return text.length > LAST_REPLY_MAX ? `${text.slice(0, LAST_REPLY_MAX)}…` : text;
 }
 
+/** An id up to its time (its last `@`): the same question asked again keeps this part. The whole id when it has no `@`. */
+export const askIdBase = (id: string): string => (id.lastIndexOf("@") < 0 ? id : id.slice(0, id.lastIndexOf("@")));
+
+/** A stop's question: its series, and the time the newest stop took its present op + reason + grant — reported again with another grant, it is another question, and no earlier answer is its answer. */
+export const stopAskId = (s: Pick<StopSummary, "key" | "contentAt">): string => `stop:${s.key.replaceAll("\u0000", "|")}@${s.contentAt}`;
+
 function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "state" | "at" | "changedAt" | "reason" | "question" | "next" | "source" | "route" | "conditions" | "task" | "lastReply">, next: string | null, outcome: Task["outcome"] | null, lastReply?: (taskId: string) => string | null): Ask {
   // a first stop has no earlier one to show the answer as a change (`next` stays decide): its `answered` says the person's reply came after it
   const answered = s.lastAnswer !== null && (s.next === "resume" || (s.next === "decide" && s.answered));
   // a stop that asks (`next` decide) is a question for the person while the stopping Task's outcome (written from its stop
   // records) is needs_action — or failed: a turn cut or stopped with the stop still asking goes on by nothing but the
   // person — and over once it is finished (a later turn ended with nothing to do); a stop that waits by
-  // itself stays auto, whatever the Task's outcome
+  // itself stays auto, whatever the Task's outcome. A `depends` stop the app does not resume asks the person too.
+  const asks = s.next === "decide" || (s.reason === "depends" && s.state === "waiting" && !resumableDepends(s));
   const [needs, state]: [Ask["needs"], Ask["state"]] =
-    s.next === "none" ? [NEEDS_PERSON.has(s.reason) || s.lastAnswer ? "person" : "auto", "resolved"] : answered ? ["person", "answered"] : s.next === "decide" && (outcome === "needs_action" || outcome === "failed") ? ["person", "open"] : s.next === "decide" && outcome === "finished" ? ["auto", "resolved"] : ["auto", "open"];
+    s.next === "none" ? [NEEDS_PERSON.has(s.reason) || s.lastAnswer ? "person" : "auto", "resolved"] : answered ? ["person", "answered"] : asks && (outcome === "needs_action" || outcome === "failed") ? ["person", "open"] : asks && outcome === "finished" ? ["auto", "resolved"] : ["auto", "open"];
   return {
     ...shared,
-    id: `stop:${s.key.replaceAll("\u0000", "|")}`,
+    id: stopAskId(s),
     kind: "stop",
     needs,
     state,
@@ -358,7 +370,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
     task: { id: s.work.taskId, title: null },
     reason: `${s.reason}: ${s.evidence}${dueOf(s)}`,
     question: null,
-    grant: s.reason === "permission" ? s.grant : null,
+    grant: NEEDS_PERSON.has(s.reason) ? s.grant : null,
     next,
     source: { label: "停止記録", url: null, taskId: s.work.taskId },
     route: "task",
@@ -550,40 +562,59 @@ export interface GoneFacts {
   endOf: (workspaceId: string, n: number) => { kind: "issue" | "pr"; state: "CLOSED" | "MERGED"; at: number | null } | null;
   /** When a stage Task of Issue `issue` created after Task `taskId` ended as done; null = none did. */
   newerStageDone: (workspaceId: string, issue: number, taskId: string) => number | null;
+  /** When job `id` ended; null = it still runs, or there is none. */
+  jobEnded: (id: number) => number | null;
+  /** When a later run of the same schedule as Task `taskId` ended as done; null = none did, or the Task is not a schedule's (or is a stage Task). */
+  laterRunDone: (taskId: string) => number | null;
 }
 
 /**
  * The person's open questions whose target is gone are over, with no answer: the Issue asked on (or the stage Task's)
  * is closed, the PR it stopped at (`place.pr`, a stop's unmet `pr#<n>` condition) is merged or closed, or a newer stage
- * Task of the same Issue finished. Resolved with what went as the reason, shown for ASK_HISTORY_MS after it went (when
+ * Task of the same Issue finished. A question for a wait past its limit (`Ask.wait`) is over when what it waits for is:
+ * the stage Task's Issue closed, the PR / Issue of its key (`pr#<n>` / `issue#<n>`) ended, the job of its key (`job#<n>`)
+ * ended, or a later run of the same schedule finished — a key of any other form is not read. Resolved with what went as the reason, shown for ASK_HISTORY_MS after it went (when
  * that is not recorded, after the question's own last change). A tool approval is never one: the runner waits on it.
  * Only the question is taken off the list — what holds the item (a label, a reply waited for) is the Backlog's to show.
  */
+/** The waits whose other side can end without the Task: those of a Task that is not at work. A turn's own wait (a command, the runner's output, a run slot, the person) is not over because an Issue closed or a later run finished. */
+const ENDED_WAITS: ReadonlySet<string> = new Set(["depends", "job", "date", "stop", "resume"]);
 export function withGone(asks: Ask[], facts: GoneFacts, now: number): Ask[] {
+  // a wait's job and the later runs of its schedule are the daemon's own records: read for a Task with no workspace too
+  const ownEnd = (a: Ask, job: number | undefined) => {
+    if (a.kind !== "wait") return null;
+    const ended = job === undefined ? null : facts.jobEnded(job);
+    if (ended !== null) return { why: `job#${job} が終わった`, at: ended };
+    const later = a.task ? facts.laterRunDone(a.task.id) : null;
+    return later === null ? null : { why: "同じ定期実行の後の回が終わった", at: later };
+  };
   const gone = (a: Ask): { why: string; at: number | null } | null => {
     const ws = a.workspace?.id;
-    if (!ws) return null;
+    // the wait's key, when it is one whose end is recorded: [, "pr" | "issue" | "job", n]
+    const key = a.kind === "wait" ? WAIT_KEY.exec(a.wait?.key ?? "") : null;
+    const named = (kind: string) => (key?.[1] === kind ? Number(key[2]) : undefined);
+    if (!ws) return ownEnd(a, named("job"));
     const issues = [...new Set([a.issue?.number, stageIssue(a)].filter((n): n is number => typeof n === "number"))];
-    for (const n of issues) {
-      const e = facts.endOf(ws, n);
+    for (const n of [...issues, named("issue")]) {
+      const e = n === undefined ? null : facts.endOf(ws, n);
       if (e?.kind === "issue") return { why: `#${n} が閉じた`, at: e.at };
     }
-    const prs = [a.place?.pr, ...a.conditions.flatMap((c) => (!c.met && /^pr#\d+$/.test(c.key) ? [Number(c.key.slice(3))] : []))].filter((n): n is number => typeof n === "number");
+    const prs = [a.place?.pr, named("pr"), ...a.conditions.flatMap((c) => (!c.met && /^pr#\d+$/.test(c.key) ? [Number(c.key.slice(3))] : []))].filter((n): n is number => typeof n === "number");
     for (const n of prs) {
       const e = facts.endOf(ws, n);
       if (e?.kind === "pr") return { why: `PR #${n} が${e.state === "MERGED" ? "マージされた" : "閉じた"}`, at: e.at };
     }
-    if (a.task && issues.length) {
+    if (a.kind !== "wait" && a.task && issues.length) {
       for (const n of issues) {
         const at = facts.newerStageDone(ws, n, a.task.id);
         if (at !== null) return { why: `#${n} のより新しい工程 Task が終わった`, at };
       }
     }
-    return null;
+    return ownEnd(a, named("job"));
   };
   return asks
     .map((a) => {
-      if ((a.state !== "open" && a.state !== "held") || a.needs !== "person" || !(a.kind === "decision" || a.kind === "check" || a.kind === "stop" || a.kind === "confirmation")) return a;
+      if ((a.state !== "open" && a.state !== "held") || a.needs !== "person" || !(a.kind === "decision" || a.kind === "check" || a.kind === "stop" || a.kind === "confirmation" || (a.kind === "wait" && a.wait !== undefined && ENDED_WAITS.has(a.wait.kind)))) return a;
       const g = gone(a);
       return g ? { ...a, state: "resolved" as const, changedAt: g.at ?? a.changedAt, reason: `${g.why}（対象が無くなった）`, answers: [], resume: null, lastReply: null } : a;
     })
@@ -734,7 +765,9 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     // a wait past its limit, or a runner silent past its: nothing ends it by itself any more, so it is the person's to look at
     for (const w of overWaits(t, now)) {
       const silent = w.kind === "output";
-      const spans = `${spanText(now - w.since)}（上限 ${spanText(w.until - w.since)}）`;
+      // a wait that comes from a stop of a Task whose turn is over is answered here; any other is the Task's own to end
+      const answered = answerableWait(t, w);
+      const spans =`${spanText(now - w.since)}（上限 ${spanText(w.until - w.since)}）`;
       asks.push({
         ...shared(t, t.id, t.title),
         blockers: [],
@@ -746,9 +779,11 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
         changedAt: w.until,
         reason: silent ? `応答なし: ${w.label}が ${spans} 無い` : `待ちが上限を過ぎた: ${w.label} を ${spans} 待っている`,
         question: null,
-        next: silent ? "Task を開いて様子を見る（固まっていれば中断して、返信で再開する）" : "Task を開いて、待ち続けるか・相手を進めるか・止めるかを決める",
+        choices: answered ? [WAIT_STOP_CHOICE, WAIT_KEEP_CHOICE] : [],
+        next: silent ? "Task を開いて様子を見る（固まっていれば中断して、返信で再開する）" : answered ? WAIT_ANSWER_NEXT : "Task を開いて、待ち続けるか・相手を進めるか・止めるかを決める",
         source: { label: "待ちの記録", url: null, taskId: t.id },
         route: "task",
+        wait: { kind: w.kind, key: w.key },
       });
     }
     if (issueOf(t) === null)

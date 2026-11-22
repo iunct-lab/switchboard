@@ -26,6 +26,9 @@
  * with an old stop, are answered with the option and the reply reaches the Task — at 1280 and 390 (nothing sideways).
  * A stage Task's stop that took a long last reply: its row opens to the reason, the last reply (six lines, 全文 for the rest), where the
  * reply goes and the box; the reply reaches the Task once and it runs; at 390 nothing sideways and the button a 44px target.
+ * Waits past their limit: two Tasks stopped on an open PR for four days are under the heading 「PR・Issue 2」 with its two buttons, a card each
+ * with 待ち続ける / 止める and 「Task を開く」 — at 1280 and 390 (nothing sideways, no title or button broken); a third comes up after the
+ * screen was drawn, 「2 件を止める」 answers the two that were shown and the third stays open, then its own 待ち続ける answers it.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -36,6 +39,7 @@ import { importing, sending } from "../packages/core/fixtures/github-import.ts";
 import type { GhRunner } from "../packages/core/src/backlog-gh.ts";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
+import { boundsOf, checkWaits, DEPENDS_LIMIT_MS, SILENT_AFTER_MS, WAIT_LIMIT_MS, waitsDirOf } from "../packages/core/src/waits.ts";
 import { rowKey } from "../apps/web/src/asks.ts";
 import { releaseBody } from "./parallel-guard.ts";
 
@@ -523,6 +527,7 @@ try {
   core.db.insertLedger({ taskId: bud, runner: "codex", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
   const refused = await task("拒否された Task", "codex", "done", (s) => s !== "running");
   stop(refused, "permission", "waiting");
+  await post(`/api/tasks/${refused}/outcome`, { outcome: "needs_action" });
   // `#304` asks now (its ## 判断待ち with A / B), and its last stage Task stopped on CI: answering it does not take that away
   issue(304).labels.nodes.push({ name: "needs-decision" });
   comments(304).push({ body: "## 判断待ち\n**問い**: どちらで作るか\n**選択肢**:\n- A: 小さく — 影響: 速い\n- B: 大きく — 影響: 遅い\n**推奨**: A — 小さい", createdAt: new Date().toISOString() });
@@ -927,6 +932,7 @@ stageOf(ci, 304);
     const id = await qTask(`#${n} 実装`, "stopreply");
     stageOf(id, n);
     core.db.appendEvent(id, { t: "stop.record", stop: { id: `s-${n}`, work: { workspaceId: meta.id, issue: n, taskId: id }, op: "ask", target: "", reason: "input", evidence: "返信が要る", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: Date.now() - 3_600_000 } } as AgentEvent);
+    await post(`/api/tasks/${id}/outcome`, { outcome: "needs_action" });
     await imported(true);
     const ask = ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks.find((x) => x.kind === "stop" && x.task?.id === id);
     assert(ask && ask.state === "open" && ask.answers.includes("text") && ask.lastReply === STOP_REPLY, `the stage Task's stop: ${JSON.stringify(ask)}`);
@@ -969,6 +975,61 @@ stageOf(ci, 304);
   report.stopReply = { tasks: [stopA.id, stopB.id], widths: [1280, 390] };
   await Promise.all([stopA.id, stopB.id].map((id) => post(`/api/tasks/${id}/abort`, {})));
 
+  // 上限を過ぎた待ちをまとめて止める: Tasks whose turn ended on a stop that waits for the open PR `#779` (the fixture's), four days ago — past the
+  // three days a PR / an Issue is waited for. The daemon's own look (checkWaits, every 30 s in a real one) stores the wait, so the question is the daemon's
+  const listed = async () => ((await (await fetch(`${base}/api/asks`)).json()) as { asks: Ask[] }).asks;
+  const overWait = async (title: string) => {
+    const id = await qTask(title, "done");
+    core.db.appendEvent(id, { t: "stop.record", stop: { id: `${id}/s-over`, work: { workspaceId: meta.id, issue: null, taskId: id }, op: "gh pr merge", target: "#779", reason: "depends", evidence: "PR #779 の完了待ち", safety: "before-effect", conditions: [{ key: "pr#779", value: "open", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 4 * 86_400_000 } } as AgentEvent);
+    // the turn ended on that stop (the judge of this script never answers: its judgement is over here, as a real daemon's is)
+    core.db.updateTask(id, { outcome: "waits", judgingAt: null });
+    await checkWaits({ db: core.db, tasks: core.tasks, dir: waitsDirOf(home), bounds: () => boundsOf({ silentAfterMs: SILENT_AFTER_MS, waitLimitMs: WAIT_LIMIT_MS, dependsLimitMs: DEPENDS_LIMIT_MS }), broadcastTask: () => undefined }, Date.now());
+    const ask = await until(async () => (await listed()).find((x) => x.id.startsWith(`waitover:${id}:`)), `the wait past its limit of ${title}`, () => taskState(id));
+    assert(ask.state === "open" && ask.needs === "person" && ask.wait?.kind === "depends" && ask.wait.key === "pr#779" && ask.answers.includes("choice") && same(ask.choices, ["止める", "待ち続ける"]), `the wait's question of ${title}: ${JSON.stringify(ask)}`);
+    return { id, ask: ask.id };
+  };
+  /** The headings of the waits past their limit as the screen has them: the title with its count, the two buttons, the cards under it and what each card offers. */
+  const waitHeads = () => evaluate(`[...document.querySelectorAll('.ask-waits')].map(g => { const h = g.querySelector('.ask-wait-head h6'); const bs = [...g.querySelectorAll('.ask-wait-actions button')]; return { kind: g.dataset.waitKind, head: h.textContent.trim(), headLines: h.getBoundingClientRect().height < parseFloat(getComputedStyle(h).fontSize) * 2 ? 1 : 2, buttons: bs.map(b => b.textContent.trim()), off: bs.map(b => b.disabled), heights: bs.map(b => Math.round(b.getBoundingClientRect().height)), cut: bs.some(b => b.scrollWidth > b.clientWidth), sameLine: new Set(bs.map(b => Math.round(b.getBoundingClientRect().top))).size === 1, cards: [...g.querySelectorAll('[data-ask]')].map(c => ({ id: c.dataset.ask, reason: c.querySelector('.ask-stop-reason')?.textContent ?? null, buttons: [...c.querySelectorAll('.ask-button button')].map(b => b.textContent.trim()), rows: new Set([...c.querySelectorAll('.ask-button button')].map(b => Math.round(b.getBoundingClientRect().top))).size, route: !!c.querySelector('.ask-answer-route'), links: [...c.parentElement.querySelectorAll('.ask-links .link')].map(l => l.textContent.trim()) })) }; })`) as Promise<Json[]>;
+  const over1 = await overWait("上限を過ぎた待ちの Task 1");
+  const over2 = await overWait("上限を過ぎた待ちの Task 2");
+  const waitScreen = async (width: number) => {
+    await open();
+    const heads = await until(async () => { const h = await waitHeads(); return h.length ? h : null; }, `the heading of the waits past their limit at ${width}`, listed);
+    assert(heads.length === 1 && heads[0].kind === "depends" && heads[0].head === "PR・Issue 2" && same(heads[0].buttons, ["2 件を待ち続ける", "2 件を止める"]) && same(heads[0].off, [false, false]), `the heading at ${width}: ${JSON.stringify(heads)}`);
+    assert(same(heads[0].cards.map((c: Json) => c.id).sort(), [over1.ask, over2.ask].sort()), `the cards under the heading at ${width}: ${JSON.stringify(heads[0].cards)}`);
+    for (const c of heads[0].cards) assert(c.reason?.startsWith("待ちが上限を過ぎた: PR #779 を ") && same(c.buttons, ["待ち続ける", "止める"]) && c.rows === 1 && !c.route && same(c.links, ["Task を開く"]), `a wait's card at ${width}: ${JSON.stringify(c)}`);
+    // neither the title nor a button breaks: the title one line, the two buttons whole on one line, 44px targets on a phone
+    assert(heads[0].headLines === 1 && heads[0].sameLine && !heads[0].cut && (width > 390 || heads[0].heights.every((h: number) => h >= 44)), `the heading's layout at ${width}: ${JSON.stringify(heads[0])}`);
+    await sideways(width, "the 判断待ち screen with the waits past their limit");
+    await evaluate(`document.querySelector('.ask-waits').scrollIntoView({ block: "start" })`);
+    await shot(`asks-waits-${width}.png`);
+  };
+  await call("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await waitScreen(1280);
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await call("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await waitScreen(390);
+  // a third wait goes past its limit after the heading was drawn: the list has it, the screen (not read again) still shows two
+  const over3 = await overWait("上限を過ぎた待ちの Task 3");
+  const still = await waitHeads();
+  assert(still[0].head === "PR・Issue 2" && same(still[0].cards.map((c: Json) => c.id).sort(), [over1.ask, over2.ask].sort()), `the heading before the press: ${JSON.stringify(still)}`);
+  await evaluate(`[...document.querySelectorAll('.ask-waits[data-wait-kind="depends"] .ask-wait-actions button')].find(b => b.textContent.trim() === '2 件を止める').click()`);
+  // the two that were under the heading are answered and gone; the one that came up since was not answered and is still open, under the heading read again
+  const openWaits = async () => (await listed()).filter((x) => x.id.startsWith("waitover:") && x.state === "open").map((x) => x.id);
+  await until(async () => same(await openWaits(), [over3.ask]), "the two waits shown are stopped and the third stays open", openWaits);
+  const afterStop = await until(async () => { const h = await waitHeads(); return h[0]?.head === "PR・Issue 1" ? h : null; }, "the heading with the third wait only", waitHeads);
+  assert(same(afterStop[0].buttons, ["1 件を待ち続ける", "1 件を止める"]) && same(afterStop[0].off, [false, false]) && same(afterStop[0].cards.map((c: Json) => c.id), [over3.ask]), `the heading after the press: ${JSON.stringify(afterStop)}`);
+  assert(!(await evaluate(`!!document.querySelector('.ask-wait-failed')`)), "no wait failed to be answered");
+  assert(same(await openWaits(), [over3.ask]), "the third wait was answered by the heading's button");
+  // a stopped Task's stop is over: nothing of it waits any more
+  for (const w of [over1, over2]) assert(core.db.listStopRecords([w.id]).at(-1)?.state === "resolved", `the stop of ${w.id} after 止める: ${JSON.stringify(core.db.listStopRecords([w.id]).at(-1))}`);
+  // the row's own button: 待ち続ける answers the third, and no heading is left
+  await evaluate(`[...${card(over3.ask)}.querySelectorAll('.ask-button button')].find(b => b.textContent.trim() === '待ち続ける').click()`);
+  await until(async () => (await openWaits()).length === 0, "the third wait is answered with 待ち続ける", openWaits);
+  await until(async () => (await waitHeads()).length === 0, "no heading of waits is left", waitHeads);
+  assert(core.db.listStopRecords([over3.id]).at(-1)?.state !== "resolved", "待ち続ける keeps the stop open");
+  report.waits = { tasks: [over1.id, over2.id, over3.id], stopped: [over1.ask, over2.ask], kept: over3.ask, widths: [1280, 390] };
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ ...report, answered, consoleErrors: errors.length }));

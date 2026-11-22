@@ -3,12 +3,13 @@ import type { Artifact, Ask, AskAnswer, AskBatch, AskChanged, AskList, PendingAp
 import { api } from "../api/index.ts";
 import { ArtifactBody } from "./Artifacts.tsx";
 import { DeviceAuth } from "./DeviceAuth.tsx";
+import { WaitGroups, type WaitFailure } from "./WaitGroups.tsx";
 import { mcpHintLabel, summarize } from "../approvals.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitersLine, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
+import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitChoices, waitersLine, waitGroups, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
 
 /** The 「次回も使う」 form of a card: the range, target, conditions and expiry, and what would be saved. */
 function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setForm: Dispatch<SetStateAction<PolicyForm | null>>; policy: PolicyInput | undefined; answerText: string }) {
@@ -156,13 +157,14 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
           ))}
         </div>
       )}
-      {(takesText || confirm || buttons.some((b) => b.answer.kind !== "dismiss")) && !(reply && buttons.length === 0) && (
+      {/* a wait's answer is not sent to its Task: its two buttons say what they do */}
+      {(takesText || confirm || buttons.some((b) => b.answer.kind !== "dismiss")) && !(reply && buttons.length === 0) && !waitChoices(x) && (
         <div className="hint ask-answer-route">
           {answerRoute(x)}
           {policy && (takesText || buttons.some((b) => b.answer.kind !== "hold" && b.answer.kind !== "deny" && b.answer.kind !== "confirm")) ? t(m.savePolicy, { scope: scopeLabel(form!.scope, x) }) : ""}
         </div>
       )}
-      {/* the reply goes to the Task: said right above its box, under the grant's route to the Issue when it has one */}
+      {/* a reply and a grant both go to the Task: said right above its box */}
       {reply && <div className="hint ask-reply-target">{replyTarget(x)}</div>}
       {(takesText || confirm) && (
         <div className="ask-text">
@@ -225,8 +227,8 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
       )}
       {/* a live approval's own head says what it asks; a long question shows its first lines, 全文 opens it */}
       {parts.question && !live && <AskQuestion text={parts.question} />}
-      {/* a stop has no question: the reason it stopped is what is read first */}
-      {x.kind === "stop" && x.needs === "person" && x.reason && (x.state === "open" || x.state === "held") && !live && <div className="ask-question ask-stop-reason">{x.reason}</div>}
+      {/* a stop, and a wait past its limit, have no question: the reason is what is read first */}
+      {(x.kind === "stop" || x.kind === "wait") && x.needs === "person" && x.reason && (x.state === "open" || x.state === "held") && !live && <div className="ask-question ask-stop-reason">{x.reason}</div>}
       {props.liveHead}
       {was?.changes && (
         <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
@@ -350,6 +352,9 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const [answeredRows, setAnsweredRows] = useState<AnsweredHere[]>([]);
   // the Workspace whose questions going on by their recommendation are being confirmed together
   const [confirming, setConfirming] = useState<string | null>(null);
+  // a heading's button of the waits past their limit is being sent, and the questions its last press could not answer
+  const [waitSending, setWaitSending] = useState(false);
+  const [waitFailed, setWaitFailed] = useState<WaitFailure[]>([]);
   const { onError } = props;
   const seq = useRef(0);
   const load = useCallback(() => {
@@ -389,8 +394,11 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   };
   const askId = (a: PendingApproval) => `approval:${a.taskId}:${a.id}`;
   const send = (x: Ask, answer: AskAnswer, policy?: PolicyInput) => {
-    if (sending) return;
+    if (sending || waitSending) return;
     setSending(x.id);
+    setWaitFailed((f) => f.filter((y) => y.id !== x.id));
+    // a wait past its limit that is answered is gone from the list read again: nothing of it is kept here
+    const wait = waitChoices(x) !== null;
     const done = (v: Answered) => {
       setAnswered((m) => new Map(m).set(x.id, v));
       if (x.kind === "approval") return;
@@ -400,7 +408,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
     api
       .answerAsk(x.id, answer, policy)
       .then((r) => {
-        done({ ask: r.ask ?? x, changes: r.changes.length ? r.changes : undefined });
+        if (!wait) done({ ask: r.ask ?? x, changes: r.changes.length ? r.changes : undefined });
         const pending = props.approvals.find((a) => askId(a) === x.id);
         if (pending) props.onAnswered(pending);
         load();
@@ -419,7 +427,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   };
   // `shown`: the questions listed under the button as the person pressed it — the ones they saw are the ones confirmed
   const confirmAll = (workspaceId: string, shown: Ask[]) => {
-    if (sending || confirming) return;
+    if (sending || confirming || waitSending) return;
     setConfirming(workspaceId);
     api
       .confirmProceeding(workspaceId, shown.map((a) => a.id))
@@ -430,6 +438,21 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         load();
       });
   };
+  // `shown`: the questions under the heading as the person pressed its button — only these are answered (one that came up
+  // since is not), each with its own choice. One that fails says so on its own; the others stay answered
+  const answerWaits = (shown: Ask[], which: "stop" | "keep") => {
+    if (sending || confirming || waitSending) return;
+    const targets = shown.flatMap((x) => { const c = waitChoices(x); return c ? [{ id: x.id, label: x.task?.title ?? x.task?.id ?? x.id, choice: c[which] }] : []; });
+    setWaitSending(true);
+    setWaitFailed([]);
+    Promise.all(targets.map((g) => api.answerAsk(g.id, { kind: "choice", choice: g.choice }).then((): WaitFailure[] => [], (e): WaitFailure[] => [{ id: g.id, text: t(m.waitAnswerFailed, { label: g.label, error: String(e.message ?? e) }) }])))
+      .then((r) => setWaitFailed(r.flat()))
+      .finally(() => {
+        setWaitSending(false);
+        load();
+      });
+  };
+  const anySending = sending !== null || confirming !== null || waitSending;
   const live = (x: Ask) => (x.kind === "approval" && x.state === "open" ? props.approvals.find((a) => x.id === askId(a)) : undefined);
   // the live approvals the list does not have yet (it is loading, failed, or older): still answered with one tap
   const unlisted = props.approvals.filter((a) => !list?.asks.some((x) => x.id === askId(a)));
@@ -474,20 +497,27 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const person = personAsks.length > 0 ? { key: "person" as const, label: personBase?.label ?? t(tm.groupPerson), asks: personAsks } : null;
   const scoped = [...(person ? [person] : []), ...others.filter((g) => g.key !== "person")];
   const toolApprovals = personAsks.filter((a) => a.kind === "approval" && (!quickOnly || isQuick(a)));
-  const personSections = workspaceSections(personAsks.filter((a) => a.kind !== "approval"))
+  // the waits past their limit that are answered here: a heading per kind of wait, out of the rows (none of them is すぐ答えられる)
+  const waits = waitGroups(personAsks);
+  const inWaits = new Set(waits.flatMap((g) => g.asks.map((a) => a.id)));
+  const waitsShown = quickOnly ? [] : waits;
+  const waitCount = waitsShown.reduce((n, g) => n + g.asks.length, 0);
+  // a failure whose question is no longer under a heading (it changed, or left the list) is still said
+  const waitFailedGone = waitFailed.filter((f) => !waitsShown.some((g) => g.asks.some((a) => a.id === f.id)));
+  const personSections = workspaceSections(personAsks.filter((a) => a.kind !== "approval" && !inWaits.has(a.id)))
     .map((s) => { const rows = askRows(s.asks); const quickKeys = new Set(quickRows(rows).map((r) => r.key)); return { ...s, rows: rows.filter((r) => !quickOnly || quickKeys.has(r.key) || r.asks.some(stays)) }; })
     .filter((s) => s.rows.length > 0);
   const quick = quickRows(askRows(personAsks)).length + personAsks.filter((a) => a.kind === "approval" && isQuick(a)).length + unlisted.length;
-  const personShown = toolApprovals.length + personSections.reduce((n, s) => n + s.rows.length, 0);
+  const personShown = toolApprovals.length + personSections.reduce((n, s) => n + s.rows.length, 0) + waitCount + waitFailedGone.length;
   // the group's heading counts as the screen's does: the rows still open, and the tool approvals still open
   const isOpenAsk = (a: Ask) => a.state === "open" || a.state === "held";
-  const personOpen = toolApprovals.filter(isOpenAsk).length + personSections.reduce((n, s) => n + s.rows.filter((r) => r.open).length, 0);
+  const personOpen = toolApprovals.filter(isOpenAsk).length + personSections.reduce((n, s) => n + s.rows.filter((r) => r.open).length, 0) + waitCount;
   // the live approvals not in the list yet have no Workspace: shown (and counted) whatever the filter
   const open = (narrowed === null ? chips.reduce((n, c) => n + c.count, 0) : (chips.find((c) => c.key === narrowed)?.count ?? 0)) + unlisted.length;
   const toggle = (key: string) => setExpanded((s) => { const n = new Set(s); if (!n.delete(key)) n.add(key); return n; });
   const card = (x: Ask, standalone: boolean) => {
     const a = live(x);
-    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={sending !== null || confirming !== null} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
+    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={anySending} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
   };
   const rowView = (r: AskRow) => {
     const isOpen = expanded.has(r.key);
@@ -581,6 +611,12 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                 {ws.rows.map(rowView)}
               </div>
             ))}
+            <WaitGroups groups={waitsShown} busy={anySending} failures={waitFailed} card={(x) => card(x, true)} onAnswerAll={answerWaits} onOpenTask={props.onOpenTask} />
+            {waitFailedGone.map((f) => (
+              <div key={f.id} className="hint warn ask-wait-failed">
+                {f.text}
+              </div>
+            ))}
           </>
         ) : (
           <>
@@ -593,7 +629,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                 </h6>
                 {/* one press for the Workspace: the work already went on with these, so confirming them lets nothing new through */}
                 {g.key === "proceeding" && ws.key !== "" && confirmable(ws.asks) > 0 && (
-                  <button className="ask-confirm-all" disabled={sending !== null || confirming !== null} onClick={() => confirmAll(ws.key, ws.asks)}>
+                  <button className="ask-confirm-all" disabled={anySending} onClick={() => confirmAll(ws.key, ws.asks)}>
                     {t(m.confirmAllProceeding)}
                   </button>
                 )}

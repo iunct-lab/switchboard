@@ -161,7 +161,11 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
       lines.push(`${ws.name}: #${p.item.number} を始めない: ${why}`);
       continue;
     }
-    const t = await sc.startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done } });
+    const t = await sc.startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done }, auto: true });
+    if ("held" in t && !("error" in t)) {
+      lines.push(`飛ばした: ${ws.name}: 実装の枠: 前回の開始から出来事が増えていない: #${p.item.number}（前回 ${t.held.previousTaskId}）`);
+      continue;
+    }
     if ("active" in t) {
       lines.push(`${ws.name}: #${p.item.number} は工程 Task が動いている`);
       continue;

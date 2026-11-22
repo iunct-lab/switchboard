@@ -11,6 +11,7 @@ import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
 import { RunnerLogin } from "./RunnerLogin.tsx";
 import { Stops } from "./Stops.tsx";
+import { BundleSection } from "./BundleSection.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
@@ -1447,7 +1448,6 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
     setData(lastBacklog);
     load(true);
   };
-
   const start = (workspaceId: string, number: number, action: BacklogAction) => {
     setStarting(number);
     api
@@ -1460,7 +1460,6 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       })
       .finally(() => setStarting(null));
   };
-
   const load = (refresh: boolean) => {
     setBusy(refresh ? "refresh" : "open");
     // read with the list (opened, 再読込): backlog-next may have been turned on or off meanwhile
@@ -1600,6 +1599,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
             </details>
           );
         })()}
+        <BundleSection reloadKey={data?.fetchedAt} now={now} onOpenTask={props.onOpenTask} onStarted={props.onStarted} onReleased={() => load(false)} onError={props.onError} />
         {workspaces && workspaces.length > 0 && <NewIssue workspaces={workspaces} current={current} onCreated={() => load(false)} />}
       </section>
 

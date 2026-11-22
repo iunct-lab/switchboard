@@ -24,6 +24,41 @@ const stop = (over: Partial<Omit<StopRecord, "work">> & { work?: Partial<StopRec
     work: { workspaceId: "ws1", issue: 939, taskId: `t${n}`, ...over.work },
   });
 
+describe("answers and a stop whose content changed", () => {
+  const grant = "PR #12 をマージすることだけ許可します";
+  const answer = { ref: "seq:1757", at: 5000 };
+  test("a stop re-reported with a new reason after a reply is not answered by that reply", () => {
+    const a = stop({ id: "merge-ask", reason: "decision", grant, at: 1000 });
+    const reply = stop({ id: "merge-ask", reason: "decision", grant, answer, at: 5500 });
+    const again = stop({ id: "merge-ask", reason: "permission", grant, answer, at: 6000 });
+    const [s] = reduceStops([a, reply, again]);
+    expect(s).toMatchObject({ reason: "permission", answered: false });
+    expect(lastStopMark([a, reply, again])!.answered).toBe(false);
+  });
+
+  test("a stop re-reported unchanged after a reply stays answered", () => {
+    const a = stop({ id: "merge-ask", reason: "decision", grant, at: 1000 });
+    const reply = stop({ id: "merge-ask", reason: "decision", grant, answer, at: 5500 });
+    const again = stop({ id: "merge-ask", reason: "decision", grant, answer, at: 6000 });
+    const [s] = reduceStops([a, reply, again]);
+    expect(s).toMatchObject({ answered: true });
+    expect(lastStopMark([a, reply, again])!.answered).toBe(true);
+  });
+
+  test("contentAt is the time the newest stop took its present op, reason and grant: a new grant moves it, a record reported again unchanged keeps it", () => {
+    const a = stop({ id: "push", reason: "permission", grant, at: 1000 });
+    const same = stop({ id: "push", reason: "permission", grant, evidence: "もう一度拒まれた", at: 2000 });
+    const other = stop({ id: "push", reason: "permission", grant: "PR #13 をマージすることだけ許可します", at: 3000 });
+    expect(reduceStops([a])[0]!.contentAt).toBe(1000);
+    expect(reduceStops([a, same])[0]).toMatchObject({ lastAt: 2000, contentAt: 1000 });
+    expect(reduceStops([a, same, other])[0]).toMatchObject({ lastAt: 3000, contentAt: 3000 });
+    // back to the first grant: its content changed again, so it is not the first time's
+    expect(reduceStops([a, same, other, { ...a, at: 4000 }])[0]!.contentAt).toBe(4000);
+    // the series stopping again (a new stop id) starts at that stop's own time, with the same grant too
+    expect(reduceStops([a, stop({ id: "push2", reason: "permission", grant, at: 5000 })])[0]).toMatchObject({ count: 2, contentAt: 5000 });
+  });
+});
+
 describe("stopKey", () => {
   test("the same cause in other words is one series", () => {
     const a = stop({ reason: "transient", evidence: "HTTP 503 from api.github.com" });
@@ -293,9 +328,9 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     expect(plan).not.toContain("並列ガード");
   });
 
-  test("stopRecoveryPrompt says the three operations with a fixed sentence take the refusing side's sentence as the grant", () => {
+  test("stopRecoveryPrompt says the two operations with a fixed sentence take the refusing side's sentence as the grant", () => {
     for (const cond of [NONE, ALL, { ...NONE, workspaceMcp: true }]) {
-      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・[merge-answer] の投稿・Task の本文への名指しのパスの追加は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。");
+      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・[merge-answer] の投稿は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。");
     }
   });
 

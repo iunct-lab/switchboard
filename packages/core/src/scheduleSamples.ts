@@ -68,6 +68,7 @@ export const SCHEDULE_SAMPLES: readonly ScheduleSample[] = [
   fromDoc("schedule-review", "定期実行の見直し", "0 20 1 * *", "Schedule review", "all"),
   fromDoc("rubric-calibration", "ルーブリックの校正", "0 20 4 * *", "Rubric calibration", "all"),
   fromDoc("aws-cost-weekly", "AWS の費用の週報", "0 20 * * 5", "Weekly AWS cost report", "workspace"),
+  fromDoc("checking-pbis", "確認中の PBI をまとめて確かめる", "0 21 * * *", "Checking PBIs in one pass", "workspace"),
 ];
 
 /**

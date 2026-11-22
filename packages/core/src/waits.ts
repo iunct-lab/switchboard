@@ -73,6 +73,55 @@ export function readWaitFiles(dir: string, alive: (pid: number) => boolean = pid
 const RESUME_LABEL: Record<NonNullable<Task["resumeReason"]>, string> = { limit: "使用上限の解除", github: "GitHub の API 上限の解除", disk: "ディスクの空き", start: "使用上限の解除（開始待ち）" };
 const QUEUE_LABEL = { slot: "実行枠の空き", memory: "空きメモリ", promotion: "昇格（動いている Task の終わり）" } as const;
 
+/** The two answers to a question for a wait past its limit (`Ask.choices`, in this order), and what each leaves in the stop's actions (`<action>: <wait key>`). */
+export const WAIT_STOP_CHOICE = "止める";
+export const WAIT_KEEP_CHOICE = "待ち続ける";
+export const WAIT_STOPPED_ACTION = "利用者が止めた";
+export const WAIT_KEPT_ACTION = "利用者が待ち続けると答えた";
+/** What the question says each answer does (`Ask.next`). */
+export const WAIT_ANSWER_NEXT = `${WAIT_STOP_CHOICE}: この待ちを片づけ、相手が片づいても再開しない / ${WAIT_KEEP_CHOICE}: 上限をいまから数え直す`;
+/** The action an answer leaves on each stop of the wait `key`, cut as a stop's action is stored. */
+export const waitAnswerAction = (action: typeof WAIT_STOPPED_ACTION | typeof WAIT_KEPT_ACTION, key: string): string => `${action}: ${key}`.slice(0, 200);
+
+/** One wait an open stop makes, before its times: `until` gives the limit from when the wait began. */
+type StopWait = Pick<WaitRecord, "kind" | "key" | "label"> & { until: (since: number, b: WaitBounds) => number };
+
+/**
+ * The waits of one open stop — the one place a wait's key is built from a stop (`waitsOf` and `stopsOfWait` both read
+ * it): each unmet condition is a wait — a job (`job#<n>`), a PR / an Issue (`pr#<n>` / `issue#<n>`), a date
+ * (`after:<value>`), another runner's limit (`runner#<id>`), anything else (`<stop id>:<condition key>`); a `depends`
+ * stop with no unmet condition is one by itself (`<stop id>`).
+ */
+function stopWaits(s: StopRecord): StopWait[] {
+  const unmet = s.conditions.filter((c) => !c.met);
+  const out = unmet.map((c): StopWait => {
+    const m = WAIT_KEY.exec(c.key);
+    const runner = RUNNER_LIMIT_KEY.exec(c.key);
+    if (m && m[1] === "job") return { kind: "job", key: c.key, label: `頼んだ仕事 ${c.key}`, until: (since, b) => since + b.ownMs };
+    if (m) return { kind: "depends", key: c.key, label: `${m[1] === "pr" ? "PR" : "Issue"} #${m[2]}`, until: (since, b) => since + b.othersMs };
+    if (c.key === AFTER_KEY && !Number.isNaN(afterTime(c.value))) return { kind: "date", key: `${AFTER_KEY}:${c.value}`, label: `期日 ${c.value}`, until: (_since, b) => afterTime(c.value) + b.graceMs };
+    if (runner) {
+      const at = Date.parse(c.value);
+      return { kind: "resume", key: c.key, label: `${runner[1]} の使用上限の解除`, until: (since, b) => (Number.isNaN(at) ? since + b.ownMs : at + b.graceMs) };
+    }
+    return { kind: "stop", key: `${s.id}:${c.key}`, label: `${c.key}: ${c.value}`, until: (since, b) => since + b.othersMs };
+  });
+  // a stop that names nothing to wait for and is not the person's: nothing would ever end it
+  if (!unmet.length && s.reason === "depends") out.push({ kind: "stop", key: s.id, label: `${s.op}${s.target ? ` ${s.target}` : ""}`, until: (since, b) => since + b.othersMs });
+  return out;
+}
+
+/** The Task's own open stops that make the wait `key` (the newest record of each): what an answer to that wait's question moves. */
+export const stopsOfWait = (stops: StopRecord[], taskId: string, key: string): StopRecord[] => openStops(stops).filter((s) => s.work.taskId === taskId && stopWaits(s).some((w) => w.key === key));
+
+/**
+ * Whether the question for this wait past its limit takes the two answers: a wait that comes from a stop (a PR / an
+ * Issue, a job, a date, another condition, another runner's limit) of a Task whose turn is over. A wait of a Task at
+ * work (a command, the runner's output, the queue) and a planned resume take none: ending one means cutting the turn.
+ */
+export const answerableWait = (t: Pick<Task, "status" | "resumeAt">, w: Pick<WaitRecord, "kind" | "key">): boolean =>
+  !isWorking(t, "gate") && (w.kind === "depends" || w.kind === "job" || w.kind === "date" || w.kind === "stop" || (w.kind === "resume" && RUNNER_LIMIT_KEY.test(w.key)));
+
 export interface WaitFacts {
   task: Task;
   /** The Task's own stop records, oldest first (`Db.listStopRecords([task.id])`). */
@@ -103,6 +152,7 @@ export interface WaitFacts {
  *   of its Issue has taken the work over), each unmet condition of an open stop:
  *   a PR / an Issue `othersMs` after the stop came, a job `ownMs`, a date its time and `graceMs`, another runner's limit
  *   its time and `graceMs`, anything else `othersMs`; an open stop that waits by itself with no condition, `othersMs`.
+ *   A wait the person answered 待ち続ける to (the stop's action says so) counts from that answer.
  */
 export function waitsOf(f: WaitFacts): WaitRecord[] {
   const { task: t, now, bounds: b } = f;
@@ -128,21 +178,17 @@ export function waitsOf(f: WaitFacts): WaitRecord[] {
   }
   for (const s of openStops(f.stops)) {
     if (s.work.taskId !== t.id) continue;
-    const since = openSince.get(s.id) ?? s.at;
-    const unmet = s.conditions.filter((c) => !c.met);
-    for (const c of unmet) {
-      const m = WAIT_KEY.exec(c.key);
-      const runner = RUNNER_LIMIT_KEY.exec(c.key);
-      if (m && m[1] === "job") out.push({ kind: "job", key: c.key, label: `頼んだ仕事 ${c.key}`, since, until: since + b.ownMs });
-      else if (m) out.push({ kind: "depends", key: c.key, label: `${m[1] === "pr" ? "PR" : "Issue"} #${m[2]}`, since, until: since + b.othersMs });
-      else if (c.key === AFTER_KEY && !Number.isNaN(afterTime(c.value))) out.push({ kind: "date", key: `${AFTER_KEY}:${c.value}`, label: `期日 ${c.value}`, since, until: afterTime(c.value) + b.graceMs });
-      else if (runner) {
-        const at = Date.parse(c.value);
-        out.push({ kind: "resume", key: c.key, label: `${runner[1]} の使用上限の解除`, since, until: Number.isNaN(at) ? since + b.ownMs : at + b.graceMs });
-      } else out.push({ kind: "stop", key: `${s.id}:${c.key}`, label: `${c.key}: ${c.value}`, since, until: since + b.othersMs });
+    const opened = openSince.get(s.id) ?? s.at;
+    for (const { until, ...w } of stopWaits(s)) {
+      // 待ち続ける: the limit counts again from the person's last answer to this wait
+      const kept = waitAnswerAction(WAIT_KEPT_ACTION, w.key);
+      // an answer from before the stop was resolved and came back is not an answer to this wait
+      const keptAt = Math.max(0, ...s.actions.filter((a) => a.what === kept && a.at >= opened).map((a) => a.at));
+      const since = Math.max(opened, keptAt);
+      // a wait whose limit is a fixed time (a date, a runner's limit) would stay over after the answer: it gets one more limit from the answer too
+      const again = keptAt ? keptAt + (w.kind === "resume" || w.kind === "job" ? b.ownMs : b.othersMs) : 0;
+      out.push({ ...w, since, until: Math.max(until(since, b), again) });
     }
-    // a stop that names nothing to wait for and is not the person's: nothing would ever end it
-    if (!unmet.length && s.reason === "depends") out.push({ kind: "stop", key: s.id, label: `${s.op}${s.target ? ` ${s.target}` : ""}`, since, until: since + b.othersMs });
   }
   // one wait per key: two stops on the same PR are one wait, from the earlier
   const byKey = new Map<string, WaitRecord>();
@@ -187,6 +233,21 @@ export interface WaitWatchDeps {
  * the person. The same wait cut again with no answer from the person in between is recorded as exhausted and the turn
  * is stopped: a Task must not go back into the wait it was just cut from without being told to.
  */
+/**
+ * One Task's waits worked out again and stored when they changed (the screens are told): what the watch does for each
+ * Task it looks at, and what an answer to a wait's question does at once, so the question does not stay until the next look.
+ */
+export function refreshTaskWaits(deps: Pick<WaitWatchDeps, "db" | "broadcastTask" | "bounds">, task: Task, extra: Pick<WaitFacts, "files" | "lastEventAt" | "queue" | "refusal">, now: number): void {
+  const { db } = deps;
+  const issue = issueOf(task);
+  const superseded = issue !== null && db.lastStageTask(task.workspaceId!, issue)?.id !== task.id;
+  const waits = task.archivedAt !== null ? [] : shownWaits(waitsOf({ task, stops: db.listStopRecords([task.id]), ...extra, superseded, now, bounds: deps.bounds() }), now);
+  if (JSON.stringify(waits) === JSON.stringify(task.waits ?? [])) return;
+  db.setTaskWaits(task.id, waits);
+  const next = db.getTask(task.id);
+  if (next) deps.broadcastTask(next);
+}
+
 export async function checkWaits(deps: WaitWatchDeps, now: number): Promise<void> {
   const { db, tasks } = deps;
   const { waiting, cut } = readWaitFiles(deps.dir, deps.alive);
@@ -230,13 +291,5 @@ export async function checkWaits(deps: WaitWatchDeps, now: number): Promise<void
     if (t && !otherMachineOf(t)) candidates.set(id, t);
   }
   const bounds = deps.bounds();
-  for (const task of candidates.values()) {
-    const issue = issueOf(task);
-    const superseded = issue !== null && db.lastStageTask(task.workspaceId!, issue)?.id !== task.id;
-    const waits = task.archivedAt !== null ? [] : shownWaits(waitsOf({ task, stops: db.listStopRecords([task.id]), files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, superseded, queue, refusal: tasks.queueRefusal(task.id), now, bounds }), now);
-    if (JSON.stringify(waits) === JSON.stringify(task.waits ?? [])) continue;
-    db.setTaskWaits(task.id, waits);
-    const next = db.getTask(task.id);
-    if (next) deps.broadcastTask(next);
-  }
+  for (const task of candidates.values()) refreshTaskWaits({ ...deps, bounds: () => bounds }, task, { files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, queue, refusal: tasks.queueRefusal(task.id) }, now);
 }

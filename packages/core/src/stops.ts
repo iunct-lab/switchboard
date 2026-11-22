@@ -105,8 +105,23 @@ function answerIsOwn(stops: StopRecord[], first: Map<string, number>, places: Ma
  * Whether `last` (the newest stop of its series) was answered after it came: an answer the newest stop carries over from
  * an earlier stop at the same place (recordStop keeps it) is not an answer to this one — the Task stopped again after it.
  */
-function answeredAfter(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, last: StopRecord): boolean {
-  return answerIsOwn(stops, first, places, last, last.answer) && last.answer!.at >= first.get(last.id)!;
+function answeredAfter(stops: StopRecord[], first: Map<string, number>, since: Map<string, number>, places: Map<string, string>, last: StopRecord): boolean {
+  return answerIsOwn(stops, first, places, last, last.answer) && last.answer!.at >= since.get(last.id)!;
+}
+
+/**
+ * Per stop id, the time its record took its present op + reason + grant (records in time order): a reply older than that
+ * answered what the stop used to say, not what it says now. A record re-reported unchanged keeps the time.
+ */
+function contentSince(sorted: StopRecord[]): Map<string, number> {
+  const since = new Map<string, number>();
+  const now = new Map<string, string>();
+  for (const r of sorted) {
+    const content = JSON.stringify([r.op, r.reason, r.grant ?? null]);
+    if (now.get(r.id) !== content) since.set(r.id, r.at);
+    now.set(r.id, content);
+  }
+  return since;
 }
 
 /**
@@ -120,7 +135,9 @@ function answeredAfter(stops: StopRecord[], first: Map<string, number>, places: 
 export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string | null } = {}): StopSummary[] {
   const byId = new Map<string, StopRecord>();
   const first = new Map<string, number>();
-  for (const r of [...records].sort((a, b) => a.at - b.at)) {
+  const sorted = [...records].sort((a, b) => a.at - b.at);
+  const since = contentSince(sorted);
+  for (const r of sorted) {
     if (!first.has(r.id)) first.set(r.id, r.at);
     byId.set(r.id, r);
   }
@@ -153,8 +170,9 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
       state: last.state,
       firstAt: first.get(list[0]!.id)!,
       lastAt: last.at,
+      contentAt: since.get(last.id)!,
       lastAnswer,
-      answered: answeredAfter(stops, first, places, last) || answeredOnIssue(last),
+      answered: answeredAfter(stops, first, since, places, last) || answeredOnIssue(last),
       grant: last.grant ?? null,
       conditions: last.conditions,
       actions: last.actions,
@@ -174,7 +192,9 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
 export function lastStopMark(records: StopRecord[]): Omit<TaskStopMark, "replies"> | null {
   const byId = new Map<string, StopRecord>();
   const first = new Map<string, number>();
-  for (const r of [...records].sort((a, b) => a.at - b.at)) {
+  const sorted = [...records].sort((a, b) => a.at - b.at);
+  const since = contentSince(sorted);
+  for (const r of sorted) {
     if (!first.has(r.id)) first.set(r.id, r.at);
     byId.set(r.id, r);
   }
@@ -195,7 +215,7 @@ export function lastStopMark(records: StopRecord[]): Omit<TaskStopMark, "replies
   const { key, last, count } = best;
   // the answer is checked for the newest series only: the others are not shown; the places are made only when it carries an answer to check
   const places = new Map<string, string>(last.answer ? stops.map((s) => [s.id, placeKey(s)]) : []);
-  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, places, last) || answeredOnIssue(last) };
+  return { key, reason: last.reason, state: last.state, conditions: last.conditions, count, answered: answeredAfter(stops, first, since, places, last) || answeredOnIssue(last) };
 }
 
 /**
@@ -228,7 +248,7 @@ export const isAfterWait = (c: { key: string; value: string }): boolean => c.key
  * the app cannot watch, like a subagent or a background run, or every condition already met) is never continued, so it
  * waits for the person.
  */
-export function resumableDepends(stop: StopRecord): boolean {
+export function resumableDepends(stop: Pick<StopRecord, "reason" | "conditions">): boolean {
   return stop.reason === "depends" && stop.conditions.some((c) => !c.met) && stop.conditions.every((c) => WAIT_KEY.test(c.key) || isAfterWait(c));
 }
 
@@ -537,7 +557,7 @@ export function stopRecoveryPrompt(open: StopSummary[], cond: PreambleConditions
         : "7 日を超えるなら conditions を省く。"
     }サブエージェント・背景の実行・別リポジトリの待ちのように、どの鍵でも書けない待ちはアプリが再開できないので、利用者の要対応に出る。`,
     "何かが済むのを待つときは `ops-kit wait --for \"<何を待つか>\" --timeout <秒> --on-timeout <fail|proceed> -- <判定コマンド>` を使い、until / while と sleep の繰り返しでは待たない（何を待つか・上限・切れたときの動作が無い待ちは書けない。待ちと上限は画面に出る）。fail で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を報告して止まる。",
-    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・[merge-answer] の投稿・Task の本文への名指しのパスの追加は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
+    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・[merge-answer] の投稿は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
     `依頼の範囲外の書き込み（${cond.planMode ? "計画モードでの commit・push・マージ、" : ""}リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。`,
   ];
   const stops = openStopsPrompt(open);

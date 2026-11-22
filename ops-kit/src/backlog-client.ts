@@ -667,10 +667,10 @@ function appRoot(env: Record<string, string | undefined>, f: Fetch, waitMs = 5_0
 export const GRANT_WAIT_MS = 150_000;
 
 /**
- * Whether the app has a record of the person's merge grant (`kind`: merge / answer / scope) to this Task for `target` of
+ * Whether the app has a record of the person's merge grant (`kind`: merge / answer) to this Task for `target` of
  * `repo`, the repository about to be written to (GET /api/merge-grants). A merge or answer grant holds for the head the
  * PR had when it was given: `head` is the head about to be merged or named by the mark, and a grant of another head does
- * not answer (a scope grant has no head). Null when the app cannot be asked (no BACKLOG_URL or task id, not reached,
+ * not answer. Null when the app cannot be asked (no BACKLOG_URL or task id, not reached,
  * 4xx / 5xx, no answer in `GRANT_WAIT_MS`). The Task is the one OPS_KIT_TASK_ID names: this keeps a slip from passing, it is
  * no fence (docs/design/permission-modes.md, "Merge grants").
  */
@@ -682,16 +682,6 @@ export async function mergeGranted(env: Record<string, string | undefined>, repo
   } catch {
     return null;
   }
-}
-
-/**
- * Whether the merge gate stopped on a file the Task `issue` of `repo` does not name, and whether the person's scope grant
- * came after (GET /api/merge-grants/scope-stop). Waits up to `GRANT_WAIT_MS` like `mergeGranted`: the person's own
- * words may still be being read. Null when the app cannot be asked.
- */
-export async function scopeStopOf(env: Record<string, string | undefined>, repo: string, issue: number, f: Fetch = fetch): Promise<{ stopped?: unknown; granted?: unknown } | null> {
-  const q = new URLSearchParams({ taskId: env.OPS_KIT_TASK_ID ?? "", repo, issue: String(issue) });
-  return ((await appRoot(env, f, GRANT_WAIT_MS)("GET", `/api/merge-grants/scope-stop?${q}`).catch(() => null)) as { stopped?: unknown; granted?: unknown } | null) ?? null;
 }
 
 /**

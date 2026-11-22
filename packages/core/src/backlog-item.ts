@@ -326,6 +326,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     waitsUntil: null,
     overlap: null,
     prereqs: [],
+    events: [],
     stopSummary: [],
     mockupTask: pbi ? mockupTaskOf(raw.body) : null,
     mockups: [],

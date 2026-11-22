@@ -18,6 +18,8 @@ export const CONDITION_KEYS = {
   runner: ["claude", "codex"],
   /** The review setting: the main reviewer is a new session of the same runner, or the other runner. */
   review: ["same", "other"],
+  /** The recheck and post-merge audit setting: a new session of the main reviewer's runner, or a runner other than the main review's. */
+  recheck: ["same", "other"],
   /** The main reviewer; follows from `runner` and `review` (`primaryReviewer`). */
   reviewer: ["claude", "codex"],
   /** Whether the reader is a Task the app started (`in`) or a session outside it (`out`). */
@@ -46,6 +48,7 @@ export const CONDITION_PHRASES: Partial<Record<ConditionKey, RegExp>> = {
   mergeGate: /mergeGate/,
   extra: /<extra>|追加のレビュアー/,
   review: /OPS_KIT_REVIEW_RUNNER|別のランナー|別ランナー/,
+  recheck: /OPS_KIT_RECHECK_RUNNER/,
 };
 
 const OPEN = /^\s*<!-- when (\S.*?) -->\s*$/;

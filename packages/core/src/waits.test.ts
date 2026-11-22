@@ -7,11 +7,12 @@ import { overWaits, QuotaAndResumeSettings, silentSince, type AgentEvent, type R
 import { waitFileName, type WaitFile } from "../../../ops-kit/src/wait.ts";
 import { asksFromTasks } from "./asks.ts";
 import { loadConfig } from "./config.ts";
-import { abortOrphanedTasks, Db } from "./db.ts";
+import { abortOrphanedTasks, Db, type BacklogSnapshotEntry } from "./db.ts";
 import { startServer } from "./server.ts";
 import { reduceStops } from "./stops.ts";
 import { TaskManager } from "./tasks/manager.ts";
-import { boundsOf, checkWaits, DEPENDS_LIMIT_MS, readWaitFiles, shownWaits, SILENT_AFTER_MS, WAIT_LIMIT_MS, WAIT_REPEATED_NOTE, waitsDirOf, waitsOf, type WaitBounds, type WaitFacts } from "./waits.ts";
+import { boundsOf, checkWaits, DEPENDS_LIMIT_MS, readWaitFiles, shownWaits, SILENT_AFTER_MS, stopsOfWait, WAIT_ANSWER_NEXT, WAIT_KEPT_ACTION, WAIT_LIMIT_MS, WAIT_REPEATED_NOTE, WAIT_STOPPED_ACTION, waitsDirOf, waitsOf, type WaitBounds, type WaitFacts } from "./waits.ts";
+import { resumeDepends } from "./depends-resume.ts";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -131,6 +132,37 @@ describe("waitsOf: every wait in one form, each with its limit", () => {
     expect(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: c }), stop({ state: "resolved", at: T0 + HOUR })] })).toEqual([]);
     expect(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: c, work: { workspaceId: null, issue: null, taskId: "task_other" } })] })).toEqual([]);
     expect(of({ task: task({ outcome: "waits", status: "running" }), stops: [stop({ conditions: c })] })).toEqual([]);
+  });
+
+  test("stopsOfWait: the Task's open stops that make a wait's key — by the same keys waitsOf gives", () => {
+    const pr = [{ key: "pr#12", value: "open", met: false }];
+    const a = stop({ conditions: [...pr, { key: "after", value: "2026-11-12T00:00:00Z", met: false }, { key: "ci", value: "red", met: false }] });
+    const b = stop({ id: "task_a/s2", conditions: [...pr, { key: "job#5", value: "running", met: false }, { key: "runner#codex", value: "2026-11-10T05:00:00Z", met: false }] });
+    const bare = stop({ id: "task_a/s3", op: "ci", target: "" });
+    const stops = [a, b, bare, stop({ id: "task_a/s4", conditions: pr, state: "resolved" }), stop({ id: "task_b/s1", conditions: pr, work: { workspaceId: null, issue: null, taskId: "task_b" } }), stop({ id: "task_a/s5", conditions: [{ key: "pr#12", value: "merged", met: true }, { key: "pr#9", value: "open", met: false }] })];
+    const ids = (key: string) => stopsOfWait(stops, "task_a", key).map((s) => s.id);
+    // every key waitsOf gives is found again, and names the stops it came from
+    const keys = of({ task: task({ outcome: "waits" }), stops }).map((w) => w.key);
+    expect(keys).toEqual(["pr#12", "after:2026-11-12T00:00:00Z", "task_a/s1:ci", "job#5", "runner#codex", "task_a/s3", "pr#9"]);
+    expect(keys.map(ids)).toEqual([["task_a/s1", "task_a/s2"], ["task_a/s1"], ["task_a/s1"], ["task_a/s2"], ["task_a/s2"], ["task_a/s3"], ["task_a/s5"]]);
+    // a key no open stop of the Task makes: none (a met condition, another Task's stop, a stop's id when it has conditions)
+    expect([ids("pr#3"), ids("task_a/s1"), stopsOfWait(stops, "task_c", "pr#12")]).toEqual([[], [], []]);
+  });
+
+  test("待ち続ける: a wait the person answered to keep counts its limit from that answer — that key only, the last answer, never earlier than the stop came back", () => {
+    const c = [{ key: "pr#12", value: "open", met: false }, { key: "job#5", value: "running", met: false }];
+    const kept = (at: number, key = "pr#12") => ({ attempt: 1, at, what: `${WAIT_KEPT_ACTION}: ${key}`, ok: true });
+    const waits = (actions: StopRecord["actions"], more: StopRecord[] = []) => brief(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: c }), ...more, stop({ conditions: c, actions, at: T0 + 5 * DAY })], now: T0 + 5 * DAY }));
+    expect(waits([kept(T0 + 4 * DAY)])).toEqual([["depends", "pr#12", "PR #12", 4 * DAY, 7 * DAY], ["job", "job#5", "頼んだ仕事 job#5", 0, 6 * HOUR]]);
+    expect(waits([kept(T0 + DAY), kept(T0 + 4 * DAY), { attempt: 3, at: T0 + 5 * DAY, what: "待ちが片づいた: pr#12", ok: true }])[0]).toEqual(["depends", "pr#12", "PR #12", 4 * DAY, 7 * DAY]);
+    // an answer from before the stop was resolved and came back is older than its return
+    expect(waits([kept(T0 + DAY)], [stop({ state: "resolved", at: T0 + 2 * DAY }), stop({ conditions: c, at: T0 + 3 * DAY })])[0]).toEqual(["depends", "pr#12", "PR #12", 3 * DAY, 6 * DAY]);
+    // a date's limit is its time, or one more limit from the answer when that is later: answered past its time, it is not over at once
+    const due = [{ key: "after", value: "2026-11-12T00:00:00Z", met: false }];
+    expect(brief(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: due, actions: [kept(T0 + DAY, "after:2026-11-12T00:00:00Z")] })] }))).toEqual([["date", "after:2026-11-12T00:00:00Z", "期日 2026-11-12T00:00:00Z", DAY, 4 * DAY]]);
+    expect(brief(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: due })] }))).toEqual([["date", "after:2026-11-12T00:00:00Z", "期日 2026-11-12T00:00:00Z", 0, 2 * DAY + 30 * MIN]]);
+    // an answer older than the stop's return does not move a fixed limit either
+    expect(brief(of({ task: task({ outcome: "waits" }), stops: [stop({ conditions: due, actions: [kept(T0 + HOUR, "after:2026-11-12T00:00:00Z")] }), stop({ state: "resolved", at: T0 + 2 * HOUR }), stop({ conditions: due, actions: [kept(T0 + HOUR, "after:2026-11-12T00:00:00Z")], at: T0 + 3 * HOUR })], now: T0 + 3 * HOUR }))).toEqual([["date", "after:2026-11-12T00:00:00Z", "期日 2026-11-12T00:00:00Z", 3 * HOUR, 2 * DAY + 30 * MIN]]);
   });
 
   test("a depends stop that names nothing to wait for still has a limit", () => {
@@ -465,6 +497,155 @@ describe("checkWaits: which stopped Tasks are looked at", () => {
     expect(db.getTask("task_refused")!.waits?.find((w) => w.kind === "queue")?.label).toBe("返信の開始の条件（budget exceeded）");
     expect(db.getTask("task_plain")!.waits?.find((w) => w.kind === "queue")?.label).toBe("実行枠の空き");
   });
+});
+
+describe("the daemon: a wait past its limit of a stopped Task is answered 止める or 待ち続ける", () => {
+  const KEY = { service: "github" as const, host: "github.com", repository: "acme/app" };
+  const PR5 = { objectKind: "pull-request" as const, externalId: "PR_5", remote: { number: 5, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" } as BacklogSnapshotEntry;
+  /** A daemon with one Task whose turn ended, stopped four days ago on `pr#5` (its wait is a day past the limit), and the question for that wait. */
+  const stoppedOnPr = async (over: { reason?: "depends" | "usage-limit"; conditions?: Array<{ key: string; value: string; met: boolean }> } = {}) => {
+    const h = mkdtempSync(join(tmpdir(), "sb-waits-answer-"));
+    const sends: string[] = [];
+    const turn: AgentEvent[] = [{ t: "session.start", runner: "claude", runnerSessionId: "sess-1", cwd: "/tmp" }, { t: "session.end", status: "ok", summary: "done" }];
+    const runner = {
+      id: "claude",
+      async detect() {
+        return { available: true };
+      },
+      start(_opts, e) {
+        let resolveExit!: (c: number | null) => void;
+        const exited = new Promise<number | null>((r) => (resolveExit = r));
+        const play = () => queueMicrotask(() => turn.forEach(e));
+        play();
+        return { send: (text: string) => (sends.push(text), play()), respondPermission: () => undefined, abort: async () => resolveExit(null), close: async () => resolveExit(0), exited } as RunnerSession;
+      },
+    } as RunnerAdapter;
+    const never = () => new Promise<never>(() => undefined);
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(h, "no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [runner], { port: 0, waitCheckMs: 20, judge: never, rubricJudge: never, titleSuggester: never, gh: async () => ({ code: 1, stdout: "", stderr: "no gh in this test" }) });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const until = async (ok: () => boolean | Promise<boolean>) => {
+      for (let i = 0; i < 150 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 20));
+      expect(await ok()).toBe(true);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const overAsks = async (): Promise<any[]> => ((await (await fetch(`${b}/api/asks`)).json()) as { asks: Array<{ id: string }> }).asks.filter((a) => a.id.startsWith("waitover:"));
+    const answer = (id: string, a: object) => fetch(`${b}/api/asks/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, answer: a }) });
+    c.db.upsertWorkspace({ id: "ws_app", name: "app", path: h, kind: "repo" });
+    c.db.setWorkspaceBacklogSource("ws_app", { ...KEY, project: { owner: "acme", number: 1 }, private: true });
+    const t = c.tasks.create({ cwd: h, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app" });
+    await until(() => c.db.getTask(t.id)!.status === "done");
+    const came = Date.now() - 4 * DAY;
+    c.db.appendEvent(t.id, { t: "stop.record", stop: { id: `${t.id}/s1`, work: { workspaceId: "ws_app", issue: null, taskId: t.id }, op: "merge", target: "", reason: over.reason ?? "depends", evidence: "", safety: "unknown", conditions: over.conditions ?? [{ key: "pr#5", value: "open", met: false }], answer: null, actions: [], state: "waiting", at: came } });
+    c.db.sqlite.query("UPDATE tasks SET outcome = 'waits' WHERE id = ?").run(t.id);
+    await until(async () => (await overAsks()).length === 1);
+    const [ask] = await overAsks();
+    const stopNow = () => c.db.listStopRecords([t.id]).at(-1)!;
+    const prMerged = () => c.db.putBacklogSnapshot(KEY, { records: [PR5], cursor: null, syncedAt: Date.now() });
+    const resume = () => resumeDepends({ db: c.db, tasks: c.tasks, workspaceId: "ws_app", now: Date.now() });
+    const close = async () => {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    };
+    return { c, t, came, ask, sends, overAsks, answer, stopNow, prMerged, resume, until, close };
+  };
+
+  test("止める: the stop that makes the wait is resolved, the question is gone from the open ones, and the Task is not resumed when the PR ends later", async () => {
+    const d = await stoppedOnPr();
+    try {
+      expect(d.ask).toMatchObject({ id: `waitover:${d.t.id}:pr#5@${d.came + DEPENDS_LIMIT_MS}`, kind: "wait", needs: "person", state: "open", wait: { kind: "depends", key: "pr#5" }, choices: ["止める", "待ち続ける"], answers: ["choice"], next: WAIT_ANSWER_NEXT, policy: { scopes: [] } });
+      // an answer that is not one of the two choices writes nothing
+      for (const a of [{ kind: "choice", choice: "進める" }, { kind: "text", text: "止める" }]) {
+        const refused = await d.answer(d.ask.id, a);
+        expect([refused.status, ((await refused.json()) as { error: string }).error]).toEqual([409, "選択肢が変わりました"]);
+      }
+      expect(d.stopNow()).toMatchObject({ state: "waiting", actions: [] });
+      const r = await d.answer(d.ask.id, { kind: "choice", choice: "止める" });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ ask: { id: d.ask.id, state: "answered", answers: [] }, already: false });
+      expect(d.stopNow()).toMatchObject({ id: `${d.t.id}/s1`, state: "resolved", actions: [{ what: `${WAIT_STOPPED_ACTION}: pr#5`, ok: true }] });
+      // gone at once, not at the watch's next look: the Task's waits were worked out again with the answer
+      expect((await d.overAsks()).filter((a) => a.state === "open")).toEqual([]);
+      expect(d.c.db.getTask(d.t.id)!.waits).toBeNull();
+      // the PR ends later: nothing is sent to the Task
+      d.prMerged();
+      expect(await d.resume()).toEqual([]);
+      await new Promise((r) => setTimeout(r, 40));
+      expect(d.sends).toEqual([]);
+    } finally {
+      await d.close();
+    }
+  });
+
+  test("待ち続ける on another runner's limit only adds its action: no resume is planned and nothing is said to the Task", async () => {
+    const d = await stoppedOnPr({ reason: "usage-limit", conditions: [{ key: "runner#codex", value: new Date(Date.now() - 2 * DAY).toISOString(), met: false }] });
+    try {
+      expect(d.ask).toMatchObject({ wait: { kind: "resume", key: "runner#codex" }, answers: ["choice"] });
+      const events = d.c.db.listEvents(d.t.id).length;
+      const r = await d.answer(d.ask.id, { kind: "choice", choice: "待ち続ける" });
+      expect(r.status).toBe(200);
+      expect(d.stopNow()).toMatchObject({ state: "waiting", actions: [{ what: "利用者が待ち続けると答えた: runner#codex" }] });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(d.c.db.getTask(d.t.id)).toMatchObject({ resumeAt: null, status: "done" });
+      // the stop's record with the action, and nothing else: no line about a planned resume
+      expect(d.c.db.listEvents(d.t.id).length).toBe(events + 1);
+      expect(d.sends).toEqual([]);
+      expect((await d.overAsks()).filter((a) => a.state === "open")).toEqual([]);
+    } finally {
+      await d.close();
+    }
+  });
+
+  test("待ち続ける: the stop stays open and the limit counts again from the answer — past it the question is asked again; the Task is resumed when the PR ends", async () => {
+    const d = await stoppedOnPr();
+    try {
+      const r = await d.answer(d.ask.id, { kind: "choice", choice: "待ち続ける" });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ ask: { id: d.ask.id, state: "answered", answers: [] }, already: false });
+      const kept = d.stopNow();
+      expect(kept).toMatchObject({ state: "waiting", conditions: [{ key: "pr#5", met: false }], actions: [{ what: `${WAIT_KEPT_ACTION}: pr#5`, ok: true }] });
+      const at = kept.actions[0]!.at;
+      expect((await d.overAsks()).filter((a) => a.state === "open")).toEqual([]);
+      expect(d.c.db.getTask(d.t.id)!.waits).toMatchObject([{ kind: "depends", key: "pr#5", since: at, until: at + DEPENDS_LIMIT_MS }]);
+      // the limit (the setting's, as it was) past the answer, and still waiting: the same wait is asked about again
+      const later = at + DEPENDS_LIMIT_MS + MIN;
+      await checkWaits({ db: d.c.db, tasks: d.c.tasks, dir: waitsDirOf(d.c.db.getTask(d.t.id)!.cwd), bounds: () => boundsOf(QuotaAndResumeSettings.parse({})), broadcastTask: () => undefined }, later);
+      const again = asksFromTasks({ approvals: [], tasks: [d.c.db.getTask(d.t.id)!], lastTurnQuestions: () => null, permissionEvents: () => [], stops: () => [], workspaceName: () => "app", now: later }).filter((a) => a.id.startsWith("waitover:"));
+      expect(again).toMatchObject([{ id: `waitover:${d.t.id}:pr#5@${at + DEPENDS_LIMIT_MS}`, state: "open", wait: { kind: "depends", key: "pr#5" }, choices: ["止める", "待ち続ける"], answers: ["choice"] }]);
+      // the PR ends: the Task goes on as before
+      d.prMerged();
+      expect(await d.resume()).toEqual([d.t.id]);
+      await d.until(() => d.sends.length === 1);
+    } finally {
+      await d.close();
+    }
+  });
+});
+
+test("laterScheduleTaskDone: when a later run of the same schedule ended as done — not a run still going, another schedule's, an earlier one, or for a stage Task", () => {
+  const home = mkdtempSync(join(tmpdir(), "sb-waits-later-"));
+  const db = new Db(join(home, "db.sqlite"));
+  try {
+    const mk = (id: string, scheduleId: string | null, createdAt: number, status: Task["status"], stage: number | null = null) => {
+      db.insertTask({ id, workspaceId: stage === null ? null : "ws", title: id, runner: "claude", cwd: home, scope: [home], status, runnerSessionId: "s", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: stage === null ? null : { issue: stage, action: "complete" }, statusAt: createdAt, createdAt, updatedAt: createdAt + MIN });
+      db.sqlite.query("UPDATE tasks SET updated_at = ? WHERE id = ?").run(createdAt + MIN, id);
+    };
+    mk("task_first", "sch_1", T0, "done");
+    mk("task_other", "sch_2", T0 + HOUR, "done");
+    mk("task_none", null, T0, "done");
+    expect([db.laterScheduleTaskDone("task_first"), db.laterScheduleTaskDone("task_none"), db.laterScheduleTaskDone("task_gone")]).toEqual([null, null, null]);
+    mk("task_running", "sch_1", T0 + 2 * HOUR, "running");
+    expect(db.laterScheduleTaskDone("task_first")).toBeNull();
+    mk("task_done", "sch_1", T0 + 3 * HOUR, "done");
+    expect(db.laterScheduleTaskDone("task_first")).toBe(T0 + 3 * HOUR + MIN);
+    expect(db.laterScheduleTaskDone("task_done")).toBeNull();
+    // a stage Task's wait is its Issue's to end
+    mk("task_stage", "sch_3", T0, "done", 7);
+    mk("task_stage_later", "sch_3", T0 + HOUR, "done");
+    expect(db.laterScheduleTaskDone("task_stage")).toBeNull();
+  } finally {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a daemon start ends the silences stored by the one before it (the runners are gone) and keeps the other waits", () => {

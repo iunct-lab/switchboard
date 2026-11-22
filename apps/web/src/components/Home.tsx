@@ -2,7 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { NewDefaultsSettings, type CloudPreparation, type ExecutionMode, type CreateTaskInput, type LedgerSummary, type ReportRow, type RoutingSuggestion, type RunnerId, type RunnerInfo, type Schedule, type TaskStopMark, type TaskSummary, type Workspace } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
 import { type Health } from "../api/daemon.ts";
-import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag } from "./ui.tsx";
+import { fmtUsd, OriginTag, pct, ResumeTag, RunnerPill, ShadowTag, WorkspaceTag } from "./ui.tsx";
+import { workspaceTag } from "../taskList.ts";
 import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
@@ -589,6 +590,7 @@ export function Home(props: {
             <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>
               <span className={`dot ${x.status === "waiting" ? "wait" : x.status === "idle" ? "idle" : "run"}`} />
               <span className="t">{x.title}</span>
+              <WorkspaceTag name={workspaceTag(props.workspaces, x.workspaceId)} />
               <RunnerPill runner={x.runner} />
               <ShadowTag task={x} />
               <span className="m">{activeLabel(x)}</span>
@@ -603,6 +605,7 @@ export function Home(props: {
                 <button className="row link" onClick={() => props.onOpenTask(x.id)}>
                   <span className={`dot ${outcomeDotClass(x.outcome)}`} />
                   <span className="t">{x.title}</span>
+                  <WorkspaceTag name={workspaceTag(props.workspaces, x.workspaceId)} />
                   <RunnerPill runner={x.runner} />
                   <OriginTag origin={x.origin} />
                   <ShadowTag task={x} />
@@ -634,6 +637,7 @@ export function Home(props: {
                   <button className="row link" onClick={() => props.onOpenTask(w.task.id)}>
                     <span className="dot idle" />
                     <span className="t">{w.task.title}</span>
+                    <WorkspaceTag name={workspaceTag(props.workspaces, w.task.workspaceId)} />
                     <RunnerPill runner={w.task.runner} />
                     <span className="m">
                       {w.reason === "depends" && w.conditions.length > 0 ? w.conditions.map((c) => `${c.key}:${c.value}`).join(" ") : w.reason ? REASON_LABEL[w.reason] : outcomeLabel(w.task.outcome)} · {ago(w.task.updatedAt, Date.now())}
@@ -649,6 +653,7 @@ export function Home(props: {
             <button key={x.id} className="row link" onClick={() => props.onOpenTask(x.id)}>
               <span className={`dot ${x.status === "error" ? "err" : "idle"}`} />
               <span className="t">{x.title}</span>
+              <WorkspaceTag name={workspaceTag(props.workspaces, x.workspaceId)} />
               <RunnerPill runner={x.runner} />
               <OriginTag origin={x.origin} />
               <ResumeTag resumeAt={x.resumeAt} reason={x.resumeReason} plannedAt={x.resumePlannedAt} />

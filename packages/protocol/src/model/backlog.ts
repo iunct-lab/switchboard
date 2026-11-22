@@ -112,6 +112,10 @@ export type BacklogSyncInfo = z.infer<typeof BacklogSyncInfo>;
 export const BacklogPrereq = z.object({ number: z.number(), kind: z.enum(["issue", "pr"]).nullable(), need: z.enum(["done", "merged", "release"]), state: BacklogPrereqState, via: z.array(z.number()), /** `met` because the PBI is left with only the user's checks. */ confirming: z.boolean() });
 export type BacklogPrereq = z.infer<typeof BacklogPrereq>;
 
+/** A thing that happened once to an Issue: `key` is `<kind>` or `<kind>:<what>`, `at` when (ms). */
+export const BacklogEvent = z.object({ key: z.string(), at: z.number() });
+export type BacklogEvent = z.infer<typeof BacklogEvent>;
+
 export const BacklogItem = z.object({
   number: z.number(),
   title: z.string(),
@@ -239,6 +243,11 @@ export const BacklogItem = z.object({
    * the PBI when every open Task has one not met (one Task free to go lets the PBI go on). Empty for the other items.
    */
   prereqs: z.array(BacklogPrereq),
+  /**
+   * The things that happened once to the Issue, as `eventsOf` (core/stage-start-gate.ts) reads them, and the person's check of the last
+   * stage Task (`reviewed:<Task id>`, from the Task's row). A stage Task cannot make one, and none goes back.
+   */
+  events: z.array(BacklogEvent).default([]),
   /** The stops of the Issue's stage Tasks, one per series; empty until the daemon adds them. */
   stopSummary: z.array(StopSummary),
   /** The Task a PBI's body names on its `**画面イメージ**:` line outside fences, the first id in it; null for a request or no line. */

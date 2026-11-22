@@ -37,7 +37,7 @@ export function requestEvalTarget(db: Db, workspaceId: string | null, raw: strin
 }
 
 /** The routes under /api/backlog. */
-export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "storedBacklogReleased" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
+export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "answerGrantHeads" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "storedBacklogReleased" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
   return {
     /**
      * Open requests and PBIs of every registered workspace's repository and the stage each is at, as the
@@ -316,7 +316,8 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
           // the person's words to the next stage Task (and a grant sentence in them) only when the request came in as the
           // screen's: one that names a sending Task, or a bare call, still answers the question — as that Task's / a call's
           const by = await sc.grantSource(req, srv, parsed.data.from);
-          answerStoredDecision(sc.db, source, asked, parsed.data.text, Date.now(), by.via === "screen" ? { screen: true } : { by: by.sender ? `task:${by.sender}` : "api" });
+          // a grant sentence in the screen's answer is for the PR as it is now: its head is read here and kept with the answer
+          answerStoredDecision(sc.db, source, asked, parsed.data.text, Date.now(), by.via === "screen" ? { screen: true, heads: await sc.answerGrantHeads(ws, parsed.data.text) } : { by: by.sender ? `task:${by.sender}` : "api" });
           sc.backlog.send(ws);
         } catch (e) {
           if (e instanceof BacklogEditError) return sc.bad(e.message, e.status);
@@ -402,7 +403,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
         // the stored data is what is true: GitHub is brought up to date first when it can be reached, and a
         // limit or an outage does not hold the start
         await sc.backlog.settle(ws).catch(() => undefined);
-        const stored = sc.storedBacklog(ws);
+        const stored = await sc.storedBacklogReleased(ws);
         if (stored.fetchedAt === null) return sc.bad(stored.error ?? "まだ GitHub から取り込んでいません", sc.UPSTREAM_FAILED);
         const items = stored.items;
         const item = items.find((i) => i.number === n);

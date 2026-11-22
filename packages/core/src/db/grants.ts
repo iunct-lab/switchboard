@@ -1,11 +1,11 @@
-/** Grants and scope stops of Tasks. */
+/** Grants of Tasks. */
 
 import { OWNER, USED_ANSWERS_KEPT, USED_ANSWERS_KEY } from "../merge-grants.ts";
 import { AskAnswerQueries } from "./asks.ts";
 
 export { USED_ANSWERS_KEPT, USED_ANSWERS_KEY };
 
-/** Grants and scope stops of Tasks. One link of the chain of classes that ends in `Db` (db.ts): the methods are reached as `db.<method>()`. */
+/** Grants of Tasks. One link of the chain of classes that ends in `Db` (db.ts): the methods are reached as `db.<method>()`. */
 export class GrantQueries extends AskAnswerQueries {
   /**
    * Records one grant (the table's comment says what each field is); a repeat moves its time and its head, unless the
@@ -39,13 +39,9 @@ export class GrantQueries extends AskAnswerQueries {
    * When a grant recorded as the person's (`by = 'owner'`: merge-grants.ts says what that does and does not mean) was last
    * given to the task (ms), or null. A row another Task's text left, or one whose sender was not told, does not answer.
    * A merge or answer grant answers only for `head`, the head the PR had when it was given: no head asked with, a grant
-   * recorded without one, or a PR that has moved since is null. A scope grant has no head.
+   * recorded without one, or a PR that has moved since is null.
    */
   mergeGrantAt(taskId: string, repo: string, kind: string, target: number, head?: string): number | null {
-    if (kind === "scope") {
-      const r = this.sqlite.query("SELECT MAX(at) AS at FROM task_grants WHERE task_id = ? AND repo = ? AND kind = ? AND target = ? AND by = ?").get(taskId, repo.toLowerCase(), kind, target, OWNER) as { at: number | null };
-      return r.at;
-    }
     if (!head) return null;
     const r = this.sqlite.query("SELECT MAX(at) AS at FROM task_grants WHERE task_id = ? AND repo = ? AND kind = ? AND target = ? AND by = ? AND head = ?").get(taskId, repo.toLowerCase(), kind, target, OWNER, head.toLowerCase()) as { at: number | null };
     return r.at;
@@ -55,16 +51,8 @@ export class GrantQueries extends AskAnswerQueries {
     return this.mergeGrantAt(taskId, repo, kind, target, head) !== null;
   }
 
-  /** Whether the screen answer `source` (its comment operation id) already gave its grants to a task: it gives them once, however long ago. */
+  /** Whether the screen answer `source` (its comment operation id) already gave its grants to a task: it gives them once, however long ago. The old `scope` rows are not read. */
   mergeGrantSourceSpent(source: string): boolean {
-    return this.sqlite.query("SELECT 1 FROM task_grants WHERE source = ? LIMIT 1").get(source) !== null;
-  }
-
-  recordScopeStop(taskId: string, repo: string, issue: number, pr: number, at = Date.now()): void {
-    this.sqlite.query("INSERT INTO task_scope_stops (task_id, repo, issue, pr, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id, repo, issue) DO UPDATE SET pr = excluded.pr, at = excluded.at").run(taskId, repo.toLowerCase(), issue, pr, at);
-  }
-
-  scopeStopOf(taskId: string, repo: string, issue: number): { pr: number; at: number } | null {
-    return (this.sqlite.query("SELECT pr, at FROM task_scope_stops WHERE task_id = ? AND repo = ? AND issue = ?").get(taskId, repo.toLowerCase(), issue) as { pr: number; at: number } | null) ?? null;
+    return this.sqlite.query("SELECT 1 FROM task_grants WHERE source = ? AND kind != 'scope' LIMIT 1").get(source) !== null;
   }
 }

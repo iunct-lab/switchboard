@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { awaitingReply, endedUnmarked, failedSince, isClosable, isUnchanged } from "./backlog-pick.ts";
+import { awaitingReply, endedUnmarked, failedSince, isClosable } from "./backlog-pick.ts";
 import { item } from "./api-test-harness.ts";
 
 // The "nothing since the last Task" judgments read the written time of the Issue's comments, never the Issue's updatedAt.
@@ -14,12 +14,6 @@ const task = (over: Partial<NonNullable<BacklogItem["lastTask"]>>): NonNullable<
 const at = (over: Partial<BacklogItem>, commentedMs: number | null): BacklogItem => item({ updatedAt: iso(T0 + 300_000), commentedAt: commentedMs === null ? null : iso(commentedMs), ...over });
 const BEFORE_END = T0 + 30_000;
 const AFTER_END = T0 + 90_000;
-
-describe("isUnchanged", () => {
-  const base: Partial<BacklogItem> = { stage: "ready", lastTask: task({ action: "complete" }) };
-  test("own comments arriving later do not release it", () => expect(isUnchanged(at(base, BEFORE_END))).toBe(true));
-  test("a comment written after the Task releases it", () => expect(isUnchanged(at(base, AFTER_END))).toBe(false));
-});
 
 describe("failedSince", () => {
   const base: Partial<BacklogItem> = { stage: "in-progress", lastTask: task({ status: "error" }) };
