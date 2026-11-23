@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { AskBatch, Task, TaskStatus } from "@switchboard/protocol";
-import { batchKindOf, BatchAnswers } from "./approval-batch.ts";
-import { parseAskBlock } from "./asks.ts";
+import type { Ask, AskBatch, StopRecord, Task, TaskStatus } from "@switchboard/protocol";
+import { approvalBatches, batchKindOf, BatchAnswers } from "./approval-batch.ts";
+import { parseAskBlock, stopAskId } from "./asks.ts";
+import { stopKey } from "./stops.ts";
 
 describe("batchKindOf", () => {
   test("batchKindOf tells sso and deploy", () => {
@@ -87,7 +88,7 @@ describe("BatchAnswers: the wait stays only while the login can still finish", (
     expect(b.decorate([batch("t1", "t2")])[0]).toMatchObject({ loggingIn: null });
     expect(b.pendingSso).toBeNull();
     b.pendingSso = { first: "t1", rest: ["t2"], at: 5 };
-    const r = await b.answer("batch:sso", undefined);
+    const r = await b.answer("batch:sso", undefined, undefined);
     expect(r.body).toMatchObject({ already: false });
     expect(sent).toEqual(["t2"]);
   });
@@ -95,7 +96,7 @@ describe("BatchAnswers: the wait stays only while the login can still finish", (
   test("a Task that had failed before the click is the one being sent on: its status does not drop the wait", async () => {
     const { b } = make(() => "error", () => {}, 1);
     expect(b.decorate([batch("t1", "t2")])[0]).toMatchObject({ loggingIn: { taskId: "t1" } });
-    expect((await b.answer("batch:sso", undefined)).body).toMatchObject({ already: true });
+    expect((await b.answer("batch:sso", undefined, undefined)).body).toMatchObject({ already: true });
   });
 
   test("a turn that ended failed drops the wait even when the next turn already runs: nothing is sent when that one ends done", async () => {
@@ -118,6 +119,31 @@ describe("BatchAnswers: the wait stays only while the login can still finish", (
     lost = cut.b;
     expect(await cut.b.turnEnded("t1")).toEqual([]);
     expect(cut.sent).toEqual([]);
+  });
+});
+
+describe("approvalBatches", () => {
+  const task = (id: string, createdAt: number) => ({ id, title: id, status: "done", outcome: "needs_action", shadowOf: null, workspaceId: null, createdAt }) as Task;
+  const refused = (taskId: string): StopRecord => ({ id: `${taskId}/p`, work: { workspaceId: null, issue: null, taskId }, op: "sam deploy", target: "stack", reason: "permission", evidence: "denied", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", at: 1000 }) as StopRecord;
+  const listed = (over: Partial<Ask>) => ({ kind: "stop", state: "open", ...over }) as Ask;
+
+  test("batch ask id is a listed one: a Task's question id is the listed question's own, and a Task tied to no listed question is in no batch", () => {
+    const entries = ["t1", "t2", "t3"].map((id, n) => ({ task: task(id, n), records: [refused(id)] }));
+    // t1's stop is listed as its own question (with the time its content took its form); t2's folded into its check; t3 has none listed
+    const stopId = stopAskId({ key: stopKey(refused("t1")), contentAt: 777 });
+    const asks = [listed({ id: stopId, task: { id: "t1", title: null } }), listed({ id: "check:t2", kind: "check", task: { id: "t2", title: null } }), listed({ id: "check:t3", kind: "check", state: "answered", task: { id: "t3", title: null } })];
+    const [batch, ...rest] = approvalBatches(entries, asks);
+    expect(rest).toEqual([]);
+    expect(batch).toMatchObject({ id: "batch:deploy", asks: [{ taskId: "t1", askId: stopId }, { taskId: "t2", askId: "check:t2" }] });
+    expect(stopId).toMatch(/@777$/);
+    // every id of the batch is an id of the list
+    for (const a of batch!.asks) expect(asks.map((q) => q.id)).toContain(a.askId);
+    // none listed at all: no batch
+    expect(approvalBatches(entries, [])).toEqual([]);
+    // a login waits for no version of a question: a Task whose stop is tied to no listed question stays in the sso batch
+    const login = (id: string): StopRecord => ({ ...refused(id), op: "aws sso login", reason: "auth" });
+    const sso = approvalBatches([{ task: task("t4", 4), records: [login("t4")] }], []);
+    expect(sso).toMatchObject([{ id: "batch:sso", asks: [{ taskId: "t4" }] }]);
   });
 });
 

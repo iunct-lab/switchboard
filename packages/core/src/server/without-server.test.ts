@@ -28,7 +28,7 @@ afterEach(() => {
 const contextFor = <F extends (sc: never, ...a: never[]) => unknown>(_fn: F, fields: Partial<Parameters<F>[0]>) => fields as Parameters<F>[0];
 const notes = () => {
   const lines: string[] = [];
-  return { lines, scheduler: { note: (line: string) => void lines.push(line) } as never };
+  return { lines, scheduler: { note: (line: string) => void lines.push(line), notes: (texts: string[]) => void lines.push(...texts) } as never };
 };
 const queue = (over: Partial<BacklogQueue>): BacklogQueue => ({ enabled: true, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, ...over });
 const ask = (over: Partial<Ask>) => ({ id: "notice:scan@1", kind: "notice", state: "open", answers: ["dismiss"], blockers: [], task: null, issue: null, ...over }) as unknown as Ask;

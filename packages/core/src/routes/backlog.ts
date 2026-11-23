@@ -13,7 +13,7 @@ import { savedConfigFile } from "../workspace-config.ts";
 import { readProjectFields } from "../backlog-send.ts";
 import { readQueue, saveQueue } from "../backlog-queue.ts";
 import { ACTION_FOR_STAGE } from "../backlog-item.ts";
-import { checkFieldTypes, answerStoredConfirmation, answerStoredDecision, BacklogEditError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, commentStoredIssue } from "../backlog-edit.ts";
+import { checkFieldTypes, answerStoredConfirmation, answerStoredDecision, setAnswerHeads, BacklogEditError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, commentStoredIssue } from "../backlog-edit.ts";
 import { changeSourceOf, changesApart, syncsGithub, runGh } from "../backlog-gh.ts";
 import { readStoredIssue, readStoredRecords, storedIssueReader, canStartStoredBacklog } from "../backlog-stored.ts";
 import { overlapLine, isOverlapped } from "../backlog-overlap.ts";
@@ -37,7 +37,7 @@ export function requestEvalTarget(db: Db, workspaceId: string | null, raw: strin
 }
 
 /** The routes under /api/backlog. */
-export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "answerGrantHeads" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "storedBacklogReleased" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
+export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSource" | "answerGrantHeads" | "pendingGrantHeads" | "stopForRefusedProceed" | "json" | "readBacklog" | "bad" | "db" | "backlog" | "readCapped" | "WEBHOOK_MAX_BYTES" | "cfg" | "UPSTREAM_FAILED" | "backlogReads" | "syncEntry" | "lightBacklog" | "storedBacklog" | "storedBacklogReleased" | "prunedQueue" | "queuedIssues" | "onQueueSaved" | "readFlowLimit" | "readAllocation" | "issueRef" | "opts" | "readJson" | "leaseRepository" | "leases" | "DEVELOP_SELF_OFF" | "metaWorkspace" | "adapterMap" | "activeStageTask" | "startStage">): Routes {
   return {
     /**
      * Open requests and PBIs of every registered workspace's repository and the stage each is at, as the
@@ -316,8 +316,18 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
           // the person's words to the next stage Task (and a grant sentence in them) only when the request came in as the
           // screen's: one that names a sending Task, or a bare call, still answers the question — as that Task's / a call's
           const by = await sc.grantSource(req, srv, parsed.data.from);
-          // a grant sentence in the screen's answer is for the PR as it is now: its head is read here and kept with the answer
-          answerStoredDecision(sc.db, source, asked, parsed.data.text, Date.now(), by.via === "screen" ? { screen: true, heads: await sc.answerGrantHeads(ws, parsed.data.text) } : { by: by.sender ? `task:${by.sender}` : "api" });
+          // the question answered: the one that was on screen (`at`), else the newest now (the kit's call names none).
+          // Whether it can still be answered is checked where the answer is kept (`answerStoredDecision`), with nothing awaited in between
+          const at = parsed.data.at ?? item.decision?.at;
+          const question = at === undefined ? undefined : { at };
+          const { text } = parsed.data;
+          if (by.via === "screen") {
+            // a grant sentence in the screen's answer is for the PR as it is when the answer is taken. The answer is kept
+            // first, each such PR with no head; the heads are read after the reply and put with the answer. One not read,
+            // or read after a stage Task took the answer, stays without a head: the grant then answers for none
+            const operation = answerStoredDecision(sc.db, source, asked, text, Date.now(), { question, screen: true, heads: sc.pendingGrantHeads(ws, text) });
+            void sc.answerGrantHeads(ws, text).then((heads) => Object.keys(heads).length && setAnswerHeads(sc.db, operation, heads)).catch((e) => console.warn(`backlog answer: heads not kept (${String((e as Error).message ?? e)})`));
+          } else answerStoredDecision(sc.db, source, asked, text, Date.now(), { question, by: by.sender ? `task:${by.sender}` : "api" });
           sc.backlog.send(ws);
         } catch (e) {
           if (e instanceof BacklogEditError) return sc.bad(e.message, e.status);

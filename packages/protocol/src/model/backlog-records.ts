@@ -75,9 +75,9 @@ export type BacklogProjectItemData = z.infer<typeof BacklogProjectItemData>;
 
 /**
  * A pull request as stored: what a PBI's wait reads and, for an open one, what it changes: `updatedAt` and `files` (the changed paths; null = more than the 100 read, i.e. not fully known, never "no files"). `closes` = the Issues it closes, read
- * from its body's `Closes #n` and its branch `sb/<n>-` (no duplicates, ascending); the body and branch are not stored.
+ * from its body's `Closes #n` and its branch `sb/<n>-` (no duplicates, ascending); the body and branch are not stored. `head` = the sha of its head commit when last read (null = a record from before it was kept). Its comments are stored as `comment` records whose `issue` is the PR's number (a PR and an Issue share one numbering).
  */
-export const BacklogPullRequestData = z.object({ number: z.number(), state: z.enum(["OPEN", "CLOSED", "MERGED"]), isDraft: z.boolean(), labels: z.array(z.string()), closes: z.array(z.number()), mergeCommit: z.string().nullable(), updatedAt: z.string(), files: z.array(z.string()).nullable(), closedAt: z.string().nullable(), mergedAt: z.string().nullable() });
+export const BacklogPullRequestData = z.object({ number: z.number(), state: z.enum(["OPEN", "CLOSED", "MERGED"]), isDraft: z.boolean(), labels: z.array(z.string()), closes: z.array(z.number()), mergeCommit: z.string().nullable(), updatedAt: z.string(), files: z.array(z.string()).nullable(), closedAt: z.string().nullable(), mergedAt: z.string().nullable(), head: z.string().nullable() });
 export type BacklogPullRequestData = z.infer<typeof BacklogPullRequestData>;
 
 /**

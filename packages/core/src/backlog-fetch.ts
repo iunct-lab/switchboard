@@ -21,12 +21,13 @@ const ISSUE = `id number title url state stateReason body createdAt updatedAt cl
 const changedQuery = (since: boolean) =>
   `query($o:String!,$r:String!,$after:String${since ? ",$since:DateTime!" : ""}){ repository(owner:$o,name:$r){ issues(first:50, after:$after, states:[OPEN,CLOSED], ${LABELS}${since ? ", filterBy:{since:$since}" : ""}, orderBy:{field:UPDATED_AT, direction:ASC}){ pageInfo{ hasNextPage endCursor } nodes{ ${ISSUE} } } } }`;
 const PR_FILES = "files(first:100){ totalCount nodes{ path } }";
-const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefName body labels(first:100){ totalCount nodes{ name } } ${PR_FILES}`;
+const PR_FIELDS = `id number state isDraft updatedAt closedAt mergedAt headRefName headRefOid body labels(first:100){ totalCount nodes{ name } } ${PR_FILES} comments(first:100){ ${COMMENTS} }`;
 /** The open Issues with their Project items and Milestone. */
 const OPEN_ISSUES = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ issues(first:100, after:$after, states:OPEN, ${LABELS}){ pageInfo{ hasNextPage endCursor } nodes{ number milestone{ title } ${PROJECT_ITEMS} } } } }`;
 const OPEN_PULLS = `query($o:String!,$r:String!,$after:String){ repository(owner:$o,name:$r){ pullRequests(first:50, after:$after, states:OPEN, orderBy:{field:UPDATED_AT, direction:DESC}){ pageInfo{ hasNextPage endCursor } nodes{ ${PR_FIELDS} } } } }`;
 const PROJECT_ID = "query($o:String!,$p:Int!){ repositoryOwner(login:$o){ ... on ProjectV2Owner{ projectV2(number:$p){ id fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ name dataType } ... on ProjectV2SingleSelectField{ options{ name } } } } } } } }";
 const MORE_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ issue(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
+const MORE_PULL_COMMENTS = `query($o:String!,$r:String!,$n:Int!,$after:String!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ comments(first:100, after:$after){ ${COMMENTS} } } } }`;
 const recheckQuery = (numbers: number[]) =>
   `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${numbers.map((n) => `w${n}: issueOrPullRequest(number:${n}){ __typename ... on Issue{ ${ISSUE} } ... on PullRequest{ ${PR_FIELDS} mergeCommit{ oid } } }`).join(" ")} } }`;
 /** The Project items of the Issues named: what a light import reads of those it has to (`items`). */
@@ -42,7 +43,7 @@ function pullEntry(raw: RawPull): BacklogSnapshotEntry {
   const files = Array.isArray(f?.nodes) && typeof f.totalCount === "number" && f.totalCount <= f.nodes.length ? f.nodes.map((x) => x.path) : null;
   return {
     objectKind: "pull-request", externalId: raw.id, fetchState: "fetched",
-    remote: { number: raw.number, state: raw.state, isDraft: !!raw.isDraft, labels: all(raw.labels, `#${raw.number} のラベル`).map((l) => l.name), closes: closesOf(raw.body, raw.headRefName), mergeCommit: raw.mergeCommit?.oid ?? null, updatedAt: raw.updatedAt, files, closedAt: raw.closedAt ?? null, mergedAt: raw.mergedAt ?? null },
+    remote: { number: raw.number, state: raw.state, isDraft: !!raw.isDraft, labels: all(raw.labels, `#${raw.number} のラベル`).map((l) => l.name), closes: closesOf(raw.body, raw.headRefName), mergeCommit: raw.mergeCommit?.oid ?? null, updatedAt: raw.updatedAt, files, closedAt: raw.closedAt ?? null, mergedAt: raw.mergedAt ?? null, head: raw.headRefOid ?? null },
   };
 }
 /** Numbers per recheck query: each alias is a whole Issue. */
@@ -51,7 +52,7 @@ const RECHECK_BATCH = 20;
 type Page<T> = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: T[] };
 type Counted<T> = { totalCount: number; nodes: T[] };
 type RawItem = { id: string; project: { number: number; owner: { login: string } }; fieldValues: Counted<{ name?: string; number?: number; text?: string; date?: string; field?: { name: string } }> };
-type RawPull = { id: string; number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; updatedAt: string; closedAt?: string | null; mergedAt?: string | null; headRefName: string | null; body: string | null; labels: Counted<{ name: string }>; files: Counted<{ path: string }>; mergeCommit?: { oid: string } | null };
+type RawPull = { id: string; number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; updatedAt: string; closedAt?: string | null; mergedAt?: string | null; headRefName: string | null; headRefOid?: string | null; body: string | null; comments: Page<RawComment>; labels: Counted<{ name: string }>; files: Counted<{ path: string }>; mergeCommit?: { oid: string } | null };
 type RawComment = { id: string; body: string; createdAt: string };
 type RawIssue = {
   id: string; number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason?: BacklogIssueData["stateReason"]; body: string; createdAt: string; updatedAt: string; closedAt?: string | null;
@@ -98,18 +99,30 @@ function itemEntries(issue: number, items: Counted<RawItem> | undefined): Backlo
   });
 }
 
+/** Every comment of Issue or pull request `n`: the first page is `first`, the pages after it are asked for with `more`. */
+async function allComments(gh: GhRunner, cwd: string, vars: Vars, n: number, first: unknown, more: string, field: "issue" | "pullRequest"): Promise<BacklogSnapshotEntry[]> {
+  const comments = [...page<RawComment>(first, `#${n} のコメント`).nodes];
+  for (let p = first as Page<RawComment>; p.pageInfo.hasNextPage; ) {
+    const { data } = await graphql(gh, cwd, more, { ...vars, n, after: p.pageInfo.endCursor ?? "" });
+    p = page<RawComment>(data?.repository?.[field]?.comments, `#${n} のコメント`);
+    comments.push(...p.nodes);
+  }
+  return comments.map((c): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt }, fetchState: "fetched" }));
+}
+
+/** A pull request read in full: itself and every comment, kept as `comment` records of the PR's number. */
+async function pullEntries(gh: GhRunner, cwd: string, vars: Vars, raw: RawPull): Promise<BacklogSnapshotEntry[]> {
+  const entry = pullEntry(raw);
+  return [entry, ...(await allComments(gh, cwd, vars, raw.number, raw.comments, MORE_PULL_COMMENTS, "pullRequest"))];
+}
+
 /** An Issue read in full: itself, every comment (the pages after the first are asked for), its Project items. */
 async function issueEntries(gh: GhRunner, cwd: string, vars: Vars, raw: RawIssue): Promise<BacklogSnapshotEntry[]> {
   const text = (v: unknown) => typeof v === "string";
   if (!text(raw?.id) || typeof raw.number !== "number" || ![raw.title, raw.url, raw.state, raw.body, raw.createdAt, raw.updatedAt].every(text))
     throw new BacklogError("gh api graphql（Issue）の応答の形が想定と違います");
   const n = raw.number;
-  const comments = [...page<RawComment>(raw.comments, `#${n} のコメント`).nodes];
-  for (let p = raw.comments; p.pageInfo.hasNextPage; ) {
-    const { data } = await graphql(gh, cwd, MORE_COMMENTS, { ...vars, n, after: p.pageInfo.endCursor ?? "" });
-    p = page<RawComment>(data?.repository?.issue?.comments, `#${n} のコメント`);
-    comments.push(...p.nodes);
-  }
+  const comments = await allComments(gh, cwd, vars, n, raw.comments, MORE_COMMENTS, "issue");
   const issue: BacklogIssueData = {
     number: n, title: raw.title, url: raw.url, state: raw.state, stateReason: raw.stateReason ?? null, body: raw.body, labels: all(raw.labels, `#${n} のラベル`).map((l) => l.name),
     milestone: raw.milestone?.title ?? null, parent: raw.parent?.number ?? null, subIssues: all(raw.subIssues, `#${n} の sub-issue`).map((s) => s.number),
@@ -117,7 +130,7 @@ async function issueEntries(gh: GhRunner, cwd: string, vars: Vars, raw: RawIssue
   };
   return [
     { objectKind: "issue", externalId: raw.id, remote: issue, fetchState: "fetched" },
-    ...comments.map((c): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt }, fetchState: "fetched" })),
+    ...comments,
     ...itemEntries(n, raw.projectItems),
   ];
 }
@@ -200,6 +213,8 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     return found;
   };
   const pullsRead = started(listPulls());
+  /** An open PR's comment pages are asked while the lists are still read. */
+  const putPull = (raw: RawPull, entries: Promise<BacklogSnapshotEntry[]>) => entries.then((e) => replace(raw.number, ["comment"], e));
 
   let cursor = since;
   const [changed, opened] = await Promise.all([listChanged(), listOpen()]);
@@ -233,6 +248,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
 
   const openPulls = new Set<number>();
   const pulls = await pullsRead;
+  const pullReads = pulls.map((raw) => ({ raw, entries: started(pullEntries(gh, cwd, vars, raw)) }));
   for (const raw of pulls) openPulls.add(raw.number);
   // what is known after the two lists: the stored records with `entries` (this import's) on top. What is asked again
   // follows from it, so it is worked out twice: before the Project items of the named Issues are in (to start at once), and after
@@ -285,7 +301,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
     // one gone or hidden is seen by a full import
     for (const n of batch) if (askedAnswers[i]!.data?.repository?.[`w${n}`]) replace(n, ["project-item"], itemEntries(n, askedAnswers[i]!.data.repository[`w${n}`].projectItems));
   });
-  for (const raw of pulls) put(pullEntry(raw));
+  for (const { raw, entries } of pullReads) await putPull(raw, entries);
 
   // the items may have moved a PBI to In progress: what its confirmation lines name is asked now (normally nothing)
   const { numbers, byNumber } = recheckNumbers(out);
@@ -302,7 +318,7 @@ export async function fetchGithubSnapshot(gh: GhRunner, cwd: string, repo: { own
   for (const { n, node, errors, entries } of rechecked) {
     if (entries) putIssue(node.number, await entries);
     else if (node?.__typename === "PullRequest")
-      put(pullEntry(node));
+      await putPull(node, pullEntries(gh, cwd, vars, node));
     else {
       const type = errors.find((e) => e.path?.[1] === `w${n}`)?.type;
       if (type !== "NOT_FOUND" && type !== "FORBIDDEN") throw new BacklogError(`gh api graphql（再確認）の応答に #${n} がありません`);

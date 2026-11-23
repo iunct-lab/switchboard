@@ -1,4 +1,4 @@
-// test-reads: none
+// test-reads: scripts/merge-gate.ts
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -7,7 +7,8 @@ import { join } from "node:path";
 import type { Job, JobRequest, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
-import { jobCommand, JobError, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { mergeRecordsOf } from "./merge-records.ts";
+import { DAEMON_MERGE_GATE, spawnCollectPending, jobCommand, JobError, reviewResult, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
 import { workspaceConfigFile, writeWorkspaceConfigs } from "./workspace-config.ts";
 
@@ -99,6 +100,169 @@ describe("jobs", () => {
     };
     expect(await run({ kind: "local-ci", taskId: "t1", pr: 12, cwd: repo, fixtures: "/srv/recordings" })).toContain("SWITCHBOARD_FIXTURES=/srv/recordings\n");
     expect(await run(local())).not.toContain("SWITCHBOARD_FIXTURES=");
+  });
+
+  test("a gate job runs the daemon's own merge-gate and records the judgement", async () => {
+    const H = "d".repeat(40);
+    const gate = (over: Partial<Extract<JobRequest, { kind: "gate" }>> = {}): Extract<JobRequest, { kind: "gate" }> => ({ kind: "gate", taskId: "t1", cwd: repo, pr: 7, ...over });
+    // the command is the daemon's own script (inside the code this daemon runs, not the Task's checkout), the number and the flags only; the verdict goes to $J/out
+    expect(DAEMON_MERGE_GATE.startsWith(join(import.meta.dir, "../../.."))).toBe(true);
+    expect(DAEMON_MERGE_GATE.startsWith(repo)).toBe(false);
+    expect(jobCommand({ ...gate(), cwd: repo })).toEqual({ argv: ["bun", "--no-env-file", DAEMON_MERGE_GATE, "7", "--cwd", repo], tail: ' > "$J/out"' });
+    expect(jobCommand({ ...gate({ repo: "acme/lib", allowLarge: true, merge: "merge-stack" }), cwd: repo }).argv).toEqual(["bun", "--no-env-file", DAEMON_MERGE_GATE, "7", "--repo", "acme/lib", "--allow-large", "--merge-stack", "--cwd", repo]);
+    expect(jobCommand({ ...gate({ change: true, scope: true }), cwd: repo }).argv).toEqual(["bun", "--no-env-file", DAEMON_MERGE_GATE, "--change", "7", "--scope", "--cwd", repo]);
+
+    // a run in the job's environment: the daemon's own place for its records, nothing of the Task's or of the shell's that reaches the front of gh
+    const run = async (script: string, req = gate(), env: Record<string, string> = {}) => {
+      const { deps, ended } = fake(script);
+      deps.app = () => ({ url: "http://127.0.0.1:47000", tokenFile: join(root, "daemon-token") });
+      deps.env = { ...deps.env, ...env };
+      const job = requestJob(deps, req);
+      return { job, end: await ended };
+    };
+    const poison = { MERGE_RECORDS_URL: "http://evil.test", MERGE_RECORDS_TOKEN_FILE: "/evil/key", BACKLOG_URL: "http://evil.test/api/backlog", BACKLOG_TOKEN_FILE: "/evil/key", OPS_MERGE_GATE_PR: "7", GH_REPO: "evil/repo" };
+    const { job, end } = await run(`env > "$J/env"; printf '{"head":"${H}","verdict":"stop","ask":["security:gates"],"recheck":["size"],"reasons":["a","b"],"allowLarge":false,"reviewSkipped":true,"merged":false}' > "$J/result.json"; echo verdict > "$J/out"; exit 1`, gate(), poison);
+    // the request had no head to record (the checkout's HEAD is not the PR's); the run's is
+    expect(job).toMatchObject({ kind: "gate", pr: 7, head: null, runner: null, repo: "acme/app" });
+    expect(end).toMatchObject({ status: "fail", exitCode: 1, head: H, result: { gate: { verdict: "stop", head: H, ask: ["security:gates"], recheck: ["size"], reasons: ["a", "b"], allowLarge: false, reviewSkipped: true, merged: false } } });
+    const env = readFileSync(join(root, "jobs", String(job.id), "env"), "utf8");
+    expect(env).toContain("MERGE_RECORDS_URL=http://127.0.0.1:47000\n");
+    expect(env).toContain(`MERGE_RECORDS_TOKEN_FILE=${join(root, "daemon-token")}\n`);
+    expect(env).toContain("OPS_KIT_TASK_ID=t1\n");
+    for (const k of ["BACKLOG_URL", "BACKLOG_TOKEN_FILE", "OPS_MERGE_GATE_PR", "GH_REPO", "SWITCHBOARD_TASK_ID", "SWITCHBOARD_SUPERVISED"]) expect(env).not.toMatch(new RegExp(`^${k}=`, "m"));
+    expect(readFileSync(join(root, "jobs", String(job.id), "out"), "utf8")).toBe("verdict\n");
+    // a PR of another repository is recorded under it (lower case, as the records are read); a run that judged nothing (exit 2) leaves no result
+    const none = await run("exit 2", gate({ repo: "Acme/Lib" }));
+    expect(none.job.repo).toBe("acme/lib");
+    expect(none.end).toMatchObject({ status: "fail", exitCode: 2, head: null, result: null });
+    expect((await run(`echo '{"head":"short"}' > "$J/result.json"`)).end).toMatchObject({ head: null, result: null });
+    // the reasons kept are bounded
+    const long = await run(`printf '{"head":"${H}","verdict":"merge","ask":[],"recheck":[],"reasons":["%s"],"allowLarge":true,"reviewSkipped":false,"merged":true}' "$(head -c 900 /dev/zero | tr '\\0' x)" > "$J/result.json"`);
+    expect(long.end.result!.gate!.reasons[0]!.length).toBe(500);
+    expect(long.end.result!.gate).toMatchObject({ verdict: "merge", allowLarge: true, merged: true });
+
+    // a change is read from the app as `ops-kit backlog view --change` reads it: that is the one place the daemon's backlog address goes (it only judges)
+    const dir = join(root, "gate-ws");
+    mkdirSync(dir);
+    sh(dir, "git", "init", "-q");
+    sh(dir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+    sh(dir, "git", "remote", "add", "origin", "https://github.com/acme/gate-ws.git");
+    const db4 = new Db(join(root, "db4.sqlite"));
+    try {
+      const ws = db4.upsertWorkspace({ name: "gate-ws", path: dir, kind: "repo" });
+      db4.insertTask(mkTask("g1", dir));
+      const f = fake(`env > "$J/env"`);
+      const deps: JobDeps = { ...f.deps, db: db4, app: () => ({ url: "http://127.0.0.1:47000", tokenFile: "/daemon/key" }) };
+      const ch = requestJob(deps, { kind: "gate", taskId: "g1", cwd: dir, pr: 3, change: true });
+      await f.ended;
+      expect(ch.repo).toBe(`local:${ws.id}`);
+      const chEnv = readFileSync(join(root, "jobs", String(ch.id), "env"), "utf8");
+      expect(chEnv).toContain("BACKLOG_URL=http://127.0.0.1:47000/api/backlog\n");
+      expect(chEnv).toContain("BACKLOG_TOKEN_FILE=/daemon/key\n");
+      expect(chEnv).toContain(`BACKLOG_WORKSPACE=${ws.id}\n`);
+      // a change takes no repository and no merge; a daemon that cannot say where its records are runs none
+      for (const bad of [{ change: true, repo: "acme/lib" }, { change: true, merge: "merge" as const }, { scope: true, merge: "merge" as const }]) {
+        expect(() => requestJob(deps, { kind: "gate", taskId: "g1", cwd: dir, pr: 3, ...bad })).toThrow(JobError);
+      }
+      expect(() => requestJob({ ...deps, app: undefined }, { kind: "gate", taskId: "g1", cwd: dir, pr: 3 })).toThrow("記録の場所");
+    } finally {
+      db4.close();
+    }
+  });
+
+  test("a local-ci job records the outcome, the head and the base its run wrote", async () => {
+    const H = "a".repeat(40);
+    const B = "b".repeat(40);
+    // the run leaves the file in its own folder as scripts/local-ci.ts does; a fail exits 1 and still records its outcome
+    const run = async (script: string) => {
+      const { deps, ended } = fake(script);
+      requestJob(deps, local());
+      return ended;
+    };
+    const pass = await run(`printf '{"head":"${H}","base":"${B}","ci":{"outcome":"pass","stepsHash":"h1"}}' > "$J/result.json"`);
+    expect(pass).toMatchObject({ status: "pass", head: H, base: B, result: { ci: { outcome: "pass", stepsHash: "h1" } } });
+    const fail = await run(`printf '{"head":"${H}","base":"${B}","ci":{"outcome":"fail"}}' > "$J/result.json"; exit 1`);
+    expect(fail).toMatchObject({ status: "fail", head: H, base: B, result: { ci: { outcome: "fail" } } });
+    // a run that wrote nothing (it never reached the post, or the head moved) has no result; a file that cannot be read gives none either
+    expect(await run("exit 0")).toMatchObject({ status: "pass", head: null, base: null, result: null });
+    expect(await run(`echo 'not json' > "$J/result.json"`)).toMatchObject({ result: null });
+  });
+
+  test("a result collected after the daemon restarted is taken into the aborted job", () => {
+    const dir = join(root, "jobs-late");
+    rmSync(dir, { recursive: true, force: true });
+    // the collect is a detached process the daemon does not wait for: it tells when it has ended
+    let collected: (() => void) | null = null;
+    const deps: JobDeps = { db, dir, env: {}, bootId: () => "boot-now", pollMs: 60_000, pendingDir: join(root, "no-pending"), collectPending: (done) => { collected = done; } };
+    const ask = (kind: "local-ci" | "review") => {
+      const j = db.insertJob({ kind, taskId: "t1", pr: 1, runner: kind === "review" ? "claude" : null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
+      db.setJobPid(j.id, 999_999_999, "boot-now");
+      return j;
+    };
+    const ci = ask("local-ci");
+    const review = ask("review");
+    recoverJobs(deps);
+    // the build outlived the daemon: both ended aborted, with no result
+    expect(db.getJob(ci.id)).toMatchObject({ status: "aborted", result: null, head: null });
+    expect(collected).not.toBeNull();
+    // `--collect` writes the result to the job's own folder after the daemon has started, and ends: no restart is needed
+    const write = (id: number, head: string, outcome: string) => {
+      mkdirSync(join(dir, String(id)), { recursive: true });
+      writeFileSync(join(dir, String(id), "result.json"), JSON.stringify({ head, base: "d".repeat(40), ci: { outcome } }));
+    };
+    write(ci.id, "c".repeat(40), "pass");
+    write(review.id, "c".repeat(40), "pass");
+    collected!();
+    expect(db.getJob(ci.id)).toMatchObject({ status: "aborted", head: "c".repeat(40), base: "d".repeat(40), result: { ci: { outcome: "pass" } } });
+    expect(db.getJob(review.id)!.result).toBeNull();
+    // a job that already has its result keeps it
+    write(ci.id, "e".repeat(40), "fail");
+    collected!();
+    expect(db.getJob(ci.id)!.head).toBe("c".repeat(40));
+  });
+
+  test("spawnCollectPending tells when the collect process has ended", async () => {
+    const empty = mkdtempSync(join(root, "no-script-"));
+    const ended = new Promise<void>((r) => spawnCollectPending(empty, { PATH: process.env.PATH }, join(root, "collect.log"), r));
+    await ended;
+  });
+
+  test("a result whose head or base is not a commit id is no result", async () => {
+    const run = async (head: string, base: string) => {
+      const { deps, ended } = fake(`printf '{"head":"${head}","base":"${base}","ci":{"outcome":"pass"}}' > "$J/result.json"`);
+      requestJob(deps, local());
+      return ended;
+    };
+    expect(await run("a".repeat(40), "b".repeat(40))).toMatchObject({ result: { ci: { outcome: "pass" } } });
+    for (const [h, b] of [["main", "b".repeat(40)], ["a".repeat(40), "../x"], ["A".repeat(40), "b".repeat(40)], ["a".repeat(39), "b".repeat(40)]]) expect(await run(h!, b!)).toMatchObject({ head: null, base: null, result: null });
+  });
+
+  test("the tag CI job's argv is Switchboard's scripts/tag-ci.ts run for the head it was asked for, with --repo for another repository's checkout; the app's job needs a registered workspace and the reserved taskId is no request's", () => {
+    const req = { kind: "tag-ci", taskId: "app", cwd: repo } as const;
+    const head = "a".repeat(40);
+    expect(jobCommand({ ...req, head, other: { script: "/sb/scripts/tag-ci.ts", repo: "" } }).argv).toEqual(["bun", "/sb/scripts/tag-ci.ts", "--sha", head]);
+    expect(jobCommand({ ...req, head, other: { script: "/sb/scripts/tag-ci.ts", repo: "acme/other" } }).argv).toEqual(["bun", "/sb/scripts/tag-ci.ts", "--sha", head, "--repo", "acme/other"]);
+    // the repository above is not a registered workspace of `db`
+    expect(() => requestJob(fake("true").deps, req, { app: true })).toThrow("not a checkout");
+    expect(() => requestJob(fake("true").deps, req)).toThrow("予約");
+  });
+
+  test("a change's repository is recorded in lower case, as the records are read, so a workspace id with capitals still finds its jobs", () => {
+    const dir = join(root, "chg-upper");
+    mkdirSync(dir);
+    sh(dir, "git", "init", "-q");
+    sh(dir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+    sh(dir, "git", "remote", "add", "origin", "https://github.com/acme/switchboard.git");
+    const db4 = new Db(join(root, "db4.sqlite"));
+    try {
+      const ws = db4.upsertWorkspace({ name: "switchboard", path: dir, kind: "meta", id: "ws_UpperCase" });
+      db4.insertTask(mkTask("c-up", dir));
+      const job = requestJob({ ...fake("true").deps, db: db4, command: () => ({ argv: ["true"], tail: "" }) }, { kind: "local-ci", taskId: "c-up", pr: 7, cwd: dir, change: true });
+      expect(job.repo).toBe("local:ws_uppercase");
+      expect(mergeRecordsOf(db4, { repo: `local:${ws.id}`, prs: [7] }).jobs.map((j) => j.id)).toEqual([job.id]);
+    } finally {
+      db4.close();
+    }
   });
 
   test("a folder outside the Task's repository is refused; a worktree and a clone of the same origin are not", () => {
@@ -219,6 +383,156 @@ describe("jobs", () => {
     expect(db.listJobs(0)[0]!.status).toBe("aborted"); // not left running
   });
 
+  test("a review job records the head of its checkout and the findings of its output", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const head = Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
+    const out = ["[codex] review", "", "### Findings", "- [blocker] `a/b.ts:12` — x.", "- [should-fix] `c.ts:3-9` — y.", "- [nit] `d.ts:1` — z.", "", "### Verdict", "- [blocker] `not/counted.ts:1` — after the section"].join("\n");
+    const { deps, ended } = fake(`printf '%s\n' "$FINDINGS" > "$JOB_OUT"`);
+    deps.env = { ...deps.env, FINDINGS: out };
+    const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "out-findings.md" });
+    expect(job).toMatchObject({ repo: "acme/app", head, as: null, kinds: [], result: null });
+    await ended;
+    expect(db.getJob(job.id)).toMatchObject({
+      head,
+      result: { review: { firstLine: "[codex] review", findings: [{ severity: "blocker", path: "a/b.ts", line: 12 }, { severity: "should-fix", path: "c.ts", line: 3 }, { severity: "nit", path: "d.ts", line: 1 }] } },
+    });
+    // a job's row is how a verdict finds it: by repository and PR, and by when it started
+    expect(db.jobsOf("acme/app", [12]).map((j) => j.id)).toContain(job.id);
+    expect(db.jobsOf("acme/app", [13])).toEqual([]);
+    expect(db.jobsOf("other/app", [12]).map((j) => j.id)).not.toContain(job.id);
+    expect(db.jobsSince("acme/app", 0).map((j) => j.id)).toContain(job.id);
+    expect(db.jobsSince("acme/app", Date.now() + 60_000)).toEqual([]);
+  });
+
+  test("a recheck job records its kind and the head of its checkout", async () => {
+    // a checkout of its own: the shared one holds the files other tests left
+    const repo = join(root, "recheck-repo");
+    mkdirSync(repo);
+    sh(repo, "git", "init", "-q");
+    sh(repo, "git", "remote", "add", "origin", ORIGIN);
+    sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+    db.insertTask(mkTask("t-recheck", repo));
+    const rev = () => Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
+    const ask = () => requestJob(deps, { kind: "recheck", taskId: "t-recheck", pr: 12, cwd: repo, recheck: "migration" });
+    const { deps, ended } = fake("true");
+    // the repository has no scripts/recheck.ts: refused, nothing recorded
+    const before = db.listJobs(0).length;
+    expect(ask).toThrow("scripts/recheck.ts");
+    expect(db.listJobs(0).length).toBe(before);
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    writeFileSync(join(repo, "scripts/recheck.ts"), "");
+    try {
+      // an untracked or modified file would make the code that runs differ from the head that is recorded: refused
+      expect(ask).toThrow("未コミット");
+      expect(db.listJobs(0).length).toBe(before);
+      sh(repo, "git", "add", "scripts/recheck.ts");
+      sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "recheck script");
+      const head = rev();
+      const job = ask();
+      expect(job).toMatchObject({ kind: "recheck", repo: "acme/app", head, as: null, kinds: ["migration"] });
+      await ended;
+      writeFileSync(join(repo, "scripts/recheck.ts"), "// changed");
+      expect(ask).toThrow("未コミット");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+    // the argv is the app's: the kind and the recorded head, in a heavy slot
+    expect(jobCommand({ kind: "recheck", taskId: "t1", pr: 12, cwd: repo, recheck: "security:lockfile", head: "abc" }).argv).toEqual(["ops-kit", "heavy", "--", "bun", "scripts/recheck.ts", "security:lockfile", "--head", "abc"]);
+  });
+
+  test("a recheck of a workspace that takes in someone else's updates is refused", () => {
+    const dir = join(root, "theirs-recheck");
+    mkdirSync(dir);
+    sh(dir, "git", "init", "-q");
+    sh(dir, "git", "remote", "add", "origin", "https://github.com/acme/theirs-recheck.git");
+    const db2 = new Db(join(root, "db-recheck.sqlite"));
+    try {
+      db2.upsertWorkspace({ name: "theirs-recheck", path: dir, kind: "repo", upstream: "https://github.com/else/theirs-recheck.git" });
+      db2.insertTask(mkTask("t-rc", dir));
+      expect(() => requestJob({ ...fake("true").deps, db: db2 }, { kind: "recheck", taskId: "t-rc", pr: 7, cwd: dir, recheck: "migration" })).toThrow("他者のリポジトリ");
+    } finally {
+      db2.close();
+    }
+  });
+
+  test("a review whose output has no Findings section records no result", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const { deps, ended } = fake(`echo "looks fine" > "$JOB_OUT"`);
+    const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "out-none.md" });
+    await ended;
+    expect(db.getJob(job.id)).toMatchObject({ status: "pass", result: null });
+    expect(reviewResult("a\n### Verdict\nok")).toBeNull();
+    expect(reviewResult("a\n### Findings\n- none\n")).toEqual({ findings: [], firstLine: "a" });
+  });
+
+  test("a failed review records no result, and a recheck without kinds is recorded with none while a word that is not a recheck kind is refused", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const { deps, ended } = fake(`printf '### Findings\n- [blocker] \`a.ts:1\` — x\n' > "$JOB_OUT"; exit 1`);
+    const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "out-fail.md" });
+    await ended;
+    expect(db.getJob(job.id)).toMatchObject({ status: "fail", result: null });
+    const recheck = (kinds?: string[]) => requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", as: "recheck", kinds, cwd: repo, promptFile: "prompt.md", outFile: "out-r.md" });
+    expect(recheck()).toMatchObject({ as: "recheck", kinds: [] });
+    expect(recheck(["size"])).toMatchObject({ as: "recheck", kinds: ["size"] });
+    expect(() => recheck(["no-such-kind"])).toThrow("知らない種類");
+    expect(() => requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", kinds: ["size"], cwd: repo, promptFile: "prompt.md", outFile: "out-r.md" })).toThrow("as: recheck");
+  });
+
+  test("a request for a change the app holds records the workspace as its repository and runs the checkout's script with --change; --local and a checkout no workspace owns are refused; another registered repository's checkout runs Switchboard's script in its folder", async () => {
+    const mk = (name: string, origin: string | null) => {
+      const dir = join(root, name);
+      mkdirSync(dir);
+      sh(dir, "git", "init", "-q");
+      sh(dir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+      if (origin) sh(dir, "git", "remote", "add", "origin", origin);
+      return dir;
+    };
+    const [metaDir, libDir, freeDir] = [mk("chg-meta", "https://github.com/acme/switchboard.git"), mk("chg-lib", "git@github.com:acme/lib.git"), mk("chg-free", "https://github.com/acme/free.git")];
+    const db3 = new Db(join(root, "db3.sqlite"));
+    try {
+      const metaWs = db3.upsertWorkspace({ name: "switchboard", path: metaDir, kind: "meta" });
+      const libWs = db3.upsertWorkspace({ name: "lib", path: libDir, kind: "repo" });
+      for (const [id, cwd] of [["c-meta", metaDir], ["c-lib", libDir], ["c-free", freeDir]] as const) db3.insertTask(mkTask(id, cwd));
+      const got: Parameters<NonNullable<JobDeps["command"]>>[0][] = [];
+      const deps: JobDeps = { ...fake("true").deps, db: db3, command: (req) => (got.push(req), { argv: ["true"], tail: "" }) };
+      const ci = requestJob(deps, { kind: "local-ci", taskId: "c-meta", pr: 7, cwd: metaDir, change: true });
+      expect(ci.repo).toBe(`local:${metaWs.id}`);
+      expect(jobCommand(got.at(-1)!).argv).toEqual(["bun", "scripts/local-ci.ts", "--change", "7"]);
+      writeFileSync(join(metaDir, "prompt.md"), "review");
+      const review = requestJob(deps, { kind: "review", taskId: "c-meta", pr: 7, runner: "codex", cwd: metaDir, promptFile: "prompt.md", outFile: "out.md", change: true });
+      expect(review.repo).toBe(`local:${metaWs.id}`);
+      const refused = (req: JobRequest) => {
+        try {
+          requestJob(deps, req);
+        } catch (e) {
+          return e as JobError;
+        }
+        throw new Error("was not refused");
+      };
+      const localCi = refused({ kind: "local-ci", taskId: "c-meta", pr: 7, cwd: metaDir, change: true, local: true });
+      expect([localCi.status, localCi.message]).toEqual([400, expect.stringContaining("--local")]);
+      // another registered repository's checkout: it has no script of its own, so Switchboard's runs from its folder in that checkout, as a person runs it by hand (no --repo), and the record is that workspace's
+      const lib = requestJob(deps, { kind: "local-ci", taskId: "c-lib", pr: 7, cwd: libDir, change: true });
+      expect(lib.repo).toBe(`local:${libWs.id.toLowerCase()}`);
+      expect(jobCommand(got.at(-1)!).argv).toEqual(["bun", join(metaDir, "scripts/local-ci.ts"), "--change", "7"]);
+      expect(got.at(-1)!.cwd).toBe(libDir);
+      // a review of a change in a checkout no workspace owns has no repository to record
+      writeFileSync(join(freeDir, "prompt.md"), "review");
+      const free = refused({ kind: "review", taskId: "c-free", pr: 7, runner: "codex", cwd: freeDir, promptFile: "prompt.md", outFile: "out.md", change: true });
+      expect([free.status, free.message]).toEqual([400, expect.stringContaining("workspace")]);
+    } finally {
+      db3.close();
+    }
+  });
+
+  test("every severity-marked line of the Findings section is kept, one whose place cannot be read with an empty path and line 0", () => {
+    expect(reviewResult(["x", "### Findings", "- [should-fix] `a.ts:4` — ok", "- [blocker] the place is not named", "- [nit] `no-line.ts` — y", "- none"].join("\n"))).toEqual({
+      findings: [{ severity: "should-fix", path: "a.ts", line: 4 }, { severity: "blocker", path: "", line: 0 }, { severity: "nit", path: "", line: 0 }],
+      firstLine: "x",
+    });
+    expect(reviewResult("x\n### Findings\n- none")!.findings).toEqual([]);
+  });
+
   test("a review's prompt must exist; its command reads the prompt and writes the out file", () => {
     const { deps } = fake("true");
     expect(() => requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "missing.md", outFile: "out.md" })).toThrow("promptFile not found");
@@ -279,7 +593,7 @@ describe("jobs", () => {
   });
 
   describe("review runner from the setting", () => {
-    const ask = (setting: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "fallback" | "recheck" | "audit" } = {}, taskId = "t1") => {
+    const ask = (setting: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "fallback" | "recheck" | "audit" | "attack" } = {}, taskId = "t1") => {
       writeFileSync(join(repo, "prompt.md"), "review");
       const { deps, ended } = fake("true");
       const job = requestJob({ ...deps, reviewRunner: () => setting }, { kind: "review", taskId, pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md", ...extra });
@@ -316,6 +630,36 @@ describe("jobs", () => {
       const audit = ask("other", { runner: "claude", as: "audit" });
       expect(audit.job.runner).toBe("claude");
       await audit.ended;
+    });
+
+    test("attack refuses the implementing runner when the setting is other", async () => {
+      const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
+      let refusal: unknown;
+      try {
+        ask("other", { runner: "claude", as: "attack" }); // the Task's runner is claude
+      } catch (e) {
+        refusal = e;
+      }
+      expect(refusal).toBeInstanceOf(JobError);
+      expect((refusal as JobError).status).toBe(400);
+      expect((refusal as JobError).message).toContain("攻める側のレビューは codex で頼んでください");
+      expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before);
+      const accepted = ask("other", { runner: "codex", as: "attack" });
+      expect(accepted.job.runner).toBe("codex");
+      await accepted.ended;
+      expect(() => ask("other", { as: "attack" })).toThrow("runner の名指し");
+    });
+
+    test("attack under the same setting runs only the implementing runner", async () => {
+      expect(() => ask("same", { runner: "codex", as: "attack" })).toThrow("攻める側のレビューは claude で頼んでください");
+      const accepted = ask("same", { runner: "claude", as: "attack" });
+      expect(accepted.job.runner).toBe("claude");
+      await accepted.ended;
+    });
+
+    test("attack for a Task whose runner reviews nothing cannot be decided", () => {
+      db.insertTask({ ...mkTask("t-adk2", repo), runner: "dak" });
+      expect(() => ask("other", { runner: "claude", as: "attack" }, "t-adk2")).toThrow("決められません");
     });
 
     test("a Task whose runner reviews nothing must name the reviewer", async () => {
@@ -384,7 +728,7 @@ describe("jobs", () => {
     const dir = join(root, "jobs-recover");
     const ended: Job[] = [];
     const deps: JobDeps = { db, dir, env: {}, onFinish: (j) => ended.push(j), pollMs: 50, bootId: () => "boot-now" };
-    const mk = () => db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() });
+    const mk = () => db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
     const exited = mk();
     mkdirSync(join(dir, String(exited.id)), { recursive: true });
     writeFileSync(join(dir, String(exited.id), "exit"), "0\n");
@@ -415,7 +759,7 @@ test("the list keeps a job for 7 days after it ended, and every running one", ()
   const d = new Db(join(root, "list.sqlite"));
   const now = Date.now();
   const day = 24 * 3600 * 1000;
-  const mk = () => d.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: now - 9 * day });
+  const mk = () => d.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: now - 9 * day, repo: "", head: null, as: null, kinds: [] });
   const running = mk();
   const endedNow = mk();
   d.finishJob(endedNow.id, { status: "pass", exitCode: 0, summary: "", endedAt: now });
@@ -430,7 +774,7 @@ test("pruneJobDirs removes the folders of jobs that ended more than 7 days ago; 
   const dir = join(root, "prune-jobs");
   const now = Date.now();
   const day = 24 * 3600 * 1000;
-  const mk = () => d.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: now - 9 * day });
+  const mk = () => d.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: now - 9 * day, repo: "", head: null, as: null, kinds: [] });
   const old = mk();
   d.finishJob(old.id, { status: "pass", exitCode: 0, summary: "", endedAt: now - 8 * day });
   const recent = mk();
@@ -456,7 +800,7 @@ test("recoverJobs collects the results left by local CI once: a local-ci job lef
   let calls = 0;
   const deps = (): JobDeps => ({ db, dir: join(root, "jobs-collect"), env: {}, bootId: () => "boot-now", pollMs: 60_000, pendingDir, collectPending: () => { calls++; } });
   const leave = (kind: "local-ci" | "review") => {
-    const j = db.insertJob({ kind, taskId: "t1", pr: 1, runner: kind === "review" ? "claude" : null, cwd: repo, startedAt: Date.now() });
+    const j = db.insertJob({ kind, taskId: "t1", pr: 1, runner: kind === "review" ? "claude" : null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
     db.setJobPid(j.id, 999_999_999, "boot-now");
     return j;
   };
@@ -476,7 +820,7 @@ test("recoverJobs collects the results left by local CI once: a local-ci job lef
   expect(calls).toBe(1);
   expect(db.getJob(ci.id)!.status).toBe("aborted");
   // a local-ci job still alive in this boot (a restart while it waits on its build) writes its own result: no collect
-  const live = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() });
+  const live = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
   db.setJobPid(live.id, process.pid, "boot-now");
   recoverJobs(deps());
   expect(calls).toBe(1);
@@ -497,7 +841,7 @@ test("a job's end and recoverJobs prune the folder of a job that ended more than
   const day = 24 * 3600 * 1000;
   const { deps, ended } = fake("exit 0");
   const oldFolder = () => {
-    const j = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() - 9 * day });
+    const j = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now() - 9 * day, repo: "", head: null, as: null, kinds: [] });
     db.finishJob(j.id, { status: "pass", exitCode: 0, summary: "", endedAt: Date.now() - 8 * day });
     mkdirSync(join(deps.dir, String(j.id)), { recursive: true });
     return join(deps.dir, String(j.id));
@@ -523,6 +867,9 @@ describe("/api/jobs", () => {
       const post = (body: unknown) => fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify(body) });
       expect((await post({ kind: "local-ci", taskId: "t9", pr: 5, cwd: root })).status).toBe(400);
       expect((await post({ kind: "shell", taskId: "t9", pr: 5, cwd: repo })).status).toBe(400);
+      // the app's own taskId is reserved: a request body cannot say it is the app (it would skip the Task and checkout checks)
+      expect((await post({ kind: "tag-ci", taskId: "app", cwd: repo })).status).toBe(400);
+      expect((await post({ kind: "local-ci", taskId: "app", pr: 5, cwd: repo })).status).toBe(400);
       const r = await post({ kind: "local-ci", taskId: "t9", pr: 5, cwd: repo });
       expect(r.status).toBe(202);
       const job = (await r.json()) as Job;

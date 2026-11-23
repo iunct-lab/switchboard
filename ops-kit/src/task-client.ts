@@ -24,7 +24,7 @@ export interface TaskIo {
 class Usage extends Error {}
 
 /** A line that reads like the person's grant sentence: a PR or Task number, ending in 「してよい」. */
-const GRANT_LIKE = /(PR|Task) #\d+.*してよい[。.]?\s*$/;
+const GRANT_LIKE = /(?:(?:PR|Task) #|変更 L)\d+.*してよい[。.]?\s*$/;
 
 export async function runTask(argv: string[], env: Record<string, string | undefined>, io: TaskIo, opts: { fetch?: Fetch; readStdin?: () => Promise<string> } = {}): Promise<number> {
   const args = [...argv];

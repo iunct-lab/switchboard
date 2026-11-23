@@ -35,7 +35,7 @@ export function asksRoutes(sc: Pick<ServerContext, "grantSource" | "currentAsks"
         // a batch is answered by pressing its one button: never a policy, never a text of the person's own
         if (id.startsWith("batch:")) {
           if (policy || answer.kind !== "allow") return sc.bad("まとまりへの回答は allow だけです（方針には保存できません）");
-          const r = await sc.batchAnswers.answer(id, taskIds);
+          const r = await sc.batchAnswers.answer(id, taskIds, askIds);
           return sc.json(r.body, r.status);
         }
         // a Workspace's questions the work went on from, confirmed at once: one button, never a policy

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Ask, AskAnswerResult, AskQuestion, AskChanged, AskList, Backlog, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
+import { mergeGranted } from "../../../ops-kit/src/backlog-client.ts";
 import { importing } from "../fixtures/github-import.ts";
 import { answerStoredDecision, screenAnswer } from "./backlog-edit.ts";
 import type { GhRunner } from "./backlog-gh.ts";
@@ -23,11 +24,25 @@ const ASKED = "a".repeat(40);
  * The fixtures' gh. `place` replaces where Issue 306's question stopped; `pr` answers `gh pr view` (the PR the question names).
  * Every call is kept in `calls`.
  */
+const B_LINE = "- B: ファイル — 影響: 移行が要らない";
 type PrView = { state: string; head: string; comments: Array<{ body: string; createdAt: string }>; commits: Array<{ committedDate: string }> };
-function fakeGh(opts: { place?: string; pr?: PrView; prs?: Record<string, PrView>; tasks306?: string[]; /** Comments added to an Issue, by its alias (`i304`). */ comments?: Record<string, Array<{ body: string; createdAt: string }>> } = {}) {
+function fakeGh(opts: { grantB?: string; /** Words put at the end of choice B's own line (no ` — 許可: `). */ tailB?: string; /** Choice B's whole line, in place of the fixture's. */ lineB?: string; place?: string; pr?: PrView; prs?: Record<string, PrView>; tasks306?: string[]; /** Comments added to an Issue, by its alias (`i304`). */ comments?: Record<string, Array<{ body: string; createdAt: string }>> } = {}) {
   const calls: string[][] = [];
   const own = structuredClone(decisions);
   for (const [alias, nodes] of Object.entries(opts.comments ?? {})) own.data.repository[alias]!.comments.nodes.push(...nodes);
+  if (opts.lineB) {
+    const nodes = own.data.repository.i306!.comments.nodes;
+    nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace(B_LINE, `- ${opts.lineB}`) };
+  }
+  if (opts.tailB) {
+    const nodes = own.data.repository.i306!.comments.nodes;
+    nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace(B_LINE, `${B_LINE} ${opts.tailB}`) };
+  }
+  // the question's second choice carries a grant sentence of the answer's own (` — 許可: <文>`)
+  if (opts.grantB) {
+    const nodes = own.data.repository.i306!.comments.nodes;
+    nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace(B_LINE, `${B_LINE} — 許可: ${opts.grantB}`) };
+  }
   if (opts.place) {
     const nodes = own.data.repository.i306!.comments.nodes;
     nodes[2] = { ...nodes[2]!, body: nodes[2]!.body.replace("**止めた場所**: Task #307", `**止めた場所**: ${opts.place}`) };
@@ -229,13 +244,44 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(moved.calls.filter((a) => a[0] === "pr")).toHaveLength(1);
   });
 
-  test("a grant of the PR the question stopped at is for no head when the answer's check read none: kept as not read, and the PR is not read again for the grant", async () => {
+  test("a reply without a head for the PR the question stopped at: the PR cannot be checked, so the answer is refused with the PR's number and nothing is written", async () => {
     const GRANT = "PR #12 を判定の外でマージしてよい";
-    const none = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: null as never, comments: [], commits: [] } });
+    const none = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: null as never, comments: [{ body: `[merge-ask] large ${ASKED}`, createdAt: "2026-09-22T02:00:00Z" }], commits: [] } });
     const base = await boot(none.gh);
-    expect((await answer(base, (await decisionOf306(base)).id, { kind: "text", text: GRANT })).status).toBe(200);
-    expect((queued()[0]![3] as { heads: unknown }).heads).toEqual({ "acme/app#12": null });
+    const r = await answer(base, (await decisionOf306(base)).id, { kind: "text", text: GRANT });
+    expect(r.status).toBe(424);
+    expect(((await r.json()) as { error: string }).error).toBe("PR #12 を確かめられない: gh pr view 12: head がありません");
+    expect(queued()).toEqual([]);
     expect(none.calls.filter((a) => a[0] === "pr")).toHaveLength(1);
+    // the daemon goes on: the question is still there to answer
+    expect((await decisionOf306(base)).state).toBe("open");
+  });
+
+  test("two routes answer one question once: while the asks route reads the question's PR, the Backlog answer box answers the same question — one ## 回答 is kept, and the later one is 409 and starts nothing", async () => {
+    const fake = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: HEAD, comments: [], commits: [] } });
+    // the read of the question's PR waits until the other route has answered
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reading!: () => void;
+    const started = new Promise<void>((r) => (reading = r));
+    const base = await boot(async (args, cwd) => {
+      if (args[0] === "pr" && args[1] === "view" && args.at(-1)!.startsWith("state,")) {
+        reading();
+        await gate;
+      }
+      return fake.gh(args, cwd);
+    });
+    const ask = await decisionOf306(base);
+    const first = answer(base, ask.id, { kind: "text", text: "A で" });
+    await started;
+    const second = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, text: "B で", at: new Date(ask.at).toISOString() }) });
+    expect(second.status).toBe(202);
+    release();
+    const late = await first;
+    expect([late.status, ((await late.json()) as { error: string }).error]).toEqual([409, "問いが変わりました。読み直してから回答してください"]);
+    expect(queued().filter((o) => o[1] === "comment")).toEqual([[306, "comment", null, { body: "## 回答\n\nB で", screen: true, heads: {} }]]);
+    expect(queued().filter((o) => o[1] === "set")).toEqual([[306, "set", "label:needs-decision", false]]);
+    expect(stageTasks(306)).toHaveLength(0);
   });
 
   test("unchanged PR: the head its [merge-ask] named is still the head → written and going on", async () => {
@@ -322,7 +368,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
     core!.db.updateTask(t.id, { outcome: "needs_action" }); // the stop is written straight to the log, so the outcome its record would set is set by hand
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
-    const r = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const r = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(r.ask).toMatchObject({ state: "answered", resume: { taskId: t.id } });
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     expect(prompts).toEqual([GRANT]);
@@ -333,7 +379,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     // the grant is of the head the PR had: another head is not granted
     expect(core!.db.hasMergeGrant(t.id, "acme/app", "merge", 12, "2".repeat(40))).toBe(false);
     // a resend of the same answer sends nothing more
-    const again = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const again = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(again.already).toBe(true);
     await Bun.sleep(50);
     expect(prompts).toEqual([GRANT]);
@@ -349,7 +395,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
     core!.db.updateTask(t.id, { outcome: "needs_action" });
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
-    const r = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const r = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(r.ask).toMatchObject({ state: "answered", resume: { taskId: t.id } });
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     await Bun.sleep(100);
@@ -366,13 +412,13 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     core!.db.updateTask(t.id, { budgetUsd: 0.01 });
     core!.db.insertLedger({ taskId: t.id, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
-    const refused = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const refused = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(refused.ask).toMatchObject({ state: "open", resume: { state: "failed", taskId: t.id } });
     expect(refused.ask!.resume!.reason).toContain("budget exceeded");
     expect(prompts).toEqual([]);
     // the budget raised, the same stop is answered again: sent to that Task, not held back by the overlap
     core!.db.updateTask(t.id, { budgetUsd: 100 });
-    const r = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const r = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(r.ask).toMatchObject({ state: "answered", resume: { taskId: t.id } });
     expect(r.ask!.resume!.state).not.toBe("queued");
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
@@ -386,7 +432,74 @@ describe("POST /api/asks/answer — the Issue side", () => {
     return ((await r.json()) as { id: string }).id;
   };
   const grantRows = () => core!.db.sqlite.query("SELECT task_id, repo, kind, target, by, source FROM task_grants ORDER BY rowid").all() as Array<{ task_id: string; repo: string; kind: string; target: number; by: string; source: string }>;
-  const screenAnswerOn = (n: number, text: string) => answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, n, text, Date.now(), { screen: true });
+  // the screen's answer as the routes keep it: to the question on the Issue (306 carries one, its Task none), with the head of the PR its grant names
+  const screenAnswerOn = (n: number, text: string) => answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, n, text, Date.now(), { ...(n === 306 ? { question: { at: "2026-09-22T03:00:00Z" } } : {}), screen: true, heads: { "acme/app#12": HEAD12 } });
+
+  // an answer to an Issue's question that carries the ask sentence: the chosen option's sentence and the person's own input are
+  // the parts read by letters (the answer's first lines are the app's); recorded for the first stage Task, for the head at the answer
+  test("merge grant: a chosen option's ask sentence, and an input that is only the sentence, are recorded with the head at the answer; a sentence among other words is not", async () => {
+    const GRANT_B = `${B} — 許可: PR #12 をマージしてよい`;
+    const run = async (a: unknown, grant = false) => {
+      const base = await boot(fakeGh({ pr: PR12, ...(grant ? { grantB: "PR #12 をマージしてよい" } : {}) }).gh);
+      const ask = await decisionOf306(base);
+      expect((await answer(base, ask.id, a)).status).toBe(200);
+      const t = stageTasks(306)[0]!;
+      for (let n = 0; n < 100 && !core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12) && n < 30; n++) await Bun.sleep(10);
+      const granted = core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12);
+      await core!.stop();
+      core = null;
+      return granted;
+    };
+    expect(await run({ kind: "choice", choice: GRANT_B }, true)).toBe(true);
+    expect(await run({ kind: "text", text: "PR #12 をマージしてよい" })).toBe(true);
+    expect(await run({ kind: "choice", choice: B, note: "条件\nPR #12 をマージしてよい" })).toBe(false);
+    expect(await run({ kind: "text", text: "条件\nPR #12 をマージしてよい" })).toBe(false);
+  });
+
+  test("merge grant: a chosen option whose own line ends in the sentence for a merge outside the gate is recorded, as it always was", async () => {
+    const OUTSIDE = "PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12, tailB: OUTSIDE }).gh);
+    const ask = await decisionOf306(base);
+    expect((await answer(base, ask.id, { kind: "choice", choice: `${B} ${OUTSIDE}` })).status).toBe(200);
+    const t = stageTasks(306)[0]!;
+    for (let n = 0; n < 30 && !core!.db.hasMergeGrant(t.id, "acme/app", "merge", 12, HEAD12); n++) await Bun.sleep(10);
+    expect(core!.db.hasMergeGrant(t.id, "acme/app", "merge", 12, HEAD12)).toBe(true);
+  });
+
+  test("merge grant: a chosen option whose own line is nothing but the ask sentence grants nothing: the Task wrote that line", async () => {
+    const ASK = "PR #12 をマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12, lineB: ASK }).gh);
+    const ask = await decisionOf306(base);
+    expect((await answer(base, ask.id, { kind: "choice", choice: ASK })).status).toBe(200);
+    const t = stageTasks(306)[0]!;
+    await Bun.sleep(300);
+    expect(core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12)).toBe(false);
+    expect(grantRows()).toEqual([]);
+  });
+
+  test("merge grant: a chosen option whose own line is a quoted line grants nothing, as it never did", async () => {
+    const QUOTED = "> PR #12 を判定の外でマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12, lineB: QUOTED }).gh);
+    const ask = await decisionOf306(base);
+    expect((await answer(base, ask.id, { kind: "choice", choice: QUOTED })).status).toBe(200);
+    expect(stageTasks(306)).toHaveLength(1);
+    await Bun.sleep(300);
+    expect(grantRows()).toEqual([]);
+  });
+
+  test("merge grant: a quoted option's sentence after 許可 grants nothing either, for a merge outside the gate or for the ask", async () => {
+    for (const sentence of ["PR #12 を判定の外でマージしてよい", "PR #12 をマージしてよい"]) {
+      const QUOTED = `> 進める — 許可: ${sentence}`;
+      const base = await boot(fakeGh({ pr: PR12, lineB: QUOTED }).gh);
+      const ask = await decisionOf306(base);
+      expect((await answer(base, ask.id, { kind: "choice", choice: QUOTED })).status).toBe(200);
+      expect(stageTasks(306)).toHaveLength(1);
+      await Bun.sleep(300);
+      expect([sentence, grantRows()]).toEqual([sentence, []]);
+      await core!.stop();
+      core = null;
+    }
+  });
 
   test("merge grant: an answer without a grant sentence leaves nothing behind, however many stage Tasks start on it", async () => {
     const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
@@ -422,7 +535,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
     core!.db.updateTask(t.id, { outcome: "needs_action" });
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
-    const r = (await (await answer(base, ask.id, { kind: "grant" }, false)).json()) as AskAnswerResult;
+    const r = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! }, false)).json()) as AskAnswerResult;
     expect(r.ask!.resume!.taskId).toBe(t.id);
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     expect(prompts.some((p) => p.includes(GRANT))).toBe(true);
@@ -498,6 +611,58 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(grantRows().filter((r) => r.source === rows[0]!.source)).toEqual(rows);
   });
 
+  // the check as the kit makes it in front of `gh` (the function `ops-kit/bin/gh` calls), asked of this daemon for the Issue's repository
+  const kit = (base: string, taskId: string, target: number, head = HEAD12) => mergeGranted({ BACKLOG_URL: `${base}/api/backlog`, OPS_KIT_TASK_ID: taskId }, "acme/app", "merge", target, fetch, head);
+
+  test("merge grant: the kit's check answers for the first stage Task after a screen answer, at the answer's head only", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const MOVED = "2".repeat(40);
+    const pr = { ...PR12 }; // this test moves the PR's head
+    const base = await boot(fakeGh({ pr }).gh, { ...holding, start: (o) => holding.start(o, () => {}) });
+    const source = core!.db.getWorkspaceBacklogSource(meta().id)!;
+    const r = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, text: GRANT }) });
+    expect(r.status).toBe(202);
+    // the head the PR has when the answer is taken is kept with the answer (read after the reply)
+    for (let n = 0; n < 200 && !screenAnswer(core!.db, source, 306)?.heads?.["acme/app#12"]; n++) await Bun.sleep(10);
+    expect(screenAnswer(core!.db, source, 306)?.heads).toEqual({ "acme/app#12": HEAD12 });
+    // a commit is pushed between the answer and the start: the grant is of what the person saw
+    pr.head = MOVED;
+    const first = await startStage(base, 306);
+    expect([await kit(base, first, 12), await kit(base, first, 12, MOVED), await kit(base, first, 13)]).toEqual([true, false, false]);
+    // the same answer is still the newest when the next stage Task starts: that one is not granted, at either head
+    core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
+    const second = await startStage(base, 306);
+    expect(second).not.toBe(first);
+    expect([await kit(base, second, 12), await kit(base, second, 12, MOVED)]).toEqual([false, false]);
+    expect(await kit(base, first, 12)).toBe(true);
+  });
+
+  test("merge grant: a grant answered on a stop answers the kit's check for that Task as the screen sent it, not as a bare call", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const prompts: string[] = [];
+    const base = await boot(fakeGh({ pr: PR12 }).gh, { ...holding, start: (o) => (prompts.push(o.prompt), holding.start(o, () => {})) });
+    // a stage Task stopped on a refused merge, and the person answering its stop with the grant: `page` = as the screen sends it
+    const stopped = async (at: number, page: boolean) => {
+      const t = insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" }, at);
+      core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: `s${at}`, work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+      core!.db.updateTask(t.id, { outcome: "needs_action" });
+      const ask = (await asks(base)).find((a) => a.kind === "stop" && a.task?.id === t.id)!;
+      const sent = prompts.length;
+      const r = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! }, page)).json()) as AskAnswerResult;
+      expect([page, r.ask?.resume?.taskId]).toEqual([page, t.id]);
+      for (let n = 0; n < 200 && prompts.length === sent; n++) await Bun.sleep(10);
+      expect(prompts.slice(sent).some((p) => p.includes(GRANT))).toBe(true); // the grant reached that Task either way
+      return t.id;
+    };
+    const screen = await stopped(Date.now() - 60_000, true);
+    expect([await kit(base, screen, 12), await kit(base, screen, 12, "2".repeat(40)), await kit(base, screen, 13)]).toEqual([true, false, false]);
+    const bare = await stopped(Date.now() - 50_000, false);
+    expect(await kit(base, bare, 12)).toBe(false);
+    // the screen's grant is that Task's alone, and the bare call's is on the record as a call's
+    expect(await kit(base, screen, 12)).toBe(true);
+    expect(grantRows().map((g) => [g.task_id, g.by])).toEqual([[screen, "owner"], [bare, "api"]]);
+  });
+
   test("permission stop grant reply: a stage Task's refused stop is answered by its grant as one reply to that Task — nothing on the Issue, no next stage Task", async () => {
     const GRANT = "git push を origin の sb/x にすることだけ許可します";
     const prompts: string[] = [];
@@ -507,7 +672,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.updateTask(t.id, { outcome: "needs_action" }); // the stop is written straight to the log, so the outcome its record would set is set by hand
     const ask = (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     expect(ask).toMatchObject({ grant: GRANT, answers: ["grant", "text"], blockers: [] });
-    const r = await answer(base, ask.id, { kind: "grant" });
+    const r = await answer(base, ask.id, { kind: "grant", grant: ask.grant! });
     expect(r.status).toBe(200);
     expect(queued().filter((o) => o[0] === 306)).toEqual([]);
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
@@ -515,7 +680,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     // a resend of the grant keeps how it goes on: the stopped Task, read again
     const first = ((await r.json()) as AskAnswerResult).ask!.resume;
     expect(first?.taskId).toBe(t.id);
-    const again = (await (await answer(base, ask.id, { kind: "grant" })).json()) as AskAnswerResult;
+    const again = (await (await answer(base, ask.id, { kind: "grant", grant: ask.grant! })).json()) as AskAnswerResult;
     expect(again).toMatchObject({ already: true, ask: { resume: { taskId: t.id } } });
     expect(stageTasks(306).map((x) => x.id)).toEqual([t.id]);
     expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
@@ -535,14 +700,15 @@ describe("POST /api/asks/answer — the Issue side", () => {
       core!.db.updateTask(t.id, { outcome: "needs_action" });
       return (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
     };
-    const grant = async (id: string) => {
-      const r = await answer(base, id, { kind: "grant" });
+    // each answer carries the grant its question showed
+    const grant = async (a: { id: string; grant: string | null }) => {
+      const r = await answer(base, a.id, { kind: "grant", grant: a.grant! });
       return { status: r.status, body: (await r.json()) as AskAnswerResult & AskChanged };
     };
     const first = await report(A);
     expect(first).toMatchObject({ grant: A, state: "open", answers: ["grant", "text"] });
     expect(first.id).toMatch(/^stop:.+@\d+$/);
-    expect(await grant(first.id)).toMatchObject({ status: 200, body: { already: false } });
+    expect(await grant(first)).toMatchObject({ status: 200, body: { already: false } });
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     expect(prompts).toEqual([A]);
     // reported again with another grant, twice: each is a question of its own, under the same id up to the time
@@ -552,17 +718,17 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(new Set([first.id, mid.id, now.id]).size).toBe(3);
     expect(new Set([first.id, mid.id, now.id].map((id) => id.slice(0, id.lastIndexOf("@")))).size).toBe(1);
     // the id the stop had with the grant before (never answered): 409 with the question now, nothing sent
-    expect(await grant(mid.id)).toMatchObject({ status: 409, body: { error: "問いが新しくなりました", current: { id: now.id, grant: B } } });
+    expect(await grant(mid)).toMatchObject({ status: 409, body: { error: "問いが新しくなりました", current: { id: now.id, grant: B } } });
     // the id answered with the first grant: not its kept result while the stop asks again with another grant
-    expect(await grant(first.id)).toMatchObject({ status: 409, body: { error: "問いが新しくなりました", current: { id: now.id, grant: B } } });
+    expect(await grant(first)).toMatchObject({ status: 409, body: { error: "問いが新しくなりました", current: { id: now.id, grant: B } } });
     expect(prompts).toEqual([A]);
     // the question now: not the first answer's result — the new grant goes to the Task
-    expect(await grant(now.id)).toMatchObject({ status: 200, body: { already: false, ask: { resume: { taskId: t.id } } } });
+    expect(await grant(now)).toMatchObject({ status: 200, body: { already: false, ask: { resume: { taskId: t.id } } } });
     for (let n = 0; n < 200 && prompts.length < 2; n++) await Bun.sleep(10);
     expect(prompts).toEqual([A, B]);
     // a resend of that answer, and one of the first answer under its own id: the result kept, nothing more sent
-    expect(await grant(now.id)).toMatchObject({ status: 200, body: { already: true } });
-    expect(await grant(first.id)).toMatchObject({ status: 200, body: { already: true } });
+    expect(await grant(now)).toMatchObject({ status: 200, body: { already: true } });
+    expect(await grant(first)).toMatchObject({ status: 200, body: { already: true } });
     await Bun.sleep(50);
     expect(prompts).toEqual([A, B]);
     expect(queued().filter((o) => o[0] === 306)).toEqual([]);
@@ -855,6 +1021,37 @@ describe("POST /api/asks/answer — questions the work went on from with their r
     expect(after.filter((a) => a.state === "open").map((a) => a.id)).toEqual([before.older.id]);
   });
 
+  // Issue 306 is labelled and waits on its newest question (asked 2026-09-22T03:00:00Z); before it, a question the table did not let go on
+  const T0 = "2026-09-21T12:00:00Z";
+  const WAITING = "2026-09-22T03:00:00Z";
+  const olderAndWaiting = () => fakeGh({ comments: { i306: [{ body: STOPPED("古い保存先をどちらにするか"), createdAt: T0 }] } });
+  const item306 = async (base: string) => ((await (await fetch(`${base}/api/backlog`)).json()) as Backlog).items.find((i) => i.number === 306)!;
+  const olderOf306 = async (base: string) => (await asks(base)).find((a) => a.pbi?.number === 306 && a.id.startsWith("proceed:") && a.id.endsWith(`@${T0}`))!;
+
+  test("an answer to an older question keeps the newer one waiting: the label stays on, the item still asks its newest question, and no stage starts", async () => {
+    const base = await boot(olderAndWaiting().gh);
+    const older = await olderOf306(base);
+    expect(older).toMatchObject({ state: "open", needs: "person" });
+    const r = await answer(base, older.id, { kind: "choice", choice: B });
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as AskAnswerResult).ask).toMatchObject({ id: older.id, state: "answered" });
+    // the answer names the older question and is kept; the label is not taken off
+    expect(queued()).toEqual([[306, "comment", null, { body: `## 回答\n\n**止めて聞く問いへの回答** — 問い ${new Date(T0).toISOString()}\n\n${B}`, screen: true, heads: {} }]]);
+    expect(await item306(base)).toMatchObject({ stage: "needs-decision", decision: { at: WAITING, issue: 306 } });
+    expect((await decisionOf306(base)).state).toBe("open");
+    expect((await olderOf306(base)).state).toBe("answered");
+    expect(stageTasks(306)).toHaveLength(0);
+  });
+
+  test("an answer to the newest question takes the label off: the item no longer waits, and the older question stays open", async () => {
+    const base = await boot(olderAndWaiting().gh);
+    const r = await answer(base, (await decisionOf306(base)).id, { kind: "text", text: "B で" });
+    expect(r.status).toBe(200);
+    expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nB で", screen: true, heads: {} }], [306, "set", "label:needs-decision", false]]);
+    expect((await item306(base)).stage).not.toBe("needs-decision");
+    expect((await olderOf306(base)).state).toBe("open");
+  });
+
   test("an answer to an Issue's question given on the screen keeps the head of the PR its grant names, read when it was answered — a stopped question's and an overturned one's alike", async () => {
     const GRANT = "PR #12 を判定の外でマージしてよい";
     const HEAD = "1".repeat(40);
@@ -1017,16 +1214,16 @@ describe("POST /api/asks/answer — task side", () => {
     };
     const first = await report(A);
     expect(first).toMatchObject({ grant: A, state: "open" });
-    expect((await (await answer(base, first.id, { kind: "grant" })).json()) as AskAnswerResult).toMatchObject({ already: false });
+    expect((await (await answer(base, first.id, { kind: "grant", grant: first.grant! })).json()) as AskAnswerResult).toMatchObject({ already: false });
     await until(() => userTurns(id).length === 1);
     const now = await report(B);
     expect(now).toMatchObject({ grant: B, state: "open" });
     expect(now.id).not.toBe(first.id);
-    expect((await (await answer(base, now.id, { kind: "grant" })).json()) as AskAnswerResult).toMatchObject({ already: false });
+    expect((await (await answer(base, now.id, { kind: "grant", grant: now.grant! })).json()) as AskAnswerResult).toMatchObject({ already: false });
     await until(() => userTurns(id).length === 2);
     expect(userTurns(id)).toEqual([A, B]);
     // a resend sends nothing more
-    expect((await (await answer(base, now.id, { kind: "grant" })).json()) as AskAnswerResult).toMatchObject({ already: true });
+    expect((await (await answer(base, now.id, { kind: "grant", grant: now.grant! })).json()) as AskAnswerResult).toMatchObject({ already: true });
     await Bun.sleep(50);
     expect(userTurns(id)).toEqual([A, B]);
   });
@@ -1050,4 +1247,147 @@ describe("GET /api/asks — mockups", () => {
     const d = await decisionOf306(base);
     expect(d.mockups.map((m) => [m.id, m.title, m.mime])).toEqual([[a.id, "画面イメージ A: 上", "text/html"]]);
   });
+});
+
+// An answer to a Task's stop is for the stop the person saw: the grant on the screen is sent with the answer and has to be
+// the stop's grant when the answer comes in and again right before it is recorded and sent, and the reply marks only the
+// stops it answers. The daemon, `answerTask`, `noteMergeGrant` and `tasks.send` are the real ones; gh and the runner are fakes.
+describe("POST /api/asks/answer — the stop the person saw", () => {
+  const [GA, GB] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
+  const HEAD12 = "1".repeat(40);
+  const PR12: PrView = { state: "OPEN", head: HEAD12, comments: [], commits: [] };
+  const until = async (ok: () => boolean | Promise<boolean>) => {
+    for (let n = 0; n < 400 && !(await ok()); n++) await Bun.sleep(10);
+  };
+  const userTurns = (id: string) => core!.db.listEvents(id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").map((e) => (e.ev as { text: string }).text);
+  const grantCount = () => (core!.db.sqlite.query("SELECT count(*) AS n FROM task_grants").get() as { n: number }).n;
+  /** A permission stop of the stage Task `t` of Issue 306, written straight to its log (the outcome its record would set is set by hand). */
+  const refuse = (t: Task, id: string, grant: string, at = Date.now()) => {
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id, work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant, at } });
+    core!.db.updateTask(t.id, { outcome: "needs_action" });
+  };
+  const stopOf306 = async (base: string) => (await asks(base)).find((a) => a.kind === "stop" && a.pbi?.number === 306)!;
+  const stage = () => insertStage("#306 実装: PBI: 判断待ちの PBI", "done", { issue: 306, action: "complete" });
+  const post = (base: string, path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
+  /** A runner that echoes each text it is given (its start's prompt too) as the user's turn and stays in that turn; `got` runs first, when the text arrives. */
+  const echoing = (got: (text: string) => void = () => {}): RunnerAdapter => ({
+    ...holding,
+    start: (o, emit) => {
+      const take = (text: string) => (got(text), emit({ t: "message.delta", role: "user", text }));
+      queueMicrotask(() => take(o.prompt));
+      return { ...holding.start(o, () => {}), send: take };
+    },
+  });
+
+  test("another Task's reply leaves the stop open: a send with `from` marks no stop answered, the person's reply does", async () => {
+    const base = await boot(fakeGh().gh, echoing());
+    const t = stage();
+    refuse(t, "s1", GA, Date.now() - 30_000);
+    expect(await stopOf306(base)).toMatchObject({ state: "open", needs: "person" });
+    expect((await post(base, `/api/tasks/${t.id}/send`, { text: "続けてください", from: "tsk_other" })).status).toBe(200);
+    await until(() => userTurns(t.id).length === 1);
+    core!.db.updateTask(t.id, { outcome: "needs_action" });
+    expect(await stopOf306(base)).toMatchObject({ state: "open", needs: "person", grant: GA });
+    expect((await post(base, `/api/tasks/${t.id}/send`, { text: "続けてください" })).status).toBe(200);
+    await until(() => userTurns(t.id).length === 2);
+    expect(await stopOf306(base)).toMatchObject({ state: "answered" });
+  });
+
+  test("grant seen differs: a stop whose grant changed under the same id is 409 with the question now — nothing reaches the Task and no grant is recorded", async () => {
+    const base = await boot(fakeGh({ pr: PR12 }).gh, echoing());
+    const t = stage();
+    const at = Date.now() - 30_000;
+    refuse(t, "s1", GA, at);
+    const seen = await stopOf306(base);
+    expect(seen).toMatchObject({ grant: GA, answers: ["grant", "text"] });
+    // reported again with another grant within the same millisecond: the id (the time the content took its form) is the same
+    refuse(t, "s1", GB, at);
+    expect((await stopOf306(base)).id).toBe(seen.id);
+    const r = await answer(base, seen.id, { kind: "grant", grant: GA });
+    expect(r.status).toBe(409);
+    expect((await r.json()) as AskChanged).toMatchObject({ error: "問いが新しくなりました", current: { id: seen.id, grant: GB } });
+    // an answer in words to the question that showed the first grant is not an answer to the second either
+    expect((await answer(base, seen.id, { kind: "grant", grant: "PR #99 を判定の外でマージしてよい" })).status).toBe(409);
+    await Bun.sleep(50);
+    expect(userTurns(t.id)).toEqual([]);
+    expect(grantCount()).toBe(0);
+    // the grant the stop shows now is taken
+    expect((await answer(base, seen.id, { kind: "grant", grant: GB })).status).toBe(200);
+    await until(() => userTurns(t.id).length === 1);
+    expect(userTurns(t.id)).toEqual([GB]);
+  });
+
+  test("grant seen differs: a grant folded into the Task's check that changed since the screen read it is 409 — the check's id does not move with the stop", async () => {
+    const base = await boot(fakeGh().gh, scripted([checkTurn(CONTINUE_QS), []]));
+    const id = ((await (await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ cwd: home, title: "check me", prompt: "go", runner: "claude" }) })).json()) as Task).id;
+    await until(() => core!.db.getTask(id)!.status !== "running");
+    const refused = (grant: string) => {
+      core!.db.appendEvent(id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: id }, op: "gh pr merge", target: "PR", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant, at: Date.now() } });
+      core!.db.updateTask(id, { outcome: "needs_action" });
+    };
+    const check = async () => (await asks(base)).find((a) => a.kind === "check" && a.task?.id === id)!;
+    refused(GA);
+    const seen = await check();
+    expect(seen).toMatchObject({ grant: GA, answers: ["grant", "questions"] });
+    await Bun.sleep(2);
+    refused(GB);
+    const r = await answer(base, seen.id, { kind: "grant", grant: GA });
+    expect(r.status).toBe(409);
+    expect((await r.json()) as AskChanged).toMatchObject({ error: "問いが新しくなりました", current: { id: seen.id, grant: GB } });
+    await Bun.sleep(50);
+    expect(userTurns(id)).toEqual([]);
+    expect(grantCount()).toBe(0);
+    expect((await answer(base, seen.id, { kind: "grant", grant: GB })).status).toBe(200);
+    await until(() => userTurns(id).length === 1);
+    expect(userTurns(id)).toEqual([GB]);
+  });
+
+  test("grant changed while sending: the stop reported with another grant while the PR's head is read is 409 — nothing is sent and no grant is recorded", async () => {
+    const fake = fakeGh({ pr: PR12 });
+    let t!: Task;
+    let reads = 0;
+    // the read of the head a grant is recorded with: the Task reports its stop again with another grant meanwhile
+    const gh: GhRunner = async (args, cwd) => {
+      if (args[0] === "pr" && args[1] === "view" && args.includes("headRefOid") && !args.includes("state,headRefOid,comments,commits")) {
+        reads++;
+        refuse(t, "s1", GB);
+      }
+      return fake.gh(args, cwd);
+    };
+    const base = await boot(gh, echoing());
+    t = stage();
+    refuse(t, "s1", GA, Date.now() - 30_000);
+    const seen = await stopOf306(base);
+    const r = await answer(base, seen.id, { kind: "grant", grant: GA });
+    expect(reads).toBe(1);
+    expect(r.status).toBe(409);
+    const body = (await r.json()) as AskChanged;
+    expect(body).toMatchObject({ error: "問いが新しくなりました", current: { grant: GB } });
+    expect(body.current!.id).not.toBe(seen.id);
+    await Bun.sleep(50);
+    expect(userTurns(t.id)).toEqual([]);
+    expect(grantCount()).toBe(0);
+  });
+
+  for (const how of ["grant", "text"] as const) {
+    test(`answer marks its own stop (${how}): a stop with another grant that came while the reply was sent stays the person's open question`, async () => {
+      let t!: Task;
+      // the runner takes the reply, and the Task stops again at the same place with another grant before the reply is marked
+      const base = await boot(fakeGh({ pr: PR12 }).gh, echoing(() => refuse(t, "s2", GB)));
+      t = stage();
+      refuse(t, "s1", GA, Date.now() - 30_000);
+      const seen = await stopOf306(base);
+      const r = await answer(base, seen.id, how === "grant" ? { kind: "grant", grant: GA } : { kind: "text", text: "確かめてから続けて" });
+      expect(r.status).toBe(200);
+      await until(() => userTurns(t.id).length === 1);
+      core!.db.updateTask(t.id, { outcome: "needs_action" });
+      // the answered stop has the reply as its answer; the new one has none
+      const latest = new Map(core!.db.listStopRecords([t.id]).map((s) => [s.id.split("/").at(-1), s]));
+      expect(latest.get("s1")!.answer?.ref).toMatch(/^seq:/);
+      expect(latest.get("s2")!.answer ?? null).toBeNull();
+      const now = await stopOf306(base);
+      expect(now).toMatchObject({ state: "open", needs: "person", grant: GB, answers: ["grant", "text"] });
+      expect(now.id).not.toBe(seen.id);
+    });
+  }
 });

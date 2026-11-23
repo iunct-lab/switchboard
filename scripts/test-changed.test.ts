@@ -23,10 +23,11 @@ describe("test-changed", () => {
     // the changed package's tests and those of what imports it
     expect(pick("scripts/gate.ts")).toEqual({ tests: ["packages/core/src/a.test.ts", "scripts/gate.test.ts"] });
     expect(pick("apps/web/src/x.ts")).toEqual({ tests: ["apps/web/src/x.test.ts"] });
-    // a shared type widens, and so does what the selection cannot judge
-    expect(pick("packages/protocol/src/index.ts")).toEqual({ full: "packages/protocol/src/index.ts: 共有の型" });
+    // a change in protocol is followed like any other, and what the selection cannot judge widens
+    expect(pick("packages/protocol/src/index.ts")).toEqual({ tests: ["packages/core/src/a.test.ts", "packages/protocol/src/index.test.ts"] });
     expect(pick(".github/workflows/ci.yml")).toEqual({ full: ".github/workflows/ci.yml: CI の手順" });
-    expect(pick("scripts/gone.ts")).toEqual({ full: "scripts/gone.ts: 今のツリーに無い（消したファイルの依存は辿れない）" });
+    // a deleted file is not a reason to run everything
+    expect(pick("scripts/gone.ts")).toEqual({ tests: [] });
     // nothing to run: a doc no test reads, and no change (the selection alone would run everything)
     expect(pick("docs/design/x.md")).toEqual({ tests: [] });
     expect(pick()).toEqual({ tests: [] });

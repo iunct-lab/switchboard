@@ -7,9 +7,9 @@ import type { BacklogIssueDetail } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { importing } from "../fixtures/github-import.ts";
-import { BacklogEditError, checkFieldTypes } from "./backlog-edit.ts";
+import { answerStoredDecision, BacklogEditError, checkFieldTypes, screenAnswer } from "./backlog-edit.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { FAKE_ORIGIN, boot, detailOf, fakeGh, holdingClaude, importedAs, limitedGh, metaId, patch, queued, refreshed, start, useBacklogDaemon } from "./api-test-harness.ts";
+import { FAKE_ORIGIN, boot, detailOf, fakeGh, holdingClaude, importedAs, limitedGh, metaId, patch, queued, refreshed, start, until, useBacklogDaemon } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -512,4 +512,121 @@ test("comment: a plain comment is kept here at once (202) as a comment operation
   expect((await post(999, "x")).status).toBe(404);
   expect((await post(304, "ghp_" + "a".repeat(36))).status).toBe(422);
   expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), text: "  " }) })).status).toBe(400);
+});
+
+/* ---------- an answer is to one question, kept once, before its PRs are read ---------- */
+
+/** The question Issue 306 waits on (the fixtures' newest `## 判断待ち` there) and the one before it, answered long ago. */
+const Q306 = "2026-09-22T03:00:00Z";
+const OLD306 = "2026-09-21T01:00:00Z";
+/** The Backlog answer box's POST, as the page sends it. */
+const answerOnScreen = (base: string, n: number, body: object) => fetch(`${base}/api/backlog/${n}/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), ...body }) });
+const storedComments = () => core!.db.listBacklogRecords(core!.db.getWorkspaceBacklogSource(metaId())!, "comment").length;
+
+test("answer names its question: sent with the time of a question that is not the one the Issue waits on now, the answer is 409 and nothing is kept; with the waiting one's time it is kept", async () => {
+  const base = await boot(fakeGh().gh);
+  const before = storedComments();
+  // the screen still showed the older question when the answer was sent
+  const stale = await answerOnScreen(base, 306, { text: "A で", at: OLD306 });
+  expect([stale.status, ((await stale.json()) as { error: string }).error]).toEqual([409, "問いが変わりました。読み直してから回答してください"]);
+  // a time no question of the Issue has
+  expect((await answerOnScreen(base, 306, { text: "A で", at: "2026-09-22T03:00:01Z" })).status).toBe(409);
+  // not a time at all
+  expect((await answerOnScreen(base, 306, { text: "A で", at: "yesterday" })).status).toBe(400);
+  expect(queued()).toEqual([]);
+  expect(storedComments()).toBe(before);
+  expect((await answerOnScreen(base, 306, { text: "A で", at: Q306 })).status).toBe(202);
+  expect(queued()).toEqual([[306, "comment", null, { body: "## 回答\n\nA で", screen: true, heads: {} }], [306, "set", "label:needs-decision", false]]);
+  expect(storedComments()).toBe(before + 1);
+});
+
+test("answer to a question already answered: a second answer to the same question, and one that names no question, are refused (409) and no comment is added", async () => {
+  await boot(fakeGh().gh);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  const refused = (f: () => unknown): number | null => {
+    try {
+      f();
+      return null;
+    } catch (e) {
+      if (e instanceof BacklogEditError) return e.status;
+      throw e;
+    }
+  };
+  const before = storedComments();
+  // an Issue that carries a question takes no answer that names none
+  expect(refused(() => answerStoredDecision(db, source, 306, "A で", Date.now(), {}))).toBe(409);
+  expect(storedComments()).toBe(before);
+  expect(refused(() => answerStoredDecision(db, source, 306, "A で", Date.now(), { question: { at: Q306 }, by: "api" }))).toBeNull();
+  const kept = queued();
+  expect(kept.map((o) => [o[1], o[2]])).toEqual([["comment", null], ["set", "label:needs-decision"]]);
+  // the same question again, whoever asks: the first answer is found, nothing more is written
+  expect(refused(() => answerStoredDecision(db, source, 306, "B で", Date.now() + 1, { question: { at: Q306 }, screen: true, heads: {} }))).toBe(409);
+  expect(refused(() => answerStoredDecision(db, source, 306, "B で", Date.now() + 1, { question: { at: Q306 }, by: "api" }))).toBe(409);
+  expect(queued()).toEqual(kept);
+  expect(storedComments()).toBe(before + 1);
+});
+
+/** A gh whose reads of a PR's head (`pr view … --json headRefOid`) wait for `release()`, then answer from `heads` (by PR number; none = the read fails). */
+function slowHeadsGh(heads: Record<string, string>) {
+  const fake = fakeGh();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const reads: string[] = [];
+  const gh: GhRunner = async (args, cwd) => {
+    if (args[0] !== "pr" || args[1] !== "view" || args.at(-1) !== "headRefOid") return fake.gh(args, cwd);
+    reads.push(args[2]!);
+    await gate;
+    const head = heads[args[2]!];
+    return head ? { code: 0, stdout: JSON.stringify({ headRefOid: head }), stderr: "" } : { code: 1, stdout: "", stderr: "HTTP 502" };
+  };
+  return { gh, reads, release };
+}
+const GRANTS = "A で\nPR #12 を判定の外でマージしてよい\nPR #13 を判定の外でマージしてよい";
+const HEAD12 = "a".repeat(40);
+const grantRows = (task: string) => core!.db.sqlite.query("SELECT target, by, head FROM task_grants WHERE task_id = ? ORDER BY target").all(task);
+
+test("a screen answer is kept before its heads are read: the reply does not wait for GitHub, the answer keeps each PR of its grants with no head, the heads read afterwards are put with it, and the next stage Task's grant is for the head read", async () => {
+  const slow = slowHeadsGh({ 12: HEAD12 });
+  const base = await boot(slow.gh, holdingClaude().adapter);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  // gh does not answer the head reads yet: the answer is taken all the same, within a second
+  const r = await Promise.race([answerOnScreen(base, 306, { text: GRANTS, at: Q306 }), Bun.sleep(1000).then(() => null)]);
+  expect(r?.status).toBe(202);
+  const NONE = { "acme/app#12": null, "acme/app#13": null };
+  expect(queued().find((o) => o[0] === 306 && o[1] === "comment")![3]).toEqual({ body: `## 回答\n\n${GRANTS}`, screen: true, heads: NONE });
+  expect(screenAnswer(db, source, 306)).toEqual({ issue: 306, text: GRANTS, id: expect.any(String), heads: NONE });
+  await until(() => slow.reads.length === 2);
+  // gh answers: PR 12's head is put with the same operation; PR 13 could not be read and stays without one
+  slow.release();
+  await until(() => screenAnswer(db, source, 306)?.heads?.["acme/app#12"] === HEAD12);
+  const READ = { "acme/app#12": HEAD12, "acme/app#13": null };
+  expect(screenAnswer(db, source, 306)?.heads).toEqual(READ);
+  expect(queued().find((o) => o[0] === 306 && o[1] === "comment")![3]).toEqual({ body: `## 回答\n\n${GRANTS}`, screen: true, heads: READ });
+  // the start of the stage records the grant for the head read at the answer, and for none where none was read
+  const started = await start(base, 306, { action: "complete" });
+  expect(started.status).toBe(201);
+  const task = ((await started.json()) as { id: string }).id;
+  expect(grantRows(task)).toEqual([{ target: 12, by: "owner", head: HEAD12 }, { target: 13, by: "owner", head: "" }]);
+  expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD12)).not.toBeNull();
+  expect(db.mergeGrantAt(task, "acme/app", "merge", 13, HEAD12)).toBeNull();
+  expect(slow.reads).toHaveLength(2);
+});
+
+test("a screen answer is kept before its heads are read: a stage Task started before they are read gets its grant for no head, and a head read afterwards does not reach it", async () => {
+  const slow = slowHeadsGh({ 12: HEAD12 });
+  const base = await boot(slow.gh, holdingClaude().adapter);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  expect((await answerOnScreen(base, 306, { text: GRANTS, at: Q306 })).status).toBe(202);
+  const started = await start(base, 306, { action: "complete" });
+  expect(started.status).toBe(201);
+  const task = ((await started.json()) as { id: string }).id;
+  expect(grantRows(task)).toEqual([{ target: 12, by: "owner", head: "" }, { target: 13, by: "owner", head: "" }]);
+  slow.release();
+  await until(() => screenAnswer(db, source, 306)?.heads?.["acme/app#12"] === HEAD12);
+  // the answer's grants were given once, to that Task, with no head: they answer for none, whatever is read later
+  expect(grantRows(task)).toEqual([{ target: 12, by: "owner", head: "" }, { target: 13, by: "owner", head: "" }]);
+  expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD12)).toBeNull();
 });

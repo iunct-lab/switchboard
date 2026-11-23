@@ -5,6 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addedExceptions, BUDGET_PATH, BUNDLE_GROWTH_LIMIT, bundleGrowth, BYTES_RECORDS_HEADER, bytesGrowth, bytesHistoryTable, bytesRows, COUNTS_RECORDS_HEADER, countsRows, type CountsRow, parseBytesRows, parseCountsRows, spreadTable, ENVS, envOf, historyTable, judge, judgeDurations, knownExceptions, lowered, loweredBy, mainBudgets, measureRef, parseRows, raisedAgainst, recordRow, RECORDS_HEADER, shapeOf, type Budget, type Budgets } from "./perf-ratchet";
 
+/**
+ * The environment for a child `perf-ratchet check`: the caller's, without PERF_BASE_TREE. The tag CI's build sets it, and
+ * mainBudgets reads that tree before PERF_BASE_REF, so a test that compares against a ref would read the wrong budgets there.
+ */
+const childEnv = (extra: Record<string, string>): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (k !== "PERF_BASE_TREE" && v !== undefined) env[k] = v;
+  return { ...env, ...extra };
+};
+
 const budget: Budget = {
   journeys: { send: { requests: 6, layoutCount: 4, recalcStyleCount: 5, layoutShift: 0.0727 } },
 };
@@ -158,7 +168,7 @@ describe("perf-ratchet bytes against main's", () => {
         const journeys = { ...budgets.local.journeys, "open-task": { ...budgets.local.journeys["open-task"], bytes: openTask, responses: evals(evalsBytes) }, "open-task-huge": { bytes: 36106, responses: evals(1000) } };
         writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle, loaded: budgets.local.loaded }));
         // the checkout's own budgets are the compared ones: a ceiling raised since origin/main or the tag CI's PERF_BASE_REF is not this test's raised:
-        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: { ...process.env, PERF_BASE_REF: "HEAD" } });
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: childEnv({ PERF_BASE_REF: "HEAD" }) });
         const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
         return { out: out + err, code };
       };
@@ -222,7 +232,7 @@ describe("perf-ratchet PERF_BASE_REF", () => {
       const r = join(dir, "result.json");
       writeFileSync(r, JSON.stringify({ runs: 5, journeys: budgets.local.journeys, bundle: { js: 100000, css: 10000 }, loaded: budgets.local.loaded }));
       const run = async (ref: string) => {
-        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: root, env: { ...process.env, PERF_BASE_REF: ref }, stdout: "pipe", stderr: "pipe" });
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", base, "--env", "local"], { cwd: root, env: childEnv({ PERF_BASE_REF: ref }),stdout: "pipe", stderr: "pipe" });
         return (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
       };
       expect(await run(commit)).toContain(`raised: local.journeys.launch.requests`);
@@ -399,7 +409,7 @@ describe("perf-ratchet bundle growth", () => {
         const r = join(dir, "result.json");
         writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle, loaded }));
         // the checkout's own budgets are the compared ones: a ceiling raised since origin/main or the tag CI's PERF_BASE_REF is not this test's raised:
-        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, ...args, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: { ...process.env, PERF_BASE_REF: "HEAD" } });
+        const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, ...args, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: childEnv({ PERF_BASE_REF: "HEAD" }) });
         const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
         return { out: out + err, code };
       };

@@ -179,10 +179,14 @@ CREATE TABLE IF NOT EXISTS schedule_log (
   ts INTEGER NOT NULL, schedule_id TEXT, text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedule_log_ts ON schedule_log (ts);
--- a job a Task asked the daemon to run as the daemon's child (jobs.ts): local CI or a review. pid = the wrapper shell
+-- a job a Task asked the daemon to run as the daemon's child (jobs.ts): local CI or a review. pid = the wrapper shell.
+-- repo = owner/name in lower case (the app's own change: local:<workspaceId>; '' = not read), head = the checkout's head a review
+-- read (null = none / a job from before), base = what the result was measured against, as_reason = why a review is not the plain
+-- main review, kinds = the kinds of a recheck (comma-separated), result = JSON of what the end recorded of the output
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, task_id TEXT NOT NULL, pr INTEGER NOT NULL, runner TEXT, cwd TEXT NOT NULL,
-  pid INTEGER, boot_id TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER, summary TEXT
+  pid INTEGER, boot_id TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER, summary TEXT,
+  repo TEXT NOT NULL DEFAULT '', head TEXT, base TEXT, as_reason TEXT, kinds TEXT NOT NULL DEFAULT '', result TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended_at);
 `;

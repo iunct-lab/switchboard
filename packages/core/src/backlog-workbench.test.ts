@@ -1,7 +1,6 @@
 // test-reads: none
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
@@ -9,7 +8,8 @@ import { BacklogEditError, commentStoredIssue as commentWindowed, createStoredIs
 import { readStoredBacklog, readStoredIssue, workspaceSyncOf } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { fakeGithub } from "./backlog-fake-github.ts";
-import { fetchReplica, importReplica, ReplicaError, replicaTakenAt, Workbench } from "./backlog-replica.ts";
+import { ExportError, readBacklogExport, writeBacklogExports } from "./backlog-export.ts";
+import { importBacklogExport, replicaTakenAt, Workbench } from "./backlog-replica.ts";
 import { sendGithubOperations } from "./backlog-send.ts";
 import { BacklogSync } from "./backlog-sync.ts";
 import { importBacklogOperations, importedId, listRefused, uploadBacklogOperations } from "./backlog-upbox.ts";
@@ -31,19 +31,19 @@ let ec2: Db;
 let pc: Db;
 let wsEc2: string;
 let wsPc: string;
-let copies = 0;
+let exportsS3: ReturnType<typeof memoryS3>;
 const issue = (number: number, more: Partial<BacklogIssueData> = {}): BacklogIssueData => ({ number, title: `Issue ${number}`, url: "", state: "OPEN", stateReason: null, body: "本文", labels: ["type:pbi"], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null, ...more });
 
-/** A copy of the instance's database as it is now, taken in by the PC. */
-function copy() {
-  const file = join(dir, `copy-${copies++}.db`);
-  ec2.snapshotTo(file);
-  return importReplica(pc, file, { workspaceId: wsPc, repository: "Acme/App" }, t);
+/** The instance writes the exports as it does after an intake, and the PC reads its own and takes it in (`write` false: the export in the bucket is left as it is). */
+async function copy(write = true) {
+  if (write) await writeBacklogExports(ec2, { uplink: { machines: MACHINES } }, exportsS3);
+  return importBacklogExport(pc, await readBacklogExport(exportsS3, "pc1", "Acme/App"), { workspaceId: wsPc }, t);
 }
 const sendFromEc2 = (gh: GhRunner) => sendGithubOperations(gh, ec2, dir, S, clock);
 
 beforeEach(() => {
   t = 1_000_000;
+  exportsS3 = memoryS3();
   dir = mkdtempSync(join(tmpdir(), "switchboard-workbench-"));
   ec2 = new Db(join(dir, "ec2.db"));
   pc = new Db(join(dir, "pc.db"));
@@ -63,8 +63,8 @@ afterEach(() => {
 });
 
 describe("the copy a work machine reads", () => {
-  test("holds what the instance stored, dated by the instance's import, and is replaced whole by the next one", () => {
-    expect(copy()).toEqual({ records: 3, replicaSyncedAt: 777, settled: 0 });
+  test("holds what the instance stored, dated by the instance's import, and is replaced whole by the next one", async () => {
+    expect(await copy()).toEqual({ records: 3, replicaSyncedAt: 777, settled: 0 });
     expect(pc.getWorkspaceBacklogSource(wsPc)).toEqual(S);
     expect(pc.getBacklogRepository(S)?.lastSuccessfulSync).toBe(777);
     expect(replicaTakenAt(pc, S)).toBe(t);
@@ -74,25 +74,25 @@ describe("the copy a work machine reads", () => {
     expect(readStoredIssue(pc, { id: wsPc }, 12)?.issue.title).toBe("PBI");
     const before = readStoredBacklog(pc, { id: wsPc, name: "app", path: "/pc/app" }).items.map((i) => i.number).sort();
     // twice: nothing more
-    copy();
+    await copy();
     expect(pc.listBacklogRecords(S).length).toBe(3);
     expect(readStoredBacklog(pc, { id: wsPc, name: "app", path: "/pc/app" }).items.map((i) => i.number).sort()).toEqual(before);
     // the instance moved on: a title changed, a record gone
     ec2.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: issue(12, { title: "直った題" }), fetchState: "fetched" }], cursor: null, syncedAt: 888 });
     ec2.deleteBacklogRecord({ ...S, objectKind: "issue", externalId: "I_3" });
-    copy();
+    await copy();
     expect(readStoredIssue(pc, { id: wsPc }, 12)?.issue.title).toBe("直った題");
     expect(pc.getBacklogRecord({ ...S, objectKind: "issue", externalId: "I_3" })).toBeNull();
     expect(pc.getBacklogRepository(S)?.lastSuccessfulSync).toBe(888);
   });
 
-  test("4,000 Issues come in with the same counts as the instance has, in under three seconds, and an edit waiting on the PC shows on top", () => {
+  test("4,000 Issues come in with the same counts as the instance has, in under three seconds, and an edit waiting on the PC shows on top", async () => {
     const records = Array.from({ length: 4000 }, (_, i) => ({ objectKind: "issue" as const, externalId: `I_big${i}`, remote: issue(1000 + i, { labels: [i % 4 === 0 ? "type:pbi" : "type:task"] }), fetchState: "fetched" as const }));
     ec2.putBacklogSnapshot(S, { records, cursor: null, syncedAt: 999 });
-    copy();
+    await copy();
     editStoredIssue(pc, S, 1000, { title: "PC で直した題" });
     const began = performance.now();
-    expect(copy().records).toBe(4003);
+    expect((await copy()).records).toBe(4003);
     expect(performance.now() - began).toBeLessThan(3000);
     const count = (db: Db, label: string) => db.listBacklogRecords(S, "issue").filter((r) => (r.remote as BacklogIssueData).labels.includes(label)).length;
     expect(count(pc, "type:pbi")).toBe(count(ec2, "type:pbi"));
@@ -101,61 +101,17 @@ describe("the copy a work machine reads", () => {
     expect(pc.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["pending"]);
   });
 
-  test("a copy of a newer database, of a repository the instance does not read, or one it never imported is refused with its reason and changes nothing", () => {
-    copy();
-    ec2.sqlite.exec("ALTER TABLE backlog_records ADD COLUMN later TEXT");
-    expect(() => copy()).toThrow(ReplicaError);
-    expect(() => copy()).toThrow("EC2 の DB のほうが新しい形です");
+  test("an export of a newer shape, or none for the repository, is refused with its reason and changes nothing", async () => {
+    await copy();
+    const key = "backlog-export/pc1/acme/app.json.zst";
+    const had = exportsS3.objects.get(key)!.body;
+    const body = JSON.parse(new TextDecoder().decode(Bun.zstdDecompressSync(had)));
+    await exportsS3.put(key, Bun.zstdCompressSync(new TextEncoder().encode(JSON.stringify({ ...body, v: body.v + 1 }))));
+    await expect(copy(false)).rejects.toThrow(ExportError);
+    await expect(copy(false)).rejects.toThrow("EC2 の写しのほうが新しい形です");
     expect(pc.listBacklogRecords(S).length).toBe(3);
-    const file = join(dir, "other.db");
-    const other = new Db(file);
-    other.close();
-    expect(() => importReplica(pc, file, { workspaceId: wsPc, repository: "acme/app" }, t)).toThrow("EC2 に acme/app を読む workspace がありません");
-  });
-
-  test("the copy is restored by litestream beside its place and renamed in; no replica or a failure leaves the copy before it", async () => {
-    const out = join(dir, "replica", "switchboard.db");
-    const seen: string[][] = [];
-    await fetchReplica({ url: "s3://bucket/litestream/switchboard.db", out, run: async (cmd) => (seen.push(cmd), writeFileSync(cmd[3]!, "copy 1"), { code: 0, stdout: "", stderr: "" }) });
-    expect(seen[0]!.slice(0, 2)).toEqual(["litestream", "restore"]);
-    expect(seen[0]!.slice(-2)).toEqual(["-if-replica-exists", "s3://bucket/litestream/switchboard.db"]);
-    expect(seen[0]![3]).not.toBe(out);
-    expect(await Bun.file(out).text()).toBe("copy 1");
-    await expect(fetchReplica({ url: "s3://b/x", out, run: async () => ({ code: 0, stdout: "", stderr: "" }) })).rejects.toThrow("複製がありません");
-    await expect(fetchReplica({ url: "s3://b/x", out, run: async (cmd) => (writeFileSync(cmd[3]!, "half"), { code: 1, stdout: "", stderr: "AccessDenied" }) })).rejects.toThrow("写しを取れません: AccessDenied");
-    expect(await Bun.file(out).text()).toBe("copy 1");
-    expect(existsSync(`${out}.tmp-${process.pid}`)).toBe(false);
-  });
-});
-
-describe("what stays on a work machine of the instance's database", () => {
-  test("only the backlog part: no Task, no conversation, no setting, and of the waiting edits only that machine's own", async () => {
-    ec2.insertTask({ id: "t-secret", workspaceId: wsEc2, title: "会話", runner: "claude", cwd: "/srv/app", scope: [], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumePlannedAt: null, resumeSince: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
-    ec2.appendEventAt("t-secret", { t: "status", text: "conversation-marker" }, 1);
-    ec2.setSetting("policies", [{ id: "p" }]);
-    comment(ec2, 12, "own-draft-marker");
-    const s3 = memoryS3();
-    copy();
-    comment(pc, 3, "PC から");
-    await uploadBacklogOperations(pc, s3, S, "pc1", t);
-    await importBacklogOperations(ec2, s3, MACHINES);
-    const out = join(dir, "replica", "switchboard.db");
-    await fetchReplica({ url: "s3://bucket/litestream/switchboard.db", out, machine: "pc1", run: async (cmd) => (ec2.snapshotTo(cmd[3]!), { code: 0, stdout: "", stderr: "" }) });
-    const kept = new Database(out, { readonly: true });
-    try {
-      expect((kept.query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name)).toEqual(["backlog_operations", "backlog_records", "backlog_repositories", "workspaces"]);
-      expect((kept.query("SELECT name FROM pragma_table_info('workspaces')").all() as Array<{ name: string }>).map((r) => r.name)).toEqual(["backlog_source"]);
-      const ops = kept.query("SELECT id FROM backlog_operations").all() as Array<{ id: string }>;
-      expect(ops.length).toBe(1);
-      expect(ops[0]!.id.startsWith("m:pc1:")).toBe(true);
-    } finally {
-      kept.close();
-    }
-    const bytes = new TextDecoder("latin1").decode(await Bun.file(out).arrayBuffer());
-    for (const marker of ["conversation-marker", "own-draft-marker", "t-secret", "policies"]) expect([marker, bytes.includes(marker)]).toEqual([marker, false]);
-    expect(existsSync(`${out}.tmp-${process.pid}`)).toBe(false);
-    // and it is all the copy needs
-    expect(importReplica(pc, out, { workspaceId: wsPc, repository: "acme/app" }, t).records).toBe(3);
+    // no export for it (the instance does not read the repository, or this machine is not registered for it)
+    await expect(readBacklogExport(exportsS3, "pc1", "acme/other")).rejects.toThrow("EC2 に acme/other の写しがありません");
   });
 });
 
@@ -163,7 +119,7 @@ describe("what a work machine writes", () => {
   test("a new Issue goes through the uplink bucket and the instance to GitHub once, and its number comes back with the next copy", async () => {
     const g = fakeGithub(clock);
     const s3 = memoryS3();
-    copy();
+    await copy();
     const { localId } = createStoredIssue(pc, S, { title: "PC で作った", body: "本文", labels: ["type:request"], milestone: null, parent: null, fields: null });
     expect(await uploadBacklogOperations(pc, s3, S, "pc1", t)).toBe(1);
     expect([...s3.objects.keys()]).toEqual(["backlog/pc1/000000000001.json"]);
@@ -190,7 +146,7 @@ describe("what a work machine writes", () => {
 
     // before the next copy the PC still reads it by its local id; after it, by the number too, and nothing waits
     expect(readStoredIssue(pc, { id: wsPc }, localId)?.issue.number).toBe(0);
-    expect(copy().settled).toBe(1);
+    expect((await copy()).settled).toBe(1);
     expect(readStoredIssue(pc, { id: wsPc }, made[0]!.number)?.issue.title).toBe("PC で作った");
     expect(pc.listPendingBacklogOperations(S)).toEqual([]);
     expect(pc.getBacklogRecord({ ...S, objectKind: "issue", externalId: `local:${localId}` })).toBeNull();
@@ -200,7 +156,7 @@ describe("what a work machine writes", () => {
   test("what was written while the instance was stopped — three Issues, a comment on one of them and one on a stored Issue, a field — is all sent at its next start, in order", async () => {
     const g = fakeGithub(clock);
     const s3 = memoryS3();
-    copy();
+    await copy();
     const ids = ["一", "二", "三"].map((title) => createStoredIssue(pc, S, { title, body: "", labels: [], milestone: null, parent: null, fields: null }).localId);
     comment(pc, 12, "PC からのコメント");
     editStoredIssue(pc, S, 12, { title: "PC で直した題" });
@@ -215,11 +171,11 @@ describe("what a work machine writes", () => {
     expect(g.issues.get(12)!.comments.map((c) => c.body.split("\n")[0])).toEqual(["PC からのコメント"]);
     expect(ec2.listPendingBacklogOperations(S)).toEqual([]);
     // a copy taken before the instance read its own write back still has the old title: the PC's edit stays on top
-    expect(copy().settled).toBe(4);
+    expect((await copy()).settled).toBe(4);
     expect(readStoredIssue(pc, { id: wsPc }, 12)?.issue.title).toBe("PC で直した題");
     expect(pc.listPendingBacklogOperations(S).map((o) => o.kind)).toEqual(["set"]);
     ec2.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: issue(12, { title: "PC で直した題", labels: ["type:pbi", "needs-decision"] }), fetchState: "fetched" }], cursor: null, syncedAt: t });
-    expect(copy().settled).toBe(1);
+    expect((await copy()).settled).toBe(1);
     expect(pc.listPendingBacklogOperations(S)).toEqual([]);
     expect(ids.every((id) => pc.getBacklogOperation(id)?.status === "done")).toBe(true);
     expect(readStoredIssue(pc, { id: wsPc }, 12)?.issue.title).toBe("PC で直した題");
@@ -228,7 +184,7 @@ describe("what a work machine writes", () => {
   test("a field changed on GitHub since the PC's copy is held as a conflict on the instance, and on the PC after its next copy", async () => {
     const g = fakeGithub(clock);
     const s3 = memoryS3();
-    copy();
+    await copy();
     editStoredIssue(pc, S, 12, { title: "PC の題" });
     await uploadBacklogOperations(pc, s3, S, "pc1", t);
     g.issues.get(12)!.title = "GitHub で変わった題";
@@ -236,7 +192,7 @@ describe("what a work machine writes", () => {
     await sendFromEc2(g.gh);
     expect(g.issues.get(12)!.title).toBe("GitHub で変わった題");
     expect(ec2.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["conflict"]);
-    copy();
+    await copy();
     // held on the PC too, so its screen offers the choice the instance's does
     expect(pc.listPendingBacklogOperations(S).map((o) => o.status)).toEqual(["conflict"]);
   });
@@ -244,7 +200,7 @@ describe("what a work machine writes", () => {
   test("an edit changed after it was put is put again as a later version, and the instance sends the later value", async () => {
     const g = fakeGithub(clock);
     const s3 = memoryS3();
-    copy();
+    await copy();
     editStoredIssue(pc, S, 12, { title: "一回目" });
     await uploadBacklogOperations(pc, s3, S, "pc1", t);
     t += 1000;
@@ -257,13 +213,13 @@ describe("what a work machine writes", () => {
     await sendFromEc2(g.gh);
     expect(g.issues.get(12)!.title).toBe("二回目");
     ec2.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "I_12", remote: issue(12, { title: "二回目", labels: ["type:pbi", "needs-decision"] }), fetchState: "fetched" }], cursor: null, syncedAt: t });
-    expect(copy().settled).toBe(1);
+    expect((await copy()).settled).toBe(1);
     expect(pc.listPendingBacklogOperations(S)).toEqual([]);
   });
 
   test("a text with a value that signs in is refused before it waits anywhere: not in the PC's queue, not in the bucket", async () => {
     const s3 = memoryS3();
-    copy();
+    await copy();
     const secret = `ghp_${"a".repeat(36)}`;
     let refused: unknown;
     try {
@@ -281,7 +237,7 @@ describe("what a work machine writes", () => {
 
   test("an edit of a repository no workspace of the instance reads is refused with its reason and does not hold the ones after it", async () => {
     const s3 = memoryS3();
-    copy();
+    await copy();
     const other: BacklogSource = { ...S, repository: "acme/other" };
     pc.putBacklogSnapshot(other, { records: [{ objectKind: "issue", externalId: "I_o", remote: issue(5), fetchState: "fetched" }], cursor: null, syncedAt: 1 });
     editStoredIssue(pc, other, 5, { title: "よその題" });
@@ -300,46 +256,36 @@ describe("a work machine's BacklogSync", () => {
   test("never asks the backlog's service: import, settle, a Webhook's notice and a send all go by the copy and the bucket, and a copy that cannot be taken says why", async () => {
     let asked = 0;
     const gh: GhRunner = async () => (asked++, { code: 1, stdout: "", stderr: "must not be called" });
-    const s3 = memoryS3();
+    const s3 = exportsS3;
     const sync = new BacklogSync(pc, gh, clock);
-    let restores = 0;
-    let fail = false;
-    sync.workbench = new Workbench(pc, {
-      file: join(dir, "replica", "switchboard.db"),
-      url: "s3://bucket/litestream/switchboard.db",
-      intervalMs: 3_600_000,
-      machine: "pc1",
-      store: s3,
-      repositoryOf: () => "acme/app",
-      clock,
-      run: async (cmd) => {
-        if (fail) return { code: 1, stdout: "", stderr: "no route to host" };
-        restores++;
-        ec2.snapshotTo(cmd[3]!);
-        return { code: 0, stdout: "", stderr: "" };
-      },
-    });
+    // how many times the export itself was read
+    let exportReads = 0;
+    const reads = () => exportReads;
+    const store = { ...s3, get: async (key: string, opts?: { maxBytes?: number }) => (key.startsWith("backlog-export/") && exportReads++, s3.get(key, opts)) };
+    sync.workbench = new Workbench(pc, { intervalMs: 3_600_000, machine: "pc1", store, repositoryOf: () => "acme/app", clock });
+    await writeBacklogExports(ec2, { uplink: { machines: MACHINES } }, s3);
     const ws = { id: wsPc, name: "app", path: "/pc/app", projectVar: undefined };
     try {
       await sync.sync(ws);
       expect(sync.read(ws).items.map((i) => i.number)).toContain(12);
       expect(sync.read(ws).fetchedAt).toBe(777);
-      // within the interval the copy here answers; 再読込 takes a new one
+      // within the interval the copy here answers; 再読込 reads the export again
+      const first = reads();
       await sync.settle(ws);
       sync.request(ws);
       sync.hint(ws);
-      expect(restores).toBe(1);
+      expect(reads()).toBe(first);
       await sync.sync(ws, undefined, { full: true });
-      expect(restores).toBe(2);
+      expect(reads()).toBe(first + 1);
       // an edit is put in the bucket and stays pending; GitHub is not asked
       const made = comment(pc, 12, "PC から");
       await sync.send(ws);
-      expect(s3.objects.size).toBe(1);
+      expect([...s3.objects.keys()].filter((k) => k.startsWith("backlog/pc1/"))).toHaveLength(1);
       expect(pc.getBacklogOperation(made.operation)?.status).toBe("pending");
       // the copy cannot be taken: the one before stays, with the reason where the backlog shows errors
-      fail = true;
-      await expect(sync.sync(ws, undefined, { full: true })).rejects.toThrow("写しを取れません: no route to host");
-      expect(sync.state(ws).error).toBe("写しを取れません: no route to host");
+      s3.objects.delete("backlog-export/pc1/acme/app.json.zst");
+      await expect(sync.sync(ws, undefined, { full: true })).rejects.toThrow("EC2 に acme/app の写しがありません");
+      expect(sync.state(ws).error).toContain("EC2 に acme/app の写しがありません");
       expect(sync.read(ws).items.map((i) => i.number)).toContain(12);
       expect(asked).toBe(0);
     } finally {

@@ -138,9 +138,10 @@ export interface UplinkConfig {
   leaseRenewMs: number;
   /** How long one request of the lease store may take before it is given up (SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20); a request that never answers must not hold the renewal round. */
   leaseCallTimeoutMs: number;
-  /** A work machine's copy of the instance's database: the Litestream replica's URL (SWITCHBOARD_REPLICA_URL) and how often it is taken (SWITCHBOARD_REPLICA_INTERVAL_S, 60 minutes). */
-  replicaUrl: string;
-  replicaIntervalMs: number;
+  /** A work machine's backlog copy: how often the instance's export of a repository is read again (SWITCHBOARD_BACKLOG_COPY_INTERVAL_S, 60 minutes). */
+  backlogCopyIntervalMs: number;
+  /** The most a work machine reads of one backlog export, compressed (SWITCHBOARD_BACKLOG_EXPORT_MAX_BYTES, 64 MiB). */
+  backlogExportMaxBytes: number;
 }
 
 /**
@@ -194,13 +195,22 @@ export function loadUplink(env: NodeJS.ProcessEnv = process.env, warn: (line: st
     leaseTtlMs: positiveOr(env.SWITCHBOARD_LEASE_TTL_S, 900) * 1000,
     leaseRenewMs: positiveOr(env.SWITCHBOARD_LEASE_RENEW_S, 60) * 1000,
     leaseCallTimeoutMs: positiveOr(env.SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20) * 1000,
-    replicaUrl: env.SWITCHBOARD_REPLICA_URL ?? "",
-    replicaIntervalMs: positiveOr(env.SWITCHBOARD_REPLICA_INTERVAL_S, 3600) * 1000,
+    backlogCopyIntervalMs: positiveOr(env.SWITCHBOARD_BACKLOG_COPY_INTERVAL_S, 3600) * 1000,
+    backlogExportMaxBytes: positiveOr(env.SWITCHBOARD_BACKLOG_EXPORT_MAX_BYTES, 64 * 1024 * 1024),
   };
 }
 
+/** The port the daemon listens on unless `SWITCHBOARD_PORT` says another. */
+export const DEFAULT_PORT = 47831;
+
+/** The daemon's home: `SWITCHBOARD_HOME`, else `~/.switchboard`. */
+export const homeOf = (env: NodeJS.ProcessEnv): string => (env.SWITCHBOARD_HOME ? resolve(env.SWITCHBOARD_HOME) : join(homedir(), ".switchboard"));
+
+/** The file of the daemon's key: `SWITCHBOARD_TOKEN_FILE`, else `token` in its home. */
+export const tokenPathOf = (env: NodeJS.ProcessEnv): string => env.SWITCHBOARD_TOKEN_FILE ?? join(homeOf(env), "token");
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
-  const home = env.SWITCHBOARD_HOME ? resolve(env.SWITCHBOARD_HOME) : join(homedir(), ".switchboard");
+  const home = homeOf(env);
   if (!existsSync(home)) mkdirSync(home, { recursive: true });
   const codeRoot = findRepoRoot(import.meta.dir);
   const repoRoot = env.SWITCHBOARD_REPO_ROOT ? resolve(env.SWITCHBOARD_REPO_ROOT) : codeRoot;
@@ -211,7 +221,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     homeIsTemp,
     homeDisplay: home === homedir() ? "~" : home.startsWith(`${homedir()}/`) ? `~${home.slice(homedir().length)}` : home,
     dbPath,
-    port: Number(env.SWITCHBOARD_PORT ?? 47831),
+    port: Number(env.SWITCHBOARD_PORT ?? DEFAULT_PORT),
     host: env.SWITCHBOARD_HOST ?? "127.0.0.1",
     repoRoot,
     reposDir: env.SWITCHBOARD_REPOS_DIR ? resolve(env.SWITCHBOARD_REPOS_DIR) : dirname(repoRoot),
@@ -233,7 +243,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     dockerdIdleMs: positiveOr(env.SWITCHBOARD_DOCKERD_IDLE_MIN, 10) * 60_000,
     workspaceShellIdleMs: positiveOr(env.SWITCHBOARD_WORKSPACE_SHELL_IDLE_MIN, 30) * 60_000,
     knowledgeDir: env.SWITCHBOARD_KNOWLEDGE ? resolve(expandHome(env.SWITCHBOARD_KNOWLEDGE)) : join(homeIsTemp ? home : homedir(), "Knowledge"),
-    tokenPath: env.SWITCHBOARD_TOKEN_FILE ?? join(home, "token"),
+    tokenPath: tokenPathOf(env),
     publicUrl: env.SWITCHBOARD_PUBLIC_URL,
     claudeProjectsDir: env.SWITCHBOARD_CLAUDE_PROJECTS ? resolve(expandHome(env.SWITCHBOARD_CLAUDE_PROJECTS)) : join(homedir(), ".claude", "projects"),
     claudeUsageDataDir: env.SWITCHBOARD_CLAUDE_USAGE_DATA ? resolve(expandHome(env.SWITCHBOARD_CLAUDE_USAGE_DATA)) : join(env.CLAUDE_CONFIG_DIR ? resolve(expandHome(env.CLAUDE_CONFIG_DIR)) : join(homedir(), ".claude"), "usage-data"),

@@ -1036,6 +1036,32 @@ describe("scheduler log in the database", () => {
     expect(again.recentLog()).toEqual(sc.recentLog());
   });
 
+  test("notes: the lines of one call share one time even when the clock moves between lines; note is one such line", () => {
+    let t = 1_700_000_000_000;
+    const sc = new Scheduler(db, tasks, () => t++);
+    sc.notes(["first", "second", "third"]);
+    sc.note("alone");
+    const log = sc.recentLog();
+    const at = (l: string) => l.slice(0, 24);
+    expect(new Set(log.slice(-4, -1).map(at)).size).toBe(1);
+    expect(at(log.at(-1)!)).not.toBe(at(log.at(-2)!));
+    expect(log.slice(-4).map((l) => l.slice(25))).toEqual(["first", "second", "third", "alone"]);
+  });
+
+  test("notes: a line that cannot be written does not keep the lines after it from being written", () => {
+    let calls = 0;
+    const flaky = Object.assign(Object.create(db), { addScheduleLog: (row: Parameters<typeof db.addScheduleLog>[0]) => { if (calls++ === 1) throw new Error("database is locked"); return db.addScheduleLog(row); } }) as typeof db;
+    const sc = new Scheduler(flaky, tasks, () => now);
+    const was = console.error;
+    console.error = () => {};
+    try {
+      expect(() => sc.notes(["one", "two", "three"])).not.toThrow();
+    } finally {
+      console.error = was;
+    }
+    expect(sc.recentLog().slice(-2).map((l) => l.slice(25))).toEqual(["one", "three"]);
+  });
+
   test("recentLog is the last 50 lines, oldest first", () => {
     const sc = new Scheduler(db, tasks, () => now);
     for (let i = 0; i < 60; i++) sc.note(`line ${i}`);

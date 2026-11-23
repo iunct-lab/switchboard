@@ -333,20 +333,123 @@ export function mergeWrite(argv: string[], texts: string[] = []): { pr: number |
 }
 
 /**
- * The head a merge is held to on the command line: `--match-head-commit <sha>` of `gh pr merge` (GitHub then merges only
- * that head), null when it names none. `at`: where the flag can be added — right after `merge` of `gh pr merge`, the one
- * form that takes it; null for `gh stack merge`, `gh api` and graphql.
+ * The head a merge is held to on the command line, and whether the merge can carry one to GitHub. `gh pr merge`: its
+ * `--match-head-commit <sha>` (null when it names none; `at` is where the flag can be added, right after `merge`).
+ * A REST `gh api` PUT of `pulls/<n>/merge`: the `sha` field of its body (`-f`/`-F`/`--field`/`--raw-field`, 40 lower-case hex digits,
+ * read as written because gh sends it as written; null when it has none, names it twice, or the body comes from `--input`). `carries` is false for `gh stack merge` and
+ * graphql, which have no place to name a head.
  */
-export function mergeHeadOf(argv: string[]): { head: string | null; at: number | null } {
+export function mergeHeadOf(argv: string[]): { head: string | null; at: number | null; carries: boolean } {
+  const [group, sub] = wordsOf(argv);
+  if (group === "api") {
+    const call = apiCallOf(argv, argv.indexOf("api"));
+    if (call === null || call.path === "graphql") return { head: null, at: null, carries: false };
+    const shas: string[] = [];
+    let input = false;
+    for (let j = argv.indexOf("api") + 1; j < argv.length; j++) {
+      const f = flagOf(argv[j]!, API_FLAGS, API_SWITCHES);
+      if (f === null) continue;
+      const value = f.value ?? argv[++j];
+      if (value === undefined) continue;
+      const kind = API_FLAGS[f.flag];
+      if (kind === "file") input = true;
+      else if ((kind === "raw" || kind === "typed") && value.startsWith("sha=")) shas.push(value.slice(4));
+    }
+    return { head: !input && shas.length === 1 && /^[0-9a-f]{40}$/.test(shas[0]!) ? shas[0]! : null, at: null, carries: true };
+  }
+  // read as gh reads it: the value of another flag (`--subject`, `--body`, `-R`, …) is text, not the flag, and the last one wins
   let head: string | null = null;
   for (let i = 0; i < argv.length && argv[i] !== "--"; i++) {
-    if (argv[i] === "--match-head-commit") head = argv[i + 1]?.toLowerCase() ?? null;
-    else if (argv[i]!.startsWith("--match-head-commit=")) head = argv[i]!.slice("--match-head-commit=".length).toLowerCase();
+    const a = argv[i]!;
+    if (a === "--match-head-commit") head = argv[++i]?.toLowerCase() ?? null;
+    else if (a.startsWith("--match-head-commit=")) head = a.slice("--match-head-commit=".length).toLowerCase();
+    else if (a === "-R" || a === "--repo" || MERGE_VALUE_FLAGS.has(a)) i++;
   }
-  const [group, sub] = wordsOf(argv);
   const pr = argv.indexOf("pr");
   const merge = argv.indexOf("merge", pr + 1);
-  return { head, at: group === "pr" && sub === "merge" && pr >= 0 && merge > pr ? merge + 1 : null };
+  const isPr = group === "pr" && sub === "merge" && pr >= 0 && merge > pr;
+  return { head, at: isPr ? merge + 1 : null, carries: isPr };
+}
+
+/** The switches a merge outside the gate may carry: the merge method and deleting the branch. */
+const PLAIN_MERGE_SWITCHES = new Set(["--rebase", "-r", "--merge", "-m", "--squash", "-s", "--delete-branch", "-d"]);
+/** The body fields a REST merge outside the gate may carry. */
+const PLAIN_MERGE_FIELDS = new Set(["sha", "merge_method", "commit_title", "commit_message"]);
+
+/**
+ * A merge outside the gate in the one shape the guard reads exactly as gh does, or null for any other shape (the guard then
+ * stops it rather than guess how gh reads it: for example a flag's value or a group of short flags).
+ * `gh pr merge <n|github.com PR URL>` with only `-R`/`--repo <owner/name>`, the switches above and `--match-head-commit <40 hex>`;
+ * a URL and `-R` naming different repositories is not it. `gh api` first, a PUT (`-X`/`--method`) of
+ * `repos/<o>/<r>/pulls/<n>/merge`, and only the fields above with `-f`/`-F`/`--field`/`--raw-field`, each once (`sha` by `-f` /
+ * `--raw-field` only).
+ * `repo` is the repository the merge names (null: none, the clone's own); `head` the head it names (null: none).
+ */
+export function plainMergeOf(argv: string[]): { pr: number; repo: string | null; head: string | null } | null {
+  // github.com only: the grant is kept by owner/name, with no host
+  const url = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d{1,9})$/;
+  const hex = /^[0-9a-f]{40}$/;
+  if (argv[0] === "api") {
+    let method: string | null = null;
+    let path: RegExpExecArray | null = null;
+    const fields = new Map<string, string>();
+    for (let i = 1; i < argv.length; i++) {
+      const a = argv[i]!;
+      const m = /^(-X|--method)(?:=(.*))?$/.exec(a) ?? (/^-X(.+)$/.exec(a) ? ["", "-X", a.slice(2)] : null);
+      if (m) {
+        const v = m[2] ?? argv[++i];
+        if (v === undefined || method !== null) return null;
+        method = v.toUpperCase();
+        continue;
+      }
+      // `-f sha=…`, `-f=sha=…`, `-fsha=…` and the long forms, as pflag reads them
+      const f = /^(--field|--raw-field)(?:=(.*))?$/s.exec(a) ?? /^(-f|-F)(?:=?(.+))?$/s.exec(a);
+      if (f) {
+        const v = f[2] ?? argv[++i];
+        const kv = v === undefined ? null : /^([a-z_]+)=(.*)$/s.exec(v);
+        if (kv === null || !PLAIN_MERGE_FIELDS.has(kv[1]!) || fields.has(kv[1]!)) return null;
+        // `-F` / `--field` may send a value as a number or a file's content; the head goes as the text written (`-f`)
+        if (kv[1] === "sha" && (f[1] === "-F" || f[1] === "--field")) return null;
+        fields.set(kv[1]!, kv[2]!);
+        continue;
+      }
+      if (a.startsWith("-") || path !== null) return null;
+      // the repository is named: gh fills `{owner}/{repo}` from its own choice of remote, which the guard cannot follow
+      path = /^\/?repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d{1,9})\/merge$/.exec(a);
+      if (path === null) return null;
+    }
+    const sha = fields.get("sha");
+    if (method !== "PUT" || path === null || (sha !== undefined && !hex.test(sha))) return null;
+    return { pr: Number(path[2]), repo: path[1]!, head: sha ?? null };
+  }
+  const words: string[] = [];
+  let named: string | null = null;
+  let head: string | null = null;
+  let heads = 0;
+  let methods = 0;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "-R" || a === "--repo" || a.startsWith("--repo=")) {
+      const v = a.startsWith("--repo=") ? a.slice("--repo=".length) : argv[++i];
+      if (v === undefined || named !== null || !/^[\w.][\w.-]*\/[\w.-]+$/.test(v)) return null;
+      named = v;
+    } else if (a === "--match-head-commit" || a.startsWith("--match-head-commit=")) {
+      const v = a === "--match-head-commit" ? argv[++i] : a.slice("--match-head-commit=".length);
+      if (v === undefined || !hex.test(v) || ++heads > 1) return null;
+      head = v;
+    } else if (PLAIN_MERGE_SWITCHES.has(a)) {
+      // one merge method at most, as gh takes it
+      if (!/^-(d|-delete-branch)$/.test(a) && ++methods > 1) return null;
+    }
+    else if (a.startsWith("-")) return null;
+    else words.push(a);
+  }
+  if (words.length !== 3 || words[0] !== "pr" || words[1] !== "merge") return null;
+  const ref = words[2]!;
+  const u = url.exec(ref);
+  if (u === null && !/^\d{1,9}$/.test(ref)) return null;
+  if (u !== null && named !== null && ownerName(u[1]!) !== ownerName(named)) return null;
+  return { pr: Number(u?.[2] ?? ref), repo: u?.[1] ?? named, head };
 }
 
 /**

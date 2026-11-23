@@ -3,8 +3,10 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resultComment, stepsHash } from "./local-ci";
-import { heldNote, judge, localCiOf, localCiOfChange, type PrFacts } from "./merge-gate";
+import { stepsHash } from "./local-ci";
+import { heldNote, judge, type PrFacts } from "./merge-gate";
+import { ciAtTips, ciOf } from "./merge-gate-records";
+import type { MergeRecordJob } from "../ops-kit/src/merge-records";
 import { heldSettingsOf, stepsNotConfirmed, type HeldSettings } from "./workspace-settings.ts";
 
 const W = mkdtempSync(join(tmpdir(), "switchboard.merge-gate-settings."));
@@ -15,16 +17,19 @@ const BASE = "b".repeat(40);
 const CONFIRMED = [{ name: "check", run: "make check" }];
 const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   files: [{ path: "src/a.ts", additions: 20, deletions: 5 }],
-  headCommittedAt: "2026-09-24T10:00:00Z",
   checks: [{ name: "test", conclusion: "SUCCESS" }],
   unresolvedThreads: 0,
   mergeState: "CLEAN",
-  reviewComments: [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }],
+  reviewed: true,
+  answers: [],
   ...over,
 });
-/** A local CI pass as local-ci writes it, with the steps it ran. */
-const pass = (steps: Array<{ name: string; run: string }> | null) =>
-  resultComment({ sha: SHA, base: BASE, ok: true, results: [], ...(steps ? { source: { workspace: "lib", hash: stepsHash(steps) } } : {}) } as never);
+/** A local CI pass as the app records it, with the hash of the steps it ran when they came from the settings Switchboard keeps (`JobCi.stepsHash`). */
+const pass = (steps: Array<{ name: string; run: string }> | null): MergeRecordJob => ({
+  id: 1, kind: "local-ci", taskId: "t", pr: 1, runner: null, status: "pass", exitCode: 0, startedAt: 1, endedAt: 2, repo: "o/r", head: SHA, base: BASE, as: null, kinds: [],
+  result: { ci: { outcome: "pass", ...(steps ? { stepsHash: stepsHash(steps) } : {}) } },
+});
+const hashOf = (j: MergeRecordJob) => (j.result as { ci: { stepsHash?: string } }).ci.stepsHash ?? null;
 const held = (over: Partial<HeldSettings> = {}): HeldSettings => ({ workspace: "lib", version: "0123456789ab", ciHash: stepsHash(CONFIRMED), pending: null, ...over });
 
 test("what the person confirmed for a clone: read from the daemon's index by the clone's folder, never from OPS_KIT_CONFIG; a change that waits is named without its value; a clone with its own ops.config.json has none", async () => {
@@ -55,21 +60,20 @@ test("what the person confirmed for a clone: read from the daemon's index by the
 
 test("a local CI pass counts only when its steps are the confirmed ones: a pass run with steps `true` from another file, or with the checkout's steps while steps are confirmed, is not the CI's success", async () => {
   const forged = pass([{ name: "true", run: "true" }]);
-  expect(stepsNotConfirmed(forged, held())).toContain("利用者の確かめた設定の手順");
-  expect(stepsNotConfirmed(forged, held({ ciHash: null }))).toContain("確かめた手順は無い");
+  expect(stepsNotConfirmed(hashOf(forged), held())).toContain("利用者の確かめた設定の手順");
+  expect(stepsNotConfirmed(hashOf(forged), held({ ciHash: null }))).toContain("確かめた手順は無い");
   // no settings kept at all (or the clone has its own file) and the pass names kept steps: not counted either
-  expect(stepsNotConfirmed(forged, undefined)).toContain("確かめた手順は無い");
-  expect(stepsNotConfirmed(pass(null), held())).toContain("で回したものでない");
-  expect(stepsNotConfirmed(pass(CONFIRMED), held())).toBeUndefined();
-  expect(stepsNotConfirmed(pass(null), undefined)).toBeUndefined();
-  expect(stepsNotConfirmed(pass(null), held({ ciHash: null }))).toBeUndefined();
+  expect(stepsNotConfirmed(hashOf(forged), undefined)).toContain("確かめた手順は無い");
+  expect(stepsNotConfirmed(hashOf(pass(null)), held())).toContain("で回したものでない");
+  expect(stepsNotConfirmed(hashOf(pass(CONFIRMED)), held())).toBeUndefined();
+  expect(stepsNotConfirmed(hashOf(pass(null)), undefined)).toBeUndefined();
+  expect(stepsNotConfirmed(hashOf(pass(null)), held({ ciHash: null }))).toBeUndefined();
 
-  const at = "2026-11-01T00:00:00Z";
-  const of = (body: string, h?: HeldSettings) => localCiOf(1, 1, [{ body, createdAt: at }], async () => "", "o/r", async () => true, async () => [], h);
+  const of = (j: MergeRecordJob, h?: HeldSettings) => ciOf([j], 1, async () => true, async () => [], h);
   expect(await of(forged, held())).toEqual({ pass: false, note: expect.stringContaining("利用者の確かめた設定の手順") });
   expect(await of(pass(CONFIRMED), held())).toEqual({ pass: true });
-  expect(localCiOfChange([{ body: forged, createdAt: at }], SHA, BASE, held())).toEqual({ pass: false, note: expect.stringContaining("利用者の確かめた設定の手順") });
-  expect(localCiOfChange([{ body: pass(CONFIRMED), createdAt: at }], SHA, BASE, held())).toEqual({ pass: true });
+  expect(ciAtTips([forged], 1, SHA, BASE, held())).toEqual({ pass: false, note: expect.stringContaining("利用者の確かめた設定の手順") });
+  expect(ciAtTips([pass(CONFIRMED)], 1, SHA, BASE, held())).toEqual({ pass: true });
 });
 
 test("a PR judged while a change of the kept settings waits for the person stops with [聞く], --allow-large or not; with none waiting the judgement names the confirmed version it used", () => {

@@ -133,8 +133,13 @@ export const AskAnswerInput = z.object({
   policy: PolicyInput.optional(),
   /** `batch:deploy`: the Tasks of the batch the person approves; the others wait. */
   taskIds: z.array(z.string()).max(50).optional(),
-  /** `proceed-all:<workspace>`: the questions the screen showed when the button was pressed. Only these are confirmed — one that came up since is not; required for that id. */
-  askIds: z.array(z.string().max(300)).max(500).optional(),
+  /**
+   * The questions the screen showed when the button was pressed; required for these ids. `proceed-all:<workspace>`: only
+   * these are confirmed — one that came up since is not. `batch:deploy`: the `askId` of each chosen Task as the batch
+   * listed it — a chosen Task whose question has another id now is 409 and nothing is sent. An id is as long as `id`
+   * above may be (a stop's id carries its operation and target).
+   */
+  askIds: z.array(z.string()).max(500).optional(),
 });
 export type AskAnswerInput = z.infer<typeof AskAnswerInput>;
 /**

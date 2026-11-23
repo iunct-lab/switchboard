@@ -372,7 +372,7 @@ describe("evalContext", () => {
   const SRC: BacklogSource = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } };
   const issue = (number: number, labels: string[], body: string, parent: number | null = null): BacklogIssueData => ({ number, title: `題 ${number}`, url: "", state: "OPEN", stateReason: null, body, labels, milestone: null, parent, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", closedAt: null });
   const taskOf = (id: string, workspaceId: string | null, stage: Task["stage"]): Task => ({ id, workspaceId, title: id, runner: "claude", cwd: "/w", scope: ["/w"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage, statusAt: 1, createdAt: 1, updatedAt: 1 });
-  const pull = (number: number, state: "OPEN" | "CLOSED" | "MERGED"): BacklogPullRequestData => ({ number, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null });
+  const pull = (number: number, state: "OPEN" | "CLOSED" | "MERGED"): BacklogPullRequestData => ({ number, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null });
   const pbiBody = (source: string) => `## ユーザーストーリー\n${"あ".repeat(EVAL_CONTEXT_CHARS + 50)}\n\n## スコープ外\n- やらない\n\n${source}## 前提\nなし`;
   const read = (db: Db) => storedIssueReader(db);
   const withDb = (run: (db: Db, wsId: string, dir: string) => void) => {
@@ -559,7 +559,7 @@ describe("requestSampleRows", () => {
         rec(issue(33, ["type:pbi"], "## 元要望\nなし")),
         // a request done directly, with no PBI
         rec(issue(40, ["type:request"], "## 要望\n3 行の追記", { closedAt: day(-5) })),
-        { objectKind: "pull-request", externalId: "PR_50", remote: { number: 50, state: "MERGED", isDraft: false, labels: [], closes: [13], mergeCommit: null, updatedAt: day(-3), files: [], closedAt: null, mergedAt: day(-3) } satisfies BacklogPullRequestData, fetchState: "fetched" },
+        { objectKind: "pull-request", externalId: "PR_50", remote: { number: 50, state: "MERGED", isDraft: false, labels: [], closes: [13], mergeCommit: null, updatedAt: day(-3), files: [], closedAt: null, mergedAt: day(-3), head: null } satisfies BacklogPullRequestData, fetchState: "fetched" },
       ], cursor: null, syncedAt: 1 });
       const counted = (id: string, userInstructions: number, decision: number) => {
         const evs = [user("go"), ...Array.from({ length: userInstructions }, (_, i) => user(`again ${i}`, `m${i}`)), ...Array.from({ length: decision }, (_, i) => stop(`s${i}`, "decision")), end("ok")];

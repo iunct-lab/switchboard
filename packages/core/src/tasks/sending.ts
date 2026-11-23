@@ -1,7 +1,7 @@
 /** The TaskManager's part that takes a prompt or a reply to a Task (see `TaskSending`). */
 import { WORK_MACHINE_OFF } from "../machine.ts";
 import { dirname } from "node:path";
-import type { Attachment, Task } from "@switchboard/protocol";
+import type { Attachment, StopRecord, Task } from "@switchboard/protocol";
 import { REPLY_QUEUED } from "@switchboard/protocol";
 import { withAttachments } from "../attachments.ts";
 import { IN_FLIGHT } from "../task-status.ts";
@@ -83,8 +83,11 @@ export abstract class TaskSending extends TaskAdmission {
    * while it waited for the runner's process to close. Any turn that needs a new process while the run slots or the
    * memory are short (a person's reply, an `asResume` or a `daemon` turn alike) waits in the queue instead of failing:
    * drain() starts it with --resume once there is room.
+   * `answers`: which of the Task's answerable stops this reply is the person's answer to (none given = all of them, as a
+   * reply typed in the Task's conversation is). A reply to one question passes the stops of that question; a reply
+   * another Task sent (`from` on the send route) is no person's answer and passes none, so it leaves every stop open.
    */
-  async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[] } = {}): Promise<Task> {
+  async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[]; answers?: (s: StopRecord) => boolean } = {}): Promise<Task> {
     // Everything that can refuse the turn (unknown task, a superseded resume, the budget) runs before any file moves:
     // a refused turn leaves the uploads in the inbox, reusable. Attachments are taken once, by the primary;
     // the shadow reads the same files (its scope is widened to them).
@@ -99,7 +102,8 @@ export abstract class TaskSending extends TaskAdmission {
       // a reply put in the queue echoes no message yet (it is sent when the Task starts): the status line that says so is the answer
       const added = this.db.listEvents(taskId, before - 1);
       const said = added.find((e) => e.ev.t === "message.delta" && e.ev.role === "user") ?? added.find((e) => e.ev.t === "status" && e.ev.text.startsWith(REPLY_QUEUED));
-      if (said) this.moveOpenStops(taskId, (s) => ({ ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
+      // only the stops the reply is an answer to (`answers`): one that came while the reply was sent, or that says another grant, stays open
+      if (said) this.moveOpenStops(taskId, (s) => (opts.answers && !opts.answers(s) ? null : { ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
     }
     const shadow = opts.asResume || opts.daemon || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
     if (shadow && !shadow.shadowStopped) {
@@ -127,6 +131,20 @@ export abstract class TaskSending extends TaskAdmission {
   private async sendOne(taskId: string, text: string, opts: { asResume?: boolean; atts?: Attachment[] } = {}): Promise<Task> {
     await this.preflight(taskId, opts);
     return this.dispatch(taskId, text, opts.atts ?? [], !!opts.asResume);
+  }
+
+  /**
+   * Throws what refuses a person's reply to this Task now — unknown, another machine's, its PBI's lease held elsewhere, a
+   * Terminal on its folder, its budget spent — and moves nothing of the Task (no planned resume is dropped, nothing is
+   * recorded; the lease is asked for as the reply itself asks). For a caller that records something with the reply (a
+   * grant) only when the reply can go: `send` checks the same again when it sends.
+   */
+  async checkSend(taskId: string): Promise<void> {
+    const task = this.mustGet(taskId);
+    this.requireLocal(task);
+    await this.turnGate?.(task, "person");
+    const refusal = this.resumeRefusal(this.mustGet(taskId));
+    if (refusal !== null) throw new Error(refusal);
   }
 
   /** The checks that can refuse a turn, before anything is moved or recorded. Throws; returns the task as it stands. */

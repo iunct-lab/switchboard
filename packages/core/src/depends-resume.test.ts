@@ -468,7 +468,7 @@ describe("resumeDepends", () => {
     const startJob = async (over: { stage?: { issue: number; action: "complete" } } = {}, wait: StopReport = JOB_WAIT) => {
       const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", ...over });
       await settle();
-      const job = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now() });
+      const job = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
       expect(tasks.recordStop(t.id, { ...wait, conditions: wait.conditions.map((c) => (c.key === "job#1" ? { ...c, key: `job#${job.id}` } : c)) }).ok).toBe(true);
       return { t, job };
     };
@@ -586,7 +586,7 @@ describe("resumeDepends", () => {
 
     test("two job stops: nothing is sent when the first ends, and one turn carries both results when the second ends", async () => {
       const { t, job } = await startJob();
-      const job2 = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now() });
+      const job2 = db.insertJob({ kind: "local-ci", taskId: t.id, pr: 12, runner: null, cwd: home, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
       expect(tasks.recordStop(t.id, { ...JOB_WAIT, id: "second", conditions: [{ key: `job#${job2.id}`, value: "done", met: false }] }).ok).toBe(true);
       end(job.id);
       expect(await resume()).toEqual([]);

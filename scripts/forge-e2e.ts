@@ -260,12 +260,14 @@ export async function run(log = console.log): Promise<boolean> {
 
     await step("未解決の discussion はマージを止め、ローカル CI の合格を MR に知らせ、resolve の後は判定した head だけをマージする", async () => {
       const quiet = () => undefined;
+      // the gate judges here, as a person's terminal does: the Task that runs this script is not this run's Task (it would ask the real daemon)
+      const noTask = { env: { ...process.env, SWITCHBOARD_TASK_ID: undefined, OPS_KIT_TASK_ID: undefined } };
       const noGh = async (a: string[]) => {
         throw new Error(`gh asked for a GitLab MR: ${a.join(" ")}`);
       };
       const gate = async () => {
         const out: string[] = [];
-        const code = await mergeGate(["7", "--merge"], noGh, (s) => out.push(s), quiet, () => undefined, g.glab, lab);
+        const code = await mergeGate(["7", "--merge"], noGh, (s) => out.push(s), quiet, () => undefined, g.glab, lab, noTask);
         return { code, out: out.join("\n") };
       };
       const post = (body: string) => reportResult({ pr: 7, repo: "group/app", root: lab }, body, async (c) => {
@@ -283,7 +285,7 @@ export async function run(log = console.log): Promise<boolean> {
       ok(!g.writes.includes("PUT /merge_requests/7/merge"), "止めたのにマージを頼んだ");
       for (const d of await gitlabMrDiscussions(g.glab, LAB_KEY, 7)) await resolveGitlabDiscussion(g.glab, LAB_KEY, 7, d.id);
       // the review summary (posted with the discussion) is older than no commit since: the gate counts it
-      ok((await mergeGate(["7", "--merge"], noGh, quiet, (s) => log(`  ${s}`), () => undefined, g.glab, lab)) === 0, "resolve の後にマージされない");
+      ok((await mergeGate(["7", "--merge"], noGh, quiet, (s) => log(`  ${s}`), () => undefined, g.glab, lab, noTask)) === 0, "resolve の後にマージされない");
       ok(g.mr.merged, "GitLab がマージしていない");
     });
 

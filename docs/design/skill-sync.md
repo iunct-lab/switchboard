@@ -175,7 +175,6 @@ The branches of the form "if CLAUDE.md names it … otherwise …" are kept: wha
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `ops-kit job request re` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `アプリの Task の外では Bash の` | `out` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task` | `ops-kit/skills/pbi-complete/SKILL.md` | `ops-kit job request lo` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
-| `mergeGate+task` | `ops-kit/skills/pbi-complete/SKILL.md` | `PR #<n> に [merge-answe` | `on+in` | split | the check in front of `gh` exists only where a merge gate is named |
 | `mergeGate+task` | `ops-kit/skills/pbi-complete/SKILL.md` | `があるリポジトリのアプリの Task）。通` | `on+in` | split | the check in front of `gh` exists only where a merge gate is named |
 | `runner` | `ops-kit/skills/pbi-complete/SKILL.md` | `上の形のままで通る` | `codex` | split | only a Codex Task cannot write under /tmp; the form of the command is the same for both |
 | `mergeGate` | `ops-kit/skills/pbi-complete/SKILL.md` | `マージ判定のコマンドが無いリポジトリでは` | `off` | split | a named merge gate judges and merges with --merge / --merge-stack, so the steps for a repository without one are not carried |

@@ -1,13 +1,8 @@
 import type { Routes, ServerContext } from "../server/context.ts";
-import { consentWaitMs } from "../server/merge-consent.ts";
+import { waitForConsentRead } from "../server/merge-consent.ts";
 
 /** The routes under /api/merge-grants. */
 export function mergeGrantsRoutes(sc: Pick<ServerContext, "bad" | "json" | "db" | "pendingConsent" | "settings">): Routes {
-  /** Waits for the reads of `taskId`'s replies that are still going, also one queued behind the first, up to `consentWaitMs` in all. */
-  const readingOf = async (taskId: string): Promise<void> => {
-    const until = Date.now() + consentWaitMs(sc);
-    for (let reading = sc.pendingConsent.get(taskId); reading && Date.now() < until; reading = sc.pendingConsent.get(taskId)) await Promise.race([reading, Bun.sleep(until - Date.now())]);
-  };
   return {
     /**
      * The merge grants recorded as the person's (merge-grants.ts says what that means), read by the check in front of
@@ -27,7 +22,7 @@ export function mergeGrantsRoutes(sc: Pick<ServerContext, "bad" | "json" | "db" 
         const head = q.get("head") ?? undefined;
         if (!taskId || !repo || !["merge", "answer"].includes(kind) || !Number.isInteger(target)) return sc.bad("taskId, repo, kind (merge|answer) and target required");
         if (head !== undefined && !/^[0-9a-f]{40}$/i.test(head)) return sc.bad("head must be a 40-digit sha");
-        await readingOf(taskId);
+        await waitForConsentRead(sc, taskId);
         return sc.json({ granted: sc.db.hasMergeGrant(taskId, repo, kind, target, head) });
       },
     },

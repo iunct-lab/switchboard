@@ -9,7 +9,8 @@ export const asksApi = {
   asks: () => req<AskList>("/api/asks"),
   /** answers one question by its id; a 409 carries `body` (AskChanged: what changed, the question now). */
   /** one press for a batch — sso logs in once, deploy approves the chosen Tasks. */
-  answerBatch: (id: AskBatch["id"], taskIds?: string[]) => req<AskBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}) }) }),
+  /** `askIds` (deploy): the chosen Tasks' questions as the card showed them (`AskBatch.asks[].askId`); a 409 = one of them changed, nothing sent. */
+  answerBatch: (id: AskBatch["id"], taskIds?: string[], askIds?: string[]) => req<AskBatchResult>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id, answer: { kind: "allow" }, ...(taskIds ? { taskIds } : {}), ...(askIds ? { askIds } : {}) }) }),
   /** 「全部推奨のままで確定」: every open question of the Workspace that went on by its recommendation gets its confirmation. */
   /** `askIds`: the questions the screen shows under the button — only these are confirmed. */
   confirmProceeding: (workspaceId: string, askIds: string[]) => req<{ confirmed: string[] }>("/api/asks/answer", { method: "POST", body: JSON.stringify({ id: `proceed-all:${workspaceId}`, answer: { kind: "confirm", ok: true }, askIds }) }),

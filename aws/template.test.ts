@@ -865,39 +865,124 @@ describe("aws/template.yaml uplink bucket", () => {
     expect(resource("Data")).not.toContain("uplink");
   });
 
-  test("the work machine's role exists only with both a machine name and principals, and is trusted by those principals only", () => {
-    expect(text).toContain("  UplinkMachineName:\n    Type: String\n    Default: ''");
-    expect(text).toContain("  UplinkWriterPrincipalArns:\n    Type: CommaDelimitedList\n    Default: ''");
-    expect(text).toMatch(/HasUplinkWriter: !And\n +- !Not \[!Equals \[!Ref UplinkMachineName, ''\]\]\n +- !Not \[!Equals \[!Join \['', !Ref UplinkWriterPrincipalArns\], ''\]\]/);
-    const role = resource("UplinkWriterRole");
-    expect(role).toContain("Condition: HasUplinkWriter");
-    expect(role).toContain("PermissionsBoundary: !Ref Boundary");
-    expect(role).toContain("Principal: { AWS: !Ref UplinkWriterPrincipalArns }");
-    // no ARN of the owner in the template
-    expect(text).not.toMatch(/arn:aws:iam::[0-9]{12}:/);
+  // The work machines' permissions are ONE managed policy: every prefix that names a machine names it through the policy variable
+  // of the principal's tag, so the template holds no machine name and no principal (a machine is added in IAM, with no deploy).
+  const TAG = "aws:PrincipalTag/switchboard-machine";
+  const VAR = "${!aws:PrincipalTag/switchboard-machine}"; // inside !Sub: CloudFormation leaves it literal for IAM
+  const policy = () => resource("UplinkWorkMachinePolicy");
+  const NOT_LIKE = `StringNotLike: { '${TAG}': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }`;
+  const guard = (st: string) => st.includes(`'Null': { '${TAG}': 'false'`) && st.includes(NOT_LIKE);
+  // made at run time: a 12-digit account id written out would read as a secret to the public tree check
+  const ACCOUNT = (d: string) => d.repeat(12);
+
+  test("the template has no work machine name and no principal: the per-machine parameter, slots and roles are gone", () => {
+    expect(text).not.toMatch(/UplinkMachines|UplinkSlots|UplinkWriter|HasUplinkMachine|TooManyUplinkMachines|UplinkMachinesAtMostEight|ForEach::Uplink/);
+    // the only loop left is the VPC origins'
+    expect([...text.matchAll(/Fn::ForEach::(\w+):/g)].map((m) => m[1])).toEqual(["Edge"]);
+    expect(text).not.toMatch(new RegExp(`arn:aws:iam::${ACCOUNT("[0-9]")}:`));
+    expect(text).not.toContain("\nMappings:");
+    expect(text).not.toContain("ignore_checks");
+    // the one parameter of the host's own name stays
+    expect(text).toMatch(/\n  InstanceMachineName:\n    Type: String\n    Default: instance\n/);
+    // the transform is still needed by the VPC origins
+    expect(text).toStartWith("AWSTemplateFormatVersion: '2010-09-09'\nTransform: [AWS::LanguageExtensions, AWS::Serverless-2016-10-31]\n");
+    // one managed policy, no role made for a work machine, and its ARN is an output
+    expect(policy()).toContain("Type: AWS::IAM::ManagedPolicy");
+    expect(text).not.toContain("-uplink/");
+    expect(text).toContain("\n  UplinkWorkMachinePolicyArn:\n");
+    expect(text.slice(text.indexOf("\n  UplinkWorkMachinePolicyArn:\n"))).toContain("Value: !Ref UplinkWorkMachinePolicy");
   });
 
-  test("the work machine's role: new keys only under its own uplink/ and backlog/, reads and writes of leases, no delete, no other machine's prefix, no data bucket", () => {
-    const role = resource("UplinkWriterRole");
+  test("every prefix of the managed policy that names a machine names it by the tag variable only, in each statement", () => {
+    const sts = statements(policy());
+    expect(sts).toHaveLength(7); // put new keys, read back, list, read leases, put a lease taken, put a lease renewed, put its own proof
+    // every key under the machine segment is the variable: no other segment follows uplink/, backlog/, backlog-refused/, backlog-export/ or lease-proof/
+    const keys = [...policy().matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+)\/([^'\n]*)'/g)].map((m) => `${m[1]}/${m[2]}`);
+    expect(keys.filter((k) => k !== "lease/*" && k !== "lease-proof/*").sort()).toEqual([
+      `backlog-export/${VAR}/*`, `backlog-refused/${VAR}/*`, `backlog/${VAR}/*`, `backlog/${VAR}/*`, `lease-proof/${VAR}/*`, `uplink/${VAR}/*`,
+    ]);
+    const listPrefixes = /'s3:prefix': \[([^\]]*)\]/.exec(policy())![1]!;
+    expect(listPrefixes).toBe(`'lease/*', !Sub 'backlog-refused/${VAR}/*', !Sub 'backlog-export/${VAR}/*'`);
+    // nothing names a machine by a value
+    expect(policy()).not.toMatch(/Machine:|InstanceMachineName|instance\//);
+    expect(policy()).not.toMatch(/\$\{Uplink\.Arn\}\/(uplink|backlog|backlog-refused|backlog-export|lease-proof)\/(?!\$\{!aws:PrincipalTag\/switchboard-machine\}\/|\*')/);
+    // a variable is only read by IAM when the policy is evaluated: the Sub wraps it with `!` so CloudFormation keeps it
+    expect(policy().match(/\$\{aws:PrincipalTag/g)).toBeNull();
+    expect(sts.every((st) => st.includes("Effect: Allow"))).toBe(true);
+  });
+
+  test("a principal without the tag, or with a tag holding a `/`, matches no statement of the managed policy", () => {
+    for (const st of statements(policy())) expect(guard(st)).toBe(true);
+    // evaluate each statement's own conditions the way IAM does: Null false = the tag exists; StringNotLike = the value
+    // matches none of the patterns (`*` any run, `?` one character), read from the template, not written here
+    const glob = (p: string) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+    for (const st of statements(policy())) {
+      const patterns = [...(/StringNotLike: \{ 'aws:PrincipalTag\/switchboard-machine': \[([^\]]*)\]/.exec(st)?.[1] ?? "").matchAll(/'([^']*)'/g)].map((m) => glob(m[1]!));
+      expect(patterns.length).toBeGreaterThan(0);
+      const matches = (tag: string | undefined) => tag !== undefined && st.includes(`'Null': { '${TAG}': 'false'`) && !patterns.some((p) => p.test(tag));
+      expect([undefined, "", "pc1/x", "pc.1", "pc1:", "a@b", "a+b", "a=b", "a b", "_pc", "-pc"].map(matches)).toEqual(Array(11).fill(false));
+      expect(["pc1", "a-2_b", "PC2"].map(matches)).toEqual([true, true, true]);
+    }
+  });
+
+  test("the work machine's permissions: new keys only under its own uplink/ and backlog/, reads and writes of leases, no delete, no other machine's prefix, no data bucket", () => {
+    const role = policy();
     expect(role).not.toMatch(/Delete|PutObjectVersionTagging|s3:\*|Action: '\*'|Data\.Arn|\$\{Data/);
     const puts = statements(role).filter((st) => st.includes("s3:PutObject"));
     const put = (key: string) => puts.filter((st) => st.includes(key));
     // every put, by prefix: what is written, and under which condition
-    expect(puts.flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)\*?/g)].map((m) => m[1])).sort()).toEqual(["backlog/${UplinkMachineName}/", "lease-proof/${UplinkMachineName}/", "lease/", "lease/", "uplink/${UplinkMachineName}/"]);
-    expect(put("uplink/${UplinkMachineName}/*")[0]).toContain(COND_NEW);
-    expect(put("backlog/${UplinkMachineName}/*")[0]).toContain(COND_NEW);
-    expect(put("backlog/${UplinkMachineName}/*")[0]).toBe(put("uplink/${UplinkMachineName}/*")[0]); // the same statement: one condition for both
-    expect(put("lease/*").map((st) => st.includes(COND_NEW) || st.includes(COND_MATCH)).sort()).toEqual([true, true]);
-    expect(put("lease-proof/${UplinkMachineName}/*")[0]).not.toContain("Condition"); // a proof is overwritten when a lease is given back
+    expect(puts.flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)\*?/g)].map((m) => m[1])).sort()).toEqual([`backlog/${VAR}/`, `lease-proof/${VAR}/`, "lease/", "lease/", `uplink/${VAR}/`]);
+    expect(put(`uplink/${VAR}/*`)[0]).toContain("StringEquals: { 's3:if-none-match': '*' }");
+    expect(put(`backlog/${VAR}/*`)[0]).toContain("StringEquals: { 's3:if-none-match': '*' }");
+    expect(put(`backlog/${VAR}/*`)[0]).toBe(put(`uplink/${VAR}/*`)[0]); // the same statement: one condition for both
+    expect(put("lease/*").map((st) => st.includes("StringEquals: { 's3:if-none-match': '*' }") || st.includes("'s3:if-match': 'false'")).sort()).toEqual([true, true]);
+    expect(put(`lease-proof/${VAR}/*`)[0]).not.toMatch(/s3:if-/); // a proof is overwritten when a lease is given back
     // reads: its own backlog edits and refusals, the leases and the proofs of everyone; the list only by prefix
     const reads = touching(role, "s3:GetObject").join("\n");
-    for (const k of ["backlog/${UplinkMachineName}/*", "backlog-refused/${UplinkMachineName}/*", "lease/*", "lease-proof/*"]) expect(reads).toContain(k);
-    expect(reads).not.toMatch(/uplink\/|backlog\/\*|backlog-refused\/\*/);
-    const list = touching(role, "s3:ListBucket")[0]!;
-    expect(list).toContain("'s3:prefix': ['lease/*', !Sub 'backlog-refused/${UplinkMachineName}/*']");
-    // nothing names another machine, and a put never reaches backlog-refused/ (only the instance writes it)
-    expect(role).not.toMatch(/PrincipalTag|instance\//);
+    for (const k of [`backlog/${VAR}/*`, `backlog-refused/${VAR}/*`, `backlog-export/${VAR}/*`, "lease/*", "lease-proof/*"]) expect(reads).toContain(k);
+    expect(reads).not.toMatch(/uplink\/|backlog\/\*|backlog-refused\/\*|backlog-export\/\*/);
+    expect(touching(role, "s3:ListBucket")).toHaveLength(1);
+    // a put never reaches backlog-refused/ or backlog-export/ (only the instance writes them)
     expect(puts.join("")).not.toContain("backlog-refused");
+    expect(puts.join("")).not.toContain("backlog-export");
+    // the managed policy is the work machine's only grant: it does not ask for a boundary or name the instance's role
+    expect(role).not.toMatch(/PermissionsBoundary|InstanceRole/);
+  });
+
+  test("the backlog copy: the instance writes backlog-export/ (over its own earlier object), a work machine reads only its own prefix, and none reaches the data bucket", () => {
+    // the instance: a put on the whole prefix with no condition (an object is replaced at every round); the bucket policy's write-once rule does not name it
+    const put = statements(resource("InstanceRole")).filter((st) => st.includes("${Uplink.Arn}/backlog-export/*"));
+    expect(put).toHaveLength(1);
+    expect(put[0]).toContain("Action: s3:PutObject");
+    expect(put[0]).not.toContain("Condition");
+    expect(statements(resource("UplinkPolicy")).find((st) => st.includes("Sid: WriteOnce"))).not.toContain("backlog-export");
+    // the instance reads nothing of it, and the delete stays refused to it
+    expect(statements(resource("InstanceRole")).filter((st) => st.includes("s3:GetObject")).join("")).not.toContain("backlog-export");
+    // the work machine: the read and the list name its own machine, and it cannot put there
+    expect([...policy().matchAll(/backlog-export\/\$\{!aws:PrincipalTag\/switchboard-machine\}\/\*/g)]).toHaveLength(2); // the read and the list
+    expect(touching(policy(), "s3:GetObject").join("\n")).toContain(`backlog-export/${VAR}/*`);
+    expect(touching(policy(), "s3:PutObject").join("\n")).not.toContain("backlog-export");
+    expect(policy()).not.toMatch(/backlog-export\/\*|Data\.Arn|\$\{Data/);
+  });
+
+  test("adding a machine changes neither the Boundary, the DeployRole nor the InstanceRole: they do not name a machine", () => {
+    for (const r of ["Boundary", "DeployRole"]) expect(resource(r)).not.toMatch(/Uplink(Machines|Writer|WorkMachine)|HasUplinkMachine|InstanceMachineName|PrincipalTag/);
+    expect(resource("DeployRole")).toContain("role/${AWS::StackName}-*'");
+  });
+
+  test("nobody the stack makes can set or remove a tag of an IAM user: the tag is what limits a machine to its prefix, so only an IAM administrator moves it", () => {
+    const boundary = text.slice(text.indexOf("\n  Boundary:\n"), text.indexOf("\n  InstanceRole:\n"));
+    const tagActions = /iam:(Un)?[Tt]ag/;
+    expect(boundary).not.toMatch(tagActions);
+    expect(boundary).not.toMatch(/iam:\*|Action: '\*'/);
+    expect(resource("InstanceRole")).not.toMatch(tagActions);
+    expect(resource("GitHubOidcRole")).not.toMatch(tagActions);
+    // the deploy role tags and untags the stack's own roles only (CloudFormation does it to the roles it makes), never a user or a policy
+    const deploy = resource("DeployRole");
+    expect(deploy).not.toMatch(/iam:(Un)?Tag(User|Policy)/);
+    const withTag = statements(deploy).filter((st) => tagActions.test(st));
+    expect(withTag.map((st) => /iam:TagRole/.test(st) && /iam:UntagRole/.test(st))).toContain(true);
+    for (const st of withTag.filter((st) => /iam:(Un)?TagRole|iam:TagOpenID/.test(st))) expect(st).toMatch(/Resource: !Sub 'arn:aws:iam::\$\{AWS::AccountId\}:(role\/\$\{AWS::StackName\}-\*|oidc-provider\/token\.actions\.githubusercontent\.com)'/);
   });
 
   test("the bucket policy refuses a put over an existing key, a lease put with neither condition, and any delete by the instance or the work machine", () => {
@@ -915,7 +1000,10 @@ describe("aws/template.yaml uplink bucket", () => {
     expect(del).toContain("Effect: Deny");
     expect(del).toContain("[s3:DeleteObject, s3:DeleteObjectVersion]");
     expect(del).toContain("!GetAtt InstanceRole.Arn");
-    expect(del).toContain("!If [HasUplinkWriter, !GetAtt UplinkWriterRole.Arn, !Ref AWS::NoValue]");
+    const delRoles = statements(pol).find((st) => st.includes("Sid: NoDeleteWorkMachine"))!;
+    expect(delRoles).toContain("Effect: Deny");
+    expect(delRoles).toContain("[s3:DeleteObject, s3:DeleteObjectVersion]");
+    expect(delRoles).toContain("Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' } }");
     expect(pol.match(/Effect: Allow/g)).toBeNull();
   });
 
@@ -925,18 +1013,31 @@ describe("aws/template.yaml uplink bucket", () => {
     expect(sts.join("")).not.toMatch(/Delete|Effect: Deny|s3:\*/);
     const get = withKey("uplink/*", "s3:GetObject")[0]!;
     for (const k of ["uplink/*", "backlog/*", "lease/*", "lease-proof/*"]) expect(get).toContain(`\${Uplink.Arn}/${k}'`);
-    expect(sts.find((st) => st.includes("s3:ListBucket"))).toContain("'s3:prefix': ['uplink/*', 'backlog/*', 'lease/*']");
+    // backlog-export/ is listed (never read) to find an export to write a tombstone over
+    expect(sts.find((st) => st.includes("s3:ListBucket"))).toContain("'s3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'backlog-export/*']");
     expect(withKey("lease/*", "s3:PutObject").map((st) => st.includes(COND_NEW) || st.includes(COND_MATCH)).sort()).toEqual([true, true]);
     expect(withKey("lease-proof/${InstanceMachineName}/*", "s3:PutObject")[0]).not.toContain("Condition");
     expect(withKey("backlog-refused/*", "s3:PutObject")[0]).toContain(COND_NEW);
     // every put it has on the bucket, by prefix: it never writes uplink/ or backlog/ (a work machine's)
-    expect(sts.filter((st) => st.includes("s3:PutObject")).flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)/g)].map((m) => m[1])).sort()).toEqual(["backlog-refused/", "lease-proof/${InstanceMachineName}/", "lease/", "lease/"]);
+    expect(sts.filter((st) => st.includes("s3:PutObject")).flatMap((st) => [...st.matchAll(/\$\{Uplink\.Arn\}\/([a-z-]+\/[^'*]*)/g)].map((m) => m[1])).sort()).toEqual(["backlog-export/", "backlog-refused/", "lease-proof/${InstanceMachineName}/", "lease/", "lease/"]);
   });
 
-  test("the host's proof prefix is its machine name, and the work machine may not take that name", () => {
+  test("the host's proof prefix is its machine name, and no principal with the tag may write it, whatever the tag holds", () => {
     expect(text).toMatch(/\n  InstanceMachineName:\n    Type: String\n    Default: instance\n/);
-    const rules = text.slice(text.indexOf("\nRules:\n"), text.indexOf("\nConditions:\n"));
-    expect(rules).toContain("Assert: !Not [!Equals [!Ref UplinkMachineName, !Ref InstanceMachineName]]");
+    // the refusal is in the bucket policy, for any principal that has the tag at all (the tag's value is not read)
+    expect(text).not.toContain("\nRules:\n");
+    const deny = statements(resource("UplinkPolicy")).find((st) => st.includes("Sid: HostProofsAreTheInstancesOwn"))!;
+    expect(deny).toContain("Effect: Deny");
+    expect(deny).toContain("Principal: '*'");
+    expect(deny).toContain("Action: s3:PutObject");
+    expect(deny).toContain("Resource: !Sub '${Uplink.Arn}/lease-proof/${InstanceMachineName}/*'");
+    expect(deny).toContain("Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' } }");
+    expect(deny).not.toContain("aws:PrincipalArn");
+    // the instance's role carries no tag and is no role of a machine, so it still writes its own proofs
+    expect(resource("InstanceRole")).not.toMatch(/PrincipalTag|Tags:/);
+    expect(statements(resource("InstanceRole")).some((st) => st.includes("${Uplink.Arn}/lease-proof/${InstanceMachineName}/*") && st.includes("s3:PutObject"))).toBe(true);
+    // a machine tagged with the host's own name gets the managed policy's prefix lease-proof/<the variable>/, which the deny above covers
+    expect(policy()).toContain(`lease-proof/${VAR}/*`);
   });
 
   test("the boundary allows the same range without delete, the deploy role may make the bucket, and the name is in Parameter Store", () => {

@@ -92,12 +92,14 @@ export class DbCore {
       this.sqlite.exec(SCHEMA);
       migrate(this.sqlite);
       if (!this.sqlite.query("SELECT 1 FROM settings WHERE key = 'quota.byAccountMoved'").get()) {
+        // IMMEDIATE: a transaction that reads first and writes after fails at once (SQLITE_BUSY_SNAPSHOT, no busy wait)
+        // when another connection wrote in between; taking the write lock first waits it out instead.
         this.sqlite.transaction(() => {
           const put = this.sqlite.query("INSERT OR IGNORE INTO quota_by_account (runner, account, window, utilization, resets_at, ts) VALUES (?, ?, ?, ?, ?, ?)");
           for (const r of this.sqlite.query("SELECT runner, window, utilization, resets_at, ts FROM quota").all() as Array<{ runner: RunnerId; window: string; utilization: number; resets_at: number; ts: number }>)
             put.run(r.runner, this.accountOf(r.runner), r.window, r.utilization, r.resets_at, r.ts);
           this.sqlite.exec("INSERT OR IGNORE INTO settings (key, json) VALUES ('quota.byAccountMoved', 'true')");
-        })();
+        }).immediate();
       }
     }
     // the events archive frees pages with `incremental_vacuum`, which only a file in INCREMENTAL mode gives back.

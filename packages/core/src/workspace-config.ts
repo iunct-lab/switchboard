@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync }
 import { join, sep } from "node:path";
 import type { Workspace } from "@switchboard/protocol";
 import { CONFIG_ENV, CONFIG_FILE, CiConfig, ciStepsHash, configFileOf, configShapeError } from "../../../ops-kit/src/config.ts";
+import { forgeTargetOf, originOf, type ForgeTarget } from "../../../ops-kit/src/forge.ts";
 import { findSecrets, type HostAws } from "../../../ops-kit/src/secrets.ts";
 
 /** Under the daemon's home: `<id>/ops.config.json` per workspace that has settings, and the index (scripts/workspace-settings.ts reads both names). */
@@ -75,6 +76,20 @@ const FILES = new Map<string, string>();
 
 /** The saved settings' file of a workspace (what `OPS_KIT_CONFIG` names for its Tasks and jobs); "" = none saved. */
 export const savedConfigFile = (id: string | null | undefined): string => (id ? FILES.get(id) ?? "" : "");
+
+/**
+ * The GitLab project a checkout's MRs belong to: the target its settings name (the saved ones of the workspace too, as the
+ * verdict reads them), only when the service is GitLab and the checkout's origin is that project. Null = not a GitLab
+ * checkout (or its settings are refused). The one rule of the key a record of an MR is kept under and the verdict asks with.
+ */
+export function gitlabTargetOf(cwd: string, workspaceId: string | null | undefined): (ForgeTarget & { repository: string }) | null {
+  try {
+    const t = forgeTargetOf(cwd, originOf(cwd), savedConfigFile(workspaceId));
+    return t.service === "gitlab" && t.repository ? { ...t, repository: t.repository } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** A change of a workspace's settings that waits for the person: named in the index so the scripts (the merge gate) can say so. */
 export interface PendingConfig { workspaceId: string; id: number; at: number; keys: string[] }

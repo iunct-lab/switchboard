@@ -17,6 +17,8 @@ gh api "repos/{owner}/{repo}/pulls/$N/reviews"  --paginate | jq -r '.[] | select
 gh pr view $N --comments --json comments -q '.comments[] | "---- \(.author.login)\n\(.body)"'   # 要約コメント（[<名前>] review）も全文
 ```
 
+攻める側のレビュー（`[<runner>] attack`。`cross-runner-review` の 2b）の指摘も、1〜4 で主レビューと同じに処理する。
+
 複数のレビュアーの同じ指摘は 1 件にまとめ、返信に「[<レビュアー A>] と [<レビュアー B>] の同じ指摘」と書く。
 
 **ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh api` と `gh pr view` は呼ばない。指摘の一覧は変更へのコメント（`ops-kit backlog view <変更> --fresh` の末尾のコメント。レビュアーごとの要約（`[<名前>] review`）とサブエージェントの要約も全文）を読む。
@@ -135,7 +137,7 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 
 全部 yes ならそのままマージする（聞き直さない。`pbi-complete` の「この依頼が含む範囲」）。1 つでも no なら理由を要約に書いて止める（PR は open のまま。聞くものは `issue-workflow` の「判断待ちの出し方」で分ける: マージしてよいかは運用の確認として Task の会話で聞いてターンを終え、Issue に書かない。実装の判断は Issue の `## 判断待ち`）:
 
-- [ ] マージ判定（CLAUDE.md のコマンド。ローカルの変更では `<マージ判定> --change <変更>`、マージは Task への指示が名指しする `local-merge.ts <変更>`（判定をもう一度通してから rebase で入れ、Task も閉じる）。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。large の理由の扱いは `pbi-complete` の 5: `[聞く]` は小さな差分でも、利用者が Task の会話でマージを認めるまで（`--allow-large`）マージしない。`[再チェック <kind>]` は聞かずに再チェックを回して印で外す。記録の印も同じ節）
+- [ ] マージ判定（CLAUDE.md のコマンド。ローカルの変更では `<マージ判定> --change <変更>`、マージは Task への指示が名指しする `local-merge.ts <変更>`（判定をもう一度通してから rebase で入れ、Task も閉じる）。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。large の理由の扱いは `pbi-complete` の 5: `[聞く]` は小さな差分でも、利用者が Task の会話で `PR #<n> をマージしてよい` と認めるまで（認めたら `--allow-large`）マージしない。`[再チェック <kind>]` は聞かずに再チェックを仕事として頼み、その記録で外す。頼み方も同じ節）
 - [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み（見送る nit は要約の表で）（main との比較で要望にした指摘の `Issue 化: #<要望>（main と比べて後退でない: …）` の返信も数える）
 - [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
 - [ ] 主レビュアーの独立レビューがある（`cross-runner-review` の「誰がレビューするか」。利用上限のときは同じスキルの 0。自己レビューだけでは満たさない。レビューできなければ未レビューとして止める）
@@ -143,7 +145,8 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
   （追加のレビュアーは未着でもよく、届いたら転記して比較する）
 <!-- end when -->
 - [ ] security / license / personal data / public readers の 4 項目が主レビューにあり、finding は処理済み
-- [ ] CI 緑: `gh run list --commit "$(gh pr view $N --json headRefOid -q .headRefOid)"`（`gh pr checks` は Checks の権限が要り、fine-grained トークンでは 403 になることがある）。**Actions が始まらない**（run が数秒で failure、ジョブのステップが 0 件: `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs -q '.jobs[].steps|length'`）ときは待たず、ローカル CI（CLAUDE.md のコマンド）を回す。通ったときの印をマージ判定がその CI の成功と数える仕組みなら、それで進める（テストが実際に落ちた CI の代わりにはならない）。スタックでいつ回すかは `pbi-complete` の 4（自動 rebase と base の前進では回し直さない）
+- [ ] 攻める側のレビューが要る PR（マージ判定の JSON の `attack` が空でない）は、攻める側のレビューの仕事の記録が今の head にあり、指摘は処理済み
+- [ ] CI 緑: `gh run list --commit "$(gh pr view $N --json headRefOid -q .headRefOid)"`（`gh pr checks` は Checks の権限が要り、fine-grained トークンでは 403 になることがある）。**Actions が始まらない**（run が数秒で failure、ジョブのステップが 0 件: `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs -q '.jobs[].steps|length'`）ときは待たず、ローカル CI（CLAUDE.md のコマンド）を回す。ローカル CI を仕事に頼み（`ops-kit job request local-ci <PR>`）、その仕事の記録（`result.ci`）をマージ判定が CI の成功と数える仕組みなら、それで進める（テストが実際に落ちた CI の代わりにはならない）。スタックでいつ回すかは `pbi-complete` の 4（自動 rebase と base の前進では回し直さない）
 - [ ] PR 本文が今の差分と一致（修正で変わったなら `gh pr edit` で直す。[x] は事実だけ）
 - [ ] Task の DoD が事実として満たされている（テスト / typecheck / 実構成、および Task が名指しした doc）
 - [ ] `git diff --stat origin/main...HEAD` に迷いファイル（作業ファイル、fixture の絶対パス）が無い

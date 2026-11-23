@@ -106,17 +106,14 @@ export function heldSettingsOf(root: string, env: Record<string, string | undefi
   return { workspace: (kept ?? waits!).name, version, ciHash, pending: waits ? { keys: waits.keys, at: waits.at } : null };
 }
 
-/** The steps' hash a local CI result names when its steps came from the settings Switchboard keeps (`resultComment` writes the line). */
-export const namedStepsHash = (body: string): string | null => /手順のハッシュ `([0-9a-f]{12})`/.exec(body)?.[1] ?? null;
-
 /**
- * Why a local CI pass does not count against what the person confirmed, or undefined when it does. A pass counts when its
- * steps are the confirmed ones: it names the hash of the confirmed settings' steps, or — with no steps confirmed — it
- * names none (its steps were the checkout's own, which the PR's review covers). So a pass run with steps from any other
- * file (`OPS_KIT_CONFIG` pointed elsewhere, a change still waiting) is not the CI's success.
+ * Why a local CI pass does not count against what the person confirmed, or undefined when it does. `named`: the hash of the
+ * steps the pass ran, which its job record has when they came from the settings Switchboard keeps; null = it names none. A
+ * pass counts when its steps are the confirmed ones: it names the hash of the confirmed settings' steps, or — with no steps
+ * confirmed — it names none (its steps were the checkout's own, which the PR's review covers). So a pass run with steps
+ * from any other file (`OPS_KIT_CONFIG` pointed elsewhere, a change still waiting) is not the CI's success.
  */
-export function stepsNotConfirmed(body: string, held: HeldSettings | undefined): string | undefined {
-  const named = namedStepsHash(body);
+export function stepsNotConfirmed(named: string | null, held: HeldSettings | undefined): string | undefined {
   const confirmed = held?.ciHash ?? null;
   if (named === confirmed) return undefined;
   if (named === null) return `local-ci の pass が、利用者の確かめた設定（Switchboard の側、workspace ${held!.workspace}、版 ${held!.version}）の CI の手順（ハッシュ ${confirmed}）で回したものでない（その設定で回し直す）`;

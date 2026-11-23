@@ -692,8 +692,10 @@ export function BatchCard(props: { batch: AskBatch; onOpenTask: (id: string) => 
   const press = () => {
     setBusy(true);
     api
-      .answerBatch(b.id, b.kind === "sso" ? undefined : chosen)
-      .catch((e) => props.onError(t(m.batchFailed, { batch: BATCH_LABEL[b.kind], error: String(e.message ?? e) })))
+      // deploy: the chosen Tasks with their questions as this card shows them — the approval is for what was seen
+      .answerBatch(b.id, b.kind === "sso" ? undefined : chosen, b.kind === "sso" ? undefined : b.asks.filter((a) => !off.has(a.taskId)).map((a) => a.askId))
+      // 409: a chosen Task's question changed since the card was drawn — nothing was sent; the batch is read again below
+      .catch((e: Error & { status?: number }) => props.onError(e.status === 409 ? t(m.askChanged) : t(m.batchFailed, { batch: BATCH_LABEL[b.kind], error: String(e.message ?? e) })))
       // read again either way: a failure part way leaves the Tasks already sent out of the batch
       .finally(() => {
         setBusy(false);

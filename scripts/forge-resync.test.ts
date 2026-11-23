@@ -1,10 +1,15 @@
 // test-reads: scripts/forge-resync.ts scripts/local-merge.ts
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubOrigin, main, unreachable, verifyLocal, type MergedRange, type Run } from "./forge-resync.ts";
+
+// the run is judged in this process (a person's terminal) unless a test says it is in a Task: the variable of the Task that runs the tests is not the test's
+const savedTask = process.env.SWITCHBOARD_TASK_ID;
+beforeAll(() => { delete process.env.SWITCHBOARD_TASK_ID; });
+afterAll(() => { if (savedTask !== undefined) process.env.SWITCHBOARD_TASK_ID = savedTask; });
 
 // The local main sent back to GitHub against a bare repository standing in for GitHub: what both mains are after
 // it, and that no push ever forces.
@@ -423,8 +428,8 @@ test("--merge-sync with a merge verdict — gh pr merge --merge at the judged he
   const merge = p.gh.find((a) => a[1] === "merge")!;
   expect(merge).toEqual(["pr", "merge", "77", "-R", "o/r", "--merge", "--delete-branch", "--match-head-commit", L]);
   expect(merge.some((a) => a === "--rebase" || a === "--squash")).toBe(false);
-  // the gate judged it: the merge carries the gate's mark of this PR, so the check in front of `gh` lets it through in a Task
-  expect(p.envs[p.gh.indexOf(merge)]).toEqual({ OPS_MERGE_GATE_PR: "77" });
+  // no variable marks it as the gate's merge: in a Task the check in front of `gh` asks the app for the person's grant of this merge, which this shape (the judged head with --match-head-commit) can carry
+  expect(p.envs[p.gh.indexOf(merge)]).toBeUndefined();
   const M = s.remoteMain();
   expect(s.git(s.origin)("rev-parse", `${M}^2`)).toBe(L);
   // main is checked out here: its work tree is not moved (ops-kit pull-main does that), and it is behind GitHub's only
@@ -433,6 +438,41 @@ test("--merge-sync with a merge verdict — gh pr merge --merge at the judged he
   expect(out).toContain(JSON.stringify({ result: "synced", pr: 77, local: L, remote: M }));
   expect(out.at(-1)).toBe(JSON.stringify({ result: "reported", reported: [1] }));
   noForce(s.pushes);
+});
+
+test("--merge-sync in a Task asks the app's gate job (merge-sync) and does not judge or merge itself; the local main still goes to GitHub's", async () => {
+  const s = setup();
+  const p = protect(s);
+  s.commit(s.local, "b.txt", "b");
+  s.landed();
+  const L = s.localMain();
+  expect(await main([], s.local, { run: p.run, repo: "o/r", merged: async () => s.merges, changes: async () => [], cache: home!, log: () => {}, err: () => {} })).toBe(5);
+  const app = reporting(s, [{ number: 1, head: "sb/5-x", mergeCommit: L, pr: null, body: "Closes #5", comments: MARKS }]);
+  const tokenFile = join(home!, "task-token");
+  writeFileSync(tokenFile, "k\n");
+  const posts: unknown[] = [];
+  // the app's job does the merge (as the daemon's run of merge-gate does); here that is the same Merge commit on the bare side
+  const fetch = async (url: string, init: RequestInit = {}) => {
+    const u = new URL(url);
+    if (u.pathname === "/api/jobs") {
+      posts.push(JSON.parse(String(init.body)));
+      await p.run(["gh", "pr", "merge", "77", "-R", "o/r", "--merge", "--delete-branch", "--match-head-commit", L], s.local);
+      return Response.json({ id: 41 });
+    }
+    if (u.pathname === "/api/jobs/41") return Response.json({ job: { id: 41, status: "pass", exitCode: 0, summary: null, result: { gate: { head: L } } }, out: '{"verdict":"merge"}' });
+    return app.deps().fetch(url, init);
+  };
+  const ghMerges: string[][] = [];
+  const run: Run = async (cmd, cwd, env) => (cmd[0] === "gh" && cmd[2] === "merge" ? (ghMerges.push(cmd), { code: 1, stdout: "", stderr: "must not merge from here" }) : p.run(cmd, cwd, env));
+  const judged: number[] = [];
+  const out: string[] = [];
+  const env = { ...app.deps().env, SWITCHBOARD_TASK_ID: "task_1", OPS_KIT_TASK_ID: "task_1", BACKLOG_TOKEN_FILE: tokenFile, SWITCHBOARD_GATE_POLL_MS: "1" };
+  const code = await main(["--merge-sync", "77"], s.local, { ...app.deps(), env, fetch, repo: "o/r", run, judgePr: async (n) => (judged.push(n), { verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], head: L }), log: (x) => out.push(x), err: (x) => out.push(x) });
+  expect(code).toBe(0);
+  expect(posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: s.local, pr: 77, repo: "o/r", merge: "merge-sync" }]);
+  expect([judged, ghMerges]).toEqual([[], []]);
+  expect(s.git(s.origin)("rev-parse", `${s.remoteMain()}^2`)).toBe(L);
+  expect(out).toContain(JSON.stringify({ result: "synced", pr: 77, local: L, remote: s.remoteMain() }));
 });
 
 test("--merge-sync: the merge is done but the report cannot be left (GitHub down): the report's exit 4, and the output says to run --report only", async () => {

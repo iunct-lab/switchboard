@@ -82,7 +82,8 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
   // A stop waiting for the person is not let go by a condition met alone: only their answer is.
   if (!NEEDS_PERSON.has(s.reason)) return changes.some((c) => c.kind === "condition-met") ? "resume" : "wait";
   // This series stopped before and was answered, and no new answer came: asking again gets the same answer — even
-  // when another cause came in between (that cause was its own series, asked on its own).
+  // when another cause came in between (that cause was its own series, asked on its own). `answered` counts only an
+  // answer to a stop that said the grant this one says (`answeredSameGrant`): a stop with another grant asks again.
   return askedBefore && answered ? "wait" : "decide";
 }
 
@@ -95,10 +96,34 @@ function nextOf(s: StopRecord, changes: StopChange[], askedBefore: boolean, answ
  * `places` = each stop's `placeKey` (made once by `reduceStops`).
  */
 function answerIsOwn(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, last: StopRecord, a: StopRecord["answer"]): boolean {
-  if (!a || !a.ref.startsWith("seq:")) return false;
+  return answerOwner(stops, first, places, last, a) !== null;
+}
+
+/** The stop `a` was given to when it is an answer to `last`'s series (`answerIsOwn`); null when it is not. */
+function answerOwner(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, last: StopRecord, a: StopRecord["answer"]): StopRecord | null {
+  if (!a || !a.ref.startsWith("seq:")) return null;
   const lastPlace = places.get(last.id);
   const owner = stops.filter((s) => places.get(s.id) === lastPlace && first.get(s.id)! < a.at).at(-1);
-  return !!owner && stopKey(owner) === stopKey(last);
+  return owner && stopKey(owner) === stopKey(last) ? owner : null;
+}
+
+/**
+ * Whether the answer `x` carries is an answer to `last`'s series given to a stop that then said the grant `last` says
+ * now: the person answered what that grant asked, so the same grant asked again gets the same answer — and another
+ * grant was never answered. The stop the answer was given to is `x` itself when it was there as the answer came (a reply
+ * marks the stops it answers, `tasks.send`'s `answers`: one at the same place it did not mark is not answered by it),
+ * else the stop `x` carries it over from (`answerOwner`). The grant that stop said is the one of its record when the
+ * answer came (`history`: each stop's records in time order; reported again with another grant since, what was answered
+ * stays).
+ */
+function answeredSameGrant(stops: StopRecord[], first: Map<string, number>, places: Map<string, string>, history: Map<string, StopRecord[]>, last: StopRecord, x: StopRecord): boolean {
+  const a = x.answer;
+  const owner = answerOwner(stops, first, places, last, a);
+  if (!a || !owner) return false;
+  const to = a.at >= first.get(x.id)! ? x : owner;
+  const records = history.get(to.id)!;
+  const then = records.filter((r) => r.at <= a.at).at(-1) ?? records[0]!;
+  return (then.grant ?? null) === (last.grant ?? null);
 }
 
 /**
@@ -137,9 +162,11 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
   const first = new Map<string, number>();
   const sorted = [...records].sort((a, b) => a.at - b.at);
   const since = contentSince(sorted);
+  const history = new Map<string, StopRecord[]>();
   for (const r of sorted) {
     if (!first.has(r.id)) first.set(r.id, r.at);
     byId.set(r.id, r);
+    history.set(r.id, [...(history.get(r.id) ?? []), r]);
   }
   // One entry per stop (its latest state), in the order the stops first happened.
   const stops = [...byId.values()].sort((a, b) => first.get(a.id)! - first.get(b.id)!);
@@ -178,7 +205,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
       actions: last.actions,
       changes,
       unchanged,
-      next: nextOf(last, changes, list.length > 1, list.some((x) => ours(x.answer))),
+      next: nextOf(last, changes, list.length > 1, list.some((x) => answeredSameGrant(stops, first, places, history, last, x))),
     });
   }
   return out.sort((a, b) => b.lastAt - a.lastAt);
@@ -557,20 +584,24 @@ export function stopRecoveryPrompt(open: StopSummary[], cond: PreambleConditions
         : "7 日を超えるなら conditions を省く。"
     }サブエージェント・背景の実行・別リポジトリの待ちのように、どの鍵でも書けない待ちはアプリが再開できないので、利用者の要対応に出る。`,
     "何かが済むのを待つときは `ops-kit wait --for \"<何を待つか>\" --timeout <秒> --on-timeout <fail|proceed> -- <判定コマンド>` を使い、until / while と sleep の繰り返しでは待たない（何を待つか・上限・切れたときの動作が無い待ちは書けない。待ちと上限は画面に出る）。fail で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を報告して止まる。",
-    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・[merge-answer] の投稿は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
+    'ランナーの自動承認や権限に拒まれて止まった（reason "permission"）なら、拒まれた操作だけを名指しした許可文を "grant" に 1 文で書く（例 "grant":"<対象> に <内容> を登録することだけ許可します"。値や秘密は書かない）。マージ判定の外のマージ・聞く理由の解除（[merge-answer] の投稿）は、拒んだ側の出力が示す決まった文（聞く理由は「PR #<n> をマージしてよい」（投稿の検査がある間は「PR #<n> に [merge-answer] yes を投稿してよい」も通る）、判定の外のマージは「PR #<n> を判定の外でマージしてよい」）をそのまま grant に書く（ほかの言い方では通らない）。利用者が選べば、その許可文が利用者の返信として 1 回だけ届く。',
     `依頼の範囲外の書き込み（${cond.planMode ? "計画モードでの commit・push・マージ、" : ""}リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。要るなら判断待ちで聞く。`,
   ];
   const stops = openStopsPrompt(open);
   return stops ? `${lines.join("\n")}\n${stops}` : lines.join("\n");
 }
 
-/** The stops of the work still open, with the retries left; empty when there is none. All a continued session is told at a restart of its process. */
+/**
+ * The stops of the work still open, with the retries left; empty when there is none. All a continued session is told at a
+ * restart of its process. The operation and its target are quoted apart and the heading says the lines are a record: a
+ * line that joined them with a space read as one command with one more argument, and a Task ran it.
+ */
 export function openStopsPrompt(open: StopSummary[]): string {
   if (!open.length) return "";
-  const lines = ["この作業でまだ解けていない停止:"];
+  const lines = ["この作業でまだ解けていない停止（前に止まったときの記録。各行の操作は、そのまま実行するコマンドではない）:"];
   for (const s of open.slice(0, 5)) {
     const left = s.reason === "transient" && s.safety !== "unknown" ? `、再試行の残り ${Math.max(0, RETRY_DELAYS_MS.length - lastAttempt(s))} 回` : "";
-    lines.push(`- ${s.op}${s.target ? ` ${s.target}` : ""}: ${s.reason}（止まったのは ${s.count} 回、${s.state}${left}）`);
+    lines.push(`- 操作「${s.op}」${s.target ? `、対象「${s.target}」` : ""}: ${s.reason}（止まったのは ${s.count} 回、${s.state}${left}）`);
   }
   return lines.join("\n");
 }

@@ -816,6 +816,34 @@ test("opening the database while another connection writes waits instead of fail
   expect(opened).toBeGreaterThan(0);
 }, 15_000);
 
+test("opening the database: a write by another connection between the move's read and its write does not fail the open", () => {
+  const path = join(dir, "snapshot.sqlite");
+  const first = new Db(path);
+  first.sqlite.exec("INSERT INTO quota (runner, window, utilization, resets_at, ts) VALUES ('claude', 'five_hour', 0.5, 1, 1)");
+  first.sqlite.exec("DELETE FROM settings WHERE key = 'quota.byAccountMoved'");
+  first.close();
+  // the move asks for the account after reading `quota`: another connection writes right then
+  let wrote = false;
+  const db = new Db(path, {
+    accountOf: () => {
+      const other = new Database(path);
+      try {
+        other.exec("PRAGMA busy_timeout = 0");
+        other.exec("INSERT INTO settings (key, json) VALUES ('other', '1') ON CONFLICT(key) DO NOTHING");
+        wrote = true;
+      } catch {
+        // the move holds the write lock: the other connection waits (here: gives up) instead of the move failing
+      } finally {
+        other.close();
+      }
+      return "acct";
+    },
+  });
+  expect(wrote).toBe(false);
+  expect(db.sqlite.query("SELECT account FROM quota_by_account").all()).toEqual([{ account: "acct" }]);
+  db.close();
+});
+
 test("startup: a migrated `background` task whose jobs died with the daemon goes back to done and plans its resume", () => {
   const db = new Db(join(dir, "switchboard.db"));
   db.insertTask({ id: "t_bg", workspaceId: "ws", title: "t_bg", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "background", runnerSessionId: "s1", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "needs_action", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 1, createdAt: 1, updatedAt: 1 });
@@ -857,7 +885,7 @@ test("stage: a stage Task in `background` status, with a daemon job or a reply b
   expect(db.workingStageTask("ws", 7)).toBeNull();
   db.updateTask("t_err", { resumeAt: null });
   // a job it asked the daemon for keeps it active until the job ends
-  const job = db.insertJob({ kind: "local-ci", taskId: "t_plain", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
+  const job = db.insertJob({ kind: "local-ci", taskId: "t_plain", pr: 1, runner: null, cwd: "/work/app", startedAt: 4, repo: "", head: null, as: null, kinds: [] });
   expect(db.activeStageTask("ws", 8)!.id).toBe("t_plain");
   db.finishJob(job.id, { status: "pass", exitCode: 0, summary: "", endedAt: 5 });
   expect(db.activeStageTask("ws", 8)).toBeNull();

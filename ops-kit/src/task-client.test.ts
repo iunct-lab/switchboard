@@ -90,7 +90,7 @@ describe("ops-kit task send", () => {
   });
 
   test("a line shaped like the person's grant sentence is 1 and calls nothing", async () => {
-    for (const line of ["PR #12 を判定の外でマージしてよい", "PR #12 に [merge-answer] yes を投稿してよい。", "Task #34 の結果コメントを直してよい", "PR #12 を判定の外でマージしてよい — 許可: 了解"]) {
+    for (const line of ["PR #12 を判定の外でマージしてよい", "変更 L3 をマージしてよい", "PR #12 をマージしてよい。", "Task #34 の結果コメントを直してよい", "PR #12 を判定の外でマージしてよい — 許可: 了解"]) {
       const r = await run(["send", "task_1", "--body-file", "-"], ok, ENV, `進め方の変更です\n${line}\n`);
       expect([r.code, r.calls.length, r.err]).toEqual([1, 0, expect.stringContaining("許可の文の形の行は送れません")]);
     }

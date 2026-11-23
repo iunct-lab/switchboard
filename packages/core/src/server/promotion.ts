@@ -1,7 +1,8 @@
 import { isWorkMachine } from "../machine.ts";
 import { isPublicCopy, type ReleaseReview } from "../release-review.ts";
-import type { Workspace } from "@switchboard/protocol";
-import { latestTag, promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, tagCiOf, type DrainView, type PromotionDrain, type PromotionStep, type TagCi, reportPromoteFailure, RESCUE_IN_CONTAINER, type ReleaseState } from "../promotion.ts";
+import { APP_JOB_TASK, type Workspace } from "@switchboard/protocol";
+import { JobError, repoKeyOf, requestJob } from "../jobs.ts";
+import { latestTag, promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, tagCiOf, tagCiPlan, type TagCiState, type DrainView, type PromotionDrain, type PromotionStep, type TagCi, reportPromoteFailure, RESCUE_IN_CONTAINER, type ReleaseState } from "../promotion.ts";
 import { call, runGh } from "../backlog-gh.ts";
 import { nextWakeFrom } from "../hostidle.ts";
 import type { RescueStatus, ServerContext, ServerContextInit } from "./context.ts";
@@ -129,18 +130,47 @@ export const drainView = (sc: Pick<ServerContext, "drainHold" | "promotionDrain"
 };
 
 /**
- * The tag CI's result for a tag of a development origin, from the tag's Release (`gh release view`). A pass is final
- * for that commit and kept; a fail or no result is read again after 5 minutes (a later run can pass). A Release that
- * cannot be read (`gh` fails, or answers what is no JSON) is no result: with the default (`no-fail`) such a tag is promoted as any tag is, with `pass` it waits.
+ * The tag CI's result for a tag of a development origin, from the app's own records of tag CI jobs (`tagCiOf`): the Release's
+ * body is not read. A tag with no result gets a tag CI job started by the app (`tagCiPlan`: one at a time, a limited number of
+ * tries) and the promotion waits for it — `{ waiting }`, whatever the `tagCi` setting says: a tag is never brought in before the
+ * CI of its own commit has been asked for and has answered. The job's end asks the promotion again (`setupJobs`). Only a commit
+ * whose jobs ended without judging it too often, or that no job can be asked for, has no result (`none`), and then the setting decides.
  */
-export const tagCi = async (sc: Pick<ServerContext, "opts" | "cfg" | "tagCiKnown">, tag: string, sha: string): Promise<TagCi> => {
+export const tagCi = async (sc: Pick<ServerContext, "opts" | "cfg" | "db" | "jobDeps" | "metaWorkspace" | "git">, tag: string, sha: string): Promise<TagCiState> => {
   if (sc.opts.tagCi) return sc.opts.tagCi(tag, sha);
-  const key = `${tag}@${sha}`;
-  const had = sc.tagCiKnown.get(key);
-  if (had && (had.result === "pass" || Date.now() - had.at < 5 * 60_000)) return had.result;
-  const result = await call(sc.opts.gh ?? runGh, sc.cfg.repoRoot, ["release", "view", tag, "--json", "body"]).then((out) => tagCiOf(String((JSON.parse(out) as { body?: unknown }).body ?? ""), sha)).catch(() => "none" as const);
-  sc.tagCiKnown.set(key, { result, at: Date.now() });
-  return result;
+  const meta = sc.metaWorkspace();
+  const repo = meta ? repoKeyOf(meta.path, meta) : "";
+  const planNow = () => {
+    const jobs = sc.db.tagCiJobsOf(repo, sha);
+    return { jobs, plan: tagCiPlan(jobs, sc.db.tagCiRunning(repo, APP_JOB_TASK), Date.now()) };
+  };
+  // what the check answers for a plan that is not "start"
+  const answer = ({ jobs, plan }: ReturnType<typeof planNow>): TagCiState => plan.do === "settled" ? tagCiOf(jobs) : plan.do === "wait" ? { waiting: plan.retry ? `job#${plan.job}（判定なしで終わった。頼み直しを待つ）` : `job#${plan.job}` } : "none";
+  const first = planNow();
+  if (first.plan.do !== "start") return answer(first);
+  // a candidate runs on a copy of the database: the live daemon's jobs are not its to start
+  if (first.plan.do === "start" && meta && !sc.cfg.candidate) {
+    // the tag of the commit the promotion decided about may not be in the clone the job reads yet: fetched here, asynchronously, only when it is missing (a request does not wait for the network)
+    const has = async () => !!(await sc.git(["-C", meta.path, "tag", "-l", "v*", "--points-at", sha]).catch(() => ""));
+    if (!(await has())) await sc.git(["-C", meta.path, "fetch", "-q", "--tags", "origin"]).catch(() => undefined);
+    // asked again after the await: a check that came meanwhile may have started the job (one at a time)
+    const again = planNow();
+    if (again.plan.do !== "start") return answer(again);
+    try {
+      const job = requestJob(sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: meta.path, sha }, { app: true });
+      return { waiting: `job#${job.id}` };
+    } catch (e) {
+      // a request the app could not make counts as a try that ended without judging, so it is waited for and asked again, not taken for a commit with no CI
+      console.error(`[promotion] tag CI job for ${tag}: ${String((e as Error)?.message ?? e)}`);
+      // a request that failed after it recorded itself (the process could not be started: status 500) has its own aborted record, which is the try; one refused before any record has none, and is recorded here
+      if (e instanceof JobError && e.status === 500) return { waiting: `job#${sc.db.tagCiJobsOf(repo, sha).at(-1)?.id ?? "?"}（頼めなかった。頼み直しを待つ）` };
+      const now = Date.now();
+      const tried = sc.db.insertJob({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: meta.path, startedAt: now, repo, head: sha, as: null, kinds: [] });
+      sc.db.finishJob(tried.id, { status: "aborted", exitCode: null, summary: `aborted（頼めなかった: ${String((e as Error)?.message ?? e)}）`, endedAt: now });
+      return { waiting: `job#${tried.id}（頼めなかった。頼み直しを待つ）` };
+    }
+  }
+  return "none";
 };
 
 /**
@@ -235,7 +265,7 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   // the drain after this decision (a restart that was asked for has set its own above); no await since the last count
   if (step.action === "pick") settle(null, "done");
   else if (step.action === "review") settle(latest!.tag, "off");
-  else if (step.action === "wait") settle(latest!.tag, step.drain ? "drain" : step.failed ? "done" : step.review || step.ci || step.bundle ? "off" : "keep");
+  else if (step.action === "wait") settle(latest!.tag, step.drain ? "drain" : step.failed ? "done" : step.review || step.ci || step.ciWait || step.bundle ? "off" : "keep");
   else if (step.ifNoRestart) settle(latest!.tag, accepted ? "done" : "keep");
   let reviewNote: string | null = null;
   if (step.action === "review") {
@@ -255,11 +285,11 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   const heldTag = step.action === "wait" ? (step.failed?.tag ?? latest!.tag) : step.action === "review" ? latest!.tag : null;
   if (heldTag === null) sc.heldSince = null;
   else if (sc.heldSince?.tag !== heldTag) sc.heldSince = { tag: heldTag, at: Date.now() };
-  sc.promotionHold = step.action === "wait" ? { tag: heldTag!, failed: !!step.failed, tasks: !!step.drain, ...(step.ci ? { ci: true } : {}), reason: step.reason, since: sc.heldSince!.at } : step.action === "review" ? { tag: heldTag!, failed: false, tasks: false, reason: reviewNote ?? `${latest!.tag} の差分を確認中`, since: sc.heldSince!.at } : null;
+  sc.promotionHold = step.action === "wait" ? { tag: heldTag!, failed: !!step.failed, tasks: !!step.drain, ...(step.ci ? { ci: true } : {}), ...(step.ciWait ? { ciWait: true } : {}), reason: step.reason, since: sc.heldSince!.at } : step.action === "review" ? { tag: heldTag!, failed: false, tasks: false, reason: reviewNote ?? `${latest!.tag} の差分を確認中`, since: sc.heldSince!.at } : null;
   if (step.action === "pick") return null;
   // a check started, running, or not ok is not a failure of the version: the backlog goes on while it holds (hold.reason shows it)
   // nor is a tag CI that failed or has no result yet: what runs is the version before it (the hold is told in 判断待ち: `tagCiNote`)
-  if (step.action === "review" || (step.action === "wait" && (step.review || step.ci))) return null;
+  if (step.action === "review" || (step.action === "wait" && (step.review || step.ci || step.ciWait))) return null;
   if (step.action === "promote") {
     const asked = { tag: step.tag, sha: step.sha, at: Date.now(), by };
     if (accepted) { sc.promotionAsked = asked; return `${step.tag} の昇格を依頼${step.ifNoRestart ? "（Task を切らない切り替え）" : ""}`; }
@@ -331,7 +361,7 @@ export const armPromotionCheck = (sc: Pick<ServerContext, "cfg" | "promotionTime
 
 export const nextWakeAt = (sc: Pick<ServerContext, "db" | "savedAutoResume">) => nextWakeFrom(sc.db.listTasksWithResume().map((t) => ({ resumeAt: t.resumeAt ?? null, auto: sc.savedAutoResume(t.runner) })), sc.db.listSchedules());
 
-export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleRetry" | "tagCiKnown" | "promotionHold" | "heldSince" | "promotionAsked" | "tasks" | "releaseReviewEnded" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "sourceLatest" | "rechecking" | "releaseKnown" | "promotionAsking" | "promoteWhenIdle">): void {
+export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleRetry" | "promotionHold" | "heldSince" | "promotionAsked" | "tasks" | "releaseReviewEnded" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "sourceLatest" | "rechecking" | "releaseKnown" | "promotionAsking" | "promoteWhenIdle">): void {
   /**
    * Why the last promotionFirst held the newest tag: Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
@@ -342,7 +372,6 @@ export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleR
   sc.heldSince = null;
   sc.askedWatch = null;
   sc.idleRetry = null;
-  sc.tagCiKnown = new Map<string, { result: TagCi; at: number }>();
   /**
    * The last promotion this daemon asked sb-rescue for — or why it could not ask. Memory only, like promotionHold:
    * a promotion restarts the daemon, and sb-rescue's `history` has the result after that. `GET /api/daemon/release` shows it.

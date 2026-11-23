@@ -1,14 +1,15 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUNDLE_HOLD_KEY, type BacklogSource } from "@switchboard/protocol";
+import { APP_JOB_TASK, BUNDLE_HOLD_KEY, type BacklogSource, type Job } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
-import { Db } from "./db.ts";
 import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
 import { tagCi } from "./server/promotion.ts";
-import { promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, drainNote, tagCiOf, reportPromoteFailure, type PromotionDrain, type ReleaseState } from "./promotion.ts";
+import { Db } from "./db.ts";
+import { JobError, jobCommand, requestJob, type JobDeps } from "./jobs.ts";
+import { promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, drainNote, tagCiOf, tagCiPlan, TAG_CI_ATTEMPTS, TAG_CI_RETRY_MS, reportPromoteFailure, type PromotionDrain, type ReleaseState } from "./promotion.ts";
 import { CHECK, STOPPED, backlogNextSchedule, boot, endableClaude, fakeGh, holdingClaude, metaId, refreshed, releaseBody, releaseHold, releasedDaemon, runSchedule, scheduleLog, scheduleLogAll, settle, start, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
@@ -82,22 +83,6 @@ test("promote: promotionStep — a tag the tag CI failed is never brought in by 
   expect(promotionStep({ status: released({ promoteKeepsTasks: true }), latest: v2, busyTasks: 2, ci: "fail" })).toEqual({ action: "wait", reason: "v0.2.0 はタグの CI が失敗しているので自動では昇格しない", ci: true });
   // not asked (a public copy: the check of the diff decides): as before
   expect(promotionStep({ status: released(), latest: v2, busyTasks: 0 })).toEqual(go);
-  // the mark is read per commit, and the last line counts
-  const a = "a".repeat(40), b = "b".repeat(40);
-  expect(tagCiOf(`notes\n\n## CI\n[tag-ci] fail ${a}\n`, a)).toBe("fail");
-  expect(tagCiOf(`[tag-ci] fail ${a}\n[tag-ci] pass ${a}\n`, a)).toBe("pass");
-  expect(tagCiOf(`[tag-ci] pass ${b}\n`, a)).toBe("none");
-  expect(tagCiOf(`the line "[tag-ci] pass ${a}" inside a sentence`, a)).toBe("none");
-  expect(tagCiOf("", a)).toBe("none");
-});
-
-test("promote: a Release that gh fails to read, or answers with what is no JSON, is no result of the tag CI — not an error", async () => {
-  const sha = "a".repeat(40);
-  const read = (gh: GhRunner) => tagCi({ opts: { gh }, cfg: { repoRoot: "/" }, tagCiKnown: new Map() } as unknown as Parameters<typeof tagCi>[0], "v0.2.0", sha);
-  expect(await read(async () => ({ code: 0, stdout: JSON.stringify({ body: `[tag-ci] pass ${sha}\n` }), stderr: "" }))).toBe("pass");
-  expect(await read(async () => ({ code: 1, stdout: "", stderr: "release not found" }))).toBe("none");
-  expect(await read(async () => ({ code: 0, stdout: "<html>502 Bad Gateway</html>", stderr: "" }))).toBe("none");
-  expect(await read(async () => ({ code: 0, stdout: "", stderr: "" }))).toBe("none");
 });
 
 test("promote: promotionStep — how far a new tag goes by itself: promote (the default), the check only, or nothing", () => {
@@ -977,22 +962,51 @@ describe("the tag CI's result before a tag is brought in by itself", () => {
     }
   }, 30_000);
 
-  test("the result is read from the tag's Release: a fail mark for the tag's commit holds it, and a Release that cannot be read is no result", async () => {
+  test("waiting for the app's own tag CI job is no stop: the hold says so and nothing is told in 判断待ち, then the job's result goes the usual way", async () => {
     const r = await releasedDaemon();
-    let body: string | null = `## CI\n[tag-ci] fail ${r.sha}\n`;
-    const views: string[][] = [];
+    let result: "pass" | "fail" | { waiting: string } = { waiting: "job#4" };
+    try {
+      const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, undefined, { tagCi: async () => result });
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(201);
+      expect(r.promoted).toEqual([]);
+      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", ciWait: true, reason: "v0.2.0 のタグの CI の仕事 job#4 を待っている" });
+      expect(await tagNotices(base)).toEqual([]);
+      for (const t of core!.db.listTasks()) await fetch(`${base}/api/tasks/${t.id}/abort`, { method: "POST" });
+      await settle(() => core!.db.listWorkingTasks("gate").length === 0);
+      // a fail record is a stop and is told, as before
+      result = "fail";
+      await runSchedule(base, id);
+      expect((await tagNotices(base)).map((a) => [a.id, a.state])).toEqual([["notice:promotion-tag-ci:v0.2.0", "open"]]);
+      for (const t of core!.db.listTasks()) await fetch(`${base}/api/tasks/${t.id}/abort`, { method: "POST" });
+      await settle(() => core!.db.listWorkingTasks("gate").length === 0);
+      // a pass record brings it in
+      result = "pass";
+      await runSchedule(base, id);
+      await settle(() => r.promoted.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("the result is read from the app's tag CI job records: a fail record for the tag's commit holds it, and the Release is not read", async () => {
+    const r = await releasedDaemon();
+    const gets: string[][] = [];
     try {
       const base = await boot(fakeGh().gh, holdingClaude().adapter, r.env, undefined, (g) => async (args, cwd) => {
-        if (args[0] !== "release") return g(args, cwd);
-        views.push(args);
-        return body === null ? { code: 1, stdout: "", stderr: "release not found" } : { code: 0, stdout: JSON.stringify({ body }), stderr: "" };
-      }, { tagCi: undefined, promotionCheckMs: 50 });
+        if (args[0] === "release") gets.push(args);
+        return g(args, cwd);
+      }, { tagCi: undefined, promotionCheckMs: 400 });
+      // a job that judged the commit and found it failing (no workspace is registered here, so the app starts no job of its own)
+      const job = core!.db.insertJob({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: r.repo, startedAt: Date.now(), repo: "", head: r.sha, as: null, kinds: [] });
+      core!.db.setJobResult(job.id, { result: { tagCi: { ok: false } } });
+      core!.db.finishJob(job.id, { status: "fail", exitCode: 1, summary: "fail", endedAt: Date.now() });
       for (const t0 = Date.now(); (await releaseHold(base)) === null && Date.now() - t0 < 20_000; ) await Bun.sleep(10);
       expect(await releaseHold(base)).toMatchObject({ reason: "v0.2.0 はタグの CI が失敗しているので自動では昇格しない" });
-      expect(views[0]).toEqual(["release", "view", "v0.2.0", "--json", "body"]);
-      await Bun.sleep(300);
+      await Bun.sleep(500);
       expect(r.promoted).toEqual([]);
-      expect(views).toHaveLength(1); // not read on every check
+      expect(gets).toEqual([]);
     } finally {
       stop(r);
     }
@@ -1160,4 +1174,307 @@ describe("a bundle's hold on promotion", () => {
       rmSync(r.repo, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe("promote: the app's own tag CI job", () => {
+  const REPO = "acme/app"; // the origin of the repository `setup` makes
+  const SHA = "a".repeat(40);
+  const job = (o: Partial<Job>): Job => ({ id: 1, kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", status: "pass", exitCode: 0, startedAt: 0, endedAt: 1, summary: null, repo: "", head: SHA, base: null, as: null, kinds: [], result: null, ...o });
+
+  test("the newest tag-ci job of the sha decides: fail holds, pass promotes", () => {
+    const failed = job({ id: 1, status: "fail", result: { tagCi: { ok: false } } });
+    const passed = job({ id: 2, result: { tagCi: { ok: true } } });
+    expect(tagCiOf([])).toBe("none");
+    expect(tagCiOf([failed])).toBe("fail");
+    expect(tagCiOf([failed, passed])).toBe("pass"); // a later run outweighs an earlier one
+    expect(tagCiOf([passed, failed])).toBe("fail");
+    // a job still running, or ended without judging the commit, says nothing: it does not erase an earlier word either
+    expect(tagCiOf([passed, job({ id: 3, status: "running", endedAt: null })])).toBe("pass");
+    expect(tagCiOf([failed, job({ id: 3, status: "aborted", exitCode: null })])).toBe("fail");
+    const go = { action: "promote", tag: "v0.2.0", sha: "bbb" } as const;
+    const v2 = { tag: "v0.2.0", sha: "bbb" };
+    const status = { managed: true, current: "aaa", history: [] };
+    expect(promotionStep({ status, latest: v2, busyTasks: 0, ci: tagCiOf([failed]) })).toMatchObject({ action: "wait", ci: true });
+    expect(promotionStep({ status, latest: v2, busyTasks: 0, ci: tagCiOf([failed, passed]) })).toEqual(go);
+  });
+
+  test("what the app does about a commit's tag CI: a word settles it, a running job (any commit) or a young failed try is waited for, three spent tries leave it with no result", () => {
+    const spent = (id: number, endedAt: number) => job({ id, status: "aborted", exitCode: null, endedAt });
+    const running = job({ id: 9, status: "running", endedAt: null });
+    expect(tagCiPlan([], null, 0)).toEqual({ do: "start" });
+    expect(tagCiPlan([], running, 0)).toEqual({ do: "wait", job: 9 }); // one at a time, whatever the commit
+    expect(tagCiPlan([job({ result: { tagCi: { ok: false } } })], running, 1e12)).toEqual({ do: "settled" }); // it has a word
+    const at = 1_000_000;
+    expect(tagCiPlan([spent(1, at)], null, at + TAG_CI_RETRY_MS - 1)).toEqual({ do: "wait", job: 1, retry: true });
+    expect(tagCiPlan([spent(1, at)], null, at + TAG_CI_RETRY_MS)).toEqual({ do: "start" });
+    const all = Array.from({ length: TAG_CI_ATTEMPTS }, (_, i) => spent(i + 1, at));
+    expect(tagCiPlan(all, null, at + 100 * TAG_CI_RETRY_MS)).toEqual({ do: "spent" });
+    // only the app's own jobs are its tries: a Task's jobs that ended without judging the commit use none up
+    const tasks = Array.from({ length: TAG_CI_ATTEMPTS }, (_, i) => job({ id: 20 + i, taskId: "task_x", status: "aborted", exitCode: null, endedAt: at }));
+    expect(tagCiPlan(tasks, null, at + 100 * TAG_CI_RETRY_MS)).toEqual({ do: "start" });
+    expect(tagCiPlan([...tasks, spent(1, at)], null, at + 1)).toEqual({ do: "wait", job: 1, retry: true });
+  });
+
+  test("the promotion waits for the app's own job under either setting, and a tag with no result and no job to wait for follows the setting", () => {
+    const v2 = { tag: "v0.2.0", sha: "bbb" };
+    const status = { managed: true, current: "aaa", history: [] };
+    const wait = { action: "wait", reason: "v0.2.0 のタグの CI の仕事 job#4 を待っている", ciWait: true } as const;
+    for (const requireCi of ["no-fail", "pass"] as const) expect(promotionStep({ status, latest: v2, busyTasks: 0, ci: { waiting: "job#4" }, requireCi })).toEqual(wait);
+    expect(promotionStep({ status, latest: v2, busyTasks: 0, ci: "none", requireCi: "no-fail" })).toMatchObject({ action: "promote" });
+    expect(promotionStep({ status, latest: v2, busyTasks: 0, ci: "none", requireCi: "pass" })).toMatchObject({ action: "wait", ci: true });
+  });
+
+  /** A real database with the meta workspace on a git repository that has the tag, the app's own job deps, and a command per test. */
+  function setup(script: string) {
+    const root = mkdtempSync(join(tmpdir(), "sb-tagci-job-"));
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    writeFileSync(join(repo, "scripts", "tag-ci.ts"), "");
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+    git("init", "-q");
+    git("remote", "add", "origin", "https://github.com/acme/app.git");
+    git("commit", "-q", "--allow-empty", "-m", "x");
+    git("tag", "v0.2.0");
+    const sha = git("rev-parse", "HEAD");
+    const db = new Db(join(root, "db.sqlite"));
+    const meta = db.upsertWorkspace({ name: "app", path: repo, kind: "meta" });
+    const ended: Job[] = [];
+    const commands: string[][] = [];
+    const argvs: string[][] = [];
+    const jobDeps: JobDeps = { db, dir: join(root, "jobs"), env: { ...process.env }, pollMs: 50, command: (req) => { commands.push([req.kind]); argvs.push(jobCommand(req).argv); return { argv: ["sh", "-c", script.replaceAll("SHA", sha)], tail: "" }; }, onFinish: (j) => ended.push(j) };
+    const gh = async () => { throw new Error("the Release is not read"); };
+    const gitAsync = async (args: string[]) => {
+      const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "ignore" });
+      const out = await new Response(p.stdout).text();
+      if ((await p.exited) !== 0) throw new Error("git failed");
+      return out.trim();
+    };
+    const sc = { opts: { gh }, cfg: { candidate: false }, db, jobDeps, metaWorkspace: () => meta, git: gitAsync } as unknown as Parameters<typeof tagCi>[0];
+    const killAll = () => { for (const j of db.listJobs(0)) { const p = db.jobPid(j.id).pid; if (p) try { process.kill(p, "SIGKILL"); } catch {} } };
+    return { sc, db, sha, git, ended, commands, argvs, killAll, done: () => { db.close(); rmSync(root, { recursive: true, force: true }); } };
+  }
+
+  test("a [tag-ci] pass line in the Release body without a job record is not a pass: the app starts its own job and the promotion waits for it", async () => {
+    // the Release's body says pass for this commit; a promotion that read it would call the commit passed. It reads the app's records: none, so the app starts its own job and waits for it
+    const t = setup("sleep 30");
+    const reads: string[][] = [];
+    const gh = async (args: string[]) => { reads.push(args); return { code: 0, stdout: JSON.stringify({ body: `## CI\n[tag-ci] pass ${t.sha}\n` }), stderr: "" }; };
+    try {
+      const state = await tagCi({ ...t.sc, opts: { gh } } as unknown as Parameters<typeof tagCi>[0], "v0.2.0", t.sha);
+      expect(state).toEqual({ waiting: expect.stringMatching(/^job#\d+$/) });
+      expect(reads).toEqual([]);
+      const jobs = t.db.tagCiJobsOf(REPO, t.sha);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, head: t.sha, status: "running" });
+      // and the promotion does not go in on it, with the default setting either
+      const status = { managed: true, current: "aaa", history: [] };
+      expect(promotionStep({ status, latest: { tag: "v0.2.0", sha: t.sha }, busyTasks: 0, ci: state, requireCi: "no-fail" })).toMatchObject({ action: "wait", ciWait: true });
+    } finally {
+      t.killAll();
+      await Bun.sleep(50);
+      t.done();
+    }
+  });
+
+  test("with no record the app starts one tag CI job and waits for it under either setting; a second check starts none; its pass record promotes and its fail record holds", async () => {
+    const pass = setup('printf \'{"judged":[{"sha":"SHA","ok":true}]}\' > "$J/result.json"; sleep 0.3');
+    try {
+      // the checks that come while it runs (the interval's, the backlog's, a Task's end) start no second one, for this commit or a newer one
+      const waiting: unknown[] = await Promise.all([tagCi(pass.sc, "v0.2.0", pass.sha), tagCi(pass.sc, "v0.2.0", pass.sha)]);
+      const id = pass.db.tagCiJobsOf(REPO, pass.sha)[0]!.id;
+      waiting.push(await tagCi(pass.sc, "v0.3.0", "b".repeat(40)));
+      expect(waiting).toEqual([{ waiting: `job#${id}` }, { waiting: `job#${id}` }, { waiting: `job#${id}` }]);
+      expect(pass.db.listJobs(0).filter((j) => j.kind === "tag-ci")).toHaveLength(1);
+      expect(pass.commands).toEqual([["tag-ci"]]);
+      const status = { managed: true, current: "aaa", history: [] };
+      for (const requireCi of ["no-fail", "pass"] as const) expect(promotionStep({ status, latest: { tag: "v0.2.0", sha: pass.sha }, busyTasks: 0, ci: waiting[0] as { waiting: string }, requireCi })).toMatchObject({ action: "wait", ciWait: true });
+      await settle(() => pass.ended.length === 1);
+      expect(pass.ended[0]).toMatchObject({ status: "pass", result: { tagCi: { ok: true } }, head: pass.sha });
+      const ci = await tagCi(pass.sc, "v0.2.0", pass.sha);
+      expect(ci).toBe("pass");
+      expect(promotionStep({ status, latest: { tag: "v0.2.0", sha: pass.sha }, busyTasks: 0, ci, requireCi: "no-fail" })).toMatchObject({ action: "promote" });
+      expect(pass.commands).toHaveLength(1); // a commit with a word starts nothing
+    } finally { pass.done(); }
+    const fail = setup('printf \'{"judged":[{"sha":"SHA","ok":false}]}\' > "$J/result.json"; exit 1');
+    try {
+      await tagCi(fail.sc, "v0.2.0", fail.sha);
+      await settle(() => fail.ended.length === 1);
+      // the job's own exit is a failure of the run; what the tag did is in the record
+      expect(fail.ended[0]).toMatchObject({ status: "fail", result: { tagCi: { ok: false } } });
+      const ci = await tagCi(fail.sc, "v0.2.0", fail.sha);
+      expect(ci).toBe("fail");
+      expect(promotionStep({ status: { managed: true, current: "aaa", history: [] }, latest: { tag: "v0.2.0", sha: fail.sha }, busyTasks: 0, ci, requireCi: "no-fail" })).toMatchObject({ action: "wait", ci: true, reason: expect.stringContaining("失敗") });
+    } finally { fail.done(); }
+  });
+
+  test("a job that ended without judging the commit leaves no record: its retry is waited for, three of them leave the commit with no result, and then the setting decides", async () => {
+    // the run judged another commit (the tag moved) and the first one's record is empty
+    const t = setup('printf \'{"judged":[{"sha":"%s","ok":true}]}\' "$(printf b%.0s $(seq 40))" > "$J/result.json"');
+    try {
+      const first = await tagCi(t.sc, "v0.2.0", t.sha);
+      expect(first).toEqual({ waiting: expect.any(String) });
+      await settle(() => t.ended.length === 1);
+      expect(t.ended[0]!.result).toBeNull();
+      // not asked again before TAG_CI_RETRY_MS: the promotion waits for the retry
+      expect(await tagCi(t.sc, "v0.2.0", t.sha)).toEqual({ waiting: expect.stringContaining("頼み直し") });
+      expect(t.db.tagCiJobsOf(REPO, t.sha)).toHaveLength(1);
+      // the tries are used up: no more are asked, and the commit has no result
+      const old = Date.now() - 2 * TAG_CI_RETRY_MS;
+      for (let i = 1; i < TAG_CI_ATTEMPTS; i++) {
+        const j = t.db.insertJob({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", startedAt: old, repo: REPO, head: t.sha, as: null, kinds: [] });
+        t.db.finishJob(j.id, { status: "aborted", exitCode: null, summary: "", endedAt: old });
+      }
+      expect(await tagCi(t.sc, "v0.2.0", t.sha)).toBe("none");
+      expect(t.db.tagCiJobsOf(REPO, t.sha)).toHaveLength(TAG_CI_ATTEMPTS);
+    } finally { t.done(); }
+  });
+
+  test("a job for another repository's commit does not count, and a request body cannot say it is the app; the app's job is refused where it cannot run", async () => {
+    const t = setup("true");
+    try {
+      const other = t.db.insertJob({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", startedAt: 0, repo: "acme/other", head: t.sha, as: null, kinds: [] });
+      t.db.setJobResult(other.id, { result: { tagCi: { ok: true } } });
+      t.db.finishJob(other.id, { status: "pass", exitCode: 0, summary: "", endedAt: 1 });
+      expect(await tagCi(t.sc, "v0.2.0", t.sha)).toEqual({ waiting: expect.any(String) }); // not "pass"
+      const dir = t.sc.metaWorkspace()!.path;
+      // the reserved taskId is the process's to use, not a request's
+      expect(() => requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: dir })).toThrow("予約");
+      expect(() => requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: "/" }, { app: true })).toThrow(JobError);
+    } finally { t.done(); }
+    // a candidate runs on a copy of the database: the live daemon's jobs are not its to start
+    const c = setup("true");
+    try {
+      expect(await tagCi({ ...c.sc, cfg: { candidate: true } } as unknown as Parameters<typeof tagCi>[0], "v0.2.0", c.sha)).toBe("none");
+      expect(c.db.tagCiJobsOf(REPO, c.sha)).toHaveLength(0);
+    } finally { c.done(); }
+  });
+
+  test("the job's head is the commit the promotion decided about, when it is a tag's — not the newest tag read again", async () => {
+    const t = setup("true");
+    try {
+      const dir = t.sc.metaWorkspace()!.path;
+      t.git("commit", "-q", "--allow-empty", "-m", "newer");
+      t.git("tag", "v0.3.0");
+      const untagged = (t.git("commit", "-q", "--allow-empty", "-m", "untagged"), t.git("rev-parse", "HEAD"));
+      const job = requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: dir, sha: t.sha }, { app: true });
+      expect(job.head).toBe(t.sha); // v0.2.0's commit, although v0.3.0 is the newest tag now
+      expect(t.argvs.at(-1)).toEqual(["bun", join(dir, "scripts/tag-ci.ts"), "--sha", t.sha]);
+      expect(() => requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: dir, sha: untagged }, { app: true })).toThrow("タグ");
+      // without a sha (a Task's request) it is the newest tag's commit
+      expect(requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: dir }, { app: true }).head).toBe(t.git("rev-parse", "v0.3.0^{commit}"));
+    } finally { t.done(); }
+  });
+
+  /** `setup` with the meta clone's origin a local bare repository that has the clone's tag; `publish` makes a tagged commit there that the clone has not fetched. */
+  function withOrigin(script: string) {
+    const t = setup(script);
+    const bare = join(t.sc.metaWorkspace()!.path, "..", "origin.git");
+    Bun.spawnSync(["git", "init", "-q", "--bare", bare]);
+    t.git("push", "-q", bare, "HEAD:refs/heads/main", "--tags");
+    t.git("remote", "set-url", "origin", bare);
+    const publish = (tag: string) => {
+      const other = join(bare, "..", `other-${tag}`);
+      Bun.spawnSync(["git", "clone", "-q", bare, other]);
+      const g = (...a: string[]) => Bun.spawnSync(["git", "-C", other, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
+      g("commit", "-q", "--allow-empty", "-m", tag);
+      g("tag", tag);
+      g("push", "-q", "origin", "HEAD:refs/heads/main", "--tags");
+      return g("rev-parse", "HEAD");
+    };
+    return { ...t, publish };
+  }
+
+  test("a tag the meta clone has not fetched yet is fetched before the job is asked for; a request that is still refused is a try that ended without judging, waited for and asked again, not a commit with no CI", async () => {
+    const t = withOrigin("sleep 30");
+    try {
+      const sha = t.publish("v0.9.0");
+      expect(Bun.spawnSync(["git", "-C", t.sc.metaWorkspace()!.path, "tag", "-l", "v0.9.0"]).stdout.toString().trim()).toBe(""); // not in the clone
+      const state = await tagCi(t.sc, "v0.9.0", sha);
+      expect(state).toEqual({ waiting: expect.stringMatching(/^job#\d+$/) });
+      const jobs = t.db.listJobs(0).filter((j) => j.kind === "tag-ci");
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ head: sha, status: "running" });
+      expect(t.argvs.at(-1)).toContain(sha);
+      t.killAll();
+      await Bun.sleep(50);
+    } finally { t.done(); }
+    const u = withOrigin("true");
+    try {
+      const nowhere = "d".repeat(40); // no tag of the origin is at it
+      const first = await tagCi(u.sc, "v0.9.0", nowhere);
+      expect(first).toEqual({ waiting: expect.stringContaining("頼めなかった") });
+      const tried = u.db.listJobs(0).filter((j) => j.kind === "tag-ci");
+      expect(tried).toHaveLength(1);
+      expect(tried[0]).toMatchObject({ status: "aborted", head: nowhere, result: null });
+      expect(u.commands).toEqual([]); // nothing was started
+      // asked about again at once: waited for, not asked again; not a commit with no CI
+      expect(await tagCi(u.sc, "v0.9.0", nowhere)).toEqual({ waiting: expect.stringContaining("頼み直し") });
+      expect(u.db.tagCiJobsOf(u.db.listJobs(0)[0]!.repo, nowhere)).toHaveLength(1);
+      // the tries used up: no result, and the setting decides
+      for (let i = 1; i < TAG_CI_ATTEMPTS; i++) u.db.finishJob(u.db.insertJob({ kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", startedAt: 0, repo: tried[0]!.repo, head: nowhere, as: null, kinds: [] }).id, { status: "aborted", exitCode: null, summary: "", endedAt: 0 });
+      expect(await tagCi(u.sc, "v0.9.0", nowhere)).toBe("none");
+    } finally { u.done(); }
+  });
+
+  test("a request does not fetch: a tag the clone lacks is refused at once, the promotion fetches it itself before asking", async () => {
+    const t = withOrigin("sleep 30");
+    try {
+      const sha = t.publish("v0.9.0");
+      const dir = t.sc.metaWorkspace()!.path;
+      // the event loop is not held for the network: requestJob only looks at the tags it has
+      expect(() => requestJob(t.sc.jobDeps, { kind: "tag-ci", taskId: APP_JOB_TASK, cwd: dir, sha }, { app: true })).toThrow("タグ");
+      expect(Bun.spawnSync(["git", "-C", dir, "tag", "-l", "v0.9.0"]).stdout.toString().trim()).toBe("");
+      expect(t.db.listJobs(0)).toEqual([]); // refused before any record
+      expect(await tagCi(t.sc, "v0.9.0", sha)).toEqual({ waiting: expect.stringMatching(/^job#\d+$/) }); // the promotion's own fetch, then the request
+      expect(Bun.spawnSync(["git", "-C", dir, "tag", "-l", "v0.9.0"]).stdout.toString().trim()).toBe("v0.9.0");
+    } finally {
+      t.killAll();
+      await Bun.sleep(50);
+      t.done();
+    }
+  });
+
+  test("a request that failed after it recorded itself is one try, not two", async () => {
+    const t = setup("true");
+    try {
+      // the job's folder cannot be made (its parent is a file): the job is recorded, then aborted by requestJob itself
+      const file = join(t.sc.metaWorkspace()!.path, "..", "a-file");
+      writeFileSync(file, "x");
+      t.sc.jobDeps.dir = join(file, "jobs");
+      const state = await tagCi(t.sc, "v0.2.0", t.sha);
+      expect(state).toEqual({ waiting: expect.stringContaining("頼めなかった") });
+      const jobs = t.db.tagCiJobsOf(REPO, t.sha);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ status: "aborted", head: t.sha });
+      expect(state).toEqual({ waiting: `job#${jobs[0]!.id}（頼めなかった。頼み直しを待つ）` });
+    } finally { t.done(); }
+  });
+
+  test("a tag CI job a Task asked for is not counted: the app starts its own job although one is running", async () => {
+    const t = setup("sleep 30");
+    try {
+      const task = t.db.insertJob({ kind: "tag-ci", taskId: "task_x", pr: 0, runner: null, cwd: "/x", startedAt: Date.now(), repo: REPO, head: "e".repeat(40), as: null, kinds: [] });
+      expect(task.status).toBe("running");
+      const state = await tagCi(t.sc, "v0.2.0", t.sha);
+      const own = t.db.tagCiJobsOf(REPO, t.sha);
+      expect(own).toHaveLength(1);
+      expect(own[0]).toMatchObject({ taskId: APP_JOB_TASK, status: "running" });
+      expect(state).toEqual({ waiting: `job#${own[0]!.id}` });
+      // its own job running, the next check waits for that one and starts none
+      await tagCi(t.sc, "v0.2.0", t.sha);
+      expect(t.db.tagCiJobsOf(REPO, t.sha)).toHaveLength(1);
+    } finally {
+      t.killAll();
+      await Bun.sleep(50);
+      t.done();
+    }
+  });
+
+  test("the job judges the commit it was asked for: the script is given its head", async () => {
+    const t = setup("true");
+    try {
+      await tagCi(t.sc, "v0.2.0", t.sha);
+      expect(t.argvs.at(-1)).toEqual(["bun", join(t.sc.metaWorkspace()!.path, "scripts/tag-ci.ts"), "--sha", t.sha]);
+    } finally { t.done(); }
+  });
 });

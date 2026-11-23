@@ -71,25 +71,14 @@ Parameters:
     Default: ''
     AllowedPattern: '(arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=.@/-]+)?'
     Description: Additional role ARNs the host may assume, comma separated; empty grants none
-  UplinkMachineName:
-    Type: String
-    Default: ''
-    AllowedPattern: '([A-Za-z0-9][A-Za-z0-9_-]*)?'
-    Description: >-
-      The name of the one work machine that may write to the uplink bucket (the SWITCHBOARD_MACHINE of that machine; never
-      InstanceMachineName, which is this host's own — the rule UplinkMachineIsNotTheHost refuses it). Empty, or with UplinkWriterPrincipalArns empty, makes no role for it
   InstanceMachineName:
     Type: String
     Default: instance
     AllowedPattern: '[A-Za-z0-9][A-Za-z0-9_-]*'
     Description: >-
       This host's own machine name in the uplink bucket (its SWITCHBOARD_MACHINE; the daemon's default is `instance`).
-      The host may write its lease proofs under lease-proof/<this name>/ only
-  UplinkWriterPrincipalArns:
-    Type: CommaDelimitedList
-    Default: ''
-    AllowedPattern: '(arn:aws:iam::[0-9]{12}:(role|user)/[A-Za-z0-9_+=.@/-]+)?'
-    Description: The principals that may assume the work machine's uplink role, comma separated; empty makes no role
+      The host may write its lease proofs under lease-proof/<this name>/ only: the bucket policy refuses them to every
+      principal that carries the tag switchboard-machine, whatever its value
   HostUser:
     Type: String
     Default: switchboard
@@ -136,16 +125,7 @@ Parameters:
     Description: >-
       The one Lambda function (DAK's) the host may invoke, as a function ARN (optionally with a version or alias).
       Empty = the host gets no Lambda permission. The function's own resource-based policy must also allow the host role
-Rules:
-  # the work machine's role must not write the host's own lease proofs (docs/design/work-machine.md, section 7)
-  UplinkMachineIsNotTheHost:
-    Assertions:
-      - Assert: !Not [!Equals [!Ref UplinkMachineName, !Ref InstanceMachineName]]
-        AssertDescription: UplinkMachineName must differ from InstanceMachineName
 Conditions:
-  HasUplinkWriter: !And
-    - !Not [!Equals [!Ref UplinkMachineName, '']]
-    - !Not [!Equals [!Join ['', !Ref UplinkWriterPrincipalArns], '']]
   HasHostAssumeRoles: !Not [!Equals [!Join ['', !Ref HostAssumeRoleArns], '']]
   HasGeo: !Not [!Equals [!Join ['', !Ref AllowedCountries], '']]
   HasWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
@@ -225,54 +205,74 @@ Resources:
           # no delete from the instance or from a work machine, even by mistake in a policy
           - Sid: NoDelete
             Effect: Deny
-            Principal:
-              AWS:
-                - !GetAtt InstanceRole.Arn
-                - !If [HasUplinkWriter, !GetAtt UplinkWriterRole.Arn, !Ref AWS::NoValue]
+            Principal: { AWS: !GetAtt InstanceRole.Arn }
             Action: [s3:DeleteObject, s3:DeleteObjectVersion]
             Resource: !Sub '${Uplink.Arn}/*'
-  # One work machine's credentials, only for the machine named in UplinkMachineName: its own prefixes, new keys only
-  UplinkWriterRole:
-    Type: AWS::IAM::Role
-    Condition: HasUplinkWriter
+          # a work machine is any principal that carries the tag switchboard-machine (UplinkWorkMachinePolicy): none deletes
+          - Sid: NoDeleteWorkMachine
+            Effect: Deny
+            Principal: '*'
+            Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+            Resource: !Sub '${Uplink.Arn}/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' } }
+          # the host's own lease proofs are the instance's alone, whatever value a principal's tag holds (a tag is set by
+          # whoever administers IAM, and the bucket policy does not read it as a name)
+          - Sid: HostProofsAreTheInstancesOwn
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${Uplink.Arn}/lease-proof/${InstanceMachineName}/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' } }
+  # What a work machine may do in the uplink bucket, for every principal that carries the tag switchboard-machine: the prefixes
+  # name the machine through the policy variable, so the template holds no machine name and no principal. A machine is added
+  # by making its IAM user or role, tagging it switchboard-machine=<its SWITCHBOARD_MACHINE> and attaching this policy (no deploy).
+  # Each statement needs the tag to exist (a principal without it matches nothing) and to hold no `/` (the prefix `pc1/` would
+  # contain the place of `pc1/x`). New keys only, no delete, no data bucket
+  UplinkWorkMachinePolicy:
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      PermissionsBoundary: !Ref Boundary
-      AssumeRolePolicyDocument:
+      ManagedPolicyName: !Sub '${AWS::StackName}-uplink-work-machine'
+      PolicyDocument:
         Version: '2012-10-17'
-        Statement: [{ Effect: Allow, Principal: { AWS: !Ref UplinkWriterPrincipalArns }, Action: sts:AssumeRole }]
-      Policies:
-        - PolicyName: uplink
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # its records and its backlog edits, each key once
-              - Effect: Allow
-                Action: s3:PutObject
-                Resource: [!Sub '${Uplink.Arn}/uplink/${UplinkMachineName}/*', !Sub '${Uplink.Arn}/backlog/${UplinkMachineName}/*']
-                Condition: { StringEquals: { 's3:if-none-match': '*' } }
-              # a backlog edit it finds taken is read back, and what the instance refused of them
-              - Effect: Allow
-                Action: s3:GetObject
-                Resource: [!Sub '${Uplink.Arn}/backlog/${UplinkMachineName}/*', !Sub '${Uplink.Arn}/backlog-refused/${UplinkMachineName}/*']
-              - Effect: Allow
-                Action: s3:ListBucket
-                Resource: !GetAtt Uplink.Arn
-                Condition: { StringLike: { 's3:prefix': ['lease/*', !Sub 'backlog-refused/${UplinkMachineName}/*'] } }
-              # leases: taken with If-None-Match, renewed and given back with If-Match; proofs of who wrote one are read, and its own written
-              - Effect: Allow
-                Action: s3:GetObject
-                Resource: [!Sub '${Uplink.Arn}/lease/*', !Sub '${Uplink.Arn}/lease-proof/*']
-              - Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${Uplink.Arn}/lease/*'
-                Condition: { StringEquals: { 's3:if-none-match': '*' } }
-              - Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${Uplink.Arn}/lease/*'
-                Condition: { 'Null': { 's3:if-match': 'false' } }
-              - Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${Uplink.Arn}/lease-proof/${UplinkMachineName}/*'
+        Statement:
+          # its records and its backlog edits, each key once
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource:
+              - !Sub '${Uplink.Arn}/uplink/${!aws:PrincipalTag/switchboard-machine}/*'
+              - !Sub '${Uplink.Arn}/backlog/${!aws:PrincipalTag/switchboard-machine}/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }, StringEquals: { 's3:if-none-match': '*' } }
+          # a backlog edit it finds taken is read back, and what the instance refused of them
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource:
+              - !Sub '${Uplink.Arn}/backlog/${!aws:PrincipalTag/switchboard-machine}/*'
+              - !Sub '${Uplink.Arn}/backlog-refused/${!aws:PrincipalTag/switchboard-machine}/*'
+              # its own backlog copy, which the instance writes (the work machine reads this and never the data bucket)
+              - !Sub '${Uplink.Arn}/backlog-export/${!aws:PrincipalTag/switchboard-machine}/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] } }
+          # the list on its own prefixes; with this prefix condition S3 still answers a GET of a missing key with "access denied", so the work machine lists a key before it reads it
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt Uplink.Arn
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }, StringLike: { 's3:prefix': ['lease/*', !Sub 'backlog-refused/${!aws:PrincipalTag/switchboard-machine}/*', !Sub 'backlog-export/${!aws:PrincipalTag/switchboard-machine}/*'] } }
+          # leases: taken with If-None-Match, renewed and given back with If-Match; proofs of who wrote one are read, and its own written
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: [!Sub '${Uplink.Arn}/lease/*', !Sub '${Uplink.Arn}/lease-proof/*']
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] } }
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub '${Uplink.Arn}/lease/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }, StringEquals: { 's3:if-none-match': '*' } }
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub '${Uplink.Arn}/lease/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false', 's3:if-match': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] } }
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub '${Uplink.Arn}/lease-proof/${!aws:PrincipalTag/switchboard-machine}/*'
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] } }
   # the daemon reads the bucket's name here, so UserData does not change (a change would replace the instance)
   UplinkBucketParam:
     Type: AWS::SSM::Parameter
@@ -321,7 +321,7 @@ Resources:
             Effect: Allow
             Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
             Resource: [!GetAtt Data.Arn, !Sub '${Data.Arn}/*', !GetAtt StartPage.Arn, !Sub '${StartPage.Arn}/*']
-          # the uplink bucket: no delete in any role (the maximum of the work machine's role and the instance's)
+          # the uplink bucket: no delete in any role the stack makes (the instance's; a work machine's grant is the stack's managed policy for work machines, which this boundary does not limit)
           - Sid: UplinkBucket
             Effect: Allow
             Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
@@ -526,7 +526,7 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Uplink.Arn
-                Condition: { StringLike: { 's3:prefix': ['uplink/*', 'backlog/*', 'lease/*'] } }
+                Condition: { StringLike: { 's3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'backlog-export/*'] } }
               # a lease is taken with If-None-Match and renewed or given back with If-Match
               - Effect: Allow
                 Action: s3:PutObject
@@ -544,6 +544,11 @@ Resources:
                 Action: s3:PutObject
                 Resource: !Sub '${Uplink.Arn}/backlog-refused/*'
                 Condition: { StringEquals: { 's3:if-none-match': '*' } }
+              # the backlog copy of each work machine, one object per machine and repository, written over at every round
+              # (the bucket policy's WriteOnce does not name this prefix; the work machines' managed policy has no put here)
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${Uplink.Arn}/backlog-export/*'
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Data.Arn
@@ -1461,3 +1466,6 @@ Outputs:
     Value: !GetAtt GitHubOidcRole.Arn
   DeployRoleArn:
     Value: !GetAtt DeployRole.Arn
+  UplinkWorkMachinePolicyArn:
+    Description: Attach this to the IAM user or role of a work machine, tagged switchboard-machine=<its SWITCHBOARD_MACHINE>
+    Value: !Ref UplinkWorkMachinePolicy

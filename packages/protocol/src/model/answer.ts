@@ -12,8 +12,11 @@ export const AskAnswer = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("allow") }),
   z.object({ kind: z.literal("deny") }),
   z.object({ kind: z.literal("confirm"), ok: z.boolean(), text: answerText.optional() }),
-  /** Send the stop's grant as the reply, once. */
-  z.object({ kind: z.literal("grant") }),
+  /**
+   * Send the stop's grant as the reply, once. `grant` = the sentence the screen showed under the button: it is sent and
+   * recorded only while it is still the stop's grant (else 409 with the question now).
+   */
+  z.object({ kind: z.literal("grant"), grant: z.string().min(1) }),
   /** Close a daemon's notice as a false positive: the same findings do not come back. */
   z.object({ kind: z.literal("dismiss") }),
   /**

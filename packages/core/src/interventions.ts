@@ -1,6 +1,6 @@
 import type { BacklogIssueData, EventEnvelope, BacklogRepositoryKey, Intervention, InterventionReason, InterventionUnknown, InterventionView, InterventionWindow, StopRecord, Workspace } from "@switchboard/protocol";
 import { askProceed } from "../../../ops-kit/src/lint.ts";
-import { ANSWER_HEADING, DECISION_HEADING, PROCEED_OVERTURNED, askPlaceOf, checkoutTop } from "./backlog-comments.ts";
+import { ANSWER_HEADING, DECISION_HEADING, PROCEED_OVERTURNED, askPlaceOf, checkoutTop, questionsAnswered } from "./backlog-comments.ts";
 import { waitsOf } from "./backlog-waits.ts";
 import { withoutMarker } from "./backlog-merge.ts";
 import type { Db } from "./db.ts";
@@ -57,9 +57,11 @@ export function warmInterventions(db: Db, workspaces: Workspace[]): void {
 /**
  * The `## 判断待ち` asked in `[from, to)` on the Issues of one repository: stopped (waited for the person; an ask with no 進め方 line
  * counts here) and proceeded (went on with the recommendation). An ask the daemon sent again (same body without the op marker within
- * `ANSWER_DUPLICATE_MS`) counts once, as answers do. One `## 回答` answers every ask before it since the previous answer, as
- * `userWait` in flow.ts reads it: it adds one time (from the earliest of those asks in the window) to the median, and one to
- * overturned when it has a `PROCEED_OVERTURNED` line and one of those asks proceeded. null median = none answered.
+ * `ANSWER_DUPLICATE_MS`) counts once, as answers do. A `## 回答` that names its question (`— 問い <time>`) answers that ask
+ * only, and the asks it leaves are answered by a later answer; one that names none answers every ask before it that is
+ * not answered yet (`questionsAnswered`, as `userWait` in flow.ts reads it). An answer adds one time (from the earliest
+ * of the asks in the window it answers) to the median, and one to overturned when it has a `PROCEED_OVERTURNED` line and
+ * one of those asks proceeded. null median = none answered.
  */
 export function questionCounts(issues: Map<number, IssueInfo>, from: number, to: number, top: { name: string; dir: boolean }[] = []): { stopped: number; proceeded: number; overturned: number; medianAnswerMs: number | null } {
   let stopped = 0, proceeded = 0, overturned = 0;
@@ -67,7 +69,8 @@ export function questionCounts(issues: Map<number, IssueInfo>, from: number, to:
   const data = new Map([...issues].map(([n, i]) => [n, i.data]));
   for (const info of issues.values()) {
     const said = new Map<string, number>(); // body without the op marker → when it was last counted
-    let pending: Array<{ at: number; proceeded: boolean }> = []; // asks in the window since the last answer
+    let pending: Array<{ at: number; proceeded: boolean }> = []; // asks in the window that no answer answered yet
+    const asked: number[] = []; // when each ask so far was asked, in the window or not: what a named answer is matched against
     for (const c of [...info.comments].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) {
       const at = Date.parse(c.createdAt);
       const text = c.body.trimStart();
@@ -76,15 +79,19 @@ export function questionCounts(issues: Map<number, IssueInfo>, from: number, to:
         const before = said.get(body);
         if (before !== undefined && at - before <= ANSWER_DUPLICATE_MS) continue;
         said.set(body, at);
+        asked.push(at);
         if (!(at >= from && at < to)) continue;
         const go = askProceed(c.body, askPlaceOf(info.data, data, top)) === "recommended";
         if (go) proceeded++;
         else stopped++;
         pending.push({ at, proceeded: go });
       } else if (text.startsWith(ANSWER_HEADING) && pending.length) {
-        waits.push(at - pending[0]!.at);
-        if (pending.some((a) => a.proceeded) && c.body.split("\n").some((l) => l.trim().startsWith(PROCEED_OVERTURNED))) overturned++;
-        pending = [];
+        const closed = new Set(questionsAnswered(c.body, asked));
+        const answered = pending.filter((a) => closed.has(a.at));
+        if (!answered.length) continue;
+        waits.push(at - answered[0]!.at);
+        if (answered.some((a) => a.proceeded) && c.body.split("\n").some((l) => l.trim().startsWith(PROCEED_OVERTURNED))) overturned++;
+        pending = pending.filter((a) => !closed.has(a.at));
       }
     }
   }

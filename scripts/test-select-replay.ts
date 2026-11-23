@@ -3,11 +3,11 @@
 //   bun scripts/test-select-replay.ts [--days 14]   過去の変更に当てる
 //   bun scripts/test-select-replay.ts --per-file     今のツリーのソースを 1 本ずつ当て、広がりの上位 20 本を出す
 // 依存は今のツリーのものを使う（宣言は過去のコミットに無い）。ただし後のコミットで消えた・動いたファイル（今のツリーに無く、その変更では消していない）は、
-// その変更の時点でそれを読み込んでいたファイル（今もあるもの）に置き換えて当てる（retarget）。置き換え先が無く、テストなら外す。どちらでもなければそのまま渡して全テストに倒す。
-// その変更で消したファイルは依存を辿れないので、置き換えずにそのまま渡す。
+// その変更の時点でそれを読み込んでいたファイル（今もあるもの）に置き換えて当てる（retarget）。置き換え先が無く、テストなら外す。どちらでもなければそのまま渡す。
+// 今のツリーに無いファイルは select が全テストに倒さず、辿る先が無いだけ（test-reads で宣言したテストは選ぶ）。その変更で消したファイルも置き換えずにそのまま渡す。
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { buildImportGraph, classify, isTest, matchesRead, parseReads, select, type ImportGraph, type Selection } from "./test-select";
+import { buildImportGraph, classify, isTest, matchesRead, parseReads, readersToFollow, select, type ImportGraph, type Selection } from "./test-select";
 
 const ROOT = join(import.meta.dir, "..");
 const REPO_FLAG = ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"];
@@ -48,14 +48,13 @@ export function importersAt(commit: string, path: string, has: (p: string) => bo
 }
 
 /** 今のツリーに無く、その変更で消してもいない .ts/.tsx（後で消えた・動いたもの）を、当時の読み込み元に置き換える。
- *  読み込み元が無ければ、テストは外し、それ以外はそのまま残す（vanished に挙げ、select が全テストに倒す）。 */
+ *  読み込み元が無ければ、テストは外し、それ以外はそのまま残す（select は辿る先が無いだけで全テストには倒さない）。 */
 export function retarget(
   group: ChangeGroup,
   has: (p: string) => boolean,
   importers: (commit: string, path: string) => string[],
-): { changed: string[]; vanished: string[] } {
+): string[] {
   const changed = new Set<string>();
-  const vanished: string[] = [];
   for (const p of group.changed) {
     if (!isCode(p) || has(p) || group.deleted.includes(p)) {
       changed.add(p);
@@ -63,12 +62,9 @@ export function retarget(
     }
     const from = importers(group.commit, p);
     if (from.length) for (const f of from) changed.add(f);
-    else if (!isTest(p)) {
-      changed.add(p);
-      vanished.push(p);
-    }
+    else if (!isTest(p)) changed.add(p);
   }
-  return { changed: [...changed], vanished };
+  return [...changed];
 }
 
 export type Distribution = { groups: number; median: number; p90: number; full: number; fullRate: number };
@@ -114,7 +110,7 @@ function changedBetween(repo: string, base: string, head: string): ChangeGroup {
   return group ?? { changed: [], deleted: [], commit: head };
 }
 
-/** local-ci の PR コメントと tag-ci の Release 本文から、`bun test` の赤を集める。 */
+/** local-ci の PR コメントと tag-ci の Release 本文から、`bun test` の赤を集める。仕事の記録は合否・head・base だけで赤のテスト名を持たないので、コメントを読み続ける（仕事の記録から読む対象外）。 */
 function collectReds(repo: string, since: string): Red[] {
   const reds: Red[] = [];
   const comments = must(["gh", "api", `repos/${repo}/issues/comments?since=${since}&per_page=100`, "--paginate", "-q", '.[]|select(.body|startswith("[local-ci] "))|{url:.issue_url,body:.body}']);
@@ -139,7 +135,7 @@ function collectReds(repo: string, since: string): Red[] {
 
 const WIDE = 100;
 
-/** source を変えたときに選ばれるテストの数を返す関数。block を渡さなければ select と同じ数。block のファイルへ着いたら、それを直に読むテストは選び、ほかの読み手へは辿らない。 */
+/** source を変えたときに選ばれるテストの数を返す関数。辿り方は select と同じ（readersToFollow）。さらに block のファイルへ着いたら、それを直に読むテストは選び、ほかの読み手へは辿らない。 */
 function counter(graph: ImportGraph, tests: string[], reads: Map<string, string[]>) {
   const testSet = new Set(tests);
   const declared = new Map<string, string[]>();
@@ -154,16 +150,16 @@ function counter(graph: ImportGraph, tests: string[], reads: Map<string, string[
     for (const f of seen) {
       if (testSet.has(f)) found.add(f);
       for (const t of readBy(f)) found.add(t);
-      for (const i of graph.get(f) ?? []) if (f !== block || isTest(i)) seen.add(i);
+      for (const i of readersToFollow(f, source, graph, testSet)) if (f !== block || testSet.has(i)) seen.add(i);
     }
     return found.size;
   };
 }
 
-/** source から読み込む側へ辿って着くファイル（source 自身を除く）。 */
-function reachable(source: string, graph: ImportGraph): Set<string> {
+/** source から読み込む側へ、select と同じ 1 歩（readersToFollow）で辿って着くファイル（source 自身を除く）。 */
+function reachable(source: string, graph: ImportGraph, testSet: Set<string>): Set<string> {
   const seen = new Set([source]);
-  for (const f of seen) for (const i of graph.get(f) ?? []) seen.add(i);
+  for (const f of seen) for (const i of readersToFollow(f, source, graph, testSet)) seen.add(i);
   seen.delete(source);
   return seen;
 }
@@ -176,7 +172,8 @@ export function perFile(sources: string[], graph: ImportGraph, tests: string[], 
   const own = new Map(sources.map((s) => [s, count(s)]));
   const wide = sources.filter((s) => own.get(s)! >= WIDE);
   const through = new Map<string, string[]>();
-  for (const s of wide) for (const f of reachable(s, graph)) through.set(f, [...(through.get(f) ?? []), s]);
+  const testSet = new Set(tests);
+  for (const s of wide) for (const f of reachable(s, graph, testSet)) through.set(f, [...(through.get(f) ?? []), s]);
   const rows: PerFileRow[] = [...through].filter(([f]) => !isTest(f)).map(([file, via]) => ({
     file,
     through: via.length,
@@ -223,18 +220,11 @@ if (import.meta.main) {
     if (!cache.has(key)) cache.set(key, importersAt(commit, path, has));
     return cache.get(key)!;
   };
-  /** 変更に当てる。select が「今のツリーに無い」と言うファイルは、同じ変更で消したものと、後で消えて読み込み元も無いものに分けて理由を書く。 */
+  /** 変更に当てる。後で消えたファイルは retarget で当時の読み込み元に置き換える。 */
   const pickGroup = (group: ChangeGroup): Selection => {
-    const { changed, vanished } = retarget(group, has, importers);
+    const changed = retarget(group, has, importers);
     if (!changed.length && group.changed.length) return { tests: [], reasons: {} }; // 後で消えたテストだけの変更。今のツリーで回すものは無い
-    const s = pick(changed);
-    if (!s.full) return s;
-    const why = (part: string) => {
-      const path = part.slice(0, part.indexOf(": "));
-      if (!part.includes("今のツリーに無い")) return part;
-      return `${path}: ${group.deleted.includes(path) ? "その変更で消した（依存は辿れない）" : vanished.includes(path) ? "後で消えて、読み込み元も無い" : "今のツリーに無い"}`;
-    };
-    return { ...s, full: s.full.split("; ").map(why).join("; ") };
+    return pick(changed);
   };
 
   const log = run(["git", "log", `--since=${days}.days`, "--format=%x00%H %s", "--name-status", "--no-renames"]) ?? "";

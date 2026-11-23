@@ -254,8 +254,11 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "bad"
         const text = from ? `（Task ${from} からの返信）\n\n${parsed.data.text}` : parsed.data.text;
         try {
           sc.catchUpWithShadow(String(req.params.id)); // a terminal turn that just finished goes in before this one
+          // a reply the Task refuses (its budget) is refused before a grant in it is recorded: no grant stays for a reply that did not go
+          await sc.tasks.checkSend(String(req.params.id));
           await sc.noteMergeGrant(String(req.params.id), parsed.data.text, await sc.grantSource(req, srv, from));
-          return sc.json(await sc.tasks.send(String(req.params.id), text, { attachmentIds }));
+          // another Task's reply is no person's answer: it marks none of this Task's stops answered
+          return sc.json(await sc.tasks.send(String(req.params.id), text, { attachmentIds, ...(from ? { answers: () => false } : {}) }));
         } catch (e) {
           return sc.bad(String((e as Error).message ?? e), 409);
         }

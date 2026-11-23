@@ -232,4 +232,24 @@ describe("what every review is told", () => {
       expect(reviewPrompt("Review this.", runner)).toContain("For a finding both files list, the class here decides, not `handled.md`.");
     }
   });
+
+  test("a follow-up round reads the fix and what it changed, not the whole PR again, and still raises an earlier finding that is not closed", () => {
+    const lines = REVIEW_RULES.split("\n");
+    const followUp = lines.filter((l) => l.startsWith("Follow-up rounds."));
+    expect(followUp).toHaveLength(1);
+    for (const part of [
+      "`_review/fix.range-diff`",
+      "the readers of the values those changes altered",
+      "Do not raise new findings on what earlier rounds already read",
+      "Raise an earlier finding that is not closed",
+    ])
+      expect(followUp[0]).toContain(part);
+    // the search with words of one's own is the first round's job; a follow-up searches only for the fix's changed meanings
+    const old = lines.find((l) => l.startsWith("Old assumptions."))!;
+    expect(old).toContain("Searching with words of your own is the first round's job");
+    expect(old).toContain("only for the readers of values the fix changed in meaning");
+    // the earlier findings are still checked again in every round
+    expect(lines.find((l) => l.startsWith("Earlier findings."))).toContain("raise it again whenever the code still has the problem");
+    for (const runner of ["codex", "claude"] as const) expect(reviewPrompt("This is a follow-up review.", runner)).toContain(followUp[0]!);
+  });
 });

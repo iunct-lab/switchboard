@@ -1,0 +1,1679 @@
+{
+ "_about": "Inputs of the merge verdict recorded from real merged PRs (gh pr view / REST file list / Actions runs / review threads, and the app's GET /api/merge-records), with names, numbers and texts made generic: the repository, the PR and Task numbers, the branch names; every comment is cut to its mark line (or \"(redacted)\"); the files under private/ are left out. handSet lists the values set by hand: a merged PR reads mergeStateStatus UNKNOWN, a PR before the records began has no record of a direct Task.",
+ "cases": [
+  {
+   "name": "large-with-rechecks-and-attack",
+   "pr": 1,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "docs/design/permission-modes.md",
+      "additions": 14,
+      "deletions": 5,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "ops-kit/bin/gh",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "ops-kit/src/backlog-client.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "ops-kit/src/task-client.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "ops-kit/src/task-client.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/approvals.api.test.ts",
+      "additions": 26,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks-answer.test.ts",
+      "additions": 81,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks.test.ts",
+      "additions": 77,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks.ts",
+      "additions": 47,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-decision.api.test.ts",
+      "additions": 11,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-edit.ts",
+      "additions": 7,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-local.test.ts",
+      "additions": 18,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/db/grants.ts",
+      "additions": 4,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-consent.api.test.ts",
+      "additions": 209,
+      "deletions": 9,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-consent.test.ts",
+      "additions": 69,
+      "deletions": 23,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-consent.ts",
+      "additions": 50,
+      "deletions": 35,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-grants.test.ts",
+      "additions": 61,
+      "deletions": 5,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-grants.ts",
+      "additions": 48,
+      "deletions": 11,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/merge-records.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/asks.ts",
+      "additions": 35,
+      "deletions": 11,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/context.ts",
+      "additions": 4,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/merge-consent.ts",
+      "additions": 27,
+      "deletions": 18,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/start.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/task-hooks.ts",
+      "additions": 26,
+      "deletions": 16,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/stops.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/stops.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "7340aa3d618245f95b3531de95b8c759f65ebb75",
+    "headRefName": "work-1",
+    "headRefOid": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:13Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:17Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:24Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:27Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T16:02:28Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:02:36Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T16:02:41Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:20:56Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T16:23:55Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T16:23:59Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:41:40Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] fail 28a4e9b2526194ec2ad6fc45603079fff390ba41 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T16:43:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T16:45:18Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T16:45:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T16:45:25Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] fail ac9784b2d55237da8e15877f3b5ded984071c1fc base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T17:01:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T17:05:28Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T17:05:33Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T17:05:34Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 4d0dc8bd3fa074feff8fa20f084a6070e7d403f5 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T17:21:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T17:22:37Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T17:22:42Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T17:22:43Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 1bf6b110f60b43d468b3c62b14596ccece187357 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T17:27:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T17:27:46Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T17:27:50Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T17:27:51Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T17:31:08Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[codex] recheck",
+      "createdAt": "2026-11-22T17:31:14Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T17:48:37Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 8c0ca05eb40b1b62f5decfe2600511b23ad944e6 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T17:53:42Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T18:11:57Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T18:12:02Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[codex] recheck",
+      "createdAt": "2026-11-22T18:12:11Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T18:12:12Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass a916fda0e923941fb0ea4ebebf227e5ad584e9d6 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T18:20:32Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T18:21:31Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T18:21:40Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T18:21:47Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[codex] recheck",
+      "createdAt": "2026-11-22T18:21:49Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T18:42:53Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass fe4f060c2bc342957a08f1e6fd38179872f192d2 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T18:50:47Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T18:51:20Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T18:51:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T18:51:27Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:11:33Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass ad049e8698544de9a313f8e0f14dd0dd93d744dc base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T19:19:32Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T19:22:32Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T19:22:37Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:22:44Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:22:46Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass f9af48c4a1cbbe4973711ad1db6fae709887b3ce base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T19:27:41Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T19:29:48Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:29:51Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T19:29:52Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:29:57Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:29:58Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 4ff9b0998a18554e83a5cb6a525cf63f323617b7 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T19:34:34Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T19:36:12Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T19:36:16Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:36:19Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:36:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:36:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 338f65863ac991dd31109557493c7ca708cfa4f0 base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T19:41:09Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T19:42:47Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T19:42:51Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:42:53Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:42:55Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 15f9f641aa8b767de918effdbf8d9044c26233dd base=7340aa3d618245f95b3531de95b8c759f65ebb75",
+      "createdAt": "2026-11-22T19:47:28Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T19:48:01Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] attack",
+      "createdAt": "2026-11-22T19:48:04Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:48:06Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T19:48:08Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[recheck] security:docs pass 15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "createdAt": "2026-11-22T19:48:41Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[recheck] migration pass 15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "createdAt": "2026-11-22T19:48:43Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] recheck",
+      "createdAt": "2026-11-22T19:50:32Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[recheck] size pass 15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "createdAt": "2026-11-22T19:50:35Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"docs/design/permission-modes.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"ops-kit/bin/gh\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"ops-kit/src/backlog-client.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"ops-kit/src/task-client.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"ops-kit/src/task-client.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/approvals.api.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks-answer.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-decision.api.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-edit.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-local.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/db/grants.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-consent.api.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-consent.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-consent.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-grants.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-grants.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/merge-records.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/asks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/context.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/merge-consent.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/start.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/task-hooks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/stops.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/stops.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 45062264358,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-22T19:42:23Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 70,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [
+     {
+      "id": 101,
+      "kind": "local-ci",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": null,
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376196521,
+      "endedAt": 1795376469671,
+      "repo": "example/development",
+      "head": null,
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": null
+     },
+     {
+      "id": 102,
+      "kind": "review",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": "claude",
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376581960,
+      "endedAt": 1795376671255,
+      "repo": "example/development",
+      "head": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": {
+       "review": {
+        "findings": [
+         {
+          "severity": "nit",
+          "path": "packages/core/src/asks-answer.test.ts",
+          "line": 491
+         },
+         {
+          "severity": "nit",
+          "path": "docs/design/permission-modes.md",
+          "line": 100
+         }
+        ],
+        "firstLine": "### Findings"
+       }
+      }
+     },
+     {
+      "id": 103,
+      "kind": "review",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": "claude",
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376582137,
+      "endedAt": 1795376674573,
+      "repo": "example/development",
+      "head": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "base": null,
+      "as": "attack",
+      "kinds": [],
+      "result": {
+       "review": {
+        "findings": [
+         {
+          "severity": "nit",
+          "path": "docs/design/permission-modes.md",
+          "line": 96
+         }
+        ],
+        "firstLine": "### Findings"
+       }
+      }
+     },
+     {
+      "id": 104,
+      "kind": "review",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": "claude",
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376587106,
+      "endedAt": 1795376663999,
+      "repo": "example/development",
+      "head": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "base": null,
+      "as": "recheck",
+      "kinds": [
+       "security:docs"
+      ],
+      "result": {
+       "review": {
+        "findings": [
+         {
+          "severity": "nit",
+          "path": "packages/core/src/asks-answer.test.ts",
+          "line": 490
+         }
+        ],
+        "firstLine": "### Findings"
+       }
+      }
+     },
+     {
+      "id": 105,
+      "kind": "local-ci",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": null,
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376587348,
+      "endedAt": 1795376849061,
+      "repo": "example/development",
+      "head": null,
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": null
+     },
+     {
+      "id": 106,
+      "kind": "recheck",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": null,
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376587655,
+      "endedAt": 1795376592116,
+      "repo": "example/development",
+      "head": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "base": null,
+      "as": null,
+      "kinds": [
+       "migration"
+      ],
+      "result": null
+     },
+     {
+      "id": 107,
+      "kind": "review",
+      "taskId": "task_1",
+      "pr": 1,
+      "runner": "claude",
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795376958441,
+      "endedAt": 1795377014269,
+      "repo": "example/development",
+      "head": "15f9f641aa8b767de918effdbf8d9044c26233dd",
+      "base": null,
+      "as": "recheck",
+      "kinds": [
+       "size"
+      ],
+      "result": {
+       "review": {
+        "findings": [],
+        "firstLine": "### Findings"
+       }
+      }
+     }
+    ],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "view.mergeStateStatus"
+   ]
+  },
+  {
+   "name": "small-with-review-job",
+   "pr": 2,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "aws/README.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "aws/template.test.ts",
+      "additions": 101,
+      "deletions": 114,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "aws/template.yaml",
+      "additions": 62,
+      "deletions": 117,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/work-machine.md",
+      "additions": 6,
+      "deletions": 6,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "46c9c3e83e79f4497264ce344034417704123bbd",
+    "headRefName": "work-2",
+    "headRefOid": "f94bb2a517694b8d81d3541175f05ea6e41ee647",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "[local-ci] pass b056866762c8cbb1fd85a56122d51f99af7f4293 base=46c9c3e83e79f4497264ce344034417704123bbd",
+      "createdAt": "2026-11-22T12:04:35Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T12:06:21Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T12:06:58Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass f94bb2a517694b8d81d3541175f05ea6e41ee647 base=46c9c3e83e79f4497264ce344034417704123bbd",
+      "createdAt": "2026-11-22T12:09:09Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T12:09:34Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T12:09:38Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"aws/README.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"aws/template.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"aws/template.yaml\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/work-machine.md\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 45020525630,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-22T12:05:50Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 6,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [
+     {
+      "id": 201,
+      "kind": "local-ci",
+      "taskId": "task_2",
+      "pr": 2,
+      "runner": null,
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795348945052,
+      "endedAt": 1795349076179,
+      "repo": "example/development",
+      "head": null,
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": null
+     },
+     {
+      "id": 202,
+      "kind": "review",
+      "taskId": "task_2",
+      "pr": 2,
+      "runner": "claude",
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795349236247,
+      "endedAt": 1795349281223,
+      "repo": "example/development",
+      "head": "f94bb2a517694b8d81d3541175f05ea6e41ee647",
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": {
+       "review": {
+        "findings": [
+         {
+          "severity": "nit",
+          "path": "aws/README.md",
+          "line": 192
+         },
+         {
+          "severity": "nit",
+          "path": "aws/template.test.ts",
+          "line": 914
+         }
+        ],
+        "firstLine": "### Findings"
+       }
+      }
+     },
+     {
+      "id": 203,
+      "kind": "local-ci",
+      "taskId": "task_2",
+      "pr": 2,
+      "runner": null,
+      "status": "pass",
+      "exitCode": 0,
+      "startedAt": 1795349236391,
+      "endedAt": 1795349350022,
+      "repo": "example/development",
+      "head": null,
+      "base": null,
+      "as": null,
+      "kinds": [],
+      "result": null
+     }
+    ],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "view.mergeStateStatus"
+   ]
+  },
+  {
+   "name": "stack-middle-migration-recheck",
+   "pr": 3,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "packages/core/fixtures/github-import.ts",
+      "additions": 2,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-fetch.ts",
+      "additions": 28,
+      "deletions": 12,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-stored.test.ts",
+      "additions": 8,
+      "deletions": 8,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-sync.test.ts",
+      "additions": 55,
+      "deletions": 9,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/evals.test.ts",
+      "additions": 2,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/interventions.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/stage-start-gate.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/waits.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/protocol/src/model/backlog-records.ts",
+      "additions": 2,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "8c1d65608da77d185a7a3322b4760d297a9a77c2",
+    "headRefName": "work-3",
+    "headRefOid": "58311ed22af363a0b52f3f2cf1602aea3ad3b5eb",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T09:53:16Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T09:53:19Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T09:53:24Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T09:53:58Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 3e7b2c8e06b3c8319c47adfda4e7bf3913dc6331 base=3b0d270a4649d596f10692eac28b15dd356efe92",
+      "createdAt": "2026-11-22T10:04:10Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass e78ff30f02fcd896a0d904c8ad5249c318a2b75e base=a84b6aa359691c3c7e899771211fb20536adee3d",
+      "createdAt": "2026-11-22T10:08:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass b5b79619aa7426c96f91efec5605199e017e40e3 base=a72dcb27f0c13472fa46d37175c10f19ea8f1d87",
+      "createdAt": "2026-11-22T10:28:28Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"packages/core/fixtures/github-import.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-fetch.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-stored.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-sync.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/evals.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/interventions.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/stage-start-gate.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/waits.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/protocol/src/model/backlog-records.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 45012962724,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-22T10:32:48Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 3,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "stackAbove",
+    "view.mergeStateStatus"
+   ],
+   "stackAbove": {
+    "pr": 99,
+    "headRefName": "work-99"
+   }
+  },
+  {
+   "name": "direct",
+   "pr": 4,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "packages/core/src/db.test.ts",
+      "additions": 28,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/db/core.ts",
+      "additions": 3,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "08972e74dd583d99c542523c19b1ef410c928a54",
+    "headRefName": "sb/direct-work",
+    "headRefOid": "a82e6d9a60819c0b340ec05de6fc1f0d1c395049",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "[recheck] migration pass a82e6d9a60819c0b340ec05de6fc1f0d1c395049",
+      "createdAt": "2026-11-21T22:12:56Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass a82e6d9a60819c0b340ec05de6fc1f0d1c395049 base=08972e74dd583d99c542523c19b1ef410c928a54",
+      "createdAt": "2026-11-21T22:20:21Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-21T22:20:42Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T22:21:13Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"packages/core/src/db.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/db/core.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 44955469511,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-21T22:11:46Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 2,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [],
+    "granted": false,
+    "direct": true
+   },
+   "handSet": [
+    "records.direct",
+    "view.mergeStateStatus"
+   ]
+  },
+  {
+   "name": "gate-file-with-ask-and-yes-comment",
+   "pr": 5,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "docs/design/merge-gate.md",
+      "additions": 2,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/merge-gate.md",
+      "additions": 12,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "scripts/merge-gate.test.ts",
+      "additions": 101,
+      "deletions": 13,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "scripts/merge-gate.ts",
+      "additions": 29,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "bf52b34adc5a0cde83e7525ad0d167806d0b0ca4",
+    "headRefName": "work-5",
+    "headRefOid": "5c413e8380a4d43f74fd84fe2431627f6f551005",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:39:12Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:39:14Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:39:16Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:39:18Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-21T11:39:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:40:41Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:42:27Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-21T11:42:29Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T11:42:31Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-21T11:43:35Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 5c413e8380a4d43f74fd84fe2431627f6f551005 base=5e1f22ae67deae7d5a357f0996e1477f586dd724",
+      "createdAt": "2026-11-21T12:39:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[merge-ask] security:gates 5c413e8380a4d43f74fd84fe2431627f6f551005",
+      "createdAt": "2026-11-21T13:00:51Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[merge-answer] yes security:gates 5c413e8380a4d43f74fd84fe2431627f6f551005",
+      "createdAt": "2026-11-21T13:09:57Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"docs/design/merge-gate.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/merge-gate.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"scripts/merge-gate.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"scripts/merge-gate.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 44900364284,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-21T11:42:17Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 2,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "view.mergeStateStatus"
+   ]
+  },
+  {
+   "name": "plain-scripts",
+   "pr": 6,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "scripts/test-select-replay.test.ts",
+      "additions": 39,
+      "deletions": 3,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "scripts/test-select-replay.ts",
+      "additions": 17,
+      "deletions": 27,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "scripts/test-select.ts",
+      "additions": 9,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "361e847aa9c4482a5b7d353e7700ef0db2eb41fd",
+    "headRefName": "work-6",
+    "headRefOid": "2e7b40655c155536b66eeed1cb23b7d98976f6cc",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T05:32:19Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T05:32:25Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T05:35:19Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T05:37:23Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T05:37:24Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T05:37:37Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] fail 972c9c044083f1584eed5257939c13f4a234727b base=836b92b895467b3236eae7764ee9540bf34a9dc0",
+      "createdAt": "2026-11-22T05:52:48Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[local-ci] pass 972c9c044083f1584eed5257939c13f4a234727b base=836b92b895467b3236eae7764ee9540bf34a9dc0",
+      "createdAt": "2026-11-22T06:09:24Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"scripts/test-select-replay.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"scripts/test-select-replay.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"scripts/test-select.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 44992540681,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-22T06:10:29Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 6,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "view.mergeStateStatus"
+   ]
+  },
+  {
+   "name": "security-docs-ask-and-yes-comment",
+   "pr": 7,
+   "view": {
+    "body": "",
+    "files": [
+     {
+      "path": "apps/web/src/api/backlog.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "apps/web/src/components/Backlog.tsx",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/asks.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/backlog.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/flow-metrics.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/interventions.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "docs/design/permission-modes.md",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks-answer.test.ts",
+      "additions": 68,
+      "deletions": 5,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks.test.ts",
+      "additions": 25,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/asks.ts",
+      "additions": 13,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-comments.ts",
+      "additions": 21,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-decision.api.test.ts",
+      "additions": 16,
+      "deletions": 5,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-edit.api.test.ts",
+      "additions": 119,
+      "deletions": 2,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-edit.ts",
+      "additions": 62,
+      "deletions": 8,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-stored.test.ts",
+      "additions": 1,
+      "deletions": 1,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/backlog-upbox.test.ts",
+      "additions": 3,
+      "deletions": 3,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/db/backlog.ts",
+      "additions": 9,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/flow.test.ts",
+      "additions": 18,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/flow.ts",
+      "additions": 25,
+      "deletions": 7,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/interventions.test.ts",
+      "additions": 18,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/interventions.ts",
+      "additions": 15,
+      "deletions": 8,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/routes/backlog.ts",
+      "additions": 14,
+      "deletions": 4,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/asks.ts",
+      "additions": 18,
+      "deletions": 5,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/context.ts",
+      "additions": 1,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/core/src/server/task-hooks.ts",
+      "additions": 20,
+      "deletions": 8,
+      "changeType": "MODIFIED"
+     },
+     {
+      "path": "packages/protocol/src/model/backlog.ts",
+      "additions": 2,
+      "deletions": 0,
+      "changeType": "MODIFIED"
+     }
+    ],
+    "baseRefName": "main",
+    "baseRefOid": "b3f437d5f28f5e350f63316fbf8b290ed44ecda5",
+    "headRefName": "work-7",
+    "headRefOid": "bf0b5504237fe9f7d119824abfad950dd587f71b",
+    "mergeStateStatus": "CLEAN",
+    "comments": [
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T23:59:13Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T23:59:15Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-21T23:59:16Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T23:59:57Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-21T23:59:59Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "(redacted)",
+      "createdAt": "2026-11-22T00:00:01Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[codex] attack",
+      "createdAt": "2026-11-22T00:00:13Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[codex] recheck",
+      "createdAt": "2026-11-22T00:25:43Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[claude] review",
+      "createdAt": "2026-11-22T00:36:02Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[recheck] migration pass bf0b5504237fe9f7d119824abfad950dd587f71b",
+      "createdAt": "2026-11-22T00:46:21Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[merge-ask] security:docs bf0b5504237fe9f7d119824abfad950dd587f71b",
+      "createdAt": "2026-11-22T00:46:22Z",
+      "authorAssociation": "MEMBER"
+     },
+     {
+      "body": "[merge-answer] yes security:docs bf0b5504237fe9f7d119824abfad950dd587f71b",
+      "createdAt": "2026-11-22T01:06:18Z",
+      "authorAssociation": "MEMBER"
+     }
+    ]
+   },
+   "filesApi": [
+    "{\"filename\":\"apps/web/src/api/backlog.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"apps/web/src/components/Backlog.tsx\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/asks.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/backlog.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/flow-metrics.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/interventions.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"docs/design/permission-modes.md\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks-answer.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/asks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-comments.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-decision.api.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-edit.api.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-edit.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-stored.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/backlog-upbox.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/db/backlog.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/flow.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/flow.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/interventions.test.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/interventions.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/routes/backlog.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/asks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/context.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/core/src/server/task-hooks.ts\",\"previous_filename\":null,\"status\":\"modified\"}",
+    "{\"filename\":\"packages/protocol/src/model/backlog.ts\",\"previous_filename\":null,\"status\":\"modified\"}"
+   ],
+   "runs": [
+    {
+     "id": 44968216036,
+     "name": "CI",
+     "status": "completed",
+     "conclusion": "skipped",
+     "created_at": "2026-11-22T00:45:59Z"
+    }
+   ],
+   "threads": {
+    "totalCount": 8,
+    "unresolved": 0
+   },
+   "records": {
+    "jobs": [],
+    "granted": false,
+    "direct": false
+   },
+   "handSet": [
+    "view.mergeStateStatus"
+   ]
+  }
+ ]
+}

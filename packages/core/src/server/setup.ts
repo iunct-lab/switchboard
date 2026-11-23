@@ -4,7 +4,7 @@ import { stopEndedTasksProcesses } from "../detached.ts";
 import { homedir, tmpdir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { TeleportProgress, TerminalStatus } from "@switchboard/protocol";
+import { APP_JOB_TASK, type TeleportProgress, type TerminalStatus } from "@switchboard/protocol";
 import { memoryHeadroom } from "../ops-load.ts";
 import { recoverJobs } from "../jobs.ts";
 import { ArtifactStore } from "../artifacts.ts";
@@ -104,7 +104,7 @@ export async function setupTasks(sc: Pick<ServerContextInit, "leaseGate" | "task
   if (sc.pty) sc.pty.idleMs = sc.cfg.workspaceShellIdleMs;
 }
 
-export function setupJobs(sc: Pick<ServerContextInit, "resumer" | "db" | "tasks" | "savedAutoResume" | "settings" | "githubBudget" | "cfg" | "jobDeps" | "opts" | "runnerChoice" | "pricingTable" | "loginKindOf" | "queueTaskFreed">): void {
+export function setupJobs(sc: Pick<ServerContextInit, "resumer" | "db" | "tasks" | "savedAutoResume" | "settings" | "githubBudget" | "cfg" | "jobDeps" | "opts" | "localUrl" | "runnerChoice" | "pricingTable" | "loginKindOf" | "queueTaskFreed" | "promoteWhenIdle">): void {
   // Usage-limit auto-resume: a task stopped on the runner's limit is continued once it lifts, per-runner setting.
   sc.resumer = new RateLimitResumer(sc.db, sc.tasks, { enabled: sc.savedAutoResume, tunables: () => sc.settings().quotaAndResume, log: (m) => console.log(m), githubBudget: (cwd) => sc.githubBudget.get(cwd) });
   if (!sc.cfg.candidate) sc.resumer.start();
@@ -127,15 +127,22 @@ export function setupJobs(sc: Pick<ServerContextInit, "resumer" | "db" | "tasks"
       return { ...process.env, PATH: kitPath(meta?.path ?? null) };
     },
     command: sc.opts.jobCommand,
+    // a gate job reads the daemon's records at the daemon's own loopback address with the daemon's own key
+    app: () => ({ url: sc.localUrl(), tokenFile: sc.cfg.tokenPath }),
     reviewChoice: (runner) => sc.runnerChoice(runner, "", ""),
     reviewRunner: () => sc.settings().reviewRunner,
     pricing: sc.pricingTable,
     loginKind: sc.loginKindOf,
     reviewIdleS: sc.cfg.jobReviewIdleS,
     // a build that ended while the daemon was down: its result is written to the PR at the next start (recoverJobs)
-    ...(sc.opts.collectPending ? { collectPending: () => sc.opts.collectPending!(sc.jobDeps.env, join(sc.jobDeps.dir, "collect-pending.log")) } : {}),
+    ...(sc.opts.collectPending ? { collectPending: (done) => sc.opts.collectPending!(sc.jobDeps.env, join(sc.jobDeps.dir, "collect-pending.log"), done) } : {}),
     // a Task that stopped on `job#<id>` goes on with the job's result, without waiting for the next import
     onFinish: (job) => {
+      // a tag CI job the app started has no Task: the promotion that waits for it is asked again with its result
+      if (job.taskId === APP_JOB_TASK) {
+        sc.promoteWhenIdle();
+        return;
+      }
       const workspaceId = sc.db.getTask(job.taskId)?.workspaceId ?? null;
       // a stop that is not depends is not resumed, but its job#<id> is met
       try {

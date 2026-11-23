@@ -48,7 +48,7 @@ export type ResourceWait = z.infer<typeof ResourceWait>;
 export const TaskWait = z.object({ taskId: z.string(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.literal("memory") });
 export type TaskWait = z.infer<typeof TaskWait>;
 /** A job as the resources screen lists it: without its summary and folder, with its Task's title (null: a Task this daemon does not know). */
-export const OpsJob = Job.omit({ summary: true, cwd: true }).extend({ taskTitle: z.string().nullable() });
+export const OpsJob = Job.omit({ summary: true, cwd: true, repo: true, head: true, base: true, as: true, kinds: true, result: true }).extend({ taskTitle: z.string().nullable() });
 export type OpsJob = z.infer<typeof OpsJob>;
 /**
  * `GET /api/ops/resources`: now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of

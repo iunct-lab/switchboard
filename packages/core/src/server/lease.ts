@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { IN_FLIGHT } from "../task-status.ts";
 import type { Workspace } from "@switchboard/protocol";
 import { receiveUplink, sendUplink } from "../uplink-s3.ts";
+import { writeBacklogExports } from "../backlog-export.ts";
 import { importBacklogOperations } from "../backlog-upbox.ts";
 import { syncsGithub } from "../backlog-gh.ts";
 import { storedIssueHeads } from "../backlog-stored.ts";
@@ -38,12 +39,19 @@ export const uplinkRound = async (sc: Pick<ServerContext, "s3" | "uplinkBusy" | 
       await sendUplink(sc.db, sc.cfg, sc.s3);
       for (const ws of sc.db.listWorkspaces().filter(sc.backlogReads)) if (existsSync(ws.path)) await sc.backlog.sync(ws).catch(() => undefined);
     } else {
-      const got = await receiveUplink(sc.db, sc.cfg, sc.s3);
-      if (got.some((r) => r.status === "applied")) console.log(`[uplink] took in ${got.filter((r) => r.status === "applied").map((r) => r.deltaId).join(", ")}`);
-      for (const id of await importBacklogOperations(sc.db, sc.s3, sc.uplink.machines)) {
-        const ws = sc.db.getWorkspace(id);
-        if (ws) void sc.backlog.send(ws);
+      try {
+        const got = await receiveUplink(sc.db, sc.cfg, sc.s3);
+        if (got.some((r) => r.status === "applied")) console.log(`[uplink] took in ${got.filter((r) => r.status === "applied").map((r) => r.deltaId).join(", ")}`);
+        for (const id of await importBacklogOperations(sc.db, sc.s3, sc.uplink.machines)) {
+          const ws = sc.db.getWorkspace(id);
+          if (ws) void sc.backlog.send(ws);
+        }
+      } catch (e) {
+        console.error(`[uplink] ${String((e as Error)?.message ?? e).slice(0, 300)}`);
       }
+      // what each work machine reads of the backlog, written after the intake so that it holds what the intake took in;
+      // also when the intake failed, so that a withdrawal does not wait for unrelated reads to succeed
+      await writeBacklogExports(sc.db, sc.cfg, sc.s3);
     }
   } catch (e) {
     console.error(`[uplink] ${String((e as Error)?.message ?? e).slice(0, 300)}`);

@@ -87,6 +87,24 @@ describe("flow", () => {
     expect(flowOfPbi(raw, null).userWaitMs).toBe(40 * MIN); // 30 + 10, not the 20 a merged timeline gives
   });
 
+  test("a named answer closes only its question: the wait is the union of each ask's span to the answer that closed it", () => {
+    const raw = madeUpPbi();
+    for (const t of raw.subIssues) t.comments = [];
+    const named = (hm: string) => `## 回答\n\n**止めて聞く問いへの回答** — 問い ${at(hm)}\n\nA で`;
+    // asked 10:00 and 10:10; 10:30 answers the first by name, 11:00 answers the one left
+    raw.comments = [comment("10:00", "## 判断待ち"), comment("10:10", "## 判断待ち"), comment("10:30", named("10:00")), comment("11:00", "## 回答")];
+    expect(flowOfPbi(raw, null).userWaitMs).toBe(60 * MIN); // 10:00–10:30 and 10:10–11:00 overlap: 10:00–11:00 once
+    // the newer one answered first by name, the older by a later answer: 10:10–10:20 lies inside 10:00–10:50
+    raw.comments = [comment("10:00", "## 判断待ち"), comment("10:10", "## 判断待ち"), comment("10:20", named("10:10")), comment("10:50", "## 回答")];
+    expect(flowOfPbi(raw, null).userWaitMs).toBe(50 * MIN);
+    // spans that do not touch add up
+    raw.comments = [comment("10:00", "## 判断待ち"), comment("10:05", named("10:00")), comment("10:30", "## 判断待ち"), comment("10:40", named("10:30"))];
+    expect(flowOfPbi(raw, null).userWaitMs).toBe(15 * MIN);
+    // an answer with no name closes every ask before it, as before: 10:00–10:30, then nothing is left for 11:00
+    raw.comments = [comment("10:00", "## 判断待ち"), comment("10:10", "## 判断待ち"), comment("10:30", "## 回答"), comment("11:00", "## 回答")];
+    expect(flowOfPbi(raw, null).userWaitMs).toBe(30 * MIN);
+  });
+
   test("a PR that closes several Tasks counts once", () => {
     const raw = madeUpPbi();
     raw.subIssues[1]!.pullRequests = raw.subIssues[0]!.pullRequests;

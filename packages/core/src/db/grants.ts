@@ -39,11 +39,13 @@ export class GrantQueries extends AskAnswerQueries {
    * When a grant recorded as the person's (`by = 'owner'`: merge-grants.ts says what that does and does not mean) was last
    * given to the task (ms), or null. A row another Task's text left, or one whose sender was not told, does not answer.
    * A merge or answer grant answers only for `head`, the head the PR had when it was given: no head asked with, a grant
-   * recorded without one, or a PR that has moved since is null.
+   * recorded without one, or a PR that has moved since is null. An `answer` question (the ask reason) is also answered by
+   * a `merge` record of the same PR and head: whoever allows the merge that skips the gate allows the step before it; a
+   * `merge` question is answered by a `merge` record only.
    */
   mergeGrantAt(taskId: string, repo: string, kind: string, target: number, head?: string): number | null {
     if (!head) return null;
-    const r = this.sqlite.query("SELECT MAX(at) AS at FROM task_grants WHERE task_id = ? AND repo = ? AND kind = ? AND target = ? AND by = ? AND head = ?").get(taskId, repo.toLowerCase(), kind, target, OWNER, head.toLowerCase()) as { at: number | null };
+    const r = this.sqlite.query("SELECT MAX(at) AS at FROM task_grants WHERE task_id = ? AND repo = ? AND kind IN (?, ?) AND target = ? AND by = ? AND head = ?").get(taskId, repo.toLowerCase(), kind, kind === "answer" ? "merge" : kind, target, OWNER, head.toLowerCase()) as { at: number | null };
     return r.at;
   }
 

@@ -358,6 +358,15 @@ export class BacklogQueries extends WorkspaceQueries {
     this.sqlite.query("UPDATE backlog_operations SET payload = ?, updated_at = ? WHERE id = ? AND status != 'done'").run(JSON.stringify(payload), now, id);
   }
 
+  /**
+   * The heads of a screen answer's grants, put into its comment operation's payload after the answer was kept
+   * (backlog-edit.ts `setAnswerHeads`): into a sent one too — the start of the next stage reads them from it — and with
+   * no new `updated_at`: what is sent to the service is the same. An operation that is not a screen answer is left.
+   */
+  setBacklogAnswerHeads(id: string, heads: Record<string, string | null>): void {
+    this.sqlite.query("UPDATE backlog_operations SET payload = json_set(payload, '$.heads', json(?)) WHERE id = ? AND kind = 'comment' AND json_extract(payload, '$.screen') = 1").run(JSON.stringify(heads), id);
+  }
+
   /** Every operation of a repository, done ones too, oldest first. */
   listBacklogOperations(repo: BacklogRepositoryKey): BacklogOperation[] {
     return this.sqlite.query("SELECT * FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? ORDER BY seq").all(repo.service, repo.host, repo.repository).map(rowToBacklogOperation);

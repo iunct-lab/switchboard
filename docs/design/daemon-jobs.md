@@ -18,8 +18,9 @@ the job runs, so the session closes at the timeout like any other finished turn.
 ## What a Task does
 
 ```bash
-ops-kit job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local]
-ops-kit job request review <PR> [--runner codex|claude [--as fallback|recheck|audit]] --prompt <file> --out <file> [--cwd <dir>]
+ops-kit job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local] [--change]
+ops-kit job request review <PR> [--runner codex|claude [--as fallback|recheck|audit|attack]] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
+ops-kit job request recheck <PR> --kind migration|rescue|security:lockfile [--cwd <dir>] [--change]
 ops-kit job list [--json]
 ```
 
@@ -31,17 +32,18 @@ asked for and from the Task's runner (`primaryReviewer` in `ops-kit/src/conditio
 the other one for `other`. Without `--runner` the job runs with that reviewer. A `--runner` that names another one is
 refused with a message that names the right one, unless `--as` says why another runner reads the PR: `fallback` (it
 stands in for a main reviewer at its usage limit), `recheck` (the second reader of a recheck) or `audit` (the
-post-merge audit, whose reader is decided from who implemented the merged PR). A Task once asked Codex for a review while the setting said "same", because the text it had read
+post-merge audit, whose reader is decided from who implemented the merged PR). `attack` (the attacking-side review, its instruction printed by `ops-kit review-attack prompt`) is the one reason that does not free the choice: the runner must be the one `attackReviewer` names, the main reviewer's runner (another runner than the implementer under `other`, the implementer's own new session under `same`), and any other is refused with a message that names it. A Task once asked Codex for a review while the setting said "same", because the text it had read
 described the other side; the choice is no longer left to what the Task read. A Task whose runner reviews nothing (not
-Claude Code or Codex) must name the runner.
+Claude Code or Codex) must name the runner, and cannot ask for `attack` at all (no runner can be named for it).
 
 With `--fixtures <dir>` (an absolute path, local CI only) the folder becomes the job's `SWITCHBOARD_FIXTURES`, so missing
 recordings fail as when the owner runs local CI by hand; the daemon's own environment does not carry it.
 
 ## Why kinds, and why the daemon builds the argv
 
-There are two kinds, `local-ci` and `review`. A request names a kind, a PR and (for a review) two files and optionally a runner;
-it never carries a command. The daemon builds the argv itself (`jobCommand` in `packages/core/src/jobs.ts`). For local CI
+There are four kinds that a Task starts, `local-ci`, `review`, `recheck` and `gate` (the app starts `tag-ci` itself). A request names a kind, a PR and (for a review) two files and optionally a runner;
+a `recheck` names one of the rechecks whose pass is a command's exit code (`migration`, `rescue`, `security:lockfile`), and the daemon
+runs the checkout's `scripts/recheck.ts` with that kind (a checkout without the script is refused). It never carries a command. The daemon builds the argv itself (`jobCommand` in `packages/core/src/jobs.ts`). For local CI
 that is the checkout's own `scripts/local-ci.ts` when the checkout is Switchboard's; a checkout of another registered
 repository has no such script, so the daemon runs Switchboard's (the meta workspace's) from that checkout's folder with
 `--repo <owner/name>` read from its origin. A job also gets the place of the settings Switchboard keeps for the
@@ -55,9 +57,19 @@ asked, with source `job`, so what a review cost can be told; a review that left 
 ends normally. This guards against mistakes. It is not a boundary against the Task itself, which runs as the same OS user.
 
 A job is a detached child of the daemon, started through a small wrapper that writes the exit code to
-`<jobs dir>/<id>/exit`. Local CI takes a heavy-work slot like any other heavy run. A review waits only for the
+`<jobs dir>/<id>/exit`. Local CI and a `recheck` take a heavy-work slot like any other heavy run. A `recheck` records the head of its checkout, is refused when the checkout has uncommitted or untracked files, and does not run if the head moved while it waited for the slot. A review waits only for the
 memory floor (`ops-kit heavy --memory-only`) and is cut after a period without output (`idle-run`). A job that is
 waiting for the slot is "waiting" in the resource view; the job's own status does not gain a waiting state.
+
+## The gate: a Task's merge verdict and merge are the app's
+
+In a Task, `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]` (and `--change <n>`, `--scope`) does not judge in the Task's shell. It posts a `gate` job (the PR's number and the flags; no command, no environment) and reads `GET /api/jobs/<id>` every 2 seconds until the job ends, prints what the job printed and ends with the job's exit code (0 merge, 1 stop or a failed merge). The wait is `SWITCHBOARD_GATE_WAIT_MS` (default 10 minutes), and the Task's turn is not ended: a verdict takes 10 to 60 seconds and the Task needs it at once. A daemon that does not answer, a request it refuses (an older daemon that does not know the kind), a wait that runs out, or a job that ended without its exit code is not a verdict: exit 2, and the merge is not made by the Task.
+
+The job runs the daemon's own `scripts/merge-gate.ts`, the code of the version that is running. It is started in the daemon's own folder with Bun's `.env` loading off (`bun --no-env-file`), so a `bunfig.toml` (a `preload` is code) or a `.env` in the Task's checkout is not read by it; the checkout is named by `--cwd` and is only the folder the script reads the PR's commits and settings in (git and `gh` run in the checkout: the front of `gh` reads its refusals to write, `ops-kit.noWrite` and the like, from the working tree it runs in, and `gh stack merge` acts on it; the front is started with Bun told not to read that folder's `.env` and `bunfig.toml`). A PR that changes the rules of the gate is therefore judged by the rules that are running, not by its own copy. The job's environment is the daemon's: the records are read at the daemon's own address (`cfg.host`, the loopback address by default) with its own key (`MERGE_RECORDS_URL`, `MERGE_RECORDS_TOKEN_FILE`), and the Task's own addresses and variables are not in it. The consent to an ask reason is read for the Task that asked (`OPS_KIT_TASK_ID`), so the person's grant held for that Task and that head is what `--allow-large` needs, as before. The front of `gh` that stops a Task's merge is on only where `BACKLOG_URL` is set, and the job has none (a `--change` job has the daemon's backlog address, to read the change; it only judges), so the merge the job makes needs no grant of the person outside the gate: it is made only at a `merge` verdict of the app's copy, and a sync PR of the local main (`--merge-sync`, a Merge commit, only for a branch `sb/sync-main-<7>`) the same way. No variable of the Task's shell stands for it. This is the one merge a Task can ask for without the person's grant outside the gate; the other jobs (`local-ci`, `recheck`) run a script of the Task's checkout as the host's user, as before. A Task's local merge of a change (`scripts/local-merge.ts`, a git operation of the Task's shell) takes its judgement from a `--change` gate job in the same way.
+
+A gate job records the verdict in `result.gate`: `verdict`, `head` (the PR's head it judged, also the job's `head`), `ask` and `recheck` (the kinds that stopped it), `reasons`, `allowLarge`, `reviewSkipped` and `merged`. A run that judged nothing (exit 2) leaves no result. The verdict is also printed to the job's `out` file, which `GET /api/jobs/<id>` returns.
+
+Until a daemon that knows the kind is the one running, a newer `scripts/merge-gate.ts` in a Task's checkout asks an older daemon, which refuses the kind: exit 2, nothing is merged. The way through is to promote the daemon first.
 
 ## What a reviewer reads
 
@@ -91,7 +103,7 @@ The same note carries the rules that hold for every review, whatever its kind (`
 finding's weight (blocker / should-fix / nit / question, decided by what breaks and not by an earlier round's mark), checking
 in the code each earlier finding `_review/handled.md` lists, whatever its reply says (a reply never settles a finding by
 itself; a finding is left out only when the reviewer verified in the code that it is resolved), marking a point raised again
-after its fix (`Repeat of:`), checking the places `_review/old-paths.md` lists, and using a comparison with main
+after its fix (`Repeat of:`), keeping a follow-up round to the fix, what the description now says about it and the readers of what it changed, checking the places `_review/old-paths.md` lists, and using a comparison with main
 (`_review/compared.md`, the output of a comparison round asked for with `ops-kit review-compare prompt`): a `REGRESSION` row is raised again until the code closes it, and the
 other rows are not raised again unless the change makes them worse than main. A branch that carries anything under `_review` does not
 get its classes used; that is a blocker. These rules are here and not in each
@@ -124,7 +136,7 @@ left waiting after a restart.
 
 ## Out of scope
 
-Type checks, `test-changed` and E2E runs are not jobs. They finish in minutes and the Task needs the result at once, so
+Type checks, `test-changed` and E2E runs are not jobs of their own (the `rescue` recheck runs its E2E inside the `recheck` job). They finish in minutes and the Task needs the result at once, so
 the Task runs them itself under `ops-kit heavy`. Other waits (an Actions run, a PR to merge) are not jobs either.
 The kinds are fixed here; the memory floor is the kit's per-machine setting (see the kit README). This document does not copy the values the app owns (the number of jobs,
 timeouts), which are in the app and the resource view.

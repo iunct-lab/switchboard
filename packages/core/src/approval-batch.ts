@@ -58,7 +58,10 @@ function eachStop(records: StopRecord[]): { stop: StopRecord; at: number; stoppe
 /**
  * The batches of these Tasks' stop records (each Task's own): per Task its newest stop, when it waits on the person and is
  * sso / deploy and its outcome is `needs_action`; per kind one batch, oldest Task first, none for a kind with no Task. A shadow waits on nothing either.
- * `asks` = the questions as listed, for the one each Task shows as (its stop, or the check it folded into).
+ * `asks` = the questions as listed, for the one each Task shows as (its stop, or the check it folded into). A Task's
+ * `askId` is that listed question's id itself — the version the person sees, which an approval is checked against
+ * (`BatchAnswers`) — so a Task whose deploy stop is tied to no listed question is in no batch: it shows as its own card or
+ * not at all. A login (sso) is checked against no id: such a Task stays in its batch, under its stop's id without the time.
  */
 export function approvalBatches(entries: { task: Task; records: StopRecord[] }[], asks: Ask[]): AskBatch[] {
   const lists: Record<BatchKind, AskBatch["asks"]> = { sso: [], deploy: [] };
@@ -71,6 +74,8 @@ export function approvalBatches(entries: { task: Task; records: StopRecord[] }[]
     // the stop's question as listed, found by its id up to the time (the list knows when the stop took its present content)
     const id = askIdBase(stopAskId({ key: stopKey(newest.stop), contentAt: 0 }));
     const shown = asks.find((a) => a.kind === "stop" && a.task?.id === task.id && askIdBase(a.id) === id) ?? asks.find((a) => a.task?.id === task.id && a.state === "open" && (a.kind === "stop" || a.kind === "check"));
+    // an approval is checked against the listed id (deploy); a login is asked of every Task that waits for it, listed or not
+    if (!shown && kind === "deploy") continue;
     lists[kind].push({ askId: shown?.id ?? id, taskId: task.id, title: task.title, workspaceId: task.workspaceId, op: newest.stop.op, at: newest.at });
   }
   return (["sso", "deploy"] as const).filter((k) => lists[k].length > 0).map((k) => ({ id: `batch:${k}` as const, kind: k, asks: lists[k], loggingIn: null, deviceAuth: null }));
@@ -92,14 +97,17 @@ export interface BatchDeps {
   deviceAuth: (taskId: string) => DeviceAuthView | null;
 }
 
-type Answered = { status: number; body: AskBatchResult | { error: string } };
+type Answered = { status: number; body: AskBatchResult | { error: string; batch?: AskBatch | null } };
 
 /**
  * The answers to a batch. sso: one click sends the batch's oldest Task on to log in, and once its turn ends
  * without a new login stop the rest are sent on. A background process left (`device-auth` runs behind the turn until
  * the person has logged in) is still the login going on, so the wait covers it too — the wait is `pendingSso`, memory only (a restart forgets it;
  * the rest stay in the batch, and one more click starts again). deploy: each Task the person chose is sent its approval
- * once; the others wait. Nothing is saved as a policy, and nothing is sent that the person did not press.
+ * once; the others wait. The approval comes with the ids of the questions the screen showed for the chosen Tasks
+ * (`askIds`): a chosen Task whose question in the batch now has another id (its stop was reported again with another
+ * operation or grant since the screen was drawn) was not seen as it is — nothing is sent to any Task, and the answer is
+ * 409 with the batch now. Nothing is saved as a policy, and nothing is sent that the person did not press.
  */
 export class BatchAnswers {
   /** `at` = when `first` was sent on: a login stop reported from then on (not the answer the send itself wrote) is a new one. */
@@ -108,13 +116,13 @@ export class BatchAnswers {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private deps: BatchDeps) {}
 
-  answer(id: string, taskIds: string[] | undefined): Promise<Answered> {
-    const run = this.queue.then(() => this.answerNow(id, taskIds));
+  answer(id: string, taskIds: string[] | undefined, askIds: string[] | undefined): Promise<Answered> {
+    const run = this.queue.then(() => this.answerNow(id, taskIds, askIds));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async answerNow(id: string, taskIds: string[] | undefined): Promise<Answered> {
+  private async answerNow(id: string, taskIds: string[] | undefined, askIds: string[] | undefined): Promise<Answered> {
     const batch = (await this.deps.batches()).find((b) => b.id === id);
     if (id === "batch:sso") {
       if (this.pendingSso && !this.dropIfGone()) return { status: 200, body: { sent: [], already: true, batch: batch ?? null } };
@@ -131,9 +139,14 @@ export class BatchAnswers {
     }
     if (id !== "batch:deploy") return { status: 400, body: { error: `unknown batch: ${id}` } };
     if (!taskIds?.length) return { status: 400, body: { error: "承認する Task を選んでください" } };
+    // what is approved is what the screen showed, by id: without the ids nothing is
+    if (!askIds) return { status: 400, body: { error: "画面に出ていた問いの id（askIds）が要ります" } };
     if (!batch) return { status: 409, body: { error: "配備の承認待ちの Task はもうありません" } };
     const chosen = taskIds.map((t) => batch.asks.find((a) => a.taskId === t));
     if (chosen.some((a) => !a)) return { status: 400, body: { error: "まとまりに無い Task があります" } };
+    // every chosen Task is checked before anything is sent: one whose question is not the one seen stops them all
+    const seen = new Set(askIds);
+    if (chosen.some((a) => !seen.has(a!.askId))) return { status: 409, body: { error: "問いが新しくなりました", batch } };
     const sent: string[] = [];
     for (const a of new Set(chosen)) {
       await this.deps.send(a!.taskId, deployApprovedText(a!.op));

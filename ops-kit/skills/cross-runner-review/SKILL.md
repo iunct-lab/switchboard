@@ -58,10 +58,10 @@ description: PR を「実装したのと同じランナーの新しいセッシ�
 主レビュアーが利用上限なら、**待たずに実装したランナーの新しいセッションで代替する**。代替は利用者に聞かずに行い、利用者が既に認めた代替・共有の範囲は同じ範囲で聞き直さない。
 <!-- end when -->
 <!-- when review=other reviewer=codex -->
-Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力に利用上限が出たら、新しい Claude のセッション（サブエージェントか、2 の頼み方）で代替する。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
+Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力に利用上限が出たら、新しい Claude のセッション（2 の頼み方）で代替する（サブエージェントのレビューはアプリに記録が残らず、判定に数えられない）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
 <!-- end when -->
 <!-- when review=other reviewer=claude -->
-Claude の枠（週間上限なども）が上限、またはレビュー実行の出力に利用上限が出たら、新しい Codex のセッション（サブエージェントか、2 の頼み方）で代替する。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
+Claude の枠（週間上限なども）が上限、またはレビュー実行の出力に利用上限が出たら、新しい Codex のセッション（2 の頼み方）で代替する（サブエージェントのレビューはアプリに記録が残らず、判定に数えられない）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
 <!-- end when -->
 <!-- when review=other -->
 main との比較（5）は代替しない。主レビュアーが上限なら停止の報告 `usage-limit` で戻る時刻まで待ってから回す。
@@ -72,7 +72,6 @@ main との比較（5）も設定どおり実装したランナーの別セッ�
 <!-- when review=other -->
 
 - 材料と指示は 1 と同じ fresh clone と `_review/` だけ（**実装時の会話・判断の要約・memory は渡さない**）。別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する。
-- サブエージェント（Claude）で代替するなら、`{ cat "$M/prompt.md"; ops-kit review-note claude; } > "$M/prompt-sub.md"`の後、渡すのは「`$R` の checkout で `_review/prompt-sub.md` に従い、出力を `_review/<runner>.md` に書く」だけ。
 <!-- end when -->
 <!-- when review=other reviewer=codex task=in -->
 - 仕事で代替するなら、代替のランナーを名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
@@ -234,7 +233,9 @@ ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt.md"
 <!-- when task=in -->
 
 request が出す `job#<id>` と JSON を止まりの報告に書き（reason `depends`・conditions に `job#<id>`）、ターンを終える。レビューが終わるとアプリが結果の要約を添えて再開するので、`--out` のファイルを読んで 3 の転記に進む。
-主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（再チェックは `--as recheck`、マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。
+主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（再チェックは `--as recheck --kinds <kind>`（`--kinds` の無い依頼は受けられるが種類なしで記録され、判定でどの再チェックも満たさない）、マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。
+
+マージ判定が数えるのは、レビューの仕事の記録（head と、出力の `### Findings` の節の指摘）。PR への投稿（`post_review`）は人が読むため。主レビュー・攻める側・再チェックを仕事で頼まず自分のシェルで回した結果は判定に数えられない。アプリが持つ変更（ローカルの変更）のレビューと `local-ci` は `--change` を付けて頼む。
 <!-- end when -->
 <!-- when task=out -->
 アプリの Task の外では直接走らせる。読み取り専用 sandbox、会話は保存しない、出力はファイルへ。1 のとおり clone の決まりと利用者の MCP・スキルを読ませない引数を付け、指示の後ろに `ops-kit review-note <runner>` の文を足す（アプリに仕事として頼むレビューには、アプリが同じ引数と文を付ける）。Codex がレビュアーのとき:
@@ -282,9 +283,30 @@ gh pr comment $N --body "[<runner>] 無進捗で打ち切り（<秒> 秒出力�
 <!-- end when -->
 **マージを止めるのは主レビュアーだけ。**
 <!-- when extra=on -->
-追加のレビュアー（ローカルモデルなら 50KB の材料で 10 分以上かかることがある）は終わっていなくても先に進み、後から届いたら転記して主レビュアーとの比較に使う（利用者の指示 2026-09-18）。
+追加のレビュアー（ローカルモデルなら 50KB の材料で 10 分以上かかることがある）は終わっていなくても先に進み、後から届いたら転記して主レビュアーとの比較に使う（2026-09-18 の利用者の指示）。
 <!-- end when -->
 終わったら各出力に `### Findings` があるか見る。無ければ（枠切れ、sandbox で止まった、モデルが形式を守らなかった）ログ（Claude Code は `$M/claude.jsonl` も）を読んで一度だけやり直す。
+
+## 2b. 攻める側のレビュー（安全に関わる PR だけ）
+
+PR を出した直後、主レビューを頼むのと同じ時点で `bun scripts/merge-gate.ts <PR>`（`--merge` なし。ローカルの変更では `--change <変更>`）を流し、出力の JSON の `attack`（当たったパスの一覧）が空でなく、reasons に攻める側のレビューが無いという行があれば、主レビューと同時にもう 1 回、攻める側のレビューを頼む。`attack` が無い PR では頼まない。スタックではその PR を出した直後に頼み、最後にまとめない。主レビューの `prompt.md` に混ぜない（5 項目の 1 行に戻り、主レビューと同じ材料で薄まる）。
+
+- 材料は 1 の同じ clone と `_review/`。指示だけを `ops-kit review-attack prompt` で作る（指示の文をここに写さない）: `ops-kit review-attack prompt > "$M/attack-prompt.md" && [ -s "$M/attack-prompt.md" ]`。失敗か空なら頼まず止まって報告する
+<!-- when review=other -->
+- レビュアーは主レビュアーと同じ（実装したのとは別のランナー）。別ランナーが上限なら同じランナーに替えず、戻る時刻まで停止の報告 `usage-limit` で待つ
+<!-- end when -->
+<!-- when review=same -->
+- レビュアーは主レビュアーと同じ（設定どおり、同じランナーの新しいセッション）
+<!-- end when -->
+<!-- when task=in -->
+- 仕事として頼む（理由は `--as attack`。2 と同じ止まり方）: `ops-kit job request review $N --runner <主レビュアーのランナー> --as attack --cwd "$R" --prompt "$M/attack-prompt.md" --out "$M/attack.md"`
+<!-- end when -->
+<!-- when task=out -->
+- 直接走らせる（2 のコマンドの `prompt.md` を `attack-prompt.md` に、出力を `attack.md` に替える）
+<!-- end when -->
+- 出力に `### Findings` が無ければ転記しない（空でも要約が付く。判定が数えるのは仕事の記録で、Findings の節の無い出力は満たさない）。2 と同じく一度だけやり直す
+- 転記は 3 の `post_review` を、1 行目だけ `[<runner>] attack` にして（`printf '[%s] review%s\n\n'` を `printf '[%s] attack%s\n\n'` に替えた関数を、使う呼び出しの中で定義する）: `post_review_attack $N <runner> "$M/attack.md"`。`[<runner>] review` では転記しない（マージ判定は主レビューと攻める側を別に数える）。ローカルの変更では、転記先は変更へのコメント（`ops-kit backlog comment <変更> --body-file -`）で、1 行目は同じ `[<runner>] attack`
+- 4 の修正後の見直しと同じく、修正を積んだら修正の差分（`fix.range-diff`）で攻める側の見直しを頼み直す（判定は、PR の今の head かそのコミットが同じ差分で入った head で合格した攻める側の仕事の記録を求める）。4 のブロックで `prompt.md`→`attack-prompt.md`、`prompt-fix.md`→`attack-prompt-fix.md`、`PREV=_review/attack.md`、出力 `attack-fix.md`、`--as attack`、`post_review_attack` に替える
 
 ## 3. PR に転記する
 
@@ -323,7 +345,7 @@ post_review $N <extra> "$M/<extra>.md"
 
 ## 4. 修正後の見直し
 
-レビューのあとに修正コミットを積んだら、**マージ前に主レビュアーに見直させる**。マージ判定（CLAUDE.md のコマンド）は「最後のコミットより新しい主レビュアーの要約（`[<runner>] review` で始まるコメント）」が無い PR を止める。
+レビューのあとに修正コミットを積んだら、**マージ前に主レビュアーに見直させる**。マージ判定（CLAUDE.md のコマンド）は「今の head（かそのコミットが同じ差分で入った head）で合格した主レビュアーの仕事の記録」が無い PR を止める。
 材料は**この PR の修正コミットだけ**の差分、前回のレビュー、作り直した `handled.md` と `old-paths.md`（5 の `$M/compared.md` があれば残す。レビューの文（`REVIEW_RULES`）が読む）。出力形式は 1 と同じ:
 
 ```bash
@@ -375,8 +397,8 @@ NOTE='（同じランナーの別セッション。設定による選択）'
   || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
 ```
 
-exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも `[<runner>] review` で始まる要約を書き、マージ判定が「見直し済み」と数えてしまう）。
-rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（マージ判定は author date を見る）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
+exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも要約を書き、人には見直し済みに見える）。
+rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（判定は同じ差分で入った head も数える）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
 見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
 
 ## 5. main との比較（指摘が収束しないとき）
@@ -421,7 +443,7 @@ ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt-com
 ops-kit review-compare check "$M/compared.md"; echo $?   # 2 なら一度だけやり直す（2 の「固まったとき」と同じ）。2 のままなら転記せず止まって報告する
 ```
 
-転記は PR への 1 件のコメントで、**1 行目を `[<runner>] compare`**、続けて出力の全文。インラインにしない（`post_review` を使わない）。`[<runner>] review` で始めない（マージ判定が主レビューと数えてしまう。比較は全体を読んでいない）:
+転記は PR への 1 件のコメントで、**1 行目を `[<runner>] compare`**、続けて出力の全文。インラインにしない（`post_review` を使わない）。`[<runner>] review` で始めない（主レビューの要約と取り違える。比較は全体を読んでいない）:
 
 ```bash
 { printf '[<runner>] compare\n\n'; cat "$M/compared.md"; } | gh pr comment $N --body-file -
