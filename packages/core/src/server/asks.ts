@@ -16,6 +16,7 @@ import { reduceStops } from "../stops.ts";
 import { stopsAnswered } from "../stop-answer.ts";
 import { approvalBatches, approvalWindowNote, BatchAnswers } from "../approval-batch.ts";
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, askIdBase, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, proceedingAsks, rankAsks, grantOfChoice, prFacts, questionsChosen, questionsReply, resumeOfTask, withGone, type GoneFacts, type PolicyEnv, type PrFacts } from "../asks.ts";
+import { gateRecordsOf, STACK_GATE_LOOKBACK_MS } from "../gate-records.ts";
 import { closedHits, noticeAsks, type NoticeRecord } from "../asks-notices.ts";
 import { boundsOf, readWaitFiles, refreshTaskWaits, stopsOfWait, WAIT_KEPT_ACTION, WAIT_STOP_CHOICE, WAIT_STOPPED_ACTION, waitAnswerAction, waitsDirOf } from "../waits.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "../policies.ts";
@@ -211,8 +212,8 @@ const answerWait = (sc: Pick<ServerContext, "db" | "tasks" | "settings" | "broad
  * The person's own input in an answer to an Issue's question, apart from the lines the app puts in front of it: the chosen
  * option's own line (before its ` — 許可: `), its sentence and the memo, or the text; each a message of its own.
  * The Task wrote the option's own line, so it is never a whole message of fixed sentences: it is marked as the option
- * (`選択肢: …`), which leaves the sentences read at the end of a line (a merge outside the gate, the older ask sentence)
- * read there as they always were, and the ask sentence, read only from a whole message, unread.
+ * (`選択肢: …`), which leaves the sentence read at the end of a line (a merge outside the gate) read there as it always
+ * was, and the ask sentence, read only from a whole message (`whole` in `merge-grants.ts`), unread.
  */
 const ownParts = (answer: AskAnswer): string[] => {
   if (answer.kind === "choice") {
@@ -276,7 +277,7 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   const checked: GrantHeads = {};
   if (ask.place?.pr && !ask.proceeding && (answer.kind === "choice" || answer.kind === "text")) {
     try {
-      const facts = pre?.pr === ask.place.pr ? pre.facts : await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at);
+      const facts = pre?.pr === ask.place.pr ? pre.facts : await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at, gateRecordsOf(sc.db, source.repository, ask.place.pr, ask.at - STACK_GATE_LOOKBACK_MS));
       moved = facts.changes;
       // the head read now is the head at the answer, also when the PR moved since the question (the answer then says so in its text); none read is none
       checked[grantHeadKey(source.repository, ask.place.pr)] = facts.head || null;
@@ -458,7 +459,9 @@ export const applyPolicies = (sc: Pick<ServerContext, "cfg" | "applying" | "judg
       if (ask.place?.pr && (!ws || !source)) continue;
       if (ask.place?.pr && ws && source) {
         try {
-          const facts = await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at);
+          const facts = await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at, gateRecordsOf(sc.db, source.repository, ask.place.pr, ask.at - STACK_GATE_LOOKBACK_MS));
+          // no verdict of the app judged the head now: what the question asks about (a security merge check or not) is not known, so it is asked
+          if (!facts.judged) continue;
           pre = { pr: ask.place.pr, facts };
           subject = { ...subject, head: facts.head, conditions: facts.mergeAsk ? [...subject.conditions, { key: "merge-ask", value: facts.mergeAsk }] : subject.conditions };
         } catch {
@@ -505,7 +508,9 @@ export const answerWithPolicy = async (sc: Pick<ServerContext, "currentAsks" | "
     const source = ws ? sc.db.getWorkspaceBacklogSource(ws.id) : null;
     if (ws && source) {
       try {
-        const facts = await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at);
+        const facts = await prFacts(sc.opts.gh ?? runGh, ws.path, source.repository, ask.place.pr, ask.at, gateRecordsOf(sc.db, source.repository, ask.place.pr, ask.at - STACK_GATE_LOOKBACK_MS));
+        // no verdict of the app judged the head now: what the question asks about is not known, so it is not saved as a policy either
+        if (!facts.judged) return refuse("この PR の今の head を判定した記録が無いため、方針にできません");
         pre = { pr: ask.place.pr, facts };
         subject = { ...subject, head: facts.head, conditions: facts.mergeAsk ? [...subject.conditions, { key: "merge-ask", value: facts.mergeAsk }] : subject.conditions };
       } catch (e) {

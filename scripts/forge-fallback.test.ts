@@ -221,7 +221,7 @@ test("GitHub is back before the local merge: the change is not merged here, noth
   expect([denied.code, s.landed()]).toEqual([1, []]);
 });
 
-test("a [merge-answer] yes is not kept on a GitHub workspace's change, however it is spelled and whoever posts it: an ask reason cannot be lifted here", async () => {
+test("a [merge-answer] yes comment on a GitHub workspace's change lifts no ask reason: the gate reads the person's grant record, which the app holds for no head of the change", async () => {
   const s = await setup();
   s.git("checkout", "-q", "sb/5-x");
   mkdirSync(join(s.repo, "scripts"));
@@ -233,14 +233,11 @@ test("a [merge-answer] yes is not kept on a GitHub workspace's change, however i
   expect((await s.run(FAILS.outage)).code).toBe(3);
   await s.mark();
   const head = s.tip("sb/5-x");
-  // straight to the app's API, past the kit's command: the reviewer's leading space, and other spellings the store or a reader would fold
-  for (const text of [`[merge-answer] yes security:gates ${head}`, ` [merge-answer] yes security:gates ${head}`, `\t[merge-answer] yes security:gates ${head}`, `\uFEFF[merge-answer] yes security:gates ${head}`, `［merge-answer］ YES security:gates ${head}`, `[merge\u200B-answer] yes security:gates ${head}`]) {
-    const r = await s.send("POST", "/1/comment?change=1", { workspaceId: s.ws.id, text });
-    expect([text, r.status]).toEqual([text, 422]);
-  }
-  expect((await s.view(1, true)).detail.comments.some((c) => c.body.includes("merge-answer"))).toBe(false);
+  // the yes text is kept like any comment (nothing reads it), and the gate still counts no answer
+  const r = await s.send("POST", "/1/comment?change=1", { workspaceId: s.ws.id, text: `[merge-answer] yes security:gates ${head}` });
+  expect(r.status).toBe(202);
   const g = await s.gate(1, ["--allow-large"]);
-  // the app holds no grant of the change's head (the yes was refused), so the flag lifts nothing in the Task
+  // the app holds no grant of the change's head, so the flag lifts nothing in the Task
   expect([g.code, g.out.includes("[聞く]") && g.out.includes("利用者の許可の記録が無い: security:gates")]).toEqual([1, true]);
   expect((await s.merge(1, ["--allow-large"])).code).toBe(1);
   expect(s.landed()).toEqual([]);

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, realCommand, writeTargetOf, markText, mergeAnswerOf, mergeAnswerYes, mergeAnswerYesHeads, mergeHeadOf, plainMergeOf } from "./gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeWrite, realCommand, writeTargetOf, mergeHeadOf, plainMergeOf } from "./gh-guard.ts";
 
 const GUARD = join(import.meta.dir, "../bin/gh");
 const code = ["QWJK", "ZRTP"].join("-");
@@ -813,25 +813,6 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     }
   });
 
-  test("mergeAnswerPost reads a yes mark in pr comment, the comments API and graphql addComment; a no, no mark and other writes are not it", () => {
-    const yes = ["[merge-answer] yes large abc"];
-    expect(mergeAnswerPost(["pr", "comment", "12", "--body", yes[0]!], yes)).toEqual({ pr: 12 });
-    expect(mergeAnswerPost(["-R", "x/y", "pr", "comment", "https://github.com/x/y/pull/9", "-b", yes[0]!], yes)).toEqual({ pr: 9 });
-    expect(mergeAnswerPost(["pr", "comment", "-b", yes[0]!], yes)).toEqual({ pr: null });
-    expect(mergeAnswerPost(["api", "-X", "POST", "repos/x/y/issues/12/comments", "-f", `body=${yes[0]}`], yes)).toEqual({ pr: 12 });
-    expect(mergeAnswerPost(["api", "repos/x/y/issues/12/comments"], yes)).toBeNull();
-    expect(mergeAnswerPost(["api", "graphql", "-f", "query=mutation { addComment(input: {}) { clientMutationId } }"], ["mutation { addComment(input: {}) }", ...yes])).toEqual({ pr: null });
-    // the same mark through an Issue comment on the PR, or an edit of a comment that is there already
-    expect(mergeAnswerPost(["issue", "comment", "12", "--body", yes[0]!], yes)).toEqual({ pr: 12 });
-    expect(mergeAnswerPost(["issue", "comment", "https://github.com/x/y/issues/9", "-b", yes[0]!], yes)).toEqual({ pr: 9 });
-    expect(mergeAnswerPost(["api", "-X", "PATCH", "repos/x/y/issues/comments/555", "-f", `body=${yes[0]}`], yes)).toEqual({ pr: null });
-    expect(mergeAnswerPost(["api", "repos/x/y/issues/comments/555"], yes)).toBeNull();
-    expect(mergeAnswerPost(["api", "graphql", "-f", "query=mutation { updateIssueComment(input: {}) { clientMutationId } }"], ["mutation { updateIssueComment(input: {}) }", ...yes])).toEqual({ pr: null });
-    expect(mergeAnswerPost(["pr", "comment", "12", "--body", "[merge-answer] no x"], ["[merge-answer] no x"])).toBeNull();
-    expect(mergeAnswerPost(["pr", "comment", "12", "--body", "x"], ["note [merge-answer] yes"])).toBeNull();
-    expect(mergeAnswerPost(["pr", "review", "12", "--body", yes[0]!], yes)).toBeNull();
-  });
-
   test("mergeWrite reads the forms: -R before the group, after --, a URL, a branch", () => {
     expect(mergeWrite(["-R", "x/y", "pr", "merge", "12"])).toEqual({ pr: 12 });
     expect(mergeWrite(["pr", "merge", "--", "https://github.com/x/y/pull/9"])).toEqual({ pr: 9 });
@@ -1012,8 +993,7 @@ describe("bodiesOf / realCommand", () => {
   });
 });
 
-describe("merge-answer: a yes mark is posted in a Task only with the grant of the PR (kind answer)", () => {
-  // the head PR 12 had when the person gave the grant
+describe("merge-answer: the gate's yes mark is no longer stopped (the gate reads the person's grant record, not a mark)", () => {
   const HEAD = "0123456789012345678901234567890123456789";
   async function post(argv: string[], opts: { gate?: boolean; down?: boolean; url?: boolean; repo?: boolean } = {}) {
     const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.answer."));
@@ -1036,57 +1016,14 @@ describe("merge-answer: a yes mark is posted in a Task only with the grant of th
   }
   const mark = `[merge-answer] yes large ${HEAD}`;
 
-  test("without the grant the mark stops before gh; with it, the comment goes on (asked with the task, kind and PR)", async () => {
-    const no = await post(["pr", "comment", "13", "--body", mark]);
-    expect([no.code, no.ran, no.err]).toEqual([1, false, expect.stringContaining("[merge-answer] yes")]);
-    const ok = await post(["pr", "comment", "12", "--body", mark]);
-    expect([ok.code, ok.ran, ok.asked]).toEqual([0, true, [`?taskId=t1&repo=acme%2Fapp&kind=answer&target=12&head=${HEAD}`]]);
-    const api = await post(["api", "-X", "POST", "repos/x/y/issues/13/comments", "-f", `body=${mark}`]);
-    expect([api.code, api.ran]).toEqual([1, false]);
-    // the same number of another repository is asked for that repository, and has no grant
-    const other = await post(["pr", "comment", "12", "-R", "x/y", "--body", mark]);
-    expect([other.code, other.ran, other.asked]).toEqual([1, false, [`?taskId=t1&repo=x%2Fy&kind=answer&target=12&head=${HEAD}`]]);
-    // no repository named and none readable: not asked, not posted
-    const unknown = await post(["pr", "comment", "12", "--body", mark], { repo: false });
-    expect([unknown.code, unknown.ran, unknown.asked, unknown.err]).toEqual([1, false, [], expect.stringContaining("書き込み先のリポジトリが読めず")]);
-  });
-
-  test("the mark is found in the form its readers compare: a leading space, a tab, a byte order mark, full-width letters, capitals and zero-width characters do not hide it", async () => {
-    const variants = [` ${mark}`, `\t${mark}`, `\uFEFF${mark}`, `\n\n  ${mark}`, mark.replace("[merge-answer]", "［ｍｅｒｇｅ－ａｎｓｗｅｒ］"), mark.replace("yes", "YES"), mark.replace("[merge-answer] yes", "[Merge-Answer]\u3000Yes"), mark.replace("[merge", "[mer\u200Bge"), mark.replace("] yes", "]  \u00A0yes"), mark.replace("] yes", "]yes"), `メモ\r\n\u200B ${mark}`];
-    for (const body of variants) {
-      // PR 13 has no grant: every variant stops before gh
-      const no = await post(["pr", "comment", "13", "--body", body]);
-      expect([body, no.code, no.ran]).toEqual([body, 1, false]);
+  test("a yes mark goes on to gh without a grant and without asking the app; a merge outside the gate still stops", async () => {
+    for (const argv of [["pr", "comment", "13", "--body", mark], ["api", "-X", "POST", "repos/x/y/issues/13/comments", "-f", `body=${mark}`], ["pr", "comment", "--body", mark]]) {
+      const r = await post(argv);
+      // the app is asked about no grant (its only other question here is the list of synced repositories)
+      expect([argv, r.code, r.ran, r.asked.some((q) => q.includes("kind="))]).toEqual([argv, 0, true, false]);
     }
-    // and with the grant of PR 12 and its head the same texts go on: the check reads them as the mark they are
-    const ok = await post(["pr", "comment", "12", "--body", ` ${mark}`]);
-    expect([ok.code, ok.ran, ok.asked]).toEqual([0, true, [`?taskId=t1&repo=acme%2Fapp&kind=answer&target=12&head=${HEAD}`]]);
-  });
-
-  test("the grant holds for the head it was given for: a yes that names another head, or none, is not posted", async () => {
-    const moved = await post(["pr", "comment", "12", "--body", `[merge-answer] yes large ${"b".repeat(40)}`]);
-    expect([moved.code, moved.ran, moved.asked, moved.err]).toEqual([1, false, [`?taskId=t1&repo=acme%2Fapp&kind=answer&target=12&head=${"b".repeat(40)}`], expect.stringContaining("新しいコミットの後は聞き直します")]);
-    const none = await post(["pr", "comment", "12", "--body", "[merge-answer] yes large"]);
-    expect([none.code, none.ran, none.asked, none.err]).toEqual([1, false, [], expect.stringContaining("head の sha")]);
-    // two yes lines: each head needs its grant
-    const two = await post(["pr", "comment", "12", "--body", `${mark}\n[merge-answer] yes size ${"b".repeat(40)}`]);
-    expect([two.code, two.ran]).toEqual([1, false]);
-  });
-
-  test("one form for the check and the reader: whatever the gate would read as a yes, the check sees as a yes", () => {
-    const sha = "a".repeat(40);
-    const plain = `[merge-answer] yes security:gates,size ${sha}`;
-    const spellings = [plain, ` ${plain}`, `\t${plain}`, `\uFEFF${plain}`, `\r\n\r\n${plain}\r\nrest`, `\u200B${plain}`, plain.replace("[merge-answer]", "［ｍｅｒｇｅ－ａｎｓｗｅｒ］"), plain.replace("yes", "ＹＥＳ"), plain.replace("yes", "Yes"), plain.replace("] yes ", "]\u3000yes\u00A0\u00A0"), plain.replace("merge-answer", "merge\u2060-an\u200Dswer"), plain.toUpperCase()];
-    for (const body of spellings) {
-      expect([body, mergeAnswerOf(body)]).toEqual([body, { answer: "yes", kinds: ["security:gates", "size"], sha }]);
-      expect([body, mergeAnswerYes(body), mergeAnswerYesHeads(body)]).toEqual([body, true, [sha]]);
-    }
-    // the check is wider than the reader: a yes on a later line, without its space, or without a head is still stopped
-    for (const body of [`note\n${plain}`, plain.replace("] yes", "]yes"), "[merge-answer] yes", "[merge-answer] yes size"]) expect([body, mergeAnswerYes(body)]).toEqual([body, true]);
-    expect(mergeAnswerYesHeads("[merge-answer] yes size")).toEqual([null]);
-    // and what is no yes stays none for both
-    for (const body of [plain.replace("yes", "no"), `note ${plain}`, "> [merge-answer] yes x", "[merge-answer] yesterday", "[merge-answers] yes"]) expect([body, mergeAnswerYes(body), mergeAnswerOf(body)?.answer === "yes"]).toEqual([body, false, false]);
-    expect(markText("  ［Ａ］\u3000 b\u200B \r\n\tC  ")).toBe("[a] b\nc");
+    const merge = await post(["pr", "merge", "13", "--rebase"]);
+    expect([merge.code, merge.err]).toEqual([1, expect.stringContaining("判定の外でマージするには")]);
   });
 
   test("mergeHeadOf: the head a merge names, and where gh pr merge takes one", () => {
@@ -1105,26 +1042,4 @@ describe("merge-answer: a yes mark is posted in a Task only with the grant of th
     for (const f of [["-f", `sha=${l}`], ["-F", `sha=${l}`], ["--field", `sha=${l}`], [`--raw-field=sha=${l}`]]) expect(mergeHeadOf([...api, ...f])).toEqual({ head: l, at: null, carries: true });
     for (const f of [["-f", "sha=abc"], ["-f", `sha=${h}`], ["--input", "b.json"], ["-f", `sha=${l}`, "--input", "b.json"], ["-f", `sha=${l}`, "-f", `sha=${"b".repeat(40)}`]]) expect(mergeHeadOf([...api, ...f]).head).toBeNull();
   });
-
-  test("a mark that names no PR, or an app that cannot be reached, stops", async () => {
-    expect((await post(["pr", "comment", "--body", mark])).code).toBe(1);
-    // an edit of a comment never passes, grant or not: the reason says to post a new comment, not to wait for the grant
-    const edit = await post(["api", "-X", "PATCH", "repos/x/y/issues/comments/555", "-f", `body=${mark}`]);
-    expect([edit.code, edit.ran, edit.asked, edit.err.includes("新しいコメントで投稿します"), edit.err.includes("1 行書いたあとに投稿します")]).toEqual([1, false, [], true, false]);
-    const down = await post(["pr", "comment", "12", "--body", mark], { down: true });
-    expect([down.code, down.ran, down.err]).toEqual([1, false, expect.stringContaining("アプリに届かず")]);
-  });
-
-  test("a no, a comment without the mark, no mergeGate and no BACKLOG_URL go on without asking the app", async () => {
-    for (const [argv, opts] of [
-      [["pr", "comment", "13", "--body", "[merge-answer] no large abc"], {}],
-      [["pr", "comment", "13", "--body", "ordinary"], {}],
-      [["pr", "comment", "13", "--body", mark], { gate: false }],
-      [["pr", "comment", "13", "--body", mark], { url: false }],
-    ] as const) {
-      const r = await post([...argv], opts);
-      expect([r.code, r.ran, r.asked]).toEqual([0, true, []]);
-    }
-  });
 });
-

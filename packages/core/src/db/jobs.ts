@@ -42,6 +42,11 @@ export class JobQueries extends ScheduleQueries {
     return (this.sqlite.query("SELECT * FROM jobs WHERE repo = ? AND started_at >= ? ORDER BY id").all(repo, sinceMs) as JobRow[]).map(rowToJob);
   }
 
+  /** When the first job that recorded a head started, in a repository (`repo` as recorded); null when none did. Before it the jobs hold no record a verdict or an audit reads. */
+  firstHeadedJobAt(repo: string): number | null {
+    return (this.sqlite.query("SELECT MIN(started_at) AS at FROM jobs WHERE repo = ? AND head IS NOT NULL").get(repo) as { at: number | null }).at;
+  }
+
   /** The wrapper's pid and the boot it runs in: after a reboot the pid may be another process's (recoverJobs). */
   setJobPid(id: number, pid: number, bootId: string | null) {
     this.sqlite.query("UPDATE jobs SET pid = ?, boot_id = ? WHERE id = ?").run(pid, bootId, id);

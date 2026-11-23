@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, Schedule, Workspace } from "@switchboard/protocol";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, readyPending, startButton, directButton, taskTimes, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, lastTaskLine, readyPending, startButton, directButton, taskTimes, overlapLine, pbiOwner, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl } from "./inProgress.ts";
 
 const item = (over: Partial<BacklogItem>): BacklogItem => ({
   number: 1, title: "t", url: "u", type: "pbi", stage: "in-progress", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z",
@@ -162,15 +162,32 @@ test("waitText: a wait solved does not promise the next firing while a prerequis
 
 test("overlapLine: the PR / Task the row's files overlap with, each linked; why it cannot be judged; none otherwise", () => {
   const url = "https://github.com/o/r/issues/1";
-  expect(overlapLine(item({ url }))).toBeNull();
-  expect(overlapLine(item({ url, overlap: { hits: [], unknown: null } }))).toBeNull();
-  expect(overlapLine(item({ url, overlap: { hits: [{ ref: "PR #50", path: "src/a.ts" }, { ref: "Task #60", path: "src/b.ts" }], unknown: null } }))).toEqual({
-    hits: [{ ref: "PR #50", url: "https://github.com/o/r/pull/50", path: "src/a.ts" }, { ref: "Task #60", url: "https://github.com/o/r/issues/60", path: "src/b.ts" }],
+  expect(overlapLine(item({ url }), [])).toBeNull();
+  expect(overlapLine(item({ url, overlap: { hits: [], unknown: null } }), [])).toBeNull();
+  expect(overlapLine(item({ url, overlap: { hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }, { ref: "Task #60", path: "src/b.ts", working: true, pbi: null }], unknown: null } }), [])).toEqual({
+    hits: [{ ref: "PR #50", url: "https://github.com/o/r/pull/50", path: "src/a.ts", owner: null }, { ref: "Task #60", url: "https://github.com/o/r/issues/60", path: "src/b.ts", owner: null }],
     unknown: null,
   });
-  expect(overlapLine(item({ url, overlap: { hits: [], unknown: "PR #51 の変更ファイルが記録に無い" } }))).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
+  expect(overlapLine(item({ url, overlap: { hits: [], unknown: "PR #51 の変更ファイルが記録に無い" } }), [])).toEqual({ hits: [], unknown: "PR #51 の変更ファイルが記録に無い" });
   // a path kept for a PBI that yielded earlier: the row names and links that PBI
-  expect(overlapLine(item({ url, overlap: { hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null } }))!.hits).toEqual([{ ref: "順番待ち #2", url: "https://github.com/o/r/issues/2", path: "src/a.ts" }]);
+  expect(overlapLine(item({ url, overlap: { hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2, pbi: null }], unknown: null } }), [])!.hits).toEqual([{ ref: "順番待ち #2", url: "https://github.com/o/r/issues/2", path: "src/a.ts", owner: null }]);
+});
+
+test("overlap owner: a hit naming a PBI carries that PBI's stage Task, chosen as a wait's is; a hit without one stays a link", () => {
+  const url = "https://github.com/acme/app/issues/1";
+  const pbi20 = { number: 20, title: "PBI 20", url: "https://github.com/acme/app/issues/20" };
+  const row = (hits: NonNullable<BacklogItem["overlap"]>["hits"]) => item({ url, overlap: { hits, unknown: null } });
+  const hit = (ref: string, pbi: number | null) => ({ ref, path: "src/a.ts", working: true, pbi });
+  const owners = (r: BacklogItem, others: BacklogItem[]) => overlapLine(r, [r, ...others])!.hits.map((h) => h.owner);
+  // the running Task before the last one, as waitOwner chooses
+  const r = row([hit("PR #50", 20), hit("Task #60", null)]);
+  expect(owners(r, [item({ number: 20, title: "PBI 20", activeTaskId: "task_run", lastTask: last("done") })])).toEqual([{ pbi: pbi20, task: { id: "task_run", running: true, label: "動いている" } }, null]);
+  expect(owners(r, [item({ number: 20, title: "PBI 20", lastTask: last("error") })])[0]).toEqual({ pbi: pbi20, task: { id: "task_1", running: false, label: "止まっている: 失敗" } });
+  // no stage Task: 工程 Task なし; not in the list: Task 不明
+  expect(owners(r, [item({ number: 20, title: "PBI 20", lastTask: null })])[0]).toEqual({ pbi: pbi20, task: null });
+  expect(owners(r, [])[0]).toEqual({ pbi: { ...pbi20, title: "" }, task: "unknown" });
+  // the same as the wait's owner of that PBI
+  expect(owners(r, [item({ number: 20, title: "PBI 20", lastTask: last("done") })])[0]).toEqual(pbiOwner(20, null, r, [r, item({ number: 20, title: "PBI 20", lastTask: last("done") })]));
 });
 
 describe("taskTimes", () => {

@@ -284,6 +284,7 @@ export function App() {
   };
   const openRelease = () => openSettingsAt("release");
   const newVersion = newVersionLink(release);
+  const drain = drainBanner(health?.promotionDrain, Date.now());
   // in: the passkey page's mark has done its job; a later refusal must go back to the passkey page, not read as stuck
   useEffect(() => {
     const clean = authorized && withoutFromAuth(location.pathname + location.search);
@@ -601,9 +602,12 @@ export function App() {
           <span>{uplinkSkippedBanner(health?.uplinkSkipped)}</span>
         </div>
       )}
-      {drainBanner(health?.promotionDrain, Date.now()) && (
-        <div className="banner promotion-drain" role="status">
-          <span>{drainBanner(health?.promotionDrain, Date.now())}</span>
+      {drain && (
+        <div className="banner promotion-drain" role="status" title={drain.detail}>
+          <details>
+            <summary>{drain.line}</summary>
+            <p>{drain.detail}</p>
+          </details>
         </div>
       )}
 

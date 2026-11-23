@@ -16,6 +16,9 @@ export class GrantQueries extends AskAnswerQueries {
     this.sqlite
       .query("INSERT INTO task_grants (task_id, repo, kind, target, by, source, at, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, repo, kind, target, by, source) DO UPDATE SET at = excluded.at, head = excluded.head WHERE excluded.at >= task_grants.at")
       .run(g.taskId, g.repo.toLowerCase(), g.kind, g.target, g.by, g.source ?? "", at, g.head ?? "");
+    // each grant of each head stays on record (the row above keeps the newest only): a head allowed again after a later ask keeps that time too
+    if (g.head && (g.kind === "answer" || g.kind === "merge"))
+      this.sqlite.query("INSERT OR IGNORE INTO task_grant_heads (task_id, repo, kind, target, head, by, at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(g.taskId, g.repo.toLowerCase(), g.kind, g.target, g.head.toLowerCase(), g.by, at);
   }
 
   /**
@@ -47,6 +50,13 @@ export class GrantQueries extends AskAnswerQueries {
     if (!head) return null;
     const r = this.sqlite.query("SELECT MAX(at) AS at FROM task_grants WHERE task_id = ? AND repo = ? AND kind IN (?, ?) AND target = ? AND by = ? AND head = ?").get(taskId, repo.toLowerCase(), kind, kind === "answer" ? "merge" : kind, target, OWNER, head.toLowerCase()) as { at: number | null };
     return r.at;
+  }
+
+  /** The person's merge and answer grants (`by = 'owner'`) of these PRs of a repository (`repo` as recorded) that name a head, oldest first, each head that was allowed (a newer grant of another head does not erase it). What an audit reads of who allowed which head. */
+  ownerMergeGrantsOf(repo: string, prs: number[]): Array<{ taskId: string; target: number; head: string; at: number }> {
+    if (!prs.length) return [];
+    const marks = prs.map(() => "?").join(",");
+    return (this.sqlite.query(`SELECT task_id, target, head, at FROM task_grant_heads WHERE repo = ? AND kind IN ('answer', 'merge') AND by = ? AND head != '' AND target IN (${marks}) ORDER BY at`).all(repo.toLowerCase(), OWNER, ...prs) as Array<{ task_id: string; target: number; head: string; at: number }>).map((r) => ({ taskId: r.task_id, target: r.target, head: r.head, at: r.at }));
   }
 
   hasMergeGrant(taskId: string, repo: string, kind: string, target: number, head?: string): boolean {

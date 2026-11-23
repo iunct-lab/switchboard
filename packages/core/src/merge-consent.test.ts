@@ -3,6 +3,9 @@ import type { AgentEvent, JudgeSettings, RunnerAdapter, RunnerId, RunnerSession,
 import { CONSENT_CHARS, buildConsentPrompt, consentCandidates, parseConsent, readConsent, requestedGrants } from "./merge-consent.ts";
 import { questionsChosen } from "./asks.ts";
 
+/** The allowing sentence of the older release (no longer read): split so a search for it finds only the code that would read it. */
+const OLD = "[merge-answer] yes" + " を投稿してよい";
+
 const SETTINGS: JudgeSettings = { enabled: true, runner: "codex", model: "gpt-6-luna", effort: "", recapChars: 12_000, laterChars: 4_000, laterEachChars: 600, pbiChars: 800, requestChars: 800, skillChars: 20_000 };
 const INPUT = { said: "merge許可する", asked: "PR #5741 を判定の外でマージしてよいですか。" };
 
@@ -42,8 +45,8 @@ describe("requestedGrants", () => {
     // inside backticks and a longer line; not a question; not another repository's; not a quoted line
     expect(requestedGrants(["次の文で通ります: `PR #7 を判定の外でマージしてよい` を送ってください。\nPR #8 を判定の外でマージしてよいですか\nacme/lib の PR #9 を判定の外でマージしてよい\n> PR #10 を判定の外でマージしてよい"])).toEqual([{ kind: "merge", target: 7 }]);
     expect(requestedGrants(["PR #6 をマージしてよい", "`PR #6 をマージしてよい`"])).toEqual([{ kind: "answer", target: 6 }]);
-    // the older sentence is read while the check on posting the mark stands
-    expect(requestedGrants(["PR #6 に [merge-answer] yes を投稿してよい"])).toEqual([{ kind: "answer", target: 6 }]);
+    // the older sentence that offered to post the mark is not read
+    expect(requestedGrants([`PR #6 に ${OLD}`])).toEqual([]);
     // a local change of the workspace is its own sentence, and carries no repository
     expect(requestedGrants(["`変更 L3 をマージしてよい` で通ります"])).toEqual([{ kind: "answer", target: 3, change: true }]);
     // another repository named in backticks before the sentence is another repository's too

@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, RECHECK_PASS, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
 import { Db } from "../packages/core/src/db";
 import { mergeRecordsOf } from "../packages/core/src/merge-records";
@@ -10,7 +10,7 @@ import recorded from "./merge-gate.recorded.json";
 import { ciOf } from "./merge-gate-records";
 import type { MergeRecordJob } from "../ops-kit/src/merge-records";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,6 +68,52 @@ const MOVED: string[] = ["security:docs", "security:tests", "security:lockfile"]
 const HEAD = "a".repeat(40);
 /** The facts with the person's grant of the head in the app's record (--allow-large lifts nothing without it); `_kinds` says what the test means the person allowed (the record has no kinds). */
 const yes = (_kinds: string, over: Partial<PrFacts> = {}) => base({ ...over, head: HEAD, granted: true });
+
+describe("the record of a verdict names every recheck kind the change asks for", () => {
+  const files = [{ path: "packages/core/src/auth.test.ts", additions: 1, deletions: 0, status: "modified" }];
+  test("judge's `required` holds the kinds whose recheck is already recorded too; `recheck` only those still without one", () => {
+    const j = judge(base({ files, rechecks: ["security:tests"] }), off);
+    expect(j.required).toEqual(["security:tests"]);
+    expect(j.recheck).toEqual([]);
+    expect(judge(base({ files }), off).required).toEqual(["security:tests"]);
+    // nothing asked: no `required` at all
+    expect(judge(base(), off).required).toBeUndefined();
+  });
+
+  test("writeGateResult writes `required` (the union over the stack's verdicts) next to `recheck`", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-gate-result-"));
+    try {
+      const marked = judge(base({ files, rechecks: ["security:tests"] }), off);
+      const plain = judge(base(), off);
+      writeGateResult({ J: dir }, { head: HEAD, verdict: "merge", judged: [{ pr: 3, j: marked }, { pr: null, j: plain }], allowLarge: false, merged: true });
+      expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))).toMatchObject({ required: ["security:tests"], recheck: [], merged: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("writeGateResult keeps each PR of a stack as its own entry (head, kinds, merged, reviewSkipped); a single PR has none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-gate-result-"));
+    try {
+      const low = judge(base({ files, rechecks: ["security:tests"] }), off);
+      const top = judge(base(), off);
+      const L = "1".repeat(40), T = "2".repeat(40);
+      writeGateResult({ J: dir }, { head: T, verdict: "merge", judged: [{ pr: 3, j: low, head: L }, { pr: null, j: top, head: T }], topPr: 4, allowLarge: false, merged: true });
+      expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).stack).toEqual([
+        { pr: 3, head: L, ask: [], recheck: [], required: ["security:tests"], merged: true, reviewSkipped: false },
+        { pr: 4, head: T, ask: [], recheck: [], required: [], merged: true, reviewSkipped: false },
+      ]);
+      // each PR's own reviewSkipped: a direct PR below a reviewed top PR says so in its entry
+      writeGateResult({ J: dir }, { head: T, verdict: "merge", judged: [{ pr: 3, j: { ...low, reviewSkipped: true }, head: L }, { pr: null, j: top, head: T }], topPr: 4, allowLarge: false, merged: true });
+      const r = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+      expect([r.reviewSkipped, r.stack.map((e: { pr: number; reviewSkipped: boolean }) => [e.pr, e.reviewSkipped])]).toEqual([false, [[3, true], [4, false]]]);
+      writeGateResult({ J: dir }, { head: T, verdict: "merge", judged: [{ pr: null, j: top, head: T }], topPr: 4, allowLarge: false, merged: true });
+      expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))).not.toHaveProperty("stack");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("merge-gate judge", () => {
   test("a small reviewed PR with green CI merges", () => {
@@ -167,12 +213,12 @@ describe("merge-gate judge", () => {
       { path: "ops.config.json", additions: 1, deletions: 0 },
     ];
     expect(judge(base({ files }), off).reasons).toEqual(["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: ops.config.json"]);
-    expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"], attack: ["src/auth/session.ts"] });
+    expect(judge(yes("security:words,responsibility,design-rules", { files, designRulesTouched: true }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: ["security:words"], recheck: ["responsibility", "design-rules"], required: ["responsibility", "design-rules"], attack: ["src/auth/session.ts"] });
   });
 
   test("--allow-large lifts every large reason, not the others", () => {
     const files = [{ path: "rescue/src/server.ts", additions: 400, deletions: 0 }];
-    expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: ["size", "rescue"], attack: ["rescue/src/server.ts"] });
+    expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: ["size", "rescue"], required: ["size", "rescue"], attack: ["rescue/src/server.ts"] });
     const j = judge(yes("rescue,size", { files, reviewed: undefined, attacked: undefined }), { allowLarge: true });
     expect(j.verdict).toBe("stop");
     expect(j.impact).toBe("large");
@@ -623,16 +669,13 @@ describe("approved security sub-kind rechecks", () => {
     ["docs/design/secret-guard.md", "security:docs"],
     ["bun.lock", "security:lockfile"],
   ] as const)("%s alone: [再チェック %s] stops, its mark of the head lifts it", (path, kind) => {
-    expect(marked([path], [])).toEqual({ verdict: "stop", impact: "large", reasons: [`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`], ask: [], recheck: [kind], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
-    expect(marked([path], [kind])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
+    expect(marked([path], [])).toEqual({ verdict: "stop", impact: "large", reasons: [`[再チェック ${kind}] セキュリティ（${kind}）: ${path}`], ask: [], recheck: [kind], required: [kind], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
+    expect(marked([path], [kind])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], required: [kind], ...(kind === "security:lockfile" ? { attack: [path] } : {}) });
     // another kind's mark does not lift it
     expect(marked([path], ["size"]).verdict).toBe("stop");
   });
 
   test("a group not moved is still asked, and a mark of the same shape is not read", () => {
-    expect(RECHECK_PASS.exec(`[recheck] security:lockfile pass ${HEAD}`)?.slice(1)).toEqual(["security:lockfile", HEAD]);
-    expect(RECHECK_PASS.exec(`[recheck] security:docs pass ${HEAD}`)?.slice(1)).toEqual(["security:docs", HEAD]);
-    for (const k of ["security:words", "security:github", "security:gates", "security:host"]) expect(RECHECK_PASS.exec(`[recheck] ${k} pass ${HEAD}`)).toBeNull();
     expect(marked(["src/auth.ts"], [])).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], ask: ["security:words"] });
   });
 
@@ -643,6 +686,7 @@ describe("approved security sub-kind rechecks", () => {
       reasons: ["[聞く] セキュリティ（security:gates）: scripts/merge-gate.ts"],
       ask: ["security:gates"],
       recheck: [],
+      required: ["security:docs", "security:lockfile"],
       attack: ["bun.lock", "scripts/merge-gate.ts"],
     });
   });
@@ -659,8 +703,6 @@ describe("instructions", () => {
       expect(judge(base({ files: [file(path)], rechecks: ["responsibility", "size"] }), off).verdict).toBe("stop");
       expect(judge(yes("instructions", { files: [file(path)] }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
       expect(judge(base({ files: [file(path)], head: HEAD }), { allowLarge: true }).verdict).toBe("stop");
-      // instructions is no recheck kind: its mark is not read at all
-      expect(RECHECK_PASS.exec(`[recheck] instructions pass ${"a".repeat(40)}`)).toBeNull();
     },
   );
 
@@ -825,7 +867,7 @@ describe("recheck", () => {
     ["db.ts only", one("packages/core/src/db.ts"), ["[再チェック migration] 保護するパスに触れている: packages/core/src/db.ts"], [], ["migration"]],
   ] as const)("%s: the reason's head, ask and recheck", (_, files, reasons, ask, recheck) => {
     const j = judge(base({ files: [...files], designRulesTouched: files[0]!.path === "README.md" || undefined }), off);
-    expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck], ...(["src/auth.ts", "rescue/src/server.ts"].includes(files[0]!.path) ? { attack: [files[0]!.path] } : {}) });
+    expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [...reasons], ask: [...ask], recheck: [...recheck], ...(recheck.length ? { required: [...recheck] } : {}), ...(["src/auth.ts", "rescue/src/server.ts"].includes(files[0]!.path) ? { attack: [files[0]!.path] } : {}) });
   });
 
   test("an asked security group stays asked: a mark does not lift it, --allow-large does", () => {
@@ -836,14 +878,12 @@ describe("recheck", () => {
     expect(judge(yes("security:words,security:lockfile", { files }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [], ask });
     // the grant of another head does not lift it: the record says which head it is of (the reader asks the app with the PR's)
     expect(judge(base({ files, head: HEAD }), { allowLarge: true })).toMatchObject({ verdict: "stop" });
-    expect(RECHECK_PASS.exec(`[recheck] security pass ${"a".repeat(40)}`)).toBeNull();
-    expect(RECHECK_PASS.exec(`[recheck] security:words pass ${"a".repeat(40)}`)).toBeNull();
   });
 
   test("rescue is a recheck kind: its mark lifts it, another kind's or none does not", () => {
     const files = one("rescue/src/x.ts");
     expect(judge(base({ files }), off)).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: ["rescue"], reasons: ["[再チェック rescue] rescue: rescue/src/x.ts"] });
-    expect(marked(files, ["rescue"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], attack: ["rescue/src/x.ts"] });
+    expect(marked(files, ["rescue"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], required: ["rescue"], attack: ["rescue/src/x.ts"] });
     expect(marked(files, ["size"]).reasons).toEqual(["[再チェック rescue] rescue: rescue/src/x.ts"]);
     // an instruction file inside rescue is rescue and instructions; a security one there says セキュリティ
     expect(marked(one("rescue/CLAUDE.md"), ["rescue"])).toMatchObject({ verdict: "stop", reasons: ["[聞く] 指示のファイル: rescue/CLAUDE.md"], recheck: [] });
@@ -854,7 +894,7 @@ describe("recheck", () => {
     const files = one("README.md");
     const over = { designRulesTouched: true };
     expect(judge(base({ files, ...over }), off)).toMatchObject({ verdict: "stop", impact: "large", ask: [], recheck: ["design-rules"], reasons: ["[再チェック design-rules] 責務: README.md の ## Design rules"] });
-    expect(marked(files, ["design-rules"], over)).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    expect(marked(files, ["design-rules"], over)).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], required: ["design-rules"] });
     expect(marked(files, ["responsibility"], over).reasons).toEqual(["[再チェック design-rules] 責務: README.md の ## Design rules"]);
   });
 
@@ -869,7 +909,7 @@ describe("recheck", () => {
   });
 
   test("a recheck-only PR with a mark per kind merges; impact stays large", () => {
-    expect(marked(one("ops.config.json"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [] });
+    expect(marked(one("ops.config.json"), ["responsibility"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], required: ["responsibility"] });
     const files = [...one("apps/web/src/App.tsx", 301), ...one("ops.config.json"), ...one("packages/core/src/schema-baseline.json")];
     expect(marked(files, ["size", "responsibility", "migration"])).toMatchObject({ verdict: "merge", reasons: [], ask: [], recheck: [] });
   });
@@ -882,6 +922,7 @@ describe("recheck", () => {
       reasons: ["[再チェック size] テストと docs を除いた変更が 302 行で、300 行を超えている"],
       ask: [],
       recheck: ["size"],
+      required: ["size", "responsibility"],
     });
   });
 
@@ -2288,18 +2329,10 @@ describe("record marks", () => {
     expect(MERGE_ASK.exec(`[merge-ask] security:lockfile,rescue ${SHA}`)?.slice(1)).toEqual(["security:lockfile,rescue", SHA]);
   });
 
-  test("[merge-answer] reads yes / no, the kinds and the head sha", () => {
-    expect(MERGE_ANSWER.exec(`[merge-answer] yes rescue,responsibility ${SHA}`)?.slice(1)).toEqual(["yes", "rescue,responsibility", SHA]);
-    expect(MERGE_ANSWER.exec(`[merge-answer] no security ${SHA}`)?.slice(1)).toEqual(["no", "security", SHA]);
-    expect(MERGE_ANSWER.exec(`[merge-answer] yes security:lockfile,rescue ${SHA}`)?.slice(1)).toEqual(["yes", "security:lockfile,rescue", SHA]);
-  });
-
   test.each([
     [MERGE_ASK, `[merge-ask] security ${SHA.slice(0, 7)}`], // a short sha
     [MERGE_ASK, `ok [merge-ask] security ${SHA}`], // not at the start
     [MERGE_ASK, `x\n[merge-ask] security ${SHA}`], // not the first line
-    [MERGE_ANSWER, `[merge-answer] maybe security ${SHA}`], // not yes / no
-    [MERGE_ANSWER, `[merge-answer] yes ${SHA}`], // no kinds
   ])("%p does not read %p", (re, body) => {
     expect(re.exec(body)).toBeNull();
   });
@@ -2891,8 +2924,6 @@ describe("reversibility table", () => {
   test("derives the ask and recheck kinds from the table (the owner moved security:docs, security:tests and security:lockfile to a recheck)", () => {
     expect(ASK_KINDS).toEqual([...SECURITY_KINDS.filter((k) => !MOVED.includes(k)), "instructions", "limits"]);
     expect(RECHECK_KINDS).toEqual(["security:docs", "security:tests", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
-    expect(RECHECK_PASS.test(`[recheck] design-rules pass ${"a".repeat(40)}`)).toBe(true);
-    expect(RECHECK_PASS.test(`[recheck] security:gates pass ${"a".repeat(40)}`)).toBe(false);
   });
 
   test("moving a kind to irreversible moves it to the ask side", () => {

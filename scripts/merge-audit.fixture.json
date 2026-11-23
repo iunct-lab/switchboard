@@ -1,357 +1,1497 @@
 {
- "_note": "Shapes of the REST API responses (issues/comments item, pulls, commits/<sha>/pulls) with made-up values; the PRs are made up with marks. merged = search/issues is:pr is:merged in the period. The last log entry reverts a commit made inside a PR's branch (its pre-rebase sha is not on main). #912 answered with no ask, #913 asked and merged with no answer, #914 asked once and answered yes twice on two heads. #921 (a main review) / #922 (none: direct) / #923 / #924 (a recheck of the merged head, no answer) merged on 2026-10-04 with a `[post-audit]` mark each: 921 and 922 pass, 923 finding, 924 pass.",
- "comments": [
-  {
-   "body": "[recheck] responsibility pass 0000000000000000000000000000000000000000\npatch-id x",
-   "created_at": "2026-10-01T08:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/804",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-ask] rescue,size aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nPR #901 をマージしてよいか",
-   "created_at": "2026-10-02T01:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/901",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/901",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] yes rescue,size aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "created_at": "2026-10-02T03:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/901",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-ask] design-rules bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-   "created_at": "2026-10-02T01:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/902",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] no design-rules bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-   "created_at": "2026-10-02T09:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/902",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass cccccccccccccccccccccccccccccccccccccccc\npatch-id x",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/903",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] responsibility pass dddddddddddddddddddddddddddddddddddddddd",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/904",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] migration pass eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/905",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass 2222222222222222222222222222222222222222",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/906",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-ask] security:words 1111111111111111111111111111111111111111",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/907",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] yes security:words ffffffffffffffffffffffffffffffffffffffff",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/908",
-   "author_association": "CONTRIBUTOR"
-  },
-  {
-   "body": "[codex] review\n\nnot a mark",
-   "created_at": "2026-10-02T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/909",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass ffffffffffffffffffffffffffffffffffffffff",
-   "created_at": "2026-09-01T00:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/910",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] yes security:words eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-   "created_at": "2026-10-02T04:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/912",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-ask] security:words ffffffffffffffffffffffffffffffffffffffff\n\nPR #913 をマージしてよいか",
-   "created_at": "2026-10-02T04:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/913",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-ask] security:words cccccccccccccccccccccccccccccccccccccccc\n\nPR #914 をマージしてよいか",
-   "created_at": "2026-10-02T01:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/914",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] yes security:words cccccccccccccccccccccccccccccccccccccccc",
-   "created_at": "2026-10-02T03:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/914",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[merge-answer] yes security:words dddddddddddddddddddddddddddddddddddddddd",
-   "created_at": "2026-10-02T05:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/914",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[codex] review\n\n指摘なし",
-   "created_at": "2026-10-04T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/921",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[post-audit] pass aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "created_at": "2026-10-04T05:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/921",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[post-audit] pass bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-   "created_at": "2026-10-04T05:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/922",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass 7777777777777777777777777777777777777777",
-   "created_at": "2026-10-04T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/923",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[post-audit] finding cccccccccccccccccccccccccccccccccccccccc\n\n- a.ts:1 入力の境界 x",
-   "created_at": "2026-10-04T05:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/923",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[recheck] size pass 8888888888888888888888888888888888888888",
-   "created_at": "2026-10-04T02:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/924",
-   "author_association": "MEMBER"
-  },
-  {
-   "body": "[post-audit] pass dddddddddddddddddddddddddddddddddddddddd",
-   "created_at": "2026-10-04T05:00:00Z",
-   "issue_url": "https://api.github.com/repos/example/development/issues/924",
-   "author_association": "MEMBER"
-  }
- ],
- "pulls": {
-  "804": {
-   "base": {
-    "ref": "main"
+ "_note": "Records of the app (GET /api/merge-records/history shape) with made-up values: the jobs, grants, stored PRs and comments of the PRs touched since 2026-09-26. #901 asked rescue,size and the person said yes; #902 asked, then went on at another head; #903/#904/#905 merged by their recheck (size and responsibility by a review, migration by its command); #906 has its recheck of an earlier head only; #910 has its recheck from before the period; #911 merged with no job; #912 the person's grant with no ask before it; #913 asked and merged with no grant; #914 asked once and granted on two heads; #930 is named by its jobs and never stored. #921 (a main review) / #922 (direct) / #923 / #924 (a recheck of the merged head) merged on 2026-10-04 with a [post-audit] comment each: 921 and 922 pass, 923 finding, 924 pass. log, revParse and commitPulls are main's commits as git and the API print them (the last log entry reverts a commit made inside a PR's branch).",
+ "history": {
+  "jobs": [
+   {
+    "id": 1,
+    "kind": "gate",
+    "taskId": "task_901",
+    "pr": 901,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ask": [
+       "rescue"
+      ],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
    },
-   "head": {
-    "ref": "sb/804-x",
-    "sha": "ffffffffffffffffffffffffffffffffffffffff"
+   {
+    "id": 2,
+    "kind": "review",
+    "taskId": "task_901",
+    "pr": 901,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790904600000,
+    "endedAt": 1790904600000,
+    "repo": "example/development",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
    },
-   "merged_at": "2026-10-01T16:30:00Z",
-   "number": 804,
-   "state": "closed"
-  },
-  "901": {
-   "number": 901,
-   "state": "closed",
-   "merged_at": "2026-10-02T03:10:00Z",
-   "head": {
-    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "ref": "sb/901-x"
+   {
+    "id": 3,
+    "kind": "review",
+    "taskId": "task_901",
+    "pr": 901,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790908200000,
+    "endedAt": 1790908200000,
+    "repo": "example/development",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
    },
-   "base": {
-    "ref": "main"
+   {
+    "id": 4,
+    "kind": "gate",
+    "taskId": "task_901",
+    "pr": 901,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790910300000,
+    "endedAt": 1790910300000,
+    "repo": "example/development",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ask": [
+       "rescue"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": true,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 5,
+    "kind": "gate",
+    "taskId": "task_902",
+    "pr": 902,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "ask": [
+       "design-rules"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 6,
+    "kind": "gate",
+    "taskId": "task_902",
+    "pr": 902,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790931600000,
+    "endedAt": 1790931600000,
+    "repo": "example/development",
+    "head": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "ask": [],
+      "recheck": [],
+      "reasons": [
+       "CI のチェックが 1 つも無い"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 7,
+    "kind": "gate",
+    "taskId": "task_903",
+    "pr": 903,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "cccccccccccccccccccccccccccccccccccccccc",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "cccccccccccccccccccccccccccccccccccccccc",
+      "ask": [],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 8,
+    "kind": "review",
+    "taskId": "task_903",
+    "pr": 903,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790904600000,
+    "endedAt": 1790904600000,
+    "repo": "example/development",
+    "head": "cccccccccccccccccccccccccccccccccccccccc",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 9,
+    "kind": "review",
+    "taskId": "task_903",
+    "pr": 903,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790905200000,
+    "endedAt": 1790905200000,
+    "repo": "example/development",
+    "head": "cccccccccccccccccccccccccccccccccccccccc",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 10,
+    "kind": "gate",
+    "taskId": "task_903",
+    "pr": 903,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790907600000,
+    "endedAt": 1790907600000,
+    "repo": "example/development",
+    "head": "cccccccccccccccccccccccccccccccccccccccc",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "cccccccccccccccccccccccccccccccccccccccc",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 11,
+    "kind": "gate",
+    "taskId": "task_904",
+    "pr": 904,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "dddddddddddddddddddddddddddddddddddddddd",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "dddddddddddddddddddddddddddddddddddddddd",
+      "ask": [],
+      "recheck": [
+       "responsibility"
+      ],
+      "reasons": [
+       "[再チェック responsibility] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 12,
+    "kind": "review",
+    "taskId": "task_904",
+    "pr": 904,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790904600000,
+    "endedAt": 1790904600000,
+    "repo": "example/development",
+    "head": "dddddddddddddddddddddddddddddddddddddddd",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "responsibility"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 13,
+    "kind": "review",
+    "taskId": "task_904",
+    "pr": 904,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790905200000,
+    "endedAt": 1790905200000,
+    "repo": "example/development",
+    "head": "dddddddddddddddddddddddddddddddddddddddd",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 14,
+    "kind": "gate",
+    "taskId": "task_904",
+    "pr": 904,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790907600000,
+    "endedAt": 1790907600000,
+    "repo": "example/development",
+    "head": "dddddddddddddddddddddddddddddddddddddddd",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "dddddddddddddddddddddddddddddddddddddddd",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 15,
+    "kind": "gate",
+    "taskId": "task_905",
+    "pr": 905,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "ask": [],
+      "recheck": [
+       "migration"
+      ],
+      "reasons": [
+       "[再チェック migration] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 16,
+    "kind": "recheck",
+    "taskId": "task_905",
+    "pr": 905,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790904600000,
+    "endedAt": 1790904600000,
+    "repo": "example/development",
+    "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "base": null,
+    "as": null,
+    "kinds": [
+     "migration"
+    ],
+    "result": null,
+    "taskRunner": "claude"
+   },
+   {
+    "id": 17,
+    "kind": "review",
+    "taskId": "task_905",
+    "pr": 905,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790905200000,
+    "endedAt": 1790905200000,
+    "repo": "example/development",
+    "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 18,
+    "kind": "gate",
+    "taskId": "task_905",
+    "pr": 905,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790907600000,
+    "endedAt": 1790907600000,
+    "repo": "example/development",
+    "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 19,
+    "kind": "gate",
+    "taskId": "task_906",
+    "pr": 906,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "6666666666666666666666666666666666666666",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "6666666666666666666666666666666666666666",
+      "ask": [],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 20,
+    "kind": "review",
+    "taskId": "task_906",
+    "pr": 906,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790904600000,
+    "endedAt": 1790904600000,
+    "repo": "example/development",
+    "head": "2222222222222222222222222222222222222222",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 21,
+    "kind": "review",
+    "taskId": "task_906",
+    "pr": 906,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790905200000,
+    "endedAt": 1790905200000,
+    "repo": "example/development",
+    "head": "6666666666666666666666666666666666666666",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 22,
+    "kind": "gate",
+    "taskId": "task_906",
+    "pr": 906,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790907600000,
+    "endedAt": 1790907600000,
+    "repo": "example/development",
+    "head": "6666666666666666666666666666666666666666",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "6666666666666666666666666666666666666666",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 23,
+    "kind": "gate",
+    "taskId": "task_910",
+    "pr": 910,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1788220800000,
+    "endedAt": 1788220800000,
+    "repo": "example/development",
+    "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "ask": [],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 24,
+    "kind": "review",
+    "taskId": "task_910",
+    "pr": 910,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1788220860000,
+    "endedAt": 1788220860000,
+    "repo": "example/development",
+    "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 25,
+    "kind": "review",
+    "taskId": "task_910",
+    "pr": 910,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 26,
+    "kind": "gate",
+    "taskId": "task_910",
+    "pr": 910,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790906400000,
+    "endedAt": 1790906400000,
+    "repo": "example/development",
+    "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 27,
+    "kind": "gate",
+    "taskId": "task_912",
+    "pr": 912,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790913600000,
+    "endedAt": 1790913600000,
+    "repo": "example/development",
+    "head": "3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+      "ask": [
+       "security:words"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": true,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 28,
+    "kind": "review",
+    "taskId": "task_912",
+    "pr": 912,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790910000000,
+    "endedAt": 1790910000000,
+    "repo": "example/development",
+    "head": "3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 29,
+    "kind": "gate",
+    "taskId": "task_913",
+    "pr": 913,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790913600000,
+    "endedAt": 1790913600000,
+    "repo": "example/development",
+    "head": "ffffffffffffffffffffffffffffffffffffffff",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "ffffffffffffffffffffffffffffffffffffffff",
+      "ask": [
+       "security:words"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 30,
+    "kind": "review",
+    "taskId": "task_913",
+    "pr": 913,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790910000000,
+    "endedAt": 1790910000000,
+    "repo": "example/development",
+    "head": "ffffffffffffffffffffffffffffffffffffffff",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 31,
+    "kind": "gate",
+    "taskId": "task_914",
+    "pr": 914,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790902800000,
+    "endedAt": 1790902800000,
+    "repo": "example/development",
+    "head": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "ask": [
+       "security:words"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 32,
+    "kind": "gate",
+    "taskId": "task_914",
+    "pr": 914,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790917200000,
+    "endedAt": 1790917200000,
+    "repo": "example/development",
+    "head": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "ask": [
+       "security:words"
+      ],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": true,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 33,
+    "kind": "review",
+    "taskId": "task_914",
+    "pr": 914,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790913600000,
+    "endedAt": 1790913600000,
+    "repo": "example/development",
+    "head": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 34,
+    "kind": "review",
+    "taskId": "task_921",
+    "pr": 921,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791078000000,
+    "endedAt": 1791078000000,
+    "repo": "example/development",
+    "head": "2121212121212121212121212121212121212121",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 35,
+    "kind": "gate",
+    "taskId": "task_921",
+    "pr": 921,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791082800000,
+    "endedAt": 1791082800000,
+    "repo": "example/development",
+    "head": "2121212121212121212121212121212121212121",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "2121212121212121212121212121212121212121",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 36,
+    "kind": "gate",
+    "taskId": "task_922",
+    "pr": 922,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791082800000,
+    "endedAt": 1791082800000,
+    "repo": "example/development",
+    "head": "2222222222222222222222222222222222222222",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "2222222222222222222222222222222222222222",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": true,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 37,
+    "kind": "gate",
+    "taskId": "task_923",
+    "pr": 923,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791075600000,
+    "endedAt": 1791075600000,
+    "repo": "example/development",
+    "head": "2323232323232323232323232323232323232323",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "2323232323232323232323232323232323232323",
+      "ask": [],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 38,
+    "kind": "review",
+    "taskId": "task_923",
+    "pr": 923,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791077400000,
+    "endedAt": 1791077400000,
+    "repo": "example/development",
+    "head": "2323232323232323232323232323232323232323",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 39,
+    "kind": "review",
+    "taskId": "task_923",
+    "pr": 923,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791078000000,
+    "endedAt": 1791078000000,
+    "repo": "example/development",
+    "head": "2323232323232323232323232323232323232323",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 40,
+    "kind": "gate",
+    "taskId": "task_923",
+    "pr": 923,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791082800000,
+    "endedAt": 1791082800000,
+    "repo": "example/development",
+    "head": "2323232323232323232323232323232323232323",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "2323232323232323232323232323232323232323",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 41,
+    "kind": "gate",
+    "taskId": "task_924",
+    "pr": 924,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791075600000,
+    "endedAt": 1791075600000,
+    "repo": "example/development",
+    "head": "2424242424242424242424242424242424242424",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "stop",
+      "head": "2424242424242424242424242424242424242424",
+      "ask": [],
+      "recheck": [
+       "size"
+      ],
+      "reasons": [
+       "[再チェック size] x"
+      ],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": false
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 42,
+    "kind": "review",
+    "taskId": "task_924",
+    "pr": 924,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791077400000,
+    "endedAt": 1791077400000,
+    "repo": "example/development",
+    "head": "2424242424242424242424242424242424242424",
+    "base": null,
+    "as": "recheck",
+    "kinds": [
+     "size"
+    ],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 43,
+    "kind": "review",
+    "taskId": "task_924",
+    "pr": 924,
+    "runner": "codex",
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791078000000,
+    "endedAt": 1791078000000,
+    "repo": "example/development",
+    "head": "2424242424242424242424242424242424242424",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "review": {
+      "findings": [],
+      "firstLine": "[codex] review"
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 44,
+    "kind": "gate",
+    "taskId": "task_924",
+    "pr": 924,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1791082800000,
+    "endedAt": 1791082800000,
+    "repo": "example/development",
+    "head": "2424242424242424242424242424242424242424",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "2424242424242424242424242424242424242424",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 45,
+    "kind": "gate",
+    "taskId": "task_930",
+    "pr": 930,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1790920800000,
+    "endedAt": 1790920800000,
+    "repo": "example/development",
+    "head": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
+   },
+   {
+    "id": 46,
+    "kind": "gate",
+    "taskId": "task_901",
+    "pr": 931,
+    "runner": null,
+    "status": "pass",
+    "exitCode": 0,
+    "startedAt": 1784505600000,
+    "endedAt": 1784505600000,
+    "repo": "example/development",
+    "head": "9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e",
+    "base": null,
+    "as": null,
+    "kinds": [],
+    "result": {
+     "gate": {
+      "verdict": "merge",
+      "head": "9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e",
+      "ask": [],
+      "recheck": [],
+      "reasons": [],
+      "allowLarge": false,
+      "reviewSkipped": false,
+      "merged": true
+     }
+    },
+    "taskRunner": "claude"
    }
-  },
-  "902": {
-   "number": 902,
-   "state": "open",
-   "merged_at": null,
-   "head": {
-    "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "ref": "sb/902-x"
+  ],
+  "grants": [
+   {
+    "taskId": "task_901",
+    "target": 901,
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "at": 1790910000000
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "903": {
-   "number": 903,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "cccccccccccccccccccccccccccccccccccccccc",
-    "ref": "sb/903-x"
+   {
+    "taskId": "task_912",
+    "target": 912,
+    "head": "3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+    "at": 1790913600000
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "904": {
-   "number": 904,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "dddddddddddddddddddddddddddddddddddddddd",
-    "ref": "sb/904-x"
+   {
+    "taskId": "task_914",
+    "target": 914,
+    "head": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "at": 1790910000000
    },
-   "base": {
-    "ref": "main"
+   {
+    "taskId": "task_914",
+    "target": 914,
+    "head": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "at": 1790917200000
    }
-  },
-  "905": {
-   "number": 905,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "ref": "sb/905-x"
+  ],
+  "pulls": [
+   {
+    "number": 901,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T03:10:00Z",
+    "closedAt": "2026-10-02T03:10:00Z",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mergeCommit": "1111111111111111111111111111111111111111"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "906": {
-   "number": 906,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "ffffffffffffffffffffffffffffffffffffffff",
-    "ref": "sb/906-x"
+   {
+    "number": 902,
+    "stored": true,
+    "state": "OPEN",
+    "mergedAt": null,
+    "closedAt": null,
+    "head": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "mergeCommit": null
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "908": {
-   "number": 908,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "ffffffffffffffffffffffffffffffffffffffff",
-    "ref": "sb/908-x"
+   {
+    "number": 903,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "cccccccccccccccccccccccccccccccccccccccc",
+    "mergeCommit": "3333333333333333333333333333333333333333"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "910": {
-   "number": 910,
-   "state": "closed",
-   "merged_at": "2026-10-02T02:30:00Z",
-   "head": {
-    "sha": "ffffffffffffffffffffffffffffffffffffffff",
-    "ref": "sb/910-x"
+   {
+    "number": 904,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "dddddddddddddddddddddddddddddddddddddddd",
+    "mergeCommit": "4444444444444444444444444444444444444444"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "912": {
-   "number": 912,
-   "state": "closed",
-   "merged_at": "2026-10-02T04:10:00Z",
-   "head": {
-    "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "ref": "sb/912-x"
+   {
+    "number": 905,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "mergeCommit": "5555555555555555555555555555555555555555"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "913": {
-   "number": 913,
-   "state": "closed",
-   "merged_at": "2026-10-02T04:10:00Z",
-   "head": {
-    "sha": "ffffffffffffffffffffffffffffffffffffffff",
-    "ref": "sb/913-x"
+   {
+    "number": 906,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "6666666666666666666666666666666666666666",
+    "mergeCommit": "d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "914": {
-   "number": 914,
-   "state": "closed",
-   "merged_at": "2026-10-02T05:10:00Z",
-   "head": {
-    "sha": "dddddddddddddddddddddddddddddddddddddddd",
-    "ref": "sb/914-x"
+   {
+    "number": 910,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+    "mergeCommit": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "921": {
-   "number": 921,
-   "state": "closed",
-   "merged_at": "2026-10-04T01:00:00Z",
-   "head": {
-    "ref": "sb/921-x",
-    "sha": "1111111111111111111111111111111111111111"
+   {
+    "number": 911,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T02:30:00Z",
+    "closedAt": "2026-10-02T02:30:00Z",
+    "head": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+    "mergeCommit": "6666666666666666666666666666666666666666"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "922": {
-   "number": 922,
-   "state": "closed",
-   "merged_at": "2026-10-04T01:00:00Z",
-   "head": {
-    "ref": "sb/922-x",
-    "sha": "2222222222222222222222222222222222222222"
+   {
+    "number": 912,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T04:10:00Z",
+    "closedAt": "2026-10-02T04:10:00Z",
+    "head": "3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+    "mergeCommit": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "923": {
-   "number": 923,
-   "state": "closed",
-   "merged_at": "2026-10-04T01:00:00Z",
-   "head": {
-    "ref": "sb/923-x",
-    "sha": "7777777777777777777777777777777777777777"
+   {
+    "number": 913,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T05:00:00Z",
+    "closedAt": "2026-10-02T05:00:00Z",
+    "head": "ffffffffffffffffffffffffffffffffffffffff",
+    "mergeCommit": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
    },
-   "base": {
-    "ref": "main"
-   }
-  },
-  "924": {
-   "number": 924,
-   "state": "closed",
-   "merged_at": "2026-10-04T01:00:00Z",
-   "head": {
-    "ref": "sb/924-x",
-    "sha": "8888888888888888888888888888888888888888"
+   {
+    "number": 914,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-02T05:10:00Z",
+    "closedAt": "2026-10-02T05:10:00Z",
+    "head": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "mergeCommit": "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4"
    },
-   "base": {
-    "ref": "main"
+   {
+    "number": 921,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-04T03:30:00Z",
+    "closedAt": "2026-10-04T03:30:00Z",
+    "head": "2121212121212121212121212121212121212121",
+    "mergeCommit": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   {
+    "number": 922,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-04T03:30:00Z",
+    "closedAt": "2026-10-04T03:30:00Z",
+    "head": "2222222222222222222222222222222222222222",
+    "mergeCommit": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+   },
+   {
+    "number": 923,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-04T03:30:00Z",
+    "closedAt": "2026-10-04T03:30:00Z",
+    "head": "2323232323232323232323232323232323232323",
+    "mergeCommit": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+   },
+   {
+    "number": 924,
+    "stored": true,
+    "state": "MERGED",
+    "mergedAt": "2026-10-04T03:30:00Z",
+    "closedAt": "2026-10-04T03:30:00Z",
+    "head": "2424242424242424242424242424242424242424",
+    "mergeCommit": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4"
+   },
+   {
+    "number": 930,
+    "stored": false,
+    "state": null,
+    "mergedAt": null,
+    "closedAt": null,
+    "head": null,
+    "mergeCommit": null
+   },
+   {
+    "number": 931,
+    "stored": false,
+    "state": null,
+    "mergedAt": null,
+    "closedAt": null,
+    "head": null,
+    "mergeCommit": null
    }
-  }
+  ],
+  "comments": [
+   {
+    "issue": 921,
+    "body": "[post-audit] pass a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\n",
+    "createdAt": "2026-10-04T05:00:00Z",
+    "authorAssociation": "OWNER"
+   },
+   {
+    "issue": 922,
+    "body": "[post-audit] pass a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2\n",
+    "createdAt": "2026-10-04T05:00:00Z",
+    "authorAssociation": "OWNER"
+   },
+   {
+    "issue": 923,
+    "body": "[post-audit] finding a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3\n\n- a.ts:1 入力の境界 x",
+    "createdAt": "2026-10-04T05:00:00Z",
+    "authorAssociation": "OWNER"
+   },
+   {
+    "issue": 924,
+    "body": "[post-audit] pass a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4\n",
+    "createdAt": "2026-10-04T05:00:00Z",
+    "authorAssociation": "OWNER"
+   },
+   {
+    "issue": 901,
+    "body": "[codex] review\n\nnot a mark",
+    "createdAt": "2026-10-02T02:00:00Z",
+    "authorAssociation": "OWNER"
+   }
+  ],
+  "since": 1788224400000
  },
+ "log": "7777777777777777777777777777777777777777\t2026-10-03T00:00:00+00:00\tRevert \"docs: x (#904)\"\n\nThis reverts commit 4444444444444444444444444444444444444444.\n\u0000\n8888888888888888888888888888888888888888\t2026-10-04T00:00:00+00:00\trevert: v0.9.0 に戻す\n\nv0.9.0..origin/main:\n- 5555555 feat: y (#905)\n- 6666666 fix: z\n\u0000\n6666666666666666666666666666666666666666\t2026-10-02T02:30:00+00:00\tfix: z\n\n- 1234567 a line that looks like a rollback's\n\u0000\n9999999999999999999999999999999999999999\t2026-10-02T03:00:00+00:00\tRevert \"wip\" (#906)\n\nThis reverts commit 3333333333333333333333333333333333333333.\n\u0000",
  "revParse": {
   "4444444444444444444444444444444444444444": "4444444444444444444444444444444444444444",
   "5555555": "5555555555555555555555555555555555555555",
@@ -379,24 +1519,5 @@
     "state": "closed"
    }
   ]
- },
- "log": "7777777777777777777777777777777777777777\t2026-10-03T00:00:00+00:00\tRevert \"docs: x (#904)\"\n\nThis reverts commit 4444444444444444444444444444444444444444.\n\u0000\n8888888888888888888888888888888888888888\t2026-10-04T00:00:00+00:00\trevert: v0.9.0 に戻す\n\nv0.9.0..origin/main:\n- 5555555 feat: y (#905)\n- 6666666 fix: z\n\u0000\n6666666666666666666666666666666666666666\t2026-10-02T02:30:00+00:00\tfix: z\n\n- 1234567 a line that looks like a rollback's\n\u0000\n9999999999999999999999999999999999999999\t2026-10-02T03:00:00+00:00\tRevert \"wip\" (#906)\n\nThis reverts commit 3333333333333333333333333333333333333333.\n\u0000",
- "merged": [
-  804,
-  901,
-  903,
-  904,
-  905,
-  906,
-  908,
-  910,
-  911,
-  912,
-  913,
-  914,
-  921,
-  922,
-  923,
-  924
- ]
+ }
 }

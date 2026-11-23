@@ -330,7 +330,7 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
 
   test("stopRecoveryPrompt says the two operations with a fixed sentence take the refusing side's sentence as the grant", () => {
     for (const cond of [NONE, ALL, { ...NONE, workspaceMcp: true }]) {
-      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・聞く理由の解除（[merge-answer] の投稿）は、拒んだ側の出力が示す決まった文（聞く理由は「PR #<n> をマージしてよい」（投稿の検査がある間は「PR #<n> に [merge-answer] yes を投稿してよい」も通る）、判定の外のマージは「PR #<n> を判定の外でマージしてよい」）をそのまま grant に書く（ほかの言い方では通らない）。");
+      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・聞く理由の解除は、拒んだ側の出力が示す決まった文（聞く理由は「PR #<n> をマージしてよい」、判定の外のマージは「PR #<n> を判定の外でマージしてよい」）をそのまま grant に書く（ほかの言い方では通らない）。");
     }
   });
 

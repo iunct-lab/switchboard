@@ -3,13 +3,13 @@ import { t } from "./i18n.ts";
 import { common } from "./i18n/common.ts";
 
 /**
- * What the screen shows of a local change: the marks of its comments, read with the patterns merge-gate reads
- * them by (the screen does not judge: whether the review is newer than the last commit is merge-gate's). The patterns are the scripts' (`LOCAL_CI_RESULT` of scripts/local-ci.ts, `RECHECK_PASS` of scripts/merge-gate.ts):
- * those modules run git and cannot go in the web bundle, so they are written here and changes.test.ts holds them equal.
+ * What the screen shows of a local change: the marks of its comments, for display only (the screen does not judge: merge-gate
+ * reads the app's job records, not these marks). `LOCAL_CI_RESULT` is the pattern of scripts/local-ci.ts: that module runs git and
+ * cannot go in the web bundle, so it is written here and changes.test.ts holds them equal. The two below are the screen's alone.
  */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
 export const RECHECK_PASS = /^\[recheck\] (security:docs|security:tests|security:lockfile|size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
-/** A main review: the other runner's (merge-gate's `REVIEW`). */
+/** A main review: the other runner's. */
 export const REVIEW = /^\[(codex|claude)\] review/;
 
 export interface ChangeMarks {

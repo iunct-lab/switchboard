@@ -1,14 +1,17 @@
 /**
  * bun scripts/post-audit.ts select [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] — which merged PRs
- * the weekly post-merge audit reads again. Prints `{ repo, period, selected: [{ pr, route, auditor, mergeSha }],
- * overflow }`; exit 0 / 2 when it could not read. Keeps nothing (the `[post-audit]` marks on the PRs are the record).
+ * the weekly post-merge audit reads again. Prints `{ repo, period, selected: [{ pr, route, auditor, implementerKnown, mergeSha }],
+ * overflow, unsaved, uncountedAudits }`; exit 0 / 2 when it could not read. Keeps nothing (an audit job of the app that read the merge commit and kept `pass`, one that kept `finding` whose PBI (`pbiTitle`, open or closed) the app has stored, or a `[post-audit]` mark of an owner, member or collaborator on the PR, is the record of an audit; a `finding` job with no PBI is selected again: `record` stopped before filing it).
  *
- * A merged PR has one of three routes, decided from the marks that exist today: `recheck` (a recheck lifted the large PR),
- * `direct` (no main review mark: nobody read it), `review` (a main review exists). `direct` and `recheck` are all
+ * A merged PR has one of three routes, decided from the app's records of it (scripts/merge-audit.ts `prViewsOf`): `recheck` (a recheck
+ * lifted the large PR, with no grant of the person's), `direct` (its merge verdict skipped the main review: nobody read it), `review`
+ * (a main review was asked for). `direct` and `recheck` are all
  * candidates; `review` is a fixed number. Everything is ordered by hash of the period and the PR number (the same period
  * picks the same PRs). One run reads at most SWITCHBOARD_POST_AUDIT_MAX PRs: `direct` first, then the `review` sample
  * (reserved before the cap cuts), then `recheck` fills the rest; the PRs the cap left out are counted in `overflow`.
- * REST only: per PR the comments and pulls/<n>; the commits only for the selected ones (the auditor).
+ * It asks GitHub nothing: the merged PRs, their routes, which were audited and the auditor (the other runner of the one whose Task asked for
+ * the PR's jobs) come from the app's records (`GET /api/merge-records/history`). `unsaved` = merged PRs the jobs name that the app never stored
+ * (no merge commit to read): they cannot be selected, and are named. A stored PR with no merge commit is skipped without a name. `implementerKnown: false` = no job named the implementer (or the main reviewer), so the implementer is taken as claude (the auditor codex) and may be wrong.
  *
  * `prompt <PR> [--repo] --dir <dir>` makes the material for one selected PR (a fresh clone at the merge commit, the diff,
  * the fixed viewpoints) and prints `{ cwd, prompt, out }` for `ops-kit job request review`. `record <PR> --out <file>
@@ -21,8 +24,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { MARK_AUTHORS, REVIEW } from "./merge-gate";
-import { mergedSince, parseMarks, period, POST_AUDIT, routeOf, spawnRun, type PrRecord, type Route, type Run } from "./merge-audit";
+import { mergeHistory } from "../ops-kit/src/merge-records.ts";
+import { mergeRecordsEnv } from "./merge-records-env.ts";
+import { period, POST_AUDIT, prViewsOf, routeOf, spawnRun, type PrRecord, type Route, type Run } from "./merge-audit";
 
 // the mark and the route live in merge-audit (its tally of the audit reads them too); re-exported so the audit side keeps one import
 export { POST_AUDIT, routeOf, type Route };
@@ -31,19 +35,23 @@ import { primaryReviewer } from "../ops-kit/src/conditions.ts";
 
 export type Auditor = "claude" | "codex";
 
-/** A merged PR with what the selection reads: the marks of merge-audit (with `reviewed`), the merge commit, whether an audit mark exists. */
+/** A merged PR with what the selection reads: the marks of merge-audit (with `reviewed`), the merge commit, whether it was audited, and the runner that implemented it. */
 export interface MergedPr extends PrRecord {
   mergeSha: string;
   audited: boolean;
+  /** An audit job kept `finding` (merge-audit's `auditFound`): audited once the app has stored the audit's PBI (`settleFound`). */
+  auditFound?: boolean;
+  uncountedAudits: number;
+  implementer: "claude" | "codex" | null;
 }
 
 export type RunnerSetting = { review: "same" | "other"; recheck: "same" | "other" };
 
-/** The implementer is claude when a commit says `Co-Authored-By: Claude`. The audit is by the other runner, or with `recheck: "same"` by the implementer's main reviewer (`primaryReviewer` of the `review` setting). */
-export function auditorOf(commits: { message: string }[], setting: RunnerSetting = { review: "other", recheck: "other" }): Auditor {
-  const implementer = commits.some((c) => /^Co-Authored-By: Claude/im.test(c.message)) ? "claude" : "codex";
-  if (setting.recheck === "same") return primaryReviewer(implementer, setting.review)!;
-  return implementer === "claude" ? "codex" : "claude";
+/** The audit is by the other runner than the implementer's, or with `recheck: "same"` by the implementer's main reviewer (`primaryReviewer` of the `review` setting). The implementer is the runner of the Task that asked for the PR's jobs; unknown is taken as claude. */
+export function auditorOf(implementer: "claude" | "codex" | null, setting: RunnerSetting = { review: "other", recheck: "other" }): Auditor {
+  const who = implementer ?? "claude";
+  if (setting.recheck === "same") return primaryReviewer(who, setting.review)!;
+  return who === "claude" ? "codex" : "claude";
 }
 
 /** The two settings a Task carries in its environment; a missing or unknown value is `other` (today's behaviour). */
@@ -60,7 +68,7 @@ export const DEFAULT_MAX = 15;
 const rank = (since: string, until: string, n: number) => createHash("sha256").update(`${since}..${until}:${n}`).digest("hex");
 
 /**
- * Without an audit mark, in this order, all by the smallest hash of `<since>..<until>:<PR>` (the same period picks the
+ * Without an audit (`audited`: a finished audit job of the app that read the merge commit and kept `pass`, a `finding` one whose PBI the app has stored (`settleFound`), or a `[post-audit]` mark by an owner, member or collaborator), in this order, all by the smallest hash of `<since>..<until>:<PR>` (the same period picks the
  * same PRs, and a cap does not favour the oldest merges): `direct` all; `review` `sample` of them, reserved inside the cap
  * before `recheck` (only what `direct` left of `max`); then `recheck` fills the rest of `max`. `overflow` is the candidates
  * (all `direct` + `sample` `review` + all `recheck`) minus the selected.
@@ -116,7 +124,9 @@ export function parseVerdict(text: string): { verdict: "pass" | "finding"; items
 /** Story Points of a filed PBI: the one value for the body line and the Project field. */
 const PBI_STORY_POINTS = 2;
 
-export const pbiTitle = (repo: string, pr: number) => `PBI: マージ後の監査の指摘 — ${repo}#${pr}`;
+/** The start every audit PBI title of a repository shares: what `select` asks the app's stored Issues for. */
+export const pbiTitlePrefix = (repo: string) => `PBI: マージ後の監査の指摘 — ${repo}#`;
+export const pbiTitle = (repo: string, pr: number) => `${pbiTitlePrefix(repo)}${pr}`;
 
 /** The PBI a finding files: the title, and a body with the sections of `ops.config.json` `sections.pbi`, the speaker line and Story Points. */
 export function pbiFor(a: { repo: string; pr: number; mergeSha: string; items: string[] }): { title: string; body: string } {
@@ -171,6 +181,17 @@ export async function prepare(pr: number, repo: string, dir: string, run: Run): 
 
 type Recorded = { repo: string; pr: number; mark: string; verdict: "pass" | "finding"; pbi: { title: string; body: string } | null; existing: number | null; dryRun: boolean };
 
+/**
+ * The PRs whose audit job (the app ran it) kept `finding` and whose audit PBI (`pbiTitle`, open or closed, `type:pbi`) the app has
+ * stored (`titles`, from the app's records): `record` filed the finding, so they are marked audited. The title only confirms an audit
+ * the app ran: an Issue anyone opened with that title settles no PR on its own. A `finding` job with no PBI: `record` stopped before
+ * filing it, and the PR is selected again. Nothing is asked of GitHub.
+ */
+export function settleFound(prs: MergedPr[], repo: string, titles: readonly string[]): MergedPr[] {
+  const filed = new Set(titles);
+  return prs.map((p) => (!p.audited && p.auditFound && filed.has(pbiTitle(repo, p.number)) ? { ...p, audited: true } : p));
+}
+
 /** The mark on the PR and, for a finding, the PBI (not when an open PBI has the same title). `dryRun` reads but writes nothing. */
 export async function record(a: { pr: number; repo: string; text: string; dryRun: boolean; workspace?: string; backlogEnv?: boolean; projectUrl?: string }, run: Run): Promise<Recorded> {
   const parsed = parseVerdict(a.text);
@@ -207,37 +228,15 @@ export async function record(a: { pr: number; repo: string; text: string; dryRun
   return result;
 }
 
-const jsonLines = <T>(out: string) => out.split("\n").filter(Boolean).map((l) => JSON.parse(l) as T);
-
-/** The PRs merged in [since, until) with their marks (mergedSince finds them; a number that is no PR is skipped). */
-export async function readMerged(p: { since: string; until: string }, run: Run, repo: string, now = Date.now()): Promise<MergedPr[]> {
-  type Comment = { body: string; created_at: string; author_association: string };
-  const numbers = await mergedSince(p.since.slice(0, 10), run, repo, now);
-  const read = async (n: number): Promise<MergedPr | null> => {
-    let pull: { merged_at: string | null; head: { sha: string }; merge_commit_sha: string | null };
-    try {
-      pull = JSON.parse(await run(["gh", "api", `repos/${repo}/pulls/${n}`]));
-    } catch (e) {
-      if (/HTTP 404/.test((e as Error).message)) return null;
-      throw e;
-    }
-    if (!pull.merged_at || pull.merged_at < p.since || pull.merged_at >= p.until || !pull.merge_commit_sha) return null;
-    const comments = jsonLines<Comment>(await run(["gh", "api", `repos/${repo}/issues/${n}/comments`, "--paginate", "-q", ".[] | {body, created_at, author_association}"]))
-      .filter((c) => MARK_AUTHORS.includes(c.author_association));
-    return {
-      number: n, mergedAt: pull.merged_at, headSha: pull.head.sha, mergeSha: pull.merge_commit_sha, marks: parseMarks(comments),
-      reviewed: comments.some((c) => REVIEW.test(c.body)), audited: comments.some((c) => POST_AUDIT.test(c.body)),
-    };
+/** The PRs merged in [since, until) with their routes (the app's records), and the merged ones the app never stored (no merge commit to audit). */
+export async function readMerged(p: { since: string; until: string }, repo: string, env: Record<string, string | undefined> = process.env, f?: Parameters<typeof mergeHistory>[2]): Promise<{ merged: MergedPr[]; unsaved: number[] }> {
+  const h = await mergeHistory(mergeRecordsEnv(env), { repo, sinceMs: Date.parse(p.since), titlePrefix: pbiTitlePrefix(repo) }, f);
+  const views = await prViewsOf(h);
+  const inPeriod = views.filter((v) => v.mergedAt !== null && v.mergedAt >= p.since && v.mergedAt < p.until);
+  return {
+    merged: settleFound(inPeriod.flatMap(({ mergeSha, ...v }) => (mergeSha ? [{ ...v, mergeSha }] : [])), repo, h.titles ?? []).sort((a, b) => a.number - b.number),
+    unsaved: inPeriod.filter((v) => !v.stored).map((v) => v.number).sort((a, b) => a - b),
   };
-  const out: MergedPr[] = [];
-  let next = 0;
-  await Promise.all(Array.from({ length: 6 }, async () => {
-    while (next < numbers.length) {
-      const r = await read(numbers[next++]!);
-      if (r) out.push(r);
-    }
-  }));
-  return out.sort((a, b) => a.number - b.number);
 }
 
 const envInt = (env: Record<string, string | undefined>, name: string, dflt: number) => {
@@ -248,7 +247,7 @@ const envInt = (env: Record<string, string | undefined>, name: string, dflt: num
 };
 
 /** The CLI; returns the exit code. `run` / `now` / `env` are injected for the tests. */
-export async function main(args: string[], run: Run = spawnRun, now = Date.now(), env: Record<string, string | undefined> = process.env): Promise<number> {
+export async function main(args: string[], run: Run = spawnRun, now = Date.now(), env: Record<string, string | undefined> = process.env, f?: Parameters<typeof mergeHistory>[2]): Promise<number> {
   try {
     const usage = "使い方: post-audit.ts select [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--repo <owner/name>] | prompt <PR> --dir <dir> [--repo] | record <PR> --out <file> [--repo] [--workspace <id>] [--dry-run]";
     const cmd = args[0];
@@ -280,14 +279,11 @@ export async function main(args: string[], run: Run = spawnRun, now = Date.now()
     const p = period(rest, now);
     const sample = envInt(env, "SWITCHBOARD_POST_AUDIT_SAMPLE", DEFAULT_SAMPLE);
     const max = envInt(env, "SWITCHBOARD_POST_AUDIT_MAX", DEFAULT_MAX);
-    const prs = await readMerged(p, run, repo, now);
-    const { selected, overflow } = select(prs, { ...p, sample, max });
-    const withAuditor = [];
-    for (const s of selected) {
-      const commits = jsonLines<{ message: string }>(await run(["gh", "api", `repos/${repo}/pulls/${s.pr}/commits`, "--paginate", "-q", ".[] | {message: .commit.message}"]));
-      withAuditor.push({ pr: s.pr, route: s.route, auditor: auditorOf(commits, settingFromEnv(env)), mergeSha: s.mergeSha });
-    }
-    console.log(JSON.stringify({ repo, period: p, selected: withAuditor, overflow }, null, 2));
+    const { merged, unsaved } = await readMerged(p, repo, env, f);
+    const { selected, overflow } = select(merged, { ...p, sample, max });
+    const byNumber = new Map(merged.map((m) => [m.number, m]));
+    const withAuditor = selected.map((x) => ({ pr: x.pr, route: x.route, auditor: auditorOf(byNumber.get(x.pr)!.implementer, settingFromEnv(env)), implementerKnown: byNumber.get(x.pr)!.implementer !== null, mergeSha: x.mergeSha }));
+    console.log(JSON.stringify({ repo, period: p, selected: withAuditor, overflow, unsaved, uncountedAudits: merged.reduce((n, m) => n + m.uncountedAudits, 0) }, null, 2));
     return 0;
   } catch (e) {
     console.error(`読めなかった: ${(e as Error).message}`);

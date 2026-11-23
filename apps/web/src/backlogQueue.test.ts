@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, BacklogQueue } from "@switchboard/protocol";
-import { dropIndex, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting } from "./backlogQueue.ts";
+import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting } from "./backlogQueue.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", activeTaskId: null, workspaceId: "w1", workspaceName: "one", ...over }) as BacklogItem;
@@ -176,7 +176,7 @@ describe("pickTop", () => {
     item(1, { priority: "P2", storyPoints: 5, tasks: { total: 4, done: 1, doneAt: null }, createdAt: "2026-10-03T00:00:00Z" }),
     item(2, { stage: "needs-tasks", priority: "P0", storyPoints: null, tasks: null, createdAt: "2026-10-05T00:00:00Z" }),
     item(3, { priority: null, storyPoints: 2, tasks: { total: 2, done: 2, doneAt: null }, createdAt: "2026-10-01T00:00:00Z" }),
-    item(4, { priority: "P1", storyPoints: 3, tasks: { total: 3, done: 0, doneAt: null }, createdAt: "2026-10-02T00:00:00Z", overlap: { hits: [{ ref: "PR #9", path: "a.ts" }], unknown: null } }),
+    item(4, { priority: "P1", storyPoints: 3, tasks: { total: 3, done: 0, doneAt: null }, createdAt: "2026-10-02T00:00:00Z", overlap: { hits: [{ ref: "PR #9", path: "a.ts", working: true, pbi: null }], unknown: null } }),
     item(5, { stage: "in-progress", priority: "P0" }),
     item(6, { type: "request", stage: "request", priority: "P0" }),
     item(7, { priority: "P0", storyPoints: 1 }),
@@ -238,6 +238,26 @@ describe("noteParts", () => {
   test("a known workspace whose URL is not an Issue / PR URL stays a sentence", () => {
     expect(noteParts("one: Task #1 が 3 件を止めている", () => "")).toEqual(["one: Task #1 が 3 件を止めている"]);
     expect(noteParts("one: Task #1 が 3 件を止めている", () => "https://example.com/board")).toEqual(["one: Task #1 が 3 件を止めている"]);
+  });
+  test("holder line opens the owner's Task: the PBI a hit with the same ref names in that workspace, and its stage Task", () => {
+    const u = (n: number) => `https://github.com/o/r/issues/${n}`;
+    const hit = (ref: string, pbi: number | null) => ({ ref, path: "src/a.ts", working: true, pbi });
+    const items = [
+      item(1, { url: u(1), overlap: { hits: [hit("PR #50", null), hit("Task #60", null)], unknown: null } }),
+      item(2, { url: u(2), overlap: { hits: [hit("PR #50", 20), hit("Task #60", 30)], unknown: null } }),
+      item(20, { url: u(20), title: "PBI 20", activeTaskId: "task_run" }),
+      item(30, { url: u(30), title: "PBI 30", lastTask: null }),
+      // another workspace's hit on the same ref names another PBI
+      item(5, { workspaceId: "w2", workspaceName: "two", url: "https://github.com/x/y/issues/5", overlap: { hits: [hit("PR #50", 99)], unknown: null } }),
+    ] as BacklogItem[];
+    const of = (line: string) => holderOwner(line, items, (ws) => noteUrlOf(items, ws));
+    expect(of("one: 実装の枠: PR #50 が 2 件を止めている（作業中）")).toEqual({ pbi: { number: 20, title: "PBI 20", url: u(20) }, task: { id: "task_run", running: true, label: "動いている" } });
+    expect(of("one: Task #60 が 1 件を止めている（作業していない）")).toEqual({ pbi: { number: 30, title: "PBI 30", url: u(30) }, task: null });
+    expect(of("two: PR #50 が 1 件を止めている（作業中）")).toMatchObject({ pbi: { number: 99, url: "https://github.com/x/y/issues/99" }, task: "unknown" });
+    // no hit names a PBI, not a holder line, or a workspace not known: nothing
+    expect(of("one: PR #77 が 1 件を止めている（作業中）")).toBeNull();
+    expect(of("one: 重なり: PR #50")).toBeNull();
+    expect(of("three: PR #50 が 2 件を止めている（作業中）")).toBeNull();
   });
   test("noteUrlOf: the workspace's Issue URL, none when two workspaces share the name", () => {
     const u = (n: number) => `https://github.com/o/r/issues/${n}`;

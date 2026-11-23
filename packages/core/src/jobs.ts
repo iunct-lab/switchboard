@@ -318,10 +318,20 @@ export function reviewResult(text: string): JobResult["review"] | null {
   return { findings, firstLine: (lines[0] ?? "").trim().slice(0, MAX_FIRST_LINE) };
 }
 
-/** A review job that passed leaves its findings in its record: its output is read once, from the file `requestJob` named in the job's folder. An output that cannot be read leaves no result; the job's end is not failed for it. */
+/**
+ * A merged PR's audit (`as: audit`) answers `pass` or `finding` on its first line and has no Findings section (scripts/post-audit.ts):
+ * its record keeps that first line (the first line that is not empty), so the audit is on record without anyone's comment.
+ */
+export const auditResult = (text: string): JobResult["review"] | null => {
+  const first = text.split("\n").map((l) => l.trim()).find((l) => l !== "");
+  return first === undefined ? null : { findings: [], firstLine: first.slice(0, MAX_FIRST_LINE) };
+};
+
+/** A review job that passed leaves its findings in its record: its output is read once, from the file `requestJob` named in the job's folder (an audit job: its first line). An output that cannot be read leaves no result; the job's end is not failed for it. */
 function recordReview(deps: JobDeps, job: Job, jobDir: string): void {
   try {
-    const result = reviewResult(readFileSync(readFileSync(join(jobDir, "out-path"), "utf8").trim(), "utf8"));
+    const text = readFileSync(readFileSync(join(jobDir, "out-path"), "utf8").trim(), "utf8");
+    const result = reviewResult(text) ?? (job.as === "audit" ? auditResult(text) : null);
     if (result) deps.db.setJobResult(job.id, { result: { review: result } });
   } catch {
     // no output file, or not readable: the job has no result
@@ -370,6 +380,9 @@ const GateFile = z.object({
   verdict: z.enum(["merge", "stop"]),
   ask: z.array(z.string()),
   recheck: z.array(z.string()),
+  // a gate job started by the release before this one and finished after the promotion has none: left absent, so the audit reads its `[再チェック <kind>]` reasons
+  required: z.array(z.string()).optional(),
+  stack: z.array(z.object({ pr: z.number(), head: z.string().nullable(), ask: z.array(z.string()), recheck: z.array(z.string()), required: z.array(z.string()), merged: z.boolean(), reviewSkipped: z.boolean().optional() })).optional(),
   reasons: z.array(z.string()),
   allowLarge: z.boolean(),
   reviewSkipped: z.boolean(),

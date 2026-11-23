@@ -15,7 +15,7 @@ export const TYPES = ["type:request", "type:pbi", "type:task"];
 const LABELS = `labels:${JSON.stringify(TYPES)}`;
 const FIELD = "field{ ... on ProjectV2FieldCommon{ name } }";
 const PROJECT_ITEMS = `projectItems(first:20){ totalCount nodes{ id project{ number owner{ ... on Organization{ login } ... on User{ login } } } fieldValues(first:50){ totalCount nodes{ ... on ProjectV2ItemFieldSingleSelectValue{ name ${FIELD} } ... on ProjectV2ItemFieldNumberValue{ number ${FIELD} } ... on ProjectV2ItemFieldTextValue{ text ${FIELD} } ... on ProjectV2ItemFieldDateValue{ date ${FIELD} } } } } }`;
-const COMMENTS = "pageInfo{ hasNextPage endCursor } nodes{ id body createdAt }";
+const COMMENTS = "pageInfo{ hasNextPage endCursor } nodes{ id body createdAt authorAssociation }";
 const ISSUE = `id number title url state stateReason body createdAt updatedAt closedAt milestone{ title } parent{ number } labels(first:100){ totalCount nodes{ name } } subIssues(first:100){ totalCount nodes{ number } } comments(first:100){ ${COMMENTS} } ${PROJECT_ITEMS}`;
 
 const changedQuery = (since: boolean) =>
@@ -53,7 +53,7 @@ type Page<T> = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; n
 type Counted<T> = { totalCount: number; nodes: T[] };
 type RawItem = { id: string; project: { number: number; owner: { login: string } }; fieldValues: Counted<{ name?: string; number?: number; text?: string; date?: string; field?: { name: string } }> };
 type RawPull = { id: string; number: number; state: "OPEN" | "CLOSED" | "MERGED"; isDraft: boolean; updatedAt: string; closedAt?: string | null; mergedAt?: string | null; headRefName: string | null; headRefOid?: string | null; body: string | null; comments: Page<RawComment>; labels: Counted<{ name: string }>; files: Counted<{ path: string }>; mergeCommit?: { oid: string } | null };
-type RawComment = { id: string; body: string; createdAt: string };
+type RawComment = { id: string; body: string; createdAt: string; authorAssociation?: string };
 type RawIssue = {
   id: string; number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason?: BacklogIssueData["stateReason"]; body: string; createdAt: string; updatedAt: string; closedAt?: string | null;
   milestone: { title: string } | null; parent: { number: number } | null; labels: Counted<{ name: string }>; subIssues: Counted<{ number: number }>;
@@ -107,7 +107,7 @@ async function allComments(gh: GhRunner, cwd: string, vars: Vars, n: number, fir
     p = page<RawComment>(data?.repository?.[field]?.comments, `#${n} のコメント`);
     comments.push(...p.nodes);
   }
-  return comments.map((c): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt }, fetchState: "fetched" }));
+  return comments.map((c): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: c.id, remote: { issue: n, body: c.body, createdAt: c.createdAt, ...(c.authorAssociation ? { authorAssociation: c.authorAssociation } : {}) }, fetchState: "fetched" }));
 }
 
 /** A pull request read in full: itself and every comment, kept as `comment` records of the PR's number. */

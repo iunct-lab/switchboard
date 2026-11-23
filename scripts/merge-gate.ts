@@ -136,21 +136,17 @@ export const ASK_KINDS: AskKind[] = REVERSIBILITY.ask;
 const REVERSIBLE_KINDS: string[] = REVERSIBILITY.reversible;
 /** The mark `mergePr` puts on a PR merged without a main review (direct, no large reason): `[merge-direct] <head sha>`. */
 export const MERGE_DIRECT = /^\[merge-direct\] ([0-9a-f]{40})\b/;
-export const RECHECK_PASS = new RegExp(`^\\[recheck\\] (${RECHECK_KINDS.join("|")}) pass ([0-9a-f]{40})\\b`);
 /**
- * Record marks for the user's side (the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
- * answered with `[merge-answer] <yes|no> <kinds> <head sha>` (kinds comma-separated; the comment's createdAt is the time).
- * merge-audit reads them; the verdict reads none (--allow-large needs the app's record of the person's grant: judge).
+ * The mark of the ask: `[merge-ask] <kinds> <head sha>` (kinds comma-separated). The answer on the Task's ask reads it for the
+ * head it was asked at; the verdict reads none (--allow-large needs the app's record of the person's grant: judge).
  */
 export const MERGE_ASK = /^\[merge-ask\] ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
-export const MERGE_ANSWER = /^\[merge-answer\] (yes|no) ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
 export const RESCUE = ["rescue/**"].map((p) => new Bun.Glob(p));
 export const MIGRATION = ["packages/core/src/db.ts", "packages/core/src/db/**", "packages/core/src/schema-baseline.json"].map((p) => new Bun.Glob(p));
 const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;
 
 const TESTS = ["**/*.test.ts", "scripts/*-e2e.ts"].map((p) => new Bun.Glob(p));
 const DOCS = ["docs/**", "**/*.md"].map((p) => new Bun.Glob(p));
-export const REVIEW = /^\[(codex|claude)\] review/;
 /**
  * Paths that need an attacking review besides the security groups they may not be in: what moves a release, the rescue,
  * the way in from outside and what a Task may run. Switchboard's own paths, applied to every --repo as they are (like
@@ -236,6 +232,8 @@ export interface Judgement {
   ask: AskKind[];
   /** The recheck kinds among the large reasons that have no mark of the head yet. */
   recheck: RecheckKind[];
+  /** Every recheck kind the change asks for, those already recorded for the head too (what `[再チェック <kind>]` reasons are built from); absent = none. */
+  required?: RecheckKind[];
   /** What was not checked: it does not stop the merge. Absent = nothing. */
   notes?: string[];
   /** The main review was not asked for: a direct PR with no large reason (mergePr marks it). Absent = it was asked for. */
@@ -650,7 +648,8 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const reviewSkipped = f.direct === true && large.every((l) => REVERSIBLE_KINDS.includes(l.kind));
   const impact = large.length > 0 ? "large" : "small";
   const marked = new Set(f.rechecks ?? []);
-  const recheck = RECHECK_KINDS.filter((k) => !marked.has(k) && large.some((l) => l.kind === k));
+  const required = RECHECK_KINDS.filter((k) => large.some((l) => l.kind === k));
+  const recheck = required.filter((k) => !marked.has(k));
   const ask = ASK_KINDS.filter((k) => large.some((l) => l.kind === k));
   const isAsk = (k: RecheckKind | AskKind): k is AskKind => (ASK_KINDS as string[]).includes(k);
 
@@ -696,7 +695,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果はアプリの仕事の記録で、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
-  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}), ...(attack.length > 0 ? { attack } : {}) };
+  return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(required.length > 0 ? { required } : {}), ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}), ...(attack.length > 0 ? { attack } : {}) };
 }
 
 /** The line a judgement names the settings it was made with: the workspace and the version the person confirmed. */
@@ -1423,7 +1422,7 @@ const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | 
  * once the merge is done; a write that fails is said and does not fail the run. `judged`: the named PR's judgement last, with the
  * PRs below it in a stack before it (their reasons carry the PR's number).
  */
-export function writeGateResult(env: Record<string, string | undefined>, r: { head: string | null | undefined; verdict: "merge" | "stop"; judged: Array<{ pr: number | null; j: Judgement }>; allowLarge: boolean; merged: boolean }, err: (s: string) => void = console.error): void {
+export function writeGateResult(env: Record<string, string | undefined>, r: { head: string | null | undefined; verdict: "merge" | "stop"; judged: Array<{ pr: number | null; j: Judgement; head?: string | null }>; /** The number of the named PR, with the stack's own entries kept per PR. */ topPr?: number; allowLarge: boolean; merged: boolean }, err: (s: string) => void = console.error): void {
   if (!env.J || !r.head) return;
   try {
     const named = r.judged.at(-1)!.j;
@@ -1432,6 +1431,9 @@ export function writeGateResult(env: Record<string, string | undefined>, r: { he
       verdict: r.verdict,
       ask: [...new Set(r.judged.flatMap((x) => x.j.ask))],
       recheck: [...new Set(r.judged.flatMap((x) => x.j.recheck))],
+      required: [...new Set(r.judged.flatMap((x) => x.j.required ?? []))],
+      // a stack: each PR's own head and kinds, and whether its main review was skipped (the lists above are the stack's union, its reasons carry `#<n>:`)
+      ...(r.topPr !== undefined && r.judged.length > 1 ? { stack: r.judged.map((x) => ({ pr: x.pr ?? r.topPr!, head: x.head ?? r.head, ask: x.j.ask, recheck: x.j.recheck, required: x.j.required ?? [], merged: r.merged, reviewSkipped: x.j.reviewSkipped === true })) } : {}),
       reasons: r.judged.flatMap((x) => x.j.reasons.map((t) => (x.pr === null ? t : `#${x.pr}: ${t}`))),
       allowLarge: r.allowLarge,
       reviewSkipped: named.reviewSkipped === true,
@@ -1609,7 +1611,7 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
   const all = lower.every((l) => l.j.verdict === "merge") && j.verdict === "merge";
   if (lower.length === 0) log(JSON.stringify(j, null, 2));
   else log(JSON.stringify({ verdict: all ? "merge" : "stop", stack: [...lower.map((l) => ({ pr: l.pr, ...l.j })), { pr: n, ...j }] }, null, 2));
-  const record = (merged: boolean) => writeGateResult(backlog.env, { head: facts.head, verdict: all ? "merge" : "stop", judged: [...lower.map((l) => ({ pr: l.pr, j: l.j })), { pr: null, j }], allowLarge, merged }, err);
+  const record = (merged: boolean) => writeGateResult(backlog.env, { head: facts.head, verdict: all ? "merge" : "stop", judged: [...lower.map((l) => ({ pr: l.pr, j: l.j, head: l.facts.head })), { pr: null, j, head: facts.head }], topPr: n, allowLarge, merged }, err);
   record(false);
   if (!all) return 1;
   if (!mode) return 0;

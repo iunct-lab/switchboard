@@ -9,6 +9,7 @@ import { importing } from "../fixtures/github-import.ts";
 import { answerStoredDecision, screenAnswer } from "./backlog-edit.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
+import { readPolicies, writePolicies } from "./policies.ts";
 import { startServer, type CoreServer } from "./server.ts";
 
 /* POST /api/asks/answer, the Issue side: a fake runner and a fake gh, as asks.test.ts boots them. */
@@ -103,6 +104,11 @@ const queued = () =>
     const issue = core!.db.getBacklogRecord({ ...o, objectKind: "issue", externalId: o.issue });
     return [((issue?.local ?? issue?.remote) as { number: number } | null)?.number, o.kind, o.field, o.payload];
   });
+/** A merge verdict the app ran of the fixture PR (number 12): the head it judged, when it started, and what it asked the person. */
+const gateAt = (head: string, at: string, ask: string[]) => {
+  const j = core!.db.insertJob({ kind: "gate", taskId: "t_gate", pr: 12, runner: null, cwd: "/", startedAt: Date.parse(at), repo: "acme/app", head: null, as: null, kinds: [] });
+  core!.db.setJobResult(j.id, { head, result: { gate: { verdict: "stop", head, ask, recheck: [], reasons: [], allowLarge: false, reviewSkipped: false, merged: false } } });
+};
 const stageTasks = (n: number) => core!.db.listTasks().filter((t) => t.stage?.issue === n);
 const B = "B: ファイル — 影響: 移行が要らない";
 const meta = () => core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
@@ -208,20 +214,49 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(((await c.json()) as AskChanged).changes).toEqual(["選択肢が変わりました"]);
   });
 
-  test("changed: the PR the question stopped at has another head than its [merge-ask] named → 409 naming both; one gh read, nothing written", async () => {
+  test("changed: the PR the question stopped at has another head than the app's verdict before it judged → 409 naming both; one gh read, nothing written", async () => {
     const asked = "2026-09-22T02:00:00Z";
-    const fake = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: HEAD, comments: [{ body: `[merge-ask] security ${ASKED}`, createdAt: asked }], commits: [{ committedDate: "2026-09-23T00:00:00Z" }] } });
+    const fake = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: HEAD, comments: [], commits: [{ committedDate: "2026-09-23T00:00:00Z" }] } });
     const base = await boot(fake.gh);
+    gateAt(ASKED, asked, ["security:gates"]);
     const ask = await decisionOf306(base);
     expect(ask.place).toEqual({ text: "PR #12（+40/-3）", pr: 12, reasons: [], diff: "+40/-3" });
     const r = await answer(base, ask.id, { kind: "choice", choice: B });
     expect(r.status).toBe(409);
     expect(((await r.json()) as AskChanged).changes).toEqual([`PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${HEAD.slice(0, 7)}）`]);
-    expect(fake.calls.filter((a) => a[0] === "pr")).toEqual([["pr", "view", "12", "-R", "acme/app", "--json", "state,headRefOid,comments,commits"]]);
+    expect(fake.calls.filter((a) => a[0] === "pr")).toEqual([["pr", "view", "12", "-R", "acme/app", "--json", "state,headRefOid,commits"]]);
     expect(queued()).toEqual([]);
     // not a dead end: a text (asking to check again) is not the PR's approval and goes
     expect((await answer(base, ask.id, { kind: "text", text: "差分が変わったのでマージ判定をやり直して" })).status).toBe(200);
     expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n差分が変わったのでマージ判定をやり直して\n\n（この回答は問いの時点の PR へのものです。回答の時点で: PR #12 の差分が変わりました（${ASKED.slice(0, 7)} → ${HEAD.slice(0, 7)}））`, screen: true, heads: {} }]);
+  });
+
+  test("with no judgement of the head the question is not answered by a policy", async () => {
+    const fake = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: HEAD, comments: [{ body: `[merge-ask] size ${HEAD}`, createdAt: "2026-09-22T02:00:00Z" }], commits: [] } });
+    const base = await boot(fake.gh);
+    // the stage Task's stop record gives the question its subject (what a policy matches)
+    const t = insertStage("#306 計画", "done", { issue: 306, action: "plan" } as never, 1000);
+    core!.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s306", work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "decide", target: "storage", reason: "decision", evidence: "needs a decision", safety: "unknown", conditions: [], answer: null, actions: [], state: "waiting", at: 1000 } } as never);
+    const ask = await decisionOf306(base);
+    expect(ask.place?.pr).toBe(12);
+    const choice = ask.choices.find((c) => c.startsWith("B:"))!;
+    const DAY = 86_400_000;
+    writePolicies(core!.db, [{ id: "pol_t", scope: "repo", workspaceId: meta().id, pbi: null, askId: null, kind: ask.subject!.kind, op: ask.subject!.op, target: ask.subject!.target, when: [], answer: { kind: "choice", choice }, expiresAt: Date.now() + DAY, revokedAt: null, createdAt: Date.now() - 1000, updatedAt: Date.now() - 1000, from: ask.subject!, uses: [], useCount: 0, firstUsedAt: null }]);
+    const s = (await (await fetch(`${base}/api/schedules`, { method: "POST", body: JSON.stringify({ title: "バックログを進める", cron: "0 */3 * * *", workspaceId: meta().id, runner: "claude", prompt: "", action: "backlog-next" }) })).json()) as { id: string };
+    await fetch(`${base}/api/workspaces/${meta().id}`, { method: "PATCH", body: JSON.stringify({ sweep: { implement: 0, plan: 0 } }) });
+    const fire = () => fetch(`${base}/api/schedules/${s.id}/run`, { method: "POST", body: "{}" });
+    // no verdict of the app judged the head (a `[merge-ask]` comment is no judgement): what is asked is not known, so the policy does not answer
+    await fire();
+    expect(queued().filter((o) => String((o[3] as { body?: string })?.body ?? "").startsWith("## 回答"))).toEqual([]);
+    expect(readPolicies(core!.db)[0]!.uses).toEqual([]);
+    // nor is an answer to it saved as a policy: 409, nothing saved or sent
+    const save = await answer(base, ask.id, { kind: "choice", choice }, true, { policy: { scope: "repo", target: ask.subject!.target, when: [], expiresAt: Date.now() + DAY } });
+    expect([save.status, ((await save.json()) as { error: string }).error]).toEqual([409, "この PR の今の head を判定した記録が無いため、方針にできません"]);
+    expect(readPolicies(core!.db)).toHaveLength(1);
+    // a verdict of the head that asked nothing: the policy answers
+    gateAt(HEAD, new Date(Date.now() - 60_000).toISOString(), []);
+    await fire();
+    expect(readPolicies(core!.db)[0]!.uses).toMatchObject([{ issue: 306 }]);
   });
 
   test("a grant of the PR the question stopped at is for the head the answer was checked against: the PR is read once, not again for the grant", async () => {
@@ -231,7 +266,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const ask = await decisionOf306(base);
     expect((await answer(base, ask.id, { kind: "text", text: GRANT })).status).toBe(200);
     expect(queued()[0]).toEqual([306, "comment", null, { body: `## 回答\n\n${GRANT}`, screen: true, heads: { "acme/app#12": HEAD } }]);
-    expect(fake.calls.filter((a) => a[0] === "pr")).toEqual([["pr", "view", "12", "-R", "acme/app", "--json", "state,headRefOid,comments,commits"]]);
+    expect(fake.calls.filter((a) => a[0] === "pr")).toEqual([["pr", "view", "12", "-R", "acme/app", "--json", "state,headRefOid,commits"]]);
   });
 
   test("a grant of the PR the question stopped at, in words given after the PR moved, is for the head read by the answer's check (the head at the answer), and the PR is not read again", async () => {
@@ -485,6 +520,16 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(stageTasks(306)).toHaveLength(1);
     await Bun.sleep(300);
     expect(grantRows()).toEqual([]);
+  });
+
+  test("merge grant: a quoted chosen option gives nothing, but a memo sent with it that is only the ask sentence is recorded: the memo is the person's own message", async () => {
+    const QUOTED = "> PR #12 をマージしてよい";
+    const base = await boot(fakeGh({ pr: PR12, lineB: QUOTED }).gh);
+    const ask = await decisionOf306(base);
+    expect((await answer(base, ask.id, { kind: "choice", choice: QUOTED, note: "PR #12 をマージしてよい" })).status).toBe(200);
+    const t = stageTasks(306)[0]!;
+    for (let n = 0; n < 30 && !core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12); n++) await Bun.sleep(10);
+    expect(core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12)).toBe(true);
   });
 
   test("merge grant: a quoted option's sentence after 許可 grants nothing either, for a merge outside the gate or for the ask", async () => {

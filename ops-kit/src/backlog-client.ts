@@ -1,13 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
-import { mergeGateOf, projectOf, type OpsConfig } from "./config.ts";
+import { projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
 import { bodyLoss } from "./lint.ts";
 import { triage } from "./triage.ts";
 import { findSecrets, hostAws } from "./secrets.ts";
-import { mergeAnswerYesHeads } from "./gh-guard.ts";
 
 /**
  * `ops-kit backlog …`: the backlog the app running the Task stored, read and edited through its API — the same
@@ -341,20 +340,6 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const body = await text(take("--body-file"));
         if (!ref || !body?.trim() || args.length) throw new Refused("backlog comment <issue> --body-file <f|->");
         noSecrets(body);
-        // a change that stands in for a PR while GitHub cannot be used shares its number with a PR and an Issue: the person's
-        // grant names a PR, so the yes that lifts an ask is not written there — what needs the person waits for GitHub
-        // (an answer that does not say where the backlog is kept is a GitHub workspace's: the app's default)
-        // the mark is looked for in the form its readers compare (`markText`): a leading space or a full-width bracket does not hide it
-        const yesHeads = mergeAnswerYesHeads(body);
-        if (asChange && yesHeads.length && ((await workspace()).backlog ?? "github") === "github") throw new Refused(`backlog comment: [merge-answer] yes は GitHub の workspace のローカルの変更には投稿しません（利用者の許可文は PR の番号を指す。聞く理由のある変更は GitHub が戻ってから PR で進める）`);
-        // `gh` is not in front of this path: the person's `[merge-answer] yes` mark is held to the same grant as in the guard
-        if (env.BACKLOG_URL && mergeGateOf(opts.cwd) !== null && yesHeads.length) {
-          // the grant is the repository's whose PR gets the mark: the workspace written to (none read: no grant), and the
-          // head the mark names: the grant holds for the head the PR had when it was given
-          const repo = direct ? null : await workspace().then((w) => w.repository, () => null);
-          const granted = await answerGranted(env, repo, number(ref), yesHeads, opts.fetch ?? fetch);
-          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話で PR #${number(ref)} への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #${number(ref)} をマージしてよい」の 1 文でも通ります。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通ります）`);
-        }
         if (direct) {
           await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);
           io.out(`#${number(ref)} にコメントを保存しました`);
@@ -682,22 +667,6 @@ export async function mergeGranted(env: Record<string, string | undefined>, repo
   } catch {
     return null;
   }
-}
-
-/**
- * Whether every yes mark a text posts on PR `target` of `repo` has the person's `answer` grant of the head it names
- * (`heads`: `mergeAnswerYesHeads` of the text). True = all; `"head"` = a yes names no head (nothing to hold the grant
- * to); `{ head }` = no grant of that head; null = the app could not be asked, or no repository was read.
- */
-export async function answerGranted(env: Record<string, string | undefined>, repo: string | null | undefined, target: number, heads: Array<string | null>, f: Fetch = fetch): Promise<true | "head" | { head: string } | null> {
-  if (heads.some((h) => h === null)) return "head";
-  if (!repo) return null;
-  for (const head of new Set(heads as string[])) {
-    const granted = await mergeGranted(env, repo, "answer", target, f, head);
-    if (granted === null) return null;
-    if (!granted) return { head };
-  }
-  return true;
 }
 
 /** The names at the top of the clone's HEAD (`dir` for a directory), from any directory of the clone; empty when git cannot read it. */

@@ -5,7 +5,6 @@ import type { Db } from "../db.ts";
 import { sameOrigin } from "../auth.ts";
 import { githubOutage, outageRefusal } from "../forge-outage.ts";
 import { landedTip } from "../landing.ts";
-import { mergeAnswerYes } from "../../../../ops-kit/src/gh-guard.ts";
 import { noticeTargets } from "../backlog-sync.ts";
 import { heldLine } from "../lease.ts";
 import { applyLocalOperations, branchTip, checkFieldChoices, checkLocalChange, checkLocalFields, checkLocalParent, localProjectFields } from "../backlog-local.ts";
@@ -350,10 +349,6 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
           if (new URL(req.url).searchParams.get("change") === "1" && changesApart(source)) {
             const kept = changeSourceOf(sc.db, ws.id)!;
             if (!readStoredIssue(sc.db, ws, Number(req.params.number), { source: kept })?.issue.change) return sc.bad(`変更 #${req.params.number} は保存されていません`, 404);
-            // the person's yes names a PR, and such a change shares its number with a PR and an Issue: the mark that lifts an
-            // ask is not kept on it, whoever sends it and through whatever client (the kit's command refuses it too). Read
-            // in the form the gate reads it (`markText`), which is also what is stored
-            if (mergeAnswerYes(parsed.data.text)) return sc.bad("[merge-answer] yes は GitHub の workspace のローカルの変更には保存しません（利用者の許可文は PR の番号を指す。聞く理由のある変更は GitHub が戻ってから PR で進める）", 422);
             const made = commentStoredIssue(sc.db, kept, Number(req.params.number), parsed.data.text);
             applyLocalOperations(sc.db, kept);
             return sc.json(made, 202);

@@ -1,19 +1,20 @@
 // test-reads: ops.config.json
 import { describe, expect, test } from "bun:test";
 import { RECHECK_KINDS } from "./merge-gate";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeGh } from "../ops-kit/src/gh.ts";
 import { loadConfig } from "../ops-kit/src/config.ts";
 import { lint } from "../ops-kit/src/lint.ts";
-import { auditorOf, main, settingFromEnv, parseVerdict, pbiFor, pbiTitle, POST_AUDIT, prepare, promptFor, record, routeOf, select, VIEWPOINTS, type MergedPr } from "./post-audit";
+import { auditorOf, main, settingFromEnv, parseVerdict, pbiFor, pbiTitle, POST_AUDIT, prepare, promptFor, pbiTitlePrefix, record, routeOf, select, settleFound, VIEWPOINTS, type MergedPr } from "./post-audit";
 import type { Run } from "./merge-audit";
+import type { MergeHistory } from "../ops-kit/src/merge-records.ts";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const kind = RECHECK_KINDS[0]!;
 const pr = (n: number, o: Partial<MergedPr> = {}): MergedPr => ({
-  number: n, mergedAt: `2026-11-0${(n % 7) + 1}T00:00:00Z`, headSha: SHA, mergeSha: `${n}`.padStart(40, "0"), marks: [], reviewed: true, audited: false, ...o,
+  number: n, mergedAt: `2026-11-0${(n % 7) + 1}T00:00:00Z`, headSha: SHA, mergeSha: `${n}`.padStart(40, "0"), marks: [], reviewed: true, audited: false, implementer: null, ...o,
 });
 const recheck = { kind: "recheck" as const, kinds: [kind], sha: SHA, at: "2026-11-01T00:00:00Z" };
 const yes = { kind: "yes" as const, kinds: [kind], sha: SHA, at: "2026-11-01T01:00:00Z" };
@@ -34,18 +35,17 @@ describe("routeOf", () => {
 });
 
 describe("auditorOf", () => {
-  test("実装が claude なら codex、無ければ claude", () => {
-    expect(auditorOf([{ message: "feat: x\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" }])).toBe("codex");
-    expect(auditorOf([{ message: "feat: x" }])).toBe("claude");
+  test("実装が claude なら codex、codex なら claude、分からなければ claude の実装として codex", () => {
+    expect(auditorOf("claude")).toBe("codex");
+    expect(auditorOf("codex")).toBe("claude");
+    expect(auditorOf(null)).toBe("codex");
   });
   test("auditorOf: the recheck setting same names the implementer's main reviewer; an unknown or missing environment value is other", () => {
-    const byClaude = [{ message: "feat: x\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" }];
-    const byCodex = [{ message: "feat: x" }];
-    expect(auditorOf(byClaude, { review: "same", recheck: "same" })).toBe("claude");
-    expect(auditorOf(byClaude, { review: "other", recheck: "same" })).toBe("codex");
-    expect(auditorOf(byCodex, { review: "same", recheck: "same" })).toBe("codex");
-    expect(auditorOf(byCodex, { review: "other", recheck: "same" })).toBe("claude");
-    expect(auditorOf(byClaude, { review: "same", recheck: "other" })).toBe("codex");
+    expect(auditorOf("claude", { review: "same", recheck: "same" })).toBe("claude");
+    expect(auditorOf("claude", { review: "other", recheck: "same" })).toBe("codex");
+    expect(auditorOf("codex", { review: "same", recheck: "same" })).toBe("codex");
+    expect(auditorOf("codex", { review: "other", recheck: "same" })).toBe("claude");
+    expect(auditorOf("claude", { review: "same", recheck: "other" })).toBe("codex");
     expect(settingFromEnv({})).toEqual({ review: "other", recheck: "other" });
     expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same", OPS_KIT_RECHECK_RUNNER: "bogus" })).toEqual({ review: "same", recheck: "other" });
   });
@@ -102,43 +102,118 @@ test("POST_AUDIT は印の行だけ", () => {
 });
 
 describe("main", () => {
-  const gh = (): Run => async (cmd) => {
-    const path = cmd[2] === "-X" ? cmd[4]! : cmd[2]!;
-    if (path === "search/issues") return `page false 2\n11\n12\n`;
-    const lines = (xs: unknown[]) => xs.map((x) => JSON.stringify(x)).join("\n") + "\n";
-    if (path.endsWith("/pulls/11")) return JSON.stringify({ merged_at: "2026-11-02T00:00:00Z", head: { sha: SHA }, merge_commit_sha: "a".repeat(40) });
-    if (path.endsWith("/pulls/12")) return JSON.stringify({ merged_at: "2026-11-09T00:00:00Z", head: { sha: SHA }, merge_commit_sha: "b".repeat(40) });
-    if (path.endsWith("/issues/11/comments")) return lines([{ body: "[codex] review ok", created_at: "2026-11-01T00:00:00Z", author_association: "NONE" }]);
-    if (path.endsWith("/pulls/11/commits")) return lines([{ message: "x\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" }]);
-    throw new Error(`unexpected ${cmd.join(" ")}`);
+  /** git and gh both fail: the selection reads the app's records only. */
+  const failing: Run = async (cmd) => {
+    throw new Error(`no command may run: ${cmd.join(" ")}`);
   };
-  test("期間外を外し、MARK_AUTHORS 以外の印は数えず、環境変数の本数で切る", async () => {
+  const job = (id: number, pr: number, over: object) => ({ id, kind: "gate", taskId: `t${pr}`, pr, runner: null, status: "pass", exitCode: 0, startedAt: Date.parse("2026-11-02T00:00:00Z") + id, endedAt: Date.parse("2026-11-02T00:00:00Z") + id, repo: "o/r", head: SHA, base: null, as: null, kinds: [], result: null, taskRunner: "claude", ...over });
+  const gate = (merged: boolean, over: object = {}) => ({ gate: { verdict: "merge", head: SHA, ask: [], recheck: [], reasons: [], allowLarge: false, reviewSkipped: false, merged, ...over } });
+  const pull = (number: number, mergedAt: string | null, mergeCommit: string | null) => ({ number, stored: mergeCommit !== null, state: mergedAt ? "MERGED" : null, mergedAt, closedAt: mergedAt, head: SHA, mergeCommit });
+  const history: MergeHistory = {
+    jobs: [
+      // 11: merged, its verdict skipped the main review (direct); the Task is a codex one
+      job(1, 11, { result: gate(true, { reviewSkipped: true }), taskRunner: "codex" }),
+      // 12: merged after the period
+      job(2, 12, { result: gate(true) }),
+      // 13: a main review and a merge, and an audit job that passed: audited
+      job(3, 13, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }),
+      job(4, 13, { result: gate(true) }),
+      // 13's audit job read another commit (SHA, not its merge commit): not a record; its [post-audit] comment of the owner (below) is
+      job(5, 13, { kind: "review", runner: "claude", as: "audit", taskId: "audit", taskRunner: "claude", result: { review: { findings: [], firstLine: "pass" } } }),
+      // 16: the app's audit job read its merge commit and kept `pass`: audited, with no comment
+      job(9, 16, { kind: "review", runner: "claude", as: "audit", taskId: "audit", head: "e".repeat(40), result: { review: { findings: [], firstLine: "pass" } } }),
+      job(10, 16, { result: gate(true) }),
+      // 14: merged in the period, never stored (no merge commit to read)
+      job(6, 14, { result: gate(true) }),
+      // 15: merged with a main review, claude's Task
+      job(7, 15, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }),
+      job(8, 15, { result: gate(true) }),
+    ] as MergeHistory["jobs"],
+    grants: [],
+    pulls: [pull(11, "2026-11-02T00:00:00Z", "a".repeat(40)), pull(12, "2026-11-09T00:00:00Z", "b".repeat(40)), pull(13, "2026-11-03T00:00:00Z", "c".repeat(40)), pull(14, null, null), pull(15, "2026-11-04T00:00:00Z", "d".repeat(40)), pull(16, "2026-11-05T00:00:00Z", "e".repeat(40))],
+    comments: [
+      { issue: 13, body: `[post-audit] pass ${"c".repeat(40)}`, createdAt: "2026-11-06T00:00:00Z", authorAssociation: "OWNER" },
+      // a comment by someone else, and one stored with no author: not counted, the PR is selected again, and both are said
+      { issue: 11, body: `[post-audit] pass ${"a".repeat(40)}`, createdAt: "2026-11-06T00:00:00Z", authorAssociation: "NONE" },
+      { issue: 15, body: `[post-audit] pass ${"d".repeat(40)}`, createdAt: "2026-11-06T00:00:00Z" },
+    ],
+    since: Date.parse("2026-10-01T00:00:00Z"),
+  };
+  const select = async (args: string[], env: Record<string, string | undefined> = {}, h: MergeHistory = history) => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-post-audit-"));
+    writeFileSync(join(dir, "key"), "k\n");
+    const urls: string[] = [];
     const out: string[] = [];
-    const log = console.log;
-    console.log = (s: string) => out.push(s);
+    const log = console.log, err = console.error;
+    console.log = (x: string) => void out.push(x);
+    console.error = () => {};
     try {
-      const now = Date.parse("2026-11-07T12:00:00Z");
-      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, {})).toBe(0);
-      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, { SWITCHBOARD_POST_AUDIT_MAX: "0" })).toBe(0);
-      expect(await main(["select", "--repo", "o/r"], gh(), now, { SWITCHBOARD_POST_AUDIT_MAX: "x" })).toBe(2);
-      // 値の無い --repo は今のリポジトリに落ちず exit 2
-      expect(await main(["select", "--repo"], gh(), now, {})).toBe(2);
-      // the Task's settings reach the auditor: Claude implemented, recheck same + review other → the main reviewer is Codex; review same → Claude
-      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, { OPS_KIT_RECHECK_RUNNER: "same" })).toBe(0);
-      expect(await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"], gh(), now, { OPS_KIT_RECHECK_RUNNER: "same", OPS_KIT_REVIEW_RUNNER: "same" })).toBe(0);
+      const code = await main(["select", ...args], failing, Date.parse("2026-11-07T12:00:00Z"), { MERGE_RECORDS_URL: "http://app.test", MERGE_RECORDS_TOKEN_FILE: join(dir, "key"), ...env }, async (url) => (urls.push(url), Response.json(h)));
+      return { code, urls, json: out[0] ? JSON.parse(out[0]) : null };
     } finally {
       console.log = log;
+      console.error = err;
+      rmSync(dir, { recursive: true, force: true });
     }
-    const j = JSON.parse(out[0]!);
-    // 11 の `[codex] review` は OWNER でないので数えない → direct。12 は期間外
-    expect(j.selected).toEqual([{ pr: 11, route: "direct", auditor: "codex", mergeSha: "a".repeat(40) }]);
-    expect(j.repo).toBe("o/r");
-    // SWITCHBOARD_POST_AUDIT_MAX=0 が select に渡る: 何も選ばず、候補は overflow に数える
-    const capped = JSON.parse(out[1]!);
+  };
+  const A = ["--since", "2026-11-01", "--until", "2026-11-07", "--repo", "o/r"];
+
+  test("select reads merged PRs, routes and audited ones from the app's records with a run that fails on gh", async () => {
+    const r = await select(A);
+    expect(r.code).toBe(0);
+    expect(r.urls).toEqual([`http://app.test/api/merge-records/history?${new URLSearchParams({ repo: "o/r", since: String(Date.parse("2026-11-01T00:00:00Z")), titlePrefix: pbiTitlePrefix("o/r") })}`]);
+    // 11 is direct (its verdict skipped the main review; a codex Task implemented it, so claude audits), 15 is a reviewed one by claude (codex audits);
+    // 12 is after the period, 13 was audited (a passed audit job), 14 has no merge commit: named, not selected
+    expect(r.json.selected).toEqual([
+      { pr: 11, route: "direct", auditor: "claude", implementerKnown: true, mergeSha: "a".repeat(40) },
+      { pr: 15, route: "review", auditor: "codex", implementerKnown: true, mergeSha: "d".repeat(40) },
+    ]);
+    expect(r.json.repo).toBe("o/r");
+    expect(r.json.unsaved).toEqual([14]);
+    expect(r.json.uncountedAudits).toBe(2);
+  });
+
+  test("an audit job the implementing Task asked for is no audit; a finding job settles the PR only once its PBI is in the backlog", async () => {
+    // 16's passing audit asked for by the Task that asked for its verdict: not counted, 16 is selected again
+    const self: MergeHistory = { ...history, jobs: history.jobs.map((j) => (j.id === 9 ? { ...j, taskId: "t16" } : j)) };
+    expect((await select(A, {}, self)).json.selected.map((s: { pr: number }) => s.pr).sort()).toEqual([11, 15, 16]);
+    // 16's audit kept `finding`: with no PBI of that title among the app's stored Issues (record stopped before filing it) it is selected again
+    const found = (titles: string[]): MergeHistory => ({ ...history, titles, jobs: history.jobs.map((j) => (j.id === 9 ? { ...j, result: { review: { findings: [], firstLine: "finding" } } } : j)) });
+    const near = await select(A, {}, found([`${pbiTitle("o/r", 16)}0`, pbiTitle("o/x", 16)]));
+    expect(near.json.selected.map((s: { pr: number }) => s.pr).sort()).toEqual([11, 15, 16]);
+    // its PBI is stored (open or closed alike): audited; the app is asked for the titles with the audit PBI's prefix, and nothing runs (gh or the backlog)
+    const filed = await select(A, {}, found([pbiTitle("o/r", 16)]));
+    expect(filed.json.selected.map((s: { pr: number }) => s.pr).sort()).toEqual([11, 15]);
+    expect(new URL(filed.urls[0]!).searchParams.get("titlePrefix")).toBe(pbiTitlePrefix("o/r"));
+    expect(settleFound([{ ...pr(16), auditFound: true }], "o/r", [pbiTitle("o/r", 16)])[0]!.audited).toBe(true);
+    // a stored Issue with the audit PBI's title and no audit job of the app (11: its mark is someone else's) settles nothing: anyone can open one
+    expect((await select(A, {}, { ...history, titles: [pbiTitle("o/r", 11)] })).json.selected.map((s: { pr: number }) => s.pr)).toEqual([11, 15]);
+    expect(settleFound([pr(11)], "o/r", [pbiTitle("o/r", 11)])[0]!.audited).toBe(false);
+  });
+
+  test("a stored PR with no merge commit is skipped, not named as never stored; an unknown implementer is said", async () => {
+    const h: MergeHistory = { ...history, pulls: history.pulls.map((p) => (p.number === 15 ? { ...p, mergeCommit: null } : p)), jobs: history.jobs.map((j) => ({ ...j, taskRunner: null, runner: null })) };
+    const r = await select(A, {}, h);
+    expect(r.json.unsaved).toEqual([14]);
+    expect(r.json.selected.map((s: { pr: number }) => s.pr)).toEqual([11]);
+    expect(r.json.selected[0].implementerKnown).toBe(false);
+  });
+
+  test("the cap and the Task's settings reach the selection; a bad number or a --repo with no value is exit 2", async () => {
+    // 環境変数の上限が select に渡る: 何も選ばず、候補は overflow に数える
+    const capped = (await select(A, { SWITCHBOARD_POST_AUDIT_MAX: "0" })).json;
     expect(capped.selected).toEqual([]);
-    expect(capped.overflow).toBe(1);
-    expect(JSON.parse(out[2]!).selected[0].auditor).toBe("codex");
-    expect(JSON.parse(out[3]!).selected[0].auditor).toBe("claude");
+    expect(capped.overflow).toBe(2);
+    expect((await select(["--repo", "o/r"], { SWITCHBOARD_POST_AUDIT_MAX: "x" })).code).toBe(2);
+    expect((await select(["--repo"])).code).toBe(2);
+    // the settings: recheck same + review other → the implementer's main reviewer is the other runner (11: codex's Task → claude); review same → the implementer itself
+    expect((await select(A, { OPS_KIT_RECHECK_RUNNER: "same" })).json.selected.map((s: { auditor: string }) => s.auditor)).toEqual(["claude", "codex"]);
+    expect((await select(A, { OPS_KIT_RECHECK_RUNNER: "same", OPS_KIT_REVIEW_RUNNER: "same" })).json.selected.map((s: { auditor: string }) => s.auditor)).toEqual(["codex", "claude"]);
+  });
+
+  test("the app not answering is exit 2 and prints nothing selected", async () => {
+    const r = await select(A, { MERGE_RECORDS_TOKEN_FILE: "/nonexistent/key" });
+    expect([r.code, r.json]).toEqual([2, null]);
   });
 });
 

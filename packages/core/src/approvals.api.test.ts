@@ -816,26 +816,6 @@ describe("merge grants", () => {
     }
   });
 
-  test("ops-kit/bin/gh against the daemon: a [merge-answer] yes of the allowed head reaches gh; another head or PR stops", async () => {
-    const { h, c, b, t } = await boot();
-    const mark = (head: string) => `[merge-answer] yes large ${head}`;
-    try {
-      expect(await guard(b, t, ["pr", "comment", "12", "--body", mark(HEAD)])).toMatchObject({ code: 1, calls: [] });
-      expect((await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 をマージしてよい" })).status).toBe(200);
-      const ok = await guard(b, t, ["pr", "comment", "12", "--body", mark(HEAD)]);
-      expect([ok.code, ok.calls, ok.err]).toEqual([0, [["pr", "comment", "12", "--body", mark(HEAD)]], ""]);
-      // the mark of a head the person did not see, and a PR they did not name
-      for (const argv of [["pr", "comment", "12", "--body", mark("b".repeat(40))], ["pr", "comment", "13", "--body", mark(HEAD)]]) {
-        const r = await guard(b, t, argv);
-        expect([argv, r.code, r.calls, r.err]).toEqual([argv, 1, [], expect.stringContaining("利用者の許可文の記録がありません")]);
-      }
-      // the answer grant is not a merge grant
-      expect(await guard(b, t, ["pr", "merge", "12", "--rebase"])).toMatchObject({ code: 1, calls: [] });
-    } finally {
-      await c.stop();
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
   test("the ask consent never lets a merge outside the gate through: gh pr merge from the Task's shell is refused", async () => {
     const { h, c, b, t } = await boot();
     try {

@@ -80,7 +80,7 @@ A Task is told only what holds for it. The app decides when it builds the text; 
 
 - **The runner is known late.** A Task that starts by itself may start on another runner when the first one is at its limit, so `startMetaTask` takes the prompt as a function of the runner and calls it once the runner is decided. The same function writes the text again for a shadow on another runner (`promptFor`); a prompt a person typed is copied as it is.
 - **Where the skills are.** The app's texts name the kit's skills by Claude Code's place; `skillPathsFor` (`packages/core/src/skillsync.ts`) rewrites those paths to the place of the Task's runner, which is the only place that Task's copies are in. A person's words inside the prompt (a request, an answer) are never rewritten.
-- **Fixed grant sentences.** The stop report says that two operations (a merge outside the gate, posting `[merge-answer]`) pass only with the sentence the refusing side prints, so a Task copies that sentence instead of writing its own.
+- **Fixed grant sentences.** The stop report says that a merge outside the gate passes only with the sentence the refusing side prints, so a Task copies that sentence instead of writing its own.
 - **Measuring.** `bun scripts/task-input.ts <task id>` prints what a Claude Code Task was given at its start, by route, in characters: the app's preamble, the request, the workspace's rules, each instruction file, the skill listing, the other attachments, and the first skill loaded.
 
 ### One way to say an operation

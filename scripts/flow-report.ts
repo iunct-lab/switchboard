@@ -20,7 +20,7 @@ import { runGh } from "../packages/core/src/backlog-gh.ts";
 import { actualsByStoryPoints, backlogGrowth, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
 import { deferredTasksSince } from "../packages/core/src/db.ts";
 import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
-import { spawnRun } from "./merge-audit.ts";
+import { formatSince, spawnRun } from "./merge-audit.ts";
 import { format as formatRounds, formatCandidates, readTable, reviewCandidates, type Candidate, type TableRow } from "./review-rounds.ts";
 
 const dur = (ms: number | null): string => {
@@ -93,9 +93,9 @@ async function main(): Promise<number> {
     let reviews: { rows: TableRow[]; candidates: Candidate[] } | null = null;
     try {
       if (!repo) throw new Error("GitHub のリポジトリが無い");
-      const { rows } = await readTable(days, repo, now, spawnRun);
+      const { rows, since } = await readTable(days, repo, now, spawnRun);
       reviews = { rows, candidates: reviewCandidates(rows) };
-      console.log();
+      console.log(`\n${formatSince(since)}`);
       for (const line of formatRounds(rows)) console.log(line);
       for (const line of formatCandidates(reviews.candidates)) console.log(line);
     } catch (e) {

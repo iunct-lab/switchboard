@@ -224,7 +224,7 @@ export function itemMarks(item: BacklogItem, auto: boolean, now = Date.now()): I
   const prereq = prereqLine(item);
   if (prereq.waiting.length) marks.push({ key: "prereq", label: t(common.markPrereq), warn: false });
   if (prereq.stuck.length) marks.push({ key: "stuck", label: t(common.markStuck), warn: true });
-  if (overlapLine(item)) marks.push({ key: "overlap", label: t(common.markOverlap), warn: true });
+  if (overlapLine(item, [])) marks.push({ key: "overlap", label: t(common.markOverlap), warn: true });
   const stops = shownStops(item.stopSummary);
   if (stops.length) marks.push({ key: "stops", label: t(common.markStops, { n: stops.length }), warn: stops.some((s) => stopDisplay(s).needsPerson) });
   const last = item.lastTask;
