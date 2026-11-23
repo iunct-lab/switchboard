@@ -63,7 +63,8 @@ export const BacklogIssueData = z.object({
 });
 export type BacklogIssueData = z.infer<typeof BacklogIssueData>;
 
-export const BacklogCommentData = z.object({ issue: z.number(), body: z.string(), createdAt: z.string() });
+/** `authorAssociation`: the commenter's relation to the repository as GitHub says it (OWNER, MEMBER, COLLABORATOR, …); absent for a comment stored before it was kept, and for one made here. */
+export const BacklogCommentData = z.object({ issue: z.number(), body: z.string(), createdAt: z.string(), authorAssociation: z.string().optional() });
 export type BacklogCommentData = z.infer<typeof BacklogCommentData>;
 
 /**

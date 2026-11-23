@@ -15,7 +15,7 @@ export const isSha = (s: unknown): s is string => typeof s === "string" && /^[0-
 export type Covers = (jobHead: string) => boolean | Promise<boolean>;
 
 /** The rechecks a command decides (`scripts/recheck.ts`, a job of kind `recheck`); every other kind is read by a review. `rescue` is both. */
-const COMMAND_RECHECKS = ["migration", "rescue", "security:lockfile"];
+export const COMMAND_RECHECKS = ["migration", "rescue", "security:lockfile"];
 
 type Review = { findings: { severity: string }[] };
 /** The findings a review job's end recorded; none when its output had no Findings section. */
@@ -23,6 +23,14 @@ const reviewOf = (j: MergeRecordJob): Review | undefined => {
   const r = (j.result as { review?: Review } | null)?.review;
   return r && Array.isArray(r.findings) ? r : undefined;
 };
+
+/** Whether a job is a passing recheck review of `kind`: run as `recheck` for it, with its findings recorded and no blocker and no should-fix among them. */
+export const reviewPassOf = (j: MergeRecordJob, kind: string): boolean => {
+  const r = reviewOf(j);
+  return j.kind === "review" && j.status === "pass" && !!r && j.as === "recheck" && j.kinds.includes(kind) && !r.findings.some((f) => f.severity === "blocker" || f.severity === "should-fix");
+};
+/** Whether a job is a passing recheck command of `kind` (the head it ran at is the caller's to check). */
+export const commandPassOf = (j: MergeRecordJob, kind: string): boolean => j.kind === "recheck" && j.status === "pass" && j.kinds.includes(kind);
 
 /** A review job that passed and left its findings (its output had the Findings section), by `as`, at a head the PR's head is covered by. */
 async function someReview(jobs: MergeRecordJob[], covers: Covers, ok: (j: MergeRecordJob, r: Review) => boolean): Promise<boolean> {
@@ -49,8 +57,8 @@ export async function rechecksOf(jobs: MergeRecordJob[], head: string, covers: C
   for (const j of jobs) for (const k of j.kinds) if ((j.kind === "review" && j.as === "recheck") || j.kind === "recheck") kinds.add(k);
   const out: string[] = [];
   for (const k of kinds) {
-    const byCommand = jobs.some((j) => j.kind === "recheck" && j.status === "pass" && j.head === head && j.kinds.includes(k));
-    const byReview = await someReview(jobs, covers, (j, r) => j.as === "recheck" && j.kinds.includes(k) && !r.findings.some((f) => f.severity === "blocker" || f.severity === "should-fix"));
+    const byCommand = jobs.some((j) => commandPassOf(j, k) && j.head === head);
+    const byReview = await someReview(jobs, covers, (j) => reviewPassOf(j, k));
     if (COMMAND_RECHECKS.includes(k) ? byCommand && (k !== "rescue" || byReview) : byReview) out.push(k);
   }
   return out;

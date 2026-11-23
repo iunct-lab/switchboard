@@ -202,7 +202,7 @@ describe("flow-improvement limit", () => {
     expect(flowStopped([flowItem({ number: 15, ...progress, onHold: true })])).toBe(1);
   });
 
-  const overlapHit = { hits: [{ ref: "Task #9", path: "src/a.ts", working: true }], unknown: null };
+  const overlapHit = { hits: [{ ref: "Task #9", path: "src/a.ts", working: true, pbi: null }], unknown: null };
 
   test("an overlapped in-progress flow PBI does not count against flowLimit", () => {
     const next = flowItem({ number: 2, priority: "P1" });

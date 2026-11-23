@@ -1,16 +1,21 @@
 /**
- * bun scripts/review-rounds.ts [--days 30] [--repo <owner/name>] [--json <file>] [--pages-per-day 14] — one row per rule (each recheck kind of
+ * bun scripts/review-rounds.ts [--days 30] [--repo <owner/name>] [--json <file>] — one row per rule (each recheck kind of
  * merge-gate, the main review route `review`, and `direct`), in two groups of columns. "拾った問題" is what a rule caught:
- * the findings and what became of them (from the review comments and the triage tables), and what was found after the
+ * the findings and what became of them (from the review jobs' records and the triage tables), and what was found after the
  * merge (the PRs auto-merged by the kind's recheck, how many were reverted, the weekly post-merge audit; merge-audit's
  * `tally` / `auditRows`). "掛かった往復" is what it took: the rounds per PR, the findings repeated on a path an earlier
- * round already named, and the minutes until the pass. Read-only, REST only, nothing is stored.
+ * round already named, and the minutes until the pass. Read-only, nothing is stored. All of it comes from the app's records
+ * (`GET /api/merge-records/history`, one call: the review jobs and their findings, the stored comments of the PRs) and main's
+ * commits (this clone's `git log`): GitHub is not asked for this repository's PRs. The first line says when the records begin.
  * Tab-separated. The kinds only a user's answer lifts have no row (no recheck runs for them).
- * Exit 0 = printed / 1 = the REST budget is too low to read / 2 = could not read or bad arguments.
+ * Exit 0 = printed / 2 = could not read or bad arguments.
  */
 import { writeFileSync } from "node:fs";
-import { auditRows, readHistory, spawnRun, tally, type PrRecord, type Revert, type Run } from "./merge-audit";
-import { MARK_AUTHORS, RECHECK_KINDS, RECHECK_PASS, REVIEW } from "./merge-gate";
+import { mergeHistory, type MergeHistory, type MergeHistoryJob } from "../ops-kit/src/merge-records.ts";
+import { auditRows, formatSince, mergeCommitsOf, prViewsOf, revertsSince, spawnRun, tally, type PrRecord, type Revert, type Run } from "./merge-audit";
+import { RECHECK_KINDS } from "./merge-gate";
+import { COMMAND_RECHECKS, commandPassOf, reviewPassOf } from "./merge-gate-records.ts";
+import { mergeRecordsEnv } from "./merge-records-env.ts";
 import { currentRepo } from "./repo.ts";
 
 type Period = { since: string; until: string };
@@ -37,21 +42,17 @@ export function afterMergeRows(prs: PrRecord[], reverts: Revert[], period: Perio
 }
 
 
-// ---- The rounds: from the comments of a PR (a summary closes a round; findings go to the next summary of the same runner) ----
+// ---- The rounds: from the review jobs the app recorded (one job = one round) ----
 
 export type Severity = "blocker" | "should-fix" | "nit" | "question";
 export interface Finding { severity: Severity; path: string }
-/** One round of one rule on one PR. `from` is the earliest comment of the round (its first finding, or the summary). */
+/** One round of one rule on one PR. `from` is when the review job began, `at` when it ended (GitHub's time form, no milliseconds). */
 export interface Round { pr: number; runner: string; rule: string; at: string; from: string; findings: Finding[] }
-/** A comment as `readRounds` reduces it: the first line of the body (a triage summary keeps its table rows too). */
-export interface IssueComment { pr: number; id?: number; body: string; created_at: string; author_association: string }
-export interface InlineComment extends IssueComment { in_reply_to_id: number | null }
+/** A PR comment the app stored, as the triage reads it. */
+export interface PrComment { pr: number; body: string; created_at: string }
 
-const WORDS = "[a-z][a-z:-]*(?: [a-z][a-z:-]*)*";
-const SUMMARY = new RegExp(`^\\[(codex|claude|dak)\\] (review(?![\\w-])|recheck (${WORDS})(?![\\w:-]))`);
-const FINDING = /^\[(codex|claude|dak)\] - \[(blocker|should-fix|nit|question)\] `([^`]+:\d+(?:-\d+)?)`/;
-const kindsIn = (words: string) => words.split(" ").filter((w) => (RECHECK_KINDS as readonly string[]).includes(w));
 const byAt = <T extends { at: string }>(a: T, b: T) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
+const kindsOf = (j: MergeHistoryJob) => j.kinds.filter((k) => (RECHECK_KINDS as readonly string[]).includes(k));
 
 function groupBy<T>(xs: T[], key: (x: T) => string): Map<string, T[]> {
   const m = new Map<string, T[]>();
@@ -59,44 +60,27 @@ function groupBy<T>(xs: T[], key: (x: T) => string): Map<string, T[]> {
   return m;
 }
 
+type JobReview = { findings: { severity: Severity; path: string }[] };
+/** The findings a review job's end recorded; none when its output had no Findings section. */
+const reviewOf = (j: MergeHistoryJob): JobReview | undefined => {
+  const r = (j.result as { review?: JobReview } | null)?.review;
+  return r && Array.isArray(r.findings) ? r : undefined;
+};
+
 /**
- * The rounds of every PR in the comments. A summary (`[<runner>] review` or `[<runner>] recheck <kinds>`, the first line)
- * closes a round, one per kind of a recheck. A finding (`[<runner>] - [<severity>] `path:line``, a general comment or the top
- * of an inline thread; replies are not findings) goes to the first summary of the same runner at or after its time; one
- * with no summary yet is not counted. A recheck of several kinds posts one summary and its findings are not told apart by
- * kind, so each kind's round counts them all. Only MARK_AUTHORS' comments count.
+ * The rounds of every PR in the jobs. A review job that passed and left its findings is one round: of the rule `review` when it
+ * is the main review (`as` none, or `fallback` at a usage limit: the jobs merge-gate counts), of each recheck kind it names when
+ * it ran as `recheck` (a job of several kinds is one round of each kind, counting all its findings); an audit or an attacking
+ * review is not a round. A finding whose place could not be read (no path) is not counted.
  */
-export function parseRounds(issue: IssueComment[], inline: InlineComment[]): Round[] {
-  type Item = { pr: number; runner: string; at: string; rules: string[] | null; finding: Finding | null };
-  const items: Item[] = [];
-  for (const c of [...issue, ...inline.filter((i) => i.in_reply_to_id == null)]) {
-    if (!MARK_AUTHORS.includes(c.author_association)) continue;
-    const line = c.body.split("\n")[0]!;
-    const s = SUMMARY.exec(line);
-    if (s) {
-      // the main review is the summary merge-gate counts (`REVIEW`: codex or claude), so that its rounds and its audit fall on the same row
-      const rules = s[2] === "review" ? (REVIEW.test(line) ? ["review"] : []) : kindsIn(s[3]!);
-      if (rules.length) items.push({ pr: c.pr, runner: s[1]!, at: c.created_at, rules, finding: null });
-      continue;
-    }
-    const f = FINDING.exec(line);
-    if (f) items.push({ pr: c.pr, runner: f[1]!, at: c.created_at, rules: null, finding: { severity: f[2] as Severity, path: f[3]!.replace(/:\d+(?:-\d+)?$/, "") } });
-  }
+export function roundsOf(jobs: MergeHistoryJob[]): Round[] {
   const rounds: Round[] = [];
-  for (const mine of groupBy(items, (i) => String(i.pr)).values()) {
-    mine.sort(byAt);
-    const summaries = mine.filter((i) => i.rules);
-    const got = new Map<Item, { from: string; findings: Finding[] }>();
-    for (const f of mine.filter((i) => i.finding)) {
-      const to = summaries.find((s) => s.runner === f.runner && s.at >= f.at);
-      if (!to) continue;
-      const g = got.get(to) ?? { from: f.at, findings: [] };
-      g.findings.push(f.finding!);
-      got.set(to, g);
-    }
-    for (const s of summaries) {
-      for (const rule of s.rules!) rounds.push({ pr: s.pr, runner: s.runner, rule, at: s.at, from: got.get(s)?.from ?? s.at, findings: got.get(s)?.findings ?? [] });
-    }
+  for (const j of jobs) {
+    const r = reviewOf(j);
+    if (j.kind !== "review" || j.status !== "pass" || !r || j.endedAt === null) continue;
+    const rules = j.as === null || j.as === "fallback" ? ["review"] : j.as === "recheck" ? kindsOf(j) : [];
+    const findings = r.findings.filter((f) => f.path !== "").map((f) => ({ severity: f.severity, path: f.path }));
+    for (const rule of rules) rounds.push({ pr: j.pr, runner: j.runner ?? "", rule, at: githubTime(j.endedAt), from: githubTime(j.startedAt), findings });
   }
   return rounds.sort((a, b) => a.pr - b.pr || byAt(a, b));
 }
@@ -105,21 +89,21 @@ export function parseRounds(issue: IssueComment[], inline: InlineComment[]): Rou
 export interface TriageRow { pr: number; rule: string; at: string; fixed: number; issued: number; notNeeded: number; answered: number }
 
 /**
- * The tables of the `## レビュー対応` summaries (`TRIAGE_HEADING`): per reviewer cell, `claude` / `claude（修正の見直し、2 回目）`
+ * The tables of the `## レビュー対応` summaries (the stored comments that begin so): per reviewer cell, `claude` / `claude（修正の見直し、2 回目）`
  * is the main review, `codex（recheck responsibility、2 回目）` is that kind (a cell of several kinds counts each in full).
  * The columns are 件数・修正・Issue 化・対処不要・回答.
  */
-export function parseTriage(issue: IssueComment[]): TriageRow[] {
+export function parseTriage(comments: PrComment[]): TriageRow[] {
   const rows: TriageRow[] = [];
-  for (const c of issue) {
-    if (!MARK_AUTHORS.includes(c.author_association) || !c.body.startsWith("## レビュー対応")) continue;
+  for (const c of comments) {
+    if (!c.body.startsWith("## レビュー対応")) continue;
     for (const line of c.body.split("\n").filter((l) => l.startsWith("|"))) {
       const cells = line.split("|").slice(1, -1).map((x) => x.trim());
       const who = /^(?:codex|claude|dak)(?:（(.*)）)?$/.exec(cells[0] ?? "");
       if (cells.length !== 6 || !who || !cells.slice(1).every((x) => /^\d+$/.test(x))) continue;
       const kinds = /recheck ([a-z: -]+)/.exec(who[1] ?? "");
-      // a reviewer cell without a recheck is the main review, by the same runners as `REVIEW` (a DAK cell is not)
-      const rules = kinds ? kindsIn(kinds[1]!.trim()) : cells[0]!.startsWith("dak") ? [] : ["review"];
+      // a reviewer cell without a recheck is the main review, by the same runners as the main review (a DAK cell is not)
+      const rules = kinds ? kinds[1]!.trim().split(" ").filter((w) => (RECHECK_KINDS as readonly string[]).includes(w)) : cells[0]!.startsWith("dak") ? [] : ["review"];
       const [, , fixed, issued, notNeeded, answered] = cells.map(Number) as [number, number, number, number, number, number];
       for (const rule of rules) rows.push({ pr: c.pr, rule, at: c.created_at, fixed, issued, notNeeded, answered });
     }
@@ -127,11 +111,25 @@ export function parseTriage(issue: IssueComment[]): TriageRow[] {
   return rows;
 }
 
-/** A `[recheck] <kind> pass <sha>` mark. */
+/** A recheck kind's pass on a PR, at the time the rule of merge-gate's `rechecksOf` is first met. */
 export interface Pass { pr: number; kind: string; at: string }
-export function parsePasses(issue: IssueComment[]): Pass[] {
-  return issue.filter((c) => MARK_AUTHORS.includes(c.author_association) && RECHECK_PASS.test(c.body))
-    .map((c) => ({ pr: c.pr, kind: RECHECK_PASS.exec(c.body)![1]!, at: c.created_at }));
+/**
+ * The rule is `rechecksOf`'s (merge-gate-records.ts): a kind a command decides (`COMMAND_RECHECKS`) passes with a passing recheck job,
+ * `rescue` needs a passing recheck review as well, any other kind passes with the review alone. The time is the end of the job that
+ * completes it (the later of the two for `rescue`). The head is not compared: the first pass of the PR is what is wanted.
+ */
+export function passesOf(jobs: MergeHistoryJob[]): Pass[] {
+  const out: Pass[] = [];
+  for (const [pr, mine] of groupBy(jobs.filter((j) => j.endedAt !== null), (j) => String(j.pr))) {
+    const first = (pred: (j: MergeHistoryJob) => boolean) => Math.min(...mine.filter(pred).map((j) => j.endedAt!));
+    for (const kind of new Set(mine.flatMap(kindsOf))) {
+      const cmd = first((j) => commandPassOf(j, kind));
+      const review = first((j) => reviewPassOf(j, kind));
+      const at = COMMAND_RECHECKS.includes(kind) ? Math.max(cmd, kind === "rescue" ? review : cmd) : review;
+      if (Number.isFinite(at)) out.push({ pr: Number(pr), kind, at: githubTime(at) });
+    }
+  }
+  return out;
 }
 
 /** The findings of a round on a path an earlier round of the same PR and rule already named (the 1st round has none). `at` is the round's. */
@@ -195,40 +193,8 @@ export function roundRows(rounds: Round[], triage: TriageRow[], passes: Pass[], 
   });
 }
 
-// ---- Reading the comment streams ----
-
-/** Of every comment of the repository: the first line of the body, and the table rows of a triage summary. One paginated call each. */
-const ISSUE_Q = '.[] | {created_at, author_association, issue_url, html_url, body: ((.body // "") | if startswith("## レビュー対応") then (["## レビュー対応"] + [split("\\n")[] | select(startswith("|"))] | join("\\n")) else split("\\n")[0] end)}';
-const INLINE_Q = '.[] | select(.in_reply_to_id == null) | {created_at, author_association, in_reply_to_id, pull_request_url, body: ((.body // "") | split("\\n")[0])}';
-
-/** `issues/comments` and `pulls/comments` of the repository since `since` (by update; the ones created before it are dropped here). Two paginated calls, not one per PR. */
-export async function readRounds(since: string, run: Run, repo: string): Promise<{ issue: IssueComment[]; inline: InlineComment[] }> {
-  const lines = <T>(out: string) => out.split("\n").filter(Boolean).map((l) => JSON.parse(l) as T);
-  const read = (what: string, q: string) => run(["gh", "api", "-X", "GET", `repos/${repo}/${what}/comments`, "-f", `since=${since}`, "-f", "per_page=100", "--paginate", "-q", q]);
-  const prOf = (url: string) => Number(url.split("/").at(-1));
-  // the issue stream carries the comments of plain Issues too; only a pull request's page is under /pull/
-  const issue = lines<IssueComment & { issue_url: string; html_url: string }>(await read("issues", ISSUE_Q))
-    .filter((c) => c.created_at >= since && /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/\d+(?:[/#?]|$)/.test(c.html_url)).map(({ html_url: _, ...c }) => ({ ...c, pr: prOf(c.issue_url) }));
-  const inline = lines<InlineComment & { pull_request_url: string }>(await read("pulls", INLINE_Q)).filter((c) => c.created_at >= since).map((c) => ({ ...c, pr: prOf(c.pull_request_url) }));
-  return { issue, inline };
-}
-
-/** Reading a day of the comment streams takes about this many REST calls; `--pages-per-day` overrides it for a repository with more or fewer comments. */
-export const PAGES_PER_DAY = 14;
-
-/** The comments are read from this many days before the period, so that a PR whose rounds began just before it keeps its first rounds. */
+/** The records are read from this many days before the period, so that a PR whose rounds began just before it keeps its first rounds. */
 export const LOOKBACK_DAYS = 7;
-
-/** Thrown when the REST budget (core) is under twice what reading the period is expected to take: nothing is read. */
-export class LowRate extends Error {}
-
-export async function checkRate(days: number, run: Run, pagesPerDay = PAGES_PER_DAY): Promise<void> {
-  const need = 2 * pagesPerDay * (days + LOOKBACK_DAYS);
-  const out = (await run(["gh", "api", "rate_limit", "-q", ".resources.core.remaining"])).trim();
-  const remaining = /^\d+$/.test(out) ? Number(out) : NaN;
-  if (!Number.isFinite(remaining)) throw new Error("gh api rate_limit の core の残りが読めない");
-  if (remaining < need) throw new LowRate(`REST の残りが足りない（core ${remaining}、${days} 日分を読むには ${need} 以上）`);
-}
 
 // ---- The table ----
 
@@ -263,7 +229,7 @@ export function format(rows: TableRow[]): string[] {
 
 const DAY = 86_400_000;
 
-/** The period's ends in GitHub's form (`…T00:00:00Z`, no milliseconds), so that comparing them with a comment's time as strings is right at midnight. */
+/** A time in GitHub's form (`…T00:00:00Z`, no milliseconds), so that the period's ends and a round's time compare as strings right at midnight. */
 export const githubTime = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /** The period of the last `days` days up to the end of `now`'s day (UTC). */
@@ -272,14 +238,22 @@ export function periodOf(days: number, now: number): Period {
   return { since: githubTime(until - days * DAY), until: githubTime(until) };
 }
 
-/** Reads the REST budget, the history and the comment streams of the period, and builds the table. Throws LowRate when the budget is too low (nothing else is read). */
-export async function readTable(days: number, repo: string, now: number, run: Run, pagesPerDay = PAGES_PER_DAY): Promise<{ period: Period; rows: TableRow[] }> {
+/** Where the app's records are read from (the tests give the address, the key and a fetch; a run from a terminal or a Task uses the usual ones). */
+export type AppReach = { env?: Record<string, string | undefined>; fetch?: Parameters<typeof mergeHistory>[2] };
+
+/**
+ * Reads the app's records of the period (one call) and main's reverts, and builds the table. `since` is when the records begin
+ * (null: none): a period before it is not in the table, and the caller says so. Nothing is asked of GitHub for this repository.
+ */
+export async function readTable(days: number, repo: string, now: number, run: Run, app: AppReach = {}): Promise<{ period: Period; rows: TableRow[]; since: number | null; reverts: Revert[] }> {
   const period = periodOf(days, now);
-  await checkRate(days, run, pagesPerDay);
-  const { prs, reverts } = await readHistory(period.since, run, repo);
-  // earlier than the period: a round that began before it has its findings and first rounds there, and `since` is by update
-  const { issue, inline } = await readRounds(githubTime(Date.parse(period.since) - LOOKBACK_DAYS * DAY), run, repo);
-  return { period, rows: tableRows(afterMergeRows(prs, reverts, period), roundRows(parseRounds(issue, inline), parseTriage(issue), parsePasses(issue), period)) };
+  // earlier than the period: a round that began before it has its findings and first rounds there
+  const h: MergeHistory = await mergeHistory(mergeRecordsEnv(app.env ?? process.env), { repo, sinceMs: Date.parse(period.since) - LOOKBACK_DAYS * DAY }, app.fetch);
+  const views = await prViewsOf(h);
+  const prs = views.filter((v) => v.marks.length > 0);
+  const reverts = await revertsSince(period.since, run, repo, mergeCommitsOf(views));
+  const comments = h.comments.map((c): PrComment => ({ pr: c.issue, body: c.body, created_at: githubTime(Date.parse(c.createdAt)) }));
+  return { period, since: h.since, reverts, rows: tableRows(afterMergeRows(prs, reverts, period), roundRows(roundsOf(h.jobs), parseTriage(comments), passesOf(h.jobs), period)) };
 }
 
 // ---- Candidates for review: a rule whose rounds do not pay ----
@@ -308,7 +282,7 @@ export function reviewCandidates(rows: TableRow[]): Candidate[] {
 export const formatCandidates = (candidates: Candidate[]): string[] =>
   candidates.length ? candidates.map((c) => `見直しの候補: ${c.rule}（${c.basis}）`) : ["見直しの候補: なし"];
 
-export async function main(args: string[], now = Date.now(), run: Run = spawnRun): Promise<number> {
+export async function main(args: string[], now = Date.now(), run: Run = spawnRun, app: AppReach = {}): Promise<number> {
   try {
     const arg = (flag: string) => {
       const i = args.indexOf(flag);
@@ -322,14 +296,13 @@ export async function main(args: string[], now = Date.now(), run: Run = spawnRun
     const repo = arg("--repo") ?? currentRepo();
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("--repo は owner/name");
     const json = arg("--json");
-    const pages = Number(arg("--pages-per-day") ?? PAGES_PER_DAY);
-    if (!Number.isInteger(pages) || pages < 1) throw new Error("--pages-per-day は 1 以上の整数");
-    const { period, rows } = await readTable(days, repo, now, run, pages);
+    const { period, rows, since } = await readTable(days, repo, now, run, app);
+    console.log(formatSince(since));
     for (const line of format(rows)) console.log(line);
-    if (json) writeFileSync(json, JSON.stringify({ period, rows }, null, 2));
+    if (json) writeFileSync(json, JSON.stringify({ period, since, rows }, null, 2));
   } catch (e) {
-    console.error(`${e instanceof LowRate ? "読まなかった" : "読めなかった"}: ${(e as Error).message}`);
-    return e instanceof LowRate ? 1 : 2;
+    console.error(`読めなかった: ${(e as Error).message}`);
+    return 2;
   }
   return 0;
 }

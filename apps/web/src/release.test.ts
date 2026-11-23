@@ -337,16 +337,34 @@ test("a web-only promotion is told apart from the core: two lines only when the 
 });
 
 describe("drainBanner", () => {
-  test("while a promotion holds new turns back: the tag, the Tasks it waits for and the minutes left; asked: said so; past the limit: nothing was cut and who decides; none: no band", async () => {
+  test("one short line per state with the tag and when new turns start; the Tasks, the minutes and the way to act go in the detail; none: no band", async () => {
     const { drainBanner } = await import("./release.ts");
     const since = Date.UTC(2030, 0, 1);
     const d = { tag: "v1.2.0", since, limitMs: 60 * 60_000, tasks: 2, queued: 1 };
-    expect(drainBanner(d, since + 10 * 60_000 + 1)).toBe("v1.2.0 の昇格待ち: 動いている・待っている Task 2 件が終わると入ります。新しいターンと Task は昇格の後に始まります（止めておくのはあと 50 分まで）");
+    const waiting = drainBanner(d, since + 10 * 60_000 + 1);
+    expect(waiting).toEqual({
+      line: "v1.2.0 の昇格待ち。新しいターンは昇格後に始まります",
+      detail: "動いている・待っている Task 2 件が終わると入ります。新しい Task も昇格の後に始まります（止めておくのはあと 50 分まで）",
+    });
     // past the limit before the daemon lifted it: never a negative time
-    expect(drainBanner(d, since + 61 * 60_000)).toContain("（止めておくのはあと 0 分まで）");
-    expect(drainBanner({ tag: "v1.2.0", since, asked: since + 5, queued: 0 }, since + 10)).toBe("v1.2.0 の昇格を頼みました。再起動まで新しいターンと Task は待ち、再起動の後に始まります");
+    expect(drainBanner(d, since + 61 * 60_000)?.detail).toContain("（止めておくのはあと 0 分まで）");
+    const asked = drainBanner({ tag: "v1.2.0", since, asked: since + 5, queued: 0 }, since + 10);
+    expect(asked).toEqual({
+      line: "v1.2.0 の昇格中。新しいターンは再起動後に始まります",
+      detail: "v1.2.0 の昇格を頼みました。再起動まで新しいターンと Task は待ち、再起動の後に始まります",
+    });
     // the hold ended at its limit: the band never says a Task is or will be cut
-    expect(drainBanner({ expired: { tag: "v1.2.0", at: since + 60 * 60_000, since, tasks: 1 } }, since + 75 * 60_000)).toBe("v1.2.0 の昇格が 75 分待っています（Task 1 件）。新しいターンを止めておくのはやめました。Task は切らず、全部止まったときに入ります。待たずに入れるなら「設定」→「動いている版」");
+    const expired = drainBanner({ expired: { tag: "v1.2.0", at: since + 60 * 60_000, since, tasks: 1 } }, since + 75 * 60_000);
+    expect(expired).toEqual({
+      line: "v1.2.0 の昇格待ち。新しいターンはもう止めていません",
+      detail: "75 分待っています（Task 1 件）。Task は切らず、全部止まったときに入ります。待たずに入れるなら「設定」→「動いている版」",
+    });
+    // the line fits one row at 390px (about 26 full-width letters at 13px; a half-width one counts half): no counts, no minutes
+    const width = (s: string) => [...s].reduce((w, c) => w + (c.codePointAt(0)! > 0xff ? 1 : 0.5), 0);
+    for (const b of [waiting, asked, expired]) {
+      expect(b!.line).not.toMatch(/件|分/);
+      expect(width(b!.line)).toBeLessThanOrEqual(26);
+    }
     expect(drainBanner(null, since)).toBeNull();
     expect(drainBanner(undefined, since)).toBeNull();
   });

@@ -165,6 +165,22 @@ export function sessionOn(opts: { active?: (pbi: number) => boolean; commentsOf?
 }
 
 /**
+ * The PBI that moves an overlap's other side forward, from the stored records only: `PR #n` = the parent of the first
+ * Issue it closes (`closes`) that has one, `Task #m` = its parent. null = none found, or another kind of ref.
+ */
+export function ownerPbiOf(ref: string, pulls: StoredPull[], issues: Map<number, BacklogIssueData>): number | null {
+  const m = /^(PR|Task) #(\d+)$/.exec(ref);
+  if (!m) return null;
+  const n = Number(m[2]);
+  if (m[1] === "Task") return issues.get(n)?.parent ?? null;
+  for (const c of pulls.find((p) => p.number === n)?.closes ?? []) {
+    const parent = issues.get(c)?.parent ?? null;
+    if (parent !== null) return parent;
+  }
+  return null;
+}
+
+/**
  * Gives each Ready / in-progress PBI the files its Tasks name that other work touches too, by the functions the guard in
  * the Task uses (scripts/parallel-guard.ts: `othersOf`, `turnsAhead`, `judge`; ops-kit/src/task-paths.ts: `pathsIn`) read
  * from the stored records, so that backlog-next does not start a session that would only find the overlap itself, and a
@@ -256,7 +272,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
     const seen = new Set<string>();
     const hits = (go.length ? [] : judged.flatMap((j) => j.blocking))
       .filter((h) => !seen.has(`${h.ref} ${h.path}`) && !!seen.add(`${h.ref} ${h.path}`))
-      .map((h) => ({ ref: h.ref, path: h.path, working: atWork(h), ...(h.turn !== undefined ? { turn: h.turn } : {}) }));
+      .map((h) => ({ ref: h.ref, path: h.path, working: atWork(h), pbi: h.turn !== undefined ? null : ownerPbiOf(h.ref, pulls, issues), ...(h.turn !== undefined ? { turn: h.turn } : {}) }));
     i.overlap = hits.length || unknown.length ? { hits, unknown: unknown.length ? unknown.map((n) => `PR #${n} の変更ファイルが記録に無い`).join("・") : null } : null;
     // a Task with no path named cannot be judged by the guard in the Task: it lets the PBI go, but is not named to start from
     if (!i.overlap) i.freeTasks = go.flatMap((j) => (j.task !== null && j.paths.length ? [j.task] : []));

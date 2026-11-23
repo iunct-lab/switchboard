@@ -178,7 +178,7 @@ export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Re
  * which are what the checks ask with when the command names none (neither: not recorded — a grant for any repository
  * is not made). A merge / answer grant is recorded with the head the PR has now (`grantHeadOf`): it holds for what the
  * PR was when the grant was recorded, and commits pushed after it ask again — also the rebase GitHub makes after a merge
- * below, as a `[merge-answer] yes` of an older head does not count either. A screen answer of an Issue is recorded at the
+ * below (the gate reads a grant only for the head it was recorded with). A screen answer of an Issue is recorded at the
  * start of the next stage task, later than the answer: its heads are the ones read when the answer was taken (`heads`,
  * `answerGrantHeads`), never read again here — a grant whose head is not among them is recorded without one and answers
  * for none.

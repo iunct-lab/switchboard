@@ -226,8 +226,10 @@ export const BacklogItem = z.object({
    * `ref` (`PR #n` / `Task #m`) and its `path`; `unknown` = why it cannot be judged (a PR's files are not all stored).
    * null = not judged (not such a PBI, no path named) or no overlap. A hit with `turn` is not work under way: the path is
    * kept for the PBI `turn`, which yielded on an overlap earlier and starts first (`ref` = its Task that names the path).
+   * `pbi` = the PBI that moves the other side forward: a PR's is the parent of the first Issue it closes (`closes`) that
+   * has one, a Task's is its parent. null = none found, or a hit with `turn` (a place waited for, not work under way).
    */
-  overlap: z.object({ hits: z.array(z.object({ ref: z.string(), path: z.string(), working: z.boolean(), turn: z.number().int().optional() })), unknown: z.string().nullable() }).nullable(),
+  overlap: z.object({ hits: z.array(z.object({ ref: z.string(), path: z.string(), working: z.boolean(), pbi: z.number().int().nullable(), turn: z.number().int().optional() })), unknown: z.string().nullable() }).nullable(),
   /**
    * The Tasks of the PBI the app judged free of overlaps and able to start now (not in review, no open PR of their own):
    * the 実装 prompt names them, so the session starts from one the guard in the Task lets go too. Absent = not judged, or

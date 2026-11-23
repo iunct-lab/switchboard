@@ -369,27 +369,38 @@ const emptyDb = () => {
   db.exec("CREATE TABLE tasks (id TEXT, status TEXT, created_at INTEGER, status_at INTEGER, shadow_of TEXT); CREATE TABLE ledger (task_id TEXT, cost_usd REAL); CREATE TABLE task_evals (task_id TEXT, source TEXT, json TEXT)");
   return db;
 };
-const SHA = "a".repeat(40);
-const prList = (...prs: Array<[number, string, string]>) => JSON.stringify(prs.map(([number, authorAssociation, body]) => ({ number, comments: [{ authorAssociation, body }] })));
-
-test("directMerges counts only the merged PRs with a [merge-direct] mark by a mark author, and renders the count", () => {
-  const calls: string[][] = [];
-  const run = (cmd: string[]) => (calls.push(cmd), prList([7, "MEMBER", `[merge-direct] ${SHA}`], [3, "OWNER", `[merge-direct] ${SHA} 理由`], [9, "MEMBER", "[local-ci] pass"], [11, "NONE", `[merge-direct] ${SHA}`]));
-  expect(directMerges(7, run, Date.parse("2026-11-14T00:00:00Z"), () => "o/r")).toEqual([3, 7]);
-  expect(calls).toEqual([["gh", "pr", "list", "-R", "o/r", "--state", "merged", "--search", "merged:>=2026-11-07", "--limit", "500", "--json", "number,comments"]]);
+const jobsDb = () => {
   const db = emptyDb();
+  db.exec("CREATE TABLE jobs (id INTEGER PRIMARY KEY, kind TEXT, pr INTEGER, repo TEXT, started_at INTEGER, ended_at INTEGER, result TEXT)");
+  return db;
+};
+const gateJob = (db: Database, pr: number, at: number, gate: object | null, kind = "gate", repo = "o/r", endedAt: number | null = at) =>
+  db.query("INSERT INTO jobs (kind, pr, repo, started_at, ended_at, result) VALUES (?, ?, ?, ?, ?, ?)").run(kind, pr, repo, at, endedAt, gate === null ? null : JSON.stringify({ gate }));
+
+test("direct merges are counted from the gate jobs without calling gh", () => {
+  const now = Date.parse("2026-11-14T00:00:00Z");
+  const db = jobsDb();
+  const direct = { merged: true, reviewSkipped: true };
+  gateJob(db, 7, now - 1000, direct);
+  gateJob(db, 3, now - 2000, direct);
+  gateJob(db, 3, now - 3000, direct); // the same PR twice is one
+  gateJob(db, 9, now - 1000, { merged: true, reviewSkipped: false }); // a reviewed merge
+  gateJob(db, 11, now - 1000, { merged: false, reviewSkipped: true }); // a verdict that did not merge
+  gateJob(db, 12, now - 8 * 86_400_000, direct); // before the window
+  gateJob(db, 13, now - 1000, direct, "review"); // not a verdict
+  gateJob(db, 14, now - 1000, direct, "gate", "o/other"); // another repository
+  gateJob(db, 15, now - 1000, null); // no judgement
+  gateJob(db, 16, now - 7 * 86_400_000 - 1000, direct, "gate", "o/r", now - 7 * 86_400_000 + 1000); // started before the window, merged inside it
+  // a stack run for reviewed top PR 21: its direct lower PR 20 is counted by its own entry; a lower PR with no entry's reviewSkipped (an older record) is not
+  gateJob(db, 21, now - 1000, { merged: true, reviewSkipped: false, stack: [{ pr: 20, merged: true, reviewSkipped: true }, { pr: 22, merged: true }, { pr: 21, merged: true, reviewSkipped: false }] });
+  // the repository as named (any case) against the jobs' lower-case one; no command is run (the function takes none)
+  expect(directMerges(db, 7, now, () => "O/R")).toEqual([3, 7, 16, 20]);
   const r = kernelReport(db, { days: 1, now: 1000, directMerges: [3, 7] });
-  expect(renderReport(r)).toContain("レビューなしで出た PR（[merge-direct]）: 2 件");
+  expect(renderReport(r)).toContain("レビューなしで出た PR（判定が主レビューを省いてマージ）: 2 件");
 });
 
-test("directMerges is null when gh or the repository cannot be read or the window fills the limit, and the report says it could not count", () => {
-  const run = () => {
-    throw new Error("gh: HTTP 403");
-  };
-  expect(directMerges(7, run, 0, () => "o/r")).toBeNull();
-  expect(directMerges(7, () => "[]", 0, () => { throw new Error("Cannot resolve repository"); })).toBeNull();
-  const full = JSON.stringify(Array.from({ length: 500 }, (_, i) => ({ number: i + 1, comments: [{ authorAssociation: "MEMBER", body: `[merge-direct] ${SHA}` }] })));
-  expect(directMerges(7, () => full, 0, () => "o/r")).toBeNull();
-  const db = emptyDb();
-  expect(renderReport(kernelReport(db, { days: 1, now: 1000, directMerges: null }))).toContain("数えられない（gh が読めないか、窓のマージ済み PR が 500 件以上）");
+test("directMerges is null when the repository cannot be named or the database has no job records, and the report says it could not count", () => {
+  expect(directMerges(jobsDb(), 7, 0, () => { throw new Error("Cannot resolve repository"); })).toBeNull();
+  expect(directMerges(emptyDb(), 7, 0, () => "o/r")).toBeNull();
+  expect(renderReport(kernelReport(emptyDb(), { days: 1, now: 1000, directMerges: null }))).toContain("数えられない（リポジトリか仕事の記録が読めない）");
 });

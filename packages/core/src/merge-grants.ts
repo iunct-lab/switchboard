@@ -31,17 +31,17 @@ export const USED_ANSWERS_KEPT = 200;
 export const API = "api";
 
 // The fixed sentences a person sends in a task's conversation to let one refused step through: `PR #n をマージしてよい`
-// lifts the ask reason (answer), `PR #n を判定の外でマージしてよい` lets the merge skip the gate (merge); a change of the
+// records the person's allowing the merge (answer; the gate reads it for its ask reason), `PR #n を判定の外でマージしてよい` lets the merge skip the gate (merge); a change of the
 // workspace has the first (`変更 Ln をマージしてよい`). A sentence ends its line (a closing full stop is fine); a different
 // verb or a longer clause does not match. A PR's may start with `<owner/name> の ` to name another repository than the task's.
 const REPO = String.raw`(?:(?<![\w./-])([\w.-]+\/[\w.-]+) の )?`;
 // `whole`: the sentence is everyday wording, so in a person's text it is read only as a whole line (after a list mark);
 // with other words before it, a condition among them, the line is left to the reader of the person's own words.
+// An Issue's chosen option line (which the Task wrote) reaches this reader as `選択肢: <line>` (`ownParts` of server/asks.ts),
+// so it is never a whole line of fixed sentences, and only the sentences read at the end of any line are read from it.
 const BODIES: Array<{ kind: MergeGrantKind; body: string; change?: true; whole?: true }> = [
   { kind: "merge", body: String.raw`PR #(\d+) を判定の外でマージしてよい` },
   { kind: "answer", body: String.raw`PR #(\d+) をマージしてよい`, whole: true },
-  // while the check on posting the mark stands, the sentence the skills still print is read too; both go when the check does
-  { kind: "answer", body: String.raw`PR #(\d+) に \[merge-answer\] yes を投稿してよい` },
   { kind: "answer", body: String.raw`変更 L(\d+) をマージしてよい`, change: true, whole: true },
 ];
 // a change has no repository to name: its group stays empty so every form reads the number as group 2
@@ -94,7 +94,7 @@ const SENTENCE_LINE = new RegExp(BODIES.map((f) => String.raw`${prefixOf(f)}${f.
  * - The two sentences that lift the ask reason are everyday wording, so they are read by letters only when the whole
  *   message is fixed sentences, one to a line: any other word in the message (a condition before or after) leaves the
  *   message to the reader of the person's own words (`noteConsent`).
- * - The two forms from before (the merge outside the gate, the older ask sentence) are read at the end of any line, and
+ * - The merge outside the gate is read at the end of any line, and
  *   after a ` — 許可: ` that a question's answer carries, as they were.
  */
 export function parseMergeGrants(text: string): MergeGrant[] {

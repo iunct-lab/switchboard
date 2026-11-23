@@ -1,190 +1,1487 @@
 {
- "_note": "Comments of two merged PRs reduced to what the counting reads: the first line of a review or recheck summary, of a finding (cut before the explanation), of a merge-ask / merge-answer mark (neither PR has a pass mark), and the table rows of a triage summary. The PR numbers and times are the real ones; no other text is kept. Inline replies are left out.",
- "issue": [
-  {"pr": 5845, "created_at": "2026-11-19T15:55:53Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `packages/core/src/server/cli-update.ts:645`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:55:57Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `packages/core/src/server/cli-update.ts:557`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:00Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:04Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:489`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:07Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:448`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:11Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/routes/runners.ts:287`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:15Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/protocol/src/model/settings.ts:786`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:18Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:486`"},
-  {"pr": 5845, "created_at": "2026-11-19T15:56:20Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-19T16:06:30Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `_review/pr.md:14`"},
-  {"pr": 5845, "created_at": "2026-11-19T16:06:40Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-19T19:59:31Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-19T20:11:14Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:02Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:106`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:03Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:170`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:05Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:115`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:07Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:154`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:08Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:88`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:10Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:81`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:11Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:128`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:13Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:261`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:14Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:86`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:16Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:18Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:19Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:20Z", "author_association": "MEMBER", "body": "[codex] - [nit] `packages/core/src/cli-update.api.test.ts:240`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:08:22Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:25Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `packages/core/src/server/cli-update.ts:198`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:26Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:31`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:28Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:120`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:29Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/cli-update.api.test.ts:261`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:30Z", "author_association": "MEMBER", "body": "[claude] - [nit] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:32Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:34Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/cli-update-install.ts:211`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:35Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:101`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:36Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:84`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:38Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:98`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:39Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:292`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:40Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:297`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:42Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:64`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:43Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:307`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:44Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:93`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:46Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:48Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:57`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:50Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:52Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:113`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:53Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:240`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:26:54Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:46Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:135`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:47Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:49Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/cli-update-install.ts:221`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:50Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:118`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:51Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:102`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:52Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:98`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:54Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:203`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:56Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:86`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:58Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:56`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:39:59Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:93`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:01Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:82`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:03Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/protocol/src/index.ts:10`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:04Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:05Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:57`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:07Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:08Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:113`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:10Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:303`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:40:11Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:32Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `packages/core/src/server/cli-update.ts:132`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:34Z", "author_association": "MEMBER", "body": "[claude] - [should-fix] `packages/core/src/server/cli-update.ts:317`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:35Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:53`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:37Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/cli-update.api.test.ts:300`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:38Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:39Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:130`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:41Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:314`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:42Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:69`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:44Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:216`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:45Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:317`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:47Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:56`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:48Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:106`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:50Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:161`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:51Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/protocol/src/index.ts:10`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:53Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:351`"},
-  {"pr": 5845, "created_at": "2026-11-20T01:52:54Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:29Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:323`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:31Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:167`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:32Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:67`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:33Z", "author_association": "MEMBER", "body": "[claude] - [nit] `_review/pr.md:20`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:35Z", "author_association": "MEMBER", "body": "[claude] - [nit] `packages/core/src/cli-update.api.test.ts:316`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:36Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:38Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:40Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:144`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:41Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/cli-update-install.ts:293`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:43Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:139`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:45Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:117`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:46Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:112`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:48Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:62`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:49Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:112`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:50Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:52Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:57`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:53Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:55Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:113`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:57Z", "author_association": "MEMBER", "body": "[codex] - [question] `packages/core/src/cli-update.api.test.ts:327`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:01:58Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:35Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:36Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:141`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:37Z", "author_association": "MEMBER", "body": "[codex] - [blocker] `packages/core/src/server/cli-update.ts:141`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:39Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update-install.ts:225`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:40Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:116`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:41Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:62`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:43Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:222`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:44Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:111`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:45Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/server/cli-update.ts:121`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:47Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:49Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/network-egress.md:57`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:50Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `docs/design/check-models.md:39`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:52Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:137`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:54Z", "author_association": "MEMBER", "body": "[codex] - [should-fix] `packages/core/src/cli-update.api.test.ts:113`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:55Z", "author_association": "MEMBER", "body": "[codex] - [question] `packages/core/src/cli-update.api.test.ts:362`"},
-  {"pr": 5845, "created_at": "2026-11-20T02:37:57Z", "author_association": "MEMBER", "body": "[codex] recheck size"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:42Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:45Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:12:05Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude | 3 | 3 | 0 | 0 | 0 |\n| codex（recheck responsibility） | 2 | 2 | 0 | 0 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:18Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:24Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:52Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し） | 2 | 2 | 0 | 0 | 0 |\n| codex（recheck responsibility、2 回目） | 4 | 4 | 0 | 0 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:21:03Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:21:06Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:21:09Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し、2 回目） | 0 | 0 | 0 | 0 | 0 |\n| codex（recheck responsibility、3 回目） | 1 | 1 | 0 | 0 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:37Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:42Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:24:06Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し、3 回目） | 1 | 1 | 0 | 0 | 0 |\n| codex（recheck responsibility、4 回目） | 3 | 3 | 0 | 0 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:29:00Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:29:04Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:29:22Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し、4 回目） | 2 | 1 | 0 | 0 | 1 |\n| codex（recheck responsibility、5 回目） | 2 | 1 | 0 | 0 | 1 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:33Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:39Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:50Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し、5 回目） | 1 | 1 | 0 | 0 | 0 |\n| codex（recheck responsibility、6 回目） | 3 | 3 | 0 | 0 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:19Z", "author_association": "MEMBER", "body": "[claude] review"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:27Z", "author_association": "MEMBER", "body": "[codex] recheck responsibility"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:59Z", "author_association": "MEMBER", "body": "## レビュー対応\n| claude（修正の見直し、6 回目） | 2 | 2 | 0 | 0 | 0 |\n| codex（recheck responsibility、7 回目） | 6 | 2 | 0 | 4 | 0 |"},
-  {"pr": 5864, "created_at": "2026-11-19T20:43:18Z", "author_association": "MEMBER", "body": "[merge-ask] responsibility 2d24ee961c492c29cd2f1f25ca78c8b2f1591770"},
-  {"pr": 5864, "created_at": "2026-11-19T22:30:29Z", "author_association": "MEMBER", "body": "[merge-answer] yes responsibility 2d24ee961c492c29cd2f1f25ca78c8b2f1591770"}
+ "_note": "The review jobs and the triage comments of two merged PRs (5845 and 5864), as the app records them: made from their real review comments, one review job per round (findings with their path), the triage tables as the comments.",
+ "jobs": [
+  {
+   "id": 1,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795103753000,
+   "endedAt": 1795103780000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/routes/runners.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/protocol/src/model/settings.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 2,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795104390000,
+   "endedAt": 1795104400000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "_review/pr.md",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/protocol/src/model/settings.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 3,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795118361000,
+   "endedAt": 1795118371000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "question",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 4,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119069000,
+   "endedAt": 1795119074000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "packages/protocol/src/model/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795136882000,
+   "endedAt": 1795136902000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 6,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795137985000,
+   "endedAt": 1795137992000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 7,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795137994000,
+   "endedAt": 1795138014000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/cli-update-install.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795138786000,
+   "endedAt": 1795138787000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 9,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795138789000,
+   "endedAt": 1795138811000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/cli-update-install.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/protocol/src/index.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 10,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795139552000,
+   "endedAt": 1795139558000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 11,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795139559000,
+   "endedAt": 1795139574000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/protocol/src/index.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 12,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795140089000,
+   "endedAt": 1795140096000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "_review/pr.md",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795140098000,
+   "endedAt": 1795140118000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/cli-update-install.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "question",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 14,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795142255000,
+   "endedAt": 1795142255000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 15,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5845,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795142256000,
+   "endedAt": 1795142277000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "size"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "blocker",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update-install.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/server/cli-update.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/network-egress.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "docs/design/check-models.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      },
+      {
+       "severity": "question",
+       "path": "packages/core/src/cli-update.api.test.ts",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 16,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119098000,
+   "endedAt": 1795119102000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 17,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119103000,
+   "endedAt": 1795119105000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 18,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119315000,
+   "endedAt": 1795119318000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "nit",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 19,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119319000,
+   "endedAt": 1795119324000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 20,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119663000,
+   "endedAt": 1795119663000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 21,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119664000,
+   "endedAt": 1795119666000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 22,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119816000,
+   "endedAt": 1795119817000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 23,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795119818000,
+   "endedAt": 1795119822000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 24,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120135000,
+   "endedAt": 1795120140000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "question",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 25,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120142000,
+   "endedAt": 1795120144000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "question",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 26,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120291000,
+   "endedAt": 1795120293000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "nit",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 27,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120294000,
+   "endedAt": 1795120299000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  },
+  {
+   "id": 28,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "claude",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120936000,
+   "endedAt": 1795120939000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": null,
+   "kinds": [],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[claude] review"
+    }
+   }
+  },
+  {
+   "id": 29,
+   "kind": "review",
+   "taskId": "t",
+   "pr": 5864,
+   "runner": "codex",
+   "status": "pass",
+   "exitCode": 0,
+   "startedAt": 1795120940000,
+   "endedAt": 1795120947000,
+   "repo": "o/r",
+   "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "base": null,
+   "as": "recheck",
+   "kinds": [
+    "responsibility"
+   ],
+   "taskRunner": "claude",
+   "result": {
+    "review": {
+     "findings": [
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      },
+      {
+       "severity": "should-fix",
+       "path": "private/CLAUDE.md",
+       "line": 1
+      }
+     ],
+     "firstLine": "[codex] review"
+    }
+   }
+  }
  ],
- "inline": [
-  {"pr": 5845, "created_at": "2026-11-19T16:06:32Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:252`"},
-  {"pr": 5845, "created_at": "2026-11-19T16:06:34Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:139`"},
-  {"pr": 5845, "created_at": "2026-11-19T16:06:36Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/protocol/src/model/settings.ts:222`"},
-  {"pr": 5845, "created_at": "2026-11-19T16:06:38Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:78`"},
-  {"pr": 5845, "created_at": "2026-11-19T19:59:21Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/server/cli-update.ts:257`"},
-  {"pr": 5845, "created_at": "2026-11-19T19:59:24Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/cli-update.api.test.ts:210`"},
-  {"pr": 5845, "created_at": "2026-11-19T19:59:26Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [question] `packages/core/src/cli-update.api.test.ts:257`"},
-  {"pr": 5845, "created_at": "2026-11-19T19:59:28Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `docs/design/network-egress.md:27`"},
-  {"pr": 5845, "created_at": "2026-11-19T20:11:09Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/protocol/src/model/cli-update.ts:54`"},
-  {"pr": 5845, "created_at": "2026-11-19T20:11:11Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `packages/core/src/cli-update.api.test.ts:210`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:38Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:39Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:40Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:43Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:11:44Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:32`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:15Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:17Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:19Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:20Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:21Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:15:22Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:21:04Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:36Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:38Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:40Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:23:41Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:32`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:28:55Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:28:57Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [question] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:29:02Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:29:03Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [question] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:31Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [nit] `private/CLAUDE.md:21`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:34Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:21`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:36Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:31:37Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:32`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:16Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [should-fix] `private/CLAUDE.md:21`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:17Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[claude] - [should-fix] `private/CLAUDE.md:32`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:20Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:21`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:21Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:21`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:22Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:23Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:22`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:25Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:32`"},
-  {"pr": 5864, "created_at": "2026-11-19T20:42:26Z", "author_association": "MEMBER", "in_reply_to_id": null, "body": "[codex] - [should-fix] `private/CLAUDE.md:32`"}
+ "comments": [
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude | 3 | 3 | 0 | 0 | 0 |\n| codex（recheck responsibility） | 2 | 2 | 0 | 0 | 0 |",
+   "createdAt": "2026-11-19T20:12:05Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し） | 2 | 2 | 0 | 0 | 0 |\n| codex（recheck responsibility、2 回目） | 4 | 4 | 0 | 0 | 0 |",
+   "createdAt": "2026-11-19T20:15:52Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し、2 回目） | 0 | 0 | 0 | 0 | 0 |\n| codex（recheck responsibility、3 回目） | 1 | 1 | 0 | 0 | 0 |",
+   "createdAt": "2026-11-19T20:21:09Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し、3 回目） | 1 | 1 | 0 | 0 | 0 |\n| codex（recheck responsibility、4 回目） | 3 | 3 | 0 | 0 | 0 |",
+   "createdAt": "2026-11-19T20:24:06Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し、4 回目） | 2 | 1 | 0 | 0 | 1 |\n| codex（recheck responsibility、5 回目） | 2 | 1 | 0 | 0 | 1 |",
+   "createdAt": "2026-11-19T20:29:22Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し、5 回目） | 1 | 1 | 0 | 0 | 0 |\n| codex（recheck responsibility、6 回目） | 3 | 3 | 0 | 0 | 0 |",
+   "createdAt": "2026-11-19T20:31:50Z"
+  },
+  {
+   "issue": 5864,
+   "body": "## レビュー対応\n| claude（修正の見直し、6 回目） | 2 | 2 | 0 | 0 | 0 |\n| codex（recheck responsibility、7 回目） | 6 | 2 | 0 | 4 | 0 |",
+   "createdAt": "2026-11-19T20:42:59Z"
+  }
  ]
 }

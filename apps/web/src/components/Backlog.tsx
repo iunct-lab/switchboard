@@ -1,9 +1,9 @@
-import { createContext, Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api/index.ts";
-import { backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, issueHref, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
-import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, overlapLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
+import { backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { changeMarks, changeStateLabel, mergedPair, short } from "../changes.ts";
 import { Flow } from "./Flow.tsx";
@@ -12,11 +12,12 @@ import { Mockups } from "./Approvals.tsx";
 import { RunnerLogin } from "./RunnerLogin.tsx";
 import { Stops } from "./Stops.tsx";
 import { BundleSection } from "./BundleSection.tsx";
+import { IssueLink, OwnerTask, Overlap } from "./BacklogOwner.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
 import { common } from "../i18n/common.ts";
-import { dropIndex, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
+import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
 import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -117,17 +118,6 @@ function SyncLine(props: { sync: BacklogSyncInfo; scope?: string; line?: ReturnT
 
 /** Whether a workspace's backlog is kept here, with no GitHub to send it to: the words of what is saved depend on it. */
 const KeptHere = createContext<(workspaceId: string) => boolean>(() => false);
-
-/** An Issue's number or title: a link to GitHub, the plain text for an Issue with no page there (the list opens it by 編集). */
-function IssueLink(props: { url: string; className?: string; children: ReactNode }) {
-  const href = issueHref(props.url);
-  if (!href) return <span className={props.className}>{props.children}</span>;
-  return (
-    <a className={props.className} href={href} target="_blank" rel="noreferrer">
-      {props.children}
-    </a>
-  );
-}
 
 /**
  * An Issue's edit form under its row: the values as the daemon shows them (stored edits over GitHub's), saved
@@ -688,34 +678,7 @@ function Waits(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; 
   const chain = waitChain(item, props.items);
   const owner = (w: BacklogItem["waits"][number]) => {
     const o = waitOwner(w, item, props.items);
-    if (!o) return <>{t(m.ownerUnknown)}</>;
-    const task = o.task;
-    return (
-      <>
-        {" ← "}
-        <IssueLink url={o.pbi.url}>
-          #{o.pbi.number} {o.pbi.title}
-        </IssueLink>
-        {t(m.ownerOf)}
-        {task === "unknown" ? (
-          t(m.taskUnknown)
-        ) : task === null ? (
-          t(m.noStageTask)
-        ) : (
-          <button className="ghost link" onClick={() => props.onOpenTask(task.id)}>
-            {t(m.ownerTask, { id: task.id, label: task.label })}
-          </button>
-        )}
-        {o.startable && (
-          <>
-            {" "}
-            <button className="ghost" disabled={props.starting !== null} onClick={() => props.onStart(o.pbi.number)}>
-              {t(m.continue)}
-            </button>
-          </>
-        )}
-      </>
-    );
+    return o ? <OwnerTask owner={o} withTitle onOpenTask={props.onOpenTask} starting={props.starting} onStart={props.onStart} /> : <>{t(m.ownerUnknown)}</>;
   };
   const refs = (waits: BacklogItem["waits"], row: BacklogItem, owners = false) =>
     waits.map((w, n) => {
@@ -806,34 +769,6 @@ function Prereqs(props: { item: BacklogItem }) {
 }
 
 /**
- * A Ready / in-progress row's overlap with other work (`overlapLine`): the PR / Task whose files its Tasks name, or
- * why that cannot be judged, in the warning colour. backlog-next leaves the row; the button still starts it.
- */
-function Overlap(props: { item: BacklogItem }) {
-  const line = overlapLine(props.item);
-  if (!line) return null;
-  return (
-    <div className="backlog-overlap hint warn" data-issue={props.item.url}>
-      {line.hits.length > 0 && (
-        <div>
-          {t(m.overlap)}{" "}
-          {line.hits.map((h, n) => (
-            <Fragment key={`${h.ref}:${h.path}`}>
-              {n > 0 && t(m.listSep)}
-              <IssueLink url={h.url}>
-                {h.ref}
-              </IssueLink>
-              {t(m.paren, { text: h.path })}
-            </Fragment>
-          ))}
-        </div>
-      )}
-      {line.unknown !== null && <div>{t(m.overlapUnknown, { reason: line.unknown })}</div>}
-    </div>
-  );
-}
-
-/**
  * A row's buttons (a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
  * when the PBI can be closed.
  */
@@ -914,7 +849,7 @@ function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: bool
       )}
       <Waits item={i} items={props.items} auto={props.auto} starting={props.starting} onOpenTask={props.onOpenTask} onStart={props.onStart} />
       <Prereqs item={i} />
-      <Overlap item={i} />
+      <Overlap item={i} items={props.items} onOpenTask={props.onOpenTask} />
       <Stops stops={i.stopSummary} issue={i.url} />
       <EditToggle target={i} onChanged={props.onChanged} onError={props.onError} />
     </>
@@ -1194,6 +1129,11 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
     />
   );
   const note = queue.lastNote ? noteSummary(queue.lastNote) : null;
+  // a holder line (`PR #n が k 件を止めている`) also opens the Task of the PBI that moves it
+  const holder = (l: string) => {
+    const o = holderOwner(l, items, (ws) => noteUrlOf(items, ws));
+    return o && <OwnerTask owner={o} onOpenTask={props.onOpenTask} />;
+  };
   return (
     <>
       <section className="card queue" data-queue-enabled={queue.enabled}>
@@ -1233,6 +1173,7 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
                       </IssueLink>
                     ),
                   )}
+                  {holder(l)}
                 </li>
               ))}
             </ul>

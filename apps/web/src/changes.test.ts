@@ -1,21 +1,23 @@
-// test-reads: scripts/merge-gate.ts
+// test-reads: scripts/local-ci.ts scripts/merge-gate.ts
 import { expect, test } from "bun:test";
-import { changeMarks, changeStateLabel, mergedPair, LOCAL_CI_RESULT, RECHECK_PASS, REVIEW } from "./changes.ts";
+import { changeMarks, changeStateLabel, mergedPair, LOCAL_CI_RESULT, RECHECK_PASS } from "./changes.ts";
 import { t } from "./i18n.ts";
 import { backlog as m } from "./i18n/backlog.ts";
 import { LOCAL_CI_RESULT as SCRIPT_LOCAL_CI } from "../../../scripts/local-ci.ts";
-import { RECHECK_PASS as SCRIPT_RECHECK } from "../../../scripts/merge-gate.ts";
+import { RECHECK_KINDS } from "../../../scripts/merge-gate.ts";
 
 const H = "a".repeat(40);
 const B = "b".repeat(40);
 const B2 = "c".repeat(40);
 const at = (n: number) => `2026-11-04T00:00:0${n}Z`;
 
-test("the marks are read by the scripts' own patterns", async () => {
+test("the local CI mark is read by the script's own pattern", () => {
   expect(LOCAL_CI_RESULT.source).toBe(SCRIPT_LOCAL_CI.source);
-  expect(RECHECK_PASS.source).toBe(SCRIPT_RECHECK.source);
-  const gate = Bun.file(new URL("../../../scripts/merge-gate.ts", import.meta.url));
-  expect(await gate.text()).toContain(`const REVIEW = ${REVIEW.toString()};`);
+});
+
+test("the screen's recheck mark names the same kinds as merge-gate's RECHECK_KINDS", () => {
+  const kinds = /\^\\\[recheck\\\] \(([^)]*)\)/.exec(RECHECK_PASS.source)![1]!.split("|");
+  expect(kinds).toEqual(RECHECK_KINDS);
 });
 
 test("changeMarks: none / the pass of the head and base now / a base moved since (stale) / a fail after the pass", () => {

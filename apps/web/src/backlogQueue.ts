@@ -1,5 +1,6 @@
 import type { BacklogItem, BacklogQueue, BacklogQueueEnded, BacklogQueueEntry } from "@switchboard/protocol";
 import { applyView, DEFAULT_VIEW, itemMarks, STAGES } from "./backlogView.ts";
+import { pbiOwner } from "./inProgress.ts";
 
 /** One entry of the queue with its row; `item` null = its workspace's backlog does not have it on this screen. */
 export interface QueueRow {
@@ -138,6 +139,21 @@ export function noteParts(line: string, urlOf: (workspaceName: string) => string
   }
   if (last < line.length) parts.push(line.slice(last));
   return parts;
+}
+
+/**
+ * The PBI that moves the holder of a queue line (`<workspace>: … PR #n が k 件を止めている…`) and its stage Task: the
+ * PBI an overlap hit with the same `ref` names on a row of that workspace (`urlOf` finds it by name, as `noteParts`
+ * does). null = not such a line, the workspace is not known, or no hit names a PBI.
+ */
+export function holderOwner(line: string, items: BacklogItem[], urlOf: (workspaceName: string) => string | null): ReturnType<typeof pbiOwner> | null {
+  const ws = /^([^:：]+)[:：] /.exec(line)?.[1];
+  const ref = /((?:Task|PR) #\d+) が \d+ 件を止めている/.exec(line)?.[1];
+  const base = ws && ref ? urlOf(ws) : null;
+  const row = base ? items.find((i) => i.url === base) : undefined;
+  if (!row || !ref) return null;
+  const pbi = items.filter((i) => i.workspaceId === row.workspaceId).flatMap((i) => i.overlap?.hits ?? []).find((h) => h.ref === ref && h.pbi != null)?.pbi;
+  return pbi != null ? pbiOwner(pbi, null, row, items) : null;
 }
 
 /** An Issue URL of the workspace named `name` in `items`, or null when no item has it or two workspaces share the name. */

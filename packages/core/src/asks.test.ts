@@ -9,6 +9,7 @@ import type { Ask, ProceedingQuestion } from "@switchboard/protocol";
 import { PROCEED_SETTLED, proceedingAsks, withGone, type GoneFacts } from "./asks.ts";
 import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, ON_HOLD_RESUME, parseAskBlock, questionsChosen, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { prFacts } from "./asks.ts";
+import { gateRecordsOf } from "./gate-records.ts";
 import { parseMergeGrants } from "./merge-grants.ts";
 import { closedHits, noticeAsks } from "./asks-notices.ts";
 import { approvalBatches } from "./approval-batch.ts";
@@ -1387,18 +1388,50 @@ describe("prFacts", () => {
     // a gh that never answers: the read ends at the limit, with the PR's number in what it says
     const never: GhRunner = () => new Promise(() => undefined);
     const began = Date.now();
-    await expect(prFacts(never, "/", "o/r", 12, ASKED_AT, 50)).rejects.toThrow("gh pr view 12: 0.05 秒で応答がありません");
+    await expect(prFacts(never, "/", "o/r", 12, ASKED_AT, [], 50)).rejects.toThrow("gh pr view 12: 0.05 秒で応答がありません");
     expect(Date.now() - began).toBeLessThan(2000);
     // one that answers in time is read as before
-    expect(await prFacts(view({ state: "OPEN", headRefOid: HEAD, comments: [], commits: [] }), "/", "o/r", 12, ASKED_AT, 50)).toEqual({ head: HEAD, mergeAsk: null, changes: [] });
+    expect(await prFacts(view({ state: "OPEN", headRefOid: HEAD, commits: [] }), "/", "o/r", 12, ASKED_AT, [], 50)).toEqual({ head: HEAD, mergeAsk: null, judged: false, changes: [] });
   });
 
   test("prFacts throws on a reply without a head", async () => {
-    // a [merge-ask] before the question names a head, and the reply has none: not known, said with the PR's number
-    const mark = [{ body: `[merge-ask] large ${"a".repeat(40)}`, createdAt: new Date(ASKED_AT - 60_000).toISOString() }];
-    await expect(prFacts(view({ state: "OPEN", comments: mark, commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
-    await expect(prFacts(view({ state: "OPEN", headRefOid: null, comments: mark, commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
-    await expect(prFacts(view({ state: "OPEN", headRefOid: "abc", comments: [], commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
+    // a verdict before the question names a head, and the reply has none: not known, said with the PR's number
+    const gates = [{ head: "a".repeat(40), startedAt: ASKED_AT - 60_000, ask: ["security:gates"], recheck: [] }];
+    await expect(prFacts(view({ state: "OPEN", commits: [] }), "/", "o/r", 12, ASKED_AT, gates)).rejects.toThrow("gh pr view 12: head がありません");
+    await expect(prFacts(view({ state: "OPEN", headRefOid: null, commits: [] }), "/", "o/r", 12, ASKED_AT, gates)).rejects.toThrow("gh pr view 12: head がありません");
+    await expect(prFacts(view({ state: "OPEN", headRefOid: "abc", commits: [] }), "/", "o/r", 12, ASKED_AT, [])).rejects.toThrow("gh pr view 12: head がありません");
+  });
+
+  test("the kinds a merge question asks about come from the gate's judgement of the head, not from a PR comment", async () => {
+    const OLD = "a".repeat(40);
+    const asked: string[][] = [];
+    const gh: GhRunner = async (args) => (asked.push(args), { code: 0, stdout: JSON.stringify({ state: "OPEN", headRefOid: HEAD, commits: [], comments: [{ body: `[merge-ask] size ${HEAD}`, createdAt: new Date(ASKED_AT - 1).toISOString() }] }), stderr: "" });
+    // the newest verdict of the head now: its ask then its recheck kinds; an older head's verdict is not this head's
+    const gates = [{ head: OLD, startedAt: ASKED_AT - 120_000, ask: ["migration"], recheck: [] }, { head: HEAD, startedAt: ASKED_AT - 60_000, ask: ["security:gates"], recheck: ["size"] }];
+    expect(await prFacts(gh, "/", "o/r", 12, ASKED_AT, gates)).toEqual({ head: HEAD, mergeAsk: "security:gates,size", judged: true, changes: [] });
+    // a `[merge-ask]` comment alone is no judgement: the kinds are not known
+    expect(await prFacts(gh, "/", "o/r", 12, ASKED_AT, [])).toMatchObject({ mergeAsk: null, judged: false });
+    // the PR's comments are not asked of GitHub
+    expect(asked.every((a) => !a.join(" ").includes("comments"))).toBe(true);
+    // the question was asked at another head's verdict: the PR moved since
+    expect((await prFacts(gh, "/", "o/r", 12, ASKED_AT, gates.slice(0, 1))).changes).toEqual([`PR #12 の差分が変わりました（${OLD.slice(0, 7)} → ${HEAD.slice(0, 7)}）`]);
+  });
+
+  test("gateRecordsOf reads the gate jobs' judgements of a PR, oldest first, by the repository as the jobs record it", () => {
+    const job = (id: number, over: object) => ({ id, kind: "gate", pr: 12, startedAt: id, result: null, ...over }) as never;
+    const own = [job(1, { result: { gate: { head: HEAD.toUpperCase(), ask: ["size"], recheck: [] } } }), job(2, { kind: "review", result: { gate: { head: HEAD, ask: [], recheck: [] } } }), job(3, {}), job(4, { result: { gate: { head: HEAD, ask: [], recheck: ["size"] } } })];
+    const db = { jobsOf: (repo: string, prs: number[]) => (repo === "o/r" && prs[0] === 12 ? own : []), jobsSince: (repo: string) => (repo === "o/r" ? own : []) };
+    expect(gateRecordsOf(db, "O/R", 12, 0)).toEqual([{ head: HEAD, startedAt: 1, ask: ["size"], recheck: [] }, { head: HEAD, startedAt: 4, ask: [], recheck: ["size"] }]);
+  });
+
+  test("gateRecordsOf gives each PR of a stack's verdict its own entry: a lower PR's is in the top PR's job, the top PR's is its own entry, not the stack's union", () => {
+    const LOW = "d".repeat(40);
+    const stack = { pr: 13, kind: "gate", id: 7, startedAt: 7, result: { gate: { head: HEAD, ask: ["security:gates", "migration"], recheck: ["size"], stack: [{ pr: 12, head: LOW, ask: ["migration"], recheck: [] }, { pr: 13, head: HEAD, ask: ["security:gates"], recheck: ["size"] }] } } } as never;
+    const db = { jobsOf: (_: string, prs: number[]) => (prs[0] === 13 ? [stack] : []), jobsSince: () => [stack] };
+    expect(gateRecordsOf(db, "o/r", 12, 0)).toEqual([{ head: LOW, startedAt: 7, ask: ["migration"], recheck: [] }]);
+    expect(gateRecordsOf(db, "o/r", 13, 0)).toEqual([{ head: HEAD, startedAt: 7, ask: ["security:gates"], recheck: ["size"] }]);
+    // a PR the stack does not name has none of it
+    expect(gateRecordsOf(db, "o/r", 14, 0)).toEqual([]);
   });
 });
 

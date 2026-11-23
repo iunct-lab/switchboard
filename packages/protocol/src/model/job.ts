@@ -21,6 +21,10 @@ export const JobResult = z.object({
     head: z.string().nullable(),
     ask: z.array(z.string()),
     recheck: z.array(z.string()),
+    /** Every recheck kind the change asked for, those already recorded for the head too (`recheck` holds only the kinds with no record yet). A record from before this was kept has none. */
+    required: z.array(z.string()).optional(),
+    /** A stack's verdict: each PR's own head and kinds, and whether its main review was skipped (absent in a record from before it was kept) (the lists above are the stack's union, its `reasons` carry `#<n>:`). Absent for a single PR. */
+    stack: z.array(z.object({ pr: z.number(), head: z.string().nullable(), ask: z.array(z.string()), recheck: z.array(z.string()), required: z.array(z.string()), merged: z.boolean(), reviewSkipped: z.boolean().optional() })).optional(),
     reasons: z.array(z.string()),
     allowLarge: z.boolean(),
     reviewSkipped: z.boolean(),

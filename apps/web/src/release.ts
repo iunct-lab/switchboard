@@ -65,12 +65,19 @@ export type PromotionDrain =
   | { expired: { tag: string; at: number; since: number; tasks: number } }
   | null;
 
-/** The one-line band of Home and the Task screen while a promotion holds new turns back, or after that hold ended at its limit; null = no band. */
-export function drainBanner(d: PromotionDrain | undefined, now: number): string | null {
+/**
+ * The band of Home and the Task screen while a promotion holds new turns back, or after that hold ended at its limit; null =
+ * no band. `line` is the one row the band shows (the tag and when new turns start), short enough for a phone held upright;
+ * `detail` (the Tasks it waits for, the minutes, the way to act) is the band's title and what it opens to.
+ */
+export function drainBanner(d: PromotionDrain | undefined, now: number): { line: string; detail: string } | null {
   if (!d) return null;
-  if ("expired" in d) return t(settings.drainExpired, { tag: d.expired.tag, n: d.expired.tasks, minutes: Math.max(0, Math.floor((now - d.expired.since) / 60_000)) });
-  if ("asked" in d) return t(settings.drainAsked, { tag: d.tag });
-  return t(settings.drainWaiting, { tag: d.tag, n: d.tasks, minutes: Math.max(0, Math.ceil((d.since + d.limitMs - now) / 60_000)) });
+  if ("expired" in d) {
+    const e = d.expired;
+    return { line: t(settings.drainExpired, { tag: e.tag }), detail: t(settings.drainExpiredDetail, { n: e.tasks, minutes: Math.max(0, Math.floor((now - e.since) / 60_000)) }) };
+  }
+  if ("asked" in d) return { line: t(settings.drainAsked, { tag: d.tag }), detail: t(settings.drainAskedDetail, { tag: d.tag }) };
+  return { line: t(settings.drainWaiting, { tag: d.tag }), detail: t(settings.drainWaitingDetail, { n: d.tasks, minutes: Math.max(0, Math.ceil((d.since + d.limitMs - now) / 60_000)) }) };
 }
 
 /** What `GET /api/daemon/release` says of the check of the newest release's diff (`ReleaseReview` in core). */

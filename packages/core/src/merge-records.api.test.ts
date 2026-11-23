@@ -9,7 +9,7 @@ import { writeWorkspaceConfigs } from "./workspace-config.ts";
 import { mergeRecordsRoutes } from "./routes/merge-records.ts";
 import { OWNER } from "./merge-grants.ts";
 import { NO_GH, NO_HISTORY, fakeAdapter, j, startServer } from "./api-test-harness.ts";
-import { mergeRecords } from "../../../ops-kit/src/merge-records.ts";
+import { mergeHistory, mergeRecords } from "../../../ops-kit/src/merge-records.ts";
 import { judge, readGitlabPr, readPr } from "../../../scripts/merge-gate.ts";
 
 const HEAD = "a".repeat(40);
@@ -77,6 +77,57 @@ describe("GET /api/merge-records", () => {
       expect((await get(x.b, `repo=acme/app&pr=13&taskId=${direct.id}`).then(j)).direct).toBe(false);
       expect((await get(x.b, `repo=other/app&pr=12&taskId=${direct.id}`).then(j)).direct).toBe(false);
       expect((await get(x.b, `repo=acme/app&pr=12&taskId=${direct.id}`).then(j)).direct).toBe(true);
+    } finally {
+      await x.stop();
+    }
+  });
+
+  test("history answers the period's jobs, grants, pulls and their comments only", async () => {
+    const x = await boot();
+    try {
+      const meta = ((await fetch(`${x.b}/api/workspaces`).then(j)) as Array<{ id: string; kind: string }>).find((w) => w.kind === "meta")!;
+      const source = { service: "github", host: "github.com", repository: "Acme/App", project: { owner: "o", number: 1 } } as const;
+      // the Task starts before the workspace names a repository its checkout is not of
+      const t = x.task("complete");
+      x.c.db.setWorkspaceBacklogSource(meta.id, source);
+      const pull = (number: number, over: object = {}) => ({ objectKind: "pull-request" as const, externalId: `PR_${number}`, fetchState: "fetched" as const, remote: { number, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: "c".repeat(40), updatedAt: "2026-11-10T00:00:00Z", files: [], closedAt: "2026-11-10T00:00:00Z", mergedAt: "2026-11-10T00:00:00Z", head: HEAD, ...over } as never });
+      const issue = (number: number, title: string, state: string, labels = ["type:pbi"]) => ({ objectKind: "issue" as const, externalId: `I_${number}`, fetchState: "fetched" as const, remote: { number, title, state, labels } as never });
+      const comment = (id: string, issue: number, body: string, authorAssociation?: string) => ({ objectKind: "comment" as const, externalId: id, fetchState: "fetched" as const, remote: { issue, body, createdAt: "2026-11-10T01:00:00Z", ...(authorAssociation ? { authorAssociation } : {}) } });
+      x.c.db.putBacklogSnapshot(source, { cursor: null, syncedAt: 1, records: [
+        pull(12), pull(5, { updatedAt: "2026-01-01T00:00:00Z", head: undefined }), pull(14, { state: "OPEN", mergedAt: null, closedAt: null, mergeCommit: null }),
+        comment("c1", 12, `[post-audit] pass ${"c".repeat(40)}`, "OWNER"), comment("c2", 5, "an old PR's comment"), comment("c3", 99, "an Issue's comment, not a PR's"),
+        issue(900, "PBI: audit — Acme/App#12", "CLOSED"), issue(901, "PBI: audit — Acme/App#14", "OPEN"), issue(902, "another PBI: audit — Acme/App#12", "OPEN"),
+        // not a PBI, and one GitHub no longer has (below): not titles
+        issue(903, "PBI: audit — Acme/App#15", "OPEN", ["type:request"]), issue(904, "PBI: audit — Acme/App#16", "OPEN"),
+      ] });
+      x.c.db.putBacklogSnapshot(source, { cursor: null, syncedAt: 2, records: [{ objectKind: "issue", externalId: "I_904", fetchState: "unavailable", remote: null } as never] });
+      const since = Date.parse("2026-11-01T00:00:00Z");
+      const job = (pr: number, startedAt: number, over: Partial<{ repo: string; head: string | null; kind: "gate" | "review"; as: "audit" | null }> = {}) =>
+        x.c.db.insertJob({ kind: over.kind ?? "gate", taskId: t.id, pr, runner: "claude", cwd: "/secret/cwd", startedAt, repo: over.repo ?? "acme/app", head: over.head === undefined ? HEAD : over.head, as: over.as ?? null, kinds: [] });
+      const before = job(12, since - 5_000);
+      const inside = job(13, since + 5_000, { head: null });
+      job(5, Date.parse("2026-01-01T00:00:00Z"));
+      job(12, since + 9_000, { repo: "other/app" });
+      x.c.db.finishJob(before.id, { status: "pass", exitCode: 0, summary: "long summary", endedAt: since - 4_000 });
+      x.c.db.recordMergeGrant({ taskId: t.id, repo: "acme/app", kind: "answer", target: 12, by: OWNER, head: HEAD });
+      x.c.db.recordMergeGrant({ taskId: t.id, repo: "acme/app", kind: "answer", target: 13, by: "task", head: HEAD });
+      x.c.db.recordMergeGrant({ taskId: t.id, repo: "acme/app", kind: "merge", target: 5, by: OWNER, head: HEAD });
+      const h = await mergeHistory({ MERGE_RECORDS_URL: x.b, MERGE_RECORDS_TOKEN_FILE: x.tokenFile }, { repo: "Acme/App", sinceMs: since });
+      // PR 12 (updated in the period) with its job from before it, PR 13 (jobs only), PR 14 (open, updated in the period); PR 5 and the other repository's job are not
+      expect(h.pulls.map((p) => [p.number, p.stored, p.state, p.head])).toEqual([[12, true, "MERGED", HEAD], [13, false, null, null], [14, true, "OPEN", HEAD]]);
+      expect(h.jobs.map((r) => [r.id, r.pr, r.taskRunner])).toEqual([[before.id, 12, "claude"], [inside.id, 13, "claude"]]);
+      expect(h.jobs[0]).not.toHaveProperty("summary");
+      expect(h.jobs[0]).not.toHaveProperty("cwd");
+      expect(h.grants.map((g) => [g.target, g.head])).toEqual([[12, HEAD]]);
+      expect(h.comments.map((c) => [c.issue, c.body.slice(0, 12), c.authorAssociation])).toEqual([[12, "[post-audit]", "OWNER"]]);
+      // the first job that recorded a head, wherever it was (PR 5's of January)
+      expect(h.since).toBe(Date.parse("2026-01-01T00:00:00Z"));
+      // no titles unless asked; asked, the stored Issues (open or closed) whose title starts with the prefix
+      expect(h.titles).toEqual([]);
+      const titled = await mergeHistory({ MERGE_RECORDS_URL: x.b, MERGE_RECORDS_TOKEN_FILE: x.tokenFile }, { repo: "Acme/App", sinceMs: since, titlePrefix: "PBI: audit — Acme/App#" });
+      expect(titled.titles!.sort()).toEqual(["PBI: audit — Acme/App#12", "PBI: audit — Acme/App#14"]);
+      expect((await fetch(`${x.b}/api/merge-records/history?repo=acme/app`)).status).toBe(400);
+      expect((await fetch(`${x.b}/api/merge-records/history?repo=acme/app&since=1&titlePrefix=${"x".repeat(201)}`)).status).toBe(400);
     } finally {
       await x.stop();
     }

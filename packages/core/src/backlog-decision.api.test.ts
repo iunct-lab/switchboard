@@ -311,7 +311,7 @@ test("a screen answer with a grant keeps the head the PR had when it was answere
   expect(fake.reads).toEqual([]);
   expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: "B で\nTask #321 の本文に名指しのパスを足してよい", id: expect.any(String), heads: {} });
   // one with grants: each PR's head as it is now, once per PR, under the repository the grant is recorded for
-  const GRANTS = "A で\nPR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\nPR #13 を判定の外でマージしてよい";
+  const GRANTS = "A で\nPR #12 を判定の外でマージしてよい\nPR #13 を判定の外でマージしてよい";
   expect((await answerOnScreen(base, 306, { text: GRANTS })).status).toBe(202);
   // the answer is kept before its PRs are read; the heads come in after the reply
   await headsKept(db, source, 306, "acme/app#12");

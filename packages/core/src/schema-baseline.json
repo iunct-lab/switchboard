@@ -36,6 +36,7 @@
   "staging": ["id","task_id","path","rel","kind","before_text","after_text","status","ts","decided_at","diff_text","stat"],
   "task_diffs": ["task_id","at","json"],
   "task_grants": ["task_id","repo","kind","target","by","source","at","head"],
+  "task_grant_heads": ["task_id","repo","kind","target","head","by","at"],
   "cli_updates": ["id","runner","at","from_version","to_version","outcome","sha256","reason","by"],
   "task_scope_stops": ["task_id","repo","issue","pr","at"],
   "task_evals": ["task_id","source","by","rubric","json","ts"],

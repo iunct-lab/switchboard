@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { Db } from "./db.ts";
 import { findGrantSentences, parseMergeGrants } from "./merge-grants.ts";
 
+/** The allowing sentence of the older release (no longer read): split so a search for it finds only the code that would read it. */
+const OLD = "[merge-answer] yes" + " を投稿してよい";
+
 // the sentence that let a Task add a path to its body: built in two parts so that a search for the sentence finds no live one
 const GONE = (n: number, repo = "") => `${repo}Task #${n} の本文に` + "名指しのパスを" + "足してよい";
 
@@ -18,7 +21,7 @@ describe("parseMergeGrants", () => {
     expect(parseMergeGrants("B — 許可: PR #3 を判定の外でマージしてよい")).toEqual([{ kind: "merge", target: 3, repo: null }]);
   });
 
-  test("the ask reason has its own sentence for a PR and for a change of the workspace; the older sentence that asked for a posted mark is still read", () => {
+  test("the ask reason has its own sentence for a PR and for a change of the workspace; the older sentence that asked for a posted mark is not read", () => {
     expect(parseMergeGrants("PR #12 をマージしてよい")).toEqual([{ kind: "answer", target: 12, repo: null }]);
     expect(parseMergeGrants("o/b の PR #12 をマージしてよい")).toEqual([{ kind: "answer", target: 12, repo: "o/b" }]);
     // the ask sentence is everyday wording, so it is read only as a whole line (a list mark before it is fine): with words
@@ -33,11 +36,9 @@ describe("parseMergeGrants", () => {
     expect(parseMergeGrants("変更 L3 を判定の外でマージしてよい")).toEqual([]);
     // the merge outside the gate is not read as the ask reason's sentence, nor the other way round
     expect(parseMergeGrants("PR #12 を判定の外でマージしてよい")).toEqual([{ kind: "merge", target: 12, repo: null }]);
-    // the sentence the skills still print is read as the same kind while the check on posting the mark stands
-    expect(parseMergeGrants("PR #12 に [merge-answer] yes を投稿してよい")).toEqual([{ kind: "answer", target: 12, repo: null }]);
-    expect(parseMergeGrants("o/b の PR #12 に [merge-answer] yes を投稿してよい。")).toEqual([{ kind: "answer", target: 12, repo: "o/b" }]);
-    expect(findGrantSentences("`PR #5 に [merge-answer] yes を投稿してよい` で通ります")).toEqual([{ kind: "answer", target: 5, repo: null }]);
-    expect(parseMergeGrants("PR #12 に [merge-answer] no を投稿してよい")).toEqual([]);
+    // the sentence that offered to post the gate's mark is read as nothing, a whole line or not, and a stop's wording of it too
+    for (const old of [`PR #12 に ${OLD}`, `o/b の PR #12 に ${OLD}。`, `A — 許可: PR #12 に ${OLD}`]) expect([old, parseMergeGrants(old)]).toEqual([old, []]);
+    expect(findGrantSentences(`\`PR #5 に ${OLD}\` で通ります`)).toEqual([]);
     expect(findGrantSentences("`変更 L3 をマージしてよい` と `PR #4 をマージしてよい` で通ります")).toEqual([{ kind: "answer", target: 4, repo: null }, { kind: "answer", target: 3, repo: null, change: true }]);
   });
 
@@ -58,9 +59,9 @@ describe("parseMergeGrants", () => {
       { kind: "merge", target: 12, repo: null },
       { kind: "answer", target: 12, repo: null },
     ]);
-    expect(parseMergeGrants("- マージしてよいか: A, B — 許可: PR #12 を判定の外でマージしてよい — 許可: PR #12 に [merge-answer] yes を投稿してよい")).toEqual([
+    expect(parseMergeGrants("- マージしてよいか: A, B — 許可: PR #12 を判定の外でマージしてよい — 許可: PR #13 を判定の外でマージしてよい")).toEqual([
       { kind: "merge", target: 12, repo: null },
-      { kind: "answer", target: 12, repo: null },
+      { kind: "merge", target: 13, repo: null },
     ]);
   });
 
@@ -91,7 +92,8 @@ describe("parseMergeGrants", () => {
       expect({ line, grants: grants.length }).toEqual({ line, grants: 1 });
       return grants[0]!.kind;
     }));
-    expect([...kinds].sort()).toEqual(["answer", "merge"]);
+    // these refusing sides (the check in front of gh, the backlog command) print only the sentence of the merge outside the gate; the ask reason's sentence is printed by the gate itself
+    expect([...kinds].sort()).toEqual(["merge"]);
   });
 });
 

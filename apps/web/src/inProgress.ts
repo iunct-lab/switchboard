@@ -166,23 +166,31 @@ export function waitChain(item: BacklogItem, items: BacklogItem[]): Array<{ dept
 }
 
 /**
- * Who moves a wait forward: the PBI behind it (`w.pbi`) and that PBI's stage Task, read from the PBI's
- * own item in the same list — not asked for apart. null = the PBI is not known (不明). `task`: running = it moves (only
- * opened), stopped = how its last one ended, null = it has none, "unknown" = the PBI is not in the list (closed, or
- * not a backlog item). `startable` = a wait not closed yet whose PBI is Ready / in progress with nothing running, which
- * 続きを始める starts (`complete`); a closed wait still names its PBI and Task.
+ * The PBI numbered `n` in `row`'s workspace and its stage Task, read from the PBI's own item in the same list — not asked
+ * for apart. `title` = the title stored with the reference, used when the PBI is not in the list. `task`: running = it
+ * moves (only opened), stopped = how its last one ended, null = it has none, "unknown" = the PBI is not in the list
+ * (closed, or not a backlog item).
  */
-export function waitOwner(w: Wait, row: BacklogItem, items: BacklogItem[]): { pbi: { number: number; title: string; url: string }; task: { id: string; running: boolean; label: string } | null | "unknown"; startable: boolean } | null {
-  if (w.pbi === null) return null;
-  const n = w.pbi.number;
+export function pbiOwner(n: number, title: string | null, row: BacklogItem, items: BacklogItem[]): { pbi: { number: number; title: string; url: string }; task: { id: string; running: boolean; label: string } | null | "unknown" } {
   const owner = items.find((i) => i.workspaceId === row.workspaceId && i.number === n);
-  const pbi = { number: n, title: owner?.title ?? w.pbi.title ?? "", url: row.url.replace(/\/issues\/\d+$/, `/issues/${n}`) };
-  if (!owner) return { pbi, task: "unknown", startable: false };
+  const pbi = { number: n, title: owner?.title ?? title ?? "", url: row.url.replace(/\/issues\/\d+$/, `/issues/${n}`) };
+  if (!owner) return { pbi, task: "unknown" };
   const last = owner.lastTask;
   // the last Task may have started between the two lookups of one read: running / waiting is moving (inProgressState)
   const running = owner.activeTaskId ?? (last && isWorkingStatus(last.status) ? last.id : null);
-  const task = running ? { id: running, running: true, label: t(m.moving) } : last ? { id: last.id, running: false, label: t(m.stoppedStatus, { status: TASK_STATUS[last.status] }) } : null;
-  return { pbi, task, startable: w.open !== false && !running && (owner.stage === "ready" || owner.stage === "in-progress") };
+  return { pbi, task: running ? { id: running, running: true, label: t(m.moving) } : last ? { id: last.id, running: false, label: t(m.stoppedStatus, { status: TASK_STATUS[last.status] }) } : null };
+}
+
+/**
+ * Who moves a wait forward: the PBI behind it (`w.pbi`) and that PBI's stage Task (`pbiOwner`). null = the PBI is not
+ * known (不明). `startable` = a wait not closed yet whose PBI is Ready / in progress with nothing running, which
+ * 続きを始める starts (`complete`); a closed wait still names its PBI and Task.
+ */
+export function waitOwner(w: Wait, row: BacklogItem, items: BacklogItem[]): (ReturnType<typeof pbiOwner> & { startable: boolean }) | null {
+  if (w.pbi === null) return null;
+  const o = pbiOwner(w.pbi.number, w.pbi.title, row, items);
+  const stage = o.task === "unknown" ? null : items.find((i) => i.workspaceId === row.workspaceId && i.number === o.pbi.number)?.stage;
+  return { ...o, startable: w.open !== false && o.task !== "unknown" && !o.task?.running && (stage === "ready" || stage === "in-progress") };
 }
 
 /** One prerequisite as a row names it: its link, and what follows the number (`（未完）` / ` 取り下げ`). */
@@ -211,14 +219,17 @@ export function prereqLine(item: BacklogItem): { waiting: PrereqPart[]; stuck: P
   return { waiting, stuck, confirming };
 }
 
-/** One side of an overlap as a row names it: its link (`PR #n` → /pull/n, `Task #m` → /issues/m) and the path. */
-export interface OverlapPart { ref: string; url: string; path: string }
+/**
+ * One side of an overlap as a row names it: its link (`PR #n` → /pull/n, `Task #m` → /issues/m), the path, and the PBI
+ * that moves it with that PBI's stage Task (`pbiOwner`; null = the hit names no PBI).
+ */
+export interface OverlapPart { ref: string; url: string; path: string; owner: ReturnType<typeof pbiOwner> | null }
 
 /**
  * A Ready / in-progress row's overlap with other work (`item.overlap`): the PRs / Tasks whose files its Tasks name
  * (`hits`; backlog-next leaves the row, the button still starts it) and why it cannot be judged (`unknown`). null = none.
  */
-export function overlapLine(item: BacklogItem): { hits: OverlapPart[]; unknown: string | null } | null {
+export function overlapLine(item: BacklogItem, items: BacklogItem[]): { hits: OverlapPart[]; unknown: string | null } | null {
   const o = item.overlap;
   if (!o || (!o.hits.length && o.unknown === null)) return null;
   const at = (ref: string) => {
@@ -226,5 +237,8 @@ export function overlapLine(item: BacklogItem): { hits: OverlapPart[]; unknown: 
     return item.url.replace(/\/issues\/\d+$/, `/${ref.startsWith("PR") ? "pull" : "issues"}/${n}`);
   };
   // a path kept for a PBI that yielded earlier (`turn`): the row names that PBI, not its Task
-  return { hits: o.hits.map((h) => (h.turn !== undefined ? { ref: t(m.overlapTurn, { pbi: h.turn }), url: at(`#${h.turn}`), path: h.path } : { ref: h.ref, url: at(h.ref), path: h.path })), unknown: o.unknown };
+  return {
+    hits: o.hits.map((h) => (h.turn !== undefined ? { ref: t(m.overlapTurn, { pbi: h.turn }), url: at(`#${h.turn}`), path: h.path, owner: null } : { ref: h.ref, url: at(h.ref), path: h.path, owner: h.pbi != null ? pbiOwner(h.pbi, null, item, items) : null })),
+    unknown: o.unknown,
+  };
 }

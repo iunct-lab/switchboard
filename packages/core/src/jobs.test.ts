@@ -8,7 +8,7 @@ import type { Job, JobRequest, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { mergeRecordsOf } from "./merge-records.ts";
-import { DAEMON_MERGE_GATE, spawnCollectPending, jobCommand, JobError, reviewResult, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { DAEMON_MERGE_GATE, spawnCollectPending, jobCommand, JobError, reviewResult, auditResult, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { startServer } from "./server.ts";
 import { workspaceConfigFile, writeWorkspaceConfigs } from "./workspace-config.ts";
 
@@ -121,10 +121,10 @@ describe("jobs", () => {
       return { job, end: await ended };
     };
     const poison = { MERGE_RECORDS_URL: "http://evil.test", MERGE_RECORDS_TOKEN_FILE: "/evil/key", BACKLOG_URL: "http://evil.test/api/backlog", BACKLOG_TOKEN_FILE: "/evil/key", OPS_MERGE_GATE_PR: "7", GH_REPO: "evil/repo" };
-    const { job, end } = await run(`env > "$J/env"; printf '{"head":"${H}","verdict":"stop","ask":["security:gates"],"recheck":["size"],"reasons":["a","b"],"allowLarge":false,"reviewSkipped":true,"merged":false}' > "$J/result.json"; echo verdict > "$J/out"; exit 1`, gate(), poison);
+    const { job, end } = await run(`env > "$J/env"; printf '{"head":"${H}","verdict":"stop","ask":["security:gates"],"recheck":["size"],"required":["size","rescue"],"reasons":["a","b"],"allowLarge":false,"reviewSkipped":true,"merged":false}' > "$J/result.json"; echo verdict > "$J/out"; exit 1`, gate(), poison);
     // the request had no head to record (the checkout's HEAD is not the PR's); the run's is
     expect(job).toMatchObject({ kind: "gate", pr: 7, head: null, runner: null, repo: "acme/app" });
-    expect(end).toMatchObject({ status: "fail", exitCode: 1, head: H, result: { gate: { verdict: "stop", head: H, ask: ["security:gates"], recheck: ["size"], reasons: ["a", "b"], allowLarge: false, reviewSkipped: true, merged: false } } });
+    expect(end).toMatchObject({ status: "fail", exitCode: 1, head: H, result: { gate: { verdict: "stop", head: H, ask: ["security:gates"], recheck: ["size"], required: ["size", "rescue"], reasons: ["a", "b"], allowLarge: false, reviewSkipped: true, merged: false } } });
     const env = readFileSync(join(root, "jobs", String(job.id), "env"), "utf8");
     expect(env).toContain("MERGE_RECORDS_URL=http://127.0.0.1:47000\n");
     expect(env).toContain(`MERGE_RECORDS_TOKEN_FILE=${join(root, "daemon-token")}\n`);
@@ -136,8 +136,12 @@ describe("jobs", () => {
     expect(none.job.repo).toBe("acme/lib");
     expect(none.end).toMatchObject({ status: "fail", exitCode: 2, head: null, result: null });
     expect((await run(`echo '{"head":"short"}' > "$J/result.json"`)).end).toMatchObject({ head: null, result: null });
+    // a gate job the release before this one started: its record has no `required`, and is kept with none (absent, so the audit reads its reasons)
+    const older = await run(`printf '{"head":"${H}","verdict":"merge","ask":[],"recheck":[],"reasons":[],"allowLarge":false,"reviewSkipped":false,"merged":true}' > "$J/result.json"`);
+    expect(older.end.result!.gate).toMatchObject({ verdict: "merge" });
+    expect("required" in older.end.result!.gate!).toBe(false);
     // the reasons kept are bounded
-    const long = await run(`printf '{"head":"${H}","verdict":"merge","ask":[],"recheck":[],"reasons":["%s"],"allowLarge":true,"reviewSkipped":false,"merged":true}' "$(head -c 900 /dev/zero | tr '\\0' x)" > "$J/result.json"`);
+    const long = await run(`printf '{"head":"${H}","verdict":"merge","ask":[],"recheck":[],"required":[],"reasons":["%s"],"allowLarge":true,"reviewSkipped":false,"merged":true}' "$(head -c 900 /dev/zero | tr '\\0' x)" > "$J/result.json"`);
     expect(long.end.result!.gate!.reasons[0]!.length).toBe(500);
     expect(long.end.result!.gate).toMatchObject({ verdict: "merge", allowLarge: true, merged: true });
 
@@ -463,6 +467,20 @@ describe("jobs", () => {
     expect(db.getJob(job.id)).toMatchObject({ status: "pass", result: null });
     expect(reviewResult("a\n### Verdict\nok")).toBeNull();
     expect(reviewResult("a\n### Findings\n- none\n")).toEqual({ findings: [], firstLine: "a" });
+  });
+
+  test("an audit job (as audit) keeps the first line of its output, which has no Findings section; another review's such output records none", async () => {
+    writeFileSync(join(repo, "prompt.md"), "audit");
+    const run = async (extra: { as?: "audit"; runner: "claude" | "codex" }, name: string) => {
+      const { deps, ended } = fake(`printf '\\npass\\n' > "$JOB_OUT"`);
+      const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: name, ...extra });
+      await ended;
+      return db.getJob(job.id)!;
+    };
+    expect((await run({ as: "audit", runner: "claude" }, "out-audit.md")).result).toEqual({ review: { findings: [], firstLine: "pass" } });
+    expect((await run({ runner: "codex" }, "out-plain.md")).result).toBeNull();
+    expect(auditResult("\n  finding  \n- a.ts:1 x")).toEqual({ findings: [], firstLine: "finding" });
+    expect(auditResult("\n \n")).toBeNull();
   });
 
   test("a failed review records no result, and a recheck without kinds is recorded with none while a word that is not a recheck kind is refused", async () => {

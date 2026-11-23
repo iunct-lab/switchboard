@@ -585,21 +585,12 @@ test("change: --pr goes with a new change, --change reads and writes the change 
   expect(await paths(["edit", "7", "--state", "closed"])).toEqual(["PATCH /7"]);
   expect(await paths(["comment", "7", "--change", "--body-file", "-"])).toEqual(["POST /7/comment?change=1"]);
   expect(await paths(["comment", "7", "--body-file", "-"])).toEqual(["POST /7/comment"]);
-  // the person's yes names a PR: it is not written on a change of a GitHub workspace
+  // the gate reads the person's grant record, not a mark: a yes text on a change is a comment like any other
   const dir = mkdtempSync(join(tmpdir(), "ops-kit-change-"));
   writeFileSync(join(dir, "yes"), `[merge-answer] yes size ${"a".repeat(40)}\n`);
   const yes = await run(["comment", "7", "--change", "--body-file", join(dir, "yes")], fake());
   rmSync(dir, { recursive: true, force: true });
-  expect([yes.code, yes.calls.filter((c) => c.method === "POST")]).toEqual([1, []]);
-  expect(yes.err).toContain("GitHub が戻ってから");
-  // the reviewer's case: the same mark behind a space, a tab or a byte order mark (the app trims it, the gate then reads a yes)
-  const again = mkdtempSync(join(tmpdir(), "ops-kit-change-"));
-  for (const lead of [" ", "\t", "\uFEFF", "\n\n ", "\u3000"]) {
-    writeFileSync(join(again, "yes"), `${lead}[merge-answer] yes security:gates ${"a".repeat(40)}`);
-    const hidden = await run(["comment", "7", "--change", "--body-file", join(again, "yes")], fake());
-    expect([lead, hidden.code, hidden.calls.filter((c) => c.method === "POST")]).toEqual([lead, 1, []]);
-  }
-  rmSync(again, { recursive: true, force: true });
+  expect([yes.code, yes.calls.filter((c) => c.method === "POST").map((c) => c.path)]).toEqual([0, ["/7/comment?change=1"]]);
   // only where a number can name either
   const set = await run(["set", "7", "Status", "Done", "--change"], fake());
   expect([set.code, set.calls.filter((c) => c.method !== "GET")]).toEqual([1, []]);
@@ -655,51 +646,18 @@ test("outside the app: a choice in another case is written as the choice; one no
   }
 });
 
-test("merge-answer: backlog comment posts a [merge-answer] yes only when the grant of the PR stands, in a repository with a merge gate", async () => {
-  // the head PR 12 had when the person gave the grant
-  const HEAD = "a".repeat(40);
-  const YES = `[merge-answer] yes large ${HEAD}`;
+test("merge-answer: backlog comment posts a [merge-answer] yes text without asking the app for a grant, in a repository with a merge gate", async () => {
+  const YES = `[merge-answer] yes large ${"a".repeat(40)}`;
   const dir = mkdtempSync(join(tmpdir(), "backlog-client-gate-"));
-  const bare = mkdtempSync(join(tmpdir(), "backlog-client-nogate-"));
-  const grants = (path: string) => (path.startsWith("http://app/api/merge-grants") ? { body: { granted: new URL(path).searchParams.get("target") === "12" && new URL(path).searchParams.get("kind") === "answer" && new URL(path).searchParams.get("repo") === "acme/app" && new URL(path).searchParams.get("head") === HEAD } } : null);
-  const fake = () => app((m, p, b) => grants(p) ?? routes()(m, p, b));
-  const comment = async (text: string, issue: string, cwd: string, f = fake(), env: Record<string, string | undefined> = {}) => {
-    const err: string[] = [];
-    const code = await runBacklog(["comment", issue, "--body-file", "-"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app", OPS_KIT_TASK_ID: "t1", ...env }, { out: () => {}, err: (s) => err.push(s), stdin: async () => text }, { fetch: f.fetch, cwd });
-    return { code, err: err.join("\n"), calls: f.calls.map((c) => `${c.method} ${c.path}`) };
-  };
   try {
     writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
-    writeFileSync(join(bare, "ops.config.json"), "{}");
-    const stopped = await comment(YES, "13", dir);
-    expect([stopped.code, stopped.err, stopped.calls.filter((c) => c.includes("merge-grants"))]).toEqual([1, expect.stringContaining("許可文の記録がありません"), [`GET http://app/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=answer&target=13&head=${HEAD}`]]);
-    expect(stopped.calls.some((c) => c.startsWith("POST"))).toBe(false);
-    // the grant is asked for the repository the comment goes to: PR 12 of another workspace's repository has none
-    const elsewhere = await comment(YES, "12", dir, fake(), { GH_REPO: "acme/other" });
-    expect([elsewhere.code, elsewhere.calls.filter((c) => c.includes("merge-grants")), elsewhere.calls.some((c) => c.startsWith("POST"))]).toEqual([1, [`GET http://app/api/merge-grants?taskId=t1&repo=acme%2Fother&kind=answer&target=12&head=${HEAD}`], false]);
-    const allowed = await comment(YES, "12", dir);
-    expect([allowed.code, allowed.calls.some((c) => c.startsWith("POST /12/comment"))]).toEqual([0, true]);
-    // a no, a text without the mark, no gate in the config and outside the app's Task never ask the app for the grant
-    for (const r of [await comment("[merge-answer] no large abc", "13", dir), await comment("メモ [merge-answer] yes", "13", dir), await comment(YES, "13", bare)]) {
-      expect([r.code, r.calls.some((c) => c.includes("merge-grants"))]).toEqual([0, false]);
-    }
-    // the grant holds for the head it was given for: a yes of a head pushed after it, or one that names no head, is not posted
-    const moved = await comment(`[merge-answer] yes large ${"b".repeat(40)}`, "12", dir);
-    expect([moved.code, moved.err, moved.calls.some((c) => c.startsWith("POST"))]).toEqual([1, expect.stringContaining("新しいコミットの後は聞き直します"), false]);
-    const headless = await comment("[merge-answer] yes large abc", "12", dir);
-    expect([headless.code, headless.err, headless.calls.some((c) => c.startsWith("POST"))]).toEqual([1, expect.stringContaining("head の sha"), false]);
-    // the mark is found in the form the app stores and the gate reads: a leading space, a tab, a byte order mark, full-width
-    // letters, capitals or a zero-width character do not let it past the check (PR 13 has no grant)
-    for (const text of [` ${YES}`, `\t${YES}`, `\uFEFF${YES}`, `\n ${YES}`, YES.replace("[merge-answer]", "［ｍｅｒｇｅ－ａｎｓｗｅｒ］"), YES.replace("yes", "YES"), YES.replace("[merge", "[mer\u200Bge"), YES.replace("] yes", "]\u3000yes")]) {
-      const r = await comment(text, "13", dir);
-      expect([text, r.code, r.calls.some((c) => c.startsWith("POST"))]).toEqual([text, 1, false]);
-    }
-    // the app cannot be reached: the mark is not posted
-    const down = await comment(YES, "12", dir, app((m, p, b) => (p.includes("merge-grants") ? "down" : routes()(m, p, b))));
-    expect([down.code, down.err]).toEqual([1, expect.stringContaining("アプリに届かず")]);
+    const f = app((m, p, b) => routes()(m, p, b));
+    const err: string[] = [];
+    const code = await runBacklog(["comment", "13", "--body-file", "-"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: "acme/app", OPS_KIT_TASK_ID: "t1" }, { out: () => {}, err: (s) => err.push(s), stdin: async () => YES }, { fetch: f.fetch, cwd: dir });
+    const calls = f.calls.map((c) => `${c.method} ${c.path}`);
+    expect([code, err.join("\n"), calls.some((c) => c.includes("merge-grants")), calls.some((c) => c.startsWith("POST /13/comment"))]).toEqual([0, "", false, true]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
-    rmSync(bare, { recursive: true, force: true });
   }
 });
 

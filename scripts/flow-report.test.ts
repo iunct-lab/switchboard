@@ -38,51 +38,44 @@ describe("flow-report's entry exits 2", () => {
 });
 
 describe("flow-report's review-rounds table", () => {
-  const bin = join(home, "bin");
   const fixture = join(import.meta.dir, "review-rounds.fixture.json");
-
-  /** A `gh` first on PATH: the rate limit, no merged PR, and the fixture's comments (PR 5845's again as PRs 9001 and 9002); with `broken` every call fails. */
-  const fakeGh = (broken: boolean) => {
+  /** The records of PR 5845 again as PRs 9001 and 9002 (the fixture's two PRs and these two: the review and the size recheck go 3 PRs). */
+  const history = () => {
+    const fx = JSON.parse(readFileSync(fixture, "utf8")) as { jobs: { id: number; pr: number }[]; comments: { issue: number }[] };
+    const copies = <T extends { pr?: number; issue?: number }>(xs: T[], key: "pr" | "issue") => [...xs, ...xs.filter((x) => x[key] === 5845).flatMap((x, i) => [9001, 9002].map((pr) => ({ ...x, [key]: pr, ...(key === "pr" ? { id: 1000 * pr + i } : {}) })))];
+    return { jobs: copies(fx.jobs, "pr"), grants: [], pulls: [], comments: copies(fx.comments, "issue"), since: Date.parse("2026-11-01T00:00:00Z") };
+  };
+  /** A `gh` first on PATH that answers only main's commits of another repository (`--repo o/r`: this clone has no such history; none) and fails on any other call: the table is read from the app's records. */
+  const bin = join(home, "bin");
+  const noGh = () => {
     mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, "gh"), String.raw`#!/usr/bin/env bun
-import { readFileSync } from "node:fs";
-const args = process.argv.slice(2);
-if (${broken}) { console.error("HTTP 502\n{\n  \"message\": \"Bad Gateway\"\n}"); process.exit(1); }
-const fx = JSON.parse(readFileSync(${JSON.stringify(fixture)}, "utf8"));
-const copies = (xs) => [...xs, ...xs.filter((c) => c.pr === 5845).flatMap((c) => [9001, 9002].map((pr) => ({ ...c, pr })))];
-const issue = copies(fx.issue), inline = copies(fx.inline);
-const lines = (xs) => xs.map((x) => JSON.stringify(x)).join("\n");
-const path = args.find((a) => a.startsWith("repos/")) ?? "";
-if (args.includes("rate_limit")) console.log("1000000000");
-else if (args.includes("search/issues")) console.log("page false 0");
-else if (path === "repos/o/r/issues/comments") console.log(lines(issue.map((c) => ({ ...c, issue_url: "https://api.github.com/repos/o/r/issues/" + c.pr, html_url: "https://github.com/o/r/pull/" + c.pr }))));
-else if (path === "repos/o/r/pulls/comments") console.log(lines(inline.map((c) => ({ ...c, pull_request_url: "https://api.github.com/repos/o/r/pulls/" + c.pr }))));
-else if (/^repos\/o\/r\/issues\/\d+\/comments$/.test(path)) console.log(lines(issue.filter((c) => path.includes("/" + c.pr + "/"))));
-else if (/^repos\/o\/r\/pulls\/\d+$/.test(path)) console.log(JSON.stringify({ merged_at: "2026-11-19T22:31:00Z", head: { sha: "2d24ee961c492c29cd2f1f25ca78c8b2f1591770" } }));
-else if (path === "repos/o/r/commits") console.log("");
-else { console.error("unexpected: " + args.join(" ")); process.exit(1); }
-`);
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\ncase \"$*\" in *repos/o/r/commits*) exit 0 ;; esac\necho \"gh was called: $*\" >&2\nexit 1\n");
     chmodSync(join(bin, "gh"), 0o755);
   };
 
   /** The app as flow-report asks it: one imported workspace for `o/r` with no PBI closed (so the PR stages read nothing). */
-  const app = () => Bun.serve({
+  const app = (broken = false) => Bun.serve({
     port: 0, hostname: "127.0.0.1",
-    fetch: (req) => new URL(req.url).pathname.endsWith("/syncs")
+    // the merge history the review-rounds table reads from the app's records
+    fetch: (req) => new URL(req.url).pathname.endsWith("/merge-records/history") ? (broken ? new Response("down", { status: 502 }) : Response.json(history()))
+      : new URL(req.url).pathname.endsWith("/syncs")
       ? Response.json({ syncs: [{ workspaceId: "ws_1", repository: "o/r", syncedAt: "2026-11-20T00:00:00.000Z", sync: { state: "ok" } }] })
       : Response.json({ workspaceId: "ws_1", service: "github", repository: "o/r", project: { owner: "o", number: 1 }, fetchedAt: 0, top: [], issues: [], comments: [], unread: [], pulls: [] }),
   });
+  const keyFile = join(home, "key");
+  writeFileSync(keyFile, "k\n");
   const run = (server: { port: number | undefined }, extra: string[] = []) =>
-    report(["--days", "3650", "--repo", "o/r", ...extra], { BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, PATH: `${bin}:${process.env.PATH}` });
+    report(["--days", "3650", "--repo", "o/r", ...extra], { BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_TOKEN_FILE: keyFile, PATH: `${bin}:${process.env.PATH}` });
 
   test("prints the table and the candidates after the Story Points table, and --json keeps its keys and adds reviews", async () => {
-    fakeGh(false);
+    noGh();
     using server = app();
     const out = join(home, "flow.json");
     const r = await run(server, ["--json", out]);
     expect(r.code).toBe(0);
     const lines = r.stdout.split("\n");
     const table = lines.findIndex((l) => l.startsWith("決まり\t"));
+    expect(lines[table - 2]).toBe("記録は 2026-11-01 から");
     expect(lines.findIndex((l) => l.startsWith("SP\t"))).toBeLessThan(table);
     expect(lines.slice(table + 1).filter((l) => l.startsWith("review\t") || l.startsWith("size\t") || l.startsWith("responsibility\t"))).toHaveLength(3);
     // PR 5845's rounds three times over: the review and the size recheck went 3+ PRs, 2+ rounds, fixing under 1 a round
@@ -95,12 +88,12 @@ else { console.error("unexpected: " + args.join(" ")); process.exit(1); }
   });
 
   test("a table that cannot be read is one line, and the exit code stays 0 (null in --json)", async () => {
-    fakeGh(true);
-    using server = app();
+    noGh();
+    using server = app(true);
     const out = join(home, "flow-broken.json");
     const r = await run(server, ["--json", out]);
     expect(r.code).toBe(0);
-    // a multi-line error of gh stays on one line
+    // the error stays on one line
     expect(r.stdout.split("\n").filter((l) => l.startsWith("レビューと再チェック: 読めなかった（")).every((l) => l.endsWith("）"))).toBe(true);
     expect(r.stdout).toContain("レビューと再チェック: 読めなかった（");
     expect(r.stdout).not.toContain("見直しの候補");

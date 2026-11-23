@@ -720,8 +720,8 @@ describe("backlog waitsUntil", () => {
         withOverlap(items, issues, new Map(), [], statuses, root);
         return items[0]!.overlap;
       };
-      expect(run({ at: AT, met: true })).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false }], unknown: null });
-      expect(run(null)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false }], unknown: null });
+      expect(run({ at: AT, met: true })).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false, pbi: 2 }], unknown: null });
+      expect(run(null)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false, pbi: 2 }], unknown: null });
       expect(run({ at: AT, met: false })).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -794,11 +794,11 @@ describe("backlog waitsUntil", () => {
         return items[0]!.overlap;
       };
       expect(run(false)).toBeNull();
-      expect(run(true)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false }], unknown: null });
+      expect(run(true)).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false, pbi: 2 }], unknown: null });
       // a ready PR and a stacked Draft: the body still holds what the Draft carries
       const items = [item({ number: 1, stage: "ready" }), item({ number: 2, stage: "in-progress" })];
       withOverlap(items, issues, new Map(), [pr(false), { ...pr(true), number: 91 }], statuses, root);
-      expect(items[0]!.overlap).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false }], unknown: null });
+      expect(items[0]!.overlap).toEqual({ hits: [{ ref: "Task #22", path: "src/a.ts", working: false, pbi: 2 }], unknown: null });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

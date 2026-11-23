@@ -40,7 +40,7 @@ test("backlog-next overlap: a Ready PBI whose Task names a file an open PR chang
   // Issue 901's files are cut (120 of 100 read): it cannot be judged, and the log says so next to the PR that overlaps
   openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }, { number: 901, files: [], filesTotal: 120, headRefName: "sb/998-x" }];
   const base = await boot(gh, claude.adapter);
-  expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts", working: true }], unknown: "PR #901 の変更ファイルが記録に無い" });
+  expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts", working: true, pbi: null }], unknown: "PR #901 の変更ファイルが記録に無い" });
   const id = await backlogNextSchedule(base);
   const before = calls.length;
   expect((await runSchedule(base, id)).status).toBe(201);
@@ -66,14 +66,17 @@ function tasksOf304Gh(...files: string[]): GhRunner {
     if (!args.find((a) => a.startsWith("query="))?.includes("comments(last:")) return r;
     const body = JSON.parse(r.stdout);
     body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: files.map((f, n) => ({ number: 3041 + n, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: `触る場所: \`${f}\``, comments: { nodes: [] } })) } };
+    // PBI 305's Task that a PR's branch may close (no path of its own): the PR's owner
+    body.data.repository.i305 = { ...body.data.repository.i305, subIssues: { nodes: [{ number: 3051, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "", comments: { nodes: [] } }] } };
     return { ...r, stdout: JSON.stringify(body) };
   };
 }
 
 test("start overlap: the row's 実装 of a Ready PBI whose Task names a file an open PR changes is 409 with the log's reason and starts no Task; to-tasks and a PBI with no overlap start", async () => {
-  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/3051-x" }];
   const base = await boot(tasksOf304Gh("src/a.ts", "src/a.ts"), holdingClaude().adapter);
-  expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts", working: true }], unknown: null });
+  // the row's hit names the PBI whose Task the PR closes
+  expect((await waitsOfItem(base, 304)).overlap).toEqual({ hits: [{ ref: "PR #900", path: "src/a.ts", working: true, pbi: 305 }], unknown: null });
   const r = await start(base, 304, { action: "complete" });
   expect(r.status).toBe(409);
   const { error } = (await r.json()) as { error: string };
@@ -99,7 +102,7 @@ test("start overlap: a PBI with one Task that can start (a file no open PR chang
 test("start overlap: a PBI whose 実装 already runs answers 409 with that Task's id (the row opens it), not the overlap refusal", async () => {
   openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
   const base = await boot(tasksOf304Gh("src/a.ts", "src/a.ts"), holdingClaude().adapter);
-  expect((await waitsOfItem(base, 304)).overlap?.hits).toEqual([{ ref: "PR #900", path: "src/a.ts", working: true }]);
+  expect((await waitsOfItem(base, 304)).overlap?.hits).toEqual([{ ref: "PR #900", path: "src/a.ts", working: true, pbi: null }]);
   const now = Date.now();
   core!.db.insertTask({ id: "tsk_run304", workspaceId: metaId(), title: "#304 実装: PBI: Ready の PBI", runner: "claude", cwd: home!, scope: [home!], status: "running", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 304, action: "complete" }, statusAt: now, createdAt: now, updatedAt: now });
   const r = await start(base, 304, { action: "complete" });
@@ -191,7 +194,7 @@ describe("overlap free tasks", () => {
       const pulls = [w.pr(90, [11], ["src/x.ts"])];
       const items = [item({ number: 1, stage: "in-progress" }), item({ number: 2, stage: "in-progress" })];
       withOverlap(items, w.issues, new Map([[1, [11, 12]]]), pulls, statuses, w.root);
-      expect(items[0]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/server.ts", working: false }], unknown: null });
+      expect(items[0]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/server.ts", working: false, pbi: 2 }], unknown: null });
       expect(items[0]!.freeTasks).toBeUndefined();
       // one more Task, not started and touching nothing others touch
       w.issues.get(1)!.subIssues.push(13);
@@ -257,7 +260,7 @@ test("backlog-next overlap: two PBIs held by each other's idle In progress Task:
     // reread with its stage Task running: its Tasks are the other work, so the other PBI is held by the started one's Task
     const after = read((n) => n === 1);
     expect(after[0]!.overlap).toBeNull();
-    expect(after[1]!.overlap).toEqual({ hits: [{ ref: "Task #11", path: "src/a.ts", working: true }], unknown: null });
+    expect(after[1]!.overlap).toEqual({ hits: [{ ref: "Task #11", path: "src/a.ts", working: true, pbi: 1 }], unknown: null });
     expect(pickNext(after.filter((i) => i.number !== 1), "implement")).toBeNull();
   } finally {
     w.done();
@@ -277,9 +280,9 @@ describe("shared files", () => {
       const shared = run(["src/server.ts"]);
       expect(shared[0]!.overlap).toBeNull();
       expect(shared[0]!.freeTasks).toEqual([11]);
-      expect(shared[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/asks.ts", working: false }], unknown: null });
+      expect(shared[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/asks.ts", working: false, pbi: 2 }], unknown: null });
       // no list: every overlap holds, as before
-      expect(run()[0]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/server.ts", working: false }], unknown: null });
+      expect(run()[0]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/server.ts", working: false, pbi: 2 }], unknown: null });
     } finally {
       w.done();
     }
@@ -310,7 +313,7 @@ describe("overlap turn", () => {
     const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [31]], [4, [41]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [], parked: opts.parked, notResumed: opts.notResumed });
     return { turns, of: (n: number) => items.find((i) => i.number === n)?.overlap ?? null };
   };
-  const turnHit = { hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null };
+  const turnHit = { hits: [{ ref: "Task #21", path: "src/a.ts", working: false, pbi: null, turn: 2 }], unknown: null };
 
   test("the PBI that yielded holds the path it yielded on; the one that came later waits for it even once the first holder closed, and it starts itself", () => {
     const w = world();
@@ -356,14 +359,14 @@ describe("overlap turn", () => {
       const first = run(false);
       expect(first.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
       expect(first.of(2)).toBeNull();
-      expect(first.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+      expect(first.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, pbi: null, turn: 2 }], unknown: null });
       // Q holds no place: R is not held back by it
       expect(first.of(4)).toBeNull();
       // P is closed: Q starts, and its place is back with the same since, so R waits for it
       const closed = run(true);
       expect(closed.turns).toEqual([{ pbi: 3, since: at(5), task: 31, paths: ["src/q.ts"] }]);
       expect(closed.of(3)).toBeNull();
-      expect(closed.of(4)).toEqual({ hits: [{ ref: "Task #31", path: "src/q.ts", working: false, turn: 3 }], unknown: null });
+      expect(closed.of(4)).toEqual({ hits: [{ ref: "Task #31", path: "src/q.ts", working: false, pbi: null, turn: 3 }], unknown: null });
     } finally {
       w.done();
     }
@@ -386,7 +389,7 @@ describe("overlap turn", () => {
       expect(claimed.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
       // the guard in Task 21 (`--claimed`) sees no place ahead of P's, as the app did when it started it
       expect(turnsAhead(claimed.turns, 2)).toEqual([]);
-      expect(claimed.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+      expect(claimed.of(3)).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, pbi: null, turn: 2 }], unknown: null });
     } finally {
       w.done();
     }
@@ -421,7 +424,7 @@ describe("overlap turn", () => {
       const comments: Record<number, { body: string; createdAt: string }[]> = { 2: [mark(releaseBody("重なり", [90], true), 0)] };
       const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, [32]]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [] });
       expect(turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
-      expect(items[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, turn: 2 }], unknown: null });
+      expect(items[1]!.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, pbi: null, turn: 2 }], unknown: null });
     } finally {
       w.done();
     }

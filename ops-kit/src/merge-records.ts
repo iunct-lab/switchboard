@@ -51,3 +51,31 @@ export async function mergeRecords(env: Env, q: { repo: string; prs: number[]; t
   if (!a || !Array.isArray(a.jobs) || typeof a.direct !== "boolean") throw new Error("merge-records: the app's answer has no records");
   return { jobs: a.jobs, granted: typeof a.granted === "boolean" ? a.granted : null, direct: a.direct };
 }
+
+export interface MergeHistoryJob extends MergeRecordJob {
+  /** The runner of the Task that asked for the job (what implemented the PR); null when the Task is unknown to the app. */
+  taskRunner: string | null;
+}
+export interface MergeHistory {
+  jobs: MergeHistoryJob[];
+  grants: Array<{ taskId: string; target: number; head: string; at: number }>;
+  /** `stored: false`: a PR the jobs name that the app's import never stored (opened and closed between two imports): it has no state and no comments here. */
+  pulls: Array<{ number: number; stored: boolean; state: "OPEN" | "CLOSED" | "MERGED" | null; mergedAt: string | null; closedAt: string | null; head: string | null; mergeCommit: string | null }>;
+  comments: Array<{ issue: number; body: string; createdAt: string; authorAssociation?: string }>;
+  /** The titles of the stored Issues (open or closed) that start with the asked `titlePrefix`; none when no prefix was asked. */
+  titles?: string[];
+  /** When the first job that recorded a head started (ms); null when none did. */
+  since: number | null;
+}
+
+/** The records a period's tables read (GET /api/merge-records/history): the jobs, grants, stored PRs and their comments of the PRs touched since `sinceMs`. It throws when the app cannot answer, like `mergeRecords`. */
+export async function mergeHistory(env: Env, q: { repo: string; sinceMs: number; titlePrefix?: string }, f: Fetch = fetch): Promise<MergeHistory> {
+  const { url, tokenFile } = appLocation(env);
+  // a period of a few thousand jobs and comments is a few MB: more than a verdict's one PR, so a longer wait than `GRANT_WAIT_MS`
+  const call = client({ ...env, BACKLOG_URL: url, BACKLOG_TOKEN_FILE: tokenFile }, (u, init) => f(u, { ...init, signal: AbortSignal.timeout(HISTORY_WAIT_MS) }));
+  const a = (await call("GET", `/api/merge-records/history?${new URLSearchParams({ repo: q.repo, since: String(Math.max(0, Math.floor(q.sinceMs))), ...(q.titlePrefix ? { titlePrefix: q.titlePrefix } : {}) })}`)) as Partial<MergeHistory> | null;
+  if (!a || !Array.isArray(a.jobs) || !Array.isArray(a.grants) || !Array.isArray(a.pulls) || !Array.isArray(a.comments)) throw new Error("merge-records: the app's answer has no history");
+  return { jobs: a.jobs, grants: a.grants, pulls: a.pulls, comments: a.comments, titles: Array.isArray(a.titles) ? a.titles.filter((t): t is string => typeof t === "string") : [], since: typeof a.since === "number" ? a.since : null };
+}
+
+const HISTORY_WAIT_MS = 60_000;

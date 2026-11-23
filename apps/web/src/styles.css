@@ -53,6 +53,15 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .new-version { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); white-space: nowrap; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
 .banner { padding: 8px 14px; display: flex; justify-content: space-between; align-items: center; }
 .banner.error { background: color-mix(in srgb, var(--red) 14%, transparent); }
+/* one row on a phone held upright: the line cuts with an ellipsis, the Tasks and minutes open from it */
+.banner.promotion-drain { background: var(--amber-soft); }
+.banner.promotion-drain details { flex: 1; min-width: 0; }
+.banner.promotion-drain summary { display: block; list-style: none; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.banner.promotion-drain summary::-webkit-details-marker { display: none; }
+@media (max-width: 767px) { .banner.promotion-drain summary { line-height: 44px; } } /* a 44px tap target on a phone, like the folded Settings cards */
+.banner.promotion-drain summary::before { content: "▸ "; color: var(--amber); }
+.banner.promotion-drain details[open] summary::before { content: "▾ "; }
+.banner.promotion-drain details p { margin: 4px 0 0; color: var(--ink2); }
 
 .body { display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 .body:has(.side) { grid-template-columns: 220px 1fr 300px; }

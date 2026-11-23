@@ -134,6 +134,8 @@ CREATE TABLE IF NOT EXISTS task_grants (
   PRIMARY KEY (task_id, repo, kind, target, by, source)
 );
 CREATE INDEX IF NOT EXISTS task_grants_source ON task_grants (source) WHERE source != '';
+-- every head a merge / answer grant was given for (migration 0057): task_grants keeps the newest head only, this keeps each allowed one, for the tables that count who allowed what
+CREATE TABLE IF NOT EXISTS task_grant_heads (task_id TEXT NOT NULL, repo TEXT NOT NULL, kind TEXT NOT NULL, target INTEGER NOT NULL, head TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, repo, kind, target, head, by, at));
 -- the host CLIs' versions (cli-update-install.ts): one row per decision about a version. outcome: installed / refused /
 -- waiting / untested / rolled-back; by: auto (the daemon decided) / person (a person asked); from_version is the version
 -- the link pointed at before, sha256 the checksum the file was checked against (NULL = none was published)

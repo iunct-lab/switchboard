@@ -126,7 +126,7 @@ test("the first import reads every page and every comment page, then stores Issu
   const twelve = raw(12, { comments: { pageInfo: { hasNextPage: true, endCursor: "cc1" }, nodes: [{ id: "C_12_1", body: "first", createdAt: "2026-10-02T00:00:00Z" }] } });
   const { gh, calls } = fakeGh({
     changed: (v) => (v.after ? pageOf([raw(13, { state: "CLOSED", labels: { totalCount: 1, nodes: [{ name: "type:task" }] }, parent: { number: 12 } })]) : pageOf([twelve], "p2")),
-    comments: (v) => ({ data: { repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_12_2", body: "second", createdAt: "2026-10-03T00:00:00Z" }] } } } } }),
+    comments: (v) => ({ data: { repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_12_2", body: "second", createdAt: "2026-10-03T00:00:00Z", authorAssociation: "OWNER" }] } } } } }),
     open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]),
   });
   db.upsertWorkspace({ id: WS.id, name: "app", path: WS.path, kind: "repo" });
@@ -140,6 +140,9 @@ test("the first import reads every page and every comment page, then stores Issu
   });
   expect(s["issue:I_13"]!.remote).toMatchObject({ state: "CLOSED", parent: 12, labels: ["type:task"] });
   expect(Object.keys(s).filter((k) => k.startsWith("comment:"))).toEqual(["comment:C_12_1", "comment:C_12_2", "comment:C_13_1"]);
+  // the commenter's relation to the repository is kept when GitHub gives it (a post-audit mark counts only from an owner, a member or a collaborator)
+  expect(s["comment:C_12_2"]!.remote).toEqual({ issue: 12, body: "second", createdAt: "2026-10-03T00:00:00Z", authorAssociation: "OWNER" });
+  expect(s["comment:C_12_1"]!.remote).not.toHaveProperty("authorAssociation");
   expect(s["project-item:PVTI_12"]!.remote).toEqual({ issue: 12, owner: "acme", project: 1, fields: { Status: "Ready", "Story Points": 5 } });
   expect(db.getBacklogRepository(KEY)).toEqual({ ...KEY, cursor: "2026-10-04T00:00:00Z", lastSuccessfulSync: 1000, retryAt: null });
 });

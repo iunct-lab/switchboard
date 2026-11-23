@@ -6,9 +6,9 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { answerGranted, mergeGranted, repoName, syncedRepositories } from "../src/backlog-client.ts";
+import { mergeGranted, repoName, syncedRepositories } from "../src/backlog-client.ts";
 import { mergeGateOf, noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets, publicCopyOf } from "../src/config.ts";
-import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeAnswerYesHeads, mergeHeadOf, mergeWrite, NO_EQUIVALENT, plainMergeOf, publicSyncMerge, realCommand, writeTargetOf } from "../src/gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeHeadOf, mergeWrite, NO_EQUIVALENT, plainMergeOf, publicSyncMerge, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { forgeReadOnly, ghReadsOnly } from "../src/gh-reads.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
 
@@ -44,27 +44,13 @@ const reads = bodiesOf(argv, (path) => {
   }
 }, !process.stdin.isTTY);
 
-// In the same Task, the person's `[merge-answer] yes` mark is posted only when the app has a record of their allowing
-// sentence of the PR in the Task's conversation (kind `answer`), given while the PR had the head the mark names: the mark is
-// what lets the gate pass a large PR. Before the backlog check, which would send the comment elsewhere: the mark itself is
-// what is judged here. The mark is looked for in the form its readers compare (`markText`).
-// These checks keep a slip from passing; they are no fence: the Task and the record are told from the environment
-// (OPS_KIT_TASK_ID, BACKLOG_URL), which the Task's own shell can change (docs/design/permission-modes.md, "Merge grants").
-// A grant is for one repository: the one this command writes to (named with -R / GH_REPO / the api path, else the clone's own)
+// A grant is for one repository: the one this command writes to (named with -R / GH_REPO / the api path, else the clone's own).
+// The checks below keep a slip from passing; they are no fence: the Task and the record are told from the environment
+// (OPS_KIT_TASK_ID, BACKLOG_URL), which the Task's own shell can change (docs/design/permission-modes.md, "Merge grants")
 const grantRepo = async () => writeTargetOf(argv, process.env)?.repo ?? (await repoName(process.env).catch(() => null));
 const NO_GRANT_REPO = "書き込み先のリポジトリが読めず、許可文の記録を確かめられません";
 const NEW_HEAD = "許可は与えられたときの head のもので、新しいコミットの後は聞き直します";
 const texts = (reads ?? []).map((r) => r.text);
-const answer = process.env.BACKLOG_URL && mergeGateOf() !== null ? mergeAnswerPost(argv, texts) : null;
-if (answer) {
-  const repo = answer.pr === null ? null : await grantRepo();
-  const granted = answer.pr === null || repo === null ? false : await answerGranted(process.env, repo, answer.pr, texts.flatMap(mergeAnswerYesHeads));
-  if (granted !== true) {
-    console.error(`gh-guard: アプリの Task の中では、利用者の許可文の記録なしに [merge-answer] yes を投稿できません（${answer.pr === null ? "既存のコメントの編集と、PR の番号が読めない書き方は、許可文があっても通りません。PR の番号を付けた新しいコメントで投稿します" : repo === null ? NO_GRANT_REPO : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `${repo} の PR #${answer.pr} の head ${granted === false ? "" : granted.head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`}）`);
-    if (answer.pr !== null) console.error("利用者が Task の会話で PR #<番号> への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #<番号> をマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）");
-    process.exit(1);
-  }
-}
 // In the app's Task, the backlog of its workspace, and of the other repositories the app syncs, is written
 // through the app, whatever form the write takes: written here, the app's next edit starts from the value
 // before it and is sent as a conflict. A repository the app does not know goes on. Before the secret check: nothing

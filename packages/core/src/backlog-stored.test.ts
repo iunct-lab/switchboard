@@ -452,7 +452,7 @@ describe("pickNext overlap", () => {
 
   test("a PBI whose Task names a file an open PR changes is skipped; the next one that does not overlap is picked, and all overlapping picks nothing", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/b.ts"), pr(50, ["src/a.ts"], { closes: [9] })]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
     expect(byNumber(ws)[2]!.overlap).toBeNull();
     expect(pick(ws)).toBe(2);
     db.putBacklogSnapshot(SOURCE, { records: [pr(51, ["src/b.ts"])], cursor: null, syncedAt: 6000 });
@@ -476,7 +476,7 @@ describe("pickNext overlap", () => {
 
   test("an In progress Task of another PBI is the other work unless it asks (needs-decision); a PR untouched for 72 hours does not hold", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false, pbi: 6 }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task", "needs-decision"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
     expect(pick(ws)).toBe(1);
     db.putBacklogSnapshot(SOURCE, { records: [pr(61, ["src/a.ts"], { updatedAt: "2026-01-01T00:00:00Z" })], cursor: null, syncedAt: 7000 });
@@ -499,20 +499,20 @@ describe("pickNext overlap", () => {
     expect(hitsOf(idleWorld())).toBeNull();
     // a Task with no parent is still counted
     const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(61, ["type:task"], { body: "`src/a.ts`", updatedAt: new Date().toISOString() }), item(61, { Status: "In progress" })]);
-    expect(hitsOf(ws)).toEqual({ hits: [{ ref: "Task #61", path: "src/a.ts", working: false }], unknown: null });
+    expect(hitsOf(ws)).toEqual({ hits: [{ ref: "Task #61", path: "src/a.ts", working: false, pbi: null }], unknown: null });
   });
 
   test("an In progress Task of a PBI a session works on is still other work", () => {
     // a stage Task runs (active) with no claim: counted, and shown as at work. PBI 7 has no comment stored at all
     const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(7, ["type:pbi"], { subIssues: [70] }), issue(70, ["type:task"], { body: "`src/a.ts`", parent: 7, updatedAt: new Date().toISOString() }), item(70, { Status: "In progress" })]);
     expect(hitsOf(ws)).toBeNull(); // nobody works on PBI 7 yet
-    expect(hitsOf(ws, (n) => n === 7)).toEqual({ hits: [{ ref: "Task #70", path: "src/a.ts", working: true }], unknown: null });
+    expect(hitsOf(ws, (n) => n === 7)).toEqual({ hits: [{ ref: "Task #70", path: "src/a.ts", working: true, pbi: 7 }], unknown: null });
     // PBI 7's last read was not complete: a claim may not be stored yet, so it counts, as the guard counts it
     db.putBacklogSnapshot(SOURCE, { records: [{ ...issue(7, ["type:pbi"], { subIssues: [70] }), fetchState: "unavailable" }], cursor: null, syncedAt: 6000 });
     expect(hitsOf(ws)!.hits.map((h) => h.ref)).toEqual(["Task #70"]);
     // held: a claim only (PBI 6)
     const held = idleWorld("<!-- pbi-complete:claim t1 -->");
-    expect(hitsOf(held)!.hits).toContainEqual({ ref: "Task #60", path: "src/a.ts", working: false });
+    expect(hitsOf(held)!.hits).toContainEqual({ ref: "Task #60", path: "src/a.ts", working: false, pbi: 6 });
   });
 
   test("the guard counts no In progress Task the app does not count", async () => {
@@ -539,25 +539,25 @@ describe("pickNext overlap", () => {
     // both overlap: skipped, the hits of both
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/c.ts")), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }, { ref: "PR #50", path: "src/c.ts", working: true }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }, { ref: "PR #50", path: "src/c.ts", working: true, pbi: null }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // the free one names the overlapping one: only that one can start, and the hit is its alone
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #10")), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // the free one waits on another PBI: only the overlapping one can start
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
       expect(pick(ws)).toBeNull();
     }
     // none can start: all the open Tasks as one, as before
     {
       const ws = imported([...two(task(10, 1, "src/a.ts", "\n\n**前提**: #70"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
-      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: null });
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
     }
     // a Task naming no path is not judged, so it counts as free
     {
@@ -664,7 +664,7 @@ describe("pickNext overlap", () => {
   test("a Task whose body changed is read for its paths again", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts")]);
     const hits = () => readStoredBacklog(db, ws, { active: (n) => n === 1 }).items.find((i) => i.number === 2)!.overlap;
-    expect(hits()).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true }], unknown: null });
+    expect(hits()).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true, pbi: 1 }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(20, ["type:task"], { body: "触る場所: `src/z.ts`", parent: 2 })], cursor: null, syncedAt: 6000 });
     expect(hits()).toBeNull();
   });
@@ -672,11 +672,11 @@ describe("pickNext overlap", () => {
   test("a Task at work whose body changed is read for its paths again", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z")]);
     const hits = () => readStoredBacklog(db, ws).items.find((i) => i.number === 1)!.overlap;
-    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
+    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false, pbi: 6 }], unknown: null });
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task"], { body: "`src/z.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 6000 });
     expect(hits()).toBeNull();
     db.putBacklogSnapshot(SOURCE, { records: [issue(60, ["type:task"], { body: "`src/a.ts`", parent: 6, updatedAt: new Date().toISOString() })], cursor: null, syncedAt: 7000 });
-    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false }], unknown: null });
+    expect(hits()).toEqual({ hits: [{ ref: "Task #60", path: "src/a.ts", working: false, pbi: 6 }], unknown: null });
   });
 
   test("a PBI whose stage Task runs (active) holds its open Tasks as the other work, Ready or not; one that does not overlap starts too; without active nothing changes", () => {
@@ -684,7 +684,7 @@ describe("pickNext overlap", () => {
     const read = (active?: (n: number) => boolean) => readStoredBacklog(db, ws, { active }).items;
     const at = (items: ReturnType<typeof read>, n: number) => items.find((i) => i.number === n)!;
     const on = read((n) => n === 1);
-    expect(at(on, 2).overlap).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true }], unknown: null });
+    expect(at(on, 2).overlap).toEqual({ hits: [{ ref: "Task #10", path: "src/a.ts", working: true, pbi: 1 }], unknown: null });
     expect(at(on, 1).overlap).toBeNull();
     expect(at(on, 3).overlap).toBeNull();
     expect(pickNext(on.filter((i) => i.number !== 1), "implement")?.item.number).toBe(3);
@@ -717,11 +717,11 @@ describe("pickNext overlap", () => {
       stage("t_resume", 2, { status: "error", resumeAt: Date.now() + 3_600_000, resumeReason: "usage-limit" });
       expect(overlapOf(ws, 1)).toBeNull();
       db.updateTask("t_resume", { status: "running", resumeAt: null, resumeReason: null });
-      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "Task #20", path: "src/a.ts", working: true }], unknown: null });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "Task #20", path: "src/a.ts", working: true, pbi: 2 }], unknown: null });
     });
 
     test("a running stage Task keeps its unstarted Tasks as other work", () => {
-      const hit = { hits: [{ ref: "Task #20", path: "src/a.ts", working: true }], unknown: null };
+      const hit = { hits: [{ ref: "Task #20", path: "src/a.ts", working: true, pbi: 2 }], unknown: null };
       const ws = two();
       stage("t_run", 2);
       expect(overlapOf(ws, 1)).toEqual(hit);
@@ -756,7 +756,7 @@ describe("pickNext overlap", () => {
       const ws = imported([...pbi(1, "P0", "src/a.ts"), ...checking, prOf(61, [60], "MERGED", ["src/a.ts"])]);
       expect(overlapOf(ws, 1)).toBeNull();
       db.putBacklogSnapshot(SOURCE, { records: [prOf(62, [60], "OPEN", ["src/a.ts"])], cursor: null, syncedAt: 6000 });
-      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "PR #62", path: "src/a.ts", working: true }], unknown: null });
+      expect(overlapOf(ws, 1)).toEqual({ hits: [{ ref: "PR #62", path: "src/a.ts", working: true, pbi: 6 }], unknown: null });
     });
   });
 
@@ -773,12 +773,12 @@ describe("pickNext overlap", () => {
       issue(60, ["type:task"], { body: "fresh/component/ に足す", parent: 6, updatedAt: new Date().toISOString() }), item(60, { Status: "In progress" }), comment(6, "c6", "<!-- pbi-complete:claim t1 -->", "2026-10-02T00:00:00Z"),
       pr(50, ["fresh/component/a.ts"], { isDraft: true }),
     ]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "fresh/component/", working: false }], unknown: null });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "Task #60", path: "fresh/component/", working: false, pbi: 6 }], unknown: null });
   });
 
   test("a PR that overlaps and one whose files are not all stored are both told: hits and the reason it cannot be judged", () => {
     const ws = imported([...pbi(1, "P0", "src/a.ts"), pr(50, ["src/a.ts"]), pr(51, null)]);
-    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true }], unknown: "PR #51 の変更ファイルが記録に無い" });
+    expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: "PR #51 の変更ファイルが記録に無い" });
   });
 
   test("a PBI whose Tasks name no path is not judged", () => {

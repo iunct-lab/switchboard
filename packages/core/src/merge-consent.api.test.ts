@@ -357,8 +357,6 @@ describe("a reply in the person's own words as a merge grant", () => {
     const ways: Array<[string, () => Promise<Awaited<ReturnType<typeof boot>>>, (x: Awaited<ReturnType<typeof boot>>) => Promise<unknown>]> = [
       ["the person's own words", () => boot(reads({ kind: "answer", target: 12 })), (x) => post(x.b, `/api/tasks/${x.t.id}/send`, { text: "はい、進めて" })],
       ["the fixed sentence", () => boot(reads()), (x) => post(x.b, `/api/tasks/${x.t.id}/send`, { text: SENTENCE })],
-      // what the skills still tell a Task to offer, read while the check on posting the mark stands
-      ["the earlier fixed sentence", () => boot(reads()), (x) => post(x.b, `/api/tasks/${x.t.id}/send`, { text: "PR #12 に [merge-answer] yes を投稿してよい" })],
       ["a choice that carries the sentence", () => boot(reads(), undefined, QUESTION, asked(`マージする — 許可: ${SENTENCE}`)), answerQuestion],
       ["a choice that carries none", () => boot(reads({ kind: "answer", target: 12 }), undefined, "確認をお願いします", asked(null)), answerQuestion],
       // the PR is named only in the Task's reply, which the question tool's question points at

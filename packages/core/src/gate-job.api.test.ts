@@ -103,7 +103,7 @@ describe("the app judges and merges for a Task", () => {
     // the job is the Task's, run for PR 7 of acme/app, and its record says what the app judged and that it merged
     const gate = (await x.jobs()).filter((k) => k.kind === "gate");
     expect(gate).toHaveLength(1);
-    expect(gate[0]).toMatchObject({ taskId: x.t.id, pr: 7, repo: "acme/app", head: SHA, status: "pass", exitCode: 0, result: { gate: { verdict: "merge", head: SHA, ask: [], recheck: [], reasons: [], allowLarge: false, reviewSkipped: false, merged: true } } });
+    expect(gate[0]).toMatchObject({ taskId: x.t.id, pr: 7, repo: "acme/app", head: SHA, status: "pass", exitCode: 0, result: { gate: { verdict: "merge", head: SHA, ask: [], recheck: [], required: [], reasons: [], allowLarge: false, reviewSkipped: false, merged: true } } });
     // the same job is read by id with what it printed; one that is not there, or not a number, is no job
     const one = await fetch(`${x.b}/api/jobs/${gate[0]!.id}`).then(j);
     expect(one.job.id).toBe(gate[0]!.id);
