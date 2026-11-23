@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, realCommand, writeTargetOf, markText, mergeAnswerOf, mergeAnswerYes, mergeAnswerYesHeads, mergeHeadOf } from "./gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeWrite, realCommand, writeTargetOf, markText, mergeAnswerOf, mergeAnswerYes, mergeAnswerYesHeads, mergeHeadOf, plainMergeOf } from "./gh-guard.ts";
 
 const GUARD = join(import.meta.dir, "../bin/gh");
 const code = ["QWJK", "ZRTP"].join("-");
@@ -617,7 +617,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
   // a fake app that answers the grant of PR 12 only, and records what it was asked
   // the head the person saw when they gave the grant of PR 12, and the head the PR has now (the fake gh's answer to `pr view`)
   const GRANTED_HEAD = "a".repeat(40);
-  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false, config: object = {}, headNow: string | null = GRANTED_HEAD, headLater?: string) {
+  async function inTree(mergeGate: string | undefined, env: Record<string, string | undefined>, argv: string[], appDown = false, config: object = {}, headNow: string | null = GRANTED_HEAD, headLater?: string, noWrite?: string) {
     const tree = mkdtempSync(join(tmpdir(), "ops-kit.gh-guard.merge."));
     const asked: string[] = [];
     const app = appDown ? null : Bun.serve({ port: 0, fetch: (req) => { const u = new URL(req.url); asked.push(u.pathname + u.search); return Response.json({ granted: u.searchParams.get("target") === "12" && u.searchParams.get("kind") === "merge" && u.searchParams.get("taskId") === "t1" && u.searchParams.get("repo") === "acme/app" && u.searchParams.get("head") === GRANTED_HEAD }); } });
@@ -629,7 +629,8 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
       writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { ${headNow === null ? "process.exit(1);" : headLater === undefined ? `console.log(${JSON.stringify(headNow)}); process.exit(0);` : `const f = ${JSON.stringify(join(tree, "reads"))}; const fs = require("node:fs"); const n = fs.existsSync(f) ? 1 : 0; fs.writeFileSync(f, "x"); console.log(n ? ${JSON.stringify(headLater)} : ${JSON.stringify(headNow)}); process.exit(0);`} }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
       chmodSync(join(fake, "gh"), 0o755);
       writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? config : { ...config, mergeGate }));
-      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      if (noWrite) for (const args of [["init", "-q"], ["config", "--add", "ops-kit.noWrite", noWrite]]) Bun.spawnSync(["git", ...args], { cwd: tree });
+      const p = Bun.spawn([GUARD, ...argv], { cwd: tree, env: { ...process.env, GH_REPO: undefined, OPS_KIT_TASK_ID: "t1", BACKLOG_URL: `http://127.0.0.1:${app?.port ?? 1}/api/backlog`, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, GH_HOST: undefined, ...env, AWS_CONFIG_FILE: awsConfig, PATH: `${dirname(GUARD)}:${fake}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       const [code, err] = [await p.exited, await new Response(p.stderr).text()];
       return { code, err, asked, ran: existsSync(calls), calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : [] };
     } finally {
@@ -648,68 +649,117 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
 
   test("graphql mergePullRequest stops; a graphql write that is not a merge goes on", async () => {
     const merge = await inTree("scripts/merge-gate.ts", {}, ["api", "graphql", "-f", "query=mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }"]);
-    expect([merge.code, merge.ran]).toEqual([1, false]);
+    expect([merge.code, merge.ran, merge.asked]).toEqual([1, false, []]);
+    expect(merge.err).toContain("前段がどの PR のマージか読めない");
     const other = await inTree("scripts/merge-gate.ts", {}, ["api", "graphql", "-f", "query=mutation { addReaction(input: {}) { clientMutationId } }"]);
     expect([other.code, other.ran]).toEqual([0, true]);
   });
 
-  test("OPS_MERGE_GATE_PR naming the same PR goes through without asking the app; another PR's mark does not", async () => {
+  test("OPS_MERGE_GATE_PR does not let a merge through: the variable is no mark, so a merge of the PR it names stops like any other, and only the app's record of the person's grant lets one go", async () => {
+    // the variable names the PR it is merging: in each of the three ways to write a merge it stops, with the app down and with the app up but holding no grant of that PR
     for (const argv of cases) {
-      const r = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12" }, argv, true);
-      expect([argv, r.code, r.ran]).toEqual([argv, 0, true]);
+      const down = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12" }, argv, true);
+      expect([argv, down.code, down.ran]).toEqual([argv, 1, false]);
     }
-    const other = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "13" }, ["pr", "merge", "12"], true);
-    expect([other.code, other.ran]).toEqual([1, false]);
+    for (const argv of cases.map((c) => c.map((a) => a.replace("12", "13")))) {
+      const r = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "13", GH_REPO: "acme/app" }, argv);
+      expect([argv, r.code, r.ran]).toEqual([argv, 1, false]);
+    }
+    // with the grant of the PR the variable is still not what lets it through: the app is asked, and it is the app's record that does
+    const grant = `/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${GRANTED_HEAD}`;
+    const pr = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12", GH_REPO: "acme/app" }, ["pr", "merge", "12", "--rebase"]);
+    expect([pr.code, pr.asked]).toEqual([0, [grant]]);
+    const api = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12" }, ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge", "-f", `sha=${GRANTED_HEAD}`]);
+    expect([api.code, api.asked]).toEqual([0, [grant]]);
+    // gh stack merge cannot carry a head: no grant lets it through, and the variable no longer does
+    const stack = await inTree("scripts/merge-gate.ts", { OPS_MERGE_GATE_PR: "12", GH_REPO: "acme/app" }, ["stack", "merge", "12", "--rebase", "-y"]);
+    expect([stack.code, stack.ran, stack.asked]).toEqual([1, false, []]);
   });
 
   test("a grant of the PR in the Task's conversation goes through (asked with the task, the repository written to, kind and PR); another PR's does not", async () => {
     const ok = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12", "--rebase"]);
     expect([ok.code, ok.ran, ok.asked]).toEqual([0, true, [`/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${GRANTED_HEAD}`]]);
     // GitHub is told to merge only the head the grant was checked for
-    expect(ok.calls).toEqual([["pr", "merge", "--match-head-commit", GRANTED_HEAD, "12", "--rebase"]]);
+    expect(ok.calls).toEqual([["pr", "merge", "-R", "acme/app", "--match-head-commit", GRANTED_HEAD, "12", "--rebase"]]);
     const no = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "14"]);
     expect([no.code, no.ran]).toEqual([1, false]);
   });
 
-  test("a merge that cannot carry the head reads it again after the check: a commit pushed while the check waited is not merged", async () => {
+  test("granted merge: only a merge that carries the head goes", async () => {
     const moved = "b".repeat(40);
-    for (const argv of [["stack", "merge", "12"], ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge"]]) {
-      const r = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv, false, {}, GRANTED_HEAD, moved);
-      expect([argv, r.code, r.ran, r.err]).toEqual([argv, 1, false, expect.stringContaining(`head が確かめた ${GRANTED_HEAD.slice(0, 7)} から動きました`)]);
-      // the head still the same: it goes through
-      const same = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv, false, {}, GRANTED_HEAD, GRANTED_HEAD);
-      expect([argv, same.code, same.ran]).toEqual([argv, 0, true]);
+    const env = { GH_REPO: "acme/app" };
+    // gh stack merge and graphql cannot name a head: stopped before the app is asked, with the way that works shown
+    const stack = await inTree("scripts/merge-gate.ts", env, ["stack", "merge", "12"]);
+    expect([stack.code, stack.ran, stack.asked, stack.err]).toEqual([1, false, [], expect.stringContaining("--rebase --match-head-commit <head>")]);
+    expect(stack.err).toContain("gh stack merge は head を GitHub に渡せない");
+    // a gh api merge goes only with a body `sha` that is the granted head; none, another, or a body from --input stops
+    const api = ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge"];
+    for (const extra of [[], ["-f", `sha=${moved}`], ["-f", "sha=abc"], ["-f", `sha=${GRANTED_HEAD.toUpperCase()}`], ["--input", "body.json"], ["-f", `sha=${GRANTED_HEAD}`, "-f", `sha=${moved}`]]) {
+      const r = await inTree("scripts/merge-gate.ts", env, [...api, ...extra]);
+      expect([extra, r.code, r.ran]).toEqual([extra, 1, false]);
     }
-    // `gh pr merge` is held to the head by --match-head-commit and is not read twice
-    const pr = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12"], false, {}, GRANTED_HEAD, moved);
-    expect([pr.code, pr.calls]).toEqual([0, [["pr", "merge", "--match-head-commit", GRANTED_HEAD, "12"]]]);
+    expect((await inTree("scripts/merge-gate.ts", env, api)).err).toContain("-f sha=<head>");
+    for (const extra of [["-f", `sha=${GRANTED_HEAD}`], [`--raw-field=sha=${GRANTED_HEAD}`], ["--raw-field", `sha=${GRANTED_HEAD}`]]) {
+      const ok = await inTree("scripts/merge-gate.ts", env, [...api, ...extra, "-f", "merge_method=rebase"], false, {}, moved);
+      // gh receives the body as written, and the head is not read: the grant was checked for the head the body names
+      expect([extra, ok.code, ok.calls, ok.asked]).toEqual([extra, 0, [[...api, ...extra, "-f", "merge_method=rebase"]], [`/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${GRANTED_HEAD}`]]);
+    }
+    // a shape the guard cannot read as gh does (a flag's value, a group of short flags, a flag before `api`) stops before the app is asked
+    for (const argv of [["pr", "merge", "12", "--subject", `--match-head-commit=${GRANTED_HEAD}`], ["pr", "merge", "12", "-dt", `--match-head-commit=${GRANTED_HEAD}`], ["-R", "acme/app", ...api, "-f", `sha=${GRANTED_HEAD}`]]) {
+      const r = await inTree("scripts/merge-gate.ts", env, argv, false, {}, moved);
+      expect([argv, r.code, r.ran, r.asked, r.err]).toEqual([argv, 1, false, [], expect.stringContaining("決まった形")]);
+    }
+    // another host: the grant, kept by owner/name of github.com, is not that host's; github.com itself goes
+    const ghe = await inTree("scripts/merge-gate.ts", { ...env, GH_HOST: "ghe.example.com" }, ["pr", "merge", "12"]);
+    expect([ghe.code, ghe.ran, ghe.asked, ghe.err]).toEqual([1, false, [], expect.stringContaining("GH_HOST が ghe.example.com")]);
+    expect((await inTree("scripts/merge-gate.ts", { ...env, GH_HOST: "github.com" }, ["pr", "merge", "12"])).code).toBe(0);
+    const gheApi = await inTree("scripts/merge-gate.ts", { ...env, GH_HOST: "ghe.example.com" }, [...api, "-f", `sha=${GRANTED_HEAD}`]);
+    expect([gheApi.code, gheApi.ran, gheApi.asked]).toEqual([1, false, []]);
+    // gh fills {owner}/{repo} from its own choice of remote, which the guard cannot follow: it stops before the app is asked
+    const placeholder = await inTree("scripts/merge-gate.ts", env, ["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/12/merge", "-f", `sha=${GRANTED_HEAD}`]);
+    expect([placeholder.code, placeholder.ran, placeholder.asked]).toEqual([1, false, []]);
+    // the write check reads the repository the front names with -R, not the arguments: a switch before -R does not hide it
+    const marked = await inTree("scripts/merge-gate.ts", { GH_REPO: "other/x" }, ["pr", "merge", "-r", "-R", "acme/app", "12"], false, {}, GRANTED_HEAD, undefined, "acme/app");
+    expect([marked.code, marked.ran, marked.err]).toEqual([1, false, expect.stringContaining("ops-kit.noWrite")]);
+    // the other switches of the fixed shape go through the real front too
+    const sw = await inTree("scripts/merge-gate.ts", env, ["pr", "merge", "12", "--squash", "-d"]);
+    expect([sw.code, sw.calls]).toEqual([0, [["pr", "merge", "-R", "acme/app", "--match-head-commit", GRANTED_HEAD, "12", "--squash", "-d"]]]);
+    // a PR named by its github.com URL: the grant is asked for the URL's repository, and gh is told that repository
+    const byUrl = await inTree("scripts/merge-gate.ts", { GH_REPO: "o/other" }, ["pr", "merge", "https://github.com/acme/app/pull/12"]);
+    expect([byUrl.code, byUrl.calls]).toEqual([0, [["pr", "merge", "-R", "acme/app", "--match-head-commit", GRANTED_HEAD, "https://github.com/acme/app/pull/12"]]]);
+    // gh pr merge is told the repository the grant was checked for, whatever gh's own default would be; leading flags keep their place
+    const lead = await inTree("scripts/merge-gate.ts", env, ["-R", "acme/app", "pr", "merge", "12", "--rebase"]);
+    expect([lead.code, lead.calls]).toEqual([0, [["-R", "acme/app", "pr", "merge", "-R", "acme/app", "--match-head-commit", GRANTED_HEAD, "12", "--rebase"]]]);
+    // gh pr merge is given the granted head, whatever the PR's head is after the check
+    const pr = await inTree("scripts/merge-gate.ts", env, ["pr", "merge", "12"], false, {}, GRANTED_HEAD, moved);
+    expect([pr.code, pr.calls]).toEqual([0, [["pr", "merge", "-R", "acme/app", "--match-head-commit", GRANTED_HEAD, "12"]]]);
   });
 
   test("the grant holds for the head the PR had when it was given: a commit pushed after it asks again", async () => {
     const moved = "b".repeat(40);
     // the PR has a new head: the same grant does not let it through, in any form of the merge
-    for (const argv of [["pr", "merge", "12", "--rebase"], ["stack", "merge", "12"], ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge"]]) {
+    for (const argv of [["pr", "merge", "12", "--rebase"], ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge", "-f", `sha=${moved}`]]) {
       const r = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv, false, {}, moved);
       expect([argv, r.code, r.ran, r.asked, r.err]).toEqual([argv, 1, false, [`/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${moved}`], expect.stringContaining("新しいコミットの後は聞き直します")]);
     }
     // the head the command itself names is the one checked (and gh is not given it twice); another head named is refused
     const named = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12", "--match-head-commit", GRANTED_HEAD], false, {}, moved);
-    expect([named.code, named.calls]).toEqual([0, [["pr", "merge", "12", "--match-head-commit", GRANTED_HEAD]]]);
+    expect([named.code, named.calls]).toEqual([0, [["pr", "merge", "-R", "acme/app", "12", "--match-head-commit", GRANTED_HEAD]]]);
     const other = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12", `--match-head-commit=${moved}`]);
     expect([other.code, other.ran]).toEqual([1, false]);
     // the head cannot be read (GitHub does not answer): not granted, and the app is not asked
     const unread = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["pr", "merge", "12"], false, {}, null);
     expect([unread.code, unread.ran, unread.asked, unread.err]).toEqual([1, false, [], expect.stringContaining("今の head を読めず")]);
-    // the forms that cannot be held to a head on the command line are still checked against the head now
-    const stack = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["stack", "merge", "12"]);
-    expect([stack.code, stack.calls]).toEqual([0, [["stack", "merge", "12"]]]);
   });
 
   test("the grant is asked for the repository the merge names: the same number of another repository is not granted", async () => {
-    for (const argv of [["pr", "merge", "12", "-R", "x/y"], ["pr", "merge", "https://github.com/x/y/pull/12"], ["api", "-X", "PUT", "repos/x/y/pulls/12/merge"]]) {
+    for (const argv of [["pr", "merge", "12", "-R", "x/y"], ["pr", "merge", "https://github.com/x/y/pull/12"], ["-R", "x/y", "pr", "merge", "https://github.com/x/y/pull/12"], ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${GRANTED_HEAD}`]]) {
       const r = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, argv);
       expect([argv, r.code, r.ran, r.asked, r.err]).toEqual([argv, 1, false, [`/api/merge-grants?taskId=t1&repo=x%2Fy&kind=merge&target=12&head=${GRANTED_HEAD}`], expect.stringContaining(`x/y の PR #12 の head ${GRANTED_HEAD.slice(0, 7)} に利用者の許可文の記録がありません`)]);
     }
+    // a URL and -R that name different repositories: gh merges the URL's, so the shape is not read and nothing is asked
+    const both = await inTree("scripts/merge-gate.ts", { GH_REPO: "acme/app" }, ["-R", "acme/app", "pr", "merge", "https://github.com/x/y/pull/12"]);
+    expect([both.code, both.ran, both.asked, both.err]).toEqual([1, false, [], expect.stringContaining("決まった形")]);
     // no repository named and none readable from the clone: the app is not asked, nothing is granted
     const unknown = await inTree("scripts/merge-gate.ts", {}, ["pr", "merge", "12"]);
     expect([unknown.code, unknown.ran, unknown.asked, unknown.err]).toEqual([1, false, [], expect.stringContaining("書き込み先のリポジトリが読めず")]);
@@ -789,6 +839,58 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     expect(mergeWrite(["pr", "view", "12"])).toBeNull();
     expect(mergeWrite(["api", "repos/x/y/pulls/12/merge"])).toBeNull();
     expect(mergeWrite(["api", "-X", "PUT", "repos/x/y/pulls/12/merge"])).toEqual({ pr: 12 });
+  });
+
+  test("plainMergeOf: only the shape the guard reads as gh does", () => {
+    const h = "a".repeat(40);
+    // the shapes that go
+    expect(plainMergeOf(["pr", "merge", "12", "--rebase", "--match-head-commit", h])).toEqual({ pr: 12, repo: null, head: h });
+    expect(plainMergeOf(["-R", "x/y", "pr", "merge", "12", "-r", "-d"])).toEqual({ pr: 12, repo: "x/y", head: null });
+    expect(plainMergeOf(["pr", "merge", "-r", "-R", "x/y", "12"])).toEqual({ pr: 12, repo: "x/y", head: null });
+    expect(plainMergeOf(["pr", "merge", "https://github.com/x/y/pull/9", "--repo=X/Y", `--match-head-commit=${h}`])).toEqual({ pr: 9, repo: "x/y", head: h });
+    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`, "--field=merge_method=rebase"])).toEqual({ pr: 12, repo: "x/y", head: h });
+    expect(plainMergeOf(["api", "--method=put", "/repos/x/y/pulls/12/merge"])).toEqual({ pr: 12, repo: "x/y", head: null });
+    for (const argv of [["api", "-XPUT", "repos/x/y/pulls/12/merge", `-fsha=${h}`], ["api", "-XPUT", "repos/x/y/pulls/12/merge", `-f=sha=${h}`], ["api", "-X=PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`]]) expect(plainMergeOf(argv)).toEqual({ pr: 12, repo: "x/y", head: h });
+    expect(plainMergeOf(["api", "-XPUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`])).toEqual({ pr: 12, repo: "x/y", head: h });
+    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "--raw-field=commit_message=a\nb"])).toEqual({ pr: 12, repo: "x/y", head: null });
+    // anything else stops: a flag's value, a group of short flags, a URL and -R that differ, two heads, a branch, other fields or flags
+    for (const argv of [
+      ["pr", "merge", "12", "--subject", `--match-head-commit=${h}`],
+      ["pr", "merge", "12", "-dt", `--match-head-commit=${h}`],
+      ["pr", "merge", "12", "-b", "x"],
+      ["-R", "a/b", "pr", "merge", "https://github.com/x/y/pull/9"],
+      ["pr", "merge", "12", "--match-head-commit", h, "--match-head-commit", h],
+      ["pr", "merge", "12", "--match-head-commit", h.toUpperCase()],
+      ["pr", "merge", "feature"],
+      ["pr", "merge", "https://ghe.example.com/x/y/pull/9"],
+      ["pr", "merge", "https://github.com/x%2Fz/y/pull/9"],
+      ["pr", "merge", "12", "--auto"],
+      ["-R", "x/y", "-R", "x/y", "pr", "merge", "12"],
+      ["-R", "git@ghe.example.com:x/y", "pr", "merge", "12"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "repos/x/y/pulls/13/merge"],
+      ["api", "-X", "PUT", "repos/:owner/:repo/pulls/12/merge"],
+      ["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/12/merge"],
+      ["pr", "merge", "1234567890"],
+      ["pr", "merge", "12", "--rebase", "--squash"],
+      ["api", "-X", "PUT", "-X", "PUT", "repos/x/y/pulls/12/merge"],
+      ["api", "-X", "PUT", "--hostname", "github.com", "repos/x/y/pulls/12/merge"],
+      ["pr", "merge", "12", "-r", "-m"],
+      ["pr", "merge", "https://github.com/x/y/pull/1234567890"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/1234567890/merge"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-F", `sha=${h}`],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", `--field=sha=${h}`],
+      ["-R", "-x/y", "pr", "merge", "12"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge?a=b"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge/x"],
+      ["api", "-X", "PUT", "https://api.github.com/repos/x/y/pulls/12/merge"],
+      ["pr", "merge", "12", "--", "13"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`, "-f", `sha=${h}`],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", "body=x"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "--input", "b.json"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-H", "x: y"],
+      ["api", "-X", "POST", "repos/x/y/pulls/12/merge"],
+      ["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h.toUpperCase()}`],
+    ]) expect([argv, plainMergeOf(argv)]).toEqual([argv, null]);
   });
 });
 
@@ -989,11 +1091,19 @@ describe("merge-answer: a yes mark is posted in a Task only with the grant of th
 
   test("mergeHeadOf: the head a merge names, and where gh pr merge takes one", () => {
     const h = "A".repeat(40);
-    expect(mergeHeadOf(["pr", "merge", "12", "--match-head-commit", h])).toEqual({ head: h.toLowerCase(), at: 2 });
-    expect(mergeHeadOf(["-R", "o/a", "pr", "merge", `--match-head-commit=${h}`, "12"])).toEqual({ head: h.toLowerCase(), at: 4 });
-    expect(mergeHeadOf(["pr", "merge", "12", "--rebase"])).toEqual({ head: null, at: 2 });
-    expect(mergeHeadOf(["stack", "merge", "12"])).toEqual({ head: null, at: null });
-    expect(mergeHeadOf(["api", "-X", "PUT", "repos/o/a/pulls/12/merge"])).toEqual({ head: null, at: null });
+    const api = ["api", "-X", "PUT", "repos/o/a/pulls/12/merge"];
+    expect(mergeHeadOf(["pr", "merge", "12", "--match-head-commit", h])).toEqual({ head: h.toLowerCase(), at: 2, carries: true });
+    expect(mergeHeadOf(["-R", "o/a", "pr", "merge", `--match-head-commit=${h}`, "12"])).toEqual({ head: h.toLowerCase(), at: 4, carries: true });
+    expect(mergeHeadOf(["pr", "merge", "12", "--rebase"])).toEqual({ head: null, at: 2, carries: true });
+    // the value of another flag is not the flag; after it, a real flag still counts
+    for (const v of ["-t", "--subject", "-b", "--body", "-A", "-R"]) expect(mergeHeadOf(["pr", "merge", "12", v, `--match-head-commit=${h}`]).head).toBeNull();
+    expect(mergeHeadOf(["pr", "merge", "12", "-b", "--match-head-commit", "--match-head-commit", h])).toEqual({ head: h.toLowerCase(), at: 2, carries: true });
+    expect(mergeHeadOf(["stack", "merge", "12"])).toEqual({ head: null, at: null, carries: false });
+    expect(mergeHeadOf(["api", "graphql", "-f", "query=mutation { mergePullRequest }"])).toEqual({ head: null, at: null, carries: false });
+    expect(mergeHeadOf(api)).toEqual({ head: null, at: null, carries: true });
+    const l = h.toLowerCase();
+    for (const f of [["-f", `sha=${l}`], ["-F", `sha=${l}`], ["--field", `sha=${l}`], [`--raw-field=sha=${l}`]]) expect(mergeHeadOf([...api, ...f])).toEqual({ head: l, at: null, carries: true });
+    for (const f of [["-f", "sha=abc"], ["-f", `sha=${h}`], ["--input", "b.json"], ["-f", `sha=${l}`, "--input", "b.json"], ["-f", `sha=${l}`, "-f", `sha=${"b".repeat(40)}`]]) expect(mergeHeadOf([...api, ...f]).head).toBeNull();
   });
 
   test("a mark that names no PR, or an app that cannot be reached, stops", async () => {

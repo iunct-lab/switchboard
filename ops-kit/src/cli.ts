@@ -15,6 +15,7 @@ import { withHeavySlot } from "./heavy.ts";
 import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { parseWaitArgs, runWait, WAIT_USAGE } from "./wait.ts";
 import { checkCompared, comparePrompt, leftoverRequests, parseCompared } from "./review-compare.ts";
+import { attackPrompt } from "./review-attack.ts";
 import { isReviewer, REVIEW_RULES, REVIEWER_NOTE, type Reviewer } from "./review-note.ts";
 import { addedLines, handledFindings, oldPathHits, oldPathsItem, oldPathsReport, type Hit, type InlineComment } from "./review-material.ts";
 import { formatLint, lint } from "./lint.ts";
@@ -134,6 +135,9 @@ ${DEPS_CHECK_USAGE}
       レビュアーとして起動するランナーに、レビューの指示の後ろに足す文（そのランナーの動き方: 読み取り専用のサンドボックス / plan モード。続けて、
       どのレビューにも共通の決まり: 指摘の重さの定義・処理済みの指摘の扱い・古い前提の一覧の使い方）を出す。rules は共通の決まりだけ（サブエージェントのレビュー用）。
       アプリに仕事として頼むレビューにはアプリが同じ文を足すので、直接走らせるときだけ使う。設定ファイルは要らない。exit 2 = 使い方の誤り
+  review-attack prompt
+      攻める側のレビュー（実装したのとは別のランナーが、差分が変えた入口ごとに認証・認可・宛先・形式・利用者の承認のどの検査が無いかを読む）の指示を出す。
+      攻撃の手順（シナリオの列・ペイロード・コマンドの全文）は書かせず、無い検査・入れる場所・既存の防御を書かせる。出力は ### Findings / ### Entries read / ### Verdict。設定ファイルは要らない。exit 2 = 使い方の誤り
   review-compare prompt
   review-compare check <ファイル>
   review-compare leftovers <ファイル> --source <経路> --out <ディレクトリ>
@@ -343,6 +347,11 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
   if (command === "review-note") {
     if (rest.length !== 1 || (rest[0] !== "rules" && !isReviewer(rest[0]))) return usage(err, "review-note <codex|claude|rules>", 2);
     out(rest[0] === "rules" ? REVIEW_RULES : REVIEWER_NOTE[rest[0] as Reviewer]);
+    return 0;
+  }
+  if (command === "review-attack") {
+    if (rest.length !== 1 || rest[0] !== "prompt") return usage(err, "review-attack prompt", 2);
+    out(attackPrompt());
     return 0;
   }
   if (command === "review-compare") {

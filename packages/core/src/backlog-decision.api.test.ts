@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Backlog, BacklogIssueDetail, BacklogItem } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
 import { taskAllowRules } from "./tasks/sessions.ts";
-import { answerStoredDecision, screenAnswer, holdStoredDecision } from "./backlog-edit.ts";
+import { answerStoredDecision, askStoredDecision, screenAnswer, holdStoredDecision } from "./backlog-edit.ts";
 import { buildStartPrompt } from "./backlog-prompt.ts";
 import { confirmationsOf, confirmAfterOf, confirmDecisionsOf, toItem } from "./backlog-item.ts";
 import { pickNext } from "./backlog-pick.ts";
@@ -271,8 +271,10 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: `## 回答\n\n${GRANT}\n\n<!-- switchboard-op:${sent.id} -->` }), sent.target]);
   // as sent (with its marker): still the screen's answer
   expect(screenAnswer(db, source, 305)).toEqual({ issue: 321, text: GRANT, id: expect.any(String), heads: {} });
-  // a saved policy's answer (no screen mark) after it is the newest: nothing goes in
-  answerStoredDecision(db, source, 321, "A: 登録しない\n\n方針で回答", Date.now() + 1000);
+  // a saved policy's answer (no screen mark) to a question asked after it is the newest: nothing goes in
+  const again = Date.now() + 500;
+  askStoredDecision(db, source, 321, "**問い**: もう一度", again);
+  answerStoredDecision(db, source, 321, "A: 登録しない\n\n方針で回答", again + 500, { question: { at: new Date(again).toISOString() } });
   expect(screenAnswer(db, source, 305)).toBeNull();
   // nothing saved as a policy, no allow rule added
   expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
@@ -292,6 +294,10 @@ const headsGh = (gh: GhRunner, heads: Record<string, string>) => {
 };
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
+/** Waits until the screen answer of Issue `n` keeps a head read for `key` (the heads are put with the answer after its reply). */
+const headsKept = async (db: CoreServer["db"], source: Parameters<typeof screenAnswer>[1], n: number, key: string) => {
+  for (let i = 0; i < 400 && !screenAnswer(db, source, n)?.heads?.[key]; i++) await Bun.sleep(5);
+};
 const answerOnScreen = (base: string, n: number, body: object) => fetch(`${base}/api/backlog/${n}/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), ...body }) });
 
 test("a screen answer with a grant keeps the head the PR had when it was answered", async () => {
@@ -307,14 +313,18 @@ test("a screen answer with a grant keeps the head the PR had when it was answere
   // one with grants: each PR's head as it is now, once per PR, under the repository the grant is recorded for
   const GRANTS = "A で\nPR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\nPR #13 を判定の外でマージしてよい";
   expect((await answerOnScreen(base, 306, { text: GRANTS })).status).toBe(202);
+  // the answer is kept before its PRs are read; the heads come in after the reply
+  await headsKept(db, source, 306, "acme/app#12");
   expect(fake.reads.sort()).toEqual(["acme/app#12", "acme/app#13"]);
   // PR 13 could not be read: kept as not read, which is not the same as an answer that keeps no heads at all
   expect(screenAnswer(db, source, 306)).toEqual({ issue: 306, text: GRANTS, id: expect.any(String), heads: { "acme/app#12": HEAD_A, "acme/app#13": null } });
   expect(queued().find((o) => o[0] === 306 && o[1] === "comment")![3]).toEqual({ body: `## 回答\n\n${GRANTS}`, screen: true, heads: { "acme/app#12": HEAD_A, "acme/app#13": null } });
-  // an answer that is not the screen's (a bare call) reads nothing and keeps none
+  // an answer that is not the screen's (a bare call), to a question asked after it, reads nothing and keeps none
   heads[12] = HEAD_B;
   const reads = fake.reads.length;
-  answerStoredDecision(db, source, 306, "PR #12 を判定の外でマージしてよい", Date.now() + 1000, { by: "api" });
+  const again = Date.now() + 500;
+  askStoredDecision(db, source, 306, "**問い**: もう一度", again);
+  answerStoredDecision(db, source, 306, "PR #12 を判定の外でマージしてよい", again + 500, { question: { at: new Date(again).toISOString() }, by: "api" });
   expect(fake.reads).toHaveLength(reads);
   expect(screenAnswer(db, source, 306)).toBeNull();
 });
@@ -326,6 +336,7 @@ test("a grant in a screen answer holds for the head at the answer, not a head pu
   const base = await boot(fake.gh, holdingClaude().adapter);
   const db = core!.db;
   expect((await answerOnScreen(base, 306, { text: "A で\nPR #12 を判定の外でマージしてよい\nPR #13 を判定の外でマージしてよい" })).status).toBe(202);
+  await headsKept(db, db.getWorkspaceBacklogSource(metaId())!, 306, "acme/app#12");
   expect(fake.reads.sort()).toEqual(["acme/app#12", "acme/app#13"]);
   // before the next stage starts both PRs get a head the person did not answer for
   heads[12] = HEAD_B;
@@ -342,6 +353,17 @@ test("a grant in a screen answer holds for the head at the answer, not a head pu
   expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD_B)).toBeNull();
   // the head that could not be read at the answer: the grant answers for no head, the one PR 13 has now included
   for (const head of [HEAD_A, HEAD_B]) expect([head, db.mergeGrantAt(task, "acme/app", "merge", 13, head)]).toEqual([head, null]);
+});
+
+test("an answer to an Issue reads the ask sentence only when the whole answer is fixed sentences: with other words it reads no head", async () => {
+  const heads: Record<string, string> = { 12: HEAD_A, 14: HEAD_A };
+  const fake = headsGh(fakeGh().gh, heads);
+  const base = await boot(fake.gh, holdingClaude().adapter);
+  const db = core!.db;
+  expect((await answerOnScreen(base, 306, { text: "A で\nPR #14 をマージしてよい" })).status).toBe(202);
+  await Bun.sleep(300);
+  expect(fake.reads).toEqual([]);
+  expect(screenAnswer(db, db.getWorkspaceBacklogSource(metaId())!, 306)).toMatchObject({ heads: {} });
 });
 
 test("hold: a Task's ## 保留 after its ## 判断待ち gives the PBI heldAt; a ## 判断待ち asked after the hold opens it again", async () => {

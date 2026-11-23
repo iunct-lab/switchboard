@@ -489,7 +489,7 @@ describe("uplink", () => {
     expect(UPLINK_PREVIEW).toEqual({ SWITCHBOARD_UPLINK_PREVIEW: "not-for-use" });
   });
 
-  test("the instance with no machine registered takes in from nobody: only its own leases are read in the bucket", async () => {
+  test("the instance with no machine registered takes in from nobody: only its own leases are read in the bucket, and backlog-export/ is listed to withdraw what an earlier registry wrote", async () => {
     const s3 = memoryS3();
     await s3.put("uplink/pc1/pc1-0000000000001-000000.tar.zst", new Uint8Array(8));
     await s3.put("backlog/pc1/000000000001.json", new Uint8Array(8));
@@ -497,7 +497,7 @@ describe("uplink", () => {
     const watching = { ...s3, put: s3.put, get: (k: string) => (asked.push(`get ${k}`), s3.get(k)), list: (p: string, a?: string) => (asked.push(`list ${p}`), s3.list(p, a)) };
     await boot({ ...UPLINK_PREVIEW, SWITCHBOARD_UPLINK: "receive", SWITCHBOARD_UPLINK_INTERVAL_S: "0.05", SWITCHBOARD_LEASE_RENEW_S: "0.05" }, watching as never);
     await Bun.sleep(300);
-    expect([...new Set(asked)]).toEqual(["list lease/"]);
+    expect([...new Set(asked)].sort()).toEqual(["list backlog-export/", "list lease/"]);
   });
 
   test("a work machine's daemon writes nothing to the forge and decides nothing by itself: no write reaches gh, the sweep fired by hand starts nothing", async () => {

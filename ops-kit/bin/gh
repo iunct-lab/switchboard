@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { answerGranted, mergeGranted, repoName, syncedRepositories } from "../src/backlog-client.ts";
 import { mergeGateOf, noWriteMarkRefusal, noWriteMarks, noWriteRefusal, noWriteTargets, publicCopyOf } from "../src/config.ts";
-import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeAnswerYesHeads, mergeHeadOf, mergeWrite, NO_EQUIVALENT, publicSyncMerge, realCommand, writeTargetOf } from "../src/gh-guard.ts";
+import { backlogWrite, bodiesOf, GUARD_MARK, mergeAnswerPost, mergeAnswerYesHeads, mergeHeadOf, mergeWrite, NO_EQUIVALENT, plainMergeOf, publicSyncMerge, realCommand, writeTargetOf } from "../src/gh-guard.ts";
 import { forgeReadOnly, ghReadsOnly } from "../src/gh-reads.ts";
 import { findSecrets, hostAws } from "../src/secrets.ts";
 
@@ -61,7 +61,7 @@ if (answer) {
   const granted = answer.pr === null || repo === null ? false : await answerGranted(process.env, repo, answer.pr, texts.flatMap(mergeAnswerYesHeads));
   if (granted !== true) {
     console.error(`gh-guard: アプリの Task の中では、利用者の許可文の記録なしに [merge-answer] yes を投稿できません（${answer.pr === null ? "既存のコメントの編集と、PR の番号が読めない書き方は、許可文があっても通りません。PR の番号を付けた新しいコメントで投稿します" : repo === null ? NO_GRANT_REPO : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `${repo} の PR #${answer.pr} の head ${granted === false ? "" : granted.head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`}）`);
-    if (answer.pr !== null) console.error("利用者が Task の会話で PR #<番号> への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #<番号> に [merge-answer] yes を投稿してよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）");
+    if (answer.pr !== null) console.error("利用者が Task の会話で PR #<番号> への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #<番号> をマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）");
     process.exit(1);
   }
 }
@@ -94,39 +94,60 @@ if (backlog) {
     process.exit(1);
   }
 }
-// In the app's Task of a repository that has a merge gate (`mergeGate` of ops.config.json), a merge goes through the gate: the
-// one the gate itself makes (it marks the PR in OPS_MERGE_GATE_PR), or one of a PR the person allowed in the Task's conversation.
-// Nothing is sent to GitHub either way; the app is asked only for a merge the gate did not make. public-sync's merge of its own
+// In the app's Task of a repository that has a merge gate (`mergeGate` of ops.config.json), a merge from the Task's shell goes only
+// as one of a PR the person allowed in the Task's conversation. The gate's own merge is not made from the Task's shell: the Task asks
+// the app to run the gate as a job (the gate script's `--merge`), and that job runs in the daemon's environment, which this check is not in.
+// Nothing is sent to GitHub either way; the app is asked for every merge from the Task's shell. public-sync's merge of its own
 // sync PR on the public copy is not this repository's PR and the gate does not judge it: it goes on with public-sync's mark
 const gate = process.env.BACKLOG_URL ? mergeGateOf() : null;
 const merge = gate !== null ? mergeWrite(argv, texts) : null;
 // the head a granted merge is held to: `gh pr merge` gets `--match-head-commit <head>` added below, so GitHub merges only it
-let pin: { at: number; head: string } | undefined;
-if (merge && !(merge.pr !== null && process.env.OPS_MERGE_GATE_PR === String(merge.pr)) && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
-  const repo = merge.pr === null || !process.env.OPS_KIT_TASK_ID ? null : await grantRepo();
-  // the grant holds for the head the PR had when it was given: the head the command names, else the PR's head now
+let pin: { at: number; args: string[]; repo: string } | undefined;
+if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
+  // a merge outside the gate goes only in a form that hands GitHub the head the grant was given for (`--match-head-commit`,
+  // the `sha` of the REST body); `gh stack merge` and graphql have no place for it, so they are not asked about
   const held = mergeHeadOf(argv);
-  let head = held.head;
-  if (repo !== null && head === null) {
-    const p = Bun.spawnSync([real, "pr", "view", String(merge.pr), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    head = p.exitCode === 0 && /^[0-9a-f]{40}$/.test(p.stdout.toString().trim()) ? p.stdout.toString().trim() : null;
-    if (head !== null && held.at !== null) pin = { at: held.at, head };
-  }
-  let granted = repo === null || head === null ? false : await mergeGranted(process.env, repo, "merge", merge.pr!, fetch, head);
-  // a merge that names no head and cannot carry one (`gh stack merge`, `gh api`): the check may have waited for the
-  // person's words to be read, so the head is read again, and a commit pushed meanwhile is not merged on the old grant
-  let moved: false | "moved" | "unread" = false;
-  if (granted && held.head === null && pin === undefined) {
-    const p = Bun.spawnSync([real, "pr", "view", String(merge.pr), "-R", repo!, "--json", "headRefOid", "-q", ".headRefOid"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    moved = p.exitCode !== 0 ? "unread" : p.stdout.toString().trim() !== head ? "moved" : false;
-    if (moved) granted = false;
-  }
-  if (!granted) {
-    const why = merge.pr === null ? "PR の番号が読めない書き方は通りません" : !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${merge.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : moved === "unread" ? `${repo} の PR #${merge.pr} の head を確かめた後に読み直せませんでした` : moved ? `${repo} の PR #${merge.pr} の head が確かめた ${head.slice(0, 7)} から動きました。${NEW_HEAD}` : `${repo} の PR #${merge.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
-    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
-    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack）`);
+  if (!held.carries) {
+    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${argv.includes("api") ? "この書き方は前段がどの PR のマージか読めない" : "gh stack merge は head を GitHub に渡せない"}ので、判定の外の許可では通りません）`);
+    console.error(`最下段から 1 本ずつ gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head> でマージします（head は gh pr view <n> [-R <owner/name>] --json headRefOid）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack）`);
     process.exit(1);
   }
+  // and only in the one shape the guard reads as gh reads it; any other shape stops rather than be guessed at
+  // the grant is kept by owner/name with no host: a merge sent to another host than github.com is not that grant's
+  const otherHost = process.env.GH_HOST && process.env.GH_HOST !== "github.com" ? process.env.GH_HOST : null;
+  if (otherHost !== null) {
+    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（GH_HOST が ${otherHost} です。判定の外の許可は github.com の owner/name で記録されるので、ほかのホストのマージには使えません）`);
+    process.exit(1);
+  }
+  const plain = plainMergeOf(argv);
+  if (plain === null) {
+    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（判定の外の許可で通るのは決まった形のマージだけです。この書き方は前段が gh と同じに読めると言えないので通りません）`);
+    console.error(`決まった形: gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head>（--rebase の代わりに --merge か --squash のどれか 1 つ。ほかに付けてよいのは --delete-branch だけ）、または gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge -f sha=<head> [-f merge_method=rebase]。head は gh pr view <n> [-R <owner/name>] --json headRefOid`);
+    process.exit(1);
+  }
+  if (held.at === null && plain.head === null) {
+    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（gh api のマージは本文に head の sha（40 桁）が要ります）`);
+    console.error("本文に -f sha=<head> を付けます（--input で本文を渡す形は通りません）。head は gh pr view <n> [-R <owner/name>] --json headRefOid。スタックは最下段から gh pr merge <n> --rebase --match-head-commit <head>");
+    process.exit(1);
+  }
+  // the repository gh merges: the one the URL or the api path names (a URL and -R agree in the shape), else -R / GH_REPO / the clone's
+  const repo = !process.env.OPS_KIT_TASK_ID ? null : (plain.repo ?? (await grantRepo()));
+  // the grant holds for the head the PR had when it was given: the head the command names, else the PR's head now
+  let head = plain.head;
+  if (repo !== null && head === null) {
+    const p = Bun.spawnSync([real, "pr", "view", String(plain.pr), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    head = p.exitCode === 0 && /^[0-9a-f]{40}$/.test(p.stdout.toString().trim()) ? p.stdout.toString().trim() : null;
+  }
+  const granted = repo === null || head === null ? false : await mergeGranted(process.env, repo, "merge", plain.pr, fetch, head);
+  if (!granted) {
+    const why = !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${plain.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `${repo} の PR #${plain.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
+    console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
+    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack。判定の外でスタックを進めるときは最下段から gh pr merge <n> --rebase --match-head-commit <head> を 1 本ずつ）`);
+    process.exit(1);
+  }
+  // `gh pr merge` is told the repository the grant was checked for (gh would otherwise pick its own default, which may be
+  // another remote's) and, when it named none, the head that was checked
+  if (held.at !== null) pin = { at: held.at, args: ["-R", repo!, ...(plain.head === null ? ["--match-head-commit", head!] : [])], repo: repo! };
 }
 const host = hostAws();
 const hits = (reads ?? []).flatMap((r) => findSecrets(r.text, host));
@@ -140,7 +161,8 @@ if (hits.length > 0) {
 // remotes, not GH_REPO, so `-R "$(gh repo view …)"` names the public copy although GH_REPO points elsewhere; it is
 // asked only for such a write, so a read and a write named elsewhere cost no call. A repository the clone marked
 // `ops-kit.noWrite` stops by name, whatever the default is
-const write = writeTargetOf(argv, process.env);
+// a granted merge goes to the repository the front names with -R, whatever the arguments read as
+const write = pin ? { repo: pin.repo } : writeTargetOf(argv, process.env);
 if (write && (write.repo === null ? noWriteTargets().length > 0 : noWriteRefusal(write.repo) !== null)) {
   const view = () => {
     const p = Bun.spawnSync([real, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -162,7 +184,7 @@ if (write && (write.repo === null ? noWriteTargets().length > 0 : noWriteRefusal
 const pass = [...argv];
 let scratch: string | undefined;
 // after the copies below are placed by index: the added flag moves what stands behind it
-const pinned = () => (pin ? [...pass.slice(0, pin.at), "--match-head-commit", pin.head, ...pass.slice(pin.at)] : pass);
+const pinned = () => (pin ? [...pass.slice(0, pin.at), ...pin.args, ...pass.slice(pin.at)] : pass);
 for (const r of reads ?? []) {
   const bytes = r.from && once.get(r.from.path);
   if (!r.from || !bytes) continue;

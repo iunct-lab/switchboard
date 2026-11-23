@@ -27,7 +27,7 @@ do not post to the PR (no comment, no review) and do not modify files of the rep
 
 ## 転記
 
-レビュアーは PR に書かない。出力のファイルを自分が読み、`cross-runner-review` の 3 の `post_review <PR> subagent <出力のパス>` で転記する（接頭辞は `[subagent]`）。マージ判定が主レビューとして数えるのは主レビュアーの `[codex] review` / `[claude] review` だけで、`[subagent]` は追加の指摘として読まれる。`### Findings` の無い出力は転記しない。
+レビュアーは PR に書かない。出力のファイルを自分が読み、`cross-runner-review` の 3 の `post_review <PR> subagent <出力のパス>` で転記する（接頭辞は `[subagent]`）。マージ判定が数えるのはレビューの仕事の記録だけで、`[subagent]` の転記は人が読む追加の指摘（判定には数えられない）。`### Findings` の無い出力は転記しない。
 
 ## 採否・返信・修正後
 

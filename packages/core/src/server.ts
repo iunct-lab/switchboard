@@ -50,6 +50,7 @@ import { processesRoutes } from "./routes/processes.ts";
 import { routingRoutes } from "./routes/routing.ts";
 import { historyRoutes } from "./routes/history.ts";
 import { mergeGrantsRoutes } from "./routes/merge-grants.ts";
+import { mergeRecordsRoutes } from "./routes/merge-records.ts";
 import { attachmentsRoutes } from "./routes/attachments.ts";
 import { reportsRoutes } from "./routes/reports.ts";
 import { artifactsRoutes } from "./routes/artifacts.ts";
@@ -68,6 +69,7 @@ import { SETTINGS_KEY } from "./server/helpers.ts";
 import { setupHome, setupTimers, setupAfterListen } from "./server/lifecycle.ts";
 import { setupLogins } from "./server/logins.ts";
 import { setupShipped } from "./server/settings.ts";
+import type { Sh } from "../../../ops-kit/src/forge-gitlab.ts";
 import { setupStores, setupTasks, setupJobs } from "./server/setup.ts";
 import { setupEntrance, setupSockets, setupRequestLog } from "./server/guards.ts";
 import { setupWorkspaceMcp } from "./server/mcp.ts";
@@ -140,13 +142,15 @@ export interface StartServerOptions {
   loadPty?: () => Promise<PtyManager | null>;
   /** Overrides how `gh` is run for GET /api/backlog; tests and the E2E answer from a fixture. Unset = `gh` from PATH. */
   gh?: GhRunner;
+  /** Overrides how `glab` is run to read a GitLab MR's head for a grant; tests answer from a fake. Unset = `glab` from PATH. */
+  glab?: Sh;
   /** Overrides the command of a job a Task asks for; tests run a fake. Unset = local CI / the review runner. */
   jobCommand?: JobDeps["command"];
   /**
    * Collects, once at start, the results of local CI builds that outlived the daemon (`recoverJobs`); main.ts passes
    * `spawnCollectPending`. Unset (tests, the E2E) = nothing is collected, so a test daemon never writes to a real PR.
    */
-  collectPending?: (env: Record<string, string | undefined>, log: string) => void;
+  collectPending?: (env: Record<string, string | undefined>, log: string, done: () => void) => void;
   /**
    * Overrides how a checkout's origin URL is read before a runner starts; tests whose fake `gh` names a
    * repository the checkout is not answer for it. Unset = git.
@@ -181,8 +185,8 @@ export interface StartServerOptions {
   promotionIdleRetryMs?: number;
   /** The host CLIs' update: the distributors and the install steps it runs against (tests give a fake distributor and the home to put versions in) and how soon the first and each next read of the distributors comes. Unset = the real ones and `settings.cliUpdate.checkMinutes`. */
   cliUpdate?: { source?: import("./cli-update-source.ts").CliSourceDeps; install?: Partial<import("./cli-update-install.ts").InstallDeps>; checkMs?: number };
-  /** Overrides how the tag CI's result of a tag is read (the tag's Release, through gh); tests answer by hand. */
-  tagCi?: (tag: string, sha: string) => Promise<"pass" | "fail" | "none">;
+  /** Overrides how the tag CI's result of a tag is read (the app's tag CI job records, and the job it starts when there is none); tests answer by hand. */
+  tagCi?: (tag: string, sha: string) => Promise<"pass" | "fail" | "none" | { waiting: string }>;
   /** How often the daemon looks for a depends stop whose date has passed (`resumeDueAfters`); tests shorten it. Unset = AFTER_CHECK_MS. */
   afterCheckMs?: number;
   /** How often the daemon looks at what the Tasks wait for (`checkWaits`); tests shorten it. Unset = WAIT_CHECK_MS. */
@@ -269,6 +273,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       routingRoutes(sc),
       historyRoutes(sc),
       mergeGrantsRoutes(sc),
+      mergeRecordsRoutes(sc),
       attachmentsRoutes(sc),
       reportsRoutes(sc),
       artifactsRoutes(sc),

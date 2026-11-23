@@ -16,9 +16,9 @@ ARG DOCKER_SHA256_X86_64=3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2
 ARG COMPOSE_VERSION=5.7.1
 ARG COMPOSE_SHA256=f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5
 ARG COMPOSE_SHA256_X86_64=af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf
-ARG UV_VERSION=0.13.7
-ARG UV_SHA256=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
-ARG UV_SHA256_X86_64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+ARG UV_VERSION=0.13.8
+ARG UV_SHA256=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
+ARG UV_SHA256_X86_64=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
 ARG GITLEAKS_SHA256_X86_64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
@@ -91,7 +91,7 @@ ENV HOME=/home/switchboard
 # is copied in: the work tree is mounted or copied by the CI steps. No USER, so root can mount tmpfs, and the
 # unprivileged user of the base stage (switchboard, uid 1000) is the one that runs the steps.
 FROM base AS ci
-ARG PLAYWRIGHT_VERSION=1.65.0
+ARG PLAYWRIGHT_VERSION=1.65.1
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN dnf install -y -q git-core zstd rsync procps-ng file diffutils fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
     cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib awscli-2 \

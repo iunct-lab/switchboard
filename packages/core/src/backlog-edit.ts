@@ -11,7 +11,7 @@ import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts";
 import { syncsGithub } from "./backlog-gh.ts";
 import { criteria, confirmationsOf } from "./backlog-item.ts";
-import { DECISION_HEADING, ANSWER_HEADING, HOLD_HEADING } from "./backlog-comments.ts";
+import { DECISION_HEADING, ANSWER_HEADING, HOLD_HEADING, proceedingAnswer, type Comment } from "./backlog-comments.ts";
 import { shown, projectItemOf, issueRecord, shownRecords } from "./backlog-stored.ts";
 import { grantHeadsOf, type GrantHeads } from "./merge-grants.ts";
 
@@ -283,21 +283,75 @@ function comment(issue: BacklogRecord, n: number, body: string, now: number, ext
   return { record: { objectKind: "comment", externalId: id, local }, op: { issue: issue.externalId, targetKind: "comment", target: id, kind: "comment", payload: { body, ...extra } } };
 }
 
+/** Issue n's comments as shown (one written here and not sent yet too), oldest first: what its questions and answers are read from. */
+function shownComments(db: Db, source: BacklogSource, n: number): Comment[] {
+  return shownRecords(db, source)
+    .flatMap((r) => {
+      const c = r.objectKind === "comment" ? (r.remote as BacklogCommentData | null) : null;
+      return c && c.issue === n ? [{ body: c.body, createdAt: c.createdAt }] : [];
+    })
+    .sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt));
+}
+
 /**
- * `## 回答` + text on Issue n, then the needs-decision label off, kept here and sent in that order.
- * `screen` = the person gave it on the app's screen: its comment's operation keeps the mark screenAnswer reads, and
- * `heads`, the heads of the PRs its grant sentences name as read when it was taken (`answerGrantHeads`) — the one record
- * of what the answer's grants are for.
+ * Who gives an answer and to which question. `question`: the `## 判断待ち` the answer is to, by the time it was asked
+ * (what the person's screen showed). `screen` = the person gave it on the app's screen: its comment's operation keeps the
+ * mark screenAnswer reads, and `heads` — required with it — the heads of the PRs its grant sentences name: null for a PR
+ * not read (yet: `setAnswerHeads` puts in what is read after the answer is kept), and a grant of it then answers for no head.
  * `by` = who else gave it (`task:<id>`, `api`): kept with the operation as a trace, and never read as the person's.
  */
-export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: { screen?: boolean; by?: string; heads?: GrantHeads } = {}): void {
+export type AnswerOpts = { question?: { at: string } } & ({ screen: true; heads: GrantHeads; parts?: string[] } | { screen?: false; by?: string });
+
+/**
+ * `## 回答` + text on Issue n, then the needs-decision label off, kept here and sent in that order. Returns the id of
+ * the comment's operation.
+ * The one place an answer to a question is checked and kept, for every route that takes one. On an Issue that carries
+ * a `## 判断待ち`, the answer is kept only when the question it is to (`opts.question`, found by the second it was asked
+ * in) is there, is still open, and is the one this answer reads as an answer to (`proceedingAnswer`: an answer that
+ * names no question is to the newest one). Still open = no `## 回答` reads as its answer yet — or it is the Issue's
+ * newest question and the label is on: the label is the record that it waits, also over a `## 回答` written on GitHub
+ * by hand, and an answer kept here takes the label off with it. Anything else — no question named, a newer question,
+ * one answered meanwhile through another route — is a `BacklogEditError` (409) and nothing is written. The check and
+ * the write are one synchronous stretch, so of two answers to one question the second finds the first. An Issue with
+ * no `## 判断待ち` at all waits by its label alone: there is no question to check.
+ * The label comes off only when this answer is to the Issue's newest `## 判断待ち`: an answer to an older question does
+ * not take the label off, and the newer question goes on waiting.
+ */
+export function answerStoredDecision(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), opts: AnswerOpts = {}): string {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
   if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してから回答してください` : `#${n} は保存されていません`, rec ? 409 : 404);
-  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now, opts.screen ? { screen: true, ...(opts.heads ? { heads: opts.heads } : {}) } : opts.by ? { by: opts.by } : {});
+  const c = comment(rec, n, `${ANSWER_HEADING}\n\n${text}`, now, opts.screen ? { screen: true, heads: opts.heads, ...(opts.parts ? { parts: opts.parts } : {}) } : opts.by ? { by: opts.by } : {});
+  // from here to the write nothing is awaited: what is checked is what the write is made on
+  const before = shownComments(db, source, n);
+  const starts = (x: Comment, heading: string) => x.body.trimStart().startsWith(heading);
+  const asked = before.filter((x) => starts(x, DECISION_HEADING));
   // a question the work went on from has no label to take off
   const labelled = (shown(rec) as BacklogIssueData).labels.includes("needs-decision");
-  db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, ...(labelled ? [{ issue: rec.externalId, targetKind: "issue" as const, target: rec.externalId, kind: "set" as const, field: "label:needs-decision", payload: false, base: true }] : [])] }, now);
+  let off = labelled;
+  if (asked.length) {
+    const mine = c.record.local as BacklogCommentData;
+    // this answer beside the questions only: which of them it reads as an answer to, whatever else answered them
+    const alone = [...before.filter((x) => !starts(x, ANSWER_HEADING)), { body: mine.body, createdAt: mine.createdAt }].sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt));
+    const answers = (d: Comment) => proceedingAnswer(alone, { at: d.createdAt }) !== null;
+    const newest = asked.at(-1)!;
+    // GitHub gives a question's time to the second: one written here and sent since the screen read it is the same question
+    const second = (at: string) => Math.floor(Date.parse(at) / 1000);
+    const q = opts.question ? asked.filter((x) => second(x.createdAt) === second(opts.question!.at)).at(-1) : undefined;
+    const open = !!q && ((q === newest && labelled) || proceedingAnswer(before, { at: q.createdAt }) === null);
+    if (!q || !open || !answers(q)) throw new BacklogEditError("問いが変わりました。読み直してから回答してください", 409);
+    off = labelled && answers(newest);
+  }
+  const [operation] = db.applyBacklogEdit(source, { records: [c.record], operations: [c.op, ...(off ? [{ issue: rec.externalId, targetKind: "issue" as const, target: rec.externalId, kind: "set" as const, field: "label:needs-decision", payload: false, base: true }] : [])] }, now);
+  return operation!;
+}
+
+/**
+ * The heads read for a screen answer's grants (`answerGrantHeads`), put with the answer's operation after the answer was
+ * kept: the answer is not held back by the read, and a PR not read stays null. Not a screen answer's operation: nothing.
+ */
+export function setAnswerHeads(db: Db, operationId: string, heads: GrantHeads): void {
+  db.setBacklogAnswerHeads(operationId, heads);
 }
 
 /**
@@ -306,7 +360,7 @@ export function answerStoredDecision(db: Db, source: BacklogSource, n: number, t
  * only), from a saved policy, or was edited after it was given — only the screen's answer is the person's words to the next stage Task.
  * `heads`: the heads its grants are for (answerStoredDecision); absent on an answer taken before answers kept them.
  */
-export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string; id: string; heads?: GrantHeads } | null {
+export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue: number; text: string; id: string; heads?: GrantHeads; parts?: string[] } | null {
   const records = shownRecords(db, source);
   const item = records.find((r) => r.objectKind === "issue" && (r.remote as BacklogIssueData | null)?.number === n)?.remote as BacklogIssueData | undefined;
   const want = new Set([n, ...(item?.subIssues ?? [])]);
@@ -325,7 +379,10 @@ export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue:
   if (typeof given !== "string" || given.trim() !== last.body.trim()) return null;
   // the heads its grants are for, as kept when it was taken; none kept = an answer taken before answers kept them
   const heads = grantHeadsOf((sent!.payload as { heads?: unknown }).heads);
-  return { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id, ...(heads ? { heads } : {}) };
+  // the person's own input as the app took it apart (a chosen option's sentence, the memo), when the answer's text starts with lines of the app's
+  const kept = (sent!.payload as { parts?: unknown }).parts;
+  const parts = Array.isArray(kept) && kept.every((p) => typeof p === "string") ? (kept as string[]) : undefined;
+  return { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id, ...(heads ? { heads } : {}), ...(parts ? { parts } : {}) };
 }
 
 /** `## 保留` + text on Issue n, kept here and sent later: the needs-decision label stays (an answer would take it off). */

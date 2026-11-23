@@ -37,7 +37,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { forgeOf, forgeTargetOf, LOCAL_SERVICE, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
 import { gitlabForge, runGlab, viewGitlabMr, type Sh } from "../ops-kit/src/forge-gitlab.ts";
@@ -49,8 +49,11 @@ import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
 import { hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
 import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
-import { localCiOf, localCiOfChange, MARK_AUTHORS, newestLocalCi, readChangeDetail, sharedMoved } from "./merge-gate.ts";
+import { readChangeDetail, sharedMoved } from "./merge-gate.ts";
 import { sharedFilesOf } from "../ops-kit/src/config.ts";
+import { mergeRecords, type MergeRecordJob } from "../ops-kit/src/merge-records.ts";
+import { homeOf } from "../packages/core/src/config.ts";
+import { mergeRecordsEnv } from "./merge-records-env.ts";
 import { isTest } from "./test-select.ts";
 import { buildKey, fileLog, findReusable, offloadRecordPath, reusableOutput, type OffloadCaller, type OffloadLog } from "./offload-record.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
@@ -275,6 +278,57 @@ export interface Deps {
   offload?: Offload;
   /** The settings Switchboard keeps for the workspace of the clone `root` (`workspaceSettingsOf`); none = only the checkout is read. */
   workspace?: (root: string) => WorkspaceSettings | undefined;
+  /** The jobs the app recorded for a PR (a change's `repo` is `local:<workspaceId>`, the id in lower case); none = nothing is reused and every step runs (the app is out of reach). */
+  records?: Records;
+}
+
+/** `repo`: as the records name it (`owner/name`, lower case; a local change `local:<workspaceId>` with the id in lower case). Throws when the app cannot answer. */
+export type Records = (repo: string, pr: number) => Promise<MergeRecordJob[]>;
+
+/** The records from the app at the address and key `env` names (`mergeRecordsEnv` fills the usual place when it names none). */
+export const recordsFrom = (env: Record<string, string | undefined>): Records => async (repo, pr) => (await mergeRecords(mergeRecordsEnv(env), { repo, prs: [pr] })).jobs;
+
+/** The outcome of an earlier local CI run, as the app recorded it: the newest job of the PR whose run left a result (a run that is still going, or posted nothing, has none). */
+export interface CiRecord { id: number; head: string; base: string; outcome: "pass" | "fail" }
+
+export function newestCiRecord(jobs: MergeRecordJob[]): CiRecord | undefined {
+  let best: CiRecord | undefined;
+  for (const j of jobs) {
+    const ci = (j.result as { ci?: { outcome?: unknown } } | null)?.ci;
+    if (j.kind !== "local-ci" || !j.head || !j.base || (ci?.outcome !== "pass" && ci?.outcome !== "fail")) continue;
+    if (!best || j.id > best.id) best = { id: j.id, head: j.head, base: j.base, outcome: ci.outcome };
+  }
+  return best;
+}
+
+/** The newest recorded run of `pr` of `repo`; none when `d` has no records. A failure to read throws. */
+async function ciRecordOf(records: Records | undefined, repo: string, pr: number): Promise<CiRecord | undefined> {
+  return records ? newestCiRecord(await records(repo.toLowerCase(), pr)) : undefined;
+}
+
+/**
+ * What a run that posted its result leaves for the job that ran it: `$J/result.json` (head, base and the outcome), which the daemon reads
+ * when the job ends. Only a job has `J`; a run from a terminal leaves nothing. A write that fails is said and does not fail the run.
+ */
+export function writeJobResult(dir: string | undefined, r: { ok: boolean; sha: string; base: string; source?: StepsSource }, log: (l: string) => void = console.error): void {
+  if (!dir) return;
+  try {
+    const ci = { outcome: r.ok ? "pass" : "fail", ...(r.source ? { stepsHash: r.source.hash } : {}) };
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ head: r.sha, base: r.base, ci }));
+  } catch (e) {
+    log(`仕事の記録に結果を残せない: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** The id of the job a run is (`$J`'s last part), when it is one. */
+const jobIdOf = (dir: string | undefined): string | undefined => (dir && /^\d+$/.test(basename(dir)) ? basename(dir) : undefined);
+
+/** `--collect`'s `record` for a build that outlived its job: the result goes to that job's own folder (still there, 7 days), for the daemon to take in when this collect has ended. */
+function lateRecord(job: string | undefined, env: Record<string, string | undefined> = process.env): (r: LocalCiResult) => void {
+  return (r) => {
+    const dir = job ? join(homeOf(env as NodeJS.ProcessEnv), "jobs", job) : undefined;
+    if (dir && existsSync(dir)) writeJobResult(dir, r);
+  };
 }
 
 /** The size of an off-host build, `sb-offload --size`. */
@@ -616,15 +670,14 @@ export function narrowTestStep(steps: Step[], files: string[]): Step[] {
 /**
  * What the PR gained since its newest pass (an incremental run): the pass's head `pass`, the commits `git cherry` marks
  * `+` between the PR's fork from `tip` (the caller gives the default branch's tip) and `head` (a rebase that kept a diff adds none), and the files
- * they touch, deleted ones too. None when the newest result (of MARK_AUTHORS) is no pass, is of this head, a merge
+ * they touch, deleted ones too. None when the newest recorded run (the app's job records) is no pass, is of this head, a merge
  * commit of the PR is not in the pass's history (a conflict resolved: `inPass`'s rule), or anything cannot be read.
  */
-export async function incrementalBase(pr: number, repo: string, repoRoot: string, head: string, tip: string, d: Pick<Deps, "sh">): Promise<{ pass: string; commits: string[]; files: string[] } | undefined> {
+export async function incrementalBase(pr: number, repo: string, repoRoot: string, head: string, tip: string, d: Pick<Deps, "sh" | "records">): Promise<{ pass: string; commits: string[]; files: string[] } | undefined> {
   try {
-    const view = JSON.parse(await d.sh(["gh", "pr", "view", String(pr), "-R", repo, "--json", "comments"])) as { comments?: Array<{ body: string; createdAt: string; authorAssociation?: string }> };
-    const newest = newestLocalCi((view.comments ?? []).filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? "")));
-    if (newest?.m[1] !== "pass" || newest.m[2] === head) return undefined;
-    const pass = newest.m[2]!;
+    const newest = await ciRecordOf(d.records, repo, pr);
+    if (newest?.outcome !== "pass" || newest.head === head) return undefined;
+    const pass = newest.head;
     const at = ["git", "-C", repoRoot];
     await d.sh([...at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", pass]);
     const mergeBase = (await d.sh([...at, "merge-base", tip, head])).trim();
@@ -694,6 +747,8 @@ export interface Pending {
   /** The local-ci process waiting for this build and this boot's id (null when unreadable): while it is alive it writes the result itself, and `--collect` leaves the record. */
   pid: number;
   boot: string | null;
+  /** The job (its id) the local-ci that started this build ran as: a result written after that job ended goes to its folder. */
+  job?: string;
 }
 
 /** This boot's id, or null when it cannot be read. */
@@ -749,7 +804,7 @@ export function clearPending(cache: string, repo: string, pr: number, build: str
 const readPendingFile = (file: string): Pending | undefined => {
   try {
     const p = JSON.parse(readFileSync(file, "utf8")) as Partial<Pending>;
-    return typeof p.repo === "string" && Number.isInteger(p.pr) && typeof p.root === "string" && typeof p.head === "string" && typeof p.base === "string" && typeof p.build === "string" && typeof p.at === "number" && Array.isArray(p.steps) ? (p as Pending) : undefined;
+    return typeof p.repo === "string" && Number.isInteger(p.pr) && typeof p.root === "string" && typeof p.head === "string" && typeof p.base === "string" && typeof p.build === "string" && typeof p.at === "number" && Array.isArray(p.steps) ? ({ ...p, job: typeof p.job === "string" && /^\d+$/.test(p.job) ? p.job : undefined } as Pending) : undefined;
   } catch {
     return undefined;
   }
@@ -838,7 +893,7 @@ export async function collectPending(d: Deps, cache: string, post = reportResult
     const t = { pr: p.pr, repo: p.repo, root: p.root };
     try {
       const r = await resultOf(p, out, d, cache);
-      const { posted, readFailed } = await notifyKeeping(t, r, d, post);
+      const { posted, readFailed } = await notifyKeeping(t, r, d, post, lateRecord(p.job));
       if (!posted && readFailed) {
         left++;
         continue;
@@ -867,7 +922,8 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
     if (prior) {
       d.log(`▶ 外: 始まっているビルド ${prior.build} の結果を待つ`);
       // this process is the one to write it now
-      writePending(cache, { ...prior, pid: process.pid, boot: bootId() });
+      const job = jobIdOf(process.env.J);
+      writePending(cache, { ...prior, pid: process.pid, boot: bootId(), ...(job ? { job } : {}) });
       const out = await d.offload!.collect(prior.build);
       if (buildSpoke(out.output)) return (built = prior.build), resultOf(prior, out, d, cache, opts.today);
       // the build is gone (its log kept 7 days) or could not be read: not a result of this head; a build of its own
@@ -905,7 +961,8 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         const selection = selectionOf(incremental);
         const summary = incrementalOf(incremental);
         built = build;
-        writePending(cache, { repo, pr, root: repoRoot, head: sha, base, build, at: Date.now(), pid: process.pid, boot: bootId(), steps, ...(selection ? { selection } : {}), ...(summary ? { incremental: summary } : {}), ciTs: existsSync(join(dir, "scripts/ci.ts")), ...(source ? { source } : {}) });
+        const job = jobIdOf(process.env.J);
+        writePending(cache, { repo, pr, root: repoRoot, head: sha, base, build, at: Date.now(), pid: process.pid, boot: bootId(), ...(job ? { job } : {}), steps, ...(selection ? { selection } : {}), ...(summary ? { incremental: summary } : {}), ciTs: existsSync(join(dir, "scripts/ci.ts")), ...(source ? { source } : {}) });
       };
       const workspace = d.workspace?.(repoRoot);
       const run = await runCheckout(dir, env, change ? change.label : `local-ci-${repo.replaceAll("/", "_")}-${pr}`, d, cache, picked?.files, change ? undefined : repo, false, !!inc && !!picked?.files, started, undefined, { ...(opts.imageRoot ? { imageRoot: opts.imageRoot } : {}), ...(workspace ? { workspace } : {}) });
@@ -1125,29 +1182,22 @@ export function remoteRepo(url: string): string | undefined {
 }
 
 /**
- * The URL of the PR's newest result when it is of the head as it is and merge-gate counts it (`localCiOf`, this PR as its
- * own top): a later fail runs; a base that moved under the same head does not — unless it moved on a
- * shared file the PR touches (`sharedMoved`, read in the checkout `git`): merge-gate does not count that pass, so it runs.
+ * What names the PR's newest recorded run (`job#<id>`) when it is a pass of the head as it is: a later fail runs; a base that moved under the
+ * same head does not — unless it moved on a shared file the PR touches (`sharedMoved`, read in the checkout `git`): merge-gate does not count
+ * that pass, so it runs. A `[local-ci]` comment is not read: a pass the app has no record of (a run from a terminal) runs again.
  */
-export async function existingPass(pr: number, repo: string, run: Deps["sh"], git?: { root: string; url: string }): Promise<string | undefined> {
-  const view = JSON.parse(await run(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefOid,comments"])) as {
-    headRefOid: string;
-    baseRefOid: string;
-    comments: Array<{ body: string; createdAt: string; url: string; authorAssociation?: string }>;
-  };
-  const marks = view.comments.filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
-  const newest = newestLocalCi(marks);
-  if (newest?.m[2] !== view.headRefOid) return undefined;
-  // the pass is of this head: its commits are the PR's as they are (no git cherry to run)
-  const counted = await localCiOf(pr, pr, marks, () => Promise.reject(new Error("unused: the PR is its own top")), repo, async () => true,
-    async (passHead, passBase) => (git ? sharedMoved(git, sharedFilesOf(git.root), passHead, passBase, view.baseRefOid) : []));
-  return counted.pass ? newest.c.url : undefined;
+export async function existingPass(pr: number, repo: string, run: Deps["sh"], git: { root: string; url: string } | undefined, records: Records | undefined): Promise<string | undefined> {
+  const view = JSON.parse(await run(["gh", "pr", "view", String(pr), "-R", repo, "--json", "headRefOid,baseRefOid"])) as { headRefOid: string; baseRefOid: string };
+  const newest = await ciRecordOf(records, repo, pr);
+  if (newest?.outcome !== "pass" || newest.head !== view.headRefOid) return undefined;
+  const moved = git ? await sharedMoved(git, sharedFilesOf(git.root), newest.head, newest.base, view.baseRefOid) : [];
+  return moved.length ? undefined : `job#${newest.id}`;
 }
 
 /** The pass to reuse: none with `--force` or `--all` (a narrowed pass is not what it asks for), on GitLab, or when unreadable (a normal run). */
-export async function reusablePass(t: { pr: number; repo: string; root: string; all?: true; force?: true }, run: Deps["sh"]): Promise<string | undefined> {
+export async function reusablePass(t: { pr: number; repo: string; root: string; all?: true; force?: true }, run: Deps["sh"], records?: Records): Promise<string | undefined> {
   if (t.force || t.all || forgeTargetOf(t.root, originOf(t.root)).service === "gitlab") return undefined;
-  return existingPass(t.pr, t.repo, run, { root: t.root, url: `https://github.com/${t.repo}.git` }).catch(() => undefined);
+  return existingPass(t.pr, t.repo, run, { root: t.root, url: `https://github.com/${t.repo}.git` }, records).catch(() => undefined);
 }
 
 /** The PR, the repository and its clone from the arguments: `<PR> [--repo <owner/name>] [--all] [--force] [--local]`. `--local`: every step here, not in the off-host build. */
@@ -1242,7 +1292,7 @@ export async function reportResult(t: { pr: number; repo: string; root: string; 
  * posted (a pass for an old head or base would be taken for the new one), false. Which PRs of a stack the pass covers is
  * merge-gate's to work out with git, not written here.
  */
-export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult, read = () => readTarget(t.pr, t.root, t.repo, d)): Promise<boolean> {
+export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult, read = () => readTarget(t.pr, t.root, t.repo, d), record: (r: LocalCiResult) => void = (r) => writeJobResult(process.env.J, r, d.log)): Promise<boolean> {
   const now = await read().catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
   if (!now) return false;
   if (now.head !== r.sha || now.base !== r.base) {
@@ -1251,14 +1301,16 @@ export async function notify(t: { pr: number; repo: string; root: string }, r: L
   }
   const body = resultComment(r);
   await post(t, body, d.sh);
+  // after the post: a record of a pass with no comment would be reused, and the comment never written
+  record(r);
   d.log(body);
   return true;
 }
 
 /** `notify`, saying whether a false is from the head and base not being readable (a result that was not posted for that is not to be dropped). */
-async function notifyKeeping(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post: typeof reportResult): Promise<{ posted: boolean; readFailed: boolean }> {
+async function notifyKeeping(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post: typeof reportResult, record?: (r: LocalCiResult) => void): Promise<{ posted: boolean; readFailed: boolean }> {
   let readFailed = false;
-  const posted = await notify(t, r, d, post, () => readTarget(t.pr, t.root, t.repo, d).catch((e: unknown) => ((readFailed = true), Promise.reject(e))));
+  const posted = await notify(t, r, d, post, () => readTarget(t.pr, t.root, t.repo, d).catch((e: unknown) => ((readFailed = true), Promise.reject(e))), record);
   return { posted, readFailed };
 }
 
@@ -1295,9 +1347,13 @@ export async function changeMain(args: string[], at: number, cwd: string, d: Dep
   };
   const workspace = (first as { workspaceId?: string }).workspaceId ?? backlog.env.BACKLOG_WORKSPACE ?? "local";
   const label = `local-ci-change-${workspace.replace(/[^\w.-]/g, "_")}-${n}`;
-  if (!args.includes("--force") && !args.includes("--all") && localCiOfChange(first.comments, first.changeRefs.head!, first.changeRefs.base!).pass) {
-    d.log(`既に pass（#${n} の今の head と base）。回し直すなら --force`);
-    return 0;
+  if (!args.includes("--force") && !args.includes("--all")) {
+    // the run the app recorded for this change, of this head and this base's tip; the app out of reach = no reuse
+    const last = await ciRecordOf(d.records, `local:${workspace}`, n).catch(() => undefined);
+    if (last?.outcome === "pass" && last.head === first.changeRefs.head && last.base === first.changeRefs.base) {
+      d.log(`既に pass（#${n} の今の head と base、job#${last.id}）。回し直すなら --force`);
+      return 0;
+    }
   }
   let r: LocalCiResult;
   try {
@@ -1363,7 +1419,7 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
     const { offload: _off, ...here } = d;
     d = here;
   }
-  const url = await reusablePass(t, d.sh);
+  const url = await reusablePass(t, d.sh, d.records);
   if (url) {
     // a record of a build for this head and base is a result already there: `--collect` would post a second mark
     const now = await readTarget(t.pr, t.root, t.repo, d).catch(() => undefined);
@@ -1419,5 +1475,5 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
 
 if (import.meta.main) {
   const offload = hostOffload();
-  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn), workspace: (root) => workspaceSettingsOf(root), ...(offload ? { offload } : {}) }));
+  process.exit(await main(process.argv.slice(2), process.cwd(), { sh, step, log: (l) => console.log(l), slot: (name, fn) => withHeavySlot(name, fn), workspace: (root) => workspaceSettingsOf(root), records: recordsFrom(process.env), ...(offload ? { offload } : {}) }));
 }

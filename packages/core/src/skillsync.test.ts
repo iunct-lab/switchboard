@@ -741,7 +741,19 @@ describe("the kit's skills as a Task reads them", () => {
     // (a Merge commit by the return script, also after the person's yes; never the gate's rebase merge, which would change the shas).
     // Raised to 267,056 (+368 bytes over 266,688): in pbi-complete, the `ゲートの変更` heading of a question about a change to the merge gate's own files
     // (which judgement gets stricter, looser or stays), written once in the branch that asks the person.
-    expect(bytes).toBeLessThanOrEqual(267_056);
+    // Raised to 267,780 (+724 bytes over 267,056): the form of the mark on a rule line that came from the person's words (and not
+    // putting it on a line the agent added), said once in issue-workflow, and the split of a Task that changes the instruction files, in
+    // pbi-to-tasks and task-to-pr (the gate stops a PR that mixes them with other code).
+    // Raised to 269,300 (+1,520 bytes over 267,780): who checks the after-merge lines of a PBI that is being checked (a scheduled Task,
+    // not the Task of each stage) and how a PBI goes back when a line is not met, said once in issue-workflow, with a pointer and the
+    // one report line in pbi-complete; where the procedure lives and who checks when the scheduled Task is not turned on.
+    // Raised to 273,000 (+3,700 bytes over 269,300): when and how the attacking review is asked (a section in cross-runner-review, the
+    // moment in stacked-pr-delivery and pbi-complete, the checklist line in review-triage-and-merge); the instruction itself is made by
+    // a command, not copied into the skill; no mark is posted for a run without an instruction or without findings.
+    // Raised to 274,400 (+1,400 bytes over 273,000; the copy measured 272,673 before and 274,359 after): the merge is asked for with one
+    // sentence and a recheck is asked of the app as a job, instead of marks posted on the PR (how to ask in pbi-complete, what the
+    // verdict counts in cross-runner-review); the marks' text it replaced is gone.
+    expect(bytes).toBeLessThanOrEqual(274_400);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

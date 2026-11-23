@@ -37,6 +37,24 @@ export const ASK_HISTORY_MS = 24 * 60 * 60 * 1000;
 export const PROCEED_CONFIRMED = "**確定**: 推奨のまま";
 export const PROCEED_OVERTURNED = "**覆す**: 推奨";
 const PROCEED_NAMED = / — 問い (\S+)\s*$/m;
+/** The time of the question a `## 回答` names with its mark (`— 問い <time>`); null = it names none. The one place the mark is read. */
+export const namedQuestion = (body: string): string | null => PROCEED_NAMED.exec(body)?.[1] ?? null;
+/**
+ * Whether a mark that names the time `named` is to the question asked at `t` (ms), the next `## 判断待ち` of its Issue
+ * asked at `next` (ms; Infinity = none): the named time is at or after the question — from the start of its second, as
+ * GitHub gives a time to the second — and before the next question. The one rule of which question a mark names.
+ */
+const namesQuestion = (named: string, t: number, next: number): boolean => Date.parse(named) >= Math.floor(t / 1000) * 1000 && Date.parse(named) < next;
+/**
+ * The questions of one Issue that a `## 回答` with `body` closes, for the counts of how long the person was waited for
+ * (interventions.ts, flow.ts): `asked` = when each `## 判断待ち` of the Issue before the answer was asked (ms, oldest
+ * first). An answer that names a question closes that one only (`namesQuestion`, the rule `proceedingAnswer` reads the
+ * mark with); one that names none closes every question before it. Returns when the closed ones were asked.
+ */
+export function questionsAnswered(body: string, asked: readonly number[]): number[] {
+  const named = namedQuestion(body);
+  return named === null ? [...asked] : asked.filter((t, i) => namesQuestion(named, t, asked[i + 1] ?? Infinity));
+}
 /** A first line of a `## 回答` with the mark of the question it is to (asked at `at`): the one place the mark is written, as `PROCEED_NAMED` reads it. */
 const namedLine = (said: string, at: string): string => `${said} — 問い ${at}`;
 export const proceedAnswerLine = (q: { at: string; recommended: string }, said: { same: true; batch?: boolean } | { same: false; choice: string | null }): string =>
@@ -63,8 +81,7 @@ export function proceedingAnswer(comments: Comment[], q: { at: string }): { at: 
   // the question a time names is the newest one written at or before it: an answer made before comments kept their
   // written time names the time the service received the question, which is a send delay after it was written. A next
   // question written within that delay takes such an old answer instead (docs/design/asks.md)
-  // GitHub gives its time to the second, so a question sent at once is named by the start of the second it was written in
-  const second = Math.floor(t / 1000) * 1000;
+  // GitHub gives its time to the second, so a question sent at once is named by the start of the second it was written in (`namesQuestion`)
   const next = Math.min(...comments.filter((c) => Date.parse(c.createdAt) > t && c.body.trimStart().startsWith(DECISION_HEADING)).map((c) => Date.parse(c.createdAt)));
   let newest = true;
   for (const c of comments) {
@@ -72,9 +89,9 @@ export function proceedingAnswer(comments: Comment[], q: { at: string }): { at: 
     const head = c.body.trimStart();
     if (head.startsWith(DECISION_HEADING)) newest = false;
     else if (head.startsWith(ANSWER_HEADING)) {
-      const named = PROCEED_NAMED.exec(c.body)?.[1];
+      const named = namedQuestion(c.body);
       // GitHub writes `…:00Z`, a comment kept here `…:00.000Z`: compared as times, not as text
-      if (named ? Date.parse(named) >= second && Date.parse(named) < next : newest) return { at: c.createdAt, body: c.body };
+      if (named ? namesQuestion(named, t, next) : newest) return { at: c.createdAt, body: c.body };
     }
   }
   return null;

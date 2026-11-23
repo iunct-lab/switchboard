@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import { deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
 import { readStoredRecords } from "./backlog-stored.ts";
 import { requestOf } from "./backlog-item.ts";
+import { questionsAnswered } from "./backlog-comments.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { closesOf } from "./backlog-fetch.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
@@ -45,16 +46,33 @@ export function median(xs: number[]): number | null {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 }
 
-/** `## 判断待ち` → the next `## 回答` on one Issue, summed. An ask with no answer after it counts nothing (still open or lost). */
+/**
+ * How long one Issue waited for the person: each `## 判断待ち` waits until the `## 回答` that closes it — one that names
+ * it (`— 問い <time>`) closes it alone, one that names none closes every ask before it (`questionsAnswered`) — and the
+ * time counted is the length of the union of those spans (two asks that waited over the same time count it once). An ask
+ * that no answer closed counts nothing (still open or lost).
+ */
 function userWait(comments: RawComment[]): number {
-  let total = 0;
-  let asked: number | null = null;
+  const asked: number[] = []; // when each ask so far was asked
+  let open: number[] = []; // those no answer closed yet
+  const spans: Array<[number, number]> = [];
   for (const c of sorted(comments)) {
-    if (ASK.test(c.body)) asked ??= ms(c.createdAt);
-    else if (ANSWER.test(c.body) && asked !== null) {
-      total += ms(c.createdAt) - asked;
-      asked = null;
+    const at = ms(c.createdAt);
+    if (ASK.test(c.body)) {
+      asked.push(at);
+      open.push(at);
+    } else if (ANSWER.test(c.body) && open.length) {
+      const closed = new Set(questionsAnswered(c.body, asked));
+      for (const q of open) if (closed.has(q)) spans.push([q, at]);
+      open = open.filter((q) => !closed.has(q));
     }
+  }
+  let total = 0;
+  let end = -Infinity;
+  for (const [from, to] of spans.sort((a, b) => a[0] - b[0])) {
+    if (to <= end) continue;
+    total += to - Math.max(from, end);
+    end = to;
   }
   return total;
 }

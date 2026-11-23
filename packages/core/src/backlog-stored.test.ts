@@ -141,7 +141,7 @@ test("questions, reports and answers are read from every stored comment, a Task'
 });
 
 test("a PBI's waits carry the stored states; a Draft or needs-decision pull request is not waited for, nor a decision Task in an overlap wait", () => {
-  const pr = (n: number, isDraft: boolean, labels: string[] = []): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_${n}`, remote: { number: n, state: "OPEN", isDraft, labels, closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" });
+  const pr = (n: number, isDraft: boolean, labels: string[] = []): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_${n}`, remote: { number: n, state: "OPEN", isDraft, labels, closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" });
   const ws = imported([
     issue(20, ["type:pbi"]), item(20, { Status: "Ready" }),
     comment(20, "c1", "<!-- pbi-complete:release waits=40,41,42,13,14 -->", "2026-10-02T00:00:00Z"),
@@ -163,7 +163,7 @@ test("waiting: each wait says why (overlap / prerequisite) and the PBI that move
     issue(21, ["type:pbi"]), item(21, { Status: "Ready" }),
     comment(21, "c2", "<!-- pbi-complete:release overlap=13,40 -->", "2026-10-02T00:00:00Z"),
     issue(13, ["type:task"], { state: "CLOSED", parent: 30 }), issue(30, ["type:pbi"]),
-    { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [13], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" },
+    { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [13], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" },
   ]);
   const items = byNumber(ws);
   expect(items[20]!.waits).toEqual([
@@ -202,7 +202,7 @@ describe("pickNext prerequisite", () => {
     const ws = imported([
       ...pbi(1, "P0", "", { subIssues: [10, 11] }), issue(10, ["type:task"], { body: "**前提**: #2" }), issue(11, ["type:task"], { body: "**前提**: #10, #40（リリース）" }),
       ...pbi(2, "P1"),
-      { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" },
+      { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: "m40", updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" },
     ]);
     expect(byNumber(ws)[1]!.prereqs).toEqual([
       { number: 2, kind: "issue", need: "done", state: "pending", via: [10], confirming: false },
@@ -252,7 +252,7 @@ describe("pickNext prerequisite", () => {
     db.putBacklogSnapshot(SOURCE, { records: [issue(21, ["type:task"], { state: "CLOSED" }), { ...issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), fetchState: "unavailable" }], cursor: null, syncedAt: 7000 });
     expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "missing", confirming: false }], guard: { state: "missing", confirming: false } });
     // (c) a number stored as both an Issue and a PR (a workspace kept only here numbers its own): the Issue on both sides
-    db.putBacklogSnapshot(SOURCE, { records: [issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), { objectKind: "pull-request", externalId: "PR_2", remote: { number: 2, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" }], cursor: null, syncedAt: 8000 });
+    db.putBacklogSnapshot(SOURCE, { records: [issue(2, ["type:pbi"], { body: left, subIssues: [20, 21] }), { objectKind: "pull-request", externalId: "PR_2", remote: { number: 2, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" }], cursor: null, syncedAt: 8000 });
     expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "met", confirming: true }], guard: { state: "met", confirming: true } });
   });
 
@@ -293,7 +293,7 @@ describe("pickNext prerequisite", () => {
     expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW + 1000)).toEqual([]);
     expect(ops()).toHaveLength(4);
     // answered with the line left as it is: Ready again and held as before, but not asked a second time
-    answerStoredDecision(db, SOURCE, 1, "A", NOW + 2000);
+    answerStoredDecision(db, SOURCE, 1, "A", NOW + 2000, { question: { at: new Date(NOW).toISOString() } });
     expect(read().find((i) => i.number === 1)).toMatchObject({ stage: "ready", prereqs: [{ number: 2, state: "withdrawn" }] });
     expect(askWithdrawnPrereqs(db, SOURCE, read(), NOW + 3000)).toEqual([]);
     // another prerequisite withdrawn later is a new question, about that one only
@@ -330,7 +330,7 @@ test("waiting: a waits= pull request closed unmerged holds the PBI as withdrawn;
   const ws = imported([
     issue(20, ["type:pbi"]), item(20, { Status: "In progress" }), comment(20, "c1", "<!-- pbi-complete:release waits=40 -->", "2026-10-02T00:00:00Z"),
     issue(21, ["type:pbi"]), item(21, { Status: "In progress" }), comment(21, "c2", "<!-- pbi-complete:release overlap=40 -->", "2026-10-02T00:00:00Z"),
-    { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "CLOSED", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" },
+    { objectKind: "pull-request", externalId: "PR_40", remote: { number: 40, state: "CLOSED", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-01T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" },
   ]);
   const items = byNumber(ws);
   expect(items[20]!.waits).toEqual([{ number: 40, kind: "pr", open: null, state: "withdrawn", reason: "prerequisite", pbi: null }]);
@@ -446,7 +446,7 @@ describe("pickNext overlap", () => {
   ];
   const pr = (n: number, files: string[] | null, over: { isDraft?: boolean; labels?: string[]; closes?: number[]; state?: "OPEN" | "CLOSED" | "MERGED"; updatedAt?: string } = {}): BacklogSnapshotEntry => ({
     objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched",
-    remote: { number: n, state: over.state ?? "OPEN", isDraft: over.isDraft ?? false, labels: over.labels ?? [], closes: over.closes ?? [], mergeCommit: null, updatedAt: over.updatedAt ?? new Date().toISOString(), files, closedAt: null, mergedAt: null },
+    remote: { number: n, state: over.state ?? "OPEN", isDraft: over.isDraft ?? false, labels: over.labels ?? [], closes: over.closes ?? [], mergeCommit: null, updatedAt: over.updatedAt ?? new Date().toISOString(), files, closedAt: null, mergedAt: null, head: null },
   });
   const pick = (ws: { id: string; name: string; path: string }) => pickNext(readStoredBacklog(db, ws).items, "implement")?.item.number ?? null;
 
@@ -737,14 +737,14 @@ describe("pickNext overlap", () => {
       db.updateTask("t_queued", { status: "done" });
       expect(overlapOf(ws, 1)).toBeNull();
       // a job it asked the daemon for, after its turn ended
-      db.insertJob({ kind: "local-ci", taskId: "t_run", pr: 1, runner: null, cwd: "/work/app", startedAt: 4 });
+      db.insertJob({ kind: "local-ci", taskId: "t_run", pr: 1, runner: null, cwd: "/work/app", startedAt: 4, repo: "", head: null, as: null, kinds: [] });
       expect(overlapOf(ws, 1)).toEqual(hit);
     });
 
     test("a Task whose PRs are merged and that only waits for a check is not other work", () => {
       const prOf = (n: number, closes: number[], state: "OPEN" | "MERGED", files: string[]): BacklogSnapshotEntry => ({
         objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched",
-        remote: { number: n, state, isDraft: false, labels: [], closes, mergeCommit: null, updatedAt: new Date().toISOString(), files, closedAt: null, mergedAt: null },
+        remote: { number: n, state, isDraft: false, labels: [], closes, mergeCommit: null, updatedAt: new Date().toISOString(), files, closedAt: null, mergedAt: null, head: null },
       });
       // the child of a PBI whose stage Task runs: In progress or not, a check-only Task is not other work either
       const ws2 = imported([...pbi(1, "P0", "src/a.ts"), ...pbi(2, "P1", "src/a.ts"), prOf(63, [20], "MERGED", ["src/a.ts"])]);
@@ -1165,7 +1165,7 @@ describe("questions the work goes on from with their recommendation", () => {
   });
 
   test("storedEnds: a closed Issue, a merged and a closed PR have ended, with when; an open one and a number not stored have not", () => {
-    const pr = (n: number, state: "OPEN" | "CLOSED" | "MERGED", over: object = {}): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched", remote: { number: n, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-02T00:00:00Z", files: [], closedAt: null, mergedAt: null, ...over } });
+    const pr = (n: number, state: "OPEN" | "CLOSED" | "MERGED", over: object = {}): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched", remote: { number: n, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-02T00:00:00Z", files: [], closedAt: null, mergedAt: null, head: null, ...over } });
     const ws = imported([issue(1, ["type:pbi"]), issue(2, ["type:task"], { state: "CLOSED", closedAt: "2026-10-03T00:00:00Z" }), pr(11, "OPEN"), pr(12, "MERGED", { mergedAt: "2026-10-04T00:00:00Z" }), pr(13, "CLOSED", { closedAt: "2026-10-05T00:00:00Z" })]);
     const end = storedEnds(db, ws);
     expect([1, 2, 11, 12, 13, 99].map(end)).toEqual([null, { kind: "issue", state: "CLOSED", at: Date.parse("2026-10-03T00:00:00Z") }, null, { kind: "pr", state: "MERGED", at: Date.parse("2026-10-04T00:00:00Z") }, { kind: "pr", state: "CLOSED", at: Date.parse("2026-10-05T00:00:00Z") }, null]);

@@ -164,7 +164,7 @@ Turns the last week's changes in what this workspace's repository depends on int
   `publicSync が無いリポジトリ`, and end.
 - `git fetch -q --prune --prune-tags origin`, then choose the tag to publish: the rule of the repository's own
   instructions when it has one; in a repository that has `scripts/tag-ci.ts`, the newest tag whose CI passed
-  (`bun scripts/tag-ci.ts --latest-pass`; another exit code than 0 means there is none: do not sync); otherwise the
+  (`bun scripts/tag-ci.ts --latest-pass`, which reads the marks in the Releases, not the app's job records that the promotion reads; another exit code than 0 means there is none: do not sync); otherwise the
   newest tag on the main branch (`git describe --tags --abbrev=0 origin/main`).
 - Run `ops-kit public-sync --source <tag>` once. Never add `--adopted`. Report the tag, the exit code and the output
   as they are.

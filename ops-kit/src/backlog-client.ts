@@ -353,7 +353,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           // head the mark names: the grant holds for the head the PR had when it was given
           const repo = direct ? null : await workspace().then((w) => w.repository, () => null);
           const granted = await answerGranted(env, repo, number(ref), yesHeads, opts.fetch ?? fetch);
-          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話で PR #${number(ref)} への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #${number(ref)} に [merge-answer] yes を投稿してよい」の 1 文でも通ります。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通ります）`);
+          if (granted !== true) throw new Refused(`backlog comment: [merge-answer] yes は投稿しません（${granted === null ? "アプリに届かず、許可文の記録を確かめられません" : granted === "head" ? "印に head の sha（40 桁）がありません" : `#${number(ref)} の head ${granted.head.slice(0, 7)} に利用者の許可文の記録がありません。許可は与えられたときの head のもので、新しいコミットの後は聞き直します`}）。利用者が Task の会話で PR #${number(ref)} への [merge-answer] yes の投稿を認めると通ります（言い方は自由。読めなかったときは「PR #${number(ref)} をマージしてよい」の 1 文でも通ります。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通ります）`);
         }
         if (direct) {
           await commentOnGithub(direct.gh, await githubRepo(), number(ref), body);

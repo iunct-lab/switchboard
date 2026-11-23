@@ -13,7 +13,7 @@ import { recapOf } from "../recap.ts";
 import { IN_FLIGHT } from "../task-status.ts";
 import { setupScripts, skillCopiesCurrent, syncSkills, type SkillSyncOptions } from "../skillsync.ts";
 import { savedConfigFile } from "../workspace-config.ts";
-import { FenceReader, reduceStops, openStopsPrompt, StopFenceReader, stopRecordsFor, stopRecoveryPrompt } from "../stops.ts";
+import { FenceReader, issueOf, reduceStops, openStopsPrompt, StopFenceReader, stopRecordsFor, stopRecoveryPrompt } from "../stops.ts";
 import { originMismatch } from "../workspace-clone.ts";
 import type { LiveSession } from "./state.ts";
 import { TaskEvents } from "./events.ts";
@@ -294,7 +294,11 @@ export abstract class TaskSessions extends TaskEvents {
     // sentences that hold for this Task. A process started again on the same session (a reply after the idle release,
     // a queued reply, an automatic resume) already has them in its conversation and is told only the stops still
     // open. A recap (`preamble`) goes last: it ends with the heading of the person's message, which the prompt follows.
-    const open = reduceStops(stopRecordsFor(this.db, task)).filter((s) => s.state !== "resolved");
+    // A schedule's Task does not take over the stops another run's Task left: they are not this run's stops, and the
+    // retries left are counted per Task. Its own records alone are read, so a later run stopping at the same operation
+    // (the same series) neither hides this Task's stop nor adds to its count. A stage Task keeps its Issue's.
+    const records = stopRecordsFor(this.db, task);
+    const open = reduceStops(issueOf(task) !== null ? records : records.filter((r) => r.work.taskId === task.id)).filter((s) => s.state !== "resolved");
     const servers = this.mcpServers?.(task);
     if (this.isBareCommand(task.scheduleId)) preamble = undefined;
     else if (resumeSessionId && !fork) preamble = openStopsPrompt(open) || undefined;

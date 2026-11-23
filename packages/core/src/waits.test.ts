@@ -501,7 +501,7 @@ describe("checkWaits: which stopped Tasks are looked at", () => {
 
 describe("the daemon: a wait past its limit of a stopped Task is answered 止める or 待ち続ける", () => {
   const KEY = { service: "github" as const, host: "github.com", repository: "acme/app" };
-  const PR5 = { objectKind: "pull-request" as const, externalId: "PR_5", remote: { number: 5, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "", files: [], closedAt: null, mergedAt: null }, fetchState: "fetched" } as BacklogSnapshotEntry;
+  const PR5 = { objectKind: "pull-request" as const, externalId: "PR_5", remote: { number: 5, state: "MERGED", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "", files: [], closedAt: null, mergedAt: null, head: null }, fetchState: "fetched" } as BacklogSnapshotEntry;
   /** A daemon with one Task whose turn ended, stopped four days ago on `pr#5` (its wait is a day past the limit), and the question for that wait. */
   const stoppedOnPr = async (over: { reason?: "depends" | "usage-limit"; conditions?: Array<{ key: string; value: string; met: boolean }> } = {}) => {
     const h = mkdtempSync(join(tmpdir(), "sb-waits-answer-"));

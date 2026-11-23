@@ -10,6 +10,7 @@ import { createStoredIssue, editStoredIssue } from "./backlog-edit.ts";
 import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
 import { applyLocalOperations, localForgeOf } from "./backlog-local.ts";
 import { Db } from "./db.ts";
+import { waitFor } from "./api-test-harness.ts";
 
 // A workspace whose backlog is kept in Switchboard only: no GitHub Issue or Project, and gh never asked for it.
 
@@ -440,6 +441,23 @@ test("a local change: made, numbered with the Issues, commented, read with its t
   expect((await create(ws, { title: "again", change: { head: "sb/9-x", base: "main" } })).status).toBe(202);
   // a reflog or a lock name is no branch
   for (const head of ["main@{0}", "sb/9-x.lock", "sb/", "/sb"]) expect((await create(ws, { title: "x", change: { head, base: "main" } })).status).toBe(400);
+});
+
+test("a change of the workspace is allowed with its own sentence, for the tip its branch had then", async () => {
+  const { base, local, create, send } = await boot();
+  const ws = await local();
+  const tips = gitRepo(ws.path);
+  expect((await create(ws, { title: "Task 9 の変更", body: "Closes #9", change: { head: "sb/9-x", base: "main" } })).body.number).toBe(1);
+  const task = (await send("POST", "/api/tasks", { workspaceId: ws.id, cwd: ws.path, title: "t", prompt: "p", runner: "claude" })).body as Task;
+  await waitFor(async () => core!.db.getTask(task.id)!.status === "done");
+  // as the screen sends it
+  const say = (text: string) => fetch(`${base}/api/tasks/${task.id}/send`, { method: "POST", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ text }) });
+  const granted = (kind: string, n: number, head: string, repo = `local:${ws.id}`) => core!.db.hasMergeGrant(task.id, repo, kind, n, head);
+  expect((await say("変更 L1 をマージしてよい")).status).toBe(200);
+  expect([granted("answer", 1, tips.head), granted("answer", 1, tips.main), granted("answer", 2, tips.head), granted("answer", 1, tips.head, "local:other"), granted("merge", 1, tips.head)]).toEqual([true, false, false, false, false]);
+  // a change that is not there, and a sentence that names a PR: nothing for the change's name
+  expect((await say("変更 L7 をマージしてよい")).status).toBe(200);
+  expect(granted("answer", 7, tips.head)).toBe(false);
 });
 
 test("a merged change's record is written once: another merge is 409, the same one again changes nothing, reportedAt still goes", async () => {

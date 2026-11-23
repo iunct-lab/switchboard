@@ -277,6 +277,8 @@ export const BacklogAnswerInput = z
     workspaceId: z.string(),
     text: z.string().trim().max(20_000).default(""),
     issue: z.number().int().positive().optional(),
+    /** The time of the question that was on screen (`decision.at`). 409 when that question can no longer be answered (a newer one came, or it was answered); without it the answer is to the newest question now. */
+    at: z.string().datetime().optional(),
     confirm: z.object({ n: z.number().int().positive(), ok: z.boolean() }).optional(),
     /** The Task that sends the answer (as `SendTaskInput.from`): the answer is then that Task's, never the person's words or permission. */
     from: z.string().trim().min(1).max(200).regex(/^[\w.:-]+$/).optional(),

@@ -891,7 +891,44 @@ describe("preamble", () => {
     db.appendEvent(t.id, { t: "stop.record", stop: StopRecord.parse({ id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI が終わっていない", at: Date.now(), work: { workspaceId: null, issue: null, taskId: t.id } }) });
     await m.send(t.id, "もう一度");
     await sleep(5);
-    expect(starts[2]!.preamble).toBe("この作業でまだ解けていない停止:\n- gh pr merge PR #12: depends（止まったのは 1 回、waiting）");
+    expect(starts[2]!.preamble).toBe("この作業でまだ解けていない停止（前に止まったときの記録。各行の操作は、そのまま実行するコマンドではない）:\n- 操作「gh pr merge」、対象「PR #12」: depends（止まったのは 1 回、waiting）");
+    m.shutdown();
+  });
+
+  test("preamble of a schedule's Task has no stop another run's Task left, of any state; that Task's own resume still has them", async () => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts)]]), () => undefined, { idleMs: 0 });
+    const old = m.create({ cwd: home, title: "前の回", prompt: "p", runner: "claude", scheduleId: "sch_sync" });
+    await sleep(5);
+    const left = (id: string, op: string, over: Record<string, unknown>) =>
+      db.appendEvent(old.id, { t: "stop.record", stop: StopRecord.parse({ id, op, target: "owner/name", evidence: "前の回", at: Date.now(), work: { workspaceId: null, issue: null, taskId: old.id, scheduleId: "sch_sync" }, ...over }) });
+    left("ask", "ops-kit public-sync --source v1", { reason: "decision" });
+    left("net", "git fetch", { reason: "transient", safety: "read-only", state: "exhausted" });
+    const next = m.create({ cwd: home, title: "次の回", prompt: "p", runner: "claude", scheduleId: "sch_sync" });
+    await sleep(5);
+    expect(starts[1]!.preamble).toContain(HEAD);
+    for (const w of ["ops-kit public-sync --source v1", "git fetch", "まだ解けていない停止"]) expect(starts[1]!.preamble).not.toContain(w);
+    // the next run stops at the same operation (the same series, now with that run's stop as its newest): the earlier Task's own stop is still its own, counted once
+    db.appendEvent(next.id, { t: "stop.record", stop: StopRecord.parse({ id: "ask-next", op: "ops-kit public-sync --source v1", target: "owner/name", evidence: "次の回", reason: "decision", at: Date.now(), work: { workspaceId: null, issue: null, taskId: next.id, scheduleId: "sch_sync" } }) });
+    await m.send(old.id, "続き");
+    await sleep(5);
+    expect(starts[2]).toMatchObject({ resumeSessionId: "sess", prompt: "続き" });
+    expect(starts[2]!.preamble).toContain("- 操作「ops-kit public-sync --source v1」、対象「owner/name」: decision（止まったのは 1 回、waiting）");
+    expect(starts[2]!.preamble).toContain("- 操作「git fetch」、対象「owner/name」: transient（止まったのは 1 回、exhausted");
+    m.shutdown();
+  });
+
+  test("preamble of a stage Task still has the open stop an earlier stage Task of the same Issue left", async () => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts)]]), () => undefined, { idleMs: 0 });
+    const ws = db.upsertWorkspace({ name: "w", path: home, kind: "repo" });
+    const old = m.create({ workspaceId: ws.id, cwd: home, title: "前の Task", prompt: "p", runner: "claude", stage: { issue: 7, action: "complete" } });
+    await sleep(5);
+    db.appendEvent(old.id, { t: "stop.record", stop: StopRecord.parse({ id: "ci", op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI が終わっていない", at: Date.now(), work: { workspaceId: ws.id, issue: 7, taskId: old.id } }) });
+    m.create({ workspaceId: ws.id, cwd: home, title: "次の Task", prompt: "p", runner: "claude", stage: { issue: 7, action: "complete" } });
+    await sleep(5);
+    expect(starts[1]!.preamble).toContain(HEAD);
+    expect(starts[1]!.preamble).toContain("- 操作「gh pr merge」、対象「PR #12」: depends（止まったのは 1 回、waiting）");
     m.shutdown();
   });
 

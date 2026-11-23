@@ -71,6 +71,56 @@ describe("ops-kit job", () => {
     expect(alone.calls).toEqual([]);
   });
 
+  test("request review --as attack sends as in the body and needs --runner", async () => {
+    const files = ["--prompt", "p.md", "--out", "o.md", "--cwd", "/tmp/clone"];
+    const sent = await run(["request", "review", "12", "--runner", "codex", "--as", "attack", ...files], () => job({ kind: "review", runner: "codex" }));
+    expect(sent.code).toBe(0);
+    expect(sent.calls[0]!.body).toMatchObject({ kind: "review", runner: "codex", as: "attack" });
+    const alone = await run(["request", "review", "12", "--as", "attack", ...files], () => job());
+    expect(alone.code).toBe(1);
+    expect(alone.err).toContain("--runner");
+    expect(alone.calls).toEqual([]);
+  });
+
+  test("--kinds and --change travel in the body, and --as recheck without --kinds is sent", async () => {
+    const files = ["--prompt", "p.md", "--out", "o.md", "--cwd", "/tmp/clone"];
+    const bare = await run(["request", "review", "12", "--runner", "codex", "--as", "recheck", ...files], () => job({ kind: "review", runner: "codex" }));
+    expect(bare.code).toBe(0);
+    expect(bare.calls[0]!.body).toMatchObject({ as: "recheck" });
+    expect(bare.calls[0]!.body).not.toHaveProperty("kinds");
+    const stray = await run(["request", "review", "12", "--runner", "codex", "--as", "attack", "--kinds", "size", ...files], () => job());
+    expect(stray.code).toBe(1);
+    expect(stray.calls).toEqual([]);
+    const sent = await run(["request", "review", "12", "--runner", "codex", "--as", "recheck", "--kinds", "size,migration", "--change", ...files], () => job({ kind: "review", runner: "codex" }));
+    expect(sent.code).toBe(0);
+    expect(sent.calls[0]!.body).toMatchObject({ as: "recheck", kinds: ["size", "migration"], change: true });
+    const ci = await run(["request", "local-ci", "3", "--change"], () => job());
+    expect(ci.calls[0]!.body).toMatchObject({ kind: "local-ci", pr: 3, change: true });
+  });
+
+  test("job request recheck sends the kind and --change, and a kind that is not a command's, a missing one or a stray flag is a usage error (1) calling nothing", async () => {
+    const sent = await run(["request", "recheck", "12", "--kind", "security:lockfile", "--change"], () => job({ kind: "recheck" }));
+    expect(sent.code).toBe(0);
+    expect(sent.calls[0]!.body).toEqual({ kind: "recheck", taskId: "task_1", pr: 12, cwd: "/work/app", recheck: "security:lockfile", change: true });
+    expect(sent.out).toContain("job#7");
+    for (const argv of [["request", "recheck", "12"], ["request", "recheck", "12", "--kind", "size"], ["request", "recheck", "12", "--kind", "rescue", "--local"], ["request", "local-ci", "12", "--kind", "rescue"], ["request", "review", "12", "--kind", "rescue", "--prompt", "p", "--out", "o"]]) {
+      const r = await run(argv, () => job());
+      expect([r.code, r.calls.length]).toEqual([1, 0]);
+    }
+  });
+
+  test("job request tag-ci takes no PR: it sends the kind and the folder, and a PR or another flag is a usage error (1) calling nothing", async () => {
+    const sent = await run(["request", "tag-ci"], () => job({ kind: "tag-ci", pr: 0 }));
+    expect(sent.code).toBe(0);
+    expect(sent.calls[0]!.body).toEqual({ kind: "tag-ci", taskId: "task_1", cwd: "/work/app" });
+    expect(sent.out).toContain("job#7");
+    expect(sent.out).toContain("タグの CI");
+    for (const argv of [["request", "tag-ci", "12"], ["request", "tag-ci", "--change"], ["request", "tag-ci", "--local"], ["request", "tag-ci", "--kind", "rescue"]]) {
+      const r = await run(argv, () => job());
+      expect([r.code, r.calls.length]).toEqual([1, 0]);
+    }
+  });
+
   test("usage errors are 1 and call nothing; the app's 400 is 1", async () => {
     for (const argv of [["request", "review", "12", "--runner", "codex"], ["request", "review", "12", "--runner", "gemini", "--prompt", "p", "--out", "o"], ["request", "shell", "12"], ["request", "local-ci", "x"], ["wait", "7"]]) {
       const r = await run(argv, () => job());

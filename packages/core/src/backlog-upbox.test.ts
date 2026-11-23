@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { answerStoredDecision, commentStoredIssue, editStoredIssue, screenAnswer } from "./backlog-edit.ts";
-import { importReplica } from "./backlog-replica.ts";
+import { buildBacklogExport } from "./backlog-export.ts";
+import { importBacklogExport } from "./backlog-replica.ts";
 import { checkEnvelope, ENVELOPE_MAX_BYTES, importBacklogOperations, importedId, listRefused, machineOfOperation, readSent, takeRefusals, uploadBacklogOperations } from "./backlog-upbox.ts";
 import { Db, SEND_DELAY_MS } from "./db.ts";
 import { memoryS3 } from "./s3.ts";
@@ -41,9 +42,7 @@ beforeEach(() => {
     { objectKind: "issue", externalId: "I_12", remote: issue(12, { title: "PBI", labels: ["type:pbi", "needs-decision"], body: `## 到達点 / 受け入れ条件\n\n${CONFIRM}\n- [ ] ほかの条件\n` }), fetchState: "fetched" },
     { objectKind: "project-item", externalId: "PVTI_I_12", remote: { issue: 12, owner: "acme", project: 1, fields: { Status: "Backlog" } }, fetchState: "fetched" },
   ], cursor: null, syncedAt: 777 });
-  const file = join(dir, "copy.db");
-  ec2.snapshotTo(file);
-  importReplica(pc, file, { workspaceId: wsPc, repository: "acme/app" }, t);
+  importBacklogExport(pc, buildBacklogExport(ec2, "pc1", "acme/app")!, { workspaceId: wsPc }, t);
 });
 afterEach(() => {
   ec2.close();
@@ -83,7 +82,7 @@ describe("an envelope cannot be the person's answer", () => {
   });
 
   test("the screen's answer is read only from an operation made on this instance, whatever one from a work machine carries", () => {
-    answerStoredDecision(ec2, S, 12, "A で進める", t, { screen: true });
+    answerStoredDecision(ec2, S, 12, "A で進める", t, { screen: true, heads: {} });
     const own = ec2.listPendingBacklogOperations(S).find((o) => o.kind === "comment")!;
     expect(machineOfOperation(own.id)).toBeNull();
     expect(screenAnswer(ec2, S, 12)?.text).toBe("A で進める");
@@ -95,7 +94,7 @@ describe("an envelope cannot be the person's answer", () => {
   });
 
   test("on the work machine an answer given there is not put in the bucket: it ends as failed with the reason", async () => {
-    answerStoredDecision(pc, S, 12, "A で進める", t - SEND_DELAY_MS, { screen: true });
+    answerStoredDecision(pc, S, 12, "A で進める", t - SEND_DELAY_MS, { screen: true, heads: {} });
     expect(await uploadBacklogOperations(pc, s3, S, "pc1", t)).toBe(0);
     expect(s3.objects.size).toBe(0);
     expect(pc.listBacklogOperations(S).map((o) => [o.kind, o.status, o.error?.slice(0, 11)])).toEqual([["comment", "failed", "作業場からは送れません"], ["set", "failed", "作業場からは送れません"]]);
@@ -196,7 +195,7 @@ describe("an envelope is a closed set, checked again on the instance", () => {
   });
 
   test("an envelope cannot end or replace an edit of the instance's own, nor write over a draft made there", async () => {
-    answerStoredDecision(ec2, S, 12, "B で進める", t, { screen: true });
+    answerStoredDecision(ec2, S, 12, "B で進める", t, { screen: true, heads: {} });
     const own = ec2.listPendingBacklogOperations(S);
     const answer = own.find((o) => o.kind === "comment")!;
     const label = own.find((o) => o.kind === "set")!;

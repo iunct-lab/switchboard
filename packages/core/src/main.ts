@@ -135,7 +135,7 @@ const fakeSuggester: Suggester = {
   },
 };
 
-const core = await startServer(cfg, adapters, { backlogAutoImport: true, collectPending: (env, log) => spawnCollectPending(cfg.repoRoot, env, log), llmSuggester: process.env.SWITCHBOARD_SUGGESTER === "fake" ? () => fakeSuggester : undefined });
+const core = await startServer(cfg, adapters, { backlogAutoImport: true, collectPending: (env, log, done) => spawnCollectPending(cfg.repoRoot, env, log, done), llmSuggester: process.env.SWITCHBOARD_SUGGESTER === "fake" ? () => fakeSuggester : undefined });
 // Off loopback (SWITCHBOARD_HOST=0.0.0.0, the cloud host) the runner list is only for authorized callers: ask as one.
 const health = (await fetch(`http://127.0.0.1:${core.server.port}/api/health`, { headers: { authorization: `Bearer ${core.token}` } }).then((r) => r.json())) as {
   runners: Array<{ id: string; available: boolean; version?: string; note?: string }>;

@@ -1,9 +1,10 @@
-// test-reads: packages/core/fixtures/ scripts/parallel-guard.ts
+// test-reads: packages/core/fixtures/ scripts/parallel-guard.ts ops-kit/bin/gh ops-kit/src/gh-guard.ts ops-kit/src/gh-reads.ts ops-kit/src/config.ts ops-kit/src/secrets.ts
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentEvent, AskList, AskQuestion, StartOptions, Task } from "@switchboard/protocol";
+import { mergeGranted } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
 import { StopReport } from "./stops.ts";
 import { deployApprovedText, SSO_REST_TEXT, SSO_RESUME_TEXT } from "./approval-batch.ts";
@@ -186,8 +187,8 @@ describe("repeated stops", () => {
       expect(c.tasks.recordStop(t.id, net(1, { id: "auth", reason: "auth" }))).toMatchObject({ ok: false });
       // the next start hears what is still open
       await post(b, `/api/tasks/${t.id}/send`, { text: "続けて" });
-      expect(starts[1]?.preamble).toContain("- gh api repos/o/r: transient（止まったのは 1 回、exhausted、再試行の残り 0 回）");
-      expect(starts[1]?.preamble).toContain("- gh pr comment repos/o/r: transient（止まったのは 1 回、waiting）");
+      expect(starts[1]?.preamble).toContain("- 操作「gh api」、対象「repos/o/r」: transient（止まったのは 1 回、exhausted、再試行の残り 0 回）");
+      expect(starts[1]?.preamble).toContain("- 操作「gh pr comment」、対象「repos/o/r」: transient（止まったのは 1 回、waiting）");
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
@@ -252,9 +253,9 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
     try {
       const [stop] = await asksOf(x.b, x.t.id);
       expect(stop).toMatchObject({ kind: "stop", grant: GRANT, answers: ["grant", "text"] });
-      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" }, policy: { scope: "once", target: "sch_x", when: [], expiresAt: null } })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! }, policy: { scope: "once", target: "sch_x", when: [], expiresAt: null } })).status).toBe(400);
       expect(x.replies()).toEqual([]);
-      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } })).status).toBe(200);
+      expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } })).status).toBe(200);
       await waitFor(async () => x.replies().length > 0);
       expect(x.replies()).toEqual([GRANT]);
       await noneSaved(x);
@@ -293,7 +294,7 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
       await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 1 }) });
       const busy = c.tasks.create({ cwd: other, title: "busy", prompt: "busy", runner: "claude" });
       await waitFor(async () => c.db.getTask(busy.id)!.status === "running");
-      const res = await post(b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } });
+      const res = await post(b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } });
       expect(res.status).toBe(200);
       expect(c.db.getTask(t.id)!.queuedAt).not.toBeNull();
       expect(((await res.json()) as { ask: { resume: unknown } }).ask.resume).toMatchObject({ state: "queued", reason: "実行枠待ち", taskId: t.id });
@@ -330,7 +331,7 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
     try {
       const [stop] = await asksOf(y.b, y.t.id);
       expect(y.c.db.hasMergeGrant(y.t.id, "o/a", "merge", 13, HEAD)).toBe(false);
-      expect((await post(y.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } })).status).toBe(200);
+      expect((await post(y.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } })).status).toBe(200);
       expect(y.c.db.hasMergeGrant(y.t.id, "o/a", "merge", 13, HEAD)).toBe(true);
     } finally {
       await y.c.stop();
@@ -340,7 +341,7 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
     const z = await boot(`マージが止められました。\n${fence}\n`);
     try {
       const [stop] = await asksOf(z.b, z.t.id);
-      expect((await bare(z.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant" } })).status).toBe(200);
+      expect((await bare(z.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } })).status).toBe(200);
       expect(z.c.db.hasMergeGrant(z.t.id, "o/a", "merge", 13, HEAD)).toBe(false);
       expect(z.c.db.sqlite.query("SELECT DISTINCT by FROM task_grants WHERE task_id = ?").all(z.t.id)).toEqual([{ by: "api" }]);
     } finally {
@@ -505,16 +506,19 @@ describe("approval batches", () => {
       x.c.tasks.recordStop(b2.id, report({ id: "p", op: "sam deploy", target: "stack", reason: "permission" }));
       x.c.tasks.recordStop(c2.id, report({ id: "p", op: "aws cloudformation deploy", target: "stack", reason: "permission" }));
       expect((await x.batches()).map((y) => [y.id, y.asks.length])).toEqual([["batch:deploy", 3]]);
-      // none chosen, or one not in the batch → 400 and nothing sent
-      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" } })).status).toBe(400);
-      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, "tk_nope"] })).status).toBe(400);
-      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id], policy: { scope: "once", target: "x", when: [], expiresAt: null } })).status).toBe(400);
+      // the questions as the card shows them go with the approval
+      const askIds = (await x.batches())[0]!.asks.map((q) => q.askId);
+      // none chosen, one not in the batch, or no question ids → 400 and nothing sent
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, askIds })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, "tk_nope"], askIds })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id] })).status).toBe(400);
+      expect((await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id], askIds, policy: { scope: "once", target: "x", when: [], expiresAt: null } })).status).toBe(400);
       expect(x.said(a).some((t) => t.includes("承認しました"))).toBe(false);
 
       // two presses at once: each Task is sent once, the second finds them gone from the batch
       const [r, again] = await Promise.all([
-        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, c2.id, a.id] }).then(j),
-        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [c2.id] }),
+        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, c2.id, a.id], askIds }).then(j),
+        post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [c2.id], askIds }),
       ]);
       expect(r.sent).toEqual([a.id, c2.id]);
       expect(again.status).toBe(400);
@@ -523,6 +527,39 @@ describe("approval batches", () => {
       // the one not chosen still waits
       expect(x.said(b2).some((t) => t.includes("承認しました"))).toBe(false);
       expect(r.batch.asks.map((q: { taskId: string }) => q.taskId)).toEqual([b2.id]);
+    } finally {
+      await x.c.stop();
+      rmSync(x.h, { recursive: true, force: true });
+    }
+  });
+  // the daemon, `approvalBatches` and `BatchAnswers` are the real ones; only the runner is a fake
+  test("deploy batch seen: an approval with the question ids of a card drawn before a stop was reported again is 409 and sends nothing; with the ids of the batch now it is sent once", async () => {
+    const x = await boot(2);
+    const [a, b2] = x.ts as [Task, Task];
+    try {
+      x.c.tasks.recordStop(a.id, report({ id: "p", op: "POST /api/daemon/promote", target: "main", reason: "permission" }));
+      x.c.tasks.recordStop(b2.id, report({ id: "p", op: "sam deploy", target: "stack", reason: "permission" }));
+      const seen = (await x.batches())[0]!;
+      expect(seen.asks.map((q) => q.taskId)).toEqual([a.id, b2.id]);
+      // each Task's question id is the listed question's own
+      const listed = ((await fetch(`${x.b}/api/asks`).then(j)) as AskList).asks.map((q) => q.id);
+      for (const q of seen.asks) expect(listed).toContain(q.askId);
+      // before the press, the first Task reports its stop again as another operation: what the card showed is no longer what waits
+      x.c.tasks.recordStop(a.id, report({ id: "p", op: "aws cloudformation deploy", target: "prod", reason: "permission" }));
+      const now = (await x.batches())[0]!;
+      const idNow = now.asks.find((q) => q.taskId === a.id)!.askId;
+      expect(idNow).not.toBe(seen.asks[0]!.askId);
+      const stale = await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id, b2.id], askIds: seen.asks.map((q) => q.askId) });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ error: "問いが新しくなりました", batch: { id: "batch:deploy", asks: [{ taskId: a.id, askId: idNow }, { taskId: b2.id }] } });
+      await Bun.sleep(50);
+      // nothing went to either Task, also not to the one whose question did not change
+      expect([...x.said(a), ...x.said(b2)].filter((t) => t.includes("承認しました"))).toEqual([]);
+      const r = await post(x.b, "/api/asks/answer", { id: "batch:deploy", answer: { kind: "allow" }, taskIds: [a.id], askIds: [idNow] });
+      expect(r.status).toBe(200);
+      expect(((await r.json()) as { sent: string[] }).sent).toEqual([a.id]);
+      expect(x.said(a).filter((t) => t.includes("承認しました"))).toEqual([deployApprovedText("aws cloudformation deploy")]);
+      expect(x.said(b2).some((t) => t.includes("承認しました"))).toBe(false);
     } finally {
       await x.c.stop();
       rmSync(x.h, { recursive: true, force: true });
@@ -555,6 +592,30 @@ describe("merge grants", () => {
     await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
     return { h, c, b, t, sent };
   };
+  // the check as the kit makes it in front of `gh` (the same function `ops-kit/bin/gh` calls), asked of this daemon
+  const kit = (b: string, taskId: string, target: number, head = HEAD, repo = "o/a", kind = "merge") => mergeGranted({ BACKLOG_URL: `${b}/api/backlog`, OPS_KIT_TASK_ID: taskId }, repo, kind, target, fetch, head);
+  const SENTENCE = "PR #12 を判定の外でマージしてよい";
+  const idle = (b: string, taskId: string) => waitFor(async () => (await fetch(`${b}/api/tasks/${taskId}`).then(j)).task.status === "done");
+  /**
+   * `ops-kit/bin/gh` run as a Task of this daemon runs it: in the Task's clone (which has a merge gate), told the Task and
+   * the app by the environment. Only the `gh` behind it is a fake: it answers the read of the PR's head with `headNow`
+   * and writes every other call to `calls`.
+   */
+  const guard = async (b: string, t: Task, argv: string[], headNow = HEAD) => {
+    const GUARD = join(import.meta.dir, "../../../ops-kit/bin/gh");
+    const tree = mkdtempSync(join(tmpdir(), "switchboard-merge-grants-gh-"));
+    try {
+      writeFileSync(join(t.cwd, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
+      const calls = join(tree, "calls.jsonl");
+      writeFileSync(join(tree, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { console.log(${JSON.stringify(headNow)}); process.exit(0); }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
+      chmodSync(join(tree, "gh"), 0o755);
+      const p = Bun.spawn([GUARD, ...argv], { cwd: t.cwd, env: { ...process.env, GH_REPO: undefined, GH_HOST: undefined, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, BACKLOG_URL: `${b}/api/backlog`, OPS_KIT_TASK_ID: t.id, AWS_CONFIG_FILE: join(tree, "aws-config"), PATH: `${dirname(GUARD)}:${tree}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      const [code, err] = [await p.exited, await new Response(p.stderr).text()];
+      return { code, err, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : [] };
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  };
 
   test("a grant sentence sent to a task is recorded for that PR of the task's repository only", async () => {
     const { h, c, b, t } = await boot();
@@ -564,7 +625,7 @@ describe("merge grants", () => {
       expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: true });
       expect(await granted(b, t.id, "merge", 12, "O/A")).toEqual({ granted: true }); // a repository's name is not case-sensitive
       expect(await granted(b, t.id, "merge", 13)).toEqual({ granted: false });
-      expect(await granted(b, t.id, "answer", 12)).toEqual({ granted: false });
+      expect(await granted(b, t.id, "answer", 12)).toEqual({ granted: true }); // the merge outside the gate lifts the ask reason of that PR too
       expect(await granted(b, "task_other", "merge", 12)).toEqual({ granted: false });
       await post(b, `/api/tasks/${t.id}/send`, { text: "PR #13 を判定の外でマージしない" });
       expect(await granted(b, t.id, "merge", 13)).toEqual({ granted: false });
@@ -598,7 +659,7 @@ describe("merge grants", () => {
     const done = () => waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
     try {
       // the person saw the PR at HEAD and gave both grants
-      await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい" });
+      await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 を判定の外でマージしてよい\nPR #12 をマージしてよい" });
       for (const kind of ["merge", "answer"]) expect([kind, await granted(b, t.id, kind, 12)]).toEqual([kind, { granted: true }]);
       // the Task pushes a fix: the PR's head is another one, and the same grants do not answer for it
       for (const kind of ["merge", "answer"]) expect([kind, await granted(b, t.id, kind, 12, "o/a", moved)]).toEqual([kind, { granted: false }]);
@@ -649,7 +710,7 @@ describe("merge grants", () => {
 
   test("from: a text another Task sent is never the person's grant, and goes to the runner under the sender's line", async () => {
     const { h, c, b, t, sent } = await boot();
-    const SENTENCES = "PR #12 を判定の外でマージしてよい\nPR #12 に [merge-answer] yes を投稿してよい\no/b の PR #12 を判定の外でマージしてよい";
+    const SENTENCES = "PR #12 を判定の外でマージしてよい\nPR #12 をマージしてよい\no/b の PR #12 を判定の外でマージしてよい";
     const none = async () => {
       for (const [kind, target, repo] of [["merge", 12, "o/a"], ["answer", 12, "o/a"], ["merge", 12, "o/b"]] as const) expect([kind, repo, await granted(b, t.id, kind, target, repo)]).toEqual([kind, repo, { granted: false }]);
     };
@@ -679,6 +740,119 @@ describe("merge grants", () => {
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
       await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCES, from: "task_sender" });
       expect(await granted(b, t.id, "merge", 12)).toEqual({ granted: true });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("a grant sentence sent over the WebSocket is a bare call's: it reaches the runner and the kit's check is not granted", async () => {
+    const { h, c, b, t, sent } = await boot();
+    const ws = new WebSocket(`${b.replace("http", "ws")}/ws`);
+    try {
+      await new Promise<void>((ok, no) => {
+        ws.onopen = () => ok();
+        ws.onerror = () => no(new Error("the WebSocket did not open"));
+      });
+      ws.send(JSON.stringify({ type: "task.send", taskId: t.id, text: SENTENCE }));
+      await waitFor(async () => sent.includes(SENTENCE));
+      expect(await kit(b, t.id, 12)).toBe(false);
+      // it is on the record as a bare call's, which is why the check is not answered
+      expect(c.db.sqlite.query("SELECT repo, kind, target, by FROM task_grants WHERE task_id = ?").all(t.id)).toEqual([{ repo: "o/a", kind: "merge", target: 12, by: "api" }]);
+      // the same sentence as the screen sends it (over HTTP) is the person's
+      await idle(b, t.id);
+      expect((await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCE })).status).toBe(200);
+      expect(await kit(b, t.id, 12)).toBe(true);
+    } finally {
+      ws.close();
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("a grant in the person's resume note answers the kit's check for the head it was given; a bare call's does not", async () => {
+    const { h, c, b, t, sent } = await boot();
+    const moved = "b".repeat(40);
+    const n0 = sent.length;
+    try {
+      expect((await bare(b, `/api/tasks/${t.id}/resume`, { text: SENTENCE })).status).toBe(200);
+      await waitFor(async () => sent.length > n0 && sent.at(-1)!.endsWith(`\n\n${SENTENCE}`)); // the note reached the runner
+      await idle(b, t.id);
+      expect(await kit(b, t.id, 12)).toBe(false);
+      expect(c.db.sqlite.query("SELECT DISTINCT by FROM task_grants WHERE task_id = ?").all(t.id)).toEqual([{ by: "api" }]);
+      // as the screen sends it: the person's, for the head the PR has now
+      expect((await post(b, `/api/tasks/${t.id}/resume`, { text: SENTENCE })).status).toBe(200);
+      expect(await kit(b, t.id, 12)).toBe(true);
+      expect(await kit(b, t.id, 13)).toBe(false);
+      // a commit after it: the check asks with the new head and is not answered
+      heads.now = moved;
+      expect(await kit(b, t.id, 12, moved)).toBe(false);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("ops-kit/bin/gh against the daemon: a merge the person allowed reaches gh pinned to the recorded head; another PR, repository or head stops", async () => {
+    const { h, c, b, t } = await boot();
+    try {
+      // nothing recorded yet: the same command stops
+      expect(await guard(b, t, ["pr", "merge", "12", "--rebase"])).toMatchObject({ code: 1, calls: [] });
+      expect((await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCE })).status).toBe(200);
+      // no -R: the repository is read from the clone's origin, the head from the PR, and both are what the daemon recorded; gh is told both
+      const own = await guard(b, t, ["pr", "merge", "12", "--rebase"]);
+      expect([own.code, own.calls, own.err]).toEqual([0, [["pr", "merge", "-R", "o/a", "--match-head-commit", HEAD, "12", "--rebase"]], ""]);
+      // a repository's name in another case is the same repository
+      const named = await guard(b, t, ["pr", "merge", "-R", "O/A", "12", "--rebase"]);
+      expect([named.code, named.calls]).toEqual([0, [["pr", "merge", "-R", "O/A", "--match-head-commit", HEAD, "-R", "O/A", "12", "--rebase"]]]);
+      // another PR, the same number of another repository, and a head the PR got after the grant
+      for (const [argv, headNow] of [[["pr", "merge", "13", "--rebase"], HEAD], [["pr", "merge", "-R", "o/b", "12", "--rebase"], HEAD], [["pr", "merge", "12", "--rebase"], "b".repeat(40)]] as const) {
+        const r = await guard(b, t, [...argv], headNow);
+        expect([argv, headNow, r.code, r.calls, r.err]).toEqual([argv, headNow, 1, [], expect.stringContaining("利用者の許可文の記録がありません")]);
+      }
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("ops-kit/bin/gh against the daemon: a [merge-answer] yes of the allowed head reaches gh; another head or PR stops", async () => {
+    const { h, c, b, t } = await boot();
+    const mark = (head: string) => `[merge-answer] yes large ${head}`;
+    try {
+      expect(await guard(b, t, ["pr", "comment", "12", "--body", mark(HEAD)])).toMatchObject({ code: 1, calls: [] });
+      expect((await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 をマージしてよい" })).status).toBe(200);
+      const ok = await guard(b, t, ["pr", "comment", "12", "--body", mark(HEAD)]);
+      expect([ok.code, ok.calls, ok.err]).toEqual([0, [["pr", "comment", "12", "--body", mark(HEAD)]], ""]);
+      // the mark of a head the person did not see, and a PR they did not name
+      for (const argv of [["pr", "comment", "12", "--body", mark("b".repeat(40))], ["pr", "comment", "13", "--body", mark(HEAD)]]) {
+        const r = await guard(b, t, argv);
+        expect([argv, r.code, r.calls, r.err]).toEqual([argv, 1, [], expect.stringContaining("利用者の許可文の記録がありません")]);
+      }
+      // the answer grant is not a merge grant
+      expect(await guard(b, t, ["pr", "merge", "12", "--rebase"])).toMatchObject({ code: 1, calls: [] });
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+  test("the ask consent never lets a merge outside the gate through: gh pr merge from the Task's shell is refused", async () => {
+    const { h, c, b, t } = await boot();
+    try {
+      // the ask reason is allowed for PR 12 at its head: the check the kit makes answers for it ...
+      expect((await post(b, `/api/tasks/${t.id}/send`, { text: "PR #12 をマージしてよい" })).status).toBe(200);
+      expect(await kit(b, t.id, 12, HEAD, "o/a", "answer")).toBe(true);
+      expect(await kit(b, t.id, 12, HEAD, "o/a", "merge")).toBe(false);
+      // ... and the merge outside the gate from the Task's own shell, real ops-kit/bin/gh in front of a fake gh, still stops
+      for (const argv of [["pr", "merge", "12", "--rebase"], ["pr", "merge", "12", "--rebase", "--match-head-commit", HEAD]]) {
+        const r = await guard(b, t, argv);
+        expect([argv, r.code, r.calls, r.err]).toEqual([argv, 1, [], expect.stringContaining("利用者の許可文の記録がありません")]);
+      }
+      // the merge outside the gate, given by the person, is the one that goes through; it also lifts the ask reason of that PR
+      expect((await post(b, `/api/tasks/${t.id}/send`, { text: SENTENCE })).status).toBe(200);
+      expect(await kit(b, t.id, 12, HEAD, "o/a", "answer")).toBe(true);
+      const ok = await guard(b, t, ["pr", "merge", "12", "--rebase"]);
+      expect([ok.code, ok.calls.length]).toEqual([0, 1]);
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });

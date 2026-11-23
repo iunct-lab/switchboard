@@ -48,7 +48,7 @@ describe("the two judgements of machines sharing work", () => {
 
 describe("the settings", () => {
   test("with nothing set there is no mode, no machine and no registry: the feature is off", () => {
-    expect(loadUplink({})).toMatchObject({ mode: null, machine: "", machines: {}, bucket: "", replicaUrl: "" });
+    expect(loadUplink({})).toMatchObject({ mode: null, machine: "", machines: {}, bucket: "" });
     // the registry alone turns nothing on, and a work machine has none
     expect(loadUplink({ SWITCHBOARD_UPLINK_MACHINES: "pc1=acme/app" })).toMatchObject({ mode: null, machines: {} });
     expect(loadUplink({ ...UPLINK_PREVIEW, SWITCHBOARD_UPLINK: "send", SWITCHBOARD_MACHINE: "pc1", SWITCHBOARD_UPLINK_BUCKET: "b", SWITCHBOARD_UPLINK_MACHINES: "pc2=acme/app" }).machines).toEqual({});

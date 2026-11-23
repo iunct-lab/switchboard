@@ -39,6 +39,7 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 - **Task の手順に書いたファイルと名前で作る。** 増やす必要が出たら、まず Issue にコメント（なぜ。`ops-kit backlog comment <Task> --body-file …`）してから増やす。設計文書・CLAUDE.md（`AGENTS.md`）・スキルへの規則の追記も同じ扱いで、Task に無い新しい規則は PR に入れず、PBI の決定ログ（`ops-kit backlog edit <PBI>`）か新しい Task（`ops-kit backlog create … --parent <PBI>`）に回す
 - **挙動・値・手順を変えたら、変えた語（関数名・設定キー・コマンド・数値・手順の名前）で同じ事実を書いているほかの文書・スキル・コード内コメントを `grep -rn` し、食い違うものは同じ PR で直す。** 直さず残すものは「変えなかったこと」に書く
 - **運用の規則の文（スキル・CLAUDE.md・設計文書）を変える PR は、関係するスクリプトを実行して実際の動きと、同じファイルのほかの行とに照らす。** 同じ規則を 2 か所に書かず既にある行を指す。観測していないことは「未検証」と書く。`path:line` は書く前にその行を開いて中身を確かめる。他リポジトリの Issue・PR は `owner/repo#N` で書く
+- **指示のファイルの「ついでの整合」をしない**（別 Task に。混ぜると `[分ける]` で止まる）
 - **ついでの整形・改名・リファクタをしない。** Task に無い方針・拒否・機構の追加と、別 Task の修正も同じ（規則の文の追記はこの節の「Task の手順に書いたファイルと名前で作る」の項のとおり PR に入れない）。気づいたことは Issue コメント（`ops-kit backlog comment`）か新しい Task に。そうした変更が要るなら、PR に入れる前に Task へ逸脱としてコメントし（`issue-workflow` の「記録の義務」の 2。`ops-kit backlog comment <Task>`）、PR 本文の「逸脱」に書く
 - **互換層・フラグ・一度しか使わない抽象を足さない**（`pbi-to-tasks` の設計チェック。実装中に必要に見えたら、たいてい設計に戻る印）
 - **既存の型を守る**: 部品のあいだで共有する型を変えるなら、それを読む全員を同じ PR で直す。互換のための optional は足さない
@@ -115,7 +116,7 @@ echo "PR: #<n>（<1 行>）" | ops-kit backlog comment <Task> --body-file -
 
 **ローカルの変更では**（2 の同名の段落の workspace）: `gh stack submit` / `gh pr edit` の代わりに `ops-kit backlog create --title "<題>" --body-file "$W/pr.md" --head <枝> --base main`（本文は下と同じ形。先頭に `Backlog-Task: <Task>` の 1 行）で変更を作り、`ops-kit backlog comment <Task> --body "変更: #<変更>（<1 行>）"`。push はしない。
 
-**GitHub が使えないときは**（CLAUDE.md が `<GitHub 不在の切り替え>` を名指しするとき。`git push` / `gh stack submit` / `gh pr create` が GitHub の一時的な障害・上限で失敗する）: PR を作る gh のコマンドを `<GitHub 不在の切り替え> --task <Task> --pbi <PBI> --head <枝> -- pr create …` で呼び直す（push の失敗の後でもそのまま呼ぶ）。exit 0 = PR ができた（そのまま PR の流れ）。exit 3 = 切り替えた: 出力の `L<n>` がローカルの変更の番号（Task と PBI には道具が書く）。以降は各スキルの「ローカルの変更では」の行で進める — ただし番号は Issue と別の並びなので、変更を指す `ops-kit backlog view` / `comment` / `edit` には `--change` を付け、push・リリースタグ・`ops-kit pull-main` はしない。exit 1 = gh そのものの失敗（引数・入力。切り替えずに直す）。exit 2 = 切り替えられなかった（停止の報告 `transient` で止まる）。聞く理由（`[聞く]`）のある変更はローカルではマージしない（`[merge-answer] yes` は変更に投稿できない。GitHub が戻ってから PR で進める）
+**GitHub が使えないときは**（CLAUDE.md が `<GitHub 不在の切り替え>` を名指しするとき。`git push` / `gh stack submit` / `gh pr create` が GitHub の一時的な障害・上限で失敗する）: PR を作る gh のコマンドを `<GitHub 不在の切り替え> --task <Task> --pbi <PBI> --head <枝> -- pr create …` で呼び直す（push の失敗の後でもそのまま呼ぶ）。exit 0 = PR ができた（そのまま PR の流れ）。exit 3 = 切り替えた: 出力の `L<n>` がローカルの変更の番号（Task と PBI には道具が書く）。以降は各スキルの「ローカルの変更では」の行で進める — ただし番号は Issue と別の並びなので、変更を指す `ops-kit backlog view` / `comment` / `edit` には `--change` を付け、push・リリースタグ・`ops-kit pull-main` はしない。exit 1 = gh そのものの失敗（引数・入力。切り替えずに直す）。exit 2 = 切り替えられなかった（停止の報告 `transient` で止まる）。聞く理由（`[聞く]`）のある変更はローカルではマージしない（GitHub が戻ってから PR で進める）
 
 PR 本文は `.github/PULL_REQUEST_TEMPLATE.md` の 4 節を埋め、**その上に「レビュアーへ」を置く**:
 

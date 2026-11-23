@@ -9,7 +9,6 @@ import { workspaceSyncOf, withStageTask } from "../backlog-stored.ts";
 import type { ReleaseState } from "../promotion.ts";
 import { IN_FLIGHT, workPhase } from "../task-status.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
-import { join } from "node:path";
 import { uplinkStores } from "../s3.ts";
 import { Workbench } from "../backlog-replica.ts";
 import { PbiLeases } from "../lease.ts";
@@ -156,9 +155,8 @@ export function setupBacklog(sc: Pick<ServerContextInit, "backlog" | "db" | "opt
   // a work machine reads the instance's copy and never asks the backlog's service
   if (sc.s3 && sc.uplink.mode === "send")
     sc.backlog.workbench = new Workbench(sc.db, {
-      file: join(sc.cfg.home, "replica", "switchboard.db"),
-      url: sc.uplink.replicaUrl,
-      intervalMs: sc.uplink.replicaIntervalMs,
+      intervalMs: sc.uplink.backlogCopyIntervalMs,
+      maxBytes: sc.uplink.backlogExportMaxBytes,
       machine: sc.uplink.machine,
       store: sc.s3,
       repositoryOf: (ws) => {

@@ -26,8 +26,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { client, runBacklog, type Detail } from "../ops-kit/src/backlog-client.ts";
-import { sh } from "./local-ci.ts";
-import { judge, readChange, readChangeDetail, readChangeRecords } from "./merge-gate.ts";
+import { newestCiRecord, sh } from "./local-ci.ts";
+import { isSha } from "./merge-gate-records.ts";
+import { appJobs, appRecords, judge, readChange, readChangeDetail, readChangeRecords, requestGate } from "./merge-gate.ts";
 import type { StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
 import { landedTip, landingRef } from "../packages/core/src/landing.ts";
@@ -176,8 +177,16 @@ async function recordOnly(n: number, r: { tip: string; head: string }, cwd: stri
   const landed = landedTip(root, change.base);
   const onBase = landed ? await sh(["git", "-C", root, "merge-base", "--is-ancestor", r.tip, landed.sha]).then(() => true, () => false) : false;
   if (!onBase) return stop(`${r.tip.slice(0, 7)} は ${change.base} に入っていない`);
-  const judged = detail.comments.map((c) => new RegExp(`^\\[local-ci\\] pass ${r.head} base=([0-9a-f]{40})\\b`).exec(c.body)?.[1]).filter(Boolean).pop();
-  if (!judged || !(await sh(["git", "-C", root, "merge-base", "--is-ancestor", judged, r.tip]).then(() => true, () => false))) return stop(`${r.head.slice(0, 7)} の判定（[local-ci] pass）が変更に無いか、その base が ${r.tip.slice(0, 7)} の祖先でない`);
+  // the base the newest recorded local CI run of this change passed against, when it ran at the head the record names
+  let ci: ReturnType<typeof newestCiRecord>;
+  try {
+    ci = newestCiRecord((await appJobs(o.env, o.fetch)(`local:${workspace}`, [n])).filter((j) => j.pr === n));
+  } catch (e) {
+    err(`判定できなかった: ${(e as Error).message}`);
+    return 2;
+  }
+  const judged = ci?.outcome === "pass" && ci.head === r.head && isSha(ci.base) ? ci.base : undefined;
+  if (!judged || !(await sh(["git", "-C", root, "merge-base", "--is-ancestor", judged, r.tip]).then(() => true, () => false))) return stop(`${r.head.slice(0, 7)} の判定（local-ci の pass の記録）が無いか、その base が ${r.tip.slice(0, 7)} の祖先でない`);
   // the record names judged..tip as this change's commits, and forge-resync sends what a record names: they must be the
   // judged head's commits and nothing else (a commit that landed after it waits for the person's --adopt-landing)
   if (!(await sameCommits(root, judged, r.tip, r.head))) return stop(`${judged.slice(0, 7)}..${r.tip.slice(0, 7)} の中身が判定した ${r.head.slice(0, 7)} のコミットと同じでない`);
@@ -208,20 +217,32 @@ export async function main(args: string[], cwd: string, o: MergeOpts): Promise<n
   if (record) return recordOnly(n, record, cwd, o, log, err);
   let root: string;
   let detail: Awaited<ReturnType<typeof readChangeDetail>>;
-  let facts: Awaited<ReturnType<typeof readChange>>;
+  let facts: Awaited<ReturnType<typeof readChange>> | undefined;
   let records: StoredRecords;
   try {
     root = (await sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
     detail = await readChangeDetail(n, o.env, { fetch: o.fetch, cwd });
     records = await readChangeRecords(detail, o.env, o.fetch);
-    facts = await readChange(detail, root, records);
+    // in a Task the judgement is not made from the Task's own environment (the address of the records is its to name): the app's gate job makes it, below
+    if (!o.env.SWITCHBOARD_TASK_ID) facts = await readChange(detail, root, records, appRecords(o.env, o.fetch));
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
   }
-  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
-  log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") return 1;
+  if (o.env.SWITCHBOARD_TASK_ID) {
+    // the app's copy of the gate judges the change (`--change`; the merge below is this script's, a git operation): only its merge verdict at the head read here goes on
+    const judged: { head?: string | null } = {};
+    const code = await requestGate(["--change", String(n), ...(args.includes("--allow-large") ? ["--allow-large"] : [])], o.env, cwd, log, err, { fetch: o.fetch, judged });
+    if (code !== 0) return code;
+    if (judged.head !== detail.changeRefs?.head) {
+      err(`アプリが判定した head（${judged.head?.slice(0, 7) ?? "なし"}）と今の枝の先（${detail.changeRefs?.head?.slice(0, 7) ?? "なし"}）が違う。何も変えていない（判定し直す）`);
+      return 1;
+    }
+  } else {
+    const j = judge(facts!, { allowLarge: args.includes("--allow-large") });
+    log(JSON.stringify(j, null, 2));
+    if (j.verdict !== "merge") return 1;
+  }
   // a workspace whose Issues are a service's numbers its changes apart: the change's own number may be a Task's there
   const apart = records.service !== "switchboard";
 

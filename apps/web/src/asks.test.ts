@@ -305,7 +305,7 @@ test("grant button: a stop with a grant gets この操作だけ許可して続�
   const GRANT = "定期実行 sch_x を POST /api/schedules に登録することだけ許可します";
   const stop = ask({ kind: "stop", answers: ["grant", "text"], grant: GRANT, task: { id: "tk", title: "t" }, next: "Task「t」が続く" });
   const [b] = answerButtons(stop);
-  expect(b).toMatchObject({ label: "この操作だけ許可して続ける", answer: { kind: "grant" }, send: GRANT, grant: GRANT, target: "Task「t」", primary: true });
+  expect(b).toMatchObject({ label: "この操作だけ許可して続ける", answer: { kind: "grant", grant: GRANT }, send: GRANT, grant: GRANT, target: "Task「t」", primary: true });
   expect(answerButtons({ ...stop, issue: { number: 306, url: "u" } })[0]!.target).toBe("Task「t」");
   // a stop without one has no such button
   expect(answerButtons(ask({ kind: "stop", answers: ["text"] }))).toEqual([]);

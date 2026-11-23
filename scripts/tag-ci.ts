@@ -32,6 +32,9 @@
  * the requests do not change (a budget that cannot be read compares nothing).
  * A red `bun test` also gets a `selection:` line in the Release: of the test files that failed, how many a PR's narrowed
  * local-ci would have run for the change since the tag before (docs/merge-gate.md).
+ * `--sha <commit>` (the app's own job for the tag it is about to promote): only the tag at that commit is judged, run even when its
+ * Release already has a mark (the job's result must be of this run, never a mark read back), the walk does not go back to older tags,
+ * and the commits this run judged are written to `$J/result.json` (`J` = the job's folder) for the app to record.
  * `--latest-pass [--contained-in <commit>]` runs nothing: it prints the newest tag whose last result is pass
  * (a fail, no result and no Release are passed over), only from the tags in `<commit>`'s history when given (the
  * public sync gives the running release's commit). Exit 0 = printed, 1 = no tag passed (prints nothing), 2 = bad
@@ -191,6 +194,17 @@ async function listTags(root: string, sh: (cmd: string[]) => Promise<string>, me
   return (await sh(cmd)).split("\n").map((t) => t.trim()).filter((t) => STRICT.test(t));
 }
 
+/**
+ * Whether what a run judged is the newest tag's business: always, except for `--sha` of a commit that is not the newest tag's
+ * (the app's job judged an older tag): its follow-up (the request for a failed newest tag, "通った" on the open ones) would
+ * then say about the newest tag what a run of another commit found.
+ */
+export async function judgesNewest(sha: string | undefined, root: string, sh: (cmd: string[]) => Promise<string>): Promise<boolean> {
+  if (!sha) return true;
+  const newest = (await listTags(root, sh))[0];
+  return newest !== undefined && (await sh(["git", "-C", root, "rev-parse", `${newest}^{commit}`])).trim() === sha;
+}
+
 export interface TagCiDeps extends Omit<Deps, "sh"> {
   /** Today (UTC, YYYY-MM-DD) for the registry's `until`; tests give theirs. */
   today?: string;
@@ -210,6 +224,10 @@ export interface TagCiDeps extends Omit<Deps, "sh"> {
   now?: () => number;
   /** The tree whose container/Dockerfile is the ci image's when the tags are another repository's (local-ci's `imageRootFor`); none = the tag's own checkout. */
   imageRoot?: string;
+  /** Whether what the run judged is the newest tag's business (`judgesNewest`), asked after the fetch of the tags: false = no follow-up of the newest tag (`onNewest`). Absent = yes. */
+  follows?: () => Promise<boolean>;
+  /** `--sha`: only the tag at this commit is judged, even when its Release already has a result (the app's job needs a result of its own run), and the walk does not go back to older tags. */
+  sha?: string;
 }
 
 /** The tags run in one go: a step of the walk takes minutes, and a run that is cut leaves no result. */
@@ -431,13 +449,14 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
     const out: TagCiEntry[] = [];
     for (const [i, tag] of tags.entries()) {
       const sha = (await d.sh(["git", "-C", root, "rev-parse", `${tag}^{commit}`])).trim();
+      if (d.sha && sha !== d.sha) continue;
       const body = await d.sh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]).catch(() => null);
       if (body === null) {
         d.log(`${tag}: release が無いか読めない（release-tag.ts で作る）。ここで止める`);
         break;
       }
       const known = tagResult(body, sha);
-      if (known) {
+      if (known && !d.sha) {
         d.log(`${tag}: 結果あり（${known}）`);
         out.push({ tag, sha, result: known, ran: false });
         break;
@@ -462,7 +481,8 @@ async function walkTags(d: TagCiDeps, repo: string, root: string, cache: string,
       if (r.warnings.length && d.onPerfStreak) await perfStreakOf(d, tag, sha, r.warnings, tags.slice(i + 1), repo, root);
       out.push({ tag, sha, result: r.ok ? "pass" : "fail", ran: true, ...(r.ok ? {} : { step: hidePaths(r.step ?? ""), fails: r.fails }) });
       if (r.ok) break;
-      if (out.length === 1) await d.onNewest?.(out);
+      if (out.length === 1 && (!d.follows || (await d.follows()))) await d.onNewest?.(out);
+      if (d.sha) break;
       if (out.filter((e) => e.ran).length >= MAX_TAG_RUNS) {
         d.log(`${MAX_TAG_RUNS} タグ回したので遡りをここで止める`);
         break;
@@ -512,17 +532,35 @@ export async function latestPassTag(sh: TagCiDeps["sh"], repo: string, root: str
 }
 
 /** `--latest-pass`, `--contained-in <commit>` and `--local` (every step here, not in the build off the host) taken off the arguments; the rest is for resolveRepo. */
-export function parseArgs(args: string[]): { latestPass: boolean; containedIn: string | undefined; local: boolean; rest: string[] } {
+export function parseArgs(args: string[]): { latestPass: boolean; containedIn: string | undefined; local: boolean; sha: string | undefined; rest: string[] } {
   const at = args.indexOf("--contained-in");
   const containedIn = at < 0 ? undefined : args[at + 1];
   if (at >= 0 && (!containedIn || containedIn.startsWith("--"))) throw new TargetError("--contained-in の後にコミットを書く");
+  const shaAt = args.indexOf("--sha");
+  const sha = shaAt < 0 ? undefined : args[shaAt + 1];
+  if (shaAt >= 0 && !/^[0-9a-f]{40}$/.test(sha ?? "")) throw new TargetError("--sha の後に 40 桁のコミットを書く");
   const latestPass = args.includes("--latest-pass");
   if (at >= 0 && !latestPass) throw new TargetError("--contained-in は --latest-pass と一緒に使う");
-  return { latestPass, containedIn, local: args.includes("--local"), rest: args.filter((a, i) => a !== "--latest-pass" && a !== "--local" && (at < 0 || (i !== at && i !== at + 1))) };
+  return { latestPass, containedIn, local: args.includes("--local"), sha, rest: args.filter((a, i) => a !== "--latest-pass" && a !== "--local" && (at < 0 || (i !== at && i !== at + 1)) && (shaAt < 0 || (i !== shaAt && i !== shaAt + 1))) };
 }
 
 /** The builds off the host to run in: none with `--local`, else the host's (none where `sb-offload` is not on PATH), as local-ci chooses. */
 export const offloadFor = (local: boolean, host: () => Offload | undefined = hostOffload): Offload | undefined => (local ? undefined : host());
+
+/**
+ * `$J/result.json`, when the run is the app's job (`J` names the job's folder): the commits this run judged — the ones it ran, not a mark
+ * read back from a Release — for the app to record as the job's result. A run that judged none writes an empty list.
+ */
+export function writeJobResult(dir: string | undefined, entries: TagCiEntry[], log: (l: string) => void = console.error): void {
+  if (!dir) return;
+  try {
+    const file = join(dir, "result.json");
+    writeFileSync(`${file}.tmp`, JSON.stringify({ judged: entries.filter((e) => e.ran).map((e) => ({ sha: e.sha, ok: e.result === "pass" })) }));
+    renameSync(`${file}.tmp`, file);
+  } catch (e) {
+    log(`仕事の結果を書けなかった（${(e as Error).message}）`);
+  }
+}
 
 /** 0 = the newest tag passed, 1 = it failed, 2 = nothing judged. */
 export const tagCiExit = (entries: TagCiEntry[]): number => (entries[0] === undefined ? 2 : entries[0].result === "pass" ? 0 : 1);
@@ -765,7 +803,7 @@ if (import.meta.main) {
     t = await resolveRepo(a.rest, process.cwd(), join(import.meta.dir, ".."), sh);
   } catch (e) {
     if (!(e instanceof TargetError)) throw e;
-    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>] [--local]\n       bun scripts/tag-ci.ts --latest-pass [--contained-in <commit>] [--repo <owner/name>]`);
+    console.error(`${e.message}\nusage: bun scripts/tag-ci.ts [--repo <owner/name>] [--local] [--sha <commit>]\n       bun scripts/tag-ci.ts --latest-pass [--contained-in <commit>] [--repo <owner/name>]`);
     process.exit(2);
   }
   if (a.latestPass) {
@@ -803,9 +841,13 @@ if (import.meta.main) {
   const onPerfStreak = (tag: string, sha: string, keys: string[], lines: string[], earlier: PerfRun[]) =>
     perfStreakFollow(tag, sha, keys, lines, { sh, log, file, comment: commentRequest, open: openRequests, text: requestText, print: log }, undefined, earlier);
   const offload = offloadFor(a.local);
-  const entries = await tagCi({ sh, step, log, onNewest: report, onSkip, repair, ...(self ? { sync, onPerfStreak } : {}), ...(offload ? { offload } : {}), ...imageRootFor(t.root, join(import.meta.dir, "..")), workspace: (root) => workspaceSettingsOf(root), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
+  // asked after the walk's fetch of the tags (a tag made since the job was asked for is in the list by then), once
+  let followed: Promise<boolean> | undefined;
+  const follows = () => (followed ??= judgesNewest(a.sha, t.root, sh));
+  const entries = await tagCi({ sh, step, log, ...(a.sha ? { sha: a.sha, follows } : {}), onNewest: report, onSkip, repair, ...(self ? { sync, onPerfStreak } : {}), ...(offload ? { offload } : {}), ...imageRootFor(t.root, join(import.meta.dir, "..")), workspace: (root) => workspaceSettingsOf(root), slot: (name, fn) => withHeavySlot(name, fn) }, t.repo, t.root);
   console.log(JSON.stringify(entries));
-  await report(entries);
+  writeJobResult(process.env.J, entries, log);
+  if (await follows()) await report(entries);
   if (!process.argv.includes("--repo")) {
     try {
       // imported here: public-stall.ts imports this file

@@ -969,9 +969,9 @@ test("skills: the three flow skills say what to do while GitHub cannot be used a
   }
   // the change is numbered apart from the Issues: the kit's commands need the mark
   expect(read("task-to-pr")).toContain("`--change` を付け");
-  // a change that stands in for a PR is not merged locally, and the person's yes is not written on a change
+  // a change that stands in for a PR is not merged locally; a change with an ask reason waits for GitHub and goes on as a PR
   expect(read("review-triage-and-merge")).toContain("ローカルではマージされない");
-  expect(read("task-to-pr")).toContain("`[merge-answer] yes` は変更に投稿できない");
+  expect(read("task-to-pr")).toContain("聞く理由（`[聞く]`）のある変更はローカルではマージしない（GitHub が戻ってから PR で進める）");
   const complete = read("pbi-complete");
   for (const word of ["<GitHub への復帰> --pbi <PBI>", "<GitHub への復帰> --report", "リリースタグを打たない", "exit 4", "exit 5"]) expect(complete).toContain(word);
   // the sync PR is the only way into GitHub's main: reviewed, then merged through the gate
@@ -1037,4 +1037,17 @@ test("skills: a PBI that raises or lowers a review rule carries the rounds table
   const rules = readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8");
   const owned = rules.slice(rules.indexOf("## 使う側のリポジトリが持つもの"), rules.indexOf("\n## ", rules.indexOf("## 使う側のリポジトリが持つもの") + 1));
   expect(owned).toContain("往復の表");
+});
+
+test("skills: the user's mark and the split of instruction-file Tasks are written down (利用者の決まりの印・指示のファイルの Task)", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  const rules = read("issue-workflow");
+  expect(rules).toContain("括弧の中に `YYYY-MM-DD の利用者の指摘|決定|指示`（この形だけ）");
+  expect(rules).toContain("利用者の文を引けない行（エージェントが足した決まり）には付けない");
+  expect(rules).toContain("`instructions` の理由");
+  const split = read("pbi-to-tasks");
+  expect(split).toContain("それだけの Task に分ける");
+  expect(split).toContain("`[分ける]`");
+  expect(split).toContain("`instructions`");
+  expect(read("task-to-pr")).toContain("「ついでの整合」をしない");
 });

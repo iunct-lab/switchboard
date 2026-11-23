@@ -1,8 +1,14 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, localCiOf, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr, RECHECK_PASS, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_ANSWER, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, RECHECK_PASS, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
-import { resultComment } from "./local-ci";
+import { Db } from "../packages/core/src/db";
+import { mergeRecordsOf } from "../packages/core/src/merge-records";
+import { changeRepoOf, grantHeadKey } from "../packages/core/src/merge-grants";
+import { noteMergeGrant } from "../packages/core/src/server/task-hooks";
+import recorded from "./merge-gate.recorded.json";
+import { ciOf } from "./merge-gate-records";
+import type { MergeRecordJob } from "../ops-kit/src/merge-records";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,28 +18,56 @@ import { join } from "node:path";
 const REPO = "example/development";
 const savedRepo = process.env.GH_REPO;
 beforeAll(() => { process.env.GH_REPO = REPO; });
+type ReadPrArgs = Parameters<typeof readPrWith>;
+/** `readPr` with no job of the app unless a test gives them (the app's records are read, never a comment). */
+const readPr = (n: number, run?: ReadPrArgs[1], repo?: ReadPrArgs[2], git?: ReadPrArgs[3], held?: ReadPrArgs[4], jobsOf: JobsOf = async () => []) => readPrWith(n, run, repo, git, held, recordsOfJobs(jobsOf));
+
+/** The app's records of a test that gives jobs only: no grant of the head and no direct Task. */
+const recordsOfJobs = (jobsOf: JobsOf): RecordsOf => async (repo, prs) => ({ jobs: await jobsOf(repo, prs), granted: false, direct: false });
+
+// What the app records of a job (GET /api/merge-records): the verdict reads these and no comment.
+let jobSeq = 0;
+const job = (over: Partial<MergeRecordJob> = {}): MergeRecordJob => ({ id: ++jobSeq, kind: "review", taskId: "task_1", pr: 1, runner: "claude", status: "pass", exitCode: 0, startedAt: 1, endedAt: 2, repo: REPO, head: null, base: null, as: null, kinds: [], result: null, ...over });
+const reviewOutput = (findings: string[] = []) => ({ review: { findings: findings.map((severity) => ({ severity, path: "a.ts", line: 1 })), firstLine: "[claude] review" } });
+/** A review job that passed, of `head`; `as` and `kinds` as the request named them. */
+const reviewJob = (head: string, over: Partial<MergeRecordJob> = {}) => job({ head, result: reviewOutput(), ...over });
+/** A local CI job's record: the outcome, the head and the base its run left (`stepsHash` when the steps were the settings Switchboard keeps). */
+const ciJob = (outcome: "pass" | "fail", head: string, base: string, stepsHash?: string, over: Partial<MergeRecordJob> = {}) => job({ kind: "local-ci", runner: null, head, base, status: outcome, result: { ci: { outcome, ...(stepsHash ? { stepsHash } : {}) } }, ...over });
+/**
+ * The app as `main` reaches it: its records answer with `jobs` (the calls are kept in `asked`), the token file is a stub.
+ * `granted`: whether the app holds the person's grant of the head asked about; `direct`: the PRs of the Tasks it started as direct;
+ * `task: false`: the gate is run from the person's terminal (no Task's variable), else it runs in `task_1`.
+ */
+const appWith = (jobs: MergeRecordJob[] | (() => MergeRecordJob[]), o: { granted?: boolean; direct?: number[]; task?: boolean } = {}) => {
+  const asked: string[] = [];
+  const tokenFile = join(mkdtempSync(join(tmpdir(), "merge-gate-app.")), "token");
+  writeFileSync(tokenFile, "k\n");
+  const fetch = (async (url: string) => {
+    asked.push(String(url));
+    const q = new URL(String(url)).searchParams;
+    const asking = q.has("taskId") && q.has("head");
+    return Response.json({ jobs: typeof jobs === "function" ? jobs() : jobs, granted: asking ? o.granted ?? false : null, direct: q.has("taskId") && (o.direct ?? []).includes(Number(q.get("pr"))) });
+  }) as unknown as typeof globalThis.fetch;
+  return { asked, env: { MERGE_RECORDS_URL: "http://app.test", MERGE_RECORDS_TOKEN_FILE: tokenFile, ...(o.task === false ? {} : { OPS_KIT_TASK_ID: "task_1" }) } as Record<string, string | undefined>, fetch };
+};
 afterAll(() => { if (savedRepo === undefined) delete process.env.GH_REPO; else process.env.GH_REPO = savedRepo; });
 
 const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   files: [{ path: "packages/core/src/tasks/manager.ts", additions: 20, deletions: 5 }],
-  headCommittedAt: "2026-09-24T10:00:00Z",
   checks: [{ name: "test", conclusion: "SUCCESS" }],
   unresolvedThreads: 0,
   mergeState: "CLEAN",
-  // the attacking review is read only for a PR that needs one (attackPaths); the tests of that rule leave it out with `noAttack`
-  reviewComments: [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }, { body: "[codex] attack\n\n### Breaking the change", createdAt: "2026-09-24T11:00:00Z" }],
+  // the app ran a main review and an attacking review that passed (the attacking one is read only for a PR that needs one (attackPaths); the tests of that rule leave it out with `noAttack`)
+  reviewed: true,
+  attacked: true,
   ...over,
 });
 const off = { allowLarge: false };
 /** The security groups the owner moved from asking to a recheck (docs/design/merge-gate.md). */
 const MOVED: string[] = ["security:docs", "security:tests", "security:lockfile"];
 const HEAD = "a".repeat(40);
-/** The facts with the user's yes of the head (--allow-large lifts nothing without it). */
-const yes = (kinds: string, over: Partial<PrFacts> = {}) => base({
-  ...over,
-  head: HEAD,
-  reviewComments: [...base().reviewComments, { body: `[merge-answer] yes ${kinds} ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }],
-});
+/** The facts with the person's grant of the head in the app's record (--allow-large lifts nothing without it); `_kinds` says what the test means the person allowed (the record has no kinds). */
+const yes = (_kinds: string, over: Partial<PrFacts> = {}) => base({ ...over, head: HEAD, granted: true });
 
 describe("merge-gate judge", () => {
   test("a small reviewed PR with green CI merges", () => {
@@ -117,27 +151,10 @@ describe("merge-gate judge", () => {
     expect(judge(base({ unresolvedThreads: 2 }), off).reasons).toEqual(["解決していないレビュースレッドが 2 件ある"]);
   });
 
-  test("a commit after the last main review stops", () => {
-    const j = judge(base({ headCommittedAt: "2026-09-24T12:00:00Z" }), off);
+  test("no recorded main review stops, with the reason naming the record", () => {
+    const j = judge(base({ reviewed: undefined }), off);
     expect(j.verdict).toBe("stop");
-    expect(j.reasons).toEqual([
-      "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い",
-    ]);
-  });
-
-  test("a [claude] review counts, a [dak] review or a triage summary does not", () => {
-    const at = "2026-09-24T11:00:00Z";
-    expect(judge(base({ reviewComments: [{ body: "[claude] review\n", createdAt: at }] }), off).verdict).toBe("merge");
-    const j = judge(base({ reviewComments: [{ body: "[dak] review\n", createdAt: at }, { body: "## レビュー対応 [codex] review", createdAt: at }] }), off);
-    expect(j.verdict).toBe("stop");
-  });
-
-  test("a compare comment is not a main review", () => {
-    // the first line the compare skill writes (`[<runner>] compare`) and a body that reads like a review: only the mark decides
-    const body = "[codex] compare\n\n### Compared with main\n- REGRESSION `a.ts:1` — x. main: ok HEAD: bad Conditions: any\n### Verdict versus main\nworse than main: one regression\n\n### Findings\n- none";
-    const j = judge(base({ headCommittedAt: "2026-09-24T12:00:00Z", reviewComments: [{ body, createdAt: "2026-09-24T13:00:00Z" }] }), off);
-    expect(j.verdict).toBe("stop");
-    expect(j.reasons).toEqual(["最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"]);
+    expect(j.reasons).toEqual(["この head（か、この PR のコミットが同じ差分で入った head）で合格した主レビューの仕事の記録が無い（アプリで回したレビュー。コメントでは満たされない）"]);
   });
 
   test("a merge state other than CLEAN stops", () => {
@@ -156,47 +173,29 @@ describe("merge-gate judge", () => {
   test("--allow-large lifts every large reason, not the others", () => {
     const files = [{ path: "rescue/src/server.ts", additions: 400, deletions: 0 }];
     expect(judge(yes("rescue,size", { files }), { allowLarge: true })).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: ["size", "rescue"], attack: ["rescue/src/server.ts"] });
-    const j = judge(yes("rescue,size", { files, headCommittedAt: "2026-09-24T12:30:00Z" }), { allowLarge: true });
+    const j = judge(yes("rescue,size", { files, reviewed: undefined, attacked: undefined }), { allowLarge: true });
     expect(j.verdict).toBe("stop");
     expect(j.impact).toBe("large");
-    // the main review and the attacking review are both older than the head: --allow-large lifts neither
+    // no recorded main review and no recorded attacking review: --allow-large lifts neither
     expect(j.reasons).toHaveLength(2);
-    expect(j.reasons.every((r) => r.startsWith("最後のコミット"))).toBe(true);
+    expect(j.reasons.every((r) => r.includes("仕事の記録が無い"))).toBe(true);
   });
 
-  test("allow-large needs merge-answer", () => {
+  test("allow-large needs the person's grant of the head in the app's record", () => {
     const files = [{ path: "src/auth/session.ts", additions: 1, deletions: 0 }, { path: "ops.config.json", additions: 1, deletions: 0 }];
     const large = ["[聞く] セキュリティ（security:words）: src/auth/session.ts", "[再チェック responsibility] 責務: ops.config.json"];
-    const missing = expect.stringContaining("[merge-answer] yes が無い: security:words,responsibility");
+    const missing = expect.stringContaining("利用者の許可の記録が無い: security:words,responsibility（Task の会話で利用者が「PR #<n> をマージしてよい」と認めると");
     const allow = { allowLarge: true };
-    // no mark: the reasons of a judgement without the flag, and the missing mark
+    // no grant: the reasons of a judgement without the flag, and the missing record
     const none = judge(base({ files, head: HEAD }), allow);
     expect(none).toMatchObject({ verdict: "stop", impact: "large" });
     expect(none.reasons).toEqual([...large, missing]);
-    // a kind is missing from the mark, the ask side or the recheck side
-    expect(judge(yes("security:words", { files }), allow).reasons).toEqual([...large, missing]);
-    expect(judge(yes("responsibility", { files }), allow).reasons).toEqual([...large, missing]);
-    // every kind
-    expect(judge(yes("security:words,responsibility", { files }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
-    // another head, a no
-    const other = base({ files, head: "b".repeat(40), reviewComments: yes("security:words,responsibility").reviewComments });
-    expect(judge(other, allow).verdict).toBe("stop");
-    const no = base({ files, head: HEAD, reviewComments: [...base().reviewComments, { body: `[merge-answer] no security:words,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }] });
-    expect(judge(no, allow).verdict).toBe("stop");
-    // the mark is read in the form the check in front of a Task's post compares (the kit's markText): a yes the store
-    // trimmed, or one with a full-width bracket, is the same yes — and so is the one the check stops
-    for (const spelled of [`  [merge-answer] yes security:words,responsibility ${HEAD}`, `［merge-answer］\u3000YES security:words,responsibility ${HEAD}`, `\uFEFF[merge-answer] yes security:words,responsibility ${HEAD}\nrest`]) {
-      const f = base({ files, head: HEAD, reviewComments: [...base().reviewComments, { body: spelled, createdAt: "2026-09-24T12:00:00Z" }] });
-      expect([spelled, judge(f, allow).verdict]).toEqual([spelled, "merge"]);
-    }
-    // a no after the yes takes it back; a yes after the no counts
-    const said = (...answers: string[]) => base({ files, head: HEAD, reviewComments: [...base().reviewComments, ...answers.map((a) => ({ body: `[merge-answer] ${a} security:words,responsibility ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }))] });
-    expect(judge(said("yes", "no"), allow).verdict).toBe("stop");
-    expect(judge(said("no", "yes"), allow).verdict).toBe("merge");
-    // by time, not by the order of the list
-    const newestFirst = said("no", "yes");
-    newestFirst.reviewComments[2]!.createdAt = "2026-09-24T13:00:00Z";
-    expect(judge(newestFirst, allow).verdict).toBe("stop");
+    // the record lifts every kind left (the kinds are not in it)
+    expect(judge(yes("", { files }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
+    // a change names itself in the sentence the person says
+    expect(judge(base({ files, head: HEAD, subject: "変更 L7" }), allow).reasons.at(-1)).toContain("「変更 L7 をマージしてよい」");
+    // the grant does nothing without the flag
+    expect(judge(yes("", { files }), off).verdict).toBe("stop");
     // a recheck kind already marked is not asked of the yes
     expect(judge(yes("security:words", { files, rechecks: ["responsibility"] }), allow)).toMatchObject({ verdict: "merge", reasons: [] });
     // nothing large: the flag does nothing and asks for no mark
@@ -206,15 +205,14 @@ describe("merge-gate judge", () => {
 });
 
 describe("attack review", () => {
-  const REVIEW_ONLY = [{ body: "[codex] review\n\n### Intent and design", createdAt: "2026-09-24T11:00:00Z" }];
-  const noAttack = (files: PrFacts["files"], over: Partial<PrFacts> = {}) => base({ files, reviewComments: REVIEW_ONLY, ...over });
+  const noAttack = (files: PrFacts["files"], over: Partial<PrFacts> = {}) => base({ files, attacked: undefined, ...over });
   const touch = (path: string, over: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, status: "modified" as const, ...over });
   const attackReasons = (j: ReturnType<typeof judge>) => j.reasons.filter((r) => r.includes("攻める側のレビュー"));
 
   test("attack is required for each security group and the added paths", () => {
     for (const path of ["src/auth.ts", "bun.lock", ".github/workflows/ci.yml", "scripts/merge-gate.ts", "aws/host/sb-host-update.sh", "packages/core/src/promotion.ts", "packages/core/src/server/promotion.ts", "scripts/promote.ts", "rescue/src/server.ts", "packages/core/src/uplink-in.ts", ".claude/settings.json", "ops-kit/bin/gh"]) {
       const j = judge(noAttack([touch(path)]), { allowLarge: true });
-      expect([path, attackReasons(j)]).toEqual([path, [`最後のコミット（2026-09-24T10:00:00Z）より新しい攻める側のレビュー（[codex] attack / [claude] attack）が無い: ${path}`]]);
+      expect([path, attackReasons(j)]).toEqual([path, [`この head（か、この PR のコミットが同じ差分で入った head）で合格した攻める側のレビューの仕事の記録が無い: ${path}`]]);
       expect([path, j.attack]).toEqual([path, [path]]);
       expect(j.verdict).toBe("stop");
     }
@@ -225,23 +223,16 @@ describe("attack review", () => {
     expect(j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
   });
 
-  test("a stale attack mark does not count", () => {
-    const stale = noAttack([touch("scripts/promote.ts")], { reviewComments: [...REVIEW_ONLY, { body: "[claude] attack", createdAt: "2026-09-24T09:59:00Z" }] });
-    expect(attackReasons(judge(stale, off))).toHaveLength(1);
-    const later = noAttack([touch("scripts/promote.ts")], { headCommittedAt: "2026-09-24T12:00:00Z", reviewComments: [{ body: "[claude] attack", createdAt: "2026-09-24T11:00:00Z" }] });
-    expect(attackReasons(judge(later, off))).toHaveLength(1);
-  });
-
-  test("a fresh attack mark lifts only the attack reason", () => {
+  test("a recorded attacking review lifts only the attack reason", () => {
     const files = [touch("scripts/merge-gate.ts")];
-    const j = judge(noAttack(files, { reviewComments: [...REVIEW_ONLY, { body: "[claude] attack\n\n### x", createdAt: "2026-09-24T11:30:00Z" }] }), off);
+    const j = judge(noAttack(files, { attacked: true }), off);
     expect(attackReasons(j)).toEqual([]);
     expect(j.reasons).toEqual(["[聞く] セキュリティ（security:gates）: scripts/merge-gate.ts"]);
     expect(j.attack).toEqual(["scripts/merge-gate.ts"]);
   });
 
   test("a yes of the user does not lift the attack reason", () => {
-    const f = noAttack([touch("rescue/src/x.ts")], { head: HEAD, reviewComments: [...REVIEW_ONLY, { body: `[merge-answer] yes rescue ${HEAD}`, createdAt: "2026-09-24T12:00:00Z" }] });
+    const f = noAttack([touch("rescue/src/x.ts")], { head: HEAD, granted: true });
     expect(judge(f, { allowLarge: true })).toMatchObject({ verdict: "stop", reasons: [expect.stringContaining("攻める側のレビュー")] });
   });
 
@@ -260,19 +251,15 @@ describe("attack review", () => {
     expect(fileSecurityKinds(touch("aws/fixtures/auth.ts", { status: "renamed", previous: "aws/auth.ts" }))).toContain("security:words");
   });
 
-  test("an attack comment is not a main review", () => {
-    const f = base({ files: [touch("scripts/promote.ts")], reviewComments: [{ body: "[codex] attack\n\n### x", createdAt: "2026-09-24T11:00:00Z" }] });
-    expect(judge(f, off).reasons).toEqual(["最後のコミット（2026-09-24T10:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"]);
-  });
-
-  test("a main review is not an attack review", () => {
+  test("a recorded attacking review is not a main review, and a recorded main review is not an attacking one", () => {
+    const f = base({ files: [touch("scripts/promote.ts")], reviewed: undefined });
+    expect(judge(f, off).reasons).toEqual(["この head（か、この PR のコミットが同じ差分で入った head）で合格した主レビューの仕事の記録が無い（アプリで回したレビュー。コメントでは満たされない）"]);
     expect(attackReasons(judge(noAttack([touch("scripts/promote.ts")]), off))).toHaveLength(1);
-    expect(attackReasons(judge(noAttack([touch("scripts/promote.ts")], { reviewComments: [{ body: "[codex] attacker", createdAt: "2026-09-24T11:00:00Z" }] }), off))).toHaveLength(1);
   });
 });
 
 describe("direct PR (branch sb/direct-)", () => {
-  const noReview = { reviewComments: [] };
+  const noReview = { reviewed: undefined };
   test("a direct PR with no large reason merges without a main review and says so", () => {
     expect(judge(base({ direct: true, ...noReview }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], reviewSkipped: true });
   });
@@ -299,24 +286,32 @@ describe("direct PR (branch sb/direct-)", () => {
     expect(j.reasons.some((r) => r.includes("主レビュー"))).toBe(true);
   });
 
-  test("mergePr gives the gh that merges OPS_MERGE_GATE_PR=<n>, in both modes, and no other call", async () => {
+  // GitHub's Stacks REST API for mergePr: no stack numbered 7, and a stack of PR 7 alone at `head`
+  const stackApi = (a: string[], head: string): string | undefined => {
+    if (a[0] !== "api" || !a[1]!.includes("/stacks")) return undefined;
+    if (!a[1]!.includes("?")) throw new Error("gh: Not Found (HTTP 404)");
+    return JSON.stringify([{ number: 100, base: { ref: "main" }, pull_requests: [{ number: 7, state: "open", draft: false, merged_at: null, head: { sha: head } }] }]);
+  };
+
+  test("mergePr marks no merge with a variable: a merge gets no environment, a stack merge only GH_REPO, and no other call gets one", async () => {
     const HEAD40 = "c".repeat(40);
     const facts = base({ head: HEAD40, base: "main" });
     for (const mode of ["merge", "merge-stack"] as const) {
       const calls: Array<[string[], Record<string, string> | undefined]> = [];
-      await mergePr(7, REPO, mode, facts, async (a, env) => { calls.push([a, env]); return a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40}\n` : ""; }, () => REPO);
+      await mergePr(7, REPO, mode, facts, async (a, env) => { calls.push([a, env]); return stackApi(a, HEAD40) ?? (a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40} main\n` : ""); }, () => REPO);
       const merging = calls.filter(([a]) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack");
-      expect(merging.map(([, env]) => env)).toEqual([{ OPS_MERGE_GATE_PR: "7" }]);
+      expect(merging.map(([, env]) => env)).toEqual([mode === "merge" ? undefined : { GH_REPO: REPO }]);
+      expect(calls.some(([, env]) => env !== undefined && "OPS_MERGE_GATE_PR" in env)).toBe(false);
       expect(calls.filter(([a]) => !merging.some(([m]) => m === a)).every(([, env]) => env === undefined)).toBe(true);
     }
   });
 
-  test("mergePr puts [merge-direct] <head> on the PR before it merges, in both modes", async () => {
+  test("mergePr puts [merge-direct] <head> on the PR before it merges, in every mode", async () => {
     const HEAD40 = "c".repeat(40);
     const facts = base({ head: HEAD40, base: "main", direct: true });
-    for (const mode of ["merge", "merge-stack"] as const) {
+    for (const mode of ["merge", "merge-stack", "merge-sync"] as const) {
       const calls: string[][] = [];
-      await mergePr(7, REPO, mode, facts, async (a) => { calls.push(a); return a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40}\n` : ""; }, () => REPO, true);
+      await mergePr(7, REPO, mode, facts, async (a) => { calls.push(a); return stackApi(a, HEAD40) ?? (a[0] === "repo" ? "main\n" : a[0] === "pr" && a[1] === "view" ? `${HEAD40} main\n` : ""); }, () => REPO, true);
       const at = calls.findIndex((a) => a[0] === "pr" && a[1] === "comment");
       const merge = calls.findIndex((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack");
       expect(at).toBeGreaterThanOrEqual(0);
@@ -612,11 +607,10 @@ describe("security sub-kinds", () => {
     expect(groups(one("auth/AGENTS.md"))).toEqual(["security:words", "instructions"]);
   });
 
-  test("--allow-large needs a yes naming every group left", () => {
+  test("--allow-large with the grant lifts every group left, and stops without it", () => {
     const files = [{ path: "bun.lock", additions: 1, deletions: 0 }, { path: "scripts/merge-gate.ts", additions: 1, deletions: 0 }];
     const allow = { allowLarge: true };
-    expect(judge(yes("security:lockfile", { files }), allow).verdict).toBe("stop");
-    expect(judge(yes("security", { files }), allow).verdict).toBe("stop");
+    expect(judge(base({ files, head: HEAD }), allow).verdict).toBe("stop");
     expect(judge(yes("security:lockfile,security:gates", { files }), allow)).toMatchObject({ verdict: "merge", ask: ["security:gates"], recheck: ["security:lockfile"] });
   });
 });
@@ -664,7 +658,7 @@ describe("instructions", () => {
       expect(j).toEqual({ verdict: "stop", impact: "large", reasons: [`[聞く] 指示のファイル: ${path}`], ask: ["instructions"], recheck: [] });
       expect(judge(base({ files: [file(path)], rechecks: ["responsibility", "size"] }), off).verdict).toBe("stop");
       expect(judge(yes("instructions", { files: [file(path)] }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
-      expect(judge(yes("size", { files: [file(path)] }), { allowLarge: true }).verdict).toBe("stop");
+      expect(judge(base({ files: [file(path)], head: HEAD }), { allowLarge: true }).verdict).toBe("stop");
       // instructions is no recheck kind: its mark is not read at all
       expect(RECHECK_PASS.exec(`[recheck] instructions pass ${"a".repeat(40)}`)).toBeNull();
     },
@@ -840,8 +834,8 @@ describe("recheck", () => {
     expect(judge(base({ files }), off)).toMatchObject({ ask, recheck: ["security:lockfile"] });
     expect(judge(base({ files, rechecks: ["size", "rescue", "security:lockfile"] }), off)).toMatchObject({ verdict: "stop", reasons: ["[聞く] セキュリティ（security:words）: src/auth.ts"], ask, recheck: [] });
     expect(judge(yes("security:words,security:lockfile", { files }), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [], ask });
-    // a yes for one group does not lift the other
-    expect(judge(yes("security:words", { files }), { allowLarge: true })).toMatchObject({ verdict: "stop" });
+    // the grant of another head does not lift it: the record says which head it is of (the reader asks the app with the PR's)
+    expect(judge(base({ files, head: HEAD }), { allowLarge: true })).toMatchObject({ verdict: "stop" });
     expect(RECHECK_PASS.exec(`[recheck] security pass ${"a".repeat(40)}`)).toBeNull();
     expect(RECHECK_PASS.exec(`[recheck] security:words pass ${"a".repeat(40)}`)).toBeNull();
   });
@@ -899,7 +893,7 @@ describe("recheck", () => {
   test.each([
     ["a failing CI", { checks: [{ name: "test", conclusion: "FAILURE" }] }, "CI のチェック test が FAILURE"],
     ["an unresolved thread", { unresolvedThreads: 1 }, "解決していないレビュースレッドが 1 件ある"],
-    ["a commit after the review", { headCommittedAt: "2026-09-24T12:00:00Z" }, "最後のコミット（2026-09-24T12:00:00Z）より新しい主レビュー（[codex] review / [claude] review）が無い"],
+    ["no recorded main review", { reviewed: undefined }, "この head（か、この PR のコミットが同じ差分で入った head）で合格した主レビューの仕事の記録が無い（アプリで回したレビュー。コメントでは満たされない）"],
     ["not CLEAN", { mergeState: "BLOCKED" }, "mergeStateStatus が CLEAN でない: BLOCKED"],
   ] as const)("a mark does not lift %s", (_, over, reason) => {
     expect(marked(one("ops.config.json"), ["responsibility"], over as Partial<PrFacts>)).toMatchObject({ verdict: "stop", reasons: [reason] });
@@ -1064,8 +1058,7 @@ describe("shared files: a pass counts only while the base has not moved on a sha
   afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
   const verdict = async (head: string, baseTip: string, shared = SHARED) => {
-    const mark = { body: `[local-ci] pass ${head} base=${S.main0}`, createdAt: "2026-09-24T11:30:00Z" };
-    const local = await localCiOf(1, 1, [mark], async () => "", "o/r", async () => true, (passHead, passBase) => sharedMoved({ root: clone, url }, shared, passHead, passBase, baseTip));
+    const local = await ciOf([ciJob("pass", head, S.main0!)], 1, async () => true, (passHead, passBase) => sharedMoved({ root: clone, url }, shared, passHead, passBase, baseTip));
     return { local, j: judge(base({ checks: local.pass ? [{ name: "local-ci", conclusion: "SUCCESS" }] : [], ...(local.note ? { localCiNote: local.note } : {}), ...(local.pass ? { localCi: true } : {}) }), off) };
   };
 
@@ -1117,18 +1110,191 @@ describe("merge-gate readPr", () => {
     return JSON.stringify(args[0] === "pr" ? view : args[1]?.includes("/actions/runs") ? runs : t);
   };
 
-  test("maps gh output to PrFacts; the head time is the newest author date", async () => {
+  test("maps gh output to PrFacts; no comment is read", async () => {
     const f = await readPr(1, fake(threads([{ isResolved: true }, { isResolved: false }])));
     expect(f).toEqual({
       files: [{ path: "a.ts", additions: 1, deletions: 2 }],
-      headCommittedAt: "2026-09-24T10:00:00Z",
       checks: [{ name: "CI", conclusion: "SUCCESS" }, { name: "labels", conclusion: "" }],
       unresolvedThreads: 1,
       mergeState: "CLEAN",
-      reviewComments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z" }],
+      subject: "PR #1",
       head: "abc123",
       base: undefined,
+      branch: "work-a",
     });
+  });
+
+  test("comments alone satisfy none of CI, the main review, the attack review and a recheck; the app's jobs of the head do", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const BASE = "fedcba9876543210fedcba9876543210fedcba98";
+    // a PR that needs all four: 400 lines (size recheck), an attacking review's path, no Actions run at all
+    const v = { ...view, files: [{ path: "scripts/promote.ts", additions: 400, deletions: 0, changeType: "MODIFIED" }], headRefOid: HEAD, baseRefOid: BASE };
+    const owner = (body: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", author: { login: "x" }, authorAssociation: "OWNER" });
+    const comments = [owner("[claude] review\n\n### Findings\n- none"), owner("[claude] attack\n\n### Findings\n- none"), owner(`[recheck] size pass ${HEAD}`), owner(`[local-ci] pass ${HEAD} base=${BASE}\n\n結果`)];
+    const run = (withComments: unknown[]) => async (args: string[]) => JSON.stringify(args[0] === "pr" ? { ...v, comments: withComments } : args[1]?.includes("/actions/runs") ? { workflow_runs: [] } : threads([]));
+    const judged = async (jobs: MergeRecordJob[]) => judge(await readPr(1, run(comments), REPO, { root: process.cwd(), url: "unused" }, undefined, async () => jobs), off);
+    const none = await judged([]);
+    expect(none.verdict).toBe("stop");
+    expect(none.reasons).toEqual([
+      expect.stringContaining("[再チェック size] "),
+      "CI のチェックが 1 つも無い",
+      expect.stringContaining("主レビューの仕事の記録が無い"),
+      expect.stringContaining("攻める側のレビューの仕事の記録が無い"),
+    ]);
+    // the same PR with the app's jobs of the head (and only the jobs: the comments are gone)
+    const jobs = [reviewJob(HEAD), reviewJob(HEAD, { as: "attack" }), reviewJob(HEAD, { as: "recheck", kinds: ["size"] }), ciJob("pass", HEAD, BASE)];
+    const withJobs = judge(await readPr(1, run([]), REPO, { root: process.cwd(), url: "unused" }, undefined, async () => jobs), off);
+    expect(withJobs).toMatchObject({ verdict: "merge", reasons: [], recheck: [] });
+    // each of the four alone missing stops it again
+    for (const [i, reason] of [[0, "主レビュー"], [1, "攻める側のレビュー"], [2, "再チェック size"], [3, "CI のチェックが 1 つも無い"]] as const) {
+      const j = judge(await readPr(1, run([]), REPO, { root: process.cwd(), url: "unused" }, undefined, async () => jobs.filter((_, k) => k !== i)), off);
+      expect([reason, j.verdict, j.reasons.filter((r) => r.includes(reason)).length]).toEqual([reason, "stop", 1]);
+    }
+  });
+
+  /** A PR with an ask reason (a security path) and every other condition met: the app's jobs of the head, a green CI run. */
+  const askedPr = (head: string, over: Record<string, unknown> = {}) => {
+    const v = { ...view, files: [{ path: "src/auth/session.ts", additions: 1, deletions: 0, changeType: "MODIFIED" }], headRefOid: head, baseRefOid: "f".repeat(40), ...over };
+    const green = { workflow_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" }] };
+    const run = async (args: string[]) => JSON.stringify(args[0] === "pr" ? v : args[1]?.includes("/actions/runs") ? green : threads([]));
+    const jobs = [reviewJob(head), reviewJob(head, { as: "attack" })];
+    return { run, jobs };
+  };
+
+  test("a [merge-answer] yes of the head without the app's grant does not lift the ask", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const owner = (body: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", author: { login: "x" }, authorAssociation: "OWNER" });
+    // every form of the old yes, by the owner, at the head
+    const { run, jobs } = askedPr(HEAD, { comments: [owner(`[merge-ask] security:words ${HEAD}`), owner(`[merge-answer] yes security:words ${HEAD}`), owner(`[merge-answer] yes security:words,responsibility,size ${HEAD}\n\nyes`)] });
+    const asked: unknown[][] = [];
+    const read = (granted: boolean) => readPrWith(1, run, REPO, { root: process.cwd(), url: "unused" }, undefined, async (...q) => (asked.push(q), { jobs, granted, direct: false }));
+    const without = judge(await read(false), { allowLarge: true });
+    expect(without.verdict).toBe("stop");
+    expect(without.reasons).toEqual([expect.stringContaining("[聞く] セキュリティ（security:words）"), "利用者の許可の記録が無い: security:words（Task の会話で利用者が「PR #1 をマージしてよい」と認めると、その head に記録される。新しいコミットの後は聞き直す）"]);
+    // the app's record of the head lifts it, with no comment at all; the head the app is asked about is the PR's
+    expect(judge(await read(true), { allowLarge: true })).toMatchObject({ verdict: "merge", reasons: [] });
+    expect(asked.at(-1)).toEqual([REPO.toLowerCase(), [1], HEAD]);
+    // and the grant lifts nothing without the person's flag
+    expect(judge(await read(true), off).verdict).toBe("stop");
+  });
+
+  test("a branch named sb/direct- that the app did not start as a direct Task keeps the main review", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const v = { ...view, headRefName: "sb/direct-x", headRefOid: HEAD, baseRefOid: "f".repeat(40), comments: [] };
+    const green = { workflow_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" }] };
+    const run = async (args: string[]) => JSON.stringify(args[0] === "pr" ? v : args[1]?.includes("/actions/runs") ? green : threads([]));
+    const read = (direct: boolean) => readPrWith(1, run, REPO, { root: process.cwd(), url: "unused" }, undefined, async () => ({ jobs: [], granted: false, direct }));
+    const named = judge(await read(false), off);
+    expect(named.verdict).toBe("stop");
+    expect(named.reasons.filter((r) => r.includes("主レビュー"))).toHaveLength(1);
+    expect(named.reviewSkipped).toBeUndefined();
+    // the app's record of a direct Task that opened the PR is what skips it
+    expect(judge(await read(true), off)).toMatchObject({ verdict: "merge", reviewSkipped: true });
+  });
+
+  test("outside a Task --allow-large is the person's own consent; inside one it needs the record", async () => {
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    const { run, jobs } = askedPr(HEAD);
+    const go = async (o: Parameters<typeof appWith>[1], extra: Record<string, string | undefined> = {}, flag = "--allow-large") => {
+      const app = appWith(jobs, o);
+      const out: string[] = [];
+      const errs: string[] = [];
+      const code = await main(["1", "--repo", REPO, flag], run, (l) => out.push(l), (e) => errs.push(e), () => REPO, undefined, undefined, { env: { ...app.env, ...extra }, fetch: app.fetch });
+      expect(errs).toEqual([]);
+      return { code, verdict: JSON.parse(out.join("\n")).verdict, asked: app.asked.map((u) => new URL(u).searchParams.get("taskId")) };
+    };
+    // the person's terminal: no Task's variable; the app is not asked about a Task (and its answer, whatever it is, does not count against)
+    expect(await go({ task: false, granted: false })).toEqual({ code: 0, verdict: "merge", asked: [null] });
+    // in a Task, by either variable the app gives: the app's record decides
+    expect(await go({ granted: false })).toEqual({ code: 1, verdict: "stop", asked: ["task_1"] });
+    expect(await go({ granted: true })).toEqual({ code: 0, verdict: "merge", asked: ["task_1"] });
+    // the Task's other variable is read the same way where the records are asked for (`main` in a Task does not judge: it asks the app to)
+    const viaVariable = async (granted: boolean) => {
+      const app = appWith(jobs, { task: false, granted });
+      const facts = await readPrWith(1, run, REPO, { root: process.cwd(), url: "unused" }, undefined, appRecords({ ...app.env, SWITCHBOARD_TASK_ID: "task_2" }, app.fetch));
+      return { verdict: judge(facts, { allowLarge: true }).verdict, asked: app.asked.map((u) => new URL(u).searchParams.get("taskId")) };
+    };
+    expect(await viaVariable(false)).toEqual({ verdict: "stop", asked: ["task_2"] });
+    expect(await viaVariable(true)).toEqual({ verdict: "merge", asked: ["task_2"] });
+    // the person's flag is the consent: without it the ask stays outside a Task too
+    expect((await judge(await readPrWith(1, run, REPO, { root: process.cwd(), url: "unused" }, undefined, appRecords({ ...appWith(jobs, { task: false }).env }, appWith(jobs).fetch)), off)).verdict).toBe("stop");
+  });
+
+  test("appJobs asks for the jobs only: no Task is sent, so no wait for a reply being read", async () => {
+    const app = appWith([reviewJob("a".repeat(40))]);
+    expect(app.env.OPS_KIT_TASK_ID).toBe("task_1");
+    expect(await appJobs(app.env, app.fetch)("example/development", [1])).toHaveLength(1);
+    expect(app.asked.map((u) => [...new URL(u).searchParams.keys()])).toEqual([["repo", "pr"]]);
+  });
+
+  test("the app out of reach is no judgement with --allow-large too", async () => {
+    const { run } = askedPr("0123456789abcdef0123456789abcdef01234567");
+    const refuse = (async () => { throw new Error("connect refused"); }) as unknown as typeof fetch;
+    for (const task of [true, false]) {
+      const errs: string[] = [];
+      const code = await main(["1", "--repo", REPO, "--allow-large"], run, () => {}, (e) => errs.push(e), () => REPO, undefined, undefined, { env: appWith([], { task }).env, fetch: refuse });
+      expect([task, code, errs.join("\n").includes("判定できなかった")]).toEqual([task, 2, true]);
+    }
+  });
+
+  test("the judgement is the same with every comment of the PR removed", async () => {
+    // inputs recorded from real PRs (scripts/merge-gate.recorded.json): gh's answers and the app's records, comments among them
+    const cases = recorded.cases;
+    expect(cases.length).toBeGreaterThanOrEqual(5);
+    // the recorded set holds what the comments could have decided: a yes of the head, a mark of a recheck, of a CI pass and of a review
+    const marks = cases.flatMap((c) => c.view.comments.map((m) => m.body.split(" ")[0]));
+    for (const mark of ["[merge-answer]", "[merge-ask]", "[recheck]", "[local-ci]", "[claude]", "[codex]"]) expect(marks).toContain(mark);
+    const outcomes = new Set<string>();
+    let smalls = 0;
+    for (const c of cases) {
+      const run = (comments: unknown[]) => async (args: string[]) => {
+        if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ ...c.view, ...(comments.length || args.join(" ").includes("comments") ? { comments } : {}) });
+        if (args[0] === "pr" && args[1] === "list") return JSON.stringify("stackAbove" in c && args.includes("work-" + c.pr) ? [{ number: 99, headRefName: "work-99" }] : []);
+        if (args[0] === "api" && args[1] === "--paginate") return c.filesApi.join("\n");
+        if (args[0] === "api" && args[1]!.includes("/actions/runs")) return JSON.stringify({ workflow_runs: c.runs });
+        if (args[0] === "api" && args[1] === "graphql") return JSON.stringify(threads(Array.from({ length: c.threads.totalCount }, (_, i) => ({ isResolved: i >= c.threads.unresolved }))));
+        throw new Error(`not recorded: ${args.join(" ")}`);
+      };
+      const records = (direct: boolean) => async (_repo: string, prs: number[]) => ({ jobs: c.records.jobs.filter((j) => prs.includes(j.pr)) as unknown as MergeRecordJob[], granted: c.records.granted, direct });
+      const judged = async (comments: unknown[], allowLarge: boolean, direct = c.records.direct) => judge(await readPrWith(c.pr, run(comments), "example/development", { root: process.cwd(), url: "unused" }, undefined, records(direct)), { allowLarge });
+      for (const allowLarge of [false, true]) {
+        const withComments = await judged(c.view.comments, allowLarge);
+        const without = await judged([], allowLarge);
+        expect([c.name, allowLarge, without]).toEqual([c.name, allowLarge, withComments]);
+        outcomes.add(`${withComments.verdict}/${withComments.impact}`);
+      }
+      // the yes comments of the head say nothing without the app's grant
+      if (c.view.comments.some((m) => m.body.startsWith("[merge-answer] yes"))) expect((await judged(c.view.comments, true)).reasons.join("\n")).toContain("利用者の許可の記録が無い");
+      // the main review is skipped by the app's record of a direct Task (only when nothing large is left), never by what the branch is called
+      const small = (await judged([], false)).impact === "small";
+      if (small) smalls++;
+      expect([c.name, (await judged([], false, true)).reviewSkipped === true]).toEqual([c.name, small]);
+      expect([c.name, (await judged([], false, false)).reviewSkipped === true]).toEqual([c.name, false]);
+    }
+    expect(outcomes.size).toBeGreaterThanOrEqual(2);
+    // the direct check above is not vacuous: a case with nothing large is there
+    expect(smalls).toBeGreaterThan(0);
+  });
+
+  test("the app out of reach is no judgement", async () => {
+    const keyed = appWith([]).env;
+    const noKey = { MERGE_RECORDS_URL: "http://app.test" }; // an address with no key file
+    const run = async (args: string[]) => JSON.stringify(args[0] === "pr" ? view : args[1]?.includes("/actions/runs") ? runs : threads([]));
+    const errs: string[] = [];
+    const refuse = (async () => { throw new Error("connect refused"); }) as unknown as typeof fetch;
+    const error = (async () => new Response("down", { status: 500 })) as unknown as typeof fetch;
+    const nothing = (async () => Response.json({ ok: true })) as unknown as typeof fetch;
+    for (const [env, f] of [[keyed, refuse], [keyed, error], [keyed, nothing], [noKey, undefined]] as const) {
+      errs.length = 0;
+      const code = await main(["1", "--repo", REPO, "--merge"], run, () => {}, (e) => errs.push(e), () => REPO, undefined, undefined, { env: { ...env, SWITCHBOARD_HOME: "/nonexistent" }, fetch: f });
+      expect([code, errs.join("\n").includes("判定できなかった")]).toEqual([2, true]);
+    }
+  });
+
+  test("the PR's comments are not asked of GitHub at all", async () => {
+    calls.length = 0;
+    await readPr(1, fake(threads([])));
+    expect(calls.find((a) => a[0] === "pr")!.join(" ")).not.toContain("comments");
   });
 
   test("CI comes from the head commit's Actions runs, not statusCheckRollup (a fine-grained token has no Checks)", async () => {
@@ -1315,8 +1481,10 @@ describe("merge-gate readPr", () => {
 
     test("a file no Task names is a note, not a reason, and nothing is recorded in the app; --scope prints the material and judges nothing", async () => {
       const posts: string[] = [];
-      const fetchApp = async (url: string) => { posts.push(url); return Response.json({ recorded: true }); };
-      const env = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", OPS_KIT_TASK_ID: "t1" };
+      // the app answers its records (the PR's main review); any other call to it would be a record written
+      const records = appWith([reviewJob("abc123", { pr: 12 })]);
+      const fetchApp = async (url: string, init?: RequestInit) => (String(url).includes("/api/merge-records") ? records.fetch(url, init) : (posts.push(url), Response.json({ recorded: true })));
+      const env = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", BACKLOG_TOKEN_FILE: records.env.MERGE_RECORDS_TOKEN_FILE, OPS_KIT_TASK_ID: "t1" };
       const run = async (path: string, extra: string[] = []) => {
         const g = gate({ body: "Closes #5", headRefName: "sb/5-a" });
         const out: string[] = [];
@@ -1351,7 +1519,7 @@ describe("merge-gate readPr", () => {
       { id: 2, name: "CI", status: "queued", conclusion: null, created_at: "2026-09-24T13:00:00Z" }, // a later run just started
       { id: 3, name: "release", status: "completed", conclusion: "skipped", created_at: "2026-09-24T12:00:00Z" },
     ])).toEqual([{ name: "CI", conclusion: "" }, { name: "release", conclusion: "SKIPPED" }]);
-    expect(judge({ files: [], headCommittedAt: "2026-09-24T10:00:00Z", checks: checksFromRuns([{ id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "x" }]), unresolvedThreads: 0, mergeState: "CLEAN", reviewComments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z" }] }, { allowLarge: false }).reasons)
+    expect(judge({ files: [], checks: checksFromRuns([{ id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "x" }]), unresolvedThreads: 0, mergeState: "CLEAN", reviewed: true, answers: [] }, { allowLarge: false }).reasons)
       .toEqual(["CI のチェック CI が FAILURE"]);
     expect(checksFromRuns([])).toEqual([]);
   });
@@ -1412,19 +1580,24 @@ describe("merge-gate readPr", () => {
     });
     afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
-    /** A result mark, the first line only (another repository's copy of local-ci writes no more). */
-    const pass = (head: string, base = BASE) => `[local-ci] pass ${head} base=${base}\n\n| 手順 | 結果 |`;
-    const fail = (head: string, base = BASE) => `[local-ci] fail ${head} base=${base}\n\n結果: \`bun test\` が exit 1`;
-    const owner = (bodies: string[]) => bodies.map((body, i) => ({ body, createdAt: `2026-09-24T11:3${i}:00Z`, authorAssociation: "OWNER" }));
+    /** A local CI job's record (its PR is set by `facts`: the one it is read for, or the stack's top). */
+    const pass = (head: string, base = BASE, stepsHash?: string) => ciJob("pass", head, base, stepsHash);
+    const fail = (head: string, base = BASE) => ciJob("fail", head, base);
     /**
      * PR `n` (head branch `b<n>`, head `head` and base tip `baseTip`, by default the stack's) and its stack: `above` = the
-     * open PRs per base branch (`b1: [2]` → `#2` is on `#1`), the top's comments `top`. `comment` / `comments`: PR n's, by the
-     * owner, a minute apart. `runs: false` = no Actions run at all; `conclusion`: the one run's (default failure).
+     * open PRs per base branch (`b1: [2]` → `#2` is on `#1`), the top's jobs `top`. `comment` / `comments`: PR n's jobs, oldest
+     * first. `runs: false` = no Actions run at all; `conclusion`: the one run's (default failure).
      * `root` / `from`: where merge-gate fetches to and from (default the clone and "GitHub").
      */
-    const facts = (opts: { n?: number; comment?: string; comments?: string[]; steps: number; runs?: boolean; conclusion?: string; status?: string; mergeState?: string; above?: Record<string, number[]>; top?: string[]; head?: string; baseTip?: string; root?: string; from?: string }) => {
+    const facts = (opts: { n?: number; comment?: MergeRecordJob; comments?: MergeRecordJob[]; steps: number; runs?: boolean; conclusion?: string; status?: string; mergeState?: string; above?: Record<string, number[]>; top?: MergeRecordJob[]; head?: string; baseTip?: string; root?: string; from?: string }) => {
       const n = opts.n ?? 1;
-      const bodies = opts.comments ?? (opts.comment ? [opts.comment] : []);
+      const own = opts.comments ?? (opts.comment ? [opts.comment] : []);
+      // the top of the stack: up by the one PR above while there is exactly one
+      let top = n;
+      for (let more = opts.above?.[`b${top}`]; more?.length === 1; more = opts.above?.[`b${top}`]) top = more[0]!;
+      const jobs = [...own.map((j) => ({ ...j, pr: n })), ...(opts.top ?? []).map((j) => ({ ...j, pr: top }))];
+      const jobsAsked: Array<[string, number[]]> = [];
+      const jobsOf: JobsOf = async (repo, prs) => (jobsAsked.push([repo, prs]), jobs.filter((j) => prs.includes(j.pr)));
       const v = {
         ...view,
         headRefName: `b${n}`,
@@ -1432,10 +1605,9 @@ describe("merge-gate readPr", () => {
         baseRefName: "main",
         baseRefOid: opts.baseTip ?? (n === 1 ? S.main0 : S[`b${n - 1}`]),
         mergeStateStatus: opts.mergeState ?? "CLEAN",
-        comments: [...view.comments, ...owner(bodies)],
       };
       const r = { workflow_runs: opts.runs === false ? [] : [{ id: 7, name: "CI", status: opts.status ?? "completed", conclusion: opts.status ? null : opts.conclusion ?? "failure", created_at: "2026-09-24T12:00:00Z" }] };
-      const jobs = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
+      const actions = { jobs: [{ name: "test", steps: Array.from({ length: opts.steps }, () => ({ name: "x" })) }] };
       const asked: string[] = [];
       const run = async (args: string[]) => {
         asked.push(args.join(" "));
@@ -1443,16 +1615,15 @@ describe("merge-gate readPr", () => {
           const ref = args[args.indexOf("--base") + 1]!;
           return JSON.stringify((opts.above?.[ref] ?? []).map((number) => ({ number, headRefName: `b${number}` })));
         }
-        // an outsider's pass on the top (newer than the owner's) does not count
-        if (args[0] === "pr" && args.at(-1) === "comments") return JSON.stringify({ comments: [...owner(opts.top ?? []), { body: pass(S.b2fix!), createdAt: "2026-09-24T13:00:00Z", authorAssociation: "NONE" }] });
         if (args[0] === "pr") return JSON.stringify(v);
-        if (args[1]?.endsWith("/actions/runs/7/jobs")) return JSON.stringify(jobs);
+        if (args[1]?.endsWith("/actions/runs/7/jobs")) return JSON.stringify(actions);
         if (args[1]?.includes("/actions/runs")) return JSON.stringify(r);
         return JSON.stringify(threads([]));
       };
-      return { asked, run, read: (repo?: string, held?: Parameters<typeof readPr>[4]) => readPr(n, run, repo, { root: opts.root ?? clone, url: opts.from ?? url }, held) };
+      return { asked, jobsAsked, run, jobs, read: (repo?: string, held?: Parameters<typeof readPr>[4]) => readPr(n, run, repo, { root: opts.root ?? clone, url: opts.from ?? url }, held, jobsOf) };
     };
-    const reasons = (f: PrFacts) => judge({ ...f, unresolvedThreads: 0 }, { allowLarge: false }).reasons;
+    // the main review is the app's record too, given here, so the reasons are the CI's
+    const reasons = (f: PrFacts) => judge({ ...f, unresolvedThreads: 0, reviewed: true }, { allowLarge: false }).reasons;
     const SUCCESS = [{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }];
     const STACK = { b1: [2], b2: [3] };
 
@@ -1467,64 +1638,30 @@ describe("merge-gate readPr", () => {
       expect(reasons({ ...f, mergeState: "UNSTABLE", localCi: undefined })).toEqual(["mergeStateStatus が CLEAN でない: UNSTABLE"]);
     });
 
-    test("a narrowed pass counts as any pass: the comment's added lines change nothing", async () => {
-      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [], selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
-      expect(await localCiOf(1, 1, [{ body, createdAt: "2026-11-01T00:00:00Z" }], async () => "", "o/r", async (h) => h === S.b1)).toEqual({ pass: true });
-    });
-
-    test("an incremental pass of the head after a fix commit counts as any pass: the 増分 line changes nothing", async () => {
-      const incremental = resultComment({ sha: S.b2fix!, base: BASE, ok: true, results: [], incremental: { pass: S.b2!, commits: 1, files: 1 }, selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
-      expect(incremental).toContain(`増分: ${S.b2!.slice(0, 7)} の pass の後の 1 コミット（変更 1 ファイル）`);
-      // `#2` is the top here: the fix commit is in the pass's head, with the same diff
-      const f = await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), incremental], steps: 0 }).read();
+    test("an incremental pass of the head after a fix commit counts as any pass of that head", async () => {
+      // `#2` is the top here: its newest record is the pass of the fix commit
+      const f = await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), pass(S.b2fix!)], steps: 0 }).read();
       expect(f.checks).toEqual(SUCCESS);
       expect(f.localCi).toBe(true);
       expect(reasons(f)).toEqual([]);
-      // the same without the line (a full run of that head) counts the same
-      expect(reasons(await facts({ n: 2, head: S.b2fix, comments: [pass(S.b2!), pass(S.b2fix!)], steps: 0 }).read())).toEqual([]);
     });
 
-    test("before the incremental pass is posted, the newest result is the earlier pass and the fix commit is not counted", async () => {
+    test("before the incremental pass is recorded, the newest record is the earlier pass and the fix commit is not counted", async () => {
       const f = await facts({ n: 2, head: S.b2fix, comment: pass(S.b2!), steps: 0 }).read();
       expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
       expect(reasons(f)).toContain(`この PR のコミットが #2 の pass（${S.b2!.slice(0, 7)}）に同じ差分で入っていない（一番上で回し直す）`);
     });
 
-    test("a pass whose comment has no perf step counts as SUCCESS: the gate asks for the mark only (a PR's run does not measure perf)", async () => {
-      const steps = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"].map((name) => ({ name, code: 0, seconds: 1 }));
-      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: steps as never, selection: { files: ["a.test.ts"], total: 200, reason: "x" } });
-      expect(body).not.toMatch(/perf-bench|perf-ratchet|bundle:|grew:/);
-      const f = await facts({ comment: body, steps: 0, runs: false }).read();
-      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
-      expect(f.localCi).toBe(true);
-      expect(reasons(f)).toEqual([]);
-    });
-
-    test("a pass that subtracted known failures merges like any pass: the gate reads the first line only", async () => {
-      const steps = ["bun install --frozen-lockfile", "bun run typecheck"].map((name) => ({ name, code: 0, seconds: 1 }));
-      const bun = { name: "bun test", run: "bun test", code: 1, seconds: 1, tail: "", fails: [] };
-      const known = { subtracted: [{ line: "(fail) a.test.ts > flaky [1.0ms]", issue: 4826, until: "2026-12-01" }], expired: [] };
-      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [...steps, bun] as never, known });
-      expect(body).toContain("既知の失敗を差し引いた（known-failures.json、base の登録）:");
-      expect(body.split("\n")[0]).toBe(`[local-ci] pass ${S.b1} base=${BASE}`);
-      const f = await facts({ comment: body, steps: 0, runs: false }).read();
-      expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
-      expect(f.localCi).toBe(true);
-      expect(reasons(f)).toEqual([]);
-    });
-
     test("a pass whose steps came from the settings Switchboard keeps for the workspace (nothing in the repository, no Actions run) merges like any pass when those steps are the ones the person confirmed; with other steps, or none confirmed, it is no CI check", async () => {
-      const body = resultComment({ sha: S.b1!, base: BASE, ok: true, results: [{ name: "check", run: "make check", code: 0, seconds: 1, tail: "" }], source: { workspace: "lib", hash: "0123456789ab" } });
-      expect(body.split("\n")[0]).toBe(`[local-ci] pass ${S.b1} base=${BASE}`);
-      expect(body).toContain("手順の出どころ: Switchboard の側の設定（workspace `lib`、手順のハッシュ `0123456789ab`）");
+      const record = pass(S.b1!, BASE, "0123456789ab");
       const held = { workspace: "lib", version: "aaaaaaaaaaaa", ciHash: "0123456789ab", pending: null };
-      const f = await facts({ comment: body, steps: 0, runs: false }).read(undefined, held);
+      const f = await facts({ comment: record, steps: 0, runs: false }).read(undefined, held);
       expect(f.checks).toEqual([{ name: "local-ci（Actions の run が無く、ローカルで pass）", conclusion: "SUCCESS" }]);
       expect(reasons(f)).toEqual([]);
       expect(f.held).toEqual(held);
-      // the same comment against other confirmed steps, or with nothing confirmed for the clone: the pass does not count
+      // the same record against other confirmed steps, or with nothing confirmed for the clone: the pass does not count
       for (const other of [{ ...held, ciHash: "ffffffffffff" }, undefined]) {
-        const g = await facts({ comment: body, steps: 0, runs: false }).read(undefined, other);
+        const g = await facts({ comment: record, steps: 0, runs: false }).read(undefined, other);
         expect(g.checks).toEqual([]);
         expect(reasons(g)).toEqual(["CI のチェックが 1 つも無い", expect.stringContaining("利用者の確かめた設定の手順")]);
       }
@@ -1568,8 +1705,8 @@ describe("merge-gate readPr", () => {
       expect(reasons(await facts({ comment: pass(S.b1!), steps: 0, status: "in_progress" }).read())).toContain("CI のチェック CI が 未完了");
     });
 
-    test("the older head-only mark, a mark not at the start, or none: FAILURE with no note; the jobs are not read", async () => {
-      for (const comment of [`[local-ci] pass ${S.b1}`, `ok ${pass(S.b1!)}`, undefined]) {
+    test("a run that left no result (from a terminal, or its head or base moved before it posted), or no run at all: FAILURE with no note; Actions' jobs are not read", async () => {
+      for (const comment of [ciJob("pass", S.b1!, BASE, undefined, { result: null }), job({ kind: "local-ci", runner: null, head: S.b1!, base: BASE, result: { ci: { outcome: "unknown" } } }), undefined]) {
         const x = facts({ comment, steps: 0 });
         const f = await x.read();
         expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
@@ -1578,15 +1715,26 @@ describe("merge-gate readPr", () => {
       }
     });
 
+    test("a comment alone is no CI: a [local-ci] pass comment of the head, by the owner, counts for nothing", async () => {
+      const x = facts({ steps: 0 });
+      const f = await readPr(1, async (args) => (args[0] === "pr" && args[1] === "view" ? JSON.stringify({ ...JSON.parse(await x.run(args)), comments: [{ body: `[local-ci] pass ${S.b1} base=${BASE}\n\n結果`, createdAt: "2026-09-24T11:30:00Z", authorAssociation: "OWNER" }] }) : x.run(args)), undefined, { root: clone, url }, undefined, async () => []);
+      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
+      expect(f.localCi).toBeUndefined();
+    });
+
     test("the newest result of the top counts: a fail after a pass is no pass; a pass after a fail is", async () => {
       const failed = await facts({ comments: [pass(S.b1!), fail(S.b1!)], steps: 0 }).read();
       expect(reasons(failed)).toContain("一番上の PR #1 の local-ci の最新が fail");
+      // the newest is by the job's id, not by where it is in the list
+      const reversed = facts({ comments: [pass(S.b1!), fail(S.b1!)], steps: 0 });
+      reversed.jobs.reverse();
+      expect(reasons(await reversed.read())).toContain("一番上の PR #1 の local-ci の最新が fail");
       expect((await facts({ comments: [fail(S.b1!), pass(S.b1!)], steps: 0 }).read()).checks).toEqual(SUCCESS);
     });
 
     test("BLOCKED with the local pass: the base branch's protection stops it, and the reason says local-ci cannot meet it", async () => {
       const f = await facts({ comment: pass(S.b1!), steps: 0, mergeState: "BLOCKED" }).read();
-      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（docs/merge-gate.md の「Branch protection and local results」）"]);
+      expect(reasons(f)).toEqual(["mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果はアプリの仕事の記録で、GitHub の必須チェックにはならない（docs/merge-gate.md の「Branch protection and local results」）"]);
       // without a local pass BLOCKED is said as before
       expect(reasons({ ...f, localCi: undefined, checks: [{ name: "CI", conclusion: "SUCCESS" }] })).toEqual(["mergeStateStatus が CLEAN でない: BLOCKED"]);
     });
@@ -1602,7 +1750,8 @@ describe("merge-gate readPr", () => {
       expect(f.checks).toEqual(SUCCESS);
       expect(f.localCiNote).toBeUndefined();
       expect(reasons(f)).toEqual([]);
-      expect(x.asked).toContain(`pr view 3 -R ${REPO} --json comments`);
+      // one read of the app's records for this PR and the top, with the repository in lower case
+      expect(x.jobsAsked).toEqual([[REPO, [1, 3]]]);
       expect(reasons(await facts({ n: 2, steps: 0, above: { b2: [3] }, top: [pass(S.b3!)] }).read())).toEqual([]);
       expect(reasons(await facts({ steps: 0, above: STACK, top: [pass(S.b3!), fail(S.b3!)] }).read())).toContain("一番上の PR #3 の local-ci の最新が fail");
     });
@@ -1633,82 +1782,85 @@ describe("merge-gate readPr", () => {
       expect(reasons(await facts({ n: 2, head: S.b2fix, comment: pass(S.b2!), steps: 0 }).read())).toContain(`この PR のコミットが #2 の pass（${S.b2!.slice(0, 7)}）に同じ差分で入っていない（一番上で回し直す）`);
     });
 
-    test("not judged: no git worktree or a fetch that fails throws, main exits 2", async () => {
+    test("a job at an older head counts only when the PR's commits are in it with the same diff", async () => {
+      const jobsAt = (h: string): MergeRecordJob[] => [
+        reviewJob(h), reviewJob(h, { as: "attack" }), reviewJob(h, { as: "recheck", kinds: ["size"] }), job({ kind: "recheck", head: h, kinds: ["migration"] }), pass(h),
+      ];
+      const read = async (head: string, baseTip: string, jobs: MergeRecordJob[]) => {
+        const f = await facts({ n: 2, head, baseTip, comments: jobs, steps: 0 }).read();
+        return { reviewed: f.reviewed, attacked: f.attacked, rechecks: f.rechecks, ci: f.localCi === true };
+      };
+      // the same head: all of them count (the command recheck is of this head)
+      expect(await read(S.b2!, S.b1!, jobsAt(S.b2!))).toEqual({ reviewed: true, attacked: true, rechecks: ["size", "migration"], ci: true });
+      // a fix commit since (the diff of the PR is not the job's): none of them
+      expect(await read(S.b2fix!, S.b1!, jobsAt(S.b2!))).toEqual({ reviewed: undefined, attacked: undefined, rechecks: undefined, ci: false });
+      // GitHub's rebase after the PR below merged keeps each commit's diff: what the jobs read still counts, but a recheck a command decides is run again for every head
+      expect(await read(S.b2r!, S.main1!, jobsAt(S.b2!))).toEqual({ reviewed: true, attacked: true, rechecks: ["size"], ci: true });
+      // a conflict resolution in a merge commit is a change of the diff too
+      expect(await read(S.b2merge!, S.b1!, jobsAt(S.b2!))).toMatchObject({ reviewed: undefined, attacked: undefined });
+    });
+
+    test("a record naming a commit that cannot be fetched (never pushed) covers nothing, and a record of the PR's own head beside it still counts", async () => {
+      const gone = "d".repeat(40);
+      const f = await facts({ comments: [reviewJob(gone), reviewJob(gone, { as: "attack" }), reviewJob(S.b1!), pass(gone), pass(S.b1!)], steps: 0 }).read();
+      expect(f.reviewed).toBe(true);
+      expect(f.attacked).toBeUndefined();
+      // the newest CI record is the one of the current head
+      expect(f.localCi).toBe(true);
+      // with only the record of the unreadable commit: no CI, no review, and the reason names it; nothing throws
+      const only = await facts({ comments: [reviewJob(gone), pass(gone)], steps: 0 }).read();
+      expect([only.reviewed, only.localCi, only.localCiNote]).toEqual([undefined, undefined, expect.stringContaining("同じ差分で入っていない")]);
+    });
+
+    test("not judged: no git worktree or a fetch that fails for another reason than a commit the remote lacks throws, main exits 2", async () => {
       const plain = join(dir, "plain");
       mkdirSync(plain, { recursive: true });
-      await expect(facts({ comment: pass(S.b1!), steps: 0, root: plain }).read()).rejects.toThrow("git の作業ツリーでない");
+      // the pass is of an older head than the PR's now: whether the PR's commits are in it is asked of git
+      const older = { n: 2, head: S.b2fix, comment: pass(S.b2!), steps: 0 };
+      await expect(facts({ ...older, root: plain }).read()).rejects.toThrow("git の作業ツリーでない");
       // an empty worktree: the commits are not there yet (git does not ask the remote for commits it already has)
       const empty = join(dir, "empty");
       execFileSync("git", ["init", "-q", empty]);
-      await expect(facts({ comment: pass(S.b1!), steps: 0, root: empty, from: join(dir, "none.git") }).read()).rejects.toThrow("を fetch できない");
+      // a fetch that fails for any reason but the remote lacking the commit (here: no such remote; the network and a login fail alike) is no judgement
+      await expect(facts({ ...older, root: empty, from: join(dir, "none.git") }).read()).rejects.toThrow("を fetch できない");
       const errs: string[] = [];
-      const code = await main(["1", "--repo", "o/r"], facts({ comment: pass(S.b1!), steps: 0 }).run, () => {}, (e) => errs.push(e), () => undefined, undefined, plain);
+      const app = appWith([{ ...pass(S.b2!), pr: 2 }]);
+      const code = await main(["2", "--repo", "o/r"], facts(older).run, () => {}, (e) => errs.push(e), () => undefined, undefined, plain, { env: app.env, fetch: app.fetch });
       expect(code).toBe(2);
       expect(errs.join("\n")).toContain("git の作業ツリーでない");
     });
   });
 
-  test("recheck: only the head's [recheck] <kind> pass marks go in rechecks", async () => {
+  test("recheck: only the app's recheck records of the head go in rechecks", async () => {
     const HEAD = "0123456789abcdef0123456789abcdef01234567";
     const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
-    const read = (bodies: string[]) => {
-      const v = { ...view, headRefOid: HEAD, comments: [...view.comments, ...bodies.map((body) => ({ body, createdAt: "2026-09-24T11:30:00Z", authorAssociation: "COLLABORATOR" }))] };
-      return readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.includes("/actions/runs") ? runs : threads([])));
+    const read = (jobs: MergeRecordJob[], comments: unknown[] = []) => {
+      const v = { ...view, headRefOid: HEAD, comments };
+      return readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.includes("/actions/runs") ? runs : threads([])), undefined, undefined, undefined, async () => jobs);
     };
+    const command = (kind: string, head = HEAD, over: Partial<MergeRecordJob> = {}) => job({ kind: "recheck", head, kinds: [kind], ...over });
+    const asRecheck = (kinds: string[], head = HEAD, over: Partial<MergeRecordJob> = {}) => reviewJob(head, { as: "recheck", kinds, ...over });
     const f = await read([
-      `[recheck] migration pass ${HEAD}\n\n24 pass`,
-      `[recheck] responsibility pass ${HEAD}`,
-      `[recheck] rescue pass ${HEAD}`,
-      `[recheck] design-rules pass ${OTHER}`, // an older head
-      `[recheck] size pass ${OTHER}`, // an older head
-      `ok [recheck] size pass ${HEAD}`, // not at the start
-      `[recheck] security pass ${HEAD}`, // not a kind
-      `[recheck] security:lockfile pass ${HEAD}`, // a security group the owner moved to a recheck
-      `[recheck] security:words pass ${HEAD}`, // an asked group: not a recheck kind
+      command("migration"),
+      asRecheck(["responsibility"]),
+      command("rescue"), asRecheck(["rescue"]),
+      command("security:lockfile", OTHER), // a command is run again for every head
+      command("size"), // size is read by a review: a command job of it is nothing
+      asRecheck(["security:docs"], HEAD, { status: "fail" }), // a review that did not pass
+      asRecheck(["security:tests"], HEAD, { result: reviewOutput(["should-fix"]) }), // a finding of weight
+      asRecheck([]), // no kind named: it satisfies none
+      reviewJob(HEAD), // a main review is no recheck
     ]);
-    expect(f.rechecks).toEqual(["security:lockfile", "responsibility", "migration", "rescue"]);
+    expect([...f.rechecks!].sort()).toEqual(["migration", "rescue", "responsibility"]);
     expect((await read([])).rechecks).toBeUndefined();
+    // a comment of the mark is nothing
+    expect((await read([], [{ body: `[recheck] migration pass ${HEAD}`, createdAt: "2026-09-24T11:30:00Z", authorAssociation: "OWNER" }])).rechecks).toBeUndefined();
   });
 
-  test("marks by an author outside the repository (a public --repo) do not count: review, [local-ci], [recheck]", async () => {
-    // a pass that would count but for its author: the PR's head on the PR's base, both in a real repository (inPass reads them)
-    const dir = mkdtempSync(join(tmpdir(), "merge-gate-outsider."));
-    try {
-      const url = join(dir, "gh.git");
-      const a = join(dir, "author");
-      const clone = join(dir, "clone");
-      const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
-      for (const x of [["--bare", url], ["-b", "main", a], [clone]]) execFileSync("git", ["init", "-q", ...x]);
-      for (const [k, val] of [["user.name", "t"], ["user.email", "t@example.com"], ["commit.gpgsign", "false"]]) git(a, "config", k!, val!);
-      const commit = (file: string) => (writeFileSync(join(a, file), `${file}\n`), git(a, "add", file), git(a, "commit", "-q", "-m", file), git(a, "rev-parse", "HEAD"));
-      const BASE = commit("README");
-      const HEAD = commit("one");
-      git(a, "push", "-q", url, `${HEAD}:refs/heads/pr`);
-      const outsider = (body: string, authorAssociation?: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", ...(authorAssociation ? { authorAssociation } : {}) });
-      const facts = (localCiAuthor: string) => {
-        const v = {
-          ...view,
-          headRefOid: HEAD,
-          baseRefOid: BASE,
-          comments: [
-            outsider("[claude] review"),
-            outsider(`[recheck] migration pass ${HEAD}`, "CONTRIBUTOR"),
-            outsider(`[local-ci] pass ${HEAD} base=${BASE}`, localCiAuthor),
-            { ...view.comments[0]!, authorAssociation: "FIRST_TIME_CONTRIBUTOR" },
-          ],
-        };
-        const r = { workflow_runs: [{ id: 7, name: "CI", status: "completed", conclusion: "failure", created_at: "2026-09-24T12:00:00Z" }] };
-        return readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? v : args[1]?.endsWith("/jobs") ? { jobs: [{ steps: [] }] } : args[1]?.includes("/actions/runs") ? r : threads([])), REPO, { root: clone, url });
-      };
-      const f = await facts("NONE");
-      expect(f.reviewComments).toEqual([]);
-      expect(f.rechecks).toBeUndefined();
-      expect(f.checks).toEqual([{ name: "CI", conclusion: "FAILURE" }]);
-      // the same mark by the owner counts: only the author rule kept it out above
-      expect((await facts("OWNER")).checks).toEqual([{ name: "CI（Actions が始まらず、ローカルで pass）", conclusion: "SUCCESS" }]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("a job of another PR in the same answer is not this PR's review, recheck or attack", async () => {
+    const f = await readPr(1, async (args) => JSON.stringify(args[0] === "pr" ? view : args[1]?.includes("/actions/runs") ? runs : threads([])), undefined, undefined, undefined, async () => [reviewJob("abc123", { pr: 2 }), reviewJob("abc123", { pr: 2, as: "attack" })]);
+    expect(f.reviewed).toBeUndefined();
+    expect(f.attacked).toBeUndefined();
   });
 
   describe("README.md's Design rules", () => {
@@ -1820,25 +1972,35 @@ describe("merge command merges only on verdict merge", () => {
     baseRefName: "main",
     headRefOid: SHA,
     mergeStateStatus: "CLEAN",
-    comments: [{ body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" }],
+    comments: [],
     ...over,
   });
+  /** The app's records: a passed main review of each PR's head (`attack`: and an attacking review of PR 7's). */
+  const reviewed = (heads: Record<number, string>, attack = false) => appWith([...Object.entries(heads).map(([pr, head]) => reviewJob(head, { pr: Number(pr), repo: REPO })), ...(attack ? [reviewJob(SHA, { pr: 7, repo: REPO, as: "attack" })] : [])]);
   const runs = { workflow_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success", created_at: "2026-09-24T12:00:00Z" }] };
   const threads = { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } };
-  const gate = async (args: string[], v: Record<string, unknown> | Error = view(), o: { local?: string; headNow?: string } = {}) => {
+  // GitHub's Stacks REST API as gh stack reads it: no stack numbered like a PR (404), and the stack of a PR
+  const notFound = () => { throw new Error("gh api repos/x/stacks/7 failed: gh: Not Found (HTTP 404)"); };
+  const remote = (prs: Array<{ number: number; head: string; ref?: string; state?: string; draft?: boolean; merged?: boolean }>, base = "main") =>
+    JSON.stringify([{ number: 100, base: { ref: base }, pull_requests: prs.map((p) => ({ number: p.number, state: p.state ?? "open", draft: p.draft ?? false, merged_at: p.merged ? "2026-11-21T00:00:00Z" : null, head: { sha: p.head, ref: p.ref ?? `feat/${p.number}` } })) }]);
+  const gate = async (args: string[], v: Record<string, unknown> | Error = view(), o: { local?: string; headNow?: string; app?: ReturnType<typeof appWith> } = {}) => {
     const calls: string[][] = [];
     const errs: string[] = [];
+    let reads = 0;
     const code = await main(args, async (a) => {
       calls.push(a);
+      if (a[0] === "api" && /\/stacks\/\d+$/.test(a[1]!)) return notFound();
+      // the first read is the judgement's; a later one (just before the merge) sees headNow
+      if (a[0] === "api" && a[1]!.includes("/stacks?")) return remote([{ number: 7, head: reads++ === 0 ? SHA : o.headNow ?? SHA }]);
       if (a[0] === "pr" && a[1] === "view") {
         if (v instanceof Error) throw v;
-        return a.includes("-q") ? `${o.headNow ?? SHA}\n` : JSON.stringify(v);
+        return a.includes("-q") ? `${o.headNow ?? SHA} main\n` : JSON.stringify(v);
       }
       if (a[0] === "repo") return "main\n";
       if (a[0] === "pr" && a[1] === "list") return "[]";
       if (a[0] === "pr" || a[0] === "stack") return "";
       return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
-    }, () => {}, (e) => errs.push(e), () => o.local ?? REPO);
+    }, () => {}, (e) => errs.push(e), () => o.local ?? REPO, undefined, undefined, o.app ?? reviewed({ 7: SHA }));
     return { code, merges: calls.filter((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack"), errs };
   };
 
@@ -1856,22 +2018,169 @@ describe("merge command merges only on verdict merge", () => {
       if (a[0] === "pr" && a[1] === "list") return "[]";
       if (a[0] === "pr") return "";
       return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
-    }, () => {}, () => {}, () => REPO);
+    }, () => {}, () => {}, () => REPO, undefined, undefined, appWith([], { direct: [7] }));
     expect(code).toBe(0);
     expect(calls.filter((a) => a[0] === "pr" && (a[1] === "comment" || a[1] === "merge")).map((a) => a[1])).toEqual(["comment", "merge"]);
     expect(calls.find((a) => a[1] === "comment")![6]).toBe(`[merge-direct] ${SHA}`);
+  });
+
+  test("--merge-sync merges only the sync PR of the local main, with a Merge commit at the judged head", async () => {
+    const ok = await gate(["7", "--merge-sync"], view({ headRefName: "sb/sync-main-abcdef0" }));
+    expect(ok.code).toBe(0);
+    expect(ok.merges).toEqual([["pr", "merge", "7", "-R", REPO, "--merge", "--delete-branch", "--match-head-commit", SHA]]);
+    // any other branch is an ordinary PR: it goes in with --merge, not as a Merge commit; a verdict that is a stop merges nothing either way
+    for (const branch of ["feat/x", "sb/sync-main-abcdef", "sb/sync-main-abcdef01", undefined]) {
+      const r = await gate(["7", "--merge-sync"], view(branch ? { headRefName: branch } : {}));
+      expect([branch, r.code, r.merges, r.errs]).toEqual([branch, 1, [], [expect.stringContaining("同期の PR ではない")]]);
+    }
   });
 
   test("--merge-stack calls gh stack merge for the bottom PR of the working tree's repository at the judged head", async () => {
     const r = await gate(["7", "--merge-stack"]);
     expect(r.code).toBe(0);
     expect(r.merges).toEqual([["stack", "merge", "7", "--rebase", "-y"]]);
-    // gh stack merges everything below the PR: an upper PR (base = another branch) is not merged
-    expect(await gate(["7", "--merge-stack"], view({ baseRefName: "sb/1-lower" }))).toMatchObject({ code: 1, merges: [] });
     // gh stack takes no -R: a --repo other than the working tree's origin would merge another repository's PR of that number
     expect(await gate(["7", "--merge-stack", "--repo", "acme/lib"])).toMatchObject({ code: 1, merges: [] });
     // a push after the judgement
     expect(await gate(["7", "--merge-stack"], view(), { headNow: "e".repeat(40) })).toMatchObject({ code: 1, merges: [] });
+  });
+
+  describe("merge-stack of a stack of three", () => {
+    const HEADS: Record<number, string> = { 5: "5".repeat(40), 6: "6".repeat(40), 7: "7".repeat(40) };
+    const BRANCH: Record<number, string> = { 5: "feat/a", 6: "feat/b", 7: "feat/c" };
+    // `movedAt`: the stack read (0 = the judgement's) from which `moved` has its new head; `ownLags`: the stack keeps the old head, the PR has the new one
+    type O = { dirty?: number; moved?: number; movedAt?: number; ownLags?: boolean; unreadable?: number; numbered?: boolean; stackBase?: string; draft?: number; merged?: number; inserted?: boolean; direct?: number; stacks?: number; rebased?: number; lastReadFails?: boolean; headReadFails?: boolean; repoReadFails?: boolean; retargeted?: number };
+    const stack = async (args: string[], o: O = {}) => {
+      const calls: string[][] = [];
+      const out: string[] = [];
+      let reads = 0;
+      // a direct PR's branch is sb/direct-<n>, and the PR above it is based on that branch
+      const branchOf = (p: number) => o.direct === p ? `sb/direct-${p}` : BRANCH[p]!;
+      const baseOf = (p: number) => p === 5 || (o.merged === 5 && p === 6) ? "main" : branchOf(p - 1);
+      const code = await main(args, async (a) => {
+        calls.push(a);
+        if (a[0] === "api" && /\/stacks\/\d+$/.test(a[1]!)) return o.numbered ? "{}" : notFound();
+        if (a[0] === "api" && a[1]!.includes("/stacks?")) {
+          if (o.stacks === 0) return "[]";
+          const read = reads++;
+          if (o.lastReadFails && read > 0) throw new Error("timeout");
+          const later = read >= (o.movedAt ?? 1);
+          // `moved` / `inserted` happen after the judgement's read, before the merge
+          const prs = [5, 6, 7].map((p) => ({ number: p, head: later && o.moved === p && !o.ownLags ? "e".repeat(40) : HEADS[p]!, ref: BRANCH[p], draft: o.draft === p, merged: o.merged === p }));
+          if (later && o.inserted) prs.splice(1, 0, { number: 9, head: "9".repeat(40), ref: "feat/x", draft: false, merged: false });
+          return remote(prs, o.stackBase);
+        }
+        if (a[0] === "pr" && a[1] === "view") {
+          const pr = Number(a[2]);
+          if (a.includes("-q") && o.headReadFails && reads > 1) throw new Error("timeout");
+          if (a.includes("-q")) return `${reads - 1 >= (o.movedAt ?? 1) && o.moved === pr ? "e".repeat(40) : HEADS[pr]} ${reads > 1 && o.retargeted === pr ? "feat/other" : baseOf(pr)}\n`;
+          if (o.rebased === pr) return JSON.stringify(view({ baseRefName: "feat/other", headRefName: branchOf(pr), headRefOid: HEADS[pr] }));
+          if (o.unreadable === pr) throw new Error("network");
+          return JSON.stringify(view({ baseRefName: baseOf(pr), headRefName: branchOf(pr), headRefOid: HEADS[pr], ...(o.dirty === pr ? { mergeStateStatus: "DIRTY" } : {}), }));
+        }
+        if (a[0] === "repo") {
+          // the judgement reads the default branch once; mergePr reads it again
+          if (o.repoReadFails && calls.filter((c) => c[0] === "repo").length > 1) throw new Error("timeout");
+          return "main\n";
+        }
+        if (a[0] === "pr" && a[1] === "list") return "[]";
+        if (a[0] === "pr" || a[0] === "stack") return "";
+        return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
+      }, (s) => out.push(s), (e) => out.push("ERR " + e), () => REPO, undefined, undefined, appWith(Object.entries(HEADS).map(([pr, head]) => reviewJob(head, { pr: Number(pr), repo: REPO })), { direct: o.direct ? [o.direct] : [] }));
+      const json = out.filter((l) => !l.startsWith("ERR ")).join("\n");
+      return { code, calls, merges: calls.filter((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack"), json: json ? JSON.parse(json) : undefined };
+    };
+    const verdicts = (r: { json?: { stack: Array<{ pr: number; verdict: string }> } }) => r.json!.stack.map((x) => [x.pr, x.verdict]);
+
+    test("naming the top judges all three at their heads and calls gh stack merge once, on the top", async () => {
+      const r = await stack(["7", "--merge-stack"]);
+      expect(r.code).toBe(0);
+      expect(r.merges).toEqual([["stack", "merge", "7", "--rebase", "-y"]]);
+      expect(r.json.verdict).toBe("merge");
+      expect(verdicts(r)).toEqual([[5, "merge"], [6, "merge"], [7, "merge"]]);
+    });
+
+    test("one PR in the middle that stops: no merge, exit 1, all three are in the output", async () => {
+      const r = await stack(["7", "--merge-stack"], { dirty: 6 });
+      expect(r.code).toBe(1);
+      expect(r.merges).toEqual([]);
+      expect(r.json.verdict).toBe("stop");
+      expect(verdicts(r)).toEqual([[5, "merge"], [6, "stop"], [7, "merge"]]);
+    });
+
+    test("a set gh stack would read otherwise is not judged (exit 2), no merge", async () => {
+      // a lower PR that cannot be read; the number is also a stack's; no stack; a stack on another base; a draft below;
+      // a PR whose own base is not the branch below it in the stack's order
+      for (const o of [{ unreadable: 5 }, { numbered: true }, { stacks: 0 }, { stackBase: "release/x" }, { draft: 5 }, { rebased: 6 }, { rebased: 5 }] as O[]) {
+        expect(await stack(["7", "--merge-stack"], o)).toMatchObject({ code: 2, merges: [] });
+      }
+    });
+
+    test("a merged PR below is left out, as gh stack does", async () => {
+      const r = await stack(["7", "--merge-stack"], { merged: 5 });
+      expect(r.code).toBe(0);
+      expect(verdicts(r)).toEqual([[6, "merge"], [7, "merge"]]);
+    });
+
+    test("the stack changed after the judgement (a head moved, a PR put in below): no merge", async () => {
+      expect(await stack(["7", "--merge-stack"], { moved: 5 })).toMatchObject({ code: 1, merges: [] });
+      expect(await stack(["7", "--merge-stack"], { moved: 7 })).toMatchObject({ code: 1, merges: [] });
+      expect(await stack(["7", "--merge-stack"], { inserted: true })).toMatchObject({ code: 1, merges: [] });
+      // the stack's copy of the head lags: the PR's own head is read too
+      expect(await stack(["7", "--merge-stack"], { moved: 5, ownLags: true })).toMatchObject({ code: 1, merges: [] });
+      // a change while the marks are posted: the read after the marks catches it
+      expect(await stack(["7", "--merge-stack"], { direct: 5, moved: 6, movedAt: 2 })).toMatchObject({ code: 1, merges: [] });
+      // a PR retargeted after the judgement, its head and the stack unchanged
+      expect(await stack(["7", "--merge-stack"], { retargeted: 6 })).toMatchObject({ code: 1, merges: [] });
+    });
+
+    test("the stack cannot be read again just before the merge: not judged (exit 2), no merge", async () => {
+      expect(await stack(["7", "--merge-stack"], { lastReadFails: true })).toMatchObject({ code: 2, merges: [] });
+      expect(await stack(["7", "--merge-stack"], { headReadFails: true })).toMatchObject({ code: 2, merges: [] });
+      expect(await stack(["7", "--merge-stack"], { repoReadFails: true })).toMatchObject({ code: 2, merges: [] });
+    });
+
+    test("gh stack merge gets GH_REPO pinned to the judged repository and no mark of the PR", async () => {
+      const envs: Array<Record<string, string> | undefined> = [];
+      await main(["7", "--merge-stack"], async (a, env) => {
+        if (a[0] === "stack") envs.push(env);
+        if (a[0] === "api" && /\/stacks\/\d+$/.test(a[1]!)) return notFound();
+        if (a[0] === "api" && a[1]!.includes("/stacks?")) return remote([{ number: 7, head: SHA, ref: "feat/c" }]);
+        if (a[0] === "pr" && a[1] === "view") return a.includes("-q") ? `${SHA} main\n` : JSON.stringify(view());
+        if (a[0] === "repo") return "main\n";
+        if (a[0] === "pr" && a[1] === "list") return "[]";
+        if (a[0] === "pr" || a[0] === "stack") return "";
+        return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
+      }, () => {}, () => {}, () => REPO, undefined, undefined, reviewed({ 7: SHA }));
+      expect(envs).toEqual([{ GH_REPO: REPO }]);
+    });
+
+    test("a lower PR that skipped the main review gets its own [merge-direct] mark before the merge", async () => {
+      const r = await stack(["7", "--merge-stack"], { direct: 5 });
+      expect(r.code).toBe(0);
+      const at = r.calls.findIndex((a) => a[1] === "comment");
+      expect(r.calls[at]).toEqual(["pr", "comment", "5", "-R", REPO, "--body", `[merge-direct] ${HEADS[5]}`]);
+      expect(r.calls.filter((a) => a[1] === "comment")).toHaveLength(1);
+      expect(at).toBeLessThan(r.calls.findIndex((a) => a[0] === "stack"));
+    });
+
+    test("naming the bottom is the same one PR as before; naming the middle merges the two", async () => {
+      const bottom = await stack(["5", "--merge-stack"]);
+      expect(bottom.merges).toEqual([["stack", "merge", "5", "--rebase", "-y"]]);
+      expect(bottom.json.verdict).toBe("merge");
+      expect(bottom.json.stack).toBeUndefined();
+      const middle = await stack(["6", "--merge-stack"]);
+      expect(middle.merges).toEqual([["stack", "merge", "6", "--rebase", "-y"]]);
+      expect(middle.json.stack.map((x: { pr: number }) => x.pr)).toEqual([5, 6]);
+    });
+
+    test("without a merge flag the run judges the named PR alone, as before, and reads no stack", async () => {
+      const r = await stack(["7"], { dirty: 5 });
+      expect(r.code).toBe(0);
+      expect(r.json.verdict).toBe("merge");
+      expect(r.json.stack).toBeUndefined();
+      expect(r.calls.some((a) => a[0] === "api" && a[1]!.includes("/stacks"))).toBe(false);
+    });
   });
 
   test("stop (exit 1) and not judged (exit 2) do not merge; both flags at once are a usage error", async () => {
@@ -1881,21 +2190,18 @@ describe("merge command merges only on verdict merge", () => {
     expect(await gate(["7", "--merge", "--merge-stack"])).toMatchObject({ code: 2, merges: [] });
   });
 
-  test("--allow-large merges only after a [merge-answer] yes of the head", async () => {
+  test("--allow-large merges only with the app's grant of the head", async () => {
     const large = { files: [{ path: "rescue/run.sh", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
-    const review = { body: "[codex] review", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" };
-    const attack = { body: "[codex] attack", createdAt: "2026-09-24T11:00:00Z", authorAssociation: "MEMBER" };
-    const answer = (sha: string, yes = "yes") => ({ body: `[merge-answer] ${yes} rescue ${sha}`, createdAt: "2026-09-24T12:00:00Z", authorAssociation: "MEMBER" });
-    expect(await gate(["7", "--merge", "--allow-large"], view(large))).toMatchObject({ code: 1, merges: [] });
-    expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer("f".repeat(40))] }))).toMatchObject({ code: 1, merges: [] });
-    expect(await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, answer(SHA, "no")] }))).toMatchObject({ code: 1, merges: [] });
-    expect((await gate(["7", "--merge", "--allow-large"], view({ ...large, comments: [review, attack, answer(SHA)] }))).merges).toHaveLength(1);
-    // a yes about another kind does not lift this one
-    const security = { files: [{ path: "packages/core/src/auth.ts", additions: 1, deletions: 0, changeType: "MODIFIED" }] };
-    expect(await gate(["7", "--merge", "--allow-large"], view({ ...security, comments: [review, answer(SHA)] }))).toMatchObject({ code: 1, merges: [] });
-    // the marks of an author who is not a member do not count, and the judgement alone asks for the mark too
-    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, { ...answer(SHA), authorAssociation: "NONE" }] }))).toMatchObject({ code: 1, merges: [] });
-    expect(await gate(["7", "--allow-large"], view({ ...large, comments: [review, attack, answer(SHA)] }))).toMatchObject({ code: 0, merges: [] });
+    // the app's records have the main review and the attacking review; the rescue recheck is not recorded, so the person's grant is what it takes
+    const records = (o: Parameters<typeof appWith>[1], attack = true) => appWith([reviewJob(SHA, { pr: 7, repo: REPO }), ...(attack ? [reviewJob(SHA, { pr: 7, repo: REPO, as: "attack" })] : [])], o);
+    const go = (o: Parameters<typeof appWith>[1], args = ["7", "--merge", "--allow-large"], attack = true) => gate(args, view(large), { app: records(o, attack) });
+    expect(await go({ granted: false })).toMatchObject({ code: 1, merges: [] });
+    expect((await go({ granted: true })).merges).toHaveLength(1);
+    // the attacking review is the app's job too, and the grant does not lift it
+    expect(await go({ granted: true }, undefined, false)).toMatchObject({ code: 1, merges: [] });
+    // the grant does nothing without the flag, and the judgement alone with it asks nothing more
+    expect(await go({ granted: true }, ["7", "--merge"])).toMatchObject({ code: 1, merges: [] });
+    expect(await go({ granted: true }, ["7", "--allow-large"])).toMatchObject({ code: 0, merges: [] });
   });
 
   test("a failed merge is exit 1 with gh's first line", async () => {
@@ -1904,9 +2210,71 @@ describe("merge command merges only on verdict merge", () => {
       if (a[0] === "pr" && a[1] === "merge") throw new Error("gh pr merge failed: not mergeable\nmore");
       if (a[0] === "pr") return JSON.stringify(view());
       return JSON.stringify(a[1]?.includes("/actions/runs") ? runs : threads);
-    }, () => {}, (e) => errs.push(e));
+    }, () => {}, (e) => errs.push(e), undefined, undefined, undefined, reviewed({ 7: SHA }));
     expect(code).toBe(1);
     expect(errs).toEqual(["マージできなかった: gh pr merge failed: not mergeable"]);
+  });
+});
+
+describe("in a Task the gate is the app's job", () => {
+  const ghNever = async (a: string[]): Promise<string> => { throw new Error(`gh must not be called in a Task: ${a.join(" ")}`); };
+  /** The app's jobs API as `requestGate` reaches it: the request body is kept; the job runs for `polls` reads, then ends as `end`. */
+  const jobsApp = (end: { status: string; exitCode: number | null; out?: string; summary?: string }, o: { polls?: number; post?: number; down?: boolean } = {}) => {
+    const posts: unknown[] = [];
+    const gets: string[] = [];
+    const heads: Array<string | null> = [];
+    let reads = 0;
+    const fetch = (async (url: string, init?: RequestInit) => {
+      if (o.down) throw new Error("connect ECONNREFUSED");
+      const u = new URL(String(url));
+      heads.push(new Headers(init?.headers).get("authorization"));
+      if (init?.method === "POST") {
+        posts.push(JSON.parse(String(init.body)));
+        return o.post ? new Response("invalid discriminator", { status: o.post }) : Response.json({ id: 41 }, { status: 202 });
+      }
+      gets.push(u.pathname);
+      const running = reads++ < (o.polls ?? 1);
+      return Response.json({ job: { id: 41, status: running ? "running" : end.status, exitCode: running ? null : end.exitCode, summary: end.summary ?? null }, out: running ? "" : end.out ?? "" });
+    }) as unknown as typeof globalThis.fetch;
+    const tokenFile = join(mkdtempSync(join(tmpdir(), "merge-gate-jobs.")), "token");
+    writeFileSync(tokenFile, "k\n");
+    const env = { SWITCHBOARD_TASK_ID: "task_1", OPS_KIT_TASK_ID: "task_1", BACKLOG_URL: "http://app.test/api/backlog", BACKLOG_TOKEN_FILE: tokenFile, SWITCHBOARD_GATE_POLL_MS: "1", SWITCHBOARD_GATE_WAIT_MS: "300" } as Record<string, string | undefined>;
+    return { posts, gets, heads, env, fetch };
+  };
+  const go = async (args: string[], app: ReturnType<typeof jobsApp>, env: Record<string, string | undefined> = {}) => {
+    const out: string[] = [];
+    const errs: string[] = [];
+    const code = await main(args, ghNever, (l) => out.push(l), (e) => errs.push(e), () => { throw new Error("no clone here"); }, undefined, "/work/task", { env: { ...app.env, ...env }, fetch: app.fetch });
+    return { code, out, errs };
+  };
+
+  test("in a Task the gate asks the app and prints its judgement; the app out of reach is exit 2", async () => {
+    // the verdict is the app's: gh is never called here, the request is the PR's number and the flags, and the job's output is printed as it is
+    const verdict = JSON.stringify({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] }, null, 2);
+    const merged = jobsApp({ status: "pass", exitCode: 0, out: `${verdict}\n` });
+    expect(await go(["7", "--merge", "--allow-large"], merged)).toEqual({ code: 0, out: [verdict], errs: [] });
+    expect(merged.posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 7, allowLarge: true, merge: "merge" }]);
+    // it was read until the job ended, with the app's key
+    expect(merged.gets).toEqual(["/api/jobs/41", "/api/jobs/41"]);
+    expect(new Set(merged.heads)).toEqual(new Set(["Bearer k"]));
+    // a stop is the job's exit 1 and its output; the shapes of the other forms
+    const stop = jobsApp({ status: "fail", exitCode: 1, out: '{"verdict":"stop"}', summary: "fail（終了コード 1）" });
+    expect(await go(["--change", "3"], stop)).toMatchObject({ code: 1, out: ['{"verdict":"stop"}'] });
+    expect(stop.posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 3, change: true }]);
+    const other = jobsApp({ status: "pass", exitCode: 0 });
+    await go(["9", "--repo", "acme/app", "--merge-stack"], other);
+    await go(["9", "--scope"], other);
+    expect(other.posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, repo: "acme/app", merge: "merge-stack" }, { kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, scope: true }]);
+    // not judged (exit 2), nothing printed as a verdict: the app not reached, a daemon that does not know the kind, a job that does not end in the wait or ends without its exit code
+    expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { down: true }))).toMatchObject({ code: 2, out: [], errs: [expect.stringContaining("判定できなかった")] });
+    expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { post: 400 }))).toMatchObject({ code: 2, errs: [expect.stringContaining("アプリが 400 を返した")] });
+    expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { polls: 100_000 }), { SWITCHBOARD_GATE_WAIT_MS: "30" })).toMatchObject({ code: 2, errs: [expect.stringContaining("終わらなかった")] });
+    expect(await go(["7"], jobsApp({ status: "aborted", exitCode: null }))).toMatchObject({ code: 2, errs: [expect.stringContaining("終わりを残さずに止まった")] });
+    // the Task's own address is needed; a form the gate does not take is not sent
+    expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }), { BACKLOG_URL: undefined })).toMatchObject({ code: 2 });
+    const bad = jobsApp({ status: "pass", exitCode: 0 });
+    for (const args of [[], ["x"], ["7", "8"], ["7", "--merge", "--merge-stack"], ["--change", "3", "4"], ["7", "--repo", "-x/y"]]) expect([args, (await go(args, bad)).code]).toEqual([args, 2]);
+    expect(bad.posts).toEqual([]);
   });
 });
 
@@ -1955,9 +2323,12 @@ describe("GitLab MR", () => {
   const lab = { service: "gitlab", host: "gitlab.example.com", repository: "group/app" };
   const M = "projects/group%2Fapp/merge_requests/7";
   /** A fake GitLab MR: good to merge unless `over` says otherwise. */
-  function gitlab(over: { status?: string; pipeline?: { sha: string; status: string } | null; notes?: Array<{ body: string; created_at: string; author: number }>; resolved?: boolean; files?: string[]; diffs?: unknown[]; merge?: number } = {}) {
+  /** The MR's jobs in the app (repository: the project's path); the notes are only the answers' place. */
+  const OF = { pr: 7, repo: "group/app" };
+  function gitlab(over: { status?: string; pipeline?: { sha: string; status: string } | null; notes?: Array<{ body: string; created_at: string; author: number }>; jobs?: MergeRecordJob[]; resolved?: boolean; files?: string[]; diffs?: unknown[]; merge?: number } = {}) {
     const calls: string[][] = [];
-    const notes = over.notes ?? [{ body: "[codex] review\n\n### Verdict\nmergeable as is", created_at: "2026-10-28T02:00:00Z", author: 1 }];
+    const notes = over.notes ?? [];
+    const jobs = over.jobs ?? [reviewJob(HEAD, OF)];
     const sh = async (cmd: string[]) => {
       calls.push(cmd);
       const p = cmd.at(-1)!.replace(/[?&]per_page=100&page=\d+$/, "");
@@ -1977,49 +2348,71 @@ describe("GitLab MR", () => {
       })();
       return JSON.stringify(answer);
     };
-    return { sh, calls };
+    const app = appWith(jobs);
+    return { sh, calls, jobs, jobsOf: (async () => jobs) as JobsOf, backlog: { env: app.env, fetch: app.fetch } };
   }
+  const readLab = (over: Parameters<typeof gitlab>[0] = {}, held?: Parameters<typeof readGitlabPr>[3]) => {
+    const x = gitlab(over);
+    return readGitlabPr(7, x.sh, lab, held, recordsOfJobs(x.jobsOf));
+  };
 
-  test("an MR whose head pipeline passed, reviewed after its last commit, with every discussion resolved, merges", async () => {
-    const f = await readGitlabPr(7, gitlab().sh, lab);
-    expect(f).toMatchObject({ files: [{ path: "src/a.ts", additions: 2, deletions: 1 }], headCommittedAt: "2026-10-28T01:00:00Z", checks: [{ name: "GitLab pipeline", conclusion: "SUCCESS" }], unresolvedThreads: 0, mergeState: "CLEAN", head: HEAD, base: "main" });
+  test("an MR whose head pipeline passed, reviewed (a recorded main review of the head), with every discussion resolved, merges", async () => {
+    const f = await readLab();
+    expect(f).toMatchObject({ files: [{ path: "src/a.ts", additions: 2, deletions: 1 }], reviewed: true, checks: [{ name: "GitLab pipeline", conclusion: "SUCCESS" }], unresolvedThreads: 0, mergeState: "CLEAN", head: HEAD, base: "main" });
     expect(judge(f, { allowLarge: false })).toMatchObject({ verdict: "merge", impact: "small" });
   });
 
-  test("an old pipeline, a failed one, an open discussion, a review by someone below Developer, or a status not mergeable stop it", async () => {
+  test("a Task's judgement of an MR without the person's record asks for the sentence the app reads, by the MR's number", async () => {
+    const x = gitlab({ files: ["src/auth/x.ts"], jobs: [reviewJob(HEAD, OF), reviewJob(HEAD, { ...OF, as: "attack" })] });
+    const f = await readGitlabPr(7, x.sh, lab, undefined, async () => ({ jobs: x.jobs, granted: false, direct: false }));
+    const j = judge(f, { allowLarge: true });
+    expect(j.verdict).toBe("stop");
+    const last = j.reasons.at(-1)!;
+    expect(last).toContain("「PR #7 をマージしてよい」");
+    expect(last).not.toContain("端末で --allow-large");
+    expect(last).not.toContain("<n>");
+    // the person's record of the MR's head lifts it, as it does a PR's
+    const g = await readGitlabPr(7, x.sh, lab, undefined, async () => ({ jobs: x.jobs, granted: true, direct: false }));
+    expect(judge(g, { allowLarge: true }).reasons.join("\n")).not.toContain("利用者の許可の記録が無い");
+  });
+
+  test("an old pipeline, a failed one, an open discussion, no recorded review of the head, or a status not mergeable stop it", async () => {
     const stop = async (over: Parameters<typeof gitlab>[0], reason: string) => {
-      const j = judge(await readGitlabPr(7, gitlab(over).sh, lab), { allowLarge: false });
+      const j = judge(await readLab(over), { allowLarge: false });
       expect({ verdict: j.verdict, reasons: j.reasons.filter((r) => r.includes(reason)).length }).toEqual({ verdict: "stop", reasons: 1 });
     };
     await stop({ pipeline: { sha: "3".repeat(40), status: "success" } }, "CI のチェックが 1 つも無い");
     await stop({ pipeline: { sha: HEAD, status: "failed" } }, "GitLab pipeline が FAILED");
     await stop({ pipeline: { sha: HEAD, status: "running" } }, "GitLab pipeline が 未完了");
     await stop({ resolved: false }, "解決していないレビュースレッドが 1 件");
-    await stop({ notes: [{ body: "[codex] review\n\nok", created_at: "2026-10-28T02:00:00Z", author: 2 }] }, "主レビュー");
-    await stop({ notes: [{ body: "[codex] review\n\nok", created_at: "2026-10-28T00:00:00Z", author: 1 }] }, "主レビュー");
+    await stop({ jobs: [] }, "主レビュー");
+    // a review of another head, one that did not pass, and a note that says it was a review
+    await stop({ jobs: [reviewJob("3".repeat(40), OF)] }, "主レビュー");
+    await stop({ jobs: [reviewJob(HEAD, { ...OF, status: "fail" })] }, "主レビュー");
+    await stop({ jobs: [], notes: [{ body: "[codex] review\n\nok", created_at: "2026-10-28T02:00:00Z", author: 1 }] }, "主レビュー");
     await stop({ status: "conflict" }, "CLEAN でない: conflict");
     await stop({ status: "not_approved" }, "CLEAN でない: not_approved");
     // README.md counts as touched on GitLab (its Design rules section is not read there)
     await stop({ files: ["README.md"] }, "[再チェック design-rules] 責務");
-    await expect(readGitlabPr(7, gitlab({ status: "checking" }).sh, lab)).rejects.toThrow("計算中");
+    await expect(readLab({ status: "checking" })).rejects.toThrow("計算中");
     // a security file renamed away is asked as on GitHub (the old path counts)
     await stop({ diffs: [{ old_path: "src/auth.ts", new_path: "src/login.ts", diff: "" }] }, "[聞く] セキュリティ（security:words）: src/auth.ts");
     // a patch GitLab left out is no size: not judged
-    await expect(readGitlabPr(7, gitlab({ diffs: [{ old_path: "big.ts", new_path: "big.ts", diff: "", too_large: true }] }).sh, lab)).rejects.toThrow("差分を GitLab が省いた（big.ts）");
+    await expect(readLab({ diffs: [{ old_path: "big.ts", new_path: "big.ts", diff: "", too_large: true }] })).rejects.toThrow("差分を GitLab が省いた（big.ts）");
   });
 
   test("without a pipeline of the head, the local pass of the head and the target's tip now is the CI; one of an older base is not", async () => {
-    const review = { body: "[codex] review\n\nok", created_at: "2026-10-28T02:00:00Z", author: 1 };
-    const pass = (base: string, author = 1) => ({ body: `[local-ci] pass ${HEAD} base=${base}`, created_at: "2026-10-28T02:30:00Z", author });
-    const ok = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass(BASE)] }).sh, lab);
+    const review = reviewJob(HEAD, OF);
+    const pass = (base: string, over: Partial<MergeRecordJob> = {}) => ciJob("pass", HEAD, base, undefined, { ...OF, ...over });
+    const ok = await readLab({ pipeline: null, status: "ci_must_pass", jobs: [review, pass(BASE)] });
     expect(ok).toMatchObject({ checks: [{ name: expect.stringContaining("local-ci"), conclusion: "SUCCESS" }], localCi: true, mergeState: "UNSTABLE" });
     expect(judge(ok, { allowLarge: false }).verdict).toBe("merge");
-    const old = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass("4".repeat(40))] }).sh, lab);
+    const old = await readLab({ pipeline: null, status: "ci_must_pass", jobs: [review, pass("4".repeat(40))] });
     expect(judge(old, { allowLarge: false }).reasons).toEqual(expect.arrayContaining(["CI のチェックが 1 つも無い", "mergeStateStatus が CLEAN でない: ci_must_pass"]));
-    expect(old.localCiNote).toContain("base が進んだ");
-    // a pass a Reporter wrote is no mark
-    const theirs = await readGitlabPr(7, gitlab({ pipeline: null, status: "ci_must_pass", notes: [review, pass(BASE, 2)] }).sh, lab);
-    expect(theirs.checks).toEqual([]);
+    expect(old.localCiNote).toContain("base");
+    // a pass comment is no CI: only the app's record is
+    const comment = await readLab({ pipeline: null, status: "ci_must_pass", jobs: [review], notes: [{ body: `[local-ci] pass ${HEAD} base=${BASE}`, created_at: "2026-10-28T02:30:00Z", author: 1 }] });
+    expect(comment.checks).toEqual([]);
   });
 
   test("the command judges the checkout's GitLab MR and merges it at the judged head only; --merge-stack is refused", async () => {
@@ -2033,18 +2426,18 @@ describe("GitLab MR", () => {
       };
       const quiet = () => undefined;
       const g = gitlab();
-      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, g.sh, dir)).toBe(0);
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, g.sh, dir, g.backlog)).toBe(0);
       const merged = g.calls.find((c) => c.at(-1) === `${M}/merge`)!;
       expect(merged.slice(4)).toEqual(["-X", "PUT", "-f", `sha=${HEAD}`, "-f", "should_remove_source_branch=true", `${M}/merge`]);
       // the head moved after the judgement: GitLab refuses (409) and nothing is merged
-      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ merge: 409 }).sh, dir)).toBe(1);
-      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ resolved: false }).sh, dir)).toBe(1);
-      expect(await main(["7", "--merge-stack"], noGh, quiet, quiet, () => undefined, g.sh, dir)).toBe(2);
-      expect(await main(["7"], noGh, quiet, quiet, () => undefined, gitlab({ status: "checking" }).sh, dir)).toBe(2);
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ merge: 409 }).sh, dir, gitlab().backlog)).toBe(1);
+      expect(await main(["7", "--merge"], noGh, quiet, quiet, () => undefined, gitlab({ resolved: false }).sh, dir, gitlab().backlog)).toBe(1);
+      expect(await main(["7", "--merge-stack"], noGh, quiet, quiet, () => undefined, g.sh, dir, g.backlog)).toBe(2);
+      expect(await main(["7"], noGh, quiet, quiet, () => undefined, gitlab({ status: "checking" }).sh, dir, gitlab().backlog)).toBe(2);
       // --scope on an MR prints the review material only: no judgement and no merge, even with --merge
       const scoped = gitlab();
       const out: string[] = [];
-      expect(await main(["7", "--scope", "--merge"], noGh, (s) => out.push(s), quiet, () => undefined, scoped.sh, dir)).toBe(0);
+      expect(await main(["7", "--scope", "--merge"], noGh, (s) => out.push(s), quiet, () => undefined, scoped.sh, dir, scoped.backlog)).toBe(0);
       expect(scoped.calls.some((c) => c.at(-1) === `${M}/merge`)).toBe(false);
       expect(out.join("\n")).not.toContain("verdict");
     } finally {
@@ -2055,6 +2448,10 @@ describe("GitLab MR", () => {
 
 describe("local change", () => {
   const BACKLOG = "http://app/api/backlog";
+  /** The app's address and the stub key file: the records of the jobs are read from the same app. */
+  const TOKEN = join(mkdtempSync(join(tmpdir(), "merge-gate-change-token.")), "token");
+  writeFileSync(TOKEN, "k\n");
+  const ENV = { BACKLOG_URL: BACKLOG, BACKLOG_TOKEN_FILE: TOKEN, BACKLOG_WORKSPACE: "ws_local" };
   /** A repository with no remote: main, and a branch sb/5-x of `lines` added lines in one commit dated 2026-01-01. */
   function repo(lines = 3) {
     const dir = mkdtempSync(join(tmpdir(), "merge-gate-change-"));
@@ -2072,14 +2469,23 @@ describe("local change", () => {
     return { dir, git, tip: (b: string) => git("rev-parse", b) };
   }
   type Repo = ReturnType<typeof repo>;
-  const REVIEW = { body: "[claude] review\n\n### Intent and design", createdAt: "2026-01-02T00:00:00Z" };
-  const ATTACK = { body: "[claude] attack\n\n### Breaking the change", createdAt: "2026-01-02T00:00:00Z" };
+  /** The app's jobs of change `#7` (`HEAD` stands for the change's head in the repository the test made). */
+  const OF = { pr: 7, repo: "local:ws_local" };
+  const REVIEW = reviewJob("HEAD", OF);
+  const ATTACK = reviewJob("HEAD", { ...OF, as: "attack" });
+  /** What a test gives the app: its jobs, and the change's comments (the answers). */
+  type Item = MergeRecordJob | { body: string; createdAt: string };
+  const isJob = (x: Item): x is MergeRecordJob => "kind" in x;
   /** The app's answers: the workspace list, and change `#7` with these comments and the tips of `r` now. */
   type Stored = { number: number; labels: string[]; body: string; parent: number | null };
   /** `github`: the workspace's Issues are GitHub's (`issues`, as last imported) and the change is numbered apart from them; `pr`: the PR it stands in for. */
-  type World = { github?: boolean; issues?: Stored[]; pr?: number; body?: string };
-  function app(r: Repo, comments: { body: string; createdAt: string }[], state = "OPEN", w: World = {}) {
+  /** `granted` / `direct`: what the app records of the change's head and its Task; `records`: the app's own answer to the records call, instead. */
+  type World = { github?: boolean; issues?: Stored[]; pr?: number; body?: string; granted?: boolean; direct?: boolean; workspace?: string; records?: (q: URLSearchParams) => { granted: boolean | null; direct: boolean } };
+  function app(r: Repo, items: Item[], state = "OPEN", w: World = {}) {
+    const comments = items.filter((x) => !isJob(x)) as { body: string; createdAt: string }[];
+    const jobs = items.filter(isJob).map((j) => (j.head === "HEAD" ? { ...j, head: r.tip("sb/5-x") } : j));
     const calls: string[] = [];
+    const asked: Array<Record<string, string>> = [];
     const posts: Array<{ path: string; body: unknown }> = [];
     const service = w.github ? "github" : "switchboard";
     const fetch = async (url: string, init?: RequestInit) => {
@@ -2089,28 +2495,33 @@ describe("local change", () => {
         return new Response("{}");
       }
       calls.push(path);
+      if (path.startsWith("/api/merge-records")) {
+        const q = new URL(url).searchParams;
+        asked.push(Object.fromEntries(q));
+        return Response.json({ jobs, ...(w.records ? w.records(q) : { granted: q.has("taskId") && q.has("head") ? w.granted ?? false : null, direct: q.has("taskId") && w.direct === true }) });
+      }
       const body = path === "/syncs"
         ? { syncs: [{ workspaceId: "ws_local", backlog: service, repository: w.github ? "acme/app" : "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] }
         : path.startsWith("/records")
           ? { workspaceId: "ws_local", service, repository: w.github ? "acme/app" : "ws_local", project: { owner: "o", number: 0 }, fetchedAt: 1, top: [{ name: "src", dir: true }, { name: "a.ts", dir: false }], unread: [], pulls: [], comments: [], issues: (w.issues ?? []).map((i) => ({ title: "t", url: "", state: "OPEN", stateReason: null, subIssues: [], createdAt: "", updatedAt: "", closedAt: null, fields: null, ...i })) }
-          : { workspaceId: "ws_local", issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: w.body ?? "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null, pr: w.pr ?? null, reportedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+          : { workspaceId: w.workspace ?? "ws_local", issue: { number: 7, title: "変更", state, labels: [], milestone: null, parent: null, subIssues: [], body: w.body ?? "", url: "", change: { head: "sb/5-x", base: "main", mergeCommit: null, mergedAt: null, reviewedHead: null, pr: w.pr ?? null, reportedAt: null } }, changeRefs: { head: r.tip("sb/5-x"), base: r.tip("main") }, comments: comments.map((c, i) => ({ id: `sb:${i}`, ...c })), fields: null, fetchedAt: 1, localId: null, pending: 0, held: [], sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
       return new Response(JSON.stringify(body));
     };
-    return { fetch, calls, posts };
+    return { fetch, calls, posts, asked };
   }
   /** main --change 7 in `r` with gh failing the test if called. */
-  async function gate(r: Repo, comments: { body: string; createdAt: string }[], extra: string[] = [], state = "OPEN", w: World = {}) {
-    const a = app(r, comments, state, w);
+  async function gate(r: Repo, items: Item[], extra: string[] = [], state = "OPEN", w: World = {}) {
+    const a = app(r, items, state, w);
     const out: string[] = [];
     const err: string[] = [];
     const ghCalls: string[][] = [];
     const run = async (args: string[]) => { ghCalls.push(args); throw new Error("gh called"); };
-    const code = await main(["--change", "7", ...extra], run, (s) => out.push(s), (s) => err.push(s), () => undefined, async () => { throw new Error("glab called"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local", OPS_KIT_TASK_ID: "task_1" }, fetch: a.fetch });
+    const code = await main(["--change", "7", ...extra], run, (s) => out.push(s), (s) => err.push(s), () => undefined, async () => { throw new Error("glab called"); }, r.dir, { env: { ...ENV, OPS_KIT_TASK_ID: "task_1" }, fetch: a.fetch });
     expect(ghCalls).toEqual([]);
-    return { code, j: out.length ? JSON.parse(out.join("\n")) : null, err: err.join("\n"), calls: a.calls, posts: a.posts };
+    return { code, j: out.length ? JSON.parse(out.join("\n")) : null, err: err.join("\n"), calls: a.calls, posts: a.posts, asked: a.asked };
   }
-  const mark = (result: "pass" | "fail", r: Repo) => `[local-ci] ${result} ${r.tip("sb/5-x")} base=${r.tip("main")}\n\n結果`;
-  const pass = (r: Repo, at = "2026-01-03T00:00:00Z") => ({ body: mark("pass", r), createdAt: at });
+  const pass = (r: Repo, outcome: "pass" | "fail" = "pass") => ciJob(outcome, r.tip("sb/5-x"), r.tip("main"), undefined, OF);
+  const fail = (r: Repo) => pass(r, "fail");
   const repos: Repo[] = [];
   const fresh = (lines?: number) => {
     const r = repo(lines);
@@ -2125,19 +2536,20 @@ describe("local change", () => {
     expect(g.code).toBe(0);
     expect(g.j).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
     // read as a change (never the Issue of the same number), and the workspace's stored Issues for the Task-scope check
-    expect(g.calls).toEqual(["/syncs", "/7?workspaceId=ws_local&change=1", "/records?workspaceId=ws_local"]);
+    expect(g.calls).toEqual(["/syncs", "/7?workspaceId=ws_local&change=1", "/records?workspaceId=ws_local", "/api/merge-records?repo=local%3Aws_local&pr=7&taskId=task_1&head=" + r.tip("sb/5-x")]);
   });
 
-  test("(b) a commit after the review: no newer main review stops", async () => {
+  test("(b) a commit after the review: the review of the older head is no review of this one", async () => {
     const r = fresh();
+    const reviewed = reviewJob(r.tip("sb/5-x"), OF);
     r.git("checkout", "-q", "sb/5-x");
     writeFileSync(join(r.dir, "src", "c.ts"), "c\n");
     r.git("add", "-A");
     execFileSync("git", ["-C", r.dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "c"], { env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-05T00:00:00Z" } });
     r.git("checkout", "-q", "main");
-    const g = await gate(r, [REVIEW, pass(r, "2026-01-06T00:00:00Z")]);
+    const g = await gate(r, [reviewed, pass(r)]);
     expect(g.code).toBe(1);
-    expect(g.j.reasons).toEqual([expect.stringContaining("より新しい主レビュー")]);
+    expect(g.j.reasons).toEqual([expect.stringContaining("主レビューの仕事の記録が無い")]);
   });
 
   test("(c) a pass of an older base: no CI, with the note", async () => {
@@ -2156,7 +2568,7 @@ describe("local change", () => {
 
   test("(c') a fail after the pass does not count the pass", async () => {
     const r = fresh();
-    const g = await gate(r, [REVIEW, pass(r), { body: mark("fail", r), createdAt: "2026-01-04T00:00:00Z" }]);
+    const g = await gate(r, [REVIEW, pass(r), fail(r)]);
     expect(g.j.reasons).toEqual(["CI のチェックが 1 つも無い", "local-ci の最新が fail"]);
   });
 
@@ -2182,8 +2594,10 @@ describe("local change", () => {
     const g = await gate(r, [REVIEW, pass(r)]);
     expect(g.code).toBe(1);
     expect(g.j).toMatchObject({ impact: "large", recheck: ["size"], reasons: [expect.stringMatching(/^\[再チェック size\] .*301 行/)] });
-    const marked = await gate(r, [REVIEW, pass(r), { body: `[recheck] size pass ${r.tip("sb/5-x")}`, createdAt: "2026-01-04T00:00:00Z" }]);
+    const marked = await gate(r, [REVIEW, pass(r), reviewJob("HEAD", { ...OF, as: "recheck", kinds: ["size"] })]);
     expect(marked.code).toBe(0);
+    // a comment of the mark lifts nothing
+    expect((await gate(r, [REVIEW, pass(r), { body: `[recheck] size pass ${r.tip("sb/5-x")}`, createdAt: "2026-01-04T00:00:00Z" }])).code).toBe(1);
   });
 
   test("readChange instructions and limits", async () => {
@@ -2207,8 +2621,7 @@ describe("local change", () => {
     expect(g.j.reasons).toContain("[聞く] 検査の上限・許可リストを上げる: scripts/perf-budget.json local.journeys.launch.layoutCount: 7 → 10");
     // the limit file beside CLAUDE.md is a mix: split, and no yes lifts it, whatever kinds it names
     expect(g.j.reasons).toContainEqual(expect.stringContaining("[分ける] 指示のファイル（CLAUDE.md）とほかのファイル（scripts/perf-budget.json, src/b.ts）"));
-    const yes = (kinds: string) => ({ body: `[merge-answer] yes ${kinds} ${r.tip("sb/5-x")}`, createdAt: "2026-01-04T00:00:00Z" });
-    const lifted = await gate(r, [REVIEW, pass(r), yes("instructions,limits")], ["--allow-large"]);
+    const lifted = await gate(r, [REVIEW, pass(r)], ["--allow-large"], "OPEN", { granted: true });
     expect(lifted.code).toBe(1);
     expect(lifted.j.reasons.filter((x: string) => x.startsWith("[聞く]"))).toEqual([]);
   });
@@ -2315,7 +2728,7 @@ describe("local change", () => {
     const a = app(r, [REVIEW, pass(r)], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
     const out: string[] = [];
     const fail = async () => { throw new Error("gh or glab called"); };
-    expect(await main(["--change", "7", "--scope"], fail, (s) => out.push(s), () => undefined, () => undefined, fail, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: a.fetch })).toBe(0);
+    expect(await main(["--change", "7", "--scope"], fail, (s) => out.push(s), () => undefined, () => undefined, fail, r.dir, { env: ENV, fetch: a.fetch })).toBe(0);
     expect(out.join("\n")).toContain("a.ts（Task #6 が名指し）");
     expect(out.join("\n")).not.toContain("verdict");
   });
@@ -2323,11 +2736,11 @@ describe("local change", () => {
   test("github workspace (c): no review, no local-ci, a pass of an older head, a conflict — each stops", async () => {
     const r = fresh();
     const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/`") };
-    expect((await gate(r, [pass(r)], [], "OPEN", w)).j.reasons).toEqual([expect.stringContaining("より新しい主レビュー")]);
+    expect((await gate(r, [pass(r)], [], "OPEN", w)).j.reasons).toEqual([expect.stringContaining("主レビューの仕事の記録が無い")]);
     expect((await gate(r, [REVIEW], [], "OPEN", w)).j.reasons).toEqual(["CI のチェックが 1 つも無い"]);
-    const old = { body: `[local-ci] pass ${"a".repeat(40)} base=${r.tip("main")}`, createdAt: "2026-01-03T00:00:00Z" };
+    const old = ciJob("pass", "a".repeat(40), r.tip("main"), undefined, OF);
     expect((await gate(r, [REVIEW, old], [], "OPEN", w)).j.reasons).toEqual(["CI のチェックが 1 つも無い", expect.stringContaining("今の head")]);
-    expect((await gate(r, [REVIEW, { body: mark("fail", r), createdAt: "2026-01-03T00:00:00Z" }], [], "OPEN", w)).code).toBe(1);
+    expect((await gate(r, [REVIEW, fail(r)], [], "OPEN", w)).code).toBe(1);
     writeFileSync(join(r.dir, "src-conflict"), "x");
     mkdirSync(join(r.dir, "src"), { recursive: true });
     writeFileSync(join(r.dir, "src", "b.ts"), "other\n");
@@ -2352,7 +2765,64 @@ describe("local change", () => {
     expect(g.j).toMatchObject({ impact: "large", ask: ["security:gates"], reasons: [expect.stringMatching(/^\[聞く\] セキュリティ（security:gates）: scripts\/merge-gate\.ts/)] });
     const forced = await gate(r, [REVIEW, pass(r)], ["--allow-large"], "OPEN", w);
     expect(forced.code).toBe(1);
-    expect(forced.j.reasons.join("\n")).toContain("[merge-answer] yes が無い: security:gates");
+    expect(forced.j.reasons.join("\n")).toContain("利用者の許可の記録が無い: security:gates（Task の会話で利用者が「変更 L7 をマージしてよい」と認めると");
+  });
+
+  test("--change: the person's grant of the change's head lifts the ask", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    mkdirSync(join(r.dir, "scripts"));
+    writeFileSync(join(r.dir, "scripts", "merge-gate.ts"), "x\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "gate");
+    r.git("checkout", "-q", "main");
+    const items = [REVIEW, ATTACK, pass(r)];
+    const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/merge-gate.ts`") };
+    // without the record the ask stays; with the app's grant of the change's head it is lifted, the flag still being the person's
+    const stop = await gate(r, items, ["--allow-large"], "OPEN", { ...w, granted: false });
+    expect(stop.code).toBe(1);
+    expect(stop.j.reasons.at(-1)).toContain("「変更 L7 をマージしてよい」");
+    const lifted = await gate(r, items, ["--allow-large"], "OPEN", { ...w, granted: true });
+    expect([lifted.code, lifted.j.verdict, lifted.j.reasons]).toEqual([0, "merge", []]);
+    expect((await gate(r, items, [], "OPEN", { ...w, granted: true })).code).toBe(1);
+    // the app is asked for the change under the workspace's key (lower case), by the Task, at the branch's tip now
+    expect(lifted.asked).toEqual([{ repo: "local:ws_local", pr: "7", taskId: "task_1", head: r.tip("sb/5-x") }]);
+  });
+
+  test("--change: the key the gate asks with is the key the person's sentence is recorded under (a workspace id in mixed case, the head the branch has)", async () => {
+    const r = fresh();
+    r.git("checkout", "-q", "sb/5-x");
+    mkdirSync(join(r.dir, "scripts"));
+    writeFileSync(join(r.dir, "scripts", "merge-gate.ts"), "x\n");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "gate");
+    r.git("checkout", "-q", "main");
+    const tip = r.tip("sb/5-x");
+    // the writing side as the app has it: the reply's sentence of a Task of the workspace goes through `noteMergeGrant` into the database
+    const dir = mkdtempSync(join(tmpdir(), "merge-gate-grant-db."));
+    const db = new Db(join(dir, "switchboard.db"));
+    const WS = "ws_Local";
+    const task = { id: "task_1", cwd: r.dir, workspaceId: WS };
+    const sc = { db: { getTask: () => task, recordMergeGrants: (...a: Parameters<Db["recordMergeGrants"]>) => db.recordMergeGrants(...a), recordMergeGrant: (...a: Parameters<Db["recordMergeGrant"]>) => db.recordMergeGrant(...a) }, originRepoOf: () => null, opts: {}, grantHeadOf: async () => { throw new Error("read the head again"); } } as unknown as Parameters<typeof noteMergeGrant>[0];
+    const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/merge-gate.ts`"), workspace: WS };
+    // the reading side: the app's records call, answered from the same database
+    const records = (q: URLSearchParams) => {
+      const { granted, direct } = mergeRecordsOf({ jobsOf: () => [], hasMergeGrant: (...a) => db.hasMergeGrant(...a), getTask: () => undefined, createdPullsOf: () => [] } as unknown as Parameters<typeof mergeRecordsOf>[0], { repo: q.get("repo")!, prs: q.getAll("pr").map(Number), taskId: q.get("taskId") ?? undefined, head: q.get("head") ?? undefined });
+      return { granted, direct };
+    };
+    try {
+      const items = [REVIEW, ATTACK, pass(r)];
+      const before = await gate(r, items, ["--allow-large"], "OPEN", { ...w, records });
+      expect(before.code).toBe(1);
+      await noteMergeGrant(sc, "task_1", "変更 L7 をマージしてよい", { via: "screen", heads: { [grantHeadKey(changeRepoOf(WS), 7)]: tip } });
+      const after = await gate(r, items, ["--allow-large"], "OPEN", { ...w, records });
+      expect([after.code, after.j.verdict]).toEqual([0, "merge"]);
+      // a grant is of one head: a read at another head finds none
+      expect((await gate(r, items, ["--allow-large"], "OPEN", { ...w, records: (q) => records(new URLSearchParams([...q].map(([k, v]) => [k, k === "head" ? "e".repeat(40) : v]))) })).code).toBe(1);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("attack is required for a local change too", async () => {
@@ -2367,7 +2837,7 @@ describe("local change", () => {
     const without = await gate(r, [REVIEW, pass(r)], [], "OPEN", w);
     expect(without.code).toBe(1);
     expect(without.j.attack).toEqual(["scripts/promote.ts"]);
-    expect(without.j.reasons.join("\n")).toContain("攻める側のレビュー（[codex] attack / [claude] attack）が無い: scripts/promote.ts");
+    expect(without.j.reasons.join("\n")).toContain("攻める側のレビューの仕事の記録が無い: scripts/promote.ts");
     const withIt = await gate(r, [REVIEW, ATTACK, pass(r)], [], "OPEN", w);
     expect(withIt.j.reasons.join("\n")).not.toContain("攻める側のレビュー");
   });
@@ -2389,7 +2859,7 @@ describe("local change", () => {
     const a = app(r, [REVIEW, pass(r)], "OPEN", { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`") });
     const down = async (url: string, init?: RequestInit) => (url.includes("/records") ? new Response("{}", { status: 500 }) : a.fetch(url, init));
     const err: string[] = [];
-    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: down })).toBe(2);
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: ENV, fetch: down })).toBe(2);
     expect(err.join("")).toContain("判定できなかった");
   });
 
@@ -2398,7 +2868,7 @@ describe("local change", () => {
     for (const extra of [["12"], ["--repo", "a/b"], ["--merge"]]) expect((await gate(r, [REVIEW], extra)).code).toBe(2);
     const noChange = async (url: string) => new Response(JSON.stringify(url.endsWith("/api/backlog/syncs") ? { syncs: [{ workspaceId: "ws_local", backlog: "switchboard", repository: "ws_local", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] } : { issue: { number: 7, title: "x", state: "OPEN", labels: [], milestone: null, parent: null, subIssues: [], body: "", url: "" }, changeRefs: null, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } }));
     const err: string[] = [];
-    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: noChange })).toBe(2);
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => err.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: ENV, fetch: noChange })).toBe(2);
     expect(err.join("")).toContain("#7 は変更ではない");
     // a branch gone: the app answers its tip as null
     const gone = async (url: string) => {
@@ -2407,7 +2877,7 @@ describe("local change", () => {
       return new Response(JSON.stringify(body));
     };
     const goneErr: string[] = [];
-    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => goneErr.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: { BACKLOG_URL: BACKLOG, BACKLOG_WORKSPACE: "ws_local" }, fetch: gone })).toBe(2);
+    expect(await main(["--change", "7"], async () => { throw new Error("gh"); }, () => {}, (s) => goneErr.push(s), () => undefined, async () => { throw new Error("glab"); }, r.dir, { env: ENV, fetch: gone })).toBe(2);
     expect(goneErr.join("")).toContain("#7 の枝が無い（sb/5-x）");
   });
 });

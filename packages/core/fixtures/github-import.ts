@@ -59,7 +59,7 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
   /** The open PRs a test put on its GitHub, in the import's shape: 50 to a page, the rest by cursor. */
   const pullPage = (later: boolean) => {
     const all = pulls().map((p) => ({
-      id: `PR_${p.number}`, number: p.number, state: p.state ?? "OPEN", isDraft: !!p.isDraft, updatedAt: p.updatedAt ?? new Date().toISOString(), headRefName: p.headRefName ?? null, body: p.body ?? "",
+      id: `PR_${p.number}`, number: p.number, state: p.state ?? "OPEN", isDraft: !!p.isDraft, updatedAt: p.updatedAt ?? new Date().toISOString(), headRefName: p.headRefName ?? null, headRefOid: p.headRefOid ?? null, body: p.body ?? "", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: p.comments ?? [] },
       labels: { totalCount: p.labels?.length ?? 0, nodes: (p.labels ?? []).map((name: string) => ({ name })) },
       files: { totalCount: p.filesTotal ?? (p.files ?? []).length, nodes: (p.files ?? []).map((path: string) => ({ path })) },
     }));
@@ -94,7 +94,7 @@ export function importing(legacy: GhRunner, pulls: () => Json[] = () => []): GhR
       const errors: Json[] = [];
       for (const n of numbers) {
         const w = states[`w${n}`];
-        if (w?.__typename === "PullRequest") repository[`w${n}`] = { __typename: "PullRequest", id: `PR_${n}`, number: n, state: w.state, isDraft: !!w.isDraft, body: w.body ?? null, headRefName: w.headRefName ?? null, updatedAt: w.updatedAt ?? "2026-09-01T00:00:00Z", files: { totalCount: (w.files ?? []).length, nodes: (w.files ?? []).map((path: string) => ({ path })) }, mergeCommit: w.mergeCommit ?? null, labels: { totalCount: w.labels?.nodes?.length ?? 0, nodes: w.labels?.nodes ?? [] } };
+        if (w?.__typename === "PullRequest") repository[`w${n}`] = { __typename: "PullRequest", id: `PR_${n}`, number: n, state: w.state, isDraft: !!w.isDraft, body: w.body ?? null, headRefName: w.headRefName ?? null, headRefOid: w.headRefOid ?? null, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: w.comments?.nodes ?? [] }, updatedAt: w.updatedAt ?? "2026-09-01T00:00:00Z", files: { totalCount: (w.files ?? []).length, nodes: (w.files ?? []).map((path: string) => ({ path })) }, mergeCommit: w.mergeCommit ?? null, labels: { totalCount: w.labels?.nodes?.length ?? 0, nodes: w.labels?.nodes ?? [] } };
         else if (w?.__typename === "Issue") repository[`w${n}`] = { __typename: "Issue", ...raw(n, task(n, w), { parent: w.parent?.number }) };
         else (repository[`w${n}`] = null), errors.push({ type: "NOT_FOUND", path: ["repository", `w${n}`] });
       }

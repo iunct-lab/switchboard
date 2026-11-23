@@ -124,7 +124,7 @@ describe("ops resources", () => {
       group(now - 60_000, null, "daemon", "judge", 50_000_000, 1);
       group(now - 60_000, "t_unknown", "task", "runner", 100_000_000, 1);
       // the jobs Tasks asked for: one running, one ended an hour ago, one ended 8 days ago (not shown)
-      const job = (pr: number) => db.insertJob({ kind: pr === 3 ? "review" : "local-ci", taskId: pr === 2 ? "t_unknown" : "t_ci", pr, runner: pr === 3 ? "codex" : null, cwd: "/w", startedAt: at - 9 * 24 * 3600_000 });
+      const job = (pr: number) => db.insertJob({ kind: pr === 3 ? "review" : "local-ci", taskId: pr === 2 ? "t_unknown" : "t_ci", pr, runner: pr === 3 ? "codex" : null, cwd: "/w", startedAt: at - 9 * 24 * 3600_000, repo: "", head: null, as: null, kinds: [] });
       const running = job(1);
       const ended = job(2);
       db.finishJob(ended.id, { status: "fail", exitCode: 1, summary: "fail", endedAt: at - 3600_000 });

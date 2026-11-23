@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // Task の中で回す「関係するテスト」。origin/main から分かれた点からの変更（未コミットと未追跡も）を集め、
 // local-ci と同じ scripts/test-select.ts の選択で選んだテストだけを回す。選択の規則はそちらが持ち、ここには足さない。
-// 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）と、ほかのパッケージが読む共有の型
-// （packages/protocol/）が変わったとき。子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
+// 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）だけ。packages/protocol/ も、ほかと同じく読み込みの木で辿る。
+// 子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
 // 変更が無い、または選ばれたテストが無ければ何も回さない。SWITCHBOARD_SUPERVISED は抜いて回す。
 // 使い方: bun scripts/test-changed.ts [--local] [--force]
 // sb-offload があるホストでは、選んだテスト全部（録画を読むものも）を外の 1 本のビルドで回す（local-ci と同じ runBuild /
@@ -21,15 +21,12 @@ import { currentRepo } from "./repo.ts";
 import { repoFiles, selectFrom } from "./test-select.ts";
 
 const ROOT = join(import.meta.dir, "..");
-const SHARED = "packages/protocol/";
 
 export type Picked = { full: string } | { tests: string[] };
 
 /** 変わったファイルから回すテストを選ぶ。 */
 export function pickTests(changed: string[], files: string[], read: (p: string) => string): Picked {
   if (!changed.length) return { tests: [] };
-  const shared = changed.find((c) => c.startsWith(SHARED));
-  if (shared) return { full: `${shared}: 共有の型` };
   const s = selectFrom(changed, files, read);
   return s.full ? { full: s.full } : { tests: s.tests };
 }

@@ -107,7 +107,10 @@ try {
   step(`変更 #${change}（${branch} → main）とレビューの要約・振り分け`);
 
   // as a Task runs them: in the checkout, with the app's address and workspace, gh first on PATH
-  const env = { ...process.env, BACKLOG_URL: api, BACKLOG_WORKSPACE: ws.id, SWITCHBOARD_SUPERVISED: "" };
+  // not the Task that runs this script: the scripts here judge and merge in their own process against this run's daemon (a Task's id would send them to the real one)
+  const env: Record<string, string | undefined> = { ...process.env, BACKLOG_URL: api, BACKLOG_WORKSPACE: ws.id, SWITCHBOARD_SUPERVISED: "" };
+  delete env.SWITCHBOARD_TASK_ID;
+  delete env.OPS_KIT_TASK_ID;
   const run = async (args: string[]) => {
     const p = Bun.spawn(["bun", ...args], { cwd: repo, env, stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);

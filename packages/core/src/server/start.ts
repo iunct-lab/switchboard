@@ -219,7 +219,7 @@ export const startStage = async <A extends true | undefined = undefined>(sc: Pic
   // this start: a head pushed in between is not granted, and one that could not be read then is none. Said so in
   // permission-modes.md, "A grant is for the head recorded with it"
   const granting = async (r: Awaited<ReturnType<typeof sc.startMetaTask>>) => {
-    if (answer && "task" in r && !sc.db.mergeGrantSourceSpent(answer.id)) await sc.noteMergeGrant(r.task.id, answer.text, { source: answer.id, via: "screen", heads: answer.heads });
+    if (answer && "task" in r && !sc.db.mergeGrantSourceSpent(answer.id)) await sc.noteMergeGrant(r.task.id, answer.text, { source: answer.id, via: "screen", heads: answer.heads, ...(answer.parts ? { parts: answer.parts } : {}) });
     return r;
   };
   if (action === "direct") return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildDirectPrompt(item, { review: sc.settings().reviewRunner, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, runner }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra })));

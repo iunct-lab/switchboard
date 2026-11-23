@@ -61,6 +61,8 @@ interface World {
   /** The open PRs' own read; without it, the same answer as `open` (`pageOf` carries both). */
   pulls?: (v: Record<string, string>) => unknown;
   comments?: (v: Record<string, string>) => unknown;
+  /** The next comment page of a pull request (`n` = its number, `after` = the cursor). */
+  pullComments?: (v: Record<string, string>) => unknown;
   /** The Project items of the Issues named: per number, its `projectItems`, or none. */
   items?: (n: number) => unknown;
   recheck?: (numbers: number[]) => { body: unknown; code?: number };
@@ -81,7 +83,7 @@ function fakeGh(world: World) {
       calls.push(`items ${numbers.join(",")}`);
       return { code: 0, stdout: JSON.stringify({ data: { repository: Object.fromEntries(numbers.map((n) => [`w${n}`, world.items?.(n) ? { number: n, projectItems: world.items(n) } : null])) } }), stderr: "" };
     }
-    const kind = query.includes("issueOrPullRequest") ? "recheck" : query.includes("issue(number:$n)") ? "comments" : query.includes("states:[OPEN,CLOSED]") ? "changed" : query.includes("pullRequests(") ? "pulls" : "open";
+    const kind = query.includes("issueOrPullRequest") ? "recheck" : query.includes("pullRequest(number:$n)") ? "pullComments" : query.includes("issue(number:$n)") ? "comments" : query.includes("states:[OPEN,CLOSED]") ? "changed" : query.includes("pullRequests(") ? "pulls" : "open";
     calls.push(`${kind}${vars.after ? `@${vars.after}` : ""}${vars.since ? ` since ${vars.since}` : ""}`);
     try {
       if (kind === "recheck") {
@@ -253,7 +255,7 @@ test("an open Issue gone from both lists is asked by number: 404 and 403 mark it
 });
 
 const openPr = (n: number, over: Record<string, unknown> = {}) => ({
-  id: `PR_${n}`, number: n, state: "OPEN", isDraft: false, updatedAt: "2026-10-05T00:00:00Z", headRefName: `sb/${n}-x`, body: "",
+  id: `PR_${n}`, number: n, state: "OPEN", isDraft: false, updatedAt: "2026-10-05T00:00:00Z", headRefName: `sb/${n}-x`, headRefOid: `sha${n}`, body: "", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   labels: { totalCount: 1, nodes: [{ name: "needs-decision" }] }, files: { totalCount: 1, nodes: [{ path: "a.ts" }] },
   ...over,
 });
@@ -267,12 +269,56 @@ test("open pull requests are stored with their files by their own read: a cut li
   });
   await importGithubSnapshot(gh, db, WS, 1000);
   expect(asked(calls)).toEqual(asked(["changed", "open", "pulls"]));
-  expect(stored()["pull-request:PR_50"]?.remote).toEqual({ number: 50, state: "OPEN", isDraft: true, labels: ["needs-decision"], closes: [50], mergeCommit: null, updatedAt: "2026-10-05T00:00:00Z", files: ["a.ts"], closedAt: null, mergedAt: null });
+  expect(stored()["pull-request:PR_50"]?.remote).toEqual({ number: 50, state: "OPEN", isDraft: true, labels: ["needs-decision"], closes: [50], mergeCommit: null, updatedAt: "2026-10-05T00:00:00Z", files: ["a.ts"], closedAt: null, mergedAt: null, head: "sha50" });
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ files: null });
   pulls = [openPr(50, { isDraft: true })];
   await importGithubSnapshot(gh, db, WS, 2000);
   expect(asked(calls.slice(3))).toEqual(asked(["changed since 2026-10-03T00:00:00Z", "open", "pulls", "recheck"]));
   expect(stored()["pull-request:PR_51"]?.remote).toMatchObject({ state: "CLOSED" });
+});
+
+const prComment = (id: string, body: string, at = "2026-10-06T00:00:00Z") => ({ id, body, createdAt: at });
+
+test("an open pull request's head and comments are stored: the pages after the first by cursor, one deleted on GitHub is marked gone", async () => {
+  const withComments = (nodes: unknown[], next: string | null = null) => ({ pageInfo: { hasNextPage: !!next, endCursor: next }, nodes });
+  let pulls: unknown[] = [openPr(50, { comments: withComments([prComment("PC_1", "[claude] review\nfirst"), prComment("PC_2", "## レビュー対応\n| 1 | 修正 |")], "pc1") })];
+  const { gh, calls } = fakeGh({
+    changed: () => pageOf([raw(12)]),
+    open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }], null, pulls),
+    pullComments: (v) => ({ data: { repository: { pullRequest: { comments: withComments(v.after === "pc1" ? [prComment("PC_3", "later", "2026-10-07T00:00:00Z")] : []) } } } }),
+  });
+  await importGithubSnapshot(gh, db, WS, 1000);
+  expect(calls.filter((c) => c.startsWith("pullComments"))).toEqual(["pullComments@pc1"]);
+  const s = stored();
+  expect(s["pull-request:PR_50"]?.remote).toMatchObject({ number: 50, head: "sha50" });
+  expect(s["comment:PC_1"]).toEqual({ state: "fetched", remote: { issue: 50, body: "[claude] review\nfirst", createdAt: "2026-10-06T00:00:00Z" } });
+  expect(s["comment:PC_2"]?.remote).toMatchObject({ issue: 50, body: "## レビュー対応\n| 1 | 修正 |" });
+  expect(s["comment:PC_3"]?.remote).toMatchObject({ issue: 50, body: "later" });
+  // the Issue's own comments are unchanged, and the PR's are on the PR's number only
+  expect(s["comment:C_12_1"]?.remote).toMatchObject({ issue: 12 });
+
+  pulls = [openPr(50, { headRefOid: "sha50b", comments: withComments([prComment("PC_2", "## レビュー対応\n| 1 | 修正 |")]) })];
+  await importGithubSnapshot(gh, db, WS, 2000);
+  expect(stored()["pull-request:PR_50"]?.remote).toMatchObject({ head: "sha50b" });
+  expect(stored()["comment:PC_1"]).toMatchObject({ state: "unavailable", remote: { issue: 50 } });
+  expect(stored()["comment:PC_2"]).toMatchObject({ state: "fetched" });
+});
+
+test("a pull request that closed is read once more with its comments", async () => {
+  const comments = (nodes: unknown[]) => ({ pageInfo: { hasNextPage: false, endCursor: null }, nodes });
+  let pulls: unknown[] = [openPr(50, { comments: comments([prComment("PC_1", "[claude] review")]) })];
+  const { gh } = fakeGh({
+    changed: () => pageOf([raw(12)]),
+    open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }], null, pulls),
+    recheck: () => ({ body: { data: { repository: { w50: openPr(50, { __typename: "PullRequest", state: "MERGED", mergedAt: "2026-10-08T00:00:00Z", headRefOid: "sha50z", comments: comments([prComment("PC_1", "[claude] review"), prComment("PC_9", "## レビュー対応\n| 1 | 修正 |", "2026-10-07T00:00:00Z")]) }) } } } }),
+  });
+  await importGithubSnapshot(gh, db, WS, 1000);
+  expect(stored()["comment:PC_9"]).toBeUndefined();
+  pulls = [];
+  await importGithubSnapshot(gh, db, WS, 2000);
+  expect(stored()["pull-request:PR_50"]?.remote).toMatchObject({ state: "MERGED", head: "sha50z", mergedAt: "2026-10-08T00:00:00Z" });
+  expect(stored()["comment:PC_9"]).toEqual({ state: "fetched", remote: { issue: 50, body: "## レビュー対応\n| 1 | 修正 |", createdAt: "2026-10-07T00:00:00Z" } });
+  expect(stored()["comment:PC_1"]).toMatchObject({ state: "fetched" });
 });
 
 test("more than 50 open pull requests: the pages after the first are read by cursor, and all are stored", async () => {
@@ -414,11 +460,11 @@ test("the pull requests an open PBI waits for are stored with their state", asyn
   const { gh, calls } = fakeGh({
     changed: () => pageOf([pbi]),
     open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "In progress")] } }, { number: 13, projectItems: { totalCount: 0, nodes: [] } }]),
-    recheck: () => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "Fixes #13, closes #13", headRefName: "sb/12-x", labels: { totalCount: 1, nodes: [{ name: "x" }] } } } } } }),
+    recheck: () => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "Fixes #13, closes #13", headRefName: "sb/12-x", headRefOid: "aaa", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, labels: { totalCount: 1, nodes: [{ name: "x" }] } } } } } }),
   });
   await importGithubSnapshot(gh, db, WS, 1000);
   expect(asked(calls)).toEqual(asked(["changed", "open", "pulls", "recheck"])); // Issue 13 is open: its state is known without asking
-  expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
+  expect(stored()["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: ["x"], closes: [12, 13], mergeCommit: null, updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null, head: "aaa" } });
 });
 
 test("stop waits are rechecked: a pull request a Task's depends stop waits for is asked by number and stored", async () => {
@@ -434,7 +480,7 @@ test("stop waits are rechecked: a pull request a Task's depends stop waits for i
     open: () => pageOf([{ number: 12, projectItems: { totalCount: 1, nodes: [item(12, "Ready")] } }]),
     recheck: (numbers) => {
       expect(numbers).toEqual([40]);
-      return { body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "", headRefName: "sb/9-x", labels: { totalCount: 0, nodes: [] } } } } } };
+      return { body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "", headRefName: "sb/9-x", headRefOid: "aaa", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, labels: { totalCount: 0, nodes: [] } } } } } };
     },
   });
   await importGithubSnapshot(gh, db, WS, at);
@@ -445,7 +491,7 @@ test("stop waits are rechecked: a pull request a Task's depends stop waits for i
 test("a wait on a closed Issue is answered by what is stored; a pull request whose labels were cut fails the import", async () => {
   const release = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: "C_r", body: "<!-- pbi-complete:release waits=13,40 -->", createdAt: "2026-10-02T00:00:00Z" }] };
   const asked: number[][] = [];
-  const pr = (labels: unknown) => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "OPEN", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, labels } } } } });
+  const pr = (labels: unknown) => ({ body: { data: { repository: { w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "OPEN", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, labels } } } } });
   const world = (labels: unknown, changed: unknown[]): World => ({
     changed: () => pageOf(changed),
     open: () => pageOf([{ number: 12, projectItems: { totalCount: 0, nodes: [] } }]),
@@ -478,7 +524,7 @@ test("the prerequisites of open PBIs and Tasks are stored: a pull request with i
       asked.push(numbers);
       const repository: Record<string, unknown> = {
         w13: { __typename: "Issue", ...raw(13, { state: "CLOSED", stateReason: "COMPLETED", labels: { totalCount: 0, nodes: [] } }) },
-        w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "", headRefName: "sb/30-x", mergeCommit: { oid: "abc123" }, labels: { totalCount: 0, nodes: [] } },
+        w40: { __typename: "PullRequest", id: "PR_40", number: 40, state: "MERGED", isDraft: false, updatedAt: "2026-10-01T00:00:00Z", files: { totalCount: 0, nodes: [] }, body: "", headRefName: "sb/30-x", headRefOid: "aaa", comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }, mergeCommit: { oid: "abc123" }, labels: { totalCount: 0, nodes: [] } },
         w41: { __typename: "Issue", ...raw(41, { state: "CLOSED", stateReason: "NOT_PLANNED", labels: { totalCount: 0, nodes: [] } }) },
         w42: gone ? null : { __typename: "Issue", ...raw(42, { labels: { totalCount: 0, nodes: [] } }) },
       };
@@ -488,7 +534,7 @@ test("the prerequisites of open PBIs and Tasks are stored: a pull request with i
   await importGithubSnapshot(fakeGh(world(false)).gh, db, WS, 1000);
   expect(asked).toEqual([[13, 40, 41, 42]]); // the fenced Issue 99 is not a prerequisite
   let s = stored();
-  expect(s["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [30], mergeCommit: "abc123", updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null } });
+  expect(s["pull-request:PR_40"]).toEqual({ state: "fetched", remote: { number: 40, state: "MERGED", isDraft: false, labels: [], closes: [30], mergeCommit: "abc123", updatedAt: expect.any(String), files: [], closedAt: null, mergedAt: null, head: "aaa" } });
   expect(s["issue:I_41"]).toMatchObject({ state: "fetched", remote: { state: "CLOSED", stateReason: "NOT_PLANNED" } });
   expect(s["issue:I_13"]).toMatchObject({ state: "fetched", remote: { stateReason: "COMPLETED" } });
   expect(s["issue:I_20"]).toMatchObject({ remote: { stateReason: null } });

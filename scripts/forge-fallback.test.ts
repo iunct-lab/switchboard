@@ -76,7 +76,11 @@ async function setup(o: { task?: string; github?: Github; openPr?: number } = {}
   // `openPr`: an open pull request that closes Task 5, as the last import stored it before GitHub went away
   const pulls = o.openPr ? [{ objectKind: "pull-request" as const, externalId: `PR_${o.openPr}`, fetchState: "fetched" as const, remote: { number: o.openPr, state: "OPEN" as const, isDraft: false, labels: [], closes: [5], mergeCommit: null, updatedAt: "2026-01-01T00:00:00Z", files: null, closedAt: null, mergedAt: null } }] : [];
   core.db.putBacklogSnapshot(source, { records: [issue(4, "PBI: p", ["type:pbi"], "", null, [5, 6]), issue(5, "Task: b と c", ["type:task"], o.task ?? "触る場所: `b.txt`、`c.txt`", 4), issue(6, "Task: a", ["type:task"], "触る場所: `a.txt`", 4), ...pulls], cursor: null, syncedAt: Date.now() });
-  const env = { BACKLOG_URL: url, BACKLOG_WORKSPACE: ws.id };
+  // the app's records (its jobs) are read with the same address and a key file
+  const tokenFile = join(home, "client-token");
+  writeFileSync(tokenFile, "k\n");
+  // the gate runs in the Task whose jobs `mark` records: outside a Task the person's own --allow-large would be the consent
+  const env = { BACKLOG_URL: url, BACKLOG_TOKEN_FILE: tokenFile, BACKLOG_WORKSPACE: ws.id, OPS_KIT_TASK_ID: "task_x" };
   const send = async (method: string, path: string, body: object) => fetch(`${url}${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const view = async (n: number, change = false) => {
     const r = await fetch(`${url}/${n}?workspaceId=${ws.id}${change ? "&change=1" : ""}`);
@@ -96,8 +100,14 @@ async function setup(o: { task?: string; github?: Github; openPr?: number } = {}
   };
   /** The marks a merge needs, on the change. */
   const mark = async (n = 1) => {
-    await send("POST", `/${n}/comment?change=1`, { workspaceId: ws.id, text: "[claude] review\n\n### Intent and design\nok" });
-    await send("POST", `/${n}/comment?change=1`, { workspaceId: ws.id, text: `[local-ci] pass ${tip("sb/5-x")} base=${tip("main")}` });
+    const at = Date.now();
+    const base = { taskId: "task_x", pr: n, cwd: repo, startedAt: at, repo: `local:${ws.id}`, as: null, kinds: [] };
+    const review = core!.db.insertJob({ ...base, kind: "review", runner: "claude", head: tip("sb/5-x") });
+    core!.db.finishJob(review.id, { status: "pass", exitCode: 0, summary: "", endedAt: at });
+    core!.db.setJobResult(review.id, { result: { review: { findings: [], firstLine: "[claude] review" } } });
+    const ci = core!.db.insertJob({ ...base, kind: "local-ci", runner: null, head: null });
+    core!.db.finishJob(ci.id, { status: "pass", exitCode: 0, summary: "", endedAt: at });
+    core!.db.setJobResult(ci.id, { head: tip("sb/5-x"), base: tip("main"), result: { ci: { outcome: "pass" } } });
   };
   const noGh = async () => { throw new Error("gh called"); };
   const gate = async (n = 1, extra: string[] = []) => {
@@ -230,7 +240,8 @@ test("a [merge-answer] yes is not kept on a GitHub workspace's change, however i
   }
   expect((await s.view(1, true)).detail.comments.some((c) => c.body.includes("merge-answer"))).toBe(false);
   const g = await s.gate(1, ["--allow-large"]);
-  expect([g.code, g.out.includes("[聞く]") || g.out.includes("[merge-answer] yes が無い")]).toEqual([1, true]);
+  // the app holds no grant of the change's head (the yes was refused), so the flag lifts nothing in the Task
+  expect([g.code, g.out.includes("[聞く]") && g.out.includes("利用者の許可の記録が無い: security:gates")]).toEqual([1, true]);
   expect((await s.merge(1, ["--allow-large"])).code).toBe(1);
   expect(s.landed()).toEqual([]);
 });

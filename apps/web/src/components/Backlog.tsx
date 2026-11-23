@@ -584,7 +584,7 @@ function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (ite
   const send = () => {
     setSending(true);
     api
-      .answerBacklog(props.item.workspaceId, props.item.number, text, d?.issue)
+      .answerBacklog(props.item.workspaceId, props.item.number, text, d?.issue, d?.at)
       .then(() => props.onAnswered(props.item))
       .catch((e) => props.onError(t(m.answerFailed, { n: props.item.number, error: String(e.message ?? e) })))
       .finally(() => setSending(false));

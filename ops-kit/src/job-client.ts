@@ -8,17 +8,25 @@
 import { isAbsolute, resolve } from "node:path";
 import { BacklogUnknown, client } from "./backlog-client.ts";
 
-export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local]
+export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local] [--change]
       アプリにローカル CI（scripts/local-ci.ts <PR>）を仕事として頼む。仕事はアプリの子として重い処理の枠を取って走り、Task のセッションの子にならない
       --local は外のビルドを使えるホストでも全手順をこのマシンで回す（既定は外。外のビルドが無ければ指定せずにここで回る）
       --fixtures は録画庫（絶対パス）。仕事の環境に録画庫として渡り（変数の名前はアプリが決める）、録画の不足を失敗にする
-  job request review <PR> [--runner codex|claude [--as fallback|recheck|audit]] --prompt <file> --out <file> [--cwd <dir>]
+      --change は <PR> がアプリが持つ変更（GitHub の PR でないローカルの変更）の番号のとき
+  job request review <PR> [--runner codex|claude [--as fallback|recheck|audit|attack]] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
       アプリにレビュー（cross-runner-review の codex exec / claude -p）を仕事として頼む。--prompt を読み --out に書く（どちらも --cwd の中）
       --runner を省くとアプリが設定と Task のランナーから主レビュアーを決める。主レビュアーでないランナーの名指しは断られる。
-      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査）
+      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー。attack は設定が other なら実装したのと別のランナーだけが通る）
+      --kinds は再チェックの種類（security:docs など。カンマ区切り）で --as recheck のときだけ渡す（無いと種類なしで記録され、どの再チェックの合格にも数えられない）。--change は <PR> がアプリが持つ変更の番号のとき
       アプリは --prompt の指示の後ろに、レビューするランナーの動き方（読み取り専用のサンドボックス / plan モード）の文を足して渡す
       request は仕事の id を job#<id> の 1 行で出し、続けて止まりの記録（アプリが Task に渡す止まりの報告の書式）に書く JSON の例を出す。待たずにそれを書いてターンを終えると、
       仕事が終わったときにアプリが結果の要約を添えて Task を再開する。--cwd の既定は今の作業フォルダ（Task のリポジトリの checkout）
+  job request recheck <PR> --kind migration|rescue|security:lockfile [--cwd <dir>] [--change]
+      アプリに、コマンドで合否が決まる再チェック（scripts/recheck.ts <種類>）を仕事として頼む。種類ごとのコマンドはアプリが組む（コマンドは運ばない）。
+      request の出力と待ち方は local-ci と同じ。レビューで見る種類（size など）は job request review --as recheck --kinds で頼む
+  job request tag-ci [--cwd <dir>]
+      アプリにタグの CI（scripts/tag-ci.ts --sha <最新のタグのコミット>。そのコミットで CI の手順を全部回す）を仕事として頼む。PR は取らない。仕事の記録（そのコミットの合否）を、アプリが昇格の判定で読む。
+      request の出力と待ち方は local-ci と同じ
   job list [--json]
       頼まれた仕事（実行中と、終わって 7 日以内）。行: job#<id> 種類 PR 状態 Task
       exit 0 = できた、1 = 断られた（使い方の誤り、アプリが断った）、2 = 判定できない（アプリの Task の外、アプリに届かない）`;
@@ -43,7 +51,7 @@ function jobsApi(env: Record<string, string | undefined>, f: Fetch) {
  * kit names no app, so the fence is the Task's to write), ends its turn on it, and is resumed when the job ends.
  */
 export const stopExample = (job: { id: number; kind: string; pr: number }) =>
-  JSON.stringify({ id: `job-${job.id}`, op: `ops-kit job request ${job.kind}`, target: `PR #${job.pr}`, reason: "depends", safety: "read-only", evidence: `job#${job.id} を頼んだ`, state: "waiting", conditions: [{ key: `job#${job.id}`, value: "done", met: false }] });
+  JSON.stringify({ id: `job-${job.id}`, op: `ops-kit job request ${job.kind}`, target: job.kind === "tag-ci" ? "タグの CI" : `PR #${job.pr}`, reason: "depends", safety: "read-only", evidence: `job#${job.id} を頼んだ`, state: "waiting", conditions: [{ key: `job#${job.id}`, value: "done", met: false }] });
 
 export async function runJob(argv: string[], env: Record<string, string | undefined>, io: JobIo, opts: { fetch?: Fetch; cwd?: string } = {}): Promise<number> {
   const args = [...argv];
@@ -64,24 +72,38 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       const outFile = take("--out");
       const fixtures = take("--fixtures");
       const why = take("--as");
+      const kindsArg = take("--kinds");
+      const recheckKind = take("--kind");
       const local = args.includes("--local");
       if (local) args.splice(args.indexOf("--local"), 1);
+      const change = args.includes("--change");
+      if (change) args.splice(args.indexOf("--change"), 1);
       const [kind, prArg, ...extra] = args;
-      const pr = Number(prArg);
-      if (!Number.isInteger(pr) || pr <= 0 || extra.length) throw new Usage(`使い方:\n${JOB_USAGE}`);
+      const pr = kind === "tag-ci" ? 0 : Number(prArg);
+      if (kind === "tag-ci" ? prArg !== undefined || extra.length : !Number.isInteger(pr) || pr <= 0 || extra.length) throw new Usage(`使い方:\n${JOB_USAGE}`);
       if (!env.OPS_KIT_TASK_ID) throw new BacklogUnknown("job: Task の id がありません（OPS_KIT_TASK_ID。アプリの Task の中で実行してください）");
       let body: Record<string, unknown>;
       if (kind === "local-ci") {
-        if (runner || prompt || outFile || why) throw new Usage("local-ci は --runner / --as / --prompt / --out を取りません");
+        if (runner || prompt || outFile || why || kindsArg !== undefined || recheckKind !== undefined) throw new Usage("local-ci は --runner / --as / --kinds / --kind / --prompt / --out を取りません");
         if (fixtures !== undefined && !isAbsolute(fixtures)) throw new Usage(`--fixtures は絶対パスで渡してください: ${fixtures}`);
-        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, ...(fixtures !== undefined && { fixtures }), ...(local && { local }) };
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, ...(fixtures !== undefined && { fixtures }), ...(local && { local }), ...(change && { change }) };
+      } else if (kind === "tag-ci") {
+        if (runner || prompt || outFile || why || kindsArg !== undefined || fixtures !== undefined || local || change || recheckKind !== undefined) throw new Usage("tag-ci は --cwd だけを取ります");
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, cwd };
+      } else if (kind === "recheck") {
+        if (runner || prompt || outFile || why || kindsArg !== undefined || fixtures !== undefined || local) throw new Usage("recheck は --kind <種類> と --cwd / --change だけを取ります");
+        if (!recheckKind || !["migration", "rescue", "security:lockfile"].includes(recheckKind)) throw new Usage(`recheck には --kind migration|rescue|security:lockfile が要ります: ${recheckKind ?? "(なし)"}`);
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, cwd, recheck: recheckKind, ...(change && { change }) };
       } else if (kind === "review") {
-        if (fixtures !== undefined || local) throw new Usage("review は --fixtures / --local を取りません");
+        if (fixtures !== undefined || local || recheckKind !== undefined) throw new Usage("review は --fixtures / --local / --kind を取りません");
         if ((runner !== undefined && runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --prompt <file> と --out <file> が要ります（--runner は codex|claude）");
-        if (why !== undefined && !["fallback", "recheck", "audit"].includes(why)) throw new Usage(`--as は fallback / recheck / audit のどれかです: ${why}`);
-        if (why && !runner) throw new Usage("--as（主レビュアーでないランナーに頼む理由）は --runner codex|claude と一緒に渡してください");
-        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, ...(runner && { runner }), ...(why && { as: why }), cwd, promptFile: resolve(cwd, prompt), outFile: resolve(cwd, outFile) };
-      } else throw new Usage(`仕事の種類は local-ci か review です: ${kind ?? "(なし)"}`);
+        if (why !== undefined && !["fallback", "recheck", "audit", "attack"].includes(why)) throw new Usage(`--as は fallback / recheck / audit / attack のどれかです: ${why}`);
+        if (why && !runner) throw new Usage("--as（主レビューでない回の理由）は --runner codex|claude と一緒に渡してください");
+        const kinds = kindsArg === undefined ? [] : kindsArg.split(",").map((k) => k.trim());
+        if (kinds.some((k) => !k)) throw new Usage("--kinds は再チェックの種類をカンマ区切りで渡してください");
+        if (why !== "recheck" && kindsArg !== undefined) throw new Usage("--kinds は --as recheck のときだけ渡します");
+        body = { kind, taskId: env.OPS_KIT_TASK_ID, pr, ...(runner && { runner }), ...(why && { as: why }), ...(kinds.length && { kinds }), ...(change && { change }), cwd, promptFile: resolve(cwd, prompt), outFile: resolve(cwd, outFile) };
+      } else throw new Usage(`仕事の種類は local-ci・review・recheck・tag-ci のどれかです: ${kind ?? "(なし)"}`);
       const job = (await jobsApi(env, opts.fetch ?? fetch)("POST", "", body)) as Job;
       io.out(`job#${job.id}`);
       io.out(`待たずに、止まりの報告（アプリの書式）にこの JSON を書いてターンを終えてください（仕事が終わるとアプリが結果を添えて再開します）:\n${stopExample({ id: job.id, kind: job.kind, pr: job.pr })}`);

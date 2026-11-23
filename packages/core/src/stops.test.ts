@@ -330,15 +330,24 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
 
   test("stopRecoveryPrompt says the two operations with a fixed sentence take the refusing side's sentence as the grant", () => {
     for (const cond of [NONE, ALL, { ...NONE, workspaceMcp: true }]) {
-      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・[merge-answer] の投稿は、拒んだ側の出力が示す決まった文をそのまま grant に書く（ほかの言い方では通らない）。");
+      expect(stopRecoveryPrompt([], cond)).toContain("マージ判定の外のマージ・聞く理由の解除（[merge-answer] の投稿）は、拒んだ側の出力が示す決まった文（聞く理由は「PR #<n> をマージしてよい」（投稿の検査がある間は「PR #<n> に [merge-answer] yes を投稿してよい」も通る）、判定の外のマージは「PR #<n> を判定の外でマージしてよい」）をそのまま grant に書く（ほかの言い方では通らない）。");
     }
   });
 
   test("openStopsPrompt is the open stops alone, and empty without one", () => {
     const [s] = reduceStops([tried(1)]);
     expect(openStopsPrompt([])).toBe("");
-    expect(openStopsPrompt([s!])).toBe("この作業でまだ解けていない停止:\n- gh pr merge PR #12: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
+    expect(openStopsPrompt([s!])).toBe("この作業でまだ解けていない停止（前に止まったときの記録。各行の操作は、そのまま実行するコマンドではない）:\n- 操作「gh pr merge」、対象「PR #12」: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
     expect(stopRecoveryPrompt([s!], NONE).endsWith(openStopsPrompt([s!]))).toBe(true);
+  });
+
+  test("openStopsPrompt keeps the operation and its target apart, so a line does not read as one command, and says the lines are a record", () => {
+    const text = openStopsPrompt(reduceStops([stop({ op: "ops-kit public-sync --source v1", target: "owner/name", reason: "decision" })]));
+    expect(text).not.toContain("ops-kit public-sync --source v1 owner/name");
+    expect(text).toContain("実行するコマンドではない");
+    expect(text).toContain("- 操作「ops-kit public-sync --source v1」、対象「owner/name」: decision（止まったのは 1 回、waiting）");
+    // a stop that names no target has no empty quotes
+    expect(openStopsPrompt(reduceStops([stop({ op: "bun test", target: "" })]))).toContain("- 操作「bun test」: depends（");
   });
 
   const tried = (n: number, state: StopRecord["state"] = "retrying") => stop({ reason: "transient", safety: "read-only", state, actions: Array.from({ length: n }, (_, i) => ({ attempt: i + 1, at: 1, what: "再試行", ok: null })) });
@@ -361,7 +370,7 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     const p = stopRecoveryPrompt([s!], NONE);
     expect(p).toContain("```switchboard-stop");
     expect(p).toContain("最大 2 回（5 秒後、30 秒後）");
-    expect(p).toContain("- gh pr merge PR #12: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
+    expect(p).toContain("- 操作「gh pr merge」、対象「PR #12」: transient（止まったのは 1 回、retrying、再試行の残り 1 回）");
     expect(stopRecoveryPrompt([], ALL)).not.toContain("まだ解けていない");
   });
 
@@ -705,5 +714,27 @@ describe("resumableDepends", () => {
       expect(outcomeFromStops([record], false), name).toBe(resumed ? "waits" : "needs_action");
     }
     expect(cases.filter(([, r]) => resumableDepends(r)).map(([n]) => n)).toEqual(["a PR", "a job", "a date"]);
+  });
+});
+
+describe("an answered grant and the next grant of the same series", () => {
+  const [A, B] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
+  const reply = { ref: "seq:7", at: 2000 };
+  test("a new grant after an answered one asks again: the answer to the first grant's stop is not an answer to the second's, while the same grant reported again still waits", () => {
+    const a = stop({ id: "g1", reason: "permission", grant: A, at: 1000 });
+    const answered: StopRecord = { ...a, answer: reply, at: 2001 };
+    // a new stop of the same series with another grant: it carries the earlier answer over, as a recorded stop does
+    const b = stop({ id: "g2", reason: "permission", grant: B, answer: reply, at: 3000 });
+    expect(reduceStops([a, answered, b])[0]).toMatchObject({ count: 2, grant: B, next: "decide", answered: false });
+    // the same grant again: asking again gets the same answer
+    const again = stop({ id: "g3", reason: "permission", grant: A, answer: reply, at: 3000 });
+    expect(reduceStops([a, answered, again])[0]).toMatchObject({ count: 2, grant: A, next: "wait" });
+    // a stop with another grant that was already there when the reply came, and that the reply did not mark, is not answered by it
+    const during = stop({ id: "g4", reason: "permission", grant: B, at: 1990 });
+    expect(reduceStops([a, during, answered])[0]).toMatchObject({ count: 2, grant: B, next: "decide", answered: false });
+    // the answered stop reported again under its own id with another grant, then stopping anew: what was answered was the first grant
+    const moved: StopRecord = { ...answered, grant: B, at: 2500 };
+    const anew = stop({ id: "g5", reason: "permission", grant: B, answer: reply, at: 3000 });
+    expect(reduceStops([a, answered, moved, anew])[0]).toMatchObject({ count: 2, grant: B, next: "decide" });
   });
 });

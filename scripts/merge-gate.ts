@@ -1,17 +1,19 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { currentRepo, originRepo } from "./repo.ts";
-import { LOCAL_CI_RESULT, sh } from "./local-ci";
+import { sh } from "./local-ci";
 import { forgeTargetOf, originOf, type ForgeTarget } from "../ops-kit/src/forge.ts";
 import { mergeGitlabMr, readGitlabMerge, runGlab, type Sh } from "../ops-kit/src/forge-gitlab.ts";
 import { linkedIssues } from "./task-paths.ts";
 import { overlaps, scopeIn } from "../ops-kit/src/task-paths.ts";
 import { client, runBacklog, type Detail, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../ops-kit/src/config.ts";
-import { mergeAnswerOf } from "../ops-kit/src/gh-guard.ts";
 import { LIMIT_FILES, limitsRaisedOf } from "./merge-gate-limits.ts";
 import { markedLinesTouched } from "./merge-gate-rules.ts";
-import { heldSettingsOf, stepsNotConfirmed, type HeldSettings } from "./workspace-settings.ts";
+import { heldSettingsOf, type HeldSettings } from "./workspace-settings.ts";
+import { mergeRecords, type MergeRecordJob, type MergeRecords } from "../ops-kit/src/merge-records.ts";
+import { mergeRecordsEnv } from "./merge-records-env.ts";
+import { attackedOf, ciAtTips, ciOf, rechecksOf, reviewedOf } from "./merge-gate-records.ts";
 
 export const LARGE_LINES = 300;
 
@@ -130,16 +132,15 @@ export function loadReversibility(path = REVERSIBILITY_PATH): { ask: AskKind[]; 
 const REVERSIBILITY = loadReversibility();
 export const RECHECK_KINDS: RecheckKind[] = REVERSIBILITY.recheck;
 export const ASK_KINDS: AskKind[] = REVERSIBILITY.ask;
-/** The kinds the table answers `reversible`: a direct PR (branch sb/direct-) touching only these skips the main review. */
+/** The kinds the table answers `reversible`: a direct PR (one the app started a Task to merge as a direct one) touching only these skips the main review. */
 const REVERSIBLE_KINDS: string[] = REVERSIBILITY.reversible;
 /** The mark `mergePr` puts on a PR merged without a main review (direct, no large reason): `[merge-direct] <head sha>`. */
 export const MERGE_DIRECT = /^\[merge-direct\] ([0-9a-f]{40})\b/;
-const DIRECT_BRANCH = "sb/direct-";
 export const RECHECK_PASS = new RegExp(`^\\[recheck\\] (${RECHECK_KINDS.join("|")}) pass ([0-9a-f]{40})\\b`);
 /**
  * Record marks for the user's side (the recheck side is RECHECK_PASS): asked with `[merge-ask] <kinds> <head sha>`,
  * answered with `[merge-answer] <yes|no> <kinds> <head sha>` (kinds comma-separated; the comment's createdAt is the time).
- * merge-audit reads them; `[merge-answer] yes` is what --allow-large needs to take effect (judge).
+ * merge-audit reads them; the verdict reads none (--allow-large needs the app's record of the person's grant: judge).
  */
 export const MERGE_ASK = /^\[merge-ask\] ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
 export const MERGE_ANSWER = /^\[merge-answer\] (yes|no) ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
@@ -150,15 +151,13 @@ const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;
 const TESTS = ["**/*.test.ts", "scripts/*-e2e.ts"].map((p) => new Bun.Glob(p));
 const DOCS = ["docs/**", "**/*.md"].map((p) => new Bun.Glob(p));
 export const REVIEW = /^\[(codex|claude)\] review/;
-/** The mark of the attacking review (a reviewer told to break the change): not a main review, and `REVIEW` does not match it. */
-export const ATTACK = /^\[(codex|claude)\] attack\b/;
 /**
  * Paths that need an attacking review besides the security groups they may not be in: what moves a release, the rescue,
  * the way in from outside and what a Task may run. Switchboard's own paths, applied to every --repo as they are (like
  * `security:host`): another repository with the same paths also needs the attacking review.
  */
 export const ATTACK_PATHS = glob(["packages/core/src/promotion.ts", "packages/core/src/server/promotion.ts", "scripts/promote.ts", "rescue/**", "packages/core/src/uplink-in.ts", ".claude/settings.json", "ops-kit/bin/**"]);
-/** Only these comment authors' marks count (review, [local-ci], [recheck]): on a public --repo anyone can comment. */
+/** Only these comment authors' marks count (the audits of the marks read them; the verdict reads no comment): on a public --repo anyone can comment. */
 export const MARK_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
 
 export type FileStatus = "added" | "removed" | "renamed" | "copied" | "modified" | "changed";
@@ -173,8 +172,6 @@ export interface PrFacts {
   files: { path: string; additions: number; deletions: number; status?: FileStatus; previous?: string; commentOnly?: boolean }[];
   /** What the PR changes in ops.config.json (`configScopeOf`); absent = it does not touch the file, or the change was not read. */
   configScope?: ConfigScope;
-  // Newest author date: a rebase keeps it, a new fix commit moves it.
-  headCommittedAt: string;
   checks: { name: string; conclusion: string }[];
   /** README.md's `## Design rules` section changed (designRulesTouched); absent = not. */
   designRulesTouched?: boolean;
@@ -192,8 +189,12 @@ export interface PrFacts {
    * `ops.config.json`, or nothing is kept.
    */
   held?: HeldSettings;
-  /** The kinds with a `[recheck] <kind> pass <head sha>` of the head; absent = none. */
+  /** The kinds the app's recheck jobs satisfy at the head (`rechecksOf`); absent = none. */
   rechecks?: RecheckKind[];
+  /** The app ran a main review of the head that passed and left its findings (`reviewedOf`); absent = none. */
+  reviewed?: true;
+  /** The same for the attacking-side review (`attackedOf`); absent = none. */
+  attacked?: true;
   unresolvedThreads: number;
   /**
    * A local change that stands in for this GitHub PR while GitHub cannot be read: its review threads are not known, so it
@@ -207,13 +208,22 @@ export interface PrFacts {
    */
   threadsUnknown?: string;
   mergeState: string;
-  reviewComments: { body: string; createdAt: string }[];
-  /** The head's sha (a `[merge-answer] yes` must name it for --allow-large; --merge merges only this head); absent = not read. */
+  /**
+   * The app holds the person's grant of this head for the Task that runs the gate (`GET /api/merge-records`), or the
+   * person runs the gate themselves, outside a Task (`appRecords`): `--allow-large` then lifts the ask reasons. Absent =
+   * no grant. A comment of the PR says nothing here: the verdict reads no comment.
+   */
+  granted?: boolean;
+  /** How the person names this in the sentence that grants it (`PR #12`, `変更 L7`); absent = a PR, named by its number. */
+  subject?: string;
+  /** The head's sha (a grant is of one head; --merge merges only this head); absent = not read. */
   head?: string;
-  /** The branch is a direct one (named sb/direct-): with no large reason it needs no main review. GitHub PRs only: a local change has no place for the mark, so it keeps the review. */
+  /** The app started the Task that opened this as a direct one (`records.direct`): with no large reason it needs no main review. The branch's name says nothing. */
   direct?: boolean;
-  /** The base branch (--merge-stack merges only a PR on the default branch: the bottom of its stack); absent = not read. */
+  /** The base branch (--merge-stack checks the stack's order by it); absent = not read. */
   base?: string;
+  /** The head branch (--merge-stack: the branch the PR above must be based on); absent = not read. */
+  branch?: string;
   /** The Tasks the PR closes: the paths their bodies name, and what the other Tasks of their PBIs name; absent = the PR closes no Task. */
   task?: { numbers: number[]; named: string[]; siblings: { number: number; paths: string[] }[] };
 }
@@ -587,7 +597,7 @@ export function scopeMaterial(f: PrFacts): string {
   ].join("\n");
 }
 
-/** --allow-large lifts the large reasons only with a `[merge-answer] yes` of the head that names every kind left. */
+/** --allow-large lifts the large reasons only with the app's record of the person's grant of the head (`PrFacts.granted`); no comment is read. */
 export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const large: { kind: RecheckKind | AskKind; text: string }[] = [];
   const add = (kind: RecheckKind | AskKind, head: string, paths: string[], note = "") => {
@@ -644,22 +654,21 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const ask = ASK_KINDS.filter((k) => large.some((l) => l.kind === k));
   const isAsk = (k: RecheckKind | AskKind): k is AskKind => (ASK_KINDS as string[]).includes(k);
 
-  // the last answer of this head decides (a later no takes the yes back); a yes must name every kind left (a yes about
-  // size does not lift a security reason)
+  // the person's grant of this head lifts every kind left: the kinds are not in the record (a grant is of one head, and
+  // the head decides what is asked of it)
   const left = [...ask, ...recheck];
-  // read in the form the check that stops a Task from posting a yes compares (the kit's `mergeAnswerOf` / `markText`):
-  // what that check lets through is never a yes here
-  const answer = f.reviewComments.map((c) => ({ at: Date.parse(c.createdAt), m: mergeAnswerOf(c.body) })).filter((a) => a.m?.sha === f.head).sort((a, b) => a.at - b.at).at(-1)?.m;
-  const lifted = opts.allowLarge && (left.length === 0 || (answer?.answer === "yes" && left.every((k) => answer.kinds.includes(k))));
+  const lifted = opts.allowLarge && (left.length === 0 || f.granted === true);
   const reasons = lifted
     ? []
     : large
       .filter((l) => isAsk(l.kind) || !marked.has(l.kind))
       .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}`);
   if (mixed) reasons.push(mixed);
-  if (opts.allowLarge && !lifted) reasons.push(`[merge-answer] yes が無い: ${left.join(",")}（--allow-large は head の最後の印が yes で ask と recheck を全部含むときだけ効く）`);
+  if (opts.allowLarge && !lifted) {
+    reasons.push(`利用者の許可の記録が無い: ${left.join(",")}（Task の会話で利用者が「${f.subject ?? "PR #<n>"} をマージしてよい」と認めると、その head に記録される。新しいコミットの後は聞き直す）`);
+  }
   // the settings kept by Switchboard (the CI's steps, the gate) have a change the person has not confirmed: the merge waits
-  // for that answer. Not lifted by --allow-large or a [merge-answer]: it is answered where the change is shown (判断待ち)
+  // for that answer. Not lifted by --allow-large or the person's grant of the head: it is answered where the change is shown (判断待ち)
   if (f.held?.pending) reasons.push(`[聞く] Switchboard の側の設定（workspace ${f.held.workspace}）に、利用者が確かめていない変更がある（キー: ${f.held.pending.keys.join(", ") || "不明"}）。アプリの判断待ちで確認するか断ってから判定し直す（--allow-large では外れない）`);
   const scope = taskScope(f);
   if (f.checks.length === 0) reasons.push("CI のチェックが 1 つも無い");
@@ -672,20 +681,19 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   if (f.unresolvedThreads > 0) reasons.push(`解決していないレビュースレッドが ${f.unresolvedThreads} 件ある`);
   if (f.threadsUnread) reasons.push(`PR #${f.threadsUnread} のレビュースレッドを読めない（GitHub が使えない間のローカルの変更）。未解決のスレッドが無いと確かめられないので、GitHub が戻ってから PR で進める`);
   else if (f.threadsUnknown) reasons.push(`枝 ${f.threadsUnknown} は origin に push 済みで、PR があるか・未解決のレビュースレッドが無いかを確かめられない（GitHub が使えない間のローカルの変更）。GitHub が戻ってから PR で進める`);
-  const head = Date.parse(f.headCommittedAt);
-  if (!reviewSkipped && !f.reviewComments.some((c) => REVIEW.test(c.body) && Date.parse(c.createdAt) > head)) {
-    reasons.push(`最後のコミット（${f.headCommittedAt}）より新しい主レビュー（[codex] review / [claude] review）が無い`);
+  if (!reviewSkipped && !f.reviewed) {
+    reasons.push("この head（か、この PR のコミットが同じ差分で入った head）で合格した主レビューの仕事の記録が無い（アプリで回したレビュー。コメントでは満たされない）");
   }
-  // not lifted by --allow-large or a [merge-answer]: the answer is about the change, the attacking review looks for what is wrong with it
+  // not lifted by --allow-large or the person's grant of the head: the answer is about the change, the attacking review looks for what is wrong with it
   const attack = attackPaths(f);
-  if (attack.length > 0 && !f.reviewComments.some((c) => ATTACK.test(c.body) && Date.parse(c.createdAt) > head)) {
+  if (attack.length > 0 && !f.attacked) {
     const named = f.files.filter((x) => attack.includes(x.path)).map((x) => (x.previous && x.previous !== x.path ? `${x.path}（改名前: ${x.previous}）` : x.path));
-    reasons.push(`最後のコミット（${f.headCommittedAt}）より新しい攻める側のレビュー（[codex] attack / [claude] attack）が無い: ${named.join(", ")}`);
+    reasons.push(`この head（か、この PR のコミットが同じ差分で入った head）で合格した攻める側のレビューの仕事の記録が無い: ${named.join(", ")}`);
   }
   const unstableForLocalCi = f.mergeState === "UNSTABLE" && f.localCi === true;
   if (f.mergeState === "BLOCKED" && f.localCi) {
-    // the local pass is a PR comment: a required status check or review of the base branch is not met by it
-    reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果は PR コメントで、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
+    // the local pass is a job record of the app: a required status check or review of the base branch is not met by it
+    reasons.push(`mergeStateStatus が BLOCKED: base の枝の保護（必須のチェックか承認）がマージを止めている。local-ci の結果はアプリの仕事の記録で、GitHub の必須チェックにはならない（${PROTECTION_DOC}）`);
   } else if (f.mergeState !== "CLEAN" && !unstableForLocalCi) reasons.push(`mergeStateStatus が CLEAN でない: ${f.mergeState}`);
 
   return { verdict: reasons.length === 0 ? "merge" : "stop", impact, reasons, ask, recheck, ...(scope.notes.length || f.held ? { notes: [...scope.notes, ...(f.held ? [heldNote(f.held)] : [])] } : {}), ...(reviewSkipped ? { reviewSkipped: true as const } : {}), ...(attack.length > 0 ? { attack } : {}) };
@@ -694,11 +702,16 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
 /** The line a judgement names the settings it was made with: the workspace and the version the person confirmed. */
 export const heldNote = (h: HeldSettings): string => `設定: Switchboard の側（workspace ${h.workspace}、利用者が確かめた版 ${h.version ?? "なし"}${h.ciHash ? `、CI の手順のハッシュ ${h.ciHash}` : ""}）${h.pending ? "。確かめていない変更が待っている（使っていない）" : ""}`;
 
-/** Runs `gh`; `env` is added to the environment (mergePr marks the PR it merges: the check in front of `gh` lets that merge through). */
+/** Runs `gh`; `env` is added to the environment (mergePr pins GH_REPO for `gh stack merge`). */
 type Run = (args: string[], env?: Record<string, string>) => Promise<string>;
 
+/** The checkout a run as the app's job works in (`--cwd`). The job starts in the daemon's own folder, so Bun reads no `bunfig.toml` or `.env` of the checkout for it; git and `gh` run in the checkout (the front of `gh` reads its refusals to write from the working tree it runs in, and `gh stack merge` acts on it). */
+let workDir: string | undefined;
+
 async function gh(args: string[], env?: Record<string, string>): Promise<string> {
-  const p = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe", ...(env && { env: { ...process.env, ...env } }) });
+  // `gh` can be the front of `gh` (a Bun script): started in the checkout it would read that folder's bunfig.toml and .env, so Bun is told not to and given the daemon's own config file
+  const bun = workDir ? { BUN_OPTIONS: `--no-env-file --config=${join(import.meta.dir, "../bunfig.toml")}` } : {};
+  const p = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe", ...(workDir && { cwd: workDir }), ...((env || workDir) && { env: { ...process.env, ...env, ...bun } }) });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   if (code !== 0) throw new Error(`gh ${args[0]} ${args[1] ?? ""} failed: ${err.trim()}`);
   return out;
@@ -730,7 +743,7 @@ export function checksFromRuns(runs: WorkflowRun[]): PrFacts["checks"] {
  * When Actions does not start (billing: the job fails with no steps and no runner, or the run stays queued), or there is no run at all, the local
  * pass of `bun scripts/local-ci.ts` counts as the CI's success. Only for a run that never started (a CI
  * whose tests really failed still stops the merge) and only when the newest result of the stack's top is a pass whose
- * head has this PR's commits as they are now, by `git cherry` (`localCiOf`).
+ * head has this PR's commits as they are now, by `git cherry` (`inPass`, read by `ciOf`).
  */
 const LOCAL_CI_SUFFIX = "（Actions が始まらず、ローカルで pass）";
 const LOCAL_CI_ONLY = "local-ci（Actions の run が無く、ローカルで pass）";
@@ -738,7 +751,7 @@ const PROTECTION_DOC = "docs/merge-gate.md の「Branch protection and local res
 
 /**
  * The top of `n`'s stack: up by the one open PR whose base is this one's head branch. None or two above → here.
- * gh stack's tracking is a catalog local to one clone (`<common-dir>/gh-stack`), and GitHub's API has no stack, so the PRs' branches are what is read.
+ * The PRs' branches are what is read (it only finds where to put the local CI; what `gh stack merge` merges is `stackMembers`).
  */
 export async function stackTop(n: number, headRefName: string, run: (args: string[]) => Promise<string>, repo: string): Promise<number> {
   const seen = new Set([n]);
@@ -751,35 +764,41 @@ export async function stackTop(n: number, headRefName: string, run: (args: strin
   }
 }
 
-/** The newest `[local-ci]` result among comments already filtered to MARK_AUTHORS. local-ci's reuse reads the same one. */
-export function newestLocalCi<C extends { body: string; createdAt: string }>(comments: C[]): { c: C; m: RegExpExecArray } | undefined {
-  return comments
-    .map((c) => ({ c, m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt) }))
-    .filter((x): x is { c: C; m: RegExpExecArray; at: number } => x.m !== null)
-    .sort((a, b) => a.at - b.at)
-    .at(-1);
-}
+/** A PR of the set `gh stack merge <n>` merges: its number and the head GitHub's stack has for it. */
+export interface StackPr { n: number; head: string }
 
 /**
- * Whether the newest local-ci result of the stack's top `top` (this PR itself when alone) is a pass whose head has this
- * PR's commits as they are now (`covered`, by `git cherry`: `inPass`); else why not. Only the first line
- * (`LOCAL_CI_RESULT`) is read, so another repository's copy of local-ci counts as it writes it. The base's tip is not
- * compared: a conflict with another PR is mergeStateStatus's, a fault of two PRs together the tag CI's.
+ * What `gh stack merge <n>` merges, read where gh stack reads it: GitHub's registered stack of PR `n` (the Stacks REST API,
+ * `repos/<repo>/stacks?pull_request=<n>`), its PRs not yet merged from the bottom up to and including `n`, bottom first, each with
+ * the head GitHub has for it. gh stack reads a bare number as a stack number first, so a stack numbered `n` is an error too
+ * (GitHub numbers stacks in the same sequence as issues and PRs, so it is not expected). No stack or more than one, a base other
+ * than the default branch, a closed or draft PR below `n`, or a PR without a head is an error: the set cannot be judged as a whole.
  */
-export async function localCiOf(n: number, top: number, comments: { body: string; createdAt: string }[], run: (args: string[]) => Promise<string>, repo: string, covered: (passHead: string) => Promise<boolean>, moved: (passHead: string, passBase: string) => Promise<string[]> = async () => [], held?: HeldSettings): Promise<{ pass: boolean; note?: string }> {
-  const ofTop = top === n ? comments : (JSON.parse(await run(["pr", "view", String(top), "-R", repo, "--json", "comments"])).comments as Array<{ body: string; createdAt: string; authorAssociation?: string }>)
-    .filter((c) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
-  const newest = newestLocalCi(ofTop);
-  if (!newest) return { pass: false };
-  if (newest.m![1] !== "pass") return { pass: false, note: `一番上の PR #${top} の local-ci の最新が fail` };
-  // the steps the pass ran are the ones the person confirmed (the rest of the comment's first line is read as before)
-  const steps = stepsNotConfirmed(newest.c.body, held);
-  if (steps) return { pass: false, note: steps };
-  const passHead = newest.m![2]!;
-  if (!await covered(passHead)) return { pass: false, note: `この PR のコミットが #${top} の pass（${passHead.slice(0, 7)}）に同じ差分で入っていない（一番上で回し直す）` };
-  const files = await moved(passHead, newest.m![3]!);
-  if (files.length) return { pass: false, note: `#${top} の pass（${passHead.slice(0, 7)}）の後に、この PR の触る合流ファイルが base で進んだ: ${files.join(", ")}（最新の base に合わせて一番上で回し直す）` };
-  return { pass: true };
+export async function stackMembers(n: number, run: (args: string[]) => Promise<string>, repo: string, defaultBranch: string): Promise<StackPr[]> {
+  let numbered = true;
+  try {
+    await run(["api", `repos/${repo}/stacks/${n}`]);
+  } catch (e) {
+    if (!/HTTP 404/.test((e as Error).message)) throw e;
+    numbered = false;
+  }
+  if (numbered) throw new Error(`#${n} はスタックの番号でもある（gh stack merge はスタックとして読む）`);
+  type Remote = { number?: number; base?: { ref?: string }; pull_requests?: Array<{ number: number; state?: string; draft?: boolean; merged_at?: string | null; head?: { sha?: string } }> };
+  const stacks = JSON.parse(await run(["api", `repos/${repo}/stacks?pull_request=${n}`])) as Remote[];
+  if (!Array.isArray(stacks) || stacks.length !== 1) throw new Error(`#${n} を含む GitHub のスタックが ${Array.isArray(stacks) ? stacks.length : "?"} 件（1 件でない。スタックに無い PR は --merge）`);
+  const s = stacks[0]!;
+  if (s.base?.ref !== defaultBranch) throw new Error(`スタックの base が ${s.base?.ref ?? "不明"}（既定の枝 ${defaultBranch} でない）`);
+  const prs = s.pull_requests ?? [];
+  const at = prs.findIndex((p) => p.number === n);
+  if (at < 0) throw new Error(`スタックに #${n} が無い`);
+  const members: StackPr[] = [];
+  for (const p of prs.slice(0, at + 1)) {
+    if (p.merged_at) continue;
+    if (p.state !== "open" || p.draft) throw new Error(`スタックの #${p.number} が ${p.draft ? "draft" : p.state ?? "不明"}`);
+    if (!p.head?.sha) throw new Error(`スタックの #${p.number} の head が読めない`);
+    members.push({ n: p.number, head: p.head.sha });
+  }
+  return members;
 }
 
 /**
@@ -806,18 +825,29 @@ export async function sharedMoved(git: { root: string; url: string }, shared: st
   return out;
 }
 
+/** A commit the remote does not have (never pushed, or gone): the record naming it covers nothing, which is not a failure to judge. A fetch that failed for another reason (the network, a login) is one. */
+export class HeadUnreadable extends Error {}
+
+/** What git says when the remote has no such commit (`fatal: remote error: upload-pack: not our ref <sha>`, and the wording of other servers). */
+const REMOTE_HAS_NOT = /not our ref|couldn't find remote ref|no such ref|unadvertised object|did not match any/i;
+
 /**
  * Whether every commit of the PR now (from its merge-base with the base's tip to its head) is in the pass's head's history
  * with the same diff: `git cherry` prints no `+` line, and every merge commit among them (which git cherry skips) is
  * in that history as is. GitHub's rebase after a merge below keeps each commit's diff; a fix commit or a conflict
- * resolution that changes one does not. The three commits are fetched from `url` into `root`
- * without writing a ref. Not a worktree or a failed fetch throws: no judgement (exit 2).
+ * resolution that changes one does not. The three commits are fetched from `url` into `root` without writing a ref.
+ * Not a worktree, or a fetch that failed for any reason but the remote not having a commit, throws: no judgement (exit 2).
+ * A commit the remote does not have throws `HeadUnreadable`.
  */
 export async function inPass(git: { root: string; url: string }, passHead: string, prHead: string, baseTip: string): Promise<boolean> {
   const at = ["git", "-C", git.root];
   await sh([...at, "rev-parse", "--git-dir"]).catch(() => { throw new Error("git の作業ツリーでない（判定に要るコミットを取れない）"); });
   await sh([...at, "fetch", "-q", "--no-tags", "--no-write-fetch-head", git.url, passHead, prHead, baseTip])
-    .catch(() => { throw new Error(`${[passHead, prHead, baseTip].map((x) => x.slice(0, 7)).join(" / ")} を fetch できない（通信か、一番上で回し直す）`); });
+    .catch((e: Error) => {
+      const names = [passHead, prHead, baseTip].map((x) => x.slice(0, 7)).join(" / ");
+      if (REMOTE_HAS_NOT.test(e.message)) throw new HeadUnreadable(`${names} をリモートが持たない`);
+      throw new Error(`${names} を fetch できない（通信か、一番上で回し直す）`);
+    });
   const mergeBase = (await sh([...at, "merge-base", baseTip, prHead])).trim();
   if ((await sh([...at, "cherry", passHead, prHead, mergeBase])).split("\n").some((l) => l.startsWith("+ "))) return false;
   // git cherry skips merge commits: one in the PR (a conflict resolved in it) counts only when the pass's head has it as is
@@ -983,18 +1013,50 @@ async function readTask(pr: { body: string | null; headRefName: string | null },
 }
 
 /**
+ * The jobs the app ran for PRs of a repository (its `GET /api/merge-records`): CI, the reviews and the rechecks are read
+ * from these and from nothing a comment or an argument says. The app not answering throws, so the caller cannot judge (exit 2).
+ */
+export type JobsOf = (repo: string, prs: number[]) => Promise<MergeRecordJob[]>;
+
+/**
+ * What the app records of `prs` (the first is the one judged) at `head`: the jobs, whether the person's grant of the
+ * head is held for the Task that runs the gate, and whether the app started that Task as a direct one that opened the PR.
+ * The app not answering throws, so the caller cannot judge (exit 2).
+ */
+export type RecordsOf = (repo: string, prs: number[], head?: string) => Promise<MergeRecords>;
+
+/** The Task the gate runs in: the id the app gives every Task (the kit's own variable first); none = the person runs it from their terminal. */
+export const taskOf = (env: Record<string, string | undefined>): string | undefined => env.OPS_KIT_TASK_ID || env.SWITCHBOARD_TASK_ID || undefined;
+
+/**
+ * The app's records (`GET /api/merge-records`) at the address and key `env` names; `mergeRecordsEnv` fills the usual place
+ * when it names none, so a terminal outside a Task reaches it too. In a Task the grant is the app's record of that Task and
+ * head. Outside a Task there is no Task to record it for: the person's own `--allow-large` is the consent (it lifts
+ * nothing without the flag, which `judge` reads), so `granted` is true.
+ */
+export const appRecords = (env: Record<string, string | undefined>, f?: (url: string, init?: RequestInit) => Promise<Response>): RecordsOf =>
+  async (repo, prs, head) => {
+    const taskId = taskOf(env);
+    const r = await mergeRecords(mergeRecordsEnv(env), { repo, prs, ...(taskId ? { taskId } : {}), ...(head ? { head } : {}) }, f);
+    return taskId ? r : { ...r, granted: true };
+  };
+
+/** The jobs alone, from the same place. No Task is sent: the app would wait (up to 110 s) for a reply of the person's still being read before it answers a call that names one, and the jobs do not depend on it. */
+export const appJobs = (env: Record<string, string | undefined>, f?: (url: string, init?: RequestInit) => Promise<Response>): JobsOf =>
+  async (repo, prs) => (await mergeRecords(mergeRecordsEnv(env), { repo, prs }, f)).jobs;
+
+/**
  * `repo`: owner/name; another repository's backlog stage Task passes its own with --repo (the rules stay these).
  * `git`: where `inPass` fetches the commits to (`root`, a git worktree) and from (`url`, the repository's own, even when
  * the worktree's origin is another: --repo).
  */
-export async function readPr(n: number, run = gh, repo = currentRepo(), git = { root: process.cwd(), url: `https://github.com/${repo}.git` }, held: HeldSettings | undefined = heldSettingsOf(git.root)): Promise<PrFacts> {
+export async function readPr(n: number, run = gh, repo = currentRepo(), git = { root: process.cwd(), url: `https://github.com/${repo}.git` }, held: HeldSettings | undefined = heldSettingsOf(git.root), recordsOf: RecordsOf = appRecords(process.env)): Promise<PrFacts> {
   const [owner, name] = repo.split("/");
   const pr = JSON.parse(
-    await run(["pr", "view", String(n), "-R", repo, "--json", "body,files,commits,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus,comments"]),
+    await run(["pr", "view", String(n), "-R", repo, "--json", "body,files,baseRefName,baseRefOid,headRefName,headRefOid,mergeStateStatus"]),
   );
   // GitHub has not worked it out yet (just after a push or a base change): nothing to judge by
   if (pr.mergeStateStatus === "UNKNOWN") throw new Error("mergeStateStatus が UNKNOWN（GitHub が計算中。少し待ってやり直す）");
-  const comments: { body: string; createdAt: string }[] = pr.comments.filter((c: { authorAssociation?: string }) => MARK_AUTHORS.includes(c.authorAssociation ?? ""));
   const rules = pr.files.some((x: { path: string; changeType?: string }) => x.path === "README.md" && x.changeType !== "ADDED")
     && await readmeDesignRulesTouched(n, run, repo, pr.baseRefOid, pr.headRefOid);
   // a rename may come from an instruction path: readUserRulesTouched reads the path before it
@@ -1012,14 +1074,18 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   if (threads.totalCount > threads.nodes.length) {
     throw new Error(`レビュースレッドが ${threads.totalCount} 件あり、1 ページ（${threads.nodes.length} 件）で読み切れない`);
   }
-  const local = await localCiOf(n, await stackTop(n, pr.headRefName, run, repo), comments, run, repo, (passHead) => inPass(git, passHead, pr.headRefOid, pr.baseRefOid), (passHead, passBase) => sharedMoved(git, sharedFilesOf(git.root), passHead, passBase, pr.baseRefOid), held);
+  // what the app recorded for this PR and for the top of its stack, where local CI is run: one read of its records
+  const top = await stackTop(n, pr.headRefName, run, repo);
+  const { jobs, granted, direct } = await recordsOf(repo.toLowerCase(), top === n ? [n] : [n, top], pr.headRefOid);
+  // a job's head stands for the PR's head when it is the same commit or has the PR's commits with the same diff (read once per head)
+  const seen = new Map<string, Promise<boolean>>();
+  const covers = (jobHead: string) => jobHead === pr.headRefOid ? true : seen.get(jobHead) ?? seen.set(jobHead, inPass(git, jobHead, pr.headRefOid, pr.baseRefOid).catch((e) => { if (e instanceof HeadUnreadable) return false; throw e; })).get(jobHead)!;
+  const own = jobs.filter((j) => j.pr === n);
+  const local = await ciOf(jobs, top, covers, (passHead, passBase) => sharedMoved(git, sharedFilesOf(git.root), passHead, passBase, pr.baseRefOid), held);
   const checks = await checksWithLocalCi(runs.workflow_runs, local.pass, run, repo);
-  const rechecks = RECHECK_KINDS.filter((k) =>
-    comments.some((c) => {
-      const m = RECHECK_PASS.exec(c.body);
-      return m?.[1] === k && m[2] === pr.headRefOid;
-    }));
-  const authored: string[] = pr.commits.map((c: { authoredDate: string }) => c.authoredDate);
+  const rechecks = (await rechecksOf(own, pr.headRefOid, covers)) as RecheckKind[];
+  const reviewed = await reviewedOf(own, covers);
+  const attacked = await attackedOf(own, covers);
   const task = await readTask(pr, pr.files.map((x: { path: string }) => x.path), run, repo);
   // how each file changed, and its path before a rename: the security groups and the scope check both judge by them
   const status = await readFileStatus(n, run, repo);
@@ -1034,7 +1100,6 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   return {
     files,
     ...(configScope ? { configScope } : {}),
-    headCommittedAt: authored.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)),
     checks,
     ...(rules ? { designRulesTouched: true } : {}),
     ...(userRules.length > 0 ? { userRulesTouched: userRules } : {}),
@@ -1043,12 +1108,16 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
     ...(local.note ? { localCiNote: local.note } : {}),
     ...(held ? { held } : {}),
     ...(rechecks.length > 0 ? { rechecks } : {}),
+    ...(reviewed ? { reviewed: true as const } : {}),
+    ...(attacked ? { attacked: true as const } : {}),
     unresolvedThreads: threads.nodes.filter((t: { isResolved: boolean }) => !t.isResolved).length,
     mergeState: pr.mergeStateStatus,
-    reviewComments: comments.map((c) => ({ body: c.body, createdAt: c.createdAt })),
+    ...(granted ? { granted: true } : {}),
+    subject: `PR #${n}`,
     head: pr.headRefOid,
-    ...(pr.headRefName?.startsWith(DIRECT_BRANCH) ? { direct: true } : {}),
+    ...(direct ? { direct: true } : {}),
     base: pr.baseRefName,
+    ...(pr.headRefName ? { branch: pr.headRefName } : {}),
     ...(task ? { task } : {}),
   };
 }
@@ -1072,22 +1141,6 @@ export async function readChangeDetail(n: number, env: Record<string, string | u
   return d as ChangeDetail;
 }
 
-/**
- * The newest `[local-ci]` result of a local change counts only for its head and its base's tip now: there is no
- * tag CI after the merge to catch a fault of two changes together, so a base that moved runs it again.
- */
-export function localCiOfChange(comments: { body: string; createdAt: string }[], head: string, baseTip: string, held?: HeldSettings): { pass: boolean; note?: string } {
-  const newest = newestLocalCi(comments);
-  if (!newest) return { pass: false };
-  const [, result, passHead, passBase] = newest.m;
-  if (result !== "pass") return { pass: false, note: "local-ci の最新が fail" };
-  const steps = stepsNotConfirmed(newest.c.body, held);
-  if (steps) return { pass: false, note: steps };
-  if (passHead !== head) return { pass: false, note: `local-ci の pass（${passHead!.slice(0, 7)}）は今の head（${head.slice(0, 7)}）のものでない（回し直す）` };
-  if (passBase !== baseTip) return { pass: false, note: `local-ci の pass の base（${passBase!.slice(0, 7)}）が今の base の先端（${baseTip.slice(0, 7)}）でない（回し直す）` };
-  return { pass: true };
-}
-
 export const LOCAL_CHANGE_CI = "local-ci（ローカルで pass）";
 
 /**
@@ -1095,13 +1148,13 @@ export const LOCAL_CHANGE_CI = "local-ci（ローカルで pass）";
  * called): the same PrFacts readPr gives a PR, judged by the same `judge`. A change has no review threads of its own
  * (findings and their triage are comments); where it stands in for a GitHub pull request, that PR's threads cannot be
  * read and nothing stored has them, so a PR known to exist (`threadsUnread`) or possibly existing (`threadsUnknown`)
- * stops the merge instead of counting as none. Every comment counts (only the app's API writes them: the person and
- * their Tasks, trusted on loopback — there is no author to tell apart, unlike MARK_AUTHORS on GitHub). The base
+ * stops the merge instead of counting as none. No comment is read: the person's grant of the change's head is the app's
+ * record under the workspace's own key (`local:<workspaceId>`, in lower case). The base
  * branch's protection on GitHub is not visible here: forge-resync never pushes to main directly, it always goes in
  * through a sync PR, and the judgement applies to that PR
  * (docs/design/forge-integration.md lists every reason and how the local way evaluates it).
  */
-export async function readChange(d: ChangeDetail, root: string, records?: StoredRecords): Promise<PrFacts> {
+export async function readChange(d: ChangeDetail, root: string, records?: StoredRecords, recordsOf: RecordsOf = appRecords(process.env)): Promise<PrFacts> {
   const git = (...args: string[]) => sh(["git", "-C", root, ...args]);
   const { head, base } = d.changeRefs as { head: string; base: string };
   const range = `${base}...${head}`;
@@ -1133,11 +1186,12 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
     const forked = await at(await mergeBaseOf());
     if (plainDiffHeader(diff, f.path) && forked !== undefined && forked === await at(base) && commentOnlyChange(f.path, forked, await at(head))) f.commentOnly = true;
   }
-  const dates = (await git("log", "--format=%aI", `${base}..${head}`)).split("\n").filter(Boolean);
-  const headCommittedAt = dates.length ? dates.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : (await git("log", "-1", "--format=%aI", head)).trim();
-  const comments = d.comments.map((c) => ({ body: c.body, createdAt: c.createdAt }));
   const held = heldSettingsOf(root);
-  const local = localCiOfChange(comments, head, base, held);
+  // what the app recorded for this change: its repository is the workspace's (`local:<workspaceId>`, in lower case: the key the
+  // grant of `変更 L<n> をマージしてよい` is recorded under, `changeRepoOf`), its number the change's, its head the branch's tip
+  if (!d.workspaceId) throw new Error(`#${d.issue.number} の workspace が分からない（アプリの答えに workspaceId が無い。仕事の記録を引けない）`);
+  const { jobs, granted, direct } = await recordsOf(`local:${d.workspaceId}`.toLowerCase(), [d.issue.number], head);
+  const local = ciAtTips(jobs, d.issue.number, head, base, held);
   let rules = false;
   if (files.some((f) => f.path === "README.md")) {
     const mergeBase = (await git("merge-base", base, head)).trim();
@@ -1152,10 +1206,11 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
     userRules.push(...markedLinesTouched(text, await git("diff", "--no-renames", range, "--", path)).map((i) => `${path}:${i}`));
   }
   const raised = await limitsRaisedOf(files, async (side, path) => git("show", `${side === "head" ? head : await mergeBaseOf()}:${path}`));
-  const rechecks = RECHECK_KINDS.filter((k) => comments.some((c) => {
-    const m = RECHECK_PASS.exec(c.body);
-    return m?.[1] === k && m[2] === head;
-  }));
+  // a job's head stands for the change's head only when it is the same commit: no PR's commits to compare by
+  const sameHead = (h: string) => h === head;
+  const rechecks = (await rechecksOf(jobs, head, sameHead)) as RecheckKind[];
+  const reviewed = await reviewedOf(jobs, sameHead);
+  const attacked = await attackedOf(jobs, sameHead);
   // a conflict with the base's tip: the merge cannot be made as is. Only exit 1 is a conflict; any other failure (an old
   // git without --write-tree, a missing object) is no judgement
   const tree = Bun.spawnSync(["git", "-C", root, "merge-tree", "--write-tree", base, head], { stdout: "ignore", stderr: "pipe" });
@@ -1168,7 +1223,6 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
   const pushed = apart && !pr && (await git("rev-parse", "--verify", "-q", `refs/remotes/origin/${d.issue.change.head}`).then((o) => o.trim() !== "", () => false));
   return {
     files,
-    headCommittedAt,
     checks: local.pass ? [{ name: LOCAL_CHANGE_CI, conclusion: "SUCCESS" }] : [],
     ...(rules ? { designRulesTouched: true } : {}),
     ...(userRules.length > 0 ? { userRulesTouched: userRules } : {}),
@@ -1176,11 +1230,15 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
     ...(local.note ? { localCiNote: local.note } : {}),
     ...(held ? { held } : {}),
     ...(rechecks.length > 0 ? { rechecks } : {}),
+    ...(reviewed ? { reviewed: true as const } : {}),
+    ...(attacked ? { attacked: true as const } : {}),
     unresolvedThreads: 0,
     ...(pr ? { threadsUnread: pr } : {}),
     ...(pushed ? { threadsUnknown: d.issue.change.head } : {}),
     mergeState: d.issue.state === "CLOSED" ? "CLOSED" : clean ? "CLEAN" : "DIRTY",
-    reviewComments: comments,
+    ...(granted ? { granted: true } : {}),
+    subject: `変更 L${d.issue.number}`,
+    ...(direct ? { direct: true } : {}),
     head,
     base: d.issue.change.base,
     ...(configScope ? { configScope } : {}),
@@ -1238,96 +1296,260 @@ export function standsInFor(d: ChangeDetail, records: StoredRecords): number | u
   return records.pulls.filter((p) => p.state === "OPEN" && p.closes.some((n) => linked.has(n))).map((p) => p.number).sort((a, b) => a - b)[0];
 }
 
-/** GitLab's Developer: the access level whose notes count as marks (as MARK_AUTHORS on GitHub). */
-export const GITLAB_MARK_LEVEL = 30;
 /** GitLab is still working the MR's merge status out: nothing to judge by yet. */
 const GITLAB_PENDING = ["unchecked", "checking", "preparing", "approvals_syncing"];
 
 /**
  * A GitLab MR as the facts `judge` reads; the rules stay the same. CI = the head pipeline, only when it ran on
  * the head; none (or an older one) = the local pass of the head and the target branch's tip now. A pipeline that ran and
- * failed stops the merge. Marks count from notes of a Developer or above. README.md's Design rules section is not read
+ * failed stops the merge. No note of the MR is read: the reviews, the rechecks and the person's grant are the app's records of the MR. README.md's Design rules section is not read
  * on GitLab: an MR touching README.md counts as touching it (asked). `mergeState`: GitLab's `detailed_merge_status`,
  * `mergeable` as CLEAN; one still being worked out throws (not judged). Approvals (a paid API) are not read.
  */
-export async function readGitlabPr(iid: number, sh: Sh, target: ForgeTarget, held?: HeldSettings): Promise<PrFacts> {
+export async function readGitlabPr(iid: number, sh: Sh, target: ForgeTarget, held?: HeldSettings, recordsOf: RecordsOf = appRecords(process.env)): Promise<PrFacts> {
   const r = await readGitlabMerge(sh, target, iid);
   const status = r.mr.mergeStatus;
   if (!status || GITLAB_PENDING.includes(status)) throw new Error(`detailed_merge_status が ${status ?? "無い"}（GitLab が計算中。少し待ってやり直す）`);
   const head = r.mr.head;
-  const marks = r.notes.filter((n) => n.access >= GITLAB_MARK_LEVEL).map(({ body, createdAt }) => ({ body, createdAt }));
-  const ofHead = marks.map((c) => ({ m: LOCAL_CI_RESULT.exec(c.body), at: Date.parse(c.createdAt), body: c.body })).filter((x): x is { m: RegExpExecArray; at: number; body: string } => x.m?.[2] === head);
-  const newest = ofHead.filter((x) => x.m[3] === r.baseTip).sort((a, b) => a.at - b.at).at(-1);
-  // a pass counts only when its steps are the ones the person confirmed (`stepsNotConfirmed`)
-  const steps = newest?.m[1] === "pass" ? stepsNotConfirmed(newest.body, held) : undefined;
-  const localPass = newest?.m[1] === "pass" && !steps;
-  const localCiNote = !ofHead.length ? undefined : !newest ? `local-ci の結果が今の base（${r.mr.target} ${r.baseTip.slice(0, 7)}）のものでない（base が進んだ。回し直す）` : localPass ? undefined : (steps ?? "local-ci の最新の結果が fail（今の head と base で落ちた）");
+  // what the app recorded for this MR, by the project's path and the MR's number: a job's head stands for the MR's head only when it is the same commit
+  if (!target.repository) throw new Error("GitLab のプロジェクトが分からない（仕事の記録を引けない）");
+  const { jobs, granted, direct } = await recordsOf(target.repository.toLowerCase(), [iid], head);
+  const local = ciAtTips(jobs, iid, head, r.baseTip, held);
+  const localPass = local.pass;
+  const localCiNote = local.note;
   const ran = r.pipeline && r.pipeline.sha === head ? r.pipeline : null;
   const checks: PrFacts["checks"] = ran
     ? [{ name: "GitLab pipeline", conclusion: ran.status === "success" ? "SUCCESS" : ran.status === "skipped" ? "SKIPPED" : ["created", "pending", "running", "waiting_for_resource", "preparing", "scheduled"].includes(ran.status) ? "" : ran.status.toUpperCase() }]
     : localPass ? [{ name: LOCAL_CI_ONLY, conclusion: "SUCCESS" }] : [];
   const localCi = !ran && localPass;
-  const rechecks = RECHECK_KINDS.filter((k) => marks.some((c) => {
-    const m = RECHECK_PASS.exec(c.body);
-    return m?.[1] === k && m[2] === head;
-  }));
+  const sameHead = (h: string) => h === head;
+  const rechecks = (await rechecksOf(jobs, head, sameHead)) as RecheckKind[];
+  const reviewed = await reviewedOf(jobs, sameHead);
+  const attacked = await attackedOf(jobs, sameHead);
   // GitLab says the CI must pass when it has no pipeline of the head: the local pass is that CI here, as UNSTABLE is on GitHub
   const mergeState = status === "mergeable" ? "CLEAN" : localCi && (status === "ci_must_pass" || status === "ci_still_running") ? "UNSTABLE" : status;
   if (!r.authored.length) throw new Error(`!${iid} のコミットが読めない`);
   return {
     // GitLab's list gives a renamed file as its two paths (readGitlabMerge), so both are judged; no file is read whole, so none is comment-only
     files: r.files.map((f) => ({ ...f, status: "modified" as const })),
-    headCommittedAt: r.authored.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)),
     checks,
     ...(r.files.some((f) => f.path === "README.md") ? { designRulesTouched: true } : {}),
     ...(localCi ? { localCi: true } : {}),
     ...(localCiNote ? { localCiNote } : {}),
     ...(held ? { held } : {}),
     ...(rechecks.length ? { rechecks } : {}),
+    ...(reviewed ? { reviewed: true as const } : {}),
+    ...(attacked ? { attacked: true as const } : {}),
     unresolvedThreads: r.unresolved,
     mergeState,
-    reviewComments: marks,
+    ...(granted ? { granted: true } : {}),
+    // the sentence the app reads (`parseMergeGrants`) names the number as `PR #n` for an MR too; an `MR !n` would grant nothing
+    subject: `PR #${iid}`,
+    ...(direct ? { direct: true } : {}),
     head,
     base: r.mr.target,
   };
 }
 
-export type MergeMode = "merge" | "merge-stack";
+export type MergeMode = "merge" | "merge-stack" | "merge-sync";
+
+/** A read just before the merge failed (the default branch, the stack, a PR's head and base): not judged (exit 2), not a failed merge. */
+export class NotJudged extends Error {}
+
+/** A PR below the one named, judged in the same process: the head it was judged at, and whether it skipped the main review. */
+export interface StackMember { n: number; head: string; reviewSkipped: boolean; base?: string }
 
 /**
- * merge: one PR, only at the judged head (`gh pr merge --match-head-commit`). merge-stack: the bottom of a stack (`gh stack merge`
- * merges every PR below the one named, so only a PR on the default branch, which has none below it). gh stack takes no -R and
- * no head to match: it runs in the stack's worktree, whose origin must be the judged repository, and the head is read again
- * just before it (a push in between stops it; one in the last moment is not caught).
+ * merge: one PR, only at the judged head (`gh pr merge --match-head-commit`). merge-stack: the named PR and every PR below it in
+ * GitHub's stack, by one `gh stack merge <n>` (`below`: the lower PRs, each judged `merge` in the same run; none = the named PR is the
+ * bottom). gh stack takes no -R and no head to match: it runs in the stack's worktree, whose origin must be the judged
+ * repository, and the stack (`stackMembers`: which PRs, at which heads) and each PR's own head and base are read again just before the marks and again just
+ * before the merge; any difference from what was judged stops it (a change in the last moment is not caught).
  */
-export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: Run, stackRepo: () => string | undefined = originRepo, reviewSkipped = false): Promise<void> {
+export async function mergePr(n: number, repo: string, mode: MergeMode, facts: PrFacts, run: Run, stackRepo: () => string | undefined = originRepo, reviewSkipped = false, below: StackMember[] = []): Promise<void> {
   if (!facts.head) throw new Error("head の sha が読めていない");
-  const marked = { OPS_MERGE_GATE_PR: String(n) };
-  const mark = () => reviewSkipped ? run(["pr", "comment", String(n), "-R", repo, "--body", `[merge-direct] ${facts.head}`]) : undefined;
+  // GH_REPO is pinned to the judged repository: gh stack takes no -R, and a GH_REPO left in the environment would name another.
+  // No variable marks the merge as the gate's: a Task's merge goes through the app's job (`requestGate`), which runs this in the daemon's
+  // environment, where the Task's front of `gh` is not; a variable the Task could set would let any merge past that front
+  const marked: Record<string, string> | undefined = mode === "merge" ? undefined : { GH_REPO: repo };
+  const mark = (pr: number, head: string, skipped: boolean) => skipped ? run(["pr", "comment", String(pr), "-R", repo, "--body", `[merge-direct] ${head}`]) : undefined;
   if (mode === "merge") {
-    await mark();
+    await mark(n, facts.head, reviewSkipped);
     await run(["pr", "merge", String(n), "-R", repo, "--rebase", "--delete-branch", "--match-head-commit", facts.head], marked);
+    return;
+  }
+  // the sync PR of the local main (`scripts/forge-resync.ts`): a Merge commit, as the landing ref is its second parent (a rebase or a squash would change the commits the local main has)
+  if (mode === "merge-sync") {
+    await mark(n, facts.head, reviewSkipped);
+    await run(["pr", "merge", String(n), "-R", repo, "--merge", "--delete-branch", "--match-head-commit", facts.head]);
     return;
   }
   const local = stackRepo();
   if (local !== repo) throw new Error(`--merge-stack は作業ツリーの origin（${local ?? "不明"}）のスタックをマージする。判定した ${repo} と違う`);
-  const branch = (await run(["repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
-  if (facts.base !== branch) throw new Error(`--merge-stack はスタックの最下段（base が ${branch}）だけ。この PR の base は ${facts.base}（下の PR も一緒にマージされる）`);
-  const now = (await run(["pr", "view", String(n), "-R", repo, "--json", "headRefOid", "-q", ".headRefOid"])).trim();
-  if (now !== facts.head) throw new Error(`判定の後に head が変わった（${facts.head} → ${now}）。判定し直す`);
-  await mark();
+  const stack: StackMember[] = [...below, { n, head: facts.head, reviewSkipped, base: facts.base }];
+  const judged = stack.map((m) => `#${m.n}@${m.head}`).join(" ");
+  // a read that fails here leaves the stack not judged (exit 2), not a failed merge
+  const read = async <T>(what: string, f: () => Promise<T>): Promise<T> => {
+    try {
+      return await f();
+    } catch (e) {
+      throw new NotJudged(`マージの直前に${what}を読み直せなかった: ${(e as Error).message}`);
+    }
+  };
+  const defaultBranch = await read("既定の枝", async () => (await run(["repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim());
+  // the stack (which PRs, the heads it has) and each PR's own head and base, in case the stack's copy lags or a PR was retargeted
+  const same = async () => {
+    const now = (await read("スタック", () => stackMembers(n, run, repo, defaultBranch))).map((m) => `#${m.n}@${m.head}`).join(" ");
+    if (now !== judged) throw new Error(`判定の後にスタックが変わった（${judged} → ${now}）。判定し直す`);
+    for (const m of stack) {
+      const [own, base] = (await read(`#${m.n} の head`, () => run(["pr", "view", String(m.n), "-R", repo, "--json", "headRefOid,baseRefName", "-q", '.headRefOid + " " + .baseRefName']))).trim().split(" ");
+      if (own !== m.head) throw new Error(`判定の後に #${m.n} の head が変わった（${m.head} → ${own}）。判定し直す`);
+      if (m.base !== undefined && base !== m.base) throw new Error(`判定の後に #${m.n} の base が変わった（${m.base} → ${base}）。判定し直す`);
+    }
+  };
+  await same();
+  if (stack.some((m) => m.reviewSkipped)) {
+    for (const m of stack) await mark(m.n, m.head, m.reviewSkipped);
+    await same();
+  }
   await run(["stack", "merge", String(n), "--rebase", "-y"], marked);
 }
 
-const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)";
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)";
+
+/**
+ * What a run as the app's job leaves for its record: `$J/result.json` (the judged head and the verdict's parts), which the daemon reads when
+ * the job ends. Only a job has `J`; a run from a terminal leaves nothing. It is written when the verdict is known, and again with `merged`
+ * once the merge is done; a write that fails is said and does not fail the run. `judged`: the named PR's judgement last, with the
+ * PRs below it in a stack before it (their reasons carry the PR's number).
+ */
+export function writeGateResult(env: Record<string, string | undefined>, r: { head: string | null | undefined; verdict: "merge" | "stop"; judged: Array<{ pr: number | null; j: Judgement }>; allowLarge: boolean; merged: boolean }, err: (s: string) => void = console.error): void {
+  if (!env.J || !r.head) return;
+  try {
+    const named = r.judged.at(-1)!.j;
+    const record = {
+      head: r.head,
+      verdict: r.verdict,
+      ask: [...new Set(r.judged.flatMap((x) => x.j.ask))],
+      recheck: [...new Set(r.judged.flatMap((x) => x.j.recheck))],
+      reasons: r.judged.flatMap((x) => x.j.reasons.map((t) => (x.pr === null ? t : `#${x.pr}: ${t}`))),
+      allowLarge: r.allowLarge,
+      reviewSkipped: named.reviewSkipped === true,
+      merged: r.merged,
+    };
+    writeFileSync(join(env.J, "result.json"), JSON.stringify(record));
+  } catch (e) {
+    err(`仕事の記録に判定を残せない: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * In a Task (`SWITCHBOARD_TASK_ID`) the verdict is not made here: this asks the app (`BACKLOG_URL`'s origin, the key in
+ * `BACKLOG_TOKEN_FILE`) to run its own copy of this script as a job (kind `gate`: the PR's number and the flags, no command), reads the job
+ * every `SWITCHBOARD_GATE_POLL_MS` (2 s) until it ends or `SWITCHBOARD_GATE_WAIT_MS` (10 min) is over, prints what the job printed and ends
+ * with its exit code. The app not reached, a request it refuses (an older daemon that does not know the kind), a wait that runs out and a
+ * job that did not end are not judged: exit 2. The job keeps running if the wait runs out; its record says what it did.
+ */
+export async function requestGate(args: string[], env: Record<string, string | undefined>, cwd: string, log: (s: string) => void, err: (s: string) => void, opts: { fetch?: (url: string, init?: RequestInit) => Promise<Response>; /** Set to the head the job judged (null when it left none), for a caller that acts on the verdict and must act on that head. */ judged?: { head?: string | null } } = {}): Promise<number> {
+  const f = opts.fetch ?? fetch;
+  const rest = [...args];
+  const take = (flag: string): boolean => {
+    const at = rest.indexOf(flag);
+    if (at < 0) return false;
+    rest.splice(at, 1);
+    return true;
+  };
+  const value = (flag: string): string | undefined => {
+    const at = rest.indexOf(flag);
+    if (at < 0) return undefined;
+    const v = rest[at + 1];
+    rest.splice(at, v === undefined ? 1 : 2);
+    return v ?? "";
+  };
+  const change = value("--change");
+  const repo = value("--repo");
+  const allowLarge = take("--allow-large");
+  const scope = take("--scope");
+  const modes = (["merge", "merge-stack", "merge-sync"] as const).filter((m) => take(`--${m}`));
+  const number = change !== undefined ? change : rest[0];
+  if ((change !== undefined ? rest.length > 0 : rest.length !== 1) || !/^\d+$/.test(number ?? "") || Number(number) < 1 || modes.length > 1 || (repo !== undefined && !/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(repo))) {
+    err(USAGE);
+    return 2;
+  }
+  const taskId = taskOf(env);
+  if (!env.BACKLOG_URL || !env.BACKLOG_TOKEN_FILE || !taskId) {
+    err("判定できなかった: アプリの Task の中なのに、アプリの住所・鍵・Task の id（BACKLOG_URL・BACKLOG_TOKEN_FILE・OPS_KIT_TASK_ID）が揃っていない");
+    return 2;
+  }
+  const origin = new URL(env.BACKLOG_URL).origin;
+  const wait = Number(env.SWITCHBOARD_GATE_WAIT_MS) > 0 ? Number(env.SWITCHBOARD_GATE_WAIT_MS) : 600_000;
+  const every = Number(env.SWITCHBOARD_GATE_POLL_MS) > 0 ? Number(env.SWITCHBOARD_GATE_POLL_MS) : 2_000;
+  const body = { kind: "gate", taskId, cwd, pr: Number(number), ...(change !== undefined ? { change: true } : {}), ...(repo !== undefined ? { repo } : {}), ...(allowLarge ? { allowLarge } : {}), ...(modes[0] ? { merge: modes[0] } : {}), ...(scope ? { scope } : {}) };
+  type Polled = { job: { id: number; status: string; exitCode: number | null; summary: string | null; result?: { gate?: { head: string | null } } | null }; out: string | null };
+  const call = async (method: "GET" | "POST", path: string, payload?: unknown): Promise<unknown> => {
+    const r = await f(`${origin}${path}`, { method, headers: { authorization: `Bearer ${readFileSync(env.BACKLOG_TOKEN_FILE!, "utf8").trim()}`, ...(payload === undefined ? {} : { "content-type": "application/json" }) }, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }), signal: AbortSignal.timeout(30_000) });
+    if (!r.ok) throw new Error(`アプリが ${r.status} を返した: ${(await r.text()).slice(0, 300)}`);
+    return r.json();
+  };
+  let id: number;
+  try {
+    id = ((await call("POST", "/api/jobs", body)) as { id: number }).id;
+  } catch (e) {
+    err(`判定できなかった: 判定の仕事をアプリに頼めない: ${(e as Error).message}`);
+    return 2;
+  }
+  const until = Date.now() + wait;
+  let lost = 0;
+  while (true) {
+    await Bun.sleep(every);
+    let p: Polled;
+    try {
+      p = (await call("GET", `/api/jobs/${id}`)) as Polled;
+      lost = 0;
+    } catch (e) {
+      if (++lost >= 5 || Date.now() >= until) {
+        err(`判定できなかった: 仕事 job#${id} を読めない: ${(e as Error).message}（仕事は続いていることがある。そのまま判定とマージが走りうるので、PR の状態を見てから聞き直す）`);
+        return 2;
+      }
+      continue;
+    }
+    if (p.job.status !== "running") {
+      if (opts.judged) opts.judged.head = p.job.result?.gate?.head ?? null;
+      if (p.out) log(p.out.trimEnd());
+      if (p.job.status === "aborted" || p.job.exitCode === null) {
+        err(`判定できなかった: 仕事 job#${id} が終わりを残さずに止まった\n${p.job.summary ?? ""}`);
+        return 2;
+      }
+      if (p.job.exitCode !== 0 && p.job.summary) err(p.job.summary);
+      return p.job.exitCode;
+    }
+    if (Date.now() >= until) {
+      err(`判定できなかった: 仕事 job#${id} が ${Math.round(wait / 1000)} 秒で終わらなかった（SWITCHBOARD_GATE_WAIT_MS で延ばせる。仕事は続いている。そのまま判定とマージが走りうるので、PR の状態を見てから聞き直す）`);
+      return 2;
+    }
+  }
+}
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
 export async function main(args: string[], run: Run = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
+  // in a Task the verdict (and the merge) is the app's: its own copy of this script runs as a job, and its record is what the Task's verdict is
+  if (backlog.env.SWITCHBOARD_TASK_ID) return requestGate(args, backlog.env, cwd, log, err, { fetch: backlog.fetch });
+  // `--cwd <dir>`: the checkout to judge in, given by the app's job, which starts in the daemon's own folder. A Task's shell never reaches this (it asks the app).
+  const cwdAt = args.indexOf("--cwd");
+  if (cwdAt >= 0) {
+    const dir = args[cwdAt + 1];
+    if (!dir || !isAbsolute(dir)) {
+      err(USAGE);
+      return 2;
+    }
+    workDir = dir;
+    return main([...args.slice(0, cwdAt), ...args.slice(cwdAt + 2)], run, log, err, stackRepo === originRepo ? () => originRepo(dir) : stackRepo, glab, dir, backlog);
+  }
   const changeAt = args.indexOf("--change");
   if (changeAt >= 0) return changeMain(args, changeAt, log, err, cwd, backlog);
   const n = Number(args.find((a) => /^\d+$/.test(a)));
   const repoAt = args.indexOf("--repo");
-  const modes = (["merge", "merge-stack"] as const).filter((m) => args.includes(`--${m}`));
+  const modes = (["merge", "merge-stack", "merge-sync"] as const).filter((m) => args.includes(`--${m}`));
   // the checkout's GitLab project (its ops.config.json `forge`): the MR is judged by the same rules, merged by GitLab
   let lab: ForgeTarget | null = null;
   if (repoAt < 0) {
@@ -1339,7 +1561,7 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
       return 2;
     }
   }
-  if (lab) return gitlabMain(n, lab, args, modes, glab, log, err, cwd);
+  if (lab) return gitlabMain(n, lab, args, modes, glab, log, err, cwd, backlog);
   const repo = repoAt >= 0 ? args[repoAt + 1] : currentRepo(cwd);
   if (!n || !repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || modes.length > 1) {
     err(USAGE);
@@ -1347,7 +1569,7 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
   }
   let facts: PrFacts;
   try {
-    facts = await readPr(n, run, repo, { root: cwd, url: `https://github.com/${repo}.git` });
+    facts = await readPr(n, run, repo, { root: cwd, url: `https://github.com/${repo}.git` }, undefined, appRecords(backlog.env, backlog.fetch));
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
@@ -1356,17 +1578,58 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
     log(scopeMaterial(facts));
     return 0;
   }
-  const j = judge(facts, { allowLarge: args.includes("--allow-large") });
-  log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") return 1;
+  const allowLarge = args.includes("--allow-large");
+  const j = judge(facts, { allowLarge });
   const mode = modes[0];
+  // --merge-stack: the named PR with every PR below it in GitHub's stack (what gh stack merges), each judged at the head the stack has.
+  // Without it the run is one PR, as before (a stack is judged PR by PR, or with --merge-stack)
+  const lower: Array<{ pr: number; facts: PrFacts; j: Judgement }> = [];
+  if (mode === "merge-stack") {
+    try {
+      const defaultBranch = (await run(["repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim();
+      const members = await stackMembers(n, run, repo, defaultBranch);
+      const top = members[members.length - 1];
+      if (top?.n !== n || top.head !== facts.head) throw new Error(`スタックの #${n} の head（${top?.head ?? "無い"}）が読んだ head（${facts.head ?? "無い"}）と違う`);
+      for (const m of members.slice(0, -1)) {
+        const f = await readPr(m.n, run, repo, { root: cwd, url: `https://github.com/${repo}.git` }, undefined, appRecords(backlog.env, backlog.fetch));
+        if (f.head !== m.head) throw new Error(`スタックの #${m.n} の head（${m.head}）が読んだ head（${f.head ?? "無い"}）と違う`);
+        lower.push({ pr: m.n, facts: f, j: judge(f, { allowLarge }) });
+      }
+      // the order the stack lists is checked by the PRs' own branches: the lowest on the default branch, each next on the one below it
+      const bases = [...lower.map((l) => l.facts.base), facts.base];
+      members.forEach((m, i) => {
+        const want = i === 0 ? defaultBranch : lower[i - 1]!.facts.branch;
+        if (!want || bases[i] !== want) throw new Error(`スタックの #${m.n} の base（${bases[i] ?? "不明"}）が下の枝（${want ?? "不明"}）でない`);
+      });
+    } catch (e) {
+      err(`判定できなかった: ${(e as Error).message}`);
+      return 2;
+    }
+  }
+  const all = lower.every((l) => l.j.verdict === "merge") && j.verdict === "merge";
+  if (lower.length === 0) log(JSON.stringify(j, null, 2));
+  else log(JSON.stringify({ verdict: all ? "merge" : "stop", stack: [...lower.map((l) => ({ pr: l.pr, ...l.j })), { pr: n, ...j }] }, null, 2));
+  const record = (merged: boolean) => writeGateResult(backlog.env, { head: facts.head, verdict: all ? "merge" : "stop", judged: [...lower.map((l) => ({ pr: l.pr, j: l.j })), { pr: null, j }], allowLarge, merged }, err);
+  record(false);
+  if (!all) return 1;
   if (!mode) return 0;
+  // only the sync PR of the local main goes in with a Merge commit: its branch is the one `forge-resync.ts` makes
+  if (mode === "merge-sync" && !(/^sb\/sync-main-[0-9a-f]{7}$/.test(facts.branch ?? "") && lower.length === 0)) {
+    err(`同期の PR ではない（枝 ${facts.branch ?? "不明"}。sb/sync-main-<7 桁> だけが Merge commit で入る）。マージしていない`);
+    return 1;
+  }
   try {
-    await mergePr(n, repo, mode, facts, run, stackRepo, j.reviewSkipped === true);
+    const below = lower.map((l) => ({ n: l.pr, head: l.facts.head!, reviewSkipped: l.j.reviewSkipped === true, base: l.facts.base }));
+    await mergePr(n, repo, mode, facts, run, stackRepo, j.reviewSkipped === true, below);
   } catch (e) {
+    if (e instanceof NotJudged) {
+      err(`判定できなかった: ${e.message.split("\n")[0]}`);
+      return 2;
+    }
     err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
     return 1;
   }
+  record(true);
   return 0;
 }
 
@@ -1387,7 +1650,7 @@ async function changeMain(args: string[], at: number, log: (s: string) => void, 
     const root = (await sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim();
     const detail = await readChangeDetail(Number(value), backlog.env, { fetch: backlog.fetch, cwd });
     records = await readChangeRecords(detail, backlog.env, backlog.fetch);
-    facts = await readChange(detail, root, records);
+    facts = await readChange(detail, root, records, appRecords(backlog.env, backlog.fetch));
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
@@ -1398,18 +1661,19 @@ async function changeMain(args: string[], at: number, log: (s: string) => void, 
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
+  writeGateResult(backlog.env, { head: facts.head, verdict: j.verdict, judged: [{ pr: null, j }], allowLarge: args.includes("--allow-large"), merged: false }, err);
   return j.verdict === "merge" ? 0 : 1;
 }
 
 /** The command on a GitLab MR: --merge merges only the judged head; there is no stack to merge (--merge-stack is refused). */
-async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes: MergeMode[], glab: Sh, log: (s: string) => void, err: (s: string) => void, cwd: string): Promise<number> {
-  if (!n || modes.length > 1 || modes[0] === "merge-stack") {
-    err(modes[0] === "merge-stack" ? "GitLab の MR は --merge だけ（スタックのマージは無い）" : USAGE);
+async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes: MergeMode[], glab: Sh, log: (s: string) => void, err: (s: string) => void, cwd: string, backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }): Promise<number> {
+  if (!n || modes.length > 1 || modes[0] === "merge-stack" || modes[0] === "merge-sync") {
+    err(modes[0] === "merge-stack" || modes[0] === "merge-sync" ? "GitLab の MR は --merge だけ（スタックのマージも同期の PR も無い）" : USAGE);
     return 2;
   }
   let facts: PrFacts;
   try {
-    facts = await readGitlabPr(n, glab, target, heldSettingsOf(cwd));
+    facts = await readGitlabPr(n, glab, target, heldSettingsOf(cwd), appRecords(backlog.env, backlog.fetch));
   } catch (e) {
     err(`判定できなかった: ${(e as Error).message}`);
     return 2;
@@ -1420,6 +1684,8 @@ async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes:
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
   log(JSON.stringify(j, null, 2));
+  const record = (merged: boolean) => writeGateResult(backlog.env, { head: facts.head, verdict: j.verdict, judged: [{ pr: null, j }], allowLarge: args.includes("--allow-large"), merged }, err);
+  record(false);
   if (j.verdict !== "merge") return 1;
   if (!modes[0]) return 0;
   try {
@@ -1428,6 +1694,7 @@ async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes:
     err(`マージできなかった: ${(e as Error).message.split("\n")[0]}`);
     return 1;
   }
+  record(true);
   return 0;
 }
 

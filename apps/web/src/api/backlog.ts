@@ -13,7 +13,7 @@ export const backlogApi = {
   /** Starts a row's next stage as a meta Task. 409 with `body.taskId` = that stage is already running. */
   startBacklog: (workspaceId: string, n: number, action: BacklogAction) => req<Task>(`/api/backlog/${n}/start`, { method: "POST", body: JSON.stringify({ workspaceId, action }) }),
   /** Answers a needs-decision item: `## 回答` on the Issue and the label off. */
-  answerBacklog: (workspaceId: string, n: number, text: string, issue?: number) => req<{ ok: boolean }>(`/api/backlog/${n}/answer`, { method: "POST", body: JSON.stringify({ workspaceId, text, issue }) }),
+  answerBacklog: (workspaceId: string, n: number, text: string, issue?: number, at?: string) => req<{ ok: boolean }>(`/api/backlog/${n}/answer`, { method: "POST", body: JSON.stringify({ workspaceId, text, issue, at }) }),
   /** One stored Issue with its stored edits, held conflicts and sync; `ref` = its number or the localId of one made here. */
   backlogIssue: (workspaceId: string, ref: number | string) => req<BacklogIssueDetail>(`/api/backlog/${ref}?workspaceId=${encodeURIComponent(workspaceId)}`),
   /** Keeps an edit here (202) and sends it to GitHub later; with `resolve` alone, a choice on a held conflict (409 = it moved since read). */

@@ -34,7 +34,7 @@ const issue = (n: number, labels: string[], over: Partial<BacklogIssueData> = {}
 });
 const pull = (n: number, over: Partial<BacklogPullRequestData> = {}): BacklogSnapshotEntry => ({
   objectKind: "pull-request", externalId: `PR_${n}`, fetchState: "fetched",
-  remote: { number: n, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: iso(T0), files: [], closedAt: null, mergedAt: null, ...over },
+  remote: { number: n, state: "OPEN", isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: iso(T0), files: [], closedAt: null, mergedAt: null, head: null, ...over },
 });
 const comment = (n: number, id: string, body: string, at: number): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: id, remote: { issue: n, body, createdAt: iso(at) }, fetchState: "fetched" });
 
@@ -485,6 +485,24 @@ describe("questions", () => {
     // as answers: the span runs from the last counted send, so a third send 12 minutes after the first counts again
     const op = (id: string) => `${WAIT}\n\n<!-- switchboard-op:${id} -->`;
     expect(questionCounts(repo([op("a1"), NOW - DAY], [op("b2"), NOW - DAY + 6 * MIN], [op("c3"), NOW - DAY + 12 * MIN]), FROM, NOW, TOP).stopped).toBe(2);
+  });
+
+  test("a named answer closes only its question: the newer ask waits for the next answer, and each adds its own time", () => {
+    const Q1 = NOW - 3 * DAY;
+    const Q2 = Q1 + 10 * MIN;
+    const WAIT2 = WAIT.replace("どちらか", "もう 1 つ");
+    const NAMED = `## 回答\n\n**止めて聞く問いへの回答** — 問い ${at(Q1)}\n\nA で`;
+    const r = repo([WAIT, Q1], [WAIT2, Q2], [NAMED, Q1 + 30 * MIN], [ANSWER, Q2 + 60 * MIN]);
+    // the older ask waited 30 min (to the answer that names it), the newer one 60 min (to the next answer): two times
+    expect(questionCounts(r, FROM, NOW, TOP)).toEqual({ stopped: 2, proceeded: 0, overturned: 0, medianAnswerMs: 45 * MIN });
+    // each one's own time: a window with the older ask only, and one with the newer only (the named answer is not the newer one's)
+    expect(questionCounts(r, FROM, Q2, TOP).medianAnswerMs).toBe(30 * MIN);
+    expect(questionCounts(r, Q2, NOW, TOP).medianAnswerMs).toBe(60 * MIN);
+    // an overturn that names the older ask is not one of the newer ask that proceeded
+    const OVERTURN_OLD = `## 回答\n\n${PROCEED_OVERTURNED} A → B — 問い ${at(Q1)}\n\nB で`;
+    expect(questionCounts(repo([WAIT, Q1], [GO, Q2], [OVERTURN_OLD, Q1 + 30 * MIN]), FROM, NOW, TOP)).toEqual({ stopped: 1, proceeded: 1, overturned: 0, medianAnswerMs: 30 * MIN });
+    // the same two answers with no name: the first closes both asks (one time, from the older), the second finds none left
+    expect(questionCounts(repo([WAIT, Q1], [WAIT2, Q2], [ANSWER, Q1 + 30 * MIN], [ANSWER, Q2 + 60 * MIN]), FROM, NOW, TOP)).toEqual({ stopped: 2, proceeded: 0, overturned: 0, medianAnswerMs: 30 * MIN });
   });
 
   test("summarizeInterventions gives a row per repository in each window", () => {

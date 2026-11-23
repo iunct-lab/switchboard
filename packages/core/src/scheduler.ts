@@ -430,12 +430,20 @@ export class Scheduler {
   }
 
   note(text: string, scheduleId: string | null = null) {
-    // a log line never fails the firing that writes it (it is called from catch handlers and after a firing ends,
-    // when the db can be closed on shutdown or busy)
-    try {
-      this.db.addScheduleLog({ ts: this.now(), scheduleId, text });
-    } catch (e) {
-      console.error(`[scheduler] log line not kept: ${String((e as Error)?.message ?? e)}`);
+    this.notes([text], scheduleId);
+  }
+
+  /** Lines one run says together: all get one time, so a reader can tell them from the lines of a later run (a clock read per line could split them at a millisecond). */
+  notes(texts: string[], scheduleId: string | null = null) {
+    const ts = this.now();
+    for (const text of texts) {
+      // a log line never fails the firing that writes it (it is called from catch handlers and after a firing ends,
+      // when the db can be closed on shutdown or busy); one that fails does not keep the lines after it from being tried
+      try {
+        this.db.addScheduleLog({ ts, scheduleId, text });
+      } catch (e) {
+        console.error(`[scheduler] log line not kept: ${String((e as Error)?.message ?? e)}`);
+      }
     }
   }
 

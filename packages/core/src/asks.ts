@@ -1,4 +1,5 @@
 import type { AnswerPolicy, Artifact, Ask, AskAnswerKind, AskQuestion, AskBlocker, AskResume, AskPolicy, ApprovalRuleMatch, BacklogItem, EventEnvelope, PendingApproval, PolicySubject, ProceedingQuestion, StopSummary, Task } from "@switchboard/protocol";
+import { CONSENT_CHARS } from "./merge-consent.ts";
 import { overWaits, personWait } from "@switchboard/protocol";
 import { MERGE_ASK } from "../../../scripts/merge-gate.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
@@ -202,6 +203,52 @@ export function questionsReply(questions: AskQuestion[], answers: Array<{ choice
 }
 
 /**
+ * What the person chose of a question tool's questions, apart from the questions the Task wrote, in two forms:
+ * - `said`: the chosen labels with their ` — 許可: <文>` (or the free text), a line per question, as the person's words for the
+ *   reader. No question's line is in it.
+ * - `readerSaid` / `readerAsked`: for the reader of the person's own words, each answer (the text of `said`, a label's line breaks flattened)
+ *   paired with its question by number (`- 2: はい` answers `質問 2: …`), as the same label can answer two questions. The questions are the Task's words; only
+ *   the answers are the person's.
+ * - `parts`: the texts read by letters for a fixed sentence, each a message of its own: the chosen options' grants (one
+ *   sentence each, as a structure and not mixed into a text), then the free answers of the submission together as one message.
+ *   A label is not one.
+ * - `questionsText`: the questions as written, whole: the numbers a reader may name are taken from it (the reader's
+ *   `readerAsked` is cut).
+ * null = the same as `questionsReply`.
+ */
+export function questionsChosen(questions: AskQuestion[], answers: Array<{ choices: string[]; text?: string }>): { said: string; readerSaid: string; readerAsked: string; parts: string[]; questionsText: string } | null {
+  if (questionsReply(questions, answers) === null) return null;
+  // what the Task wrote (a question, a label) is one line for the reader: a line break would let a part of it pass for
+  // another numbered line. The person's free text keeps its lines everywhere: a quoted line stays quoted, and a fixed
+  // sentence on its own line still ends its line.
+  const flat = (text: string) => text.replace(/\s*\n\s*/g, " ").trim();
+  // the reader's prompt cuts what is long. Only what the Task wrote is shortened here: every question keeps a share of
+  // the prompt's room for the reply (its start and its end, where a number is usually named), so no answer loses its
+  // question. The person's text is never shortened here; the prompt has its own limit for it and says when it cut.
+  const room = Math.max(40, Math.floor(CONSENT_CHARS.asked / 2 / questions.length));
+  const cut = (text: string) => (text.length > room ? `${text.slice(0, Math.ceil(room / 2))}…${text.slice(-Math.floor(room / 2))}` : text);
+  const parts = questions.map((q, i) => {
+    const a = answers[i]!;
+    // a free text whose first line is quoted starts on a line of its own, so the answer's prefix does not hide the quote
+    if (!q.options.length) return { said: a.text!.trim(), reader: a.text!.trim(), sep: /^>/.test(a.text!.trim()) ? "\n" : " " };
+    const grants = a.choices.flatMap((c) => grantOfChoice(q.options.find((o) => o.label === c)?.description ?? "") ?? []).map((g) => ` — 許可: ${g}`).join("");
+    return { said: `${a.choices.join(", ")}${grants}`, reader: `${flat(a.choices.join(", "))}${grants}`, sep: " " };
+  });
+  return {
+    // the chosen options' sentences, one each; the free answers of the one submission together as one message (a word among
+    // them that is no fixed sentence keeps every sentence among them from being read by letters)
+    parts: [
+      ...questions.flatMap((q, i) => (q.options.length ? answers[i]!.choices.flatMap((c) => grantOfChoice(q.options.find((o) => o.label === c)?.description ?? "") ?? []) : [])),
+      ...(questions.some((q) => !q.options.length) ? [questions.flatMap((q, i) => (q.options.length ? [] : [answers[i]!.text!.trim()])).join("\n")] : []),
+    ],
+    questionsText: questions.map((q) => q.question).join("\n"),
+    said: parts.map((p) => `-${p.sep}${p.said}`).join("\n"),
+    readerSaid: parts.map((p, i) => `- ${i + 1}:${p.sep}${p.reader}`).join("\n"),
+    readerAsked: questions.map((q, i) => `質問 ${i + 1}: ${cut(flat(q.question))}`).join("\n"),
+  };
+}
+
+/**
  * What changed on the PR a question stopped at since it was asked, read from GitHub once: the head is not the one
  * the newest `[merge-ask]` before the question named (merge-gate's mark), new commits after the question when there is no
  * such mark, or the PR is no longer open. Empty = nothing changed. Throws when gh fails: nothing is known, so nothing is
@@ -214,10 +261,21 @@ export interface PrFacts {
   changes: string[];
 }
 
-export async function prFacts(gh: GhRunner, cwd: string, repo: string, pr: number, askedAt: number): Promise<PrFacts> {
-  const r = await gh(["pr", "view", String(pr), "-R", repo, "--json", "state,headRefOid,comments,commits"], cwd);
+/**
+ * How long a read of a PR from GitHub is waited for when an answer or a grant depends on it (`prFacts`, the head of a
+ * grant): past it the read counts as not made. The `gh` process is not killed; only the wait ends.
+ */
+export const GH_READ_TIMEOUT_MS = 8_000;
+
+export async function prFacts(gh: GhRunner, cwd: string, repo: string, pr: number, askedAt: number, timeoutMs = GH_READ_TIMEOUT_MS): Promise<PrFacts> {
+  // an answer waits for this read: one that does not end is given up, and the answer is refused with nothing written
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`gh pr view ${pr}: ${timeoutMs / 1000} 秒で応答がありません`)), timeoutMs)));
+  const r = await Promise.race([gh(["pr", "view", String(pr), "-R", repo, "--json", "state,headRefOid,comments,commits"], cwd), late]).finally(() => clearTimeout(timer));
   if (r.code !== 0) throw new Error(`gh pr view ${pr}: ${(r.stderr.trim() || `exit ${r.code}`).slice(0, 200)}`);
   const v = JSON.parse(r.stdout) as { state: string; headRefOid: string; comments: Array<{ body: string; createdAt: string }>; commits: Array<{ committedDate: string }> };
+  // a reply without a head says nothing of what the PR is now: not known, as a failed read
+  if (typeof v.headRefOid !== "string" || !/^[0-9a-f]{40}$/i.test(v.headRefOid)) throw new Error(`gh pr view ${pr}: head がありません`);
   const changes: string[] = [];
   const mark = v.comments.filter((c) => Date.parse(c.createdAt) <= askedAt && MERGE_ASK.test(c.body.trim())).at(-1);
   const sha = mark ? MERGE_ASK.exec(mark.body.trim())![2]! : null;

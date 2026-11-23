@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, parseReads, select, selectFrom } from "./test-select";
+import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, namedImports, parseReads, select, selectFrom } from "./test-select";
 
 /** 偽のツリー。パス → 中身。 */
 function tree(src: Record<string, string>) {
@@ -105,10 +105,87 @@ describe("select", () => {
     expect(s.tests).toEqual(tests);
   });
 
-  test("今のツリーに無い .ts（消したファイル）と空の一覧は全テストに倒す", () => {
+  test("消したファイルは一式に倒さず、ほかの変更から選ぶ。空の一覧は全テストに倒す", () => {
     const { graph, tests } = chain();
-    expect(select(["lib/gone.ts"], graph, tests).full).toContain("今のツリーに無い");
+    // 消したファイルだけの変更は選ぶ元が無く、0 件
+    expect(select(["lib/gone.ts"], graph, tests)).toEqual({ tests: [], reasons: {} });
+    // ほかの変更と混ざっても、そちらの選びは変わらない
+    const s = select(["lib/gone.ts", "lib/a.ts"], graph, tests);
+    expect(s.full).toBeUndefined();
+    expect(s.tests.sort()).toEqual(["lib/a.test.ts", "lib/c.test.ts"]);
     expect(select([], graph, tests).full).toBe("変更の一覧が空");
+  });
+
+  test("消したファイルを読んだまま残るファイルは、解決できないので全テストに倒す", () => {
+    const files = ["a.ts", "a.test.ts"];
+    const src: Record<string, string> = { "a.ts": `import "./gone";`, "a.test.ts": `import "./a";` };
+    expect(selectFrom(["gone.ts"], files, (p) => src[p]!).full).toContain("./gone を解決できない");
+  });
+});
+
+/** 5 本の `export *` を並べたまとめ口と、その部品。 */
+const barrelTree = (extra: Record<string, string>) =>
+  tree({
+    "pkg/index.ts": ["a", "b", "c", "d", "e"].map((n) => `export * from "./${n}";`).join("\n") + `\nexport const VERSION = "1";`,
+    "pkg/a.ts": `export const alpha = 1; export type AlphaT = 1;`,
+    "pkg/b.ts": `export function beta() {}`,
+    "pkg/c.ts": `export const gamma = 1;`,
+    "pkg/d.ts": `export const delta = 1;`,
+    "pkg/e.ts": `export const epsilon = 1;`,
+    ...extra,
+  });
+
+describe("namedImports", () => {
+  test("import と export の名前だけを返し、type の付いたものは除く", () => {
+    expect(namedImports(`import { a, b as c, type T } from "./x"; import type { U } from "./x";`, "./x")).toEqual(["a", "b"]);
+    expect(namedImports(`export { a } from "./x";`, "./x")).toEqual(["a"]);
+  });
+
+  test("namespace・default・副作用だけ・動的 import が混ざれば undefined", () => {
+    expect(namedImports(`import * as x from "./x";`, "./x")).toBeUndefined();
+    expect(namedImports(`import d, { a } from "./x";`, "./x")).toBeUndefined();
+    expect(namedImports(`import "./x";`, "./x")).toBeUndefined();
+    expect(namedImports(`import { a } from "./x"; await import("./x");`, "./x")).toBeUndefined();
+  });
+});
+
+describe("まとめ口", () => {
+  test("まとめ口を名前で読むファイルは、定義する部品の変更でだけ選ぶ", () => {
+    const { graph, tests } = barrelTree({
+      "use.ts": `import { alpha, beta } from "./pkg";`,
+      "use.test.ts": `import "./use";`,
+      "other.ts": `import { gamma } from "./pkg/index";`,
+      "other.test.ts": `import "./other";`,
+    });
+    expect(select(["pkg/a.ts"], graph, tests).tests).toEqual(["use.test.ts"]);
+    expect(select(["pkg/b.ts"], graph, tests).tests).toEqual(["use.test.ts"]);
+    expect(select(["pkg/c.ts"], graph, tests).tests).toEqual(["other.test.ts"]);
+    expect(select(["pkg/d.ts"], graph, tests).tests).toEqual([]);
+    // まとめ口が自分で定義する名前は、まとめ口へつなぐ（部品の変更もまとめ口を通って届く）
+    const own = barrelTree({ "v.ts": `import { VERSION } from "./pkg";`, "v.test.ts": `import "./v";` });
+    expect(select(["pkg/index.ts"], own.graph, own.tests).tests).toEqual(["v.test.ts"]);
+    expect(select(["pkg/a.ts"], own.graph, own.tests).tests).toEqual(["v.test.ts"]);
+  });
+
+  test("namespace の import と見つからない名前は、まとめ口のどの部品の変更でも選ぶ", () => {
+    const { graph, tests } = barrelTree({
+      "ns.ts": `import * as p from "./pkg";`,
+      "ns.test.ts": `import "./ns";`,
+      "miss.ts": `import { alpha, nothing } from "./pkg";`,
+      "miss.test.ts": `import "./miss";`,
+    });
+    expect(select(["pkg/d.ts"], graph, tests).tests).toEqual(["ns.test.ts", "miss.test.ts"]);
+  });
+
+  test("export * が 5 行に満たないファイルはまとめ口にしない", () => {
+    const { graph, tests } = tree({
+      "p/index.ts": `export * from "./a"; export * from "./b";`,
+      "p/a.ts": `export const x = 1;`,
+      "p/b.ts": `export const y = 1;`,
+      "u.ts": `import { x } from "./p";`,
+      "u.test.ts": `import "./u";`,
+    });
+    expect(select(["p/b.ts"], graph, tests).tests).toEqual(["u.test.ts"]);
   });
 });
 
@@ -287,6 +364,48 @@ describe("selectFrom / formatSelection", () => {
   test("1 行目が件数か full で、続けてテストと理由", () => {
     expect(formatSelection({ tests: ["a.test.ts"], reasons: { "a.test.ts": "a.ts → a.test.ts" } })).toBe("selected: 1\na.test.ts  a.ts → a.test.ts");
     expect(formatSelection({ tests: ["a.test.ts"], reasons: { "a.test.ts": "全テスト" }, full: "bun.lock: 依存の定義や設定" })).toBe("full: bun.lock: 依存の定義や設定\na.test.ts  全テスト");
+  });
+});
+
+describe("組み立ての口", () => {
+  const roots = () =>
+    tree({
+      "packages/core/src/feature.ts": "",
+      "packages/core/src/server.ts": `import "./feature";`,
+      "packages/core/src/api-test-harness.ts": `import "./server";`,
+      "packages/core/src/main.ts": `import "./server";`,
+      "packages/core/src/feature.test.ts": `import "./feature";`,
+      "packages/core/src/server.test.ts": `import "./server";`,
+      "packages/core/src/feature.api.test.ts": `import "./api-test-harness";`,
+      "packages/core/src/main.test.ts": `import "./main";`,
+      "packages/core/src/harness-user.ts": `import "./api-test-harness";`,
+      "packages/core/src/harness-user.test.ts": `import "./harness-user";`,
+    });
+
+  test("組み立ての口に辿り着いたら直に読むテストだけを選び、その先へは辿らない", () => {
+    const { graph, tests } = roots();
+    const s = select(["packages/core/src/feature.ts"], graph, tests);
+    expect(s.tests.sort()).toEqual(["packages/core/src/feature.test.ts", "packages/core/src/server.test.ts"]);
+  });
+
+  test("止めた口を test-reads で宣言したテストは選ぶ", () => {
+    const { graph, tests } = roots();
+    const reads = new Map([["packages/core/src/main.test.ts", ["packages/core/src/server.ts"]]]);
+    expect(select(["packages/core/src/feature.ts"], graph, tests, reads).tests).toContain("packages/core/src/main.test.ts");
+  });
+
+  test("組み立ての口そのものの変更は今どおり先まで辿る", () => {
+    const { graph, tests } = roots();
+    expect(select(["packages/core/src/server.ts"], graph, tests).tests.sort()).toEqual([
+      "packages/core/src/feature.api.test.ts",
+      "packages/core/src/harness-user.test.ts",
+      "packages/core/src/main.test.ts",
+      "packages/core/src/server.test.ts",
+    ]);
+    expect(select(["packages/core/src/api-test-harness.ts"], graph, tests).tests.sort()).toEqual([
+      "packages/core/src/feature.api.test.ts",
+      "packages/core/src/harness-user.test.ts",
+    ]);
   });
 });
 

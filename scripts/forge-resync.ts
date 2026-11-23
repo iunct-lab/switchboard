@@ -51,7 +51,7 @@ import { client, readRecords, runBacklog, type Detail } from "../ops-kit/src/bac
 import { githubHost, outageOf, responseOf, retryAtFromResponse } from "../ops-kit/src/gh.ts";
 import { landedTip, landingRef } from "../packages/core/src/landing.ts";
 import { closedBy, landOn, LOCAL_MERGE, worktreeOf } from "./local-merge.ts";
-import { judge, readPr, type Judgement } from "./merge-gate.ts";
+import { judge, readPr, requestGate, type Judgement } from "./merge-gate.ts";
 import { originRepo } from "./repo.ts";
 
 const USAGE = "usage: bun scripts/forge-resync.ts [--pbi <n>]\n       bun scripts/forge-resync.ts --merge-sync <PR> [--allow-large]\n       bun scripts/forge-resync.ts --report\n       bun scripts/forge-resync.ts --adopt-landing <tip sha> [--pbi <n>]   (the person, in a terminal)\n       bun scripts/forge-resync.ts --drop-landing <tip sha>              (the person, in a terminal)";
@@ -469,27 +469,40 @@ async function mergeSync(n: number, allowLarge: boolean, landed: NonNullable<Ret
     c.err("origin が GitHub のリポジトリでない。判定していない");
     return 2;
   }
-  let j: Judgement & { head: string };
-  try {
-    j = await (c.deps.judgePr ?? (async (pr: number, allow: boolean) => {
-      const facts = await readPr(pr, (a) => gh(c, ...a), repo, { root: c.root, url: `https://github.com/${repo}.git` });
-      return { ...judge(facts, { allowLarge: allow }), head: facts.head! };
-    }))(n, allowLarge);
-  } catch (e) {
-    c.err(`判定できなかった: ${(e as Error).message}`);
-    return 2;
-  }
-  c.log(JSON.stringify(j, null, 2));
-  if (j.verdict !== "merge") return 1;
-  try {
-    // the gate's own merge, as merge-gate's --merge is: the PR is marked for the check in front of `gh`, which would
-    // otherwise ask for the person's grant of a merge the gate has just judged
-    const merged = await c.run(["gh", "pr", "merge", String(n), "-R", repo, "--merge", "--delete-branch", "--match-head-commit", j.head], c.root, { OPS_MERGE_GATE_PR: String(n) });
-    if (merged.code !== 0) throw new Error(`gh pr merge failed: ${merged.stderr.trim().split("\n")[0]}`);
-    await c.git("fetch", "-q", "origin", "main");
-  } catch (e) {
-    c.err(`同期の PR #${n} をマージできなかった: ${(e as Error).message}`);
-    return 1;
+  const env = c.deps.env ?? process.env;
+  if (env.SWITCHBOARD_TASK_ID) {
+    // in a Task the verdict and the merge are the app's (a gate job, `--merge-sync`: a Merge commit, only for the branch this script makes); nothing here judges with the Task's own environment
+    const code = await requestGate([String(n), "--merge-sync", "--repo", repo, ...(allowLarge ? ["--allow-large"] : [])], env, c.root, c.log, c.err, { fetch: c.deps.fetch });
+    if (code !== 0) return code;
+    try {
+      await c.git("fetch", "-q", "origin", "main");
+    } catch (e) {
+      c.err(`同期の PR #${n} をマージできなかった: ${(e as Error).message}`);
+      return 1;
+    }
+  } else {
+    let j: Judgement & { head: string };
+    try {
+      j = await (c.deps.judgePr ?? (async (pr: number, allow: boolean) => {
+        const facts = await readPr(pr, (a) => gh(c, ...a), repo, { root: c.root, url: `https://github.com/${repo}.git` });
+        return { ...judge(facts, { allowLarge: allow }), head: facts.head! };
+      }))(n, allowLarge);
+    } catch (e) {
+      c.err(`判定できなかった: ${(e as Error).message}`);
+      return 2;
+    }
+    c.log(JSON.stringify(j, null, 2));
+    if (j.verdict !== "merge") return 1;
+    try {
+      // a merge commit (the landing ref is the sync PR's second parent), which merge-gate's --merge (a rebase) is not. From a person's
+      // terminal nothing stands in front of `gh`; a Task's merge goes through the app's gate job above
+      const merged = await c.run(["gh", "pr", "merge", String(n), "-R", repo, "--merge", "--delete-branch", "--match-head-commit", j.head], c.root);
+      if (merged.code !== 0) throw new Error(`gh pr merge failed: ${merged.stderr.trim().split("\n")[0]}`);
+      await c.git("fetch", "-q", "origin", "main");
+    } catch (e) {
+      c.err(`同期の PR #${n} をマージできなかった: ${(e as Error).message}`);
+      return 1;
+    }
   }
   const G = await c.git("rev-parse", "refs/remotes/origin/main");
   try {

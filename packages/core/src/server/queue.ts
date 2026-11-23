@@ -91,7 +91,7 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
   if (!queue.enabled) return;
   const lines: string[] = [];
   const finish = () => {
-    for (const l of lines) sc.scheduler.note(`キュー: ${l} (${reason})`);
+    sc.scheduler.notes(lines.map((l) => `キュー: ${l} (${reason})`));
     noteQueue(sc.db, lines);
   };
   if (!queue.items.length) return (lines.push("キューが空"), finish());

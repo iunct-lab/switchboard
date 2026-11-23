@@ -88,7 +88,7 @@ describe("startStage with auto", () => {
     remote: { number: n, title: `#${n}`, url: `https://github.com/acme/app/issues/${n}`, state: "OPEN", stateReason: null, body: "", labels: ["type:task"], milestone: null, parent: null, subIssues: [], createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-02T00:00:00Z", closedAt: null, ...over },
   });
   const commentRec = (n: number, id: string, body: string, createdAt: string): BacklogSnapshotEntry => ({ objectKind: "comment", externalId: id, remote: { issue: n, body, createdAt }, fetchState: "fetched" });
-  const pullRec = (n: number, closes: number[]): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_gate${n}`, fetchState: "fetched", remote: { number: n, state: "MERGED", isDraft: false, labels: [], closes, mergeCommit: "a".repeat(40), updatedAt: "2026-10-06T00:00:00Z", files: null, closedAt: "2026-10-05T00:00:00Z", mergedAt: "2026-10-05T00:00:00Z" } });
+  const pullRec = (n: number, closes: number[]): BacklogSnapshotEntry => ({ objectKind: "pull-request", externalId: `PR_gate${n}`, fetchState: "fetched", remote: { number: n, state: "MERGED", isDraft: false, labels: [], closes, mergeCommit: "a".repeat(40), updatedAt: "2026-10-06T00:00:00Z", files: null, closedAt: "2026-10-05T00:00:00Z", mergedAt: "2026-10-05T00:00:00Z", head: null } });
   const world = async () => {
     const h = await bootStart();
     const source = h.core.db.getWorkspaceBacklogSource(h.ws.id)!;

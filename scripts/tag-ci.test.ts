@@ -7,7 +7,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { OffloadStartError, stepWithIdle, type Offload } from "./local-ci";
-import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
+import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, judgesNewest, writeJobResult, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
 const ciTs = await Bun.file(new URL("./ci.ts", import.meta.url)).text();
@@ -252,6 +252,66 @@ describe("tag-ci", () => {
     expect(section).toContain(`[tag-ci] fail ${shaOf("v1.0.0")}`);
     expect(section).toContain("無進捗で打ち切り");
     expect(f.edits.at(-1)!.body).toContain("無進捗で打ち切り");
+  });
+
+  test("--sha: only that commit is judged, run again although its Release has a mark, the walk does not go back, and the job result names only what this run judged", async () => {
+    const A = shaOf("v2.0.0");
+    const old = `- n\n\n## CI\n[tag-ci] pass ${A}`;
+    // without --sha the mark is read back and nothing runs (the job result would be empty)
+    const plain = fake([{ tag: "v2.0.0", body: old }, { tag: "v1.0.0", body: "" }]);
+    expect(await tagCi(plain.d, "o/r", "/repo", CACHE)).toEqual([{ tag: "v2.0.0", sha: A, result: "pass", ran: false }]);
+    // a fail of the commit stops there: the older tag (no mark, it would run in a walk) is left alone
+    const again = fake([{ tag: "v2.0.0", body: old, fail: testFail }, { tag: "v1.0.0", body: "" }]);
+    const r = await tagCi({ ...again.d, sha: A }, "o/r", "/repo", CACHE);
+    expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v2.0.0 fail true"]);
+    expect(again.worktrees).toEqual(["v2.0.0"]);
+    // a commit that is not the newest tag's: the tags before it are passed over without being read
+    const older = fake([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
+    const o = await tagCi({ ...older.d, sha: shaOf("v1.0.0") }, "o/r", "/repo", CACHE);
+    expect(o.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v1.0.0 pass true"]);
+    expect(older.viewed).toEqual(["v1.0.0"]);
+    // a commit no tag is at: nothing is judged
+    expect(await tagCi({ ...fake([{ tag: "v2.0.0", body: "" }]).d, sha: "f".repeat(40) }, "o/r", "/repo", CACHE)).toEqual([]);
+    const dir = mkdtempSync(join(CACHE, "job-"));
+    writeJobResult(dir, r, () => undefined);
+    expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))).toEqual({ judged: [{ sha: A, ok: false }] });
+    // not a job (no folder): nothing is written, and a run that judged nothing writes an empty list
+    writeJobResult(undefined, r, () => undefined);
+    writeJobResult(dir, [{ tag: "v2.0.0", sha: A, result: "pass", ran: false }], () => undefined);
+    expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))).toEqual({ judged: [] });
+    expect(parseArgs(["--sha", A, "--repo", "o/r"])).toMatchObject({ sha: A, rest: ["--repo", "o/r"] });
+    expect(() => parseArgs(["--sha", "abc"])).toThrow("40 桁");
+  });
+
+  test("--sha of an older tag: the follow-up of the newest tag (the request, the comment on the open ones) is left to a run that judged it", async () => {
+    const f = fake([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
+    expect(await judgesNewest(undefined, "/repo", f.d.sh)).toBe(true);
+    expect(await judgesNewest(shaOf("v2.0.0"), "/repo", f.d.sh)).toBe(true);
+    expect(await judgesNewest(shaOf("v1.0.0"), "/repo", f.d.sh)).toBe(false);
+    expect(await judgesNewest("f".repeat(40), "/repo", f.d.sh)).toBe(false);
+    expect(await judgesNewest(shaOf("v1.0.0"), "/repo", fake([]).d.sh)).toBe(false); // no tag at all
+  });
+
+  test("--sha: whether it follows the newest tag is asked after the fetch of the tags, so a tag made since the job was asked for does not get this run's follow-up", async () => {
+    const after = fake([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "", fail: testFail }]);
+    const before = fake([{ tag: "v1.0.0", body: "" }]);
+    let fetched = false;
+    // the clone lists only v1.0.0 until the walk fetches; then v2.0.0 is there too
+    const sh: typeof after.d.sh = (cmd, cwd, input) => {
+      if (cmd.includes("fetch")) fetched = true;
+      return (fetched ? after : before).d.sh(cmd, cwd, input);
+    };
+    const A = shaOf("v1.0.0");
+    const told: string[] = [];
+    const d = { ...after.d, sh, sha: A, onNewest: async (e: TagCiEntry[]) => void told.push(e[0]!.tag), follows: () => judgesNewest(A, "/repo", sh) };
+    expect(await judgesNewest(A, "/repo", sh)).toBe(true); // before the fetch it is the newest tag
+    const r = await tagCi(d, "o/r", "/repo", CACHE);
+    expect(r.map((x) => `${x.tag} ${x.result} ${x.ran}`)).toEqual(["v1.0.0 fail true"]);
+    expect(told).toEqual([]); // v2.0.0 is the newest now: its follow-up is not this run's to make
+    // asked about the newest tag, the same run follows up
+    fetched = false;
+    const again = await tagCi({ ...d, sha: shaOf("v2.0.0"), follows: () => judgesNewest(shaOf("v2.0.0"), "/repo", sh) }, "o/r", "/repo", CACHE);
+    expect(again.map((x) => `${x.tag} ${x.ran}`)).toEqual(["v2.0.0 true"]);
   });
 
   test("second run calls no step", async () => {
@@ -707,8 +767,8 @@ describe("tag-ci --latest-pass", () => {
   });
 
   test("the arguments: --latest-pass and --contained-in come off before --repo is read", () => {
-    expect(parseArgs(["--latest-pass", "--contained-in", "abc", "--repo", "o/r"])).toEqual({ latestPass: true, containedIn: "abc", local: false, rest: ["--repo", "o/r"] });
-    expect(parseArgs(["--repo", "o/r"])).toEqual({ latestPass: false, containedIn: undefined, local: false, rest: ["--repo", "o/r"] });
+    expect(parseArgs(["--latest-pass", "--contained-in", "abc", "--repo", "o/r"])).toEqual({ latestPass: true, containedIn: "abc", local: false, sha: undefined, rest: ["--repo", "o/r"] });
+    expect(parseArgs(["--repo", "o/r"])).toEqual({ latestPass: false, containedIn: undefined, local: false, sha: undefined, rest: ["--repo", "o/r"] });
     expect(() => parseArgs(["--contained-in", "abc"])).toThrow("--latest-pass");
     expect(() => parseArgs(["--latest-pass", "--contained-in"])).toThrow("コミット");
   });

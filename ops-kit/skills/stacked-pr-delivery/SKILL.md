@@ -24,6 +24,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
 3. `gh stack submit --auto --open` で push + PR 作成（`--open` で最初から ready。無いと draft）。**テンプレは未記入**なので必ず
    `gh pr edit <n> --title ... --body ...`（PULL_REQUEST_TEMPLATE.md の項目を埋める）。draft のままなら `gh pr ready <n>`。
 4. レビュー: PR ごとに `cross-runner-review`（主レビュアー）と、使うなら `review-with-subagent`（追加）。どちらもレビュアーは PR に書かず、自分が接頭辞つきで転記する。
+   マージ判定の JSON の `attack` が空でない PR は、攻める側のレビュー（`cross-runner-review` の 2b）も、最後にまとめず、その PR を出した直後（主レビューを起動する同じ時点）に頼む。
 5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`（`submit` と同じく全部の枝を atomic に push する。1 本でも断られたらどの枝も更新されない）。
    `review-triage-and-merge` の 4 の形で返信し（`gh api .../comments/<id>/replies`。見送る nit は要約の表）、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
 6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。

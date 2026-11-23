@@ -166,6 +166,6 @@ export function opsResources(db: Db, opts: { home: string; procRoot?: string; no
     consumers: latest?.ts
       ? { at: latest.ts, groups: rows.map((g) => ({ taskId: g.task_id, taskTitle: title(g.task_id), owner: g.owner, kind: g.kind, rssBytes: g.rss, procs: g.procs })) }
       : null,
-    jobs: db.listJobs(now - JOBS_KEEP_MS).map(({ summary: _s, cwd: _c, ...j }) => ({ ...j, taskTitle: title(j.taskId) })),
+    jobs: db.listJobs(now - JOBS_KEEP_MS).map(({ summary: _s, cwd: _c, repo: _r, head: _h, base: _b, as: _a, kinds: _k, result: _x, ...j }) => ({ ...j, taskTitle: title(j.taskId) })),
   };
 }

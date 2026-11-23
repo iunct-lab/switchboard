@@ -4,13 +4,22 @@
 // 1 行目は `full: <理由>`（全テストに倒した）か `selected: <件数>`、続けて `<テスト>  <理由>`。
 // 依存は import と、テストの先頭の宣言 `// test-reads: <パスかディレクトリ（末尾 /）> …` を見る（ツリー全体を読むなら `./`、一時ディレクトリだけなら `none`）。
 // テストの共通部品（TEST_HELPERS）も倒さず、ほかのコードと同じに import の木と宣言で選ぶ。import で辿れない読み方（子プロセスなど）は `test-reads` で宣言する。
-// 判定できないものは全テストに倒す（classify）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
+// 判定できないものは全テストに倒す（classify）。
+// 選ぶ数を減らす規則が下にある。その代わり、import で辿れない読み方（子プロセスなど）を `test-reads` で宣言していないテストは選ばれないことが増える
+// （たとえば 1 の前は、消したファイルを含む変更は全テストに倒れて、そうしたテストも回っていた）:
+//   1. 消した .ts/.tsx は全テストに倒さない。読んでいたファイルは同じ変更で直っているはずで、直っていなければ buildImportGraph が「解決できない」で全テストに倒す。
+//   2. `export *` を 5 行以上並べたまとめ口（今は packages/protocol/src/index.ts）を `import { a }` と名前で読むファイルは、その名前を定義している部品へ直接つなぐ。
+//      まとめ口を通ると、protocol のどのファイルを変えても protocol を読む全部に届く。`import * as`・default・見つからない名前はまとめ口へつなぐ。型だけの import は辿らない（型の変更は型検査が見る）。
+//   3. packages/protocol/ の変更も全テストに倒さず、ほかと同じく木をたどる（scripts/test-changed.ts）。
+//   4. 組み立ての口（COMPOSITION_ROOTS: server.ts と api-test-harness.ts）に別の変更から辿り着いたら、それを直に読むテストだけを選び、それを読むほかのファイル（harness・main.ts・scripts/*-e2e.ts など）へは辿らない。
+//      core のほぼ全部が server.ts に届き、約 96 件の API テストが付いてくるため。変更が口そのものなら、どこでも止めずに先まで辿る。
+// 選ばれなくなったテストを拾うのはタグの CI の全テスト（docs/design/local-ci.md の「Tag CI」）。local-ci がこの出力で bun test を絞る（scripts/local-ci.ts の selectTests）。
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 
-/** 被 import 側 → import 元。キーは走査した .ts/.tsx の全部（無いキーは「今のツリーに無い」）。 */
+/** 被 import 側 → import 元。キーは走査した .ts/.tsx の全部（無いキーは今のツリーに無いファイル）。 */
 export type ImportGraph = Map<string, string[]>;
 export type Selection = { tests: string[]; reasons: Record<string, string>; full?: string };
 
@@ -39,13 +48,62 @@ function resolveFile(base: string, known: Set<string>): string | undefined {
   return candidates.find((c) => known.has(c));
 }
 
-/** 相対 import と workspace パッケージ名を解決して逆辺にする。外部パッケージと node: は辿らない。 */
+/** `export * from` がこの行数以上並んだファイルを、部品をまとめる口とする。 */
+const BARREL_MIN = 5;
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** `spec` の読み込みが全部 `import { a, b as c }` / `export { a } from` の形ならその名前（`type` の付いたものは除く）。`import * as`・default・副作用だけ・動的 import が 1 つでもあれば undefined。 */
+export function namedImports(src: string, spec: string): string[] | undefined {
+  const q = escapeRe(spec);
+  const quoted = src.match(new RegExp(`["']${q}["']`, "g"))?.length ?? 0;
+  const names: string[] = [];
+  let statements = 0;
+  for (const m of src.matchAll(new RegExp(`\\b(?:import|export)\\s+(?:type\\s+)?\\{([^}]*)\\}\\s*from\\s*["']${q}["']`, "g"))) {
+    statements++;
+    if (/^\s*(?:import|export)\s+type\b/.test(m[0])) continue;
+    for (const part of m[1]!.split(",")) {
+      const item = part.trim();
+      if (!item || /^type\s/.test(item)) continue;
+      names.push(item.split(/\s+as\s+/)[0]!.trim());
+    }
+  }
+  return statements && statements === quoted ? names : undefined;
+}
+
+/** まとめ口の部品（`export * from` の先）と、各部品とまとめ口自身が実行時に定義する名前。部品が解決できなければ undefined。 */
+function barrelParts(file: string, src: string, known: Set<string>, read: (p: string) => string): { defs: Map<string, string[]>; own: Set<string> } | undefined {
+  const specs = [...src.matchAll(/^\s*export\s*\*\s*from\s*["']([^"']+)["']/gm)].map((m) => m[1]!);
+  if (specs.length < BARREL_MIN) return undefined;
+  const defs = new Map<string, string[]>();
+  for (const spec of specs) {
+    const part = resolveFile(normalize(join(dirname(file), spec)), known);
+    if (!part) return undefined;
+    const exported = new Bun.Transpiler({ loader: part.endsWith("x") ? "tsx" : "ts" }).scan(read(part).replace(/^#!.*/, "")).exports;
+    for (const name of exported) defs.set(name, [...(defs.get(name) ?? []), part]);
+  }
+  const own = new Set(new Bun.Transpiler({ loader: file.endsWith("x") ? "tsx" : "ts" }).scan(src).exports);
+  return { defs, own };
+}
+
+/** 相対 import と workspace パッケージ名を解決して逆辺にする。外部パッケージと node: は辿らない。
+ *  まとめ口（`export *` を並べたファイル）は、名前で読むファイルを、その名前を定義している部品へ直接つなぐ。 */
 export function buildImportGraph(files: string[], read: (p: string) => string): ImportGraph {
   const known = new Set(files);
   const packages = workspaces(files, read);
   const graph: ImportGraph = new Map();
   const code = files.filter(isCode);
   for (const f of code) graph.set(f, []);
+  const barrels = new Map<string, NonNullable<ReturnType<typeof barrelParts>>>();
+  for (const f of code) {
+    const parts = barrelParts(f, read(f).replace(/^#!.*/, ""), known, read);
+    if (parts) barrels.set(f, parts);
+  }
+  const link = (target: string, importer: string) => {
+    const importers = graph.get(target) ?? [];
+    if (!importers.includes(importer)) importers.push(importer);
+    graph.set(target, importers);
+  };
   for (const f of code) {
     const transpiler = new Bun.Transpiler({ loader: f.endsWith("x") ? "tsx" : "ts" });
     let imports: { path: string }[];
@@ -65,9 +123,16 @@ export function buildImportGraph(files: string[], read: (p: string) => string): 
         target = path === name ? resolveFile(pkg.entry, known) : resolveFile(normalize(join(pkg.dir, path.slice(name.length + 1))), known);
       }
       if (!target) throw new Error(`${f}: ${path} を解決できない`);
-      const importers = graph.get(target) ?? [];
-      if (!importers.includes(f)) importers.push(f);
-      graph.set(target, importers);
+      const barrel = barrels.get(target);
+      const names = barrel ? namedImports(read(f), path) : undefined;
+      if (barrel && names?.length) {
+        const found = names.map((n) => [...(barrel.defs.get(n) ?? []), ...(barrel.own.has(n) ? [target] : [])]);
+        if (found.every((t) => t.length)) {
+          for (const t of new Set(found.flat())) link(t, f);
+          continue;
+        }
+      }
+      link(target, f);
     }
   }
   return graph;
@@ -126,11 +191,20 @@ export function findStaleReads(tests: Array<{ path: string; src: string }>, file
   );
 }
 
-/** 変更ファイルから逆辺を推移的にたどり、当たったテストと、たどった先を宣言で読むテストを選ぶ。判定できない変更が 1 つでもあれば全テスト。 */
+/** 多くの変更が辿り着く組み立ての口。別の変更から着いたときは直に読むテストだけを選び、その先へ辿らない（頭のコメントの 4）。 */
+export const COMPOSITION_ROOTS = new Set(["packages/core/src/server.ts", "packages/core/src/api-test-harness.ts"]);
+
+/** 幅優先の 1 歩。ファイル f（変更 origin から辿って着いた）から次に進む読み手。組み立ての口では、口そのものの変更でなければテスト以外へ進まない。口そのものの変更は、もう一つの口でも止めない。 */
+export function readersToFollow(f: string, origin: string, graph: ImportGraph, testSet: Set<string>): string[] {
+  const stop = COMPOSITION_ROOTS.has(f) && !COMPOSITION_ROOTS.has(origin);
+  return (graph.get(f) ?? []).filter((importer) => !stop || testSet.has(importer));
+}
+
+/** 変更ファイルから逆辺をたどり（組み立ての口では readersToFollow のとおり止まる）、当たったテストと、たどった先を宣言で読むテストを選ぶ。判定できない変更が 1 つでもあれば全テスト。 */
 export function select(changed: string[], graph: ImportGraph, tests: string[], reads: Map<string, string[]> = new Map()): Selection {
   const fulls: string[] = changed.length ? [] : ["変更の一覧が空"];
   for (const c of changed) {
-    const why = classify(c) ?? (isCode(c) && !graph.has(c) ? "今のツリーに無い（消したファイルの依存は辿れない）" : undefined);
+    const why = classify(c);
     if (why) fulls.push(`${c}: ${why}`);
   }
   if (fulls.length) {
@@ -139,6 +213,7 @@ export function select(changed: string[], graph: ImportGraph, tests: string[], r
   }
   const testSet = new Set(tests);
   const reasons: Record<string, string> = {};
+  // 今のツリーに無い .ts/.tsx（消したファイル）は import の木に辺が無いので、辿る先が無いだけで全テストには倒さない（読んでいたファイルは同じ変更で直っていて、直っていなければ buildImportGraph が解決できないと言って全テストに倒す）。`test-reads` で読むテストは選ぶ
   for (const c of changed) {
     const tag = TEST_HELPERS.some((re) => re.test(c)) ? `共通部品 ${c} を読む: ` : "";
     const from = new Map<string, string | null>([[c, null]]);
@@ -155,7 +230,7 @@ export function select(changed: string[], graph: ImportGraph, tests: string[], r
         for (let p = from.get(f); p; p = from.get(p)) chain.unshift(p);
         reasons[test] = `${tag}${chain.join(" → ")} ← ${test}（test-reads）`;
       }
-      for (const importer of graph.get(f) ?? []) {
+      for (const importer of readersToFollow(f, c, graph, testSet)) {
         if (from.has(importer)) continue;
         from.set(importer, f);
         queue.push(importer);

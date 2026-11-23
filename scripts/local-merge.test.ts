@@ -51,16 +51,25 @@ async function setup(o: { lines?: number } = {}) {
   await send("POST", "", { workspaceId: ws.id, title: "Task: t", labels: ["type:task"], parent: 1 });
   expect((await send("POST", "", { workspaceId: ws.id, title: "変更", body: "Backlog-Task: 2", change: { head: "sb/2-x", base: "main" } })).number).toBe(3);
   const tip = (b: string) => git("rev-parse", b);
+  // the app's jobs of the change (it reads them, not a comment): a main review of the head and a local CI pass of the head on the base
   const mark = async () => {
-    await send("POST", "/3/comment", { workspaceId: ws.id, text: "[claude] review\n\n### Intent and design\nok" });
-    await send("POST", "/3/comment", { workspaceId: ws.id, text: `[local-ci] pass ${tip("sb/2-x")} base=${tip("main")}` });
+    const at = Date.now();
+    const base = { taskId: "task_x", pr: 3, cwd: repo, startedAt: at, repo: `local:${ws.id}`, as: null, kinds: [] };
+    const review = core!.db.insertJob({ ...base, kind: "review", runner: "claude", head: tip("sb/2-x") });
+    core!.db.finishJob(review.id, { status: "pass", exitCode: 0, summary: "", endedAt: at });
+    core!.db.setJobResult(review.id, { result: { review: { findings: [], firstLine: "[claude] review" } } });
+    const ci = core!.db.insertJob({ ...base, kind: "local-ci", runner: null, head: null });
+    core!.db.finishJob(ci.id, { status: "pass", exitCode: 0, summary: "", endedAt: at });
+    core!.db.setJobResult(ci.id, { head: tip("sb/2-x"), base: tip("main"), result: { ci: { outcome: "pass" } } });
   };
   await mark();
+  const tokenFile = join(home, "client-token");
+  writeFileSync(tokenFile, "k\n");
   const view = async (n: number) => (await (await fetch(`${url}/${n}?workspaceId=${ws.id}`)).json()) as BacklogIssueDetail;
   const done = async () => ((await (await fetch(url)).json()) as Backlog).items.find((i) => i.workspaceId === ws.id && i.number === 1)?.tasks;
-  const run = async (args: string[] = ["3"], f?: (u: string, init?: RequestInit) => Promise<Response>) => {
+  const run = async (args: string[] = ["3"], f?: (u: string, init?: RequestInit) => Promise<Response>, env: Record<string, string> = {}) => {
     const out: string[] = [];
-    const code = await main(args, repo, { env: { BACKLOG_URL: url, BACKLOG_WORKSPACE: ws.id }, ...(f ? { fetch: f } : {}), cache: home!, log: (s) => out.push(s), err: (s) => out.push(s), now: () => new Date("2026-01-02T00:00:00Z") });
+    const code = await main(args, repo, { env: { BACKLOG_URL: url, BACKLOG_TOKEN_FILE: tokenFile, BACKLOG_WORKSPACE: ws.id, ...env }, ...(f ? { fetch: f } : {}), cache: home!, log: (s) => out.push(s), err: (s) => out.push(s), now: () => new Date("2026-01-02T00:00:00Z") });
     return { code, out: out.join("\n") };
   };
   const branches = () => git("branch", "--format=%(refname:short)").split("\n").sort();
@@ -91,6 +100,36 @@ test("(a, c) base not moved: main gets the branch's commits in order, no merge c
   expect(task.issue.state).toBe("CLOSED");
   expect(task.fields).toMatchObject({ Status: "Done" });
   expect((await s.done())).toMatchObject({ total: 1, done: 1 });
+});
+
+test("in a Task the judgement is the app's gate job: an address of the records in the Task's environment is not read, and only its merge verdict at the head read here goes on", async () => {
+  const s = await setup();
+  const head = s.tip("sb/2-x");
+  const urls: string[] = [];
+  const posts: unknown[] = [];
+  // the app's gate job (the daemon's own run of merge-gate --change) as a verdict: the head it judged and whether it merges
+  const job = (verdict: "merge" | "stop", judged: string) => async (u: string, init?: RequestInit) => {
+    urls.push(u);
+    const path = new URL(u).pathname;
+    if (path === "/api/jobs") return (posts.push(JSON.parse(String(init?.body))), Response.json({ id: 41 }));
+    if (path === "/api/jobs/41") return Response.json({ job: { id: 41, status: verdict === "merge" ? "pass" : "fail", exitCode: verdict === "merge" ? 0 : 1, summary: null, result: { gate: { head: judged } } }, out: JSON.stringify({ verdict }) });
+    return fetch(u, init);
+  };
+  const env = { SWITCHBOARD_TASK_ID: "task_1", OPS_KIT_TASK_ID: "task_1", SWITCHBOARD_GATE_POLL_MS: "1", MERGE_RECORDS_URL: "http://evil.test", MERGE_RECORDS_TOKEN_FILE: "/nonexistent" };
+  const before = () => [s.tip("main"), s.tip("sb/2-x"), s.branches().join(",")];
+  const was = before();
+  // a stop, and a verdict for another head: nothing moves
+  expect((await s.run(["3", "--allow-large"], job("stop", head), env)).code).toBe(1);
+  expect((await s.run(["3"], job("merge", "e".repeat(40)), env)).out).toContain("判定した head");
+  expect(before()).toEqual(was);
+  expect(posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: s.repo, pr: 3, change: true, allowLarge: true }, { kind: "gate", taskId: "task_1", cwd: s.repo, pr: 3, change: true }]);
+  // the merge verdict at the head: the merge goes through, as outside a Task
+  const ok = await s.run(["3"], job("merge", head), env);
+  expect(ok.code).toBe(0);
+  expect(s.subjects()).toEqual(["c", "b", "a"]);
+  expect((await s.view(3)).issue).toMatchObject({ state: "CLOSED" });
+  // nothing here read the address the Task's environment named, or the app's records itself
+  expect(urls.some((u) => u.includes("evil.test") || u.includes("/api/merge-records"))).toBe(false);
 });
 
 test("(b) base moved before: the branch's commits are rebased onto the new tip, author dates kept", async () => {

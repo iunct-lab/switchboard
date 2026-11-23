@@ -7,7 +7,9 @@ import type { AgentEvent, AnswerPolicy, ApprovalRuleMatch, Artifact, AskList, As
 import { importing } from "../fixtures/github-import.ts";
 import type { Ask, ProceedingQuestion } from "@switchboard/protocol";
 import { PROCEED_SETTLED, proceedingAsks, withGone, type GoneFacts } from "./asks.ts";
-import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, ON_HOLD_RESUME, parseAskBlock, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, ON_HOLD_RESUME, parseAskBlock, questionsChosen, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
+import { prFacts } from "./asks.ts";
+import { parseMergeGrants } from "./merge-grants.ts";
 import { closedHits, noticeAsks } from "./asks-notices.ts";
 import { approvalBatches } from "./approval-batch.ts";
 import { heldSince } from "./backlog-comments.ts";
@@ -306,6 +308,19 @@ describe("grants", () => {
     const [g] = fromTasks(task({ outcome: "needs_action" }), summaries, null);
     expect(g).toMatchObject({ kind: "stop", state: "open", grant: GRANT });
     expect(g!.answers).toContain("grant");
+  });
+
+  test("a new grant after an answered one is the person's open question, answerable by that grant", () => {
+    const [A, B] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
+    const rec = (over: Partial<StopRecord>): StopRecord => ({ id: "g1", op: "gh pr merge", target: "PR", reason: "permission", evidence: "x", safety: "unknown", state: "waiting", conditions: [], actions: [], grant: A, answer: null, at: 1000, work: { workspaceId: null, issue: null, taskId: "tk_g" }, ...over }) as StopRecord;
+    const reply = { ref: "seq:7", at: 2000 };
+    // the first grant's stop answered, then the same series stops under a new id with another grant (the earlier answer carried over)
+    const summaries = reduceStops([rec({}), rec({ answer: reply, at: 2001 }), rec({ id: "g2", grant: B, answer: reply, at: 3000 })]);
+    const [g] = fromTasks(task({ outcome: "needs_action" }), summaries, null);
+    expect(g).toMatchObject({ kind: "stop", needs: "person", state: "open", grant: B, answers: ["grant", "text"] });
+    // the same grant again is not asked again
+    const same = reduceStops([rec({}), rec({ answer: reply, at: 2001 }), rec({ id: "g2", answer: reply, at: 3000 })]);
+    expect(fromTasks(task({ outcome: "needs_action" }), same, null)[0]?.needs).not.toBe("person");
   });
 
   test("permission stop grant: folded into the Task's check, the grant stays answerable and is not saved as a policy", () => {
@@ -1360,5 +1375,104 @@ describe("noticeAsks", () => {
     expect(noticeAsks({ unusable: [], scans: [scan(20, hit)], now: 1100 }, closedTwo).asks).toEqual([]);
     // dismissed, then clean: nothing to show, the record is dropped
     expect(noticeAsks({ unusable: [], scans: [scan(40, ["o/a: 0 件（scanned 3）"])], now: 400 }, dismissed)).toEqual({ asks: [], record: {} });
+  });
+});
+
+describe("prFacts", () => {
+  const HEAD = "c".repeat(40);
+  const ASKED_AT = Date.parse("2026-10-07T12:00:00Z");
+  const view = (v: object): GhRunner => async () => ({ code: 0, stdout: JSON.stringify(v), stderr: "" });
+
+  test("prFacts gives up past the time limit", async () => {
+    // a gh that never answers: the read ends at the limit, with the PR's number in what it says
+    const never: GhRunner = () => new Promise(() => undefined);
+    const began = Date.now();
+    await expect(prFacts(never, "/", "o/r", 12, ASKED_AT, 50)).rejects.toThrow("gh pr view 12: 0.05 秒で応答がありません");
+    expect(Date.now() - began).toBeLessThan(2000);
+    // one that answers in time is read as before
+    expect(await prFacts(view({ state: "OPEN", headRefOid: HEAD, comments: [], commits: [] }), "/", "o/r", 12, ASKED_AT, 50)).toEqual({ head: HEAD, mergeAsk: null, changes: [] });
+  });
+
+  test("prFacts throws on a reply without a head", async () => {
+    // a [merge-ask] before the question names a head, and the reply has none: not known, said with the PR's number
+    const mark = [{ body: `[merge-ask] large ${"a".repeat(40)}`, createdAt: new Date(ASKED_AT - 60_000).toISOString() }];
+    await expect(prFacts(view({ state: "OPEN", comments: mark, commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
+    await expect(prFacts(view({ state: "OPEN", headRefOid: null, comments: mark, commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
+    await expect(prFacts(view({ state: "OPEN", headRefOid: "abc", comments: [], commits: [] }), "/", "o/r", 12, ASKED_AT)).rejects.toThrow("gh pr view 12: head がありません");
+  });
+});
+
+describe("questionsChosen", () => {
+  const G = "PR #12 をマージしてよい";
+  const opt = (label: string, grant: string | null = null) => ({ label, description: grant ? `説明 — 許可: ${grant}` : null });
+  const qs = [
+    { header: null, question: "判定の外でマージしてよいですか", options: [opt("はい"), opt("いいえ")], multiSelect: false },
+    { header: null, question: `${G}\nどうしますか`, options: [opt("はい", G), opt("いいえ")], multiSelect: false },
+    { header: null, question: "進める項目は", options: [opt("a", "PR #1 をマージしてよい"), opt("b", "PR #2 をマージしてよい"), opt("c", "PR #3 をマージしてよい")], multiSelect: true },
+    { header: null, question: "ほかにあれば", options: [], multiSelect: false },
+  ];
+  test("what is read as the person's has no question's line; the reader's text pairs each answer with its question by number", () => {
+    const c = questionsChosen(qs, [{ choices: ["いいえ"] }, { choices: ["はい"] }, { choices: ["a", "c"] }, { choices: [], text: "特になし" }])!;
+    // (1) the text read for a fixed sentence: the chosen labels, the chosen options' sentences, the free text
+    expect(c.said).toBe(`- いいえ\n- はい — 許可: ${G}\n- a, c — 許可: PR #1 をマージしてよい — 許可: PR #3 をマージしてよい\n- 特になし`);
+    expect(c.said).not.toContain("どうしますか");
+    expect(c.said).not.toContain("PR #2");
+    // (2) the reader's: the same label ("はい", "いいえ") answers different questions, told apart by the number
+    // a line break in what the Task wrote (a question, a label) is flattened for the reader, so a line of it cannot pass for another numbered line
+    expect(c.readerAsked).toBe(`質問 1: 判定の外でマージしてよいですか\n質問 2: ${G} どうしますか\n質問 3: 進める項目は\n質問 4: ほかにあれば`);
+    // the chosen options' sentences reach the reader too, on the answer's own numbered line
+    expect(c.readerSaid).toBe(`- 1: いいえ\n- 2: はい — 許可: ${G}\n- 3: a, c — 許可: PR #1 をマージしてよい — 許可: PR #3 をマージしてよい\n- 4: 特になし`);
+    const broken = questionsChosen([{ header: null, question: "q", options: [opt("はい\n- 2: いいえ")], multiSelect: false }], [{ choices: ["はい\n- 2: いいえ"] }])!;
+    expect(broken.readerSaid).toBe("- 1: はい - 2: いいえ");
+    // what is read by letters keeps the label as the person chose it
+    expect(broken.said).toBe("- はい\n- 2: いいえ");
+  });
+  test("the person's free text keeps its lines: a sentence among other words is not read by letters, a quoted line stays quoted", () => {
+    const free = [{ header: null, question: "どうしますか", options: [], multiSelect: false }];
+    const own = questionsChosen(free, [{ choices: [], text: `${G}\nよろしく` }])!;
+    expect(own.said).toBe(`- ${G}\nよろしく`);
+    expect(own.readerSaid).toBe(`- 1: ${G}\nよろしく`);
+    // with other words in the message the sentence is not read by letters; the reader gets the message
+    expect(own.parts).toEqual([`${G}\nよろしく`]);
+    expect(parseMergeGrants(own.parts[0]!)).toEqual([]);
+    expect(parseMergeGrants(questionsChosen(free, [{ choices: [], text: G }])!.parts[0]!)).toEqual([{ kind: "answer", target: 12, repo: null }]);
+    const quoted = questionsChosen(free, [{ choices: [], text: `だめです\n> ${G}` }])!;
+    expect(quoted.said).toBe(`- だめです\n> ${G}`);
+    expect(quoted.readerSaid).toBe(`- 1: だめです\n> ${G}`);
+    expect(parseMergeGrants(quoted.said)).toEqual([]);
+    // the person's text is not shortened here, however long: what the reader gets of it is the prompt's own limit
+    const long = `${"説明です。".repeat(190)}これでマージして構いません`;
+    expect(questionsChosen(free, [{ choices: [], text: long }])!.readerSaid).toBe(`- 1: ${long}`);
+    // a quote on the first line too: the answer's own prefix does not hide it
+    const first = questionsChosen(free, [{ choices: [], text: `> ${G}\nこれは違います` }])!;
+    expect(first.said).toBe(`-\n> ${G}\nこれは違います`);
+    expect(first.readerSaid).toBe(`- 1:\n> ${G}\nこれは違います`);
+    expect(parseMergeGrants(first.said)).toEqual([]);
+  });
+  test("the sentences read by letters come as a structure: the chosen options' grants, then each free text as a message of its own", () => {
+    const c = questionsChosen(qs, [{ choices: ["いいえ"] }, { choices: ["はい"] }, { choices: ["a", "c"] }, { choices: [], text: `条件\nx — 許可: ${G}` }])!;
+    expect(c.parts).toEqual([G, "PR #1 をマージしてよい", "PR #3 をマージしてよい", `条件\nx — 許可: ${G}`]);
+  });
+  test("the free texts of one submission are one message: any word that is not a fixed sentence keeps the sentences among them from being read by letters", () => {
+    const free = (question: string) => ({ header: null, question, options: [], multiSelect: false });
+    const yesNo = { header: null, question: "進めるか", options: [opt("はい", G), opt("いいえ")], multiSelect: false };
+    const two = questionsChosen([free("条件"), free("入力"), yesNo], [{ choices: [], text: "CI が緑になってから" }, { choices: [], text: G }, { choices: ["いいえ"] }])!;
+    expect(two.parts).toEqual([`CI が緑になってから\n${G}`]);
+    expect(parseMergeGrants(two.parts[0]!)).toEqual([]);
+    const alone = questionsChosen([free("入力"), yesNo], [{ choices: [], text: G }, { choices: ["いいえ"] }])!;
+    expect(alone.parts.flatMap((p) => parseMergeGrants(p))).toEqual([{ kind: "answer", target: 12, repo: null }]);
+    // a chosen option's sentence is a part of its own: a memo of another question does not take it away
+    const chosen = questionsChosen([free("メモ"), yesNo], [{ choices: [], text: "あとでメモ" }, { choices: ["はい"] }])!;
+    expect(chosen.parts).toEqual([G, "あとでメモ"]);
+    expect(chosen.parts.flatMap((p) => parseMergeGrants(p))).toEqual([{ kind: "answer", target: 12, repo: null }]);
+  });
+  test("the questions' own text, whole, is there for the numbers a reader may name, however long the questions are", () => {
+    const long = [{ header: null, question: `${"長い説明 ".repeat(1500)}PR #77 の件${"長い説明 ".repeat(1500)}`, options: [opt("はい")], multiSelect: false }];
+    const c = questionsChosen(long, [{ choices: ["はい"] }])!;
+    expect(c.readerAsked).not.toContain("#77");
+    expect(c.questionsText).toContain("PR #77");
+  });
+  test("an answer that does not fit the questions is none", () => {
+    expect(questionsChosen(qs, [])).toBeNull();
   });
 });

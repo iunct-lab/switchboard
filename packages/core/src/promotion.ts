@@ -3,7 +3,8 @@
  * (`promotionStep`), the drain that waits for the running Tasks, the note the screens show while it waits, and the
  * question asked when a promotion failed.
  */
-import type { BacklogCommentData, BacklogIssueData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
+import { APP_JOB_TASK } from "@switchboard/protocol";
+import type { Job, BacklogCommentData, BacklogIssueData, BacklogPullRequestData, BacklogSource } from "@switchboard/protocol";
 import type { Db } from "./db.ts";
 import { closesOf } from "./backlog-fetch.ts";
 import type { ReleaseReview } from "./release-review.ts";
@@ -41,14 +42,42 @@ export async function latestTag(git: (args: string[]) => Promise<string>): Promi
 /** How far a new version found is taken by itself (`settings.release.auto`). */
 export type PromotionAuto = "promote" | "review" | "off";
 
-/** The tag CI's last word on a tag's commit, as its Release says it (`[tag-ci] pass|fail <sha>`); `none` = no result, or it could not be read. */
+/** The tag CI's last word on a tag's commit, as the app's own record of a tag CI job says it; `none` = no job judged it. */
 export type TagCi = "pass" | "fail" | "none";
 
-/** The last `[tag-ci]` result of `sha` in a Release's body (a later line outweighs an earlier one), `none` without one. */
-export function tagCiOf(releaseBody: string, sha: string): TagCi {
-  let last: TagCi = "none";
-  for (const m of releaseBody.matchAll(/^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/gm)) if (m[2] === sha) last = m[1] as TagCi;
-  return last;
+/**
+ * The tag CI's result of a commit from the jobs asked for it (oldest first): the newest job that judged it decides, a later
+ * one outweighs an earlier one, and a job still running or ended without judging it says nothing. A mark in a Release's body
+ * is not read: anyone who can edit a Release could write it.
+ */
+export function tagCiOf(jobs: Job[]): TagCi {
+  for (const j of [...jobs].reverse()) if (j.result?.tagCi) return j.result.tagCi.ok ? "pass" : "fail";
+  return "none";
+}
+
+/** Jobs that ended without judging the commit are asked again at most this many times, and not before the interval has passed (the same 10 minutes as a check of a release's diff that failed to start). */
+export const TAG_CI_ATTEMPTS = 3;
+export const TAG_CI_RETRY_MS = 10 * 60_000;
+
+/** What the promotion check sees of a tag's CI: its result, or that the app's own job for it is still to come (`waiting`: which job, or why none yet). */
+export type TagCiState = TagCi | { waiting: string };
+
+/**
+ * What the app does about a commit's tag CI, whatever the `tagCi` setting says (the setting only decides what a commit
+ * that stays without a result is worth): `settled` = a job judged it; `wait` = a tag CI job is running (one at a time:
+ * each is the whole CI, in a heavy slot, so a job for another commit is waited on too), or the last one ended without
+ * judging it less than `TAG_CI_RETRY_MS` ago; `start` = ask for a job now; `spent` = `TAG_CI_ATTEMPTS` jobs ended without
+ * judging it, no more are asked and the commit has no result.
+ */
+export function tagCiPlan(jobs: Job[], running: Job | null, now: number): { do: "settled" | "start" | "spent" } | { do: "wait"; job: number; retry?: true } {
+  if (tagCiOf(jobs) !== "none") return { do: "settled" };
+  if (running) return { do: "wait", job: running.id };
+  // the tries are the app's own jobs that ended without judging it (a Task's job that judged it is a record, read above; one that did not is not the app's try)
+  const spent = jobs.filter((j) => j.status !== "running" && j.taskId === APP_JOB_TASK);
+  if (spent.length >= TAG_CI_ATTEMPTS) return { do: "spent" };
+  const last = spent.at(-1);
+  if (last && now - Math.max(...spent.map((j) => j.endedAt ?? 0)) < TAG_CI_RETRY_MS) return { do: "wait", job: last.id, retry: true };
+  return { do: "start" };
 }
 
 export type PromotionStep =
@@ -56,8 +85,8 @@ export type PromotionStep =
   /** `ifNoRestart`: asked as a switch that keeps the Tasks; sb-rescue refuses it (409, `restart: true`) when the release needs a restart. */
   | { action: "promote"; tag: string; sha: string; ifNoRestart?: true }
   | { action: "review" }
-  /** `drain`: it waits for the Tasks a restart would cut, and nothing new starts meanwhile (the caller holds new starts). `ci`: held by the tag CI's result, not by Tasks. */
-  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview; drain?: true; ci?: true; bundle?: true };
+  /** `drain`: it waits for the Tasks a restart would cut, and nothing new starts meanwhile (the caller holds new starts). `ci`: held by the tag CI's result (a fail, or no result under `pass`), not by Tasks. `ciWait`: waiting for the app's own tag CI job, which is the usual state of a new tag and no stop (not told in 判断待ち). */
+  | { action: "wait"; reason: string; failed?: { tag: string; sha: string; reason: string }; review?: ReleaseReview; drain?: true; ci?: true; ciWait?: true; bundle?: true };
 
 /**
  * The one decision about the newest tag, for the interval check, a backlog-next firing and a turn's end alike: bring
@@ -70,13 +99,14 @@ export type PromotionStep =
  * the backlog, and a failed tag still does. A bundle's hold (`bundle`) waits whatever `auto` says and holds the backlog.
  * `ci` (given for a development origin only): the tag CI's result. A tag that failed it is never brought in by itself;
  * one without a result is brought in as any tag is (`requireCi` `no-fail`, the default: a promotion does not wait for
- * the tag CI) unless `requireCi` is `pass`. Neither wait holds the backlog, and each is told to the person (`tagCiNote`).
+ * the tag CI) unless `requireCi` is `pass`. While the app's own tag CI job for the tag is still to come (`ci` is `{ waiting }`) it waits for
+ * the job under either setting (`ciWait`, the usual state of a new tag: no stop, not told). Neither wait holds the backlog; a hold by the tag CI's result (`ci`: a fail, or no result under `pass`) is told to the person (`tagCiNote`), the wait for the job is not.
  * `busyTasks`: the Tasks a restart would cut — a turn under way, a turn stopped on an approval or a question (the
  * middle of a turn), background jobs. This decision never restarts under one of them: while there are any and sb-rescue
  * can switch without ever restarting (`promoteKeepsTasks`), that is asked for (`ifNoRestart`); `needsRestart` =
  * sb-rescue answered that this tag cannot go in that way, so it waits until none is left (`drain`).
  */
-export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; needsRestart?: boolean; bundle?: { taskId: string } | null; ci?: TagCi; requireCi?: "pass" | "no-fail" }): PromotionStep {
+export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; needsRestart?: boolean; bundle?: { taskId: string } | null; ci?: TagCiState; requireCi?: "pass" | "no-fail" }): PromotionStep {
   const { status, latest } = s;
   if (!status.managed || !latest || latest.sha === status.current || s.latestInCurrent) return { action: "pick" };
   const failure = status.history.find((h) =>
@@ -96,6 +126,8 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
     return { action: "wait", reason, review: r };
   }
   if (auto === "review") return { action: "pick" };
+  // the app's own tag CI job for the tag is still to come: the promotion waits for it, whatever `requireCi` says
+  if (typeof s.ci === "object") return { action: "wait", reason: `${latest.tag} のタグの CI の仕事 ${s.ci.waiting} を待っている`, ciWait: true };
   if (s.ci === "fail") return { action: "wait", reason: `${latest.tag} はタグの CI が失敗しているので自動では昇格しない`, ci: true };
   if (s.ci === "none" && (s.requireCi ?? "no-fail") === "pass") return { action: "wait", reason: `${latest.tag} のタグの CI の結果がまだ無いので自動の昇格を待つ`, ci: true };
   // a promotion in flight: the next check must not ask for the same tag again
@@ -186,7 +218,7 @@ export function drainNote(d: PromotionDrain, holding: Array<{ title: string; sta
 }
 
 /** Why a promotionFirst held the newest tag, and since when it has held that tag. */
-export type PromotionHold = { tag: string; failed: boolean; reason: string; since: number; /** false = held by something that is not a Task (the diff's check, the tag CI, sb-rescue busy): no Task ending brings it in. */ tasks?: boolean; /** Held by the tag CI's result (a fail, or no result under `pass`). */ ci?: boolean };
+export type PromotionHold = { tag: string; failed: boolean; reason: string; since: number; /** false = held by something that is not a Task (the diff's check, the tag CI, sb-rescue busy): no Task ending brings it in. */ tasks?: boolean; /** Held by the tag CI's result (a fail, or no result under `pass`): told in 判断待ち. */ ci?: boolean; /** Waiting for the app's own tag CI job (the usual state of a new tag; shown as the hold's reason, not told as a stop). */ ciWait?: boolean };
 
 /**
  * The notice of a tag the tag CI holds back: told from the first check that held it, whatever the schedules, because
