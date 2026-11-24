@@ -5,7 +5,7 @@ import { common } from "./i18n/common.ts";
 /**
  * What the screen shows of a local change: the marks of its comments, for display only (the screen does not judge: merge-gate
  * reads the app's job records, not these marks). `LOCAL_CI_RESULT` is the pattern of scripts/local-ci.ts: that module runs git and
- * cannot go in the web bundle, so it is written here and changes.test.ts holds them equal. The two below are the screen's alone.
+ * cannot go in the web bundle, so it is written here and changes.test.ts holds them equal. `RECHECK_PASS`'s kinds are held equal to merge-gate's `RECHECK_KINDS` by the same test; `REVIEW` is the screen's alone.
  */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
 export const RECHECK_PASS = /^\[recheck\] (security:docs|security:tests|security:lockfile|size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;

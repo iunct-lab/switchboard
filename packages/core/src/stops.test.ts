@@ -379,8 +379,41 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     const b = stop({ reason: "permission" });
     expect(reduceStops([a])[0]!.grant).toBe("PR #12 をマージすることだけ許可します");
     expect(reduceStops([a, b])[0]!.grant).toBeNull();
-    expect(StopRecord.parse({ ...a, grant: "x".repeat(400) }).grant).toHaveLength(300);
-    expect(stopRecoveryPrompt([], ALL)).toContain('許可文を "grant" に 1 文で書く');
+    expect(StopRecord.parse({ ...a, grant: "x".repeat(2400) }).grant).toHaveLength(2000);
+    expect(stopRecoveryPrompt([], ALL)).toContain('許可文を "grant" に書く');
+  });
+
+  test("stop grant: the grants of a six-PR stack, one sentence to a line, come through a report and its record whole", () => {
+    // each PR's ask reason and two merges outside the gate, of a repository named in full: past the limit one sentence had
+    const lines = [...[6101, 6102, 6103, 6104, 6105, 6106].map((n) => `example-org/example-repository の PR #${n} をマージしてよい`), ...[6105, 6106].map((n) => `example-org/example-repository の PR #${n} を判定の外でマージしてよい`)];
+    const grant = lines.join("\n");
+    expect(grant.length).toBeGreaterThan(300);
+    const [report] = new StopFenceReader().feed("```switchboard-stop\n" + JSON.stringify({ id: "stack", op: "gh stack merge", target: "PR #6106", reason: "permission", evidence: "ask reasons", grant }) + "\n```\n", "m1");
+    expect(report!.grant).toBe(grant);
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.stop-grant."));
+    const db = new Db(join(dir, "t.db"));
+    try {
+      // a report carries no answer of its own (a comment URL at most): the record is the stop as the app keeps it
+      const { answer: _none, ...reported } = report!;
+      const record = stop({ ...reported, work: { workspaceId: null, issue: null, taskId: "tg" } });
+      db.appendEvent("tg", { t: "stop.record", stop: record });
+      const [kept] = db.listStopRecords(["tg"]);
+      expect(kept!.grant).toBe(grant);
+      expect(kept!.grant!.split("\n")).toEqual(lines);
+      expect(reduceStops([kept!])[0]!.grant).toBe(grant);
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stop grant: the prompt says the grants one piece of work needs go one sentence to a line, all of them", () => {
+    const p = stopRecoveryPrompt([], ALL);
+    expect(p).toContain("同じ作業で要る許可（スタックの PR ごとの聞く理由の解除・判定の外のマージなど）は 1 行 1 文で全部並べ、行をまとめたり省いたりしない。");
+    expect(p).toContain("聞く理由の文を書く grant には決まった文でない行（条件・説明・自由な形の許可文）を混ぜない（1 行でも混じると聞く理由の文は読まれない。判定の外のマージの決まった文は並べてよい）。");
+    // the fixed sentences are still written as they are, and no value or secret goes in
+    expect(p).toContain("をそのまま grant に書く（ほかの言い方では通らない）");
+    expect(p).toContain("値や秘密は書かない");
   });
 
   test("prompt asks for wait conditions: a depends stop names its PRs / Issues as pr#N / issue#N, copied from overlap", () => {

@@ -21,11 +21,11 @@ auto: { maxBodyChars: 600, excludeLabels: [needs-decision, on-hold, flow-improve
 
 次の信号を読み、それが求める最小の変更を 1 本の PR にしてください: {{signal}}
 
-- main の作業ツリーでは作業しない。`git worktree add --detach ../<リポジトリ名>-<topic> origin/main` で worktree を作り、枝は `sb/direct-<topic>`
+- main の作業ツリーでは作業しない。`git worktree add --detach ../<リポジトリ名>-<topic> origin/main` で worktree を作り、枝は `sb/direct-<topic>`（名前の決まり。直行かどうかを決めるのは枝の名前ではなく、アプリがこの Task を直行として始めた記録）
 - 触る前に、その信号が不変条件（`ops-kit/invariants.md`）に触れるか確かめる。触れるなら次の行のとおり戻す（止まるだけにしない。`direct-returned` が無いと要望は自動処理から外れたまま残る）
 - 読んだ結果、小さくない・明確でない・不変条件に触れる、のどれかだと分かったら、変更を作らず戻す: `ops-kit backlog edit <要望> --add-label direct-returned` を付け、要望に `直行から戻す: <理由>` をコメントして（`ops-kit backlog comment <要望> --body-file -`）止まる。PBI にするのは p0-pipeline の役で、ここでは作らない
 - 変更は、信号が求めることだけ。ついでの整形・改名・リファクタをしない
 - テストは変更の等級に応じて: 関数なら単体テスト、API なら偽の依存で起動して `fetch`。テストの無い PR は出さない。型検査と関係するテストのコマンドはリポジトリの CLAUDE.md
 - PBI・Task Issue は作らない。PR の本文に、読んだ信号・変えたこと・走らせたテスト・変えなかったことを書く。Issue・決定ログ・Project のフィールドは書かない（この型では作らない）。例外は要望 Issue への書き込みだけ（戻す印とコメントは上、閉じるのは下）: 信号が要望 Issue なら、PR を出したらその要望に `直行: PR #<番号>` の 1 行をコメントする（`ops-kit backlog comment <要望> --body-file -`）
-- PR を出したあとも、終わるまで通す。先に `bun scripts/merge-gate.ts <PR>`（`--merge` なし）で判定を見る。exit 2（判定できない）なら、レビューの要否も分からないので止まって理由を返答に書く。理由に「主レビュー」が出たときだけ、`.claude/skills/cross-runner-review/SKILL.md` で{{reviewer}}にレビューさせる。理由に攻める側のレビュー（`attack`）の行があれば、同じスキルの 2b で攻める側のレビューも頼む。そのあと `.claude/skills/review-triage-and-merge/SKILL.md` で指摘を処理する。どちらの理由も出なければレビューを通さない。要否を自分で決めない。レビューを通さないときも CI は要る: CI が走らないリポジトリでは、リポジトリの CLAUDE.md のローカル CI を回す（アプリの Task の中なら `ops-kit job request local-ci <PR>` で頼む）。そのあと `bun scripts/merge-gate.ts <PR> --merge` でマージ判定とマージをする。判定が merge でなければマージせず、止まって理由を返答に書く。マージしたら、信号が要望 Issue なら `ops-kit backlog edit <要望> --state closed` で閉じる
+- PR を出したあとも、終わるまで通す。先に `bun scripts/merge-gate.ts <PR>`（`--merge` なし）で判定を見る。exit 2（判定できない）なら、レビューの要否も分からないので止まって理由を返答に書く。理由に「主レビュー」が出たときだけ、`.claude/skills/cross-runner-review/SKILL.md` で{{reviewer}}にレビューさせる。理由に攻める側のレビューの仕事の記録が無いという行（`attack`）があれば、同じスキルの 2b で攻める側のレビューを `--as attack` の仕事として頼む（PR のコメントの印は判定に数えない）。そのあと `.claude/skills/review-triage-and-merge/SKILL.md` で指摘を処理する。どちらの理由も出なければレビューを通さない。要否を自分で決めない。レビューを通さないときも CI は要る: CI が走らないリポジトリでは、リポジトリの CLAUDE.md のローカル CI を回す（アプリの Task の中なら `ops-kit job request local-ci <PR>` で頼む）。そのあと `bun scripts/merge-gate.ts <PR> --merge` でマージ判定とマージをする。判定が merge でなければマージせず、止まって理由を返答に書く。マージしたら、信号が要望 Issue なら `ops-kit backlog edit <要望> --state closed` で閉じる
 - 返答に、PR の番号と、信号のうち扱わなかった部分があればそれを書く

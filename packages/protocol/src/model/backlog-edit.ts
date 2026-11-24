@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BacklogItem } from "./backlog.ts";
 
 const fieldValue = z.union([z.string(), z.number(), z.null()]);
 /** A branch name as `refs/heads/<name>` takes it: no space, `..`, `@{`, `//`, not starting with `-` or `/`, not ending with `/`, `.` or `.lock`. */
@@ -71,3 +72,11 @@ export type BacklogCreateInput = z.infer<typeof BacklogCreateInput>;
 /** An Issue a Task opened: the URL in the result of its `gh issue create` / `request_issue.sh`. `repo` is `owner/name`, lower case. */
 export const CreatedIssue = z.object({ repo: z.string(), number: z.number() });
 export type CreatedIssue = z.infer<typeof CreatedIssue>;
+
+/**
+ * An open request or PBI a Task opened, as the Task's screen lists it: the stored Issue's title and URL, in the
+ * workspace whose backlog reads its repository. `item` = its backlog item with its stage Task (withActive); null where
+ * the backlog has none (a request with a derived PBI).
+ */
+export const CreatedIssueRow = CreatedIssue.extend({ workspaceId: z.string(), title: z.string(), url: z.string(), kind: z.enum(["request", "pbi"]), item: BacklogItem.nullable() });
+export type CreatedIssueRow = z.infer<typeof CreatedIssueRow>;

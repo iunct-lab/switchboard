@@ -1,4 +1,4 @@
-import type { Artifact, Attachment, CheckRun, CloudPreparation, CreatedIssue, CreateTaskInput, DeviceAuthView, EventEnvelope, Footprint, HumanAnswers, HistorySession, Queue, RoutingSuggestion, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskListItem, TaskStopMark, TeleportProgress } from "@switchboard/protocol";
+import type { Artifact, Attachment, CheckRun, CloudPreparation, CreatedIssue, CreatedIssueRow, CreateTaskInput, DeviceAuthView, EventEnvelope, Footprint, HumanAnswers, HistorySession, Queue, RoutingSuggestion, StagedChange, StopSummary, SuggestInput, Task, TaskDiffFile, TaskEvals, TaskOutcome, TaskListItem, TaskStopMark, TeleportProgress } from "@switchboard/protocol";
 import type { EventsArchive } from "../events-archive.ts";
 import { req } from "./request.ts";
 
@@ -22,6 +22,8 @@ export interface TaskDetail {
   mcpServers?: string[];
   /** The Issues this task opened (`gh issue create` / `request_issue.sh`); not shown on any screen. */
   createdIssues?: CreatedIssue[];
+  /** The open requests and PBIs among them with their backlog items: the Task screen's この Task が作った Issue. Only on a read of the latest events (not `after` / `before`). */
+  createdRows?: CreatedIssueRow[];
   /** Its final report put something off (the words of DEFERRED_WORDS); not shown on any screen. */
   deferred?: boolean;
 }

@@ -23,7 +23,7 @@ export function afterSeq(raw: string | null): number {
 }
 
 /** The routes under /api/tasks. */
-export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
+export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "createdRowsOf" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
   return {
     "/api/tasks/:id/mcp": {
       GET: (req) => {
@@ -207,8 +207,9 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "bad"
       const before = q.has("after") ? null : q.get("before");
       if (before !== null && !(Number.isSafeInteger(Number(before)) && Number(before) > 0)) return sc.bad("before must be a positive integer");
       const limit = q.get("limit") === "0" ? 0 : clampLimit(q.get("limit"));
+      const created = createdIssuesOf(sc.db.sqlite, t.id);
       const events = q.has("after") ? sc.db.listEvents(t.id, afterSeq(q.get("after"))) : limit === 0 ? [] : before !== null ? sc.db.listEventsBefore(t.id, Number(before), limit) : sc.db.listEventsTail(t.id, limit);
-      return sc.json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(sc.taskMcpServers(t)) : [], events, cost: sc.db.taskCost(t.id), history: t.executionMode === "cloud" ? null : sc.history.forTask(t.id), localContinuations: sc.db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? sc.db.getTask(t.sourceCloudTaskId) : null, attachments: sc.attachments.listForTask(t.id), teleport: sc.teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(sc.db, t)), eventsArchive: sc.db.eventsArchiveOf(t.id), createdIssues: createdIssuesOf(sc.db.sqlite, t.id), deferred: deferredOf(sc.db.sqlite, t.id) });
+      return sc.json({ task: t, mcpServers: t.runner === "claude" && t.executionMode !== "cloud" ? Object.keys(sc.taskMcpServers(t)) : [], events, cost: sc.db.taskCost(t.id), history: t.executionMode === "cloud" ? null : sc.history.forTask(t.id), localContinuations: sc.db.listLocalTasksForCloud(t.id), sourceCloudTask: t.sourceCloudTaskId ? sc.db.getTask(t.sourceCloudTaskId) : null, attachments: sc.attachments.listForTask(t.id), teleport: sc.teleports.get(t.id) ?? null, stopSummary: reduceStops(stopRecordsFor(sc.db, t)), eventsArchive: sc.db.eventsArchiveOf(t.id), createdIssues: created, ...(before === null && !q.has("after") ? { createdRows: sc.createdRowsOf(created) } : {}), deferred: deferredOf(sc.db.sqlite, t.id) });
       },
       // The person renames the task: it is not set again automatically.
       PATCH: async (req) => {

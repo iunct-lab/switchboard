@@ -1504,6 +1504,46 @@ exit 0`);
   });
 });
 
+describe("aws/host cli-autoupdate", () => {
+  const settings = (home: string) => join(home, ".claude", "settings.json");
+  const daemon = (home: string) => join(home, ".codex", "app-server-daemon", "settings.json");
+  const json = (f: string) => JSON.parse(readFileSync(f, "utf8"));
+
+  test("cli-autoupdate runs as the host user right after the runner CLIs are installed", () => {
+    const lines = readFileSync(join(HERE, "bootstrap.sh"), "utf8").split("\n");
+    const at = lines.indexOf('as_user bash "$HERE/cli-autoupdate.sh"');
+    expect(at).toBeGreaterThan(0);
+    expect(lines[at - 1]).toContain("https://chatgpt.com/codex/install.sh");
+    expect(lines[at - 2]).toContain("https://claude.ai/install.sh");
+  });
+
+  test("cli-autoupdate turns both self-updaters off on an empty home and keeps what a home already has, twice over", () => {
+    const empty = join(dir, "autoupdate-empty");
+    const mine = join(dir, "autoupdate-mine");
+    mkdirSync(empty);
+    mkdirSync(dirname(settings(mine)), { recursive: true });
+    mkdirSync(dirname(daemon(mine)), { recursive: true });
+    const claude = { model: "opus", env: { FOO: "1", DISABLE_AUTOUPDATER: "0" }, enabledPlugins: { "a@market": true } };
+    const codex = { remoteControlEnabled: true, shutdownGraceSeconds: 30, updater: { autoUpdateEnabled: true, updateIntervalMinutes: 120 } };
+    writeFileSync(settings(mine), JSON.stringify(claude));
+    writeFileSync(daemon(mine), JSON.stringify(codex));
+    for (let i = 0; i < 2; i++) {
+      for (const home of [empty, mine]) {
+        const r = run("cli-autoupdate.sh", [], { HOME: home });
+        expect(r.err).toBe("");
+        expect(r.code).toBe(0);
+      }
+      expect(json(settings(empty))).toEqual({ env: { DISABLE_AUTOUPDATER: "1" } });
+      expect(json(daemon(empty))).toEqual({ updater: { autoUpdateEnabled: false } });
+      expect(json(settings(mine))).toEqual({ ...claude, env: { FOO: "1", DISABLE_AUTOUPDATER: "1" } });
+      expect(json(daemon(mine))).toEqual({ ...codex, updater: { autoUpdateEnabled: false, updateIntervalMinutes: 120 } });
+      expect(readFileSync(daemon(mine), "utf8").match(/autoUpdateEnabled/g)).toHaveLength(1);
+    }
+    // ~/.claude.json is Claude Code's own state, written while Tasks run: never touched
+    expect(existsSync(join(empty, ".claude.json"))).toBe(false);
+  });
+});
+
 describe("aws/host memory", () => {
   const read = (f: string) => readFileSync(join(HERE, f), "utf8");
   let m: string;

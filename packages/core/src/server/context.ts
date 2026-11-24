@@ -1,6 +1,6 @@
 import type { ReleaseReview } from "../release-review.ts";
 import type { ServerWebSocket } from "bun";
-import type { AutoStartKind, FeedbackInput, LoginKind, RunnerId, Settings, AgentEvent, EventEnvelope, AnswerPolicy, Ask, AskAnswer, AskAnswerResult, AskBatch, Backlog, BacklogAllocation, McpServerConfig, BacklogQueue, BacklogAction, BacklogItem, PolicyInput, PolicySubject, Task, TaskEvals, TeleportProgress, TerminalStatus, LlmRoutingSettings, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerInfo, ServerMessage, ScanCursors, Workspace, BacklogSyncInfo, BacklogSyncState, BacklogIssueData, CustomRunner, Artifact, BundleHold } from "@switchboard/protocol";
+import type { AutoStartKind, FeedbackInput, LoginKind, RunnerId, Settings, AgentEvent, EventEnvelope, AnswerPolicy, Ask, AskAnswer, AskAnswerResult, AskBatch, Backlog, BacklogAllocation, McpServerConfig, BacklogQueue, BacklogAction, BacklogItem, PolicyInput, PolicySubject, Task, TaskEvals, TeleportProgress, TerminalStatus, LlmRoutingSettings, PricingTable, RoutingSuggestion, RunnerAdapter, RunnerInfo, ServerMessage, ScanCursors, Workspace, BacklogSyncInfo, BacklogSyncState, BacklogIssueData, CustomRunner, Artifact, BundleHold, CreatedIssue, CreatedIssueRow } from "@switchboard/protocol";
 import type { CoreConfig, UplinkConfig } from "../config.ts";
 import type { Db, ApiRequestRow } from "../db.ts";
 import type { OpsLoadSampler } from "../ops-load.ts";
@@ -199,6 +199,8 @@ export interface ServerContext {
   readonly activeAs: (t: Task) => string;
   readonly mockupsOf: (id: string) => Artifact[];
   readonly withActive: (b: Backlog) => Backlog;
+  /** The open requests and PBIs a Task opened, with their backlog items (created-rows.ts). */
+  readonly createdRowsOf: (created: CreatedIssue[]) => CreatedIssueRow[];
   readonly readBacklog: (refresh: boolean) => Promise<Backlog>;
   readonly syncEntry: (ws: Workspace, stored: Pick<StoredBacklog, "fetchedAt" | "syncing" | "error">) => { sync: BacklogSyncInfo; creates: Array<{ localId: string; title: string; state: BacklogSyncState; }>; issues: Array<{ number: number; title: string; url: string; closed: boolean; state: BacklogSyncState; pendingCount: number; conflictCount: number; }>; workspaceId: string; backlog: "switchboard" | "github"; enabling: { total: number; done: number; } | null; repository: string | null; syncing: boolean; syncedAt: number | null; };
   readonly queuedIssues: () => (e: { workspaceId: string; number: number; }) => { state: BacklogIssueData["state"]; title: string; } | null;

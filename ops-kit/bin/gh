@@ -95,7 +95,7 @@ if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   const held = mergeHeadOf(argv);
   if (!held.carries) {
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${argv.includes("api") ? "この書き方は前段がどの PR のマージか読めない" : "gh stack merge は head を GitHub に渡せない"}ので、判定の外の許可では通りません）`);
-    console.error(`最下段から 1 本ずつ gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head> でマージします（head は gh pr view <n> [-R <owner/name>] --json headRefOid）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack）`);
+    console.error(`最下段から 1 本ずつ gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head> でマージします（head は gh pr view <n> [-R <owner/name>] --json headRefOid）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする）`);
     process.exit(1);
   }
   // and only in the one shape the guard reads as gh reads it; any other shape stops rather than be guessed at
@@ -128,7 +128,7 @@ if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   if (!granted) {
     const why = !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${plain.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `${repo} の PR #${plain.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
-    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックの最下段は --merge-stack。判定の外でスタックを進めるときは最下段から gh pr merge <n> --rebase --match-head-commit <head> を 1 本ずつ）`);
+    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする。判定の外でスタックを進めるときは最下段から gh pr merge <n> --rebase --match-head-commit <head> を 1 本ずつ）`);
     process.exit(1);
   }
   // `gh pr merge` is told the repository the grant was checked for (gh would otherwise pick its own default, which may be

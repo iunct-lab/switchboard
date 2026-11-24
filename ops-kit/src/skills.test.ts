@@ -149,6 +149,19 @@ test("pbi-complete: a Task's body is not asked to be extended with named paths b
   expect({ before: text.indexOf("Task の結果コメントに逸脱として 1 行書く", gate) < stop }).toEqual({ before: true });
 });
 
+test("pbi-complete: a stack's grants are asked in one question, and the stack merges once from its top PR", () => {
+  const text = readFileSync(join(skills, "pbi-complete", "SKILL.md"), "utf8");
+  const step = text.slice(text.indexOf("## 5. "), text.indexOf("## 6. "));
+  // every PR is judged first; the PRs that need the person are asked together, each with its number, size and reasons, one grant sentence a line
+  const ask = step.split("\n").find((l) => l.includes("**1 つの問いにまとめ**")) ?? "";
+  for (const word of ["`[聞く]` の PR", "`+add/-del`", "`reasons`", "1 行 1 文で全部並べる", "認める行だけを返信に書けばよい"]) expect({ word, has: ask.includes(word) }).toEqual({ word, has: true });
+  // after the answer the top PR is named: the gate judges every PR below at its head and merges them together
+  expect(step).toContain("<マージ判定> <一番上の PR> --merge-stack");
+  expect(step).not.toContain("<一番下の PR> --merge-stack");
+  expect(step).not.toContain("一度に `gh stack merge <top>` しない");
+  for (const name of ["review-triage-and-merge", "stacked-pr-delivery"]) expect({ name, bottomOnly: readFileSync(join(skills, name, "SKILL.md"), "utf8").includes("最下段だけ") }).toEqual({ name, bottomOnly: false });
+});
+
 test("cross-runner-review: step 4 appends the fix commits' diff to fix.range-diff after the range-diff (a fix commit added on top shows only as one line in range-diff)", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
   const step = text.slice(text.indexOf("## 4. 修正後の見直し"));

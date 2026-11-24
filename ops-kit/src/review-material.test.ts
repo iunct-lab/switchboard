@@ -233,6 +233,23 @@ describe("what every review is told", () => {
     }
   });
 
+  test("a blocking finding carries its evidence, one without evidence is a nit, and a non-blocking one is the implementer's to take or leave", () => {
+    const lines = REVIEW_RULES.split("\n");
+    const weight = lines.slice(0, lines.indexOf(""));
+    // the four weights stay as they are: the transcription, the merge gate and the rounds table read them
+    for (const mark of ["- blocker:", "- should-fix:", "- nit:", "- question:"]) expect(weight.filter((l) => l.startsWith(mark))).toHaveLength(1);
+    const blocking = weight.find((l) => l.startsWith("Blocking"));
+    const nonBlocking = weight.find((l) => l.startsWith("Non-blocking"));
+    expect(blocking).toContain("blocker and should-fix");
+    expect(blocking).toContain("Evidence: <test file and command | rule path:line or section>");
+    expect(nonBlocking).toContain("nit and question");
+    expect(nonBlocking).toContain("the implementer decides whether to take it");
+    const nit = weight.find((l) => l.startsWith("- nit:"));
+    expect(nit).toContain("A finding whose Scenario cannot name what breaks is a nit.");
+    expect(nit).toContain("A blocker or should-fix whose Evidence you cannot give is written as a nit.");
+    for (const runner of ["codex", "claude"] as const) expect(reviewPrompt("Review this.", runner)).toContain(blocking!);
+  });
+
   test("a follow-up round reads the fix and what it changed, not the whole PR again, and still raises an earlier finding that is not closed", () => {
     const lines = REVIEW_RULES.split("\n");
     const followUp = lines.filter((l) => l.startsWith("Follow-up rounds."));

@@ -348,6 +348,57 @@ describe("grants: a grant goes to the Task once, as the person's reply", () => {
       await z.c.stop();
     }
   });
+
+  describe("a stop's grant of several sentences, one to a line", () => {
+    // two ask reasons and one merge outside the gate of the same stack: the grants one piece of work needs
+    const STACK = ["o/a の PR #21 をマージしてよい", "o/a の PR #22 をマージしてよい", "o/a の PR #23 を判定の外でマージしてよい"];
+    const stopOf = (grant: string) => "マージが止められました。\n```switchboard-stop\n" + JSON.stringify({ id: "stack", op: "gh stack merge", target: "PR #23", reason: "permission", evidence: "ask reasons", grant }) + "\n```\n";
+    const granted = async (b: string, taskId: string, kind: string, target: number) => ((await fetch(`${b}/api/merge-grants?taskId=${taskId}&repo=o/a&kind=${kind}&target=${target}&head=${HEAD}`).then(j)) as { granted: boolean }).granted;
+
+    test("grant: pressing the grant once sends every line as one reply, and records every PR it names", async () => {
+      const x = await boot(stopOf(STACK.join("\n")));
+      try {
+        const [stop] = await asksOf(x.b, x.t.id);
+        expect(stop).toMatchObject({ kind: "stop", grant: STACK.join("\n"), answers: ["grant", "text"] });
+        expect(await granted(x.b, x.t.id, "answer", 21)).toBe(false);
+        expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } })).status).toBe(200);
+        await waitFor(async () => x.replies().length > 0);
+        expect(x.replies()).toEqual([STACK.join("\n")]);
+        expect([await granted(x.b, x.t.id, "answer", 21), await granted(x.b, x.t.id, "answer", 22), await granted(x.b, x.t.id, "merge", 23)]).toEqual([true, true, true]);
+      } finally {
+        await x.c.stop();
+      }
+    });
+
+    test("grant: a line that is not a grant sentence records nothing for what it names; the ask reason's sentences then are not read either", async () => {
+      // a question is not the sentence (`…してよいですか` asks, it does not allow). A line in the Task's own words (a condition)
+      // beside the ask reason's sentence leaves that sentence unread, as in one message the person writes: pressing the card
+      // must not record the sentence without the condition the card showed beside it. The merge outside the gate is read per line
+      const mixed = ["o/a の PR #31 をマージしてよい", "o/a の PR #33 を判定の外でマージしてよいですか", "ただし PR #30 のマージ後に限る", "o/a の PR #32 を判定の外でマージしてよい"].join("\n");
+      const x = await boot(stopOf(mixed));
+      try {
+        const [stop] = await asksOf(x.b, x.t.id);
+        expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "grant", grant: stop!.grant! } })).status).toBe(200);
+        expect(await granted(x.b, x.t.id, "merge", 32)).toBe(true);
+        expect([await granted(x.b, x.t.id, "answer", 31), await granted(x.b, x.t.id, "merge", 33), await granted(x.b, x.t.id, "answer", 33)]).toEqual([false, false, false]);
+      } finally {
+        await x.c.stop();
+      }
+    });
+
+    test("grant: answering the same stop in words with two of its three lines records those two only", async () => {
+      const x = await boot(stopOf(STACK.join("\n")));
+      try {
+        const [stop] = await asksOf(x.b, x.t.id);
+        expect((await post(x.b, "/api/asks/answer", { id: stop!.id, answer: { kind: "text", text: STACK.slice(0, 2).join("\n") } })).status).toBe(200);
+        await waitFor(async () => x.replies().length > 0);
+        expect([await granted(x.b, x.t.id, "answer", 21), await granted(x.b, x.t.id, "answer", 22)]).toEqual([true, true]);
+        expect([await granted(x.b, x.t.id, "merge", 23), await granted(x.b, x.t.id, "answer", 23)]).toEqual([false, false]);
+      } finally {
+        await x.c.stop();
+      }
+    });
+  });
 });
 
 describe("approval batches", () => {

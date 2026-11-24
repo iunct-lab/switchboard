@@ -69,7 +69,7 @@ test("p2-baseline: one entry that takes the concept as data, plans in docs/conce
   expect(text).toContain("押し直しで渡された構想の文があれば `.claude/skills/request-to-backlog/SKILL.md` で要望にする");
   // the merge's arguments, the release tag's place and no stacking without GitHub are in the entry
   expect(text).toContain("積んだ PR の最下段は `--merge-stack`");
-  expect(text).toContain("利用者が認めたら `--allow-large`");
+  expect(text).toContain("アプリがその head への許可を記録したら `--allow-large`");
   expect(text).toContain("タグはロードマップのその行に `（PR #<番号>、<タグ>）` と書く");
   expect(text).toContain("GitHub を使わないリポジトリでは積まず、マージしてから次の項目の枝を切る");
   // a question added in the middle of the roadmap holds only the items it concerns, and its answer is a small pull request

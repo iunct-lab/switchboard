@@ -89,6 +89,7 @@ rm -rf "$DL"
 as_user bash -c 'command -v bun >/dev/null || curl -fsSL https://bun.sh/install | bash'
 as_user bash -c 'command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash'
 as_user bash -c 'command -v codex >/dev/null || curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+as_user bash "$HERE/cli-autoupdate.sh"
 
 # --- swap: somewhere for a short peak under the unit's limits; a failure is logged and skipped, as devtools ---
 # (a failing mkswap would stop the bootstrap and the host would never serve: a host without swap is still better)

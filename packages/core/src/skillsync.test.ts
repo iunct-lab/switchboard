@@ -753,7 +753,10 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 274,400 (+1,400 bytes over 273,000; the copy measured 272,673 before and 274,359 after): the merge is asked for with one
     // sentence and a recheck is asked of the app as a job, instead of marks posted on the PR (how to ask in pbi-complete, what the
     // verdict counts in cross-runner-review); the marks' text it replaced is gone.
-    expect(bytes).toBeLessThanOrEqual(274_400);
+    // Raised to 275,500 (+1,100 bytes over 274,400; the copy measured 274,393 before and 275,409 after): a stack's merge grants are asked
+    // in one question and the stack merges once from its top PR (pbi-complete 5, pointed to from review-triage-and-merge and
+    // stacked-pr-delivery); the one-by-one merge example it replaced is gone, and the first draft (+4,030) was cut to this.
+    expect(bytes).toBeLessThanOrEqual(275_500);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

@@ -63,8 +63,11 @@ export const StopRecord = z.object({
   answer: z.object({ ref: clip(300), at: z.number() }).nullable().default(null),
   actions: z.array(z.object({ attempt: z.number().int(), at: z.number().default(0), what: clip(200), ok: z.boolean().nullable() })).transform((a) => a.slice(-20)).default([]),
   state: StopState.catch("waiting").default("waiting"),
-  /** A permission stop's grant: one sentence that allows only the refused operation, sent as the person's reply when they choose to. Never a secret. */
-  grant: clip(300).nullable().optional(),
+  /**
+   * A permission stop's grant: one or more sentences, one to a line, each allowing only a refused operation — every grant
+   * the same work needs (each PR of a stack), listed in full. Sent as the person's reply, as one message, when they choose to. Never a secret.
+   */
+  grant: clip(2000).nullable().optional(),
   at: z.number(),
 });
 export type StopRecord = z.infer<typeof StopRecord>;
