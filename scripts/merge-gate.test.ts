@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, MERGE_DIRECT, MERGE_ASK, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
 import { Db } from "../packages/core/src/db";
 import { mergeRecordsOf } from "../packages/core/src/merge-records";
@@ -362,7 +362,6 @@ describe("direct PR (branch sb/direct-)", () => {
       const merge = calls.findIndex((a) => (a[0] === "pr" && a[1] === "merge") || a[0] === "stack");
       expect(at).toBeGreaterThanOrEqual(0);
       expect(calls[at]).toEqual(["pr", "comment", "7", "-R", REPO, "--body", `[merge-direct] ${HEAD40}`]);
-      expect(MERGE_DIRECT.exec(calls[at]![6]!)?.[1]).toBe(HEAD40);
       expect(at).toBeLessThan(merge);
     }
     const none: string[][] = [];
@@ -2316,25 +2315,6 @@ describe("in a Task the gate is the app's job", () => {
     const bad = jobsApp({ status: "pass", exitCode: 0 });
     for (const args of [[], ["x"], ["7", "8"], ["7", "--merge", "--merge-stack"], ["--change", "3", "4"], ["7", "--repo", "-x/y"]]) expect([args, (await go(args, bad)).code]).toEqual([args, 2]);
     expect(bad.posts).toEqual([]);
-  });
-});
-
-describe("record marks", () => {
-  const SHA = "0123456789abcdef0123456789abcdef01234567";
-
-  test("[merge-ask] reads the kinds and the head sha on the first line", () => {
-    expect(MERGE_ASK.exec(`[merge-ask] security,size ${SHA}`)?.slice(1)).toEqual(["security,size", SHA]);
-    expect(MERGE_ASK.exec(`[merge-ask] design-rules ${SHA}\n\nPR #1 をマージしてよいか`)?.slice(1)).toEqual(["design-rules", SHA]);
-    // the security groups
-    expect(MERGE_ASK.exec(`[merge-ask] security:lockfile,rescue ${SHA}`)?.slice(1)).toEqual(["security:lockfile,rescue", SHA]);
-  });
-
-  test.each([
-    [MERGE_ASK, `[merge-ask] security ${SHA.slice(0, 7)}`], // a short sha
-    [MERGE_ASK, `ok [merge-ask] security ${SHA}`], // not at the start
-    [MERGE_ASK, `x\n[merge-ask] security ${SHA}`], // not the first line
-  ])("%p does not read %p", (re, body) => {
-    expect(re.exec(body)).toBeNull();
   });
 });
 

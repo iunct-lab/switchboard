@@ -35,6 +35,11 @@ test("a catch-up answer replaces the detail and merges its events; a failed read
   expect(seqs(ok.t1!.events)).toEqual([1, 2, 3, 4, 5]);
   expect(ok.t1!.task.status).toBe("done");
   expect(ok.t2).toBe(held.t2);
+  // the Issues the Task opened come with a whole read only: a catch-up keeps the held ones, a meta read brings new ones
+  const rows = [{ number: 6001 }] as unknown as TaskDetail["createdRows"];
+  const withRows = { t1: { ...detail([1]), createdRows: rows } };
+  expect(caughtUp(withRows, "t1", detail([2])).t1!.createdRows).toBe(rows);
+  expect(caughtUp(withRows, "t1", { ...detail([2]), createdRows: [] }).t1!.createdRows).toEqual([]);
   // [1, 2] held, [3, 4] missed, live 5 arrived, the read failed: keeping [1, 2, 5] would make the next cursor 5 and lose 3, 4
   const failed = caughtUp(held, "t1", null);
   expect("t1" in failed).toBe(false);

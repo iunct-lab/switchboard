@@ -1,11 +1,11 @@
 ---
 name: stacked-pr-delivery
-description: Task を Stacked PR（GitHub public preview, gh stack）として積み、レビューを頼み（`cross-runner-review`）、指摘に対応してコメント返信し、下から順にマージするまでの手順とハマりどころ。PR を作る・積む・rebase する・マージするときに読む。
+description: Task を Stacked PR（GitHub public preview, gh stack）として積み、レビューを頼み（`cross-runner-review`）、指摘に対応してコメント返信し、一番上の PR でスタックをまとめてマージするまでの手順とハマりどころ。PR を作る・積む・rebase する・マージするときに読む。
 ---
 
 # Stacked PR delivery（gh stack）
 
-> 流れ全体（Task の順番、レビュー、下から 1 本ずつのマージ、PBI を閉じる）は `pbi-complete`。1 Task の実装と PR 本文は `task-to-pr`。ここは gh stack の操作とハマりどころ。
+> 流れ全体（Task の順番、レビュー、一番上でまとめてマージ、PBI を閉じる）は `pbi-complete`。1 Task の実装と PR 本文は `task-to-pr`。ここは gh stack の操作とハマりどころ。
 
 前提: 1 Task = 1 branch = 1 PR（`issue-workflow` スキル）。worktree の場所と枝の名前は CLAUDE.md の規則（以下 `<枝>`）。
 
@@ -27,12 +27,12 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
    マージ判定の JSON の `attack` が空でない PR は、攻める側のレビュー（`cross-runner-review` の 2b）も、最後にまとめず、その PR を出した直後（主レビューを起動する同じ時点）に頼む。
 5. 指摘対応: **指摘のある枝で**修正 → commit → `gh stack rebase`（スタック全体を下から rebase）→ `gh stack push`（`submit` と同じく全部の枝を atomic に push する。1 本でも断られたらどの枝も更新されない）。
    `review-triage-and-merge` の 4 の形で返信し（`gh api .../comments/<id>/replies`。見送る nit は要約の表）、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
-6. CI 緑・返信済みを確認して `<マージ判定> <PR番号> --merge-stack`（判定が merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。最下段だけ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
+6. CI 緑・返信済みを確認して `<マージ判定> <一番上の PR番号> --merge-stack`（下の PR も今の head で判定し、全部 merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
    スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
 <!-- when mergeGate=off -->
    マージ判定のコマンド（CLAUDE.md）にその引数が無いリポジトリでは、`gh stack merge <PR番号> --rebase -y` / 単発は `gh pr merge <n> --rebase --delete-branch`。
 <!-- end when -->
-7. マージそのものは `pbi-complete` の手順（下から 1 本ずつ、GitHub 側の retarget + rebase を待つ。ローカル rebase は CONFLICTING のときだけ）。
+7. マージそのものは `pbi-complete` の 5 の手順（ローカル rebase は CONFLICTING のときだけ）。
    `gh stack rebase` が要るのは**マージ後にローカルの上の枝で作業を続ける（commit を足す）とき**だけ: 同期せずに commit を足すと
    古いハッシュの commit が残り、後で `gh stack merge` が「rebase conflict」で失敗する（実際に起きた）。触らない枝は rebase しない。
 

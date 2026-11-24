@@ -224,6 +224,14 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .end .fork { margin-left: 8px; }
 .fork-first { margin-bottom: 8px; }
 .note { font-size: 12px; color: var(--red); }
+/* この Task が作った Issue (CreatedIssues.tsx): under the conversation; a long title wraps, the buttons wrap under it */
+.created-issues { border: 1px solid var(--line2); border-radius: 4px; background: var(--panel); max-width: 760px; }
+.created-issues h5 { margin: 0; padding: 8px 10px 6px; border-bottom: 1px solid var(--line2); }
+.created-issue { padding: 8px 10px; border-bottom: 1px solid var(--line2); display: flex; flex-direction: column; gap: 6px; }
+.created-issue:last-child { border-bottom: 0; }
+.created-issue .t { overflow-wrap: anywhere; word-break: break-word; }
+.created-issue .t .pill { margin-left: 6px; }
+.created-issue-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .perm { border: 1px solid var(--amber); background: var(--amber-soft); border-radius: 4px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; max-width: 760px; }
 .perm b { margin-right: 8px; }
 .perm .tool-name { font-family: var(--mono); font-size: 11px; margin-right: 8px; color: var(--ink2); }
@@ -747,8 +755,8 @@ label.toggle.off { opacity: .45; cursor: default; }
 .ask-questions .opt { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
 .ask-questions textarea { width: 100%; box-sizing: border-box; }
 .ask-questions > button { min-height: 44px; width: 100%; }
-/* a grant on its own line, marked: the one operation the answer allows */
-.ask-grant { background: var(--acc-soft); color: var(--acc-ink); border-left: 3px solid var(--acc); padding: 0 6px; }
+/* a grant on its own line, marked: the operations the answer allows, one sentence to a line */
+.ask-grant { background: var(--acc-soft); color: var(--acc-ink); border-left: 3px solid var(--acc); padding: 0 6px; white-space: pre-line; }
 /* a Task's open questions on its screen, above the composer */
 .task-asks { display: grid; gap: 8px; margin: 8px 0; max-width: 760px; }
 .ask-policy { margin: 6px 0; }

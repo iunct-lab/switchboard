@@ -18,6 +18,7 @@ import * as asks from "./asks.ts";
 import * as releaseReview from "./release-review.ts";
 import * as backlogNext from "./backlog-next.ts";
 import * as taskHooks from "./task-hooks.ts";
+import * as createdRows from "./created-rows.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
 
 /** A module of functions that take the context first: each export is a function of the context under the same name. */
@@ -53,4 +54,5 @@ export function bindFunctions(sc: ServerContextInit): void {
   bind(sc, releaseReview);
   bind(sc, backlogNext);
   bind(sc, taskHooks);
+  bind(sc, createdRows);
 }

@@ -21,7 +21,8 @@ export function lastSeq(events: EventEnvelope[]): number {
 }
 
 /**
- * One held Task after its ?after= read. The answer replaces the detail except its events, which are merged. No answer (the
+ * One held Task after its ?after= read. The answer replaces the detail except its events, which are merged, and the
+ * Issues it opened (`createdRows`), which the answer does not carry. No answer (the
  * read failed) forgets the detail: a live event would otherwise move its cursor past the gap for good, and the open Task
  * is read again whole once it is gone. A Task let go meanwhile stays gone.
  */
@@ -32,7 +33,8 @@ export function caughtUp(details: Record<string, TaskDetail>, id: string, fetche
     const { [id]: _forgotten, ...rest } = details;
     return rest;
   }
-  return { ...details, [id]: { ...fetched, events: mergeEvents(held.events, fetched.events) } };
+  // createdRows comes with a read of the latest events only, not with ?after=: the held ones stay until a read brings new ones
+  return { ...details, [id]: { ...fetched, createdRows: fetched.createdRows ?? held.createdRows, events: mergeEvents(held.events, fetched.events) } };
 }
 
 /**

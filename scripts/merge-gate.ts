@@ -84,7 +84,7 @@ const DESIGN_RULES = "README.md の ## Design rules";
 
 /**
  * Two kinds of large reason. Ask: only the user lifts it (--allow-large) — the security groups the table answers
- * irreversible. Recheck: a `[recheck] <kind> pass <head sha>` PR comment lifts it, per kind (size: line count and the other
+ * irreversible. Recheck: a passing recheck job of the app at the head (or the same diff) lifts it, per kind (size: line count and the other
  * protected paths; responsibility: ops.config.json; migration: MIGRATION; rescue: RESCUE, the rollback itself;
  * design-rules: README.md's Design rules; security:docs, security:tests and security:lockfile: the security groups the
  * owner moved to a recheck, docs/design/merge-gate.md).
@@ -134,13 +134,6 @@ export const RECHECK_KINDS: RecheckKind[] = REVERSIBILITY.recheck;
 export const ASK_KINDS: AskKind[] = REVERSIBILITY.ask;
 /** The kinds the table answers `reversible`: a direct PR (one the app started a Task to merge as a direct one) touching only these skips the main review. */
 const REVERSIBLE_KINDS: string[] = REVERSIBILITY.reversible;
-/** The mark `mergePr` puts on a PR merged without a main review (direct, no large reason): `[merge-direct] <head sha>`. */
-export const MERGE_DIRECT = /^\[merge-direct\] ([0-9a-f]{40})\b/;
-/**
- * The mark of the ask: `[merge-ask] <kinds> <head sha>` (kinds comma-separated). The answer on the Task's ask reads it for the
- * head it was asked at; the verdict reads none (--allow-large needs the app's record of the person's grant: judge).
- */
-export const MERGE_ASK = /^\[merge-ask\] ([a-z:-]+(?:,[a-z:-]+)*) ([0-9a-f]{40})\b/;
 export const RESCUE = ["rescue/**"].map((p) => new Bun.Glob(p));
 export const MIGRATION = ["packages/core/src/db.ts", "packages/core/src/db/**", "packages/core/src/schema-baseline.json"].map((p) => new Bun.Glob(p));
 const DESIGN_RULES_HEADING = /^## Design rules[ \t]*$/m;

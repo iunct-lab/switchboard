@@ -9,7 +9,7 @@ import { delegatedNote } from "./evals.ts";
 import { buildDirectPrompt, buildStartPrompt, subagentModelAlias, otherRepoRules } from "./backlog-prompt.ts";
 import { canStartStoredBacklog } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { DECOMPOSED_READY, backlogNextSchedule, boot, closeTried, decomposedGh, fakeGh, holdingClaude, importedAs, limitedGh, metaId, openTaskAndConfirmationGh, patch, queued, refreshed, runSchedule, scheduleLogAll, start, startedTasks, useBacklogDaemon } from "./api-test-harness.ts";
+import { DECOMPOSED_READY, backlogNextSchedule, boot, closeTried, decomposedGh, fakeGh, holdingClaude, importedAs, limitedGh, metaId, openTaskAndConfirmationGh, patch, queued, refreshed, runSchedule, scheduleLogAll, start, startedTasks, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -196,9 +196,9 @@ test("start: a local workspace without a remote (localForge) gets local changes,
     expect(p).toContain("`--repo` を付けずに実行する");
     // changes, not PRs
     expect(p).toContain("この workspace の変更はアプリに置く（リモートは使わない）");
-    // the marks that lift a recheck or answer a merge ask go on the change
+    // a recheck is asked of the app as a job on the change; the gate reads the job's record, not a comment
     expect(p).toContain(`${scripts}docs/merge-gate.md` + "\` の「Recheck」");
-    expect(p).toContain("\`ops-kit backlog comment <変更>\` で変更に付ける");
+    expect(p).toContain("\`ops-kit job request review <変更> --change --runner <再チェックのランナー（主レビューと別）> --as recheck --kinds <種類> --prompt <指示> --out <出力>\`");
     expect(p).toContain("--head <枝> --base main");
     expect(p).toContain("Backlog-Task: <Task>");
     for (const cmd of [`bun ${scripts}scripts/local-ci.ts --change <変更>`, `bun ${scripts}scripts/merge-gate.ts --change <変更>`, `bun ${scripts}scripts/local-merge.ts <変更>`]) expect(p).toContain(cmd);
@@ -821,4 +821,76 @@ test("complete and direct prompts name the reviewer by the review setting", () =
   // without the setting the reviewer is the other runner, and only a complete carries the scope
   expect(buildStartPrompt({ number: 1 }, "complete")).toBe(buildStartPrompt({ number: 1 }, "complete", { review: "other" }));
   expect(buildStartPrompt({ number: 1 }, "to-tasks", { review: "same" })).toBe(buildStartPrompt({ number: 1 }, "to-tasks"));
+});
+
+/** A done Task of the meta workspace that opened Issues 302, 301 and 304 of the fake gh's acme/app, and said a line of its own. */
+function openerTask(): string {
+  const now = Date.now();
+  core!.db.insertTask({ id: "tsk_opener", workspaceId: metaId(), title: "気になったこと", runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now });
+  core!.db.appendEvent("tsk_opener", { t: "message.delta", role: "assistant", text: "元の会話だけにある文" });
+  core!.db.appendEvent("tsk_opener", { t: "tool.call", id: "c1", name: "Bash", input: { command: "gh issue create --title x" }, summary: "create" });
+  core!.db.appendEvent("tsk_opener", { t: "tool.result", id: "c1", ok: true, summary: "https://github.com/acme/app/issues/302\nhttps://github.com/acme/app/issues/301\nhttps://github.com/acme/app/issues/304" });
+  return "tsk_opener";
+}
+
+type CreatedRowsDetail = { createdRows?: Array<{ number: number; workspaceId: string; kind: string; item: BacklogItem | null }> };
+
+test("created rows: a Task's detail lists the requests and PBIs it opened; a row's stage starts as the Backlog's button starts it and leaves the opening Task as it was; a running stage Task answers 409 with its id", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  const opener = openerTask();
+  const detail = async (q = "") => (await (await fetch(`${base}/api/tasks/${opener}${q}`)).json()) as CreatedRowsDetail & { task: Task; events: unknown[] };
+  const first = await detail();
+  // the request with a derived PBI (301) has no item: no stage to start
+  expect(first.createdRows!.map((r) => [r.number, r.workspaceId, r.kind, r.item?.stage ?? null])).toEqual([[302, metaId(), "request", "request"], [301, metaId(), "request", null], [304, metaId(), "pbi", "ready"]]);
+  // the turn's end reads them (limit=0); a page back and the catch-up do not
+  expect((await detail("?limit=0")).createdRows!.map((r) => r.number)).toEqual([302, 301, 304]);
+  expect((await detail("?before=2")).createdRows).toBeUndefined();
+  expect((await detail("?after=0")).createdRows).toBeUndefined();
+  const events = core!.db.listEvents(opener).length;
+
+  const row = first.createdRows!.find((r) => r.number === 304)!;
+  const r = await start(base, row.number, { workspaceId: row.workspaceId, action: "complete" });
+  expect(r.status).toBe(201);
+  const task = await r.json() as Task;
+  for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
+  const fromRow = claude.starts[0]!.prompt;
+  expect(fromRow).not.toContain("元の会話だけにある文");
+  // the row shows the stage Task it started; another start opens that one
+  expect((await detail()).createdRows!.find((x) => x.number === 304)!.item!.activeTaskId).toBe(task.id);
+  const again = await start(base, row.number, { workspaceId: row.workspaceId, action: "complete" });
+  expect(again.status).toBe(409);
+  expect(await again.json()).toMatchObject({ taskId: task.id });
+
+  // the same stage from the Backlog's row, once that Task ended, is started with the same prompt
+  core!.db.updateTask(task.id, { status: "done" });
+  const item = (await refreshed(base, false)).items.find((i) => i.number === 304 && i.workspaceId === metaId())!;
+  expect((await start(base, item.number, { workspaceId: item.workspaceId, action: "complete" })).status).toBe(201);
+  for (let i = 0; claude.starts.length < 2 && i < 100; i++) await Bun.sleep(10);
+  expect(claude.starts[1]!.prompt).toBe(fromRow);
+  // the opening Task got no event and kept its status
+  expect(core!.db.listEvents(opener)).toHaveLength(events);
+  expect(core!.db.getTask(opener)!.status).toBe("done");
+});
+
+test("created rows: a row's 実装 that overlaps an open PR is refused with the Backlog's reason", async () => {
+  const fake = waitsGh({}, {});
+  const gh: GhRunner = async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!args.find((a) => a.startsWith("query="))?.includes("comments(last:")) return r;
+    const body = JSON.parse(r.stdout);
+    body.data.repository.i304 = { ...body.data.repository.i304, subIssues: { nodes: [3041, 3042].map((number) => ({ number, state: "OPEN", labels: { nodes: [{ name: "type:task" }] }, body: "触る場所: `src/a.ts`", comments: { nodes: [] } })) } };
+    return { ...r, stdout: JSON.stringify(body) };
+  };
+  openPulls = [{ number: 900, files: ["src/a.ts"], headRefName: "sb/999-x" }];
+  const base = await boot(gh, holdingClaude().adapter);
+  const opener = openerTask();
+  const row = ((await (await fetch(`${base}/api/tasks/${opener}`)).json()) as CreatedRowsDetail).createdRows!.find((r) => r.number === 304)!;
+  expect(row.item!.overlap?.hits).toEqual([{ ref: "PR #900", path: "src/a.ts", working: true, pbi: null }]);
+  const r = await start(base, row.number, { workspaceId: row.workspaceId, action: "complete" });
+  expect(r.status).toBe(409);
+  const { error } = (await r.json()) as { error: string };
+  expect(error.startsWith("重なり: #304（")).toBe(true);
+  expect(error).toContain("PR #900: src/a.ts");
+  expect(core!.db.listTasks().map((t) => t.id)).toEqual([opener]);
 });

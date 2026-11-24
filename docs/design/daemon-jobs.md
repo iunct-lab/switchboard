@@ -100,7 +100,9 @@ condition blocks, because a usage-limit fallback changes the reviewer after the 
 runs a review directly gets the same text from `ops-kit review-note <codex|claude>`.
 
 The same note carries the rules that hold for every review, whatever its kind (`REVIEW_RULES`): the one definition of a
-finding's weight (blocker / should-fix / nit / question, decided by what breaks and not by an earlier round's mark), checking
+finding's weight (blocker / should-fix / nit / question, decided by what breaks and not by an earlier round's mark; a blocking
+finding — blocker or should-fix — carries `Evidence:`, a test that shows the break or the written rule it rests on, and one
+without it is a nit; the implementer decides whether to take a non-blocking one — nit or question), checking
 in the code each earlier finding `_review/handled.md` lists, whatever its reply says (a reply never settles a finding by
 itself; a finding is left out only when the reviewer verified in the code that it is resolved), marking a point raised again
 after its fix (`Repeat of:`), keeping a follow-up round to the fix, what the description now says about it and the readers of what it changed, checking the places `_review/old-paths.md` lists, and using a comparison with main

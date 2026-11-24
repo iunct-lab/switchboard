@@ -150,7 +150,7 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 - [ ] PR 本文が今の差分と一致（修正で変わったなら `gh pr edit` で直す。[x] は事実だけ）
 - [ ] Task の DoD が事実として満たされている（テスト / typecheck / 実構成、および Task が名指しした doc）
 - [ ] `git diff --stat origin/main...HEAD` に迷いファイル（作業ファイル、fixture の絶対パス）が無い
-- [ ] `gh pr view $N --json baseRefName,mergeable,mergeStateStatus` が base=main（スタックの一番下）で CLEAN
+- [ ] `gh pr view $N --json baseRefName,mergeable,mergeStateStatus` が CLEAN
 
 **ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh` の行は呼ばない。CI 緑は `<ローカル CI> --change <変更>` の合格（`<マージ判定> --change <変更>` が数える）、PR 本文は変更の本文（`ops-kit backlog edit <変更> --body-file <ファイル>` で直す）、迷いファイルは `git diff --stat main...<枝>`、base と CLEAN は `<マージ判定> --change <変更>` が見る。
 
@@ -158,14 +158,13 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 
 ## 6. マージと記録
 
-スタックは **main に近い方から 1 本ずつ**（`pbi-complete`）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリと、利用者が判定の外のマージを認めたとき（`pbi-complete` の 5）は、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。
+スタックは**一番上の PR でまとめて**（`pbi-complete` の 5）。マージ判定のコマンド（CLAUDE.md）に `--merge` / `--merge-stack` があれば、判定とマージを 1 つのコマンドで（判定が merge のときだけマージする。Task の許可に入る）。単発は `<マージ判定> $N --merge`。その引数が無いリポジトリでは、単発は `gh pr merge $N --rebase --delete-branch`、スタックは `gh stack merge $N --rebase -y`。判定の外のマージは `pbi-complete` の 5。
 <!-- when mergeGate=on task=in -->
 `PR #<n> を判定の外でマージしてよい` の許可文が記録されているときだけ `gh` の前段を通る（`ops.config.json` に `mergeGate` があるリポジトリのアプリの Task）。
 <!-- end when -->
 
 ```bash
-<マージ判定> $N --merge-stack   # スタックの最下段だけ。上は GitHub が retarget + rebase する
-gh pr view <next> --json baseRefName,mergeable,mergeStateStatus   # base=main かつ CLEAN になってから次へ（UNSTABLE = CI 中）
+<マージ判定> $N --merge-stack   # $N はスタックの一番上。下の PR も判定し、全部 merge ならまとめて
 ```
 
 マージ直後:
@@ -187,4 +186,4 @@ PR #<n>: 指摘 <k> 件 → 修正 a / Issue 化 b（#..）/ 対処不要 c / �
 - 指摘を黙って無視する（返信も要約の表の行も無い指摘はマージを止める）
 - 「意図的です」「後で」だけの返信
 - レビュアーの指摘を避けるために PR の説明を書き換える（差分が変わったときだけ直す）
-- スタックをまとめて `gh stack merge <top>` する（コンフリクトが隠れる）
+- 判定の外で `gh stack merge <top>` を呼ぶ（下の PR が判定なしで入る）

@@ -115,6 +115,10 @@ export const task = msgs({
   checkStatus: { ja: "状況を確認", en: "Check status" },
   makeReady: { ja: "Ready にする", en: "Make Ready" },
   direct: { ja: "直行で直す", en: "Fix directly" },
+
+  // CreatedIssues.tsx: the Issues this Task opened, under the conversation
+  createdIssues: { ja: "この Task が作った Issue", en: "Issues this Task opened" },
+  createdPbiMade: { ja: "PBI 作成済み", en: "PBI made" },
   statusIdle: { ja: "未開始", en: "Not started" },
   statusWaiting: { ja: "承認待ち", en: "Waiting for approval" },
   statusQueued: { ja: "実行枠待ち", en: "Waiting for a run slot" },
