@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, RunnerSession, StartOptions } from "@switchboard/protocol";
 import { Db } from "./db.ts";
+import { jobCommand } from "./jobs.ts";
 import { type Conditions, renderConditions } from "../../../ops-kit/src/conditions.ts";
 import { SKILL_INCOMPLETE, SKILL_MARKER, SKILL_SOURCE, SKILL_TARGETS, setupScripts, skillCopiesCurrent, skillHeader, skillPathsFor, syncSkills } from "./skillsync.ts";
 import { stopArmedQueues } from "./tasks/state.ts";
@@ -546,11 +547,14 @@ describe("skills by runner and review setting", () => {
     expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "other" }).linked).toContain("demo");
     expect(read(".claude/skills")).toContain("別のランナーで再チェック");
     expect(read(".claude/skills")).not.toContain("同じランナーで再チェック");
-    // no setting = other
+    // no setting at all = other (the review setting's default)
     expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude" })).toBe(true);
     expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude" }).unchanged).toContain("demo");
     syncSkills({ metaPath: meta, cwd: repo, runner: "claude", recheck: "same" });
     expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude" })).toBe(false);
+    // no recheck setting follows the review setting
+    expect(skillCopiesCurrent({ metaPath: meta, cwd: repo, runner: "claude", review: "same" })).toBe(true);
+    expect(syncSkills({ metaPath: meta, cwd: repo, runner: "claude", review: "same" }).unchanged).toContain("demo");
   });
 
   test("the line that names the source comes right after the frontmatter", () => {
@@ -611,13 +615,13 @@ describe("skills by repository conditions", () => {
 describe("the kit's skills as a Task reads them", () => {
   const kit = join(import.meta.dir, "../../../ops-kit/skills");
   const names = readdirSync(kit);
-  const BASE: Conditions = { runner: "claude", review: "other", reviewer: "codex", task: "in", backlog: "github", mergeGate: "on", extra: "off" };
+  const BASE: Conditions = { runner: "claude", review: "other", recheck: "other", reviewer: "codex", task: "in", backlog: "github", mergeGate: "on", extra: "off" };
   const render = (name: string, conds: Conditions = {}) => renderConditions(readFileSync(join(kit, name, "SKILL.md"), "utf8"), { ...BASE, ...conds }, name);
   const PAIRS = [
-    { review: "same", runner: "claude", reviewer: "claude" },
-    { review: "same", runner: "codex", reviewer: "codex" },
-    { review: "other", runner: "claude", reviewer: "codex" },
-    { review: "other", runner: "codex", reviewer: "claude" },
+    { review: "same", recheck: "same", runner: "claude", reviewer: "claude" },
+    { review: "same", recheck: "same", runner: "codex", reviewer: "codex" },
+    { review: "other", recheck: "other", runner: "claude", reviewer: "codex" },
+    { review: "other", recheck: "other", runner: "codex", reviewer: "claude" },
   ] as const;
   /** The lines that name `--runner <r>` without being the usage-limit fallback. */
   const asksFor = (text: string, r: string) => text.split("\n").filter((l) => l.includes(`--runner ${r}`) && !l.includes("--as fallback"));
@@ -675,14 +679,60 @@ describe("the kit's skills as a Task reads them", () => {
       }
       // the reviewer is started by the app, not by the Task's shell
       const review = render("cross-runner-review", pair);
-      for (const gone of ["exec --sandbox", "claude -p --permission-mode", "ops-kit review-note codex;", "CODEX=$(command -v codex)"]) expect({ gone, has: review.includes(gone) }).toEqual({ gone, has: false });
+      for (const gone of ["exec --sandbox", 'claude -p "${MAY[@]}"', "MAY=(", "ops-kit review-note codex;", "CODEX=$(command -v codex)"]) expect({ gone, has: review.includes(gone) }).toEqual({ gone, has: false });
       expect(review).toContain("ops-kit job request review");
     }
     expect(render("task-to-pr")).toContain("ops-kit job request local-ci");
     expect(render("task-to-pr")).not.toContain("CLAUDE.md のコマンドを直接回す");
     // the source keeps the outside side for whoever reads it there
-    expect(render("cross-runner-review", { task: "out" })).toContain("exec --sandbox read-only");
+    expect(render("cross-runner-review", { task: "out" })).toContain("exec --sandbox workspace-write");
     expect(render("task-to-pr", { task: "out" })).toContain("CLAUDE.md のコマンドを直接回す");
+  });
+
+  test("task=out: the direct review commands start the reviewer with the review job's arguments", () => {
+    const out = render("cross-runner-review", { task: "out" });
+    const dir = mkdtempSync(join(tmpdir(), "skill-direct-review-"));
+    try {
+      const home = join(dir, "home");
+      const R = join(dir, "clone");
+      const M = join(R, "_review");
+      mkdirSync(home);
+      mkdirSync(M, { recursive: true });
+      // a PATH with only what the lines call, so whether bubblewrap and socat are there is the test's to say
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      for (const tool of ["bash", "jq", "realpath", "mkdir", "mktemp"]) symlinkSync(Bun.which(tool)!, join(bin, tool));
+      const line = (start: string) => out.split("\n").find((l) => l.startsWith(start)) ?? "";
+      const from = out.indexOf("if command -v bwrap");
+      const shell = (script: string) => Bun.spawnSync(["bash", "-c", `${line('H="$HOME/')}\n${out.slice(from, out.indexOf("\nfi\n", from) + 3)}\n${script}`], { env: { HOME: home, PATH: bin, R, M, NAME: "repo", TMPDIR: dir }, stdout: "pipe", stderr: "pipe" }).stdout.toString();
+      const may = () => shell(`printf '%s\\0' "\${MAY[@]}"`).split("\0").slice(0, -1);
+      // the reviewer's $TMPDIR: a short folder of its own, as the job's is (Claude Code makes its sockets under it)
+      const T = shell(`printf %s "$T"`);
+      expect(T.startsWith(join(dir, "repo.rv."))).toBe(true);
+      const req = { kind: "review", taskId: "t", pr: 1, cwd: R, promptFile: join(M, "prompt.md"), outFile: join(M, "out.md"), tmpDir: T } as const;
+      const claude = (readOnly?: true) => {
+        const argv = jobCommand({ ...req, runner: "claude", ...(readOnly ? { readOnly } : {}) }, 900, {}, home).argv;
+        return argv.slice(argv.indexOf("-p") + 1, argv.indexOf("--strict-mcp-config"));
+      };
+      // without bubblewrap or socat the reviewer only reads, as the job is then started
+      expect(may()).toEqual(claude(true));
+      for (const tool of ["bwrap", "socat"]) writeFileSync(join(bin, tool), "#!/bin/sh\n", { mode: 0o755 });
+      expect(may()).toEqual(claude());
+      // Codex: the job's sandbox, whose slots' folder is the `$H` of the same home
+      const H = shell(`printf %s "$H"`);
+      const codex = jobCommand({ ...req, runner: "codex" }, 900, {}, home).argv;
+      const sandbox = codex.slice(codex.indexOf("exec") + 1, codex.indexOf("--skip-git-repo-check")).map((a) => (a === H ? '"$H"' : a === T ? '"$T"' : a));
+      expect(sandbox).toContain('"$H"');
+      expect(sandbox).toContain('"$T"');
+      for (const prompt of ["prompt.md", "prompt-fix.md"]) {
+        const run = line(`( cd "$R" && { cat "$M/${prompt}"`);
+        expect(run).toContain(`TMPDIR="$T" ops-kit heavy`);
+        expect(run).toContain(` exec ${sandbox.join(" ")} --skip-git-repo-check`);
+      }
+      for (const start of ['( set -o pipefail; cd "$R" && TMPDIR="$T" ops-kit heavy', '# ( set -o pipefail; cd "$R" && TMPDIR="$T" ops-kit heavy']) expect(line(start)).toContain('claude -p "${MAY[@]}" --strict-mcp-config');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("skills by backlog: issues on GitHub or only in the app", () => {
@@ -756,7 +806,27 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 275,500 (+1,100 bytes over 274,400; the copy measured 274,393 before and 275,409 after): a stack's merge grants are asked
     // in one question and the stack merges once from its top PR (pbi-complete 5, pointed to from review-triage-and-merge and
     // stacked-pr-delivery); the one-by-one merge example it replaced is gone, and the first draft (+4,030) was cut to this.
-    expect(bytes).toBeLessThanOrEqual(275_500);
+    // Raised to 277,300 (+1,800 bytes over 275,500; the copy measured 275,498 before and 277,276 after): the recheck's runner is
+    // the recheck setting's, said once on its side in cross-runner-review 2 with the request that names no runner and how its
+    // summary is posted, and post_review prints the model and effort of the job from the app's record under the first line; the
+    // attacking review's two sides became one line and the sentence that swapped a limited recheck runner is gone.
+    // Raised to 279,100 (+1,800 bytes over 277,300; the copy measured 277,296 before and 279,007 after): with a merge gate, the
+    // main review's material (not a recheck's) gets the viewpoints the PR asks for and the original request they read
+    // (cross-runner-review 1), its instructions say to finish each viewpoint and list it, a blocking finding's line carries its
+    // evidence, and a non-blocking finding is the implementer's to take or leave with one line in the summary table
+    // (review-triage-and-merge 2, with its reply rules and summary template saying nit・question to match).
+    // Raised to 279,600 (+500 bytes over 279,100; the copy measured 279,007 before and 279,571 after): the review's clone gets the
+    // repository's dependencies (cross-runner-review 1, the command named in CLAUDE.md), a finding's line names the test the reviewer
+    // left, and the implementer runs that test before fixing (review-triage-and-merge 2); the first draft (+843) was cut to this.
+    // Raised to 279,800 (+200 bytes; the copy measured 279,743): the follow-up review installs the dependencies again after it
+    // checks out the fixed head, and a failed install is said instead of passed over (cross-runner-review 1 and 4).
+    // Raised to 280,140 (+340 bytes; the copy measured 279,799 before and 280,135 after): the attacking review stands in with the
+    // other runner at a usage limit instead of waiting, whatever the review setting, with its request and its summary's mark
+    // (cross-runner-review 2b); the first draft (+622) was cut to this.
+    // Raised to 280,500 (+360 bytes; the copy measured 280,135 before and 280,496 after): a stack's PRs allowed past the gate go in
+    // one at a time from the bottom without --delete-branch and gh stack merge does not pass on that grant (pbi-complete 5), and the
+    // upper PR's retargeting is checked after each (stacked-pr-delivery 6); the first draft (+656) was cut to this.
+    expect(bytes).toBeLessThanOrEqual(280_500);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

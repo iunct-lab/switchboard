@@ -177,6 +177,29 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
         // The rubric judge: on / off only; the runner and model are the judge's
         // The main reviewer of a PR: it takes effect through the skills rendered at a Task's next start or resume, and at once where a review job picks its runner
         if (data.reviewRunner !== undefined) next.reviewRunner = data.reviewRunner;
+        // Who reads a recheck and an audit: null (handled above) unsets it, back to following the review setting
+        if (data.recheckRunner !== undefined) next.recheckRunner = data.recheckRunner;
+        // A review job's model and effort, written as defaultModel / defaultEffort are; empty = the Task's default
+        for (const [runner, model] of Object.entries(data.reviewModel ?? {})) {
+          if (model === null) {
+            delete next.reviewModel[runner];
+            continue;
+          }
+          const adapter = sc.adapterMap.get(runner as RunnerId);
+          if (!adapter) return sc.bad(`runner "${runner}" is not installed`);
+          if (!adapter.models) return sc.bad(`runner "${runner}" has no model to choose`);
+          if (model.trim() === "") return sc.bad("model must not be empty (null removes it)");
+          next.reviewModel[runner] = model.trim();
+        }
+        for (const [runner, effort] of Object.entries(data.reviewEffort ?? {})) {
+          if (effort === null) {
+            delete next.reviewEffort[runner];
+            continue;
+          }
+          const why = sc.tasks.checkEffort(runner as RunnerId, effort); // also refuses a runner that is not installed
+          if (why) return sc.bad(why);
+          next.reviewEffort[runner] = effort;
+        }
         if (data.maxRunners !== undefined) next.maxRunners = data.maxRunners;
         if (data.developSelf !== undefined) next.developSelf = data.developSelf;
         if (data.titles) {

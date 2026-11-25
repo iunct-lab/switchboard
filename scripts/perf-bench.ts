@@ -279,8 +279,8 @@ const runOnce = (chromePort: string, base: string, cwd: string) => withTab(chrom
   // the Workspace is picked, not left to 自動 (that asks the runner which one, a turn of its own)
   await until(() => evaluate(`(() => { const s = document.querySelector("main.home select"); const o = s && [...s.options].find((o) => o.value); if (!o) return false; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(s, o.value); s.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`), "a workspace to pick");
   await type("main.home textarea", "bench");
-  await until(() => evaluate(`!![...document.querySelectorAll("main .pri")].find((b) => b.textContent.trim() === "開始" && !b.disabled)`), "the start button");
-  out["new-task"] = await journey("new-task", () => click("main .pri", "開始"));
+  await until(() => evaluate(`!![...document.querySelectorAll("main .pri")].find((b) => b.textContent.trim() === "今すぐ始める" && !b.disabled)`), "the start button");
+  out["new-task"] = await journey("new-task", () => click("main .pri", "今すぐ始める"));
   await until(() => click("header .tabs button", "Home"), "Home");
   out["open-task"] = await journey("open-task", () => until(() => click(".rail .it", "long"), "the long task in the rail"));
   await type(".composer textarea", "reply");

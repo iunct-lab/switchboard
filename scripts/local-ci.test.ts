@@ -7,7 +7,12 @@ import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
 import type { MergeRecordJob } from "../ops-kit/src/merge-records";
-import { buildFiles, checkoutSteps, ciScript, hostOffload, parseBuild, runBuild, recordBundle, recordBytes, recordCounts, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, markerSeconds, narrowTestStep, notify, perfVerdict, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepSeconds, stepWithIdle, TargetError, testsOf, withoutPerf, collectPending, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Deps, type LocalCiResult, type Offload, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash, newestCiRecord, writeJobResult } from "./local-ci";
+import { checkoutSteps, fileSizeBaseOf, parseBuild, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, narrowTestStep, notify, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepWithIdle, TargetError, withoutPerf, collectPending, type Deps, type LocalCiResult, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash, newestCiRecord, writeJobResult } from "./local-ci";
+import { buildFiles, ciScript, hostOffload, runBuild, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Offload } from "./local-ci-offload";
+import { listedIn } from "./file-size";
+import { ciAtTips } from "./merge-gate-records";
+import { markerSeconds, perfVerdict, stepSeconds, testsOf } from "./local-ci-notes";
+import { recordBundle, recordBytes, recordCounts } from "./local-ci-records";
 import type { OffloadLog, OffloadRecord } from "./offload-record";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
@@ -480,7 +485,9 @@ describe("local-ci", () => {
     expect(add.at(-1)).toBe(BASE);
     expect(calls.find((c) => c.includes("merge"))!.slice(-4)).toEqual(["-q", "--no-ff", "--no-edit", SHA]);
     expect(calls.find((c) => c.includes("merge"))![2]).toBe(add[add.indexOf("--detach") + 1]);
-    expect(Object.keys(envs[0]!).sort()).toEqual(["CI", "HOME", "PATH", "TMPDIR", ...(process.env.SWITCHBOARD_FIXTURES === undefined ? [] : ["SWITCHBOARD_FIXTURES"])].sort());
+    expect(Object.keys(envs[0]!).sort()).toEqual(["CI", "FILE_SIZE_BASE_REF", "HOME", "PATH", "TMPDIR", ...(process.env.SWITCHBOARD_FIXTURES === undefined ? [] : ["SWITCHBOARD_FIXTURES"])].sort());
+    // file sizes compares with the default branch's tip fetched just now (refs/local-ci/42/default), not the clone's origin/main
+    expect(envs[0]!.FILE_SIZE_BASE_REF).toBe(BASE);
     // TMPDIR is under the OS temp dir the `local` perf ceilings were measured with, not ~/.cache
     expect(envs[0]!.TMPDIR).toStartWith(join(tmpdir(), "switchboard.local-ci-42-tmp."));
     expect(calls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(true);
@@ -497,7 +504,7 @@ describe("local-ci", () => {
     expect(ran.at(-1)).toBe("bun test");
   });
 
-  test("withoutPerf: the range from the web build to the last perf step goes, the install and what follows stay; a CI without it is as it is", () => {
+  test("withoutPerf: the range from the web build to the last perf step goes, and fetch main with it; the install and what follows stay; a CI without it is as it is", () => {
     const names = (xs: Array<{ name: string }>) => xs.map((x) => x.name);
     const dropped = names(ciSteps).filter((n) => !names(withoutPerf(ciSteps)).includes(n));
     expect(dropped).toContain("bun run --cwd apps/web build");
@@ -731,13 +738,28 @@ describe("local-ci", () => {
     expect(calls.filter((c) => c[3] === "rev-parse").map((c) => c[4])).toEqual(["refs/local-ci/42/base", "refs/local-ci/42/head"]);
   });
 
-  test("notify: the head or the base moved during the run → nothing posted (a pass for the old pair is not one for the new)", async () => {
+  test("notify: the head moved during the run → nothing posted (a pass for the old head is not one for the new)", async () => {
     const NEW = "4444444444444444444444444444444444444444";
-    for (const o of [{ heads: [SHA, NEW] }, { bases: [BASE, NEW] }]) {
-      const { sent, posted, logged } = await runAndNotify(undefined, o);
-      expect([sent, posted]).toEqual([false, []]);
-      expect(logged.at(-1)).toContain("結果を投稿しない");
-    }
+    const { sent, posted, logged } = await runAndNotify(undefined, { heads: [SHA, NEW] });
+    expect([sent, posted]).toEqual([false, []]);
+    expect(logged.at(-1)).toContain("結果を投稿しない");
+  });
+
+  test("notify: only the base moved during the run → one pass posted with the base it ran on, and a line saying the base moved", async () => {
+    const NEW = "4444444444444444444444444444444444444444";
+    const { sent, posted, logged } = await runAndNotify(undefined, { bases: [BASE, NEW] });
+    expect(sent).toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(passOf(posted[0]!)).toEqual([SHA, BASE]);
+    expect(logged).toContain(`base が実行中に進んだ（${BASE.slice(0, 7)} → ${NEW.slice(0, 7)}）。実行した base ${BASE.slice(0, 7)} の結果として投稿する`);
+  });
+
+  test("notify: only the base moved during a failed run → one fail posted with the base it ran on", async () => {
+    const NEW = "4444444444444444444444444444444444444444";
+    const { sent, posted } = await runAndNotify("bun test", { bases: [BASE, NEW] });
+    expect(sent).toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.split("\n")[0]).toBe(`[local-ci] fail ${SHA} base=${BASE}`);
   });
 
   test("LOCAL_CI_RESULT: pass or fail, the head, then the base; no base, a short sha or another word after it is no result", () => {
@@ -1681,6 +1703,113 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       expect(parseBuild("sb-step: 0 begin 1\nsb-step: 0 exit 3 2\nsb-step: 1 begin 2\nsb-step: 1 exit 0 4\n", s, 0).map((r) => [r.name, r.code])).toEqual([["a", 3], ["b", 0]]);
     });
 
+    test("ciScript からの終了コードを parseBuild が fail と読む", async () => {
+      // the steps' marks are written by local-ci-offload.ts and read by local-ci.ts: the real script runs in bash and its log goes to the real reading
+      const dir = mkdtempSync(join(CACHE, "ci-script-bash-"));
+      try {
+        const work = join(dir, "work");
+        mkdirSync(work);
+        mkdirSync(join(dir, "home"));
+        mkdirSync(join(dir, "tmp"));
+        writeFileSync(join(work, "package.json"), '{"name":"x"}');
+        writeFileSync(join(work, "ops.config.json"), JSON.stringify({ ci: { steps: [{ name: "a", run: "true" }, { name: "b", run: "exit 1" }] } }));
+        const outputs = new Map<string, { code: number; output: string }>();
+        const d: Omit<Deps, "slot"> = {
+          sh: async (cmd) => {
+            throw new Error(`no command here: ${cmd.join(" ")}`);
+          },
+          step: async () => {
+            throw new Error("a step ran on the host");
+          },
+          log: () => undefined,
+          offload: {
+            // the part sb-offload's build runs as the image's user; the root part around it (tmpfs, PID namespace, su) is the build's, not this host's
+            start: async (script, cwd) => {
+              const user = /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF\n/.exec(script)![1]!.replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
+              const p = Bun.spawnSync(["bash", "-c", user], { cwd, env: { PATH: process.env.PATH ?? "", HOME: join(dir, "home") }, stdout: "pipe", stderr: "pipe" });
+              outputs.set("build-1", { code: p.exitCode, output: `${p.stdout.toString()}${p.stderr.toString()}` });
+              return { build: "build-1" };
+            },
+            collect: async (build) => outputs.get(build)!,
+          },
+        };
+        const r = await runCheckout(work, {}, "ci-script-bash", d, dir, undefined, undefined, false);
+        expect(outputs.get("build-1")!.code).toBe(1);
+        expect(r.results.map((x) => [x.name, x.code])).toEqual([["a", 0], ["b", 1]]);
+        // the code is the step's own exit mark, not the build's exit put on a step without one
+        expect(r.results[1]!.tail).not.toContain("sb-offload: exit");
+        expect(r.ok).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("fileSizeBaseOf: the base ref's list, or none with a line of the host's log saying why (a ref it cannot read, a text with no STILL_OVER)", async () => {
+      const logged: string[] = [];
+      const at = (show: (ref: string) => string) => ({ sh: async (cmd: string[]) => show(cmd.at(-1)!), log: (l: string) => void logged.push(l) });
+      expect(await fileSizeBaseOf("/w", "origin/main", at(() => 'export const STILL_OVER: Record<string, number> = {\n  "a.ts": 1200,\n};\n'))).toEqual({ "a.ts": 1200 });
+      expect(logged).toEqual([]);
+      expect(await fileSizeBaseOf("/w", "no-such", at(() => { throw new Error("git show failed: fatal: invalid object name 'no-such'.\nmore"); }))).toBeUndefined();
+      expect(await fileSizeBaseOf("/w", "v1.0.0", at(() => "export const ROOTS = [];\n"))).toBeUndefined();
+      expect(logged).toEqual(["file sizes: no-such:scripts/file-size.ts を読めない: git show failed: fatal: invalid object name 'no-such'.", "file sizes: v1.0.0:scripts/file-size.ts に STILL_OVER が無い"]);
+    });
+
+    test("an off-host build's file sizes step compares with the base's list: the host reads it from the base ref, ciScript exports it and the real scripts/file-size.ts fails a raised ceiling in a tree with no base", async () => {
+      // the parts joined as they are: runCheckout's reading of the base, ciScript's script run in bash, scripts/file-size.ts; only the host's git is a fake
+      const dir = mkdtempSync(join(CACHE, "file-size-base-"));
+      try {
+        const work = join(dir, "work");
+        for (const d of ["scripts", "packages/core/src", "packages/protocol/src", "apps/web/src"]) mkdirSync(join(work, d), { recursive: true });
+        mkdirSync(join(dir, "home"));
+        mkdirSync(join(dir, "tmp"));
+        const script = readFileSync(join(import.meta.dir, "file-size.ts"), "utf8");
+        const base = listedIn(script)!;
+        const [raised, ceiling] = Object.entries(base)[0]!;
+        // the change: one ceiling raised by one, with its file grown to it, so that only the comparison with the base can fail it
+        const list = { ...base, [raised]: ceiling + 1 };
+        writeFileSync(join(work, "scripts/file-size.ts"), script.replace(/^(export const STILL_OVER\b[^=]*=\s*\{)[\s\S]*?^\};/m, (_, head: string) => `${head}\n${Object.entries(list).map(([p, n]) => `  "${p}": ${n},`).join("\n")}\n};`));
+        for (const [p, n] of Object.entries(list)) {
+          mkdirSync(join(work, p, ".."), { recursive: true });
+          writeFileSync(join(work, p), "x\n".repeat(n));
+        }
+        writeFileSync(join(work, "package.json"), '{"name":"x"}');
+        writeFileSync(join(work, "ops.config.json"), JSON.stringify({ ci: { steps: [{ name: "file sizes", run: "bun scripts/file-size.ts" }] } }));
+        const asked: string[] = [];
+        const outputs = new Map<string, { code: number; output: string }>();
+        const scripts: string[] = [];
+        const d: Omit<Deps, "slot"> = {
+          // the host's clone has the base: what `git show <ref>:scripts/file-size.ts` gives there
+          sh: async (cmd) => {
+            if (cmd.includes("show")) return (asked.push(cmd.at(-1)!), script);
+            throw new Error(`no command here: ${cmd.join(" ")}`);
+          },
+          step: async () => {
+            throw new Error("a step ran on the host");
+          },
+          log: () => undefined,
+          offload: {
+            start: async (s, cwd) => {
+              scripts.push(s);
+              const user = /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF\n/.exec(s)![1]!.replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
+              const p = Bun.spawnSync(["bash", "-c", user], { cwd, env: { PATH: process.env.PATH ?? "", HOME: join(dir, "home") }, stdout: "pipe", stderr: "pipe" });
+              outputs.set("build-1", { code: p.exitCode, output: `${p.stdout.toString()}${p.stderr.toString()}` });
+              return { build: "build-1" };
+            },
+            collect: async (build) => outputs.get(build)!,
+          },
+        };
+        const r = await runCheckout(work, {}, "file-size-base", d, dir, undefined, undefined, false);
+        expect(asked).toEqual(["origin/main:scripts/file-size.ts"]);
+        expect(scripts[0]).toContain(`export FILE_SIZE_BASE_LIST='${JSON.stringify(base)}'\n`);
+        expect(r.results.map((x) => [x.name, x.code])).toEqual([["file sizes", 1]]);
+        expect(r.outputs["file sizes"]).toContain(`${raised}: its ceiling ${ceiling + 1} > the base's ${ceiling}: a ceiling only goes down\nthe ceilings are compared with FILE_SIZE_BASE_LIST\n`);
+        // a build given no list (test-changed's, or a base that cannot be read) has no FILE_SIZE_BASE_LIST
+        expect(ciScript([{ name: "file sizes", run: "bun scripts/file-size.ts" }], {})).not.toContain("FILE_SIZE_BASE_LIST");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     describe("pending: a started build's record and --collect", () => {
       const FILE = join(pendingDirOf(CACHE), "example_development-42.json");
       const passLog = (steps: Array<{ name: string }>) => steps.flatMap((_, i) => [`sb-step: ${i} begin 100`, "ok", "", `sb-step: ${i} exit 0 ${101 + i}`]).join("\n");
@@ -1693,9 +1822,9 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(existsSync(FILE)).toBe(true);
         return JSON.parse(readFileSync(FILE, "utf8")) as { build: string; steps: Array<{ name: string }>; [k: string]: unknown };
       };
-      /** `main(["--collect"])` on a host whose build ends with `answer`; the head the PR names now is `head`. */
-      const collect = async (rec: { build: string; steps: Array<{ name: string }> }, o: { head?: string; post?: () => Promise<void>; output?: string; code?: number; live?: boolean; during?: () => void; registry?: string } = {}) => {
-        const y = deps(undefined, undefined, "", {}, false, { heads: [o.head ?? SHA] });
+      /** `main(["--collect"])` on a host whose build ends with `answer`; the head the PR names now is `head`, its base's tip `base`. */
+      const collect = async (rec: { build: string; steps: Array<{ name: string }> }, o: { head?: string; base?: string; post?: () => Promise<void>; output?: string; code?: number; live?: boolean; during?: () => void; registry?: string } = {}) => {
+        const y = deps(undefined, undefined, "", {}, false, { heads: [o.head ?? SHA], bases: [o.base ?? BASE] });
         if (o.registry !== undefined) {
           const inner = y.d.sh;
           y.d.sh = async (cmd, cwd) => (cmd.includes("ls-tree") ? "known-failures.json\n" : cmd.at(-1) === `${BASE}:known-failures.json` ? o.registry! : inner(cmd, cwd));
@@ -1743,6 +1872,17 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         const rec = await cutOff();
         const r = await collect(rec, { head: "9".repeat(40) });
         expect(r.posted).toEqual([]);
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+      });
+
+      test("pending: a base that alone moved is posted with the base the build ran on, and the record is removed", async () => {
+        const rec = await cutOff();
+        const NEW = "4".repeat(40);
+        const r = await collect(rec, { base: NEW });
+        expect(r.posted).toHaveLength(1);
+        expect(r.posted[0]!.split("\n")[0]).toBe(`[local-ci] pass ${SHA} base=${BASE}`);
+        expect(r.logged).toContain(`base が実行中に進んだ（${BASE.slice(0, 7)} → ${NEW.slice(0, 7)}）。実行した base ${BASE.slice(0, 7)} の結果として投稿する`);
         expect(r.code).toBe(0);
         expect(existsSync(FILE)).toBe(false);
       });
@@ -2664,8 +2804,9 @@ describe("local change", () => {
     expect(errors[0]).toStartWith("ops.config.json の ci が不正: ci.steps:");
   });
 
-  test("a branch that moved during the run: nothing posted, exit 1", async () => {
+  test("a branch that moved during the run: the base alone moved → posted with the base it ran on, exit 0, and merge-gate does not count that pass (run again)", async () => {
     const r = fresh("echo ok");
+    const ran = r.tip("main");
     let reads = 0;
     const a = app(r, [], () => {
       // the first read is the target's, the second the run's own; the third (after the run) sees a new base
@@ -2675,9 +2816,27 @@ describe("local change", () => {
         r.git("commit", "-q", "-m", "z");
       }
     });
-    const res = await run(r, a);
-    expect([res.code, a.posted.length]).toEqual([1, 0]);
-    expect(res.logs.join("\n")).toContain("実行中に変わった");
+    // the job's folder: notify leaves the record merge-gate counts there
+    const job = mkdtempSync(join(CACHE, "job-"));
+    const was = process.env.J;
+    process.env.J = job;
+    let res: Awaited<ReturnType<typeof run>>;
+    try {
+      res = await run(r, a);
+    } finally {
+      was === undefined ? delete process.env.J : (process.env.J = was);
+    }
+    const moved = r.tip("main");
+    expect(moved).not.toBe(ran);
+    expect([res.code, a.posted.length]).toEqual([0, 1]);
+    expect(passOf((a.posted[0] as { text: string }).text)).toEqual([r.tip("sb/5-x"), ran]);
+    expect(res.logs).toContain(`base が実行中に進んだ（${ran.slice(0, 7)} → ${moved.slice(0, 7)}）。実行した base ${ran.slice(0, 7)} の結果として投稿する`);
+    // the record as the app takes it in, counted at the change's head and the base's tip now
+    const written = JSON.parse(readFileSync(join(job, "result.json"), "utf8")) as { head: string; base: string; ci: { outcome: "pass" | "fail" } };
+    expect(written).toMatchObject({ head: r.tip("sb/5-x"), base: ran });
+    const counted = ciAtTips([rec(written.ci.outcome, written.head, 1, { repo: "local:ws_l", pr: 7, base: written.base, result: { ci: written.ci } })], 7, r.tip("sb/5-x"), moved);
+    expect(counted.pass).toBe(false);
+    expect(counted.note).toContain("回し直す");
   });
 
   test("not run (2): a PR number or --repo with it; not a change", async () => {

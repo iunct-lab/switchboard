@@ -95,11 +95,15 @@ export function kindPick(own: AutoStartChoice | undefined, shown: { model: strin
   return { model: shown.model, effort, ...change };
 }
 
-export type JobRowId = "manual" | "autoStart" | `kind:${AutoStartKind}` | "review" | "judge" | "judgeFallback" | "routing" | "titles";
-export type JobRow = { id: JobRowId; label: Msg; runner: RunnerId | "other" | "same"; model: string; effort: string; runnerOnly?: boolean };
+export type JobRowId = "manual" | "autoStart" | `kind:${AutoStartKind}` | "review" | "recheck" | `reviewModel:${RunnerId}` | "judge" | "judgeFallback" | "routing" | "titles";
+/** `runner` "" = the recheck row left unset: it follows the review setting. */
+export type JobRow = { id: JobRowId; label: Msg; runner: RunnerId | "other" | "same" | ""; model: string; effort: string; runnerOnly?: boolean };
 
-/** The jobs and the runner / model / effort each runs on. "" model / effort = the runner's default. */
-export function jobRows(s: Settings): JobRow[] {
+/**
+ * The jobs and the runner / model / effort each runs on. "" model / effort = the runner's default. `reviewers` are the
+ * runners that get a 「レビューで使うモデル」 row (the model / effort a review job of that runner starts with), in that order.
+ */
+export function jobRows(s: Settings, reviewers: RunnerId[]): JobRow[] {
   const nd = s.newDefaults;
   const kinds: JobRow[] = AUTO_START_KINDS.flatMap(([kind, label]) => {
     const own = s.autoStart.byKind[kind];
@@ -111,6 +115,8 @@ export function jobRows(s: Settings): JobRow[] {
     { id: "autoStart", label: settings.jobAutoStart, runner: s.autoStart.runner, model: s.autoStart.model, effort: s.autoStart.effort },
     ...kinds,
     { id: "review", label: settings.jobReview, runner: s.reviewRunner, model: "", effort: "", runnerOnly: true },
+    { id: "recheck", label: settings.jobRecheck, runner: s.recheckRunner ?? "", model: "", effort: "", runnerOnly: true },
+    ...reviewers.map((runner): JobRow => ({ id: `reviewModel:${runner}`, label: settings.jobReviewModel, runner, model: s.reviewModel[runner] ?? "", effort: s.reviewEffort[runner] ?? "" })),
     { id: "judge", label: settings.jobJudge, runner: s.judge.runner, model: s.judge.model, effort: s.judge.effort },
     { id: "judgeFallback", label: settings.jobJudgeFallback, runner: s.judgeAndChoice.judgeFallbackRunner, model: s.judgeAndChoice.judgeFallbackModel, effort: s.judgeAndChoice.judgeFallbackEffort },
     { id: "routing", label: settings.jobRouting, runner: s.routing.llm.runner, model: s.routing.llm.model, effort: s.routing.llm.effort },
@@ -150,7 +156,7 @@ export function runnerDefaultLabel(kind: "model" | "effort", info: Pick<RunnerIn
 
 /**
  * Where a job row's runner / model / effort is saved: the PATCH for one change of the row (a field left out is not
- * sent). The kinds' own rows and the review row are saved by their own controls, not here; they fall to autoStart.
+ * sent). The kinds' own rows and the review, recheck and review-model rows are saved by their own controls, not here; they fall to autoStart.
  */
 export function jobPatchOf(id: JobRowId, p: { runner?: RunnerId; model?: string; effort?: string }): SettingsPatch {
   const only = <T extends object>(o: T): T => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;

@@ -1,8 +1,8 @@
 import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
-import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
+import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueEntry, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api/index.ts";
-import { backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, loadNewIssueDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm, type NewIssueDraft } from "../backlogSync.ts";
+import { BACKLOG_CHANGED_EVENT, backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { changeMarks, changeStateLabel, mergedPair, short } from "../changes.ts";
@@ -11,13 +11,16 @@ import { Interventions } from "./Interventions.tsx";
 import { Mockups } from "./Approvals.tsx";
 import { RunnerLogin } from "./RunnerLogin.tsx";
 import { Stops } from "./Stops.tsx";
-import { BundleSection } from "./BundleSection.tsx";
+import { BundleDoor, BundleHoldLine, useBundleHold } from "./BundleSection.tsx";
+import { QueueOutside, SelectBar, SelectBox, Selection } from "./BacklogSelect.tsx";
 import { IssueLink, OwnerTask, Overlap } from "./BacklogOwner.tsx";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
 import { backlog as m } from "../i18n/backlog.ts";
 import { common } from "../i18n/common.ts";
-import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting, type PickAxis, type QueueRow } from "../backlogQueue.ts";
+import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, queueFacts, queueSaver, queueSections, withRemoved, withWaiting, type QueueRow } from "../backlogQueue.ts";
+import { keepOpen, queueWithSelected, rowsOf, toggleSelected } from "../backlogSelect.ts";
+import { bundleGate } from "../bundle.ts";
 import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -361,34 +364,6 @@ function EditToggle(props: { target: EditTarget; summary?: string; held?: boolea
   );
 }
 
-/** One Issue made here, followed from its localId to the number GitHub gives it (and the row it then is). */
-function Made(props: { workspaceId: string; localId: string; title: string }) {
-  const words = savedWords(useContext(KeptHere)(props.workspaceId));
-  const [detail, setDetail] = useState<BacklogIssueDetail | null>(null);
-  const read = () => api.backlogIssue(props.workspaceId, props.localId).then(setDetail).catch(() => undefined);
-  useEffect(() => {
-    void read();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const n = detail?.issue.number ?? 0;
-  return (
-    <div className="hint backlog-made" data-local={props.localId}>
-      {n > 0 ? (
-        <IssueLink url={detail!.issue.url}>
-          #{n}
-        </IssueLink>
-      ) : (
-        t(m.noNumber)
-      )}{" "}
-      {props.title}
-      {t(m.paren, { text: detail ? (n > 0 ? words.made : createWord(detail.sync.state)) : t(m.checking) })}{" "}
-      <button className="ghost link" onClick={() => void read()}>
-        {t(m.refresh)}
-      </button>
-    </div>
-  );
-}
-
 /**
  * One local change opened: its branches' tips now, the marks merge-gate counts (main review, local-ci of this
  * head and base, rechecks), then its body and every comment oldest first — the review, the triage, the results.
@@ -468,83 +443,6 @@ function Changes(props: { changes: BacklogData["changes"] }) {
         </details>
       )}
     </section>
-  );
-}
-
-/**
- * A new Issue: kept here and created on GitHub later. Made as a request or a PBI (the labels the Backlog lists
- * by), its localId is followed to the number; what is typed stays until it is kept.
- */
-function NewIssue(props: { workspaces: Workspace[]; current: string; onCreated: () => void }) {
-  const keptHere = useContext(KeptHere);
-  const [ws, setWs] = useState(props.current || props.workspaces[0]?.id || "");
-  const draftOf = (w: string) => textDraftKey(`new:${w}`);
-  const [saved] = useState(() => loadNewIssueDraft(localStorage, draftOf(ws)));
-  const [kind, setKind] = useState<NewIssueDraft["kind"]>(saved?.kind ?? "type:request");
-  const [title, setTitle] = useState(saved?.title ?? "");
-  const [body, setBody] = useState(saved?.body ?? "");
-  const [note, setNote] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [made, setMade] = useState<Array<{ workspaceId: string; localId: string; title: string }>>([]);
-  const keep = (d: NewIssueDraft) => localStorage.setItem(draftOf(ws), JSON.stringify(d));
-  // the workspace shown above is where a new Issue goes: follow it when it changes (the first value is the initial one)
-  const shown = useRef(props.current);
-  useEffect(() => {
-    if (shown.current === props.current) return;
-    shown.current = props.current;
-    if (props.current && !saving) switchTo(props.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.current]);
-  // each workspace has its own draft: switching shows that one's, and typing does not overwrite it with another's; not
-  // while a save is under way (its answer clears the form it was made from)
-  const switchTo = (w: string) => {
-    const d = loadNewIssueDraft(localStorage, draftOf(w));
-    setWs(w);
-    setTitle(d?.title ?? "");
-    setBody(d?.body ?? "");
-    setKind(d?.kind ?? "type:request");
-  };
-  const create = () => {
-    setSaving(true);
-    api
-      .createBacklog(ws, { title, body, labels: [kind] })
-      .then((r) => {
-        setMade((m) => [...m, { workspaceId: ws, localId: r.localId, title }]);
-        localStorage.removeItem(draftOf(ws));
-        setTitle("");
-        setBody("");
-        setNote(savedWords(keptHere(ws)).created);
-        props.onCreated();
-      })
-      .catch((e) => setNote(t(m.createFailed, { error: String(e.message ?? e) })))
-      .finally(() => setSaving(false));
-  };
-  return (
-    <details className="backlog-new" open={saved !== null || undefined}>
-      <summary>{t(m.newIssue)}</summary>
-      {props.workspaces.length > 1 && (
-        <select value={ws} disabled={saving} onChange={(e) => switchTo(e.target.value)}>
-          {props.workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-            </option>
-          ))}
-        </select>
-      )}
-      <select value={kind} disabled={saving} onChange={(e) => (keep({ title, body, kind: e.target.value as typeof kind }), setKind(e.target.value as typeof kind))}>
-        <option value="type:request">{t(m.kindRequest)}</option>
-        <option value="type:pbi">{t(m.kindPbi)}</option>
-      </select>
-      <input value={title} placeholder={t(m.fieldTitle)} disabled={saving} onChange={(e) => (keep({ title: e.target.value, body, kind }), setTitle(e.target.value))} />
-      <textarea rows={4} value={body} placeholder={t(m.fieldBody)} disabled={saving} onChange={(e) => (keep({ title, body: e.target.value, kind }), setBody(e.target.value))} />
-      <button className="pri" disabled={saving || !title.trim() || !ws} onClick={create}>
-        {t(m.saveLocally)}
-      </button>
-      {note && <div className="hint backlog-note">{note}</div>}
-      {made.map((m) => (
-        <Made key={m.localId} {...m} />
-      ))}
-    </details>
   );
 }
 
@@ -870,6 +768,7 @@ function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean
   return (
     <div className="backlog-listrow">
       <div className="row backlog-item" data-issue={i.url}>
+        <SelectBox item={i} />
         <button className="ghost" aria-expanded={open} aria-label={label} title={label} data-open-row onClick={() => setOpen(!open)}>
           {open ? "▼" : "▶"}
         </button>
@@ -934,6 +833,7 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
         #{i.number} {i.title}
       </IssueLink>
       <div className="row">
+        <SelectBox item={i} />
         <button className="ghost" aria-expanded={open} aria-label={label} title={label} data-open-tile onClick={() => setOpen(!open)}>
           {open ? "▼" : "▶"}
         </button>
@@ -989,7 +889,7 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
           {i ? (
             <>
               <div className="queue-title">
-                <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
+                <SelectBox item={i} /> <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
               </div>
               <div className="queue-facts">
                 <span>{queueFacts(i)}</span>
@@ -1057,10 +957,10 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
 
 /**
  * The queue view: the backlog queue's on / off and how many run at once, its last decision, then the running
- * and the waiting PBIs in order (外す), the PBIs not in it (＋ キューに入れる) and the newest left ones (folded). Every
+ * and the waiting PBIs in order (外す), the PBIs not in it (a box on each row; 「キューに入れる」 in the selection bar adds the chosen ones) and the newest left ones (folded). Every
  * change is saved at once (`PUT /api/backlog/queue`); no save button, no draft.
  */
-function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; metaId: string | null; onSave: (input: BacklogQueueInput) => unknown; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; metaId: string | null; onSave: (input: BacklogQueueInput) => unknown; onSelect: (entries: BacklogQueueEntry[]) => void; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { queue, items } = props;
   const s = queueSections(queue, items);
   // the waiting row being dragged — by its entry, with the waiting entries when it was taken, where the pointer
@@ -1098,15 +998,6 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
         if (to !== n) props.onSave({ items: withWaiting(queue, s.running.map((r) => r.entry), moved) });
       },
     };
-  };
-  const outside = s.outside.filter((i) => props.inView(i.workspaceId));
-  // several at once, by what to put first and how many (not kept: a choice made now and then)
-  const [axis, setAxis] = useState<PickAxis>("priority");
-  const [count, setCount] = useState(5);
-  const [withWaitingOnes, setWithWaitingOnes] = useState(false);
-  const addTop = () => {
-    const top = pickTop(items.filter((i) => props.inView(i.workspaceId)), queue, axis, count, withWaitingOnes, (w) => props.auto[w] ?? false);
-    if (top.length) props.onSave({ items: [...queue.items, ...top.map((i) => ({ workspaceId: i.workspaceId, number: i.number }))] });
   };
   const row = (r: QueueRow, order: number | null) => (
     <QueueItem
@@ -1203,66 +1094,7 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
           </ul>
         </details>
       </section>
-      <section className="card queue">
-        <div className="queue-h">
-          {t(m.queueOutside)} <span className="hint">{t(m.queueOutsideHint)}</span>
-        </div>
-        <div className="queue-pick" data-queue-pick>
-          <b className="hint">{t(m.queuePickLead)}</b>
-          <label>
-            {t(m.queuePickAxis)}{" "}
-            <select data-queue-pick-axis value={axis} onChange={(e) => setAxis(e.target.value as PickAxis)}>
-              <option value="priority">{t(m.queuePickPriority)}</option>
-              <option value="progress">{t(m.queuePickProgress)}</option>
-              <option value="small">{t(m.queuePickSmall)}</option>
-              <option value="old">{t(m.queuePickOld)}</option>
-            </select>
-          </label>
-          <label>
-            {t(m.queuePickCount)}{" "}
-            <select data-queue-pick-count value={count} onChange={(e) => setCount(Number(e.target.value))}>
-              {[3, 5, 8, 12].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <input type="checkbox" data-queue-pick-waiting checked={withWaitingOnes} onChange={(e) => setWithWaitingOnes(e.target.checked)} /> {t(m.queuePickWaiting)}
-          </label>
-          <button className="queue-btn" data-queue-pick-add disabled={outside.length === 0} onClick={addTop}>
-            {t(m.queuePickAdd)}
-          </button>
-        </div>
-        {outside.length === 0 && <div className="muted">{t(m.none)}</div>}
-        <div className="queue-list">
-          {outside.map((i) => (
-            <div key={`${i.workspaceId}:${i.number}`} className="queue-row" data-outside={`${i.workspaceId}:${i.number}`}>
-              <div className="queue-main">
-                <div className="queue-body">
-                  <div className="queue-title">
-                    <IssueLink url={i.url}>#{i.number}</IssueLink> {i.title}
-                  </div>
-                  <div className="queue-facts">
-                    <span>{queueFacts(i)}</span>
-                    {itemMarks(i, props.auto[i.workspaceId] ?? false).map((x) => (
-                      <span key={x.key} className={"mark" + (x.warn ? " warn" : "")} data-mark={x.key}>
-                        {x.label}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <div className="queue-actions">
-                  <button className="queue-btn" data-queue-add onClick={() => props.onSave({ items: withAdded(queue, i) })}>
-                    {t(m.queueAdd)}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+      <QueueOutside queue={queue} items={items} inView={props.inView} auto={props.auto} onSelect={props.onSelect} />
     </>
   );
 }
@@ -1331,7 +1163,7 @@ function ViewPicker(props: { view: BacklogView; onChange: (v: BacklogView) => vo
   );
 }
 
-export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => void; onError: (msg: string) => void; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onOpenSchedules: () => void }) {
+export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void; onError: (msg: string) => void; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onOpenSchedules: () => void }) {
   const [data, setData] = useState<BacklogData | null>(lastBacklog);
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState<"open" | "refresh" | null>(null);
@@ -1339,6 +1171,9 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
   const [approvals, setApprovals] = useState(0);
   const [promotion, setPromotion] = useState<ReturnType<typeof promotionLine>>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  // the rows chosen, in the order chosen: the one place the choice lives (the queue and the bundle both read it); not kept past this screen
+  const [selected, setSelected] = useState<BacklogQueueEntry[]>([]);
+  const [hold, setHold] = useBundleHold(data?.fetchedAt);
   // whether backlog-next resumes a row whose waits closed: an enabled バックログを進める and an implement slot
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
@@ -1383,6 +1218,11 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
     else localStorage.removeItem(SHOWN_KEY);
   };
 
+  // 「＋ 指示」 opened from here starts on the repository shown (App keeps what is told here); leaving the screen tells it none
+  useEffect(() => {
+    props.onNarrow(current ? { id: current, name: currentName ?? current } : undefined);
+  }, [current, currentName]);
+  useEffect(() => () => props.onNarrow(undefined), []);
   const answered = (item: BacklogItem) => {
     // from lastBacklog, not this render's data: another answer may have landed since (two in flight)
     lastBacklog = lastBacklog && { ...lastBacklog, items: lastBacklog.items.filter((i) => key(i) !== key(item)) };
@@ -1423,6 +1263,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       .then((b) => {
         lastBacklog = b;
         setData(b);
+        setSelected((s) => keepOpen(s, b.items));
         setFailure(null);
       })
       .catch((e) => {
@@ -1444,10 +1285,20 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // an Issue saved from the instruction form (「自分で書いて保存」) while this screen is open
+  useEffect(() => {
+    const changed = () => load(false);
+    addEventListener(BACKLOG_CHANGED_EVENT, changed);
+    return () => removeEventListener(BACKLOG_CHANGED_EVENT, changed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const keptHere = (workspaceId: string) => workspaces?.find((w) => w.id === workspaceId)?.backlog === "switchboard";
+  const chosen = rowsOf(selected, data?.items ?? []);
+  const gate = bundleGate(chosen, metaId, hold);
   return (
     <KeptHere.Provider value={keptHere}>
+    <Selection.Provider value={{ selected, toggle: (e) => setSelected((s) => toggleSelected(s, e)) }}>
     <main className="main backlog">
       <section className="card">
         <div className="row head">
@@ -1457,9 +1308,6 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
             {t(m.reload)}
           </button>
           <ViewPicker view={view} onChange={changeView} />
-          <button className="pri" onClick={() => props.onFeedback(current ? { id: current, name: currentName ?? current } : undefined)}>
-            {t(m.fileRequest)}
-          </button>
         </div>
         {summary && (
           <div className="hint backlog-view-line">
@@ -1540,8 +1388,17 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
             </details>
           );
         })()}
-        <BundleSection reloadKey={data?.fetchedAt} now={now} onOpenTask={props.onOpenTask} onStarted={props.onStarted} onReleased={() => load(false)} onError={props.onError} />
-        {workspaces && workspaces.length > 0 && <NewIssue workspaces={workspaces} current={current} onCreated={() => load(false)} />}
+        <BundleHoldLine
+          hold={hold}
+          now={now}
+          onOpenTask={props.onOpenTask}
+          onReleased={() => {
+            setHold(null);
+            // the promotion line and the schedules' state change with the hold
+            load(false);
+          }}
+          onError={props.onError}
+        />
       </section>
 
       {data && <Changes changes={data.changes.filter((c) => inView(c.workspaceId))} />}
@@ -1580,6 +1437,7 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
           starting={starting}
           metaId={metaId}
           onSave={saveQueue}
+          onSelect={setSelected}
           onStart={(i, action) => start(i.workspaceId, i.number, action)}
           onOpenTask={props.onOpenTask}
           onAnswered={answered}
@@ -1622,7 +1480,31 @@ export function Backlog(props: { onFeedback: (workspace?: FeedbackTarget) => voi
       <Flow items={shownItems} now={now} />
       {/* after the list's first read: interventions reads the whole event log in one synchronous pass, which holds the daemon and the list behind it */}
       {(data !== null || failure !== null) && <Interventions inView={(workspaceId) => workspaceId === null || inView(workspaceId)} onOpenTask={props.onOpenTask} />}
+      <SelectBar
+        count={selected.length}
+        canQueue={queue !== null}
+        onQueue={() => {
+          if (!queue) return;
+          const items = queueWithSelected(queue, selected);
+          setSelected([]);
+          // nothing new to add: no write (a write sends the whole list as read here)
+          return items.length > queue.items.length ? saveQueue({ items }) : undefined;
+        }}
+        onClear={() => setSelected([])}
+      >
+        <BundleDoor
+          chosen={chosen}
+          gate={gate}
+          onChanged={() => api.bundleHold().then(setHold).catch(() => undefined)}
+          onStarted={(task) => {
+            setSelected([]);
+            props.onStarted(task);
+          }}
+          onError={props.onError}
+        />
+      </SelectBar>
     </main>
+    </Selection.Provider>
     </KeptHere.Provider>
   );
 }

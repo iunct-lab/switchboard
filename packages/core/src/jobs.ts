@@ -1,11 +1,12 @@
-import { APP_JOB_TASK, JobCi, type AgentEvent, type Job, type JobRequest, type JobResult, type LoginKind, type PricingTable, type RunnerId } from "@switchboard/protocol";
+import { APP_JOB_TASK, JobCi, TaskStatus, type AgentEvent, type Job, type JobRequest, type JobResult, type LoginKind, type PricingTable, type RunnerId } from "@switchboard/protocol";
 import { z } from "zod";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { childEnv } from "@switchboard/adapter-claude";
 import { primaryReviewer } from "../../../ops-kit/src/conditions.ts";
 import { RECHECK_KINDS } from "../../../scripts/merge-gate.ts";
+import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { REVIEWER_ISOLATION, reviewPrompt } from "../../../ops-kit/src/review-note.ts";
 import type { Db } from "./db.ts";
 import { TASK_MARK } from "./detached.ts";
@@ -66,7 +67,8 @@ export type JobCommand = { argv: string[]; tail: string };
 /** A request whose reviewer is decided (`requestJob` decides it from the setting and the Task's runner when the request names none). */
 export type ResolvedJobRequest =
   | (Exclude<JobRequest, { kind: "review" }> & { /** Another repository's PR: Switchboard's own `scripts/local-ci.ts` (that repository has none) and the `owner/name` it is given as `--repo`. A change in another workspace has `repo` "" and no `--repo` (`--change` takes none). */ other?: { script: string; repo: string }; /** A recheck or a tag CI run: the head the request recorded (a tag CI run judges that commit only); a recheck runs only if the checkout is still on it once the heavy slot is given. */ head?: string })
-  | (Extract<JobRequest, { kind: "review" }> & { runner: "codex" | "claude" });
+  // a review's `outFile` is where the reviewer writes: once the job is recorded, the job's own `out.md` (`$J`, which the reviewer cannot write); the daemon copies it to the place the request named when the job ends (`deliverReview`)
+  | (Extract<JobRequest, { kind: "review" }> & { runner: "codex" | "claude"; /** The reviewer's TMPDIR: `tmp` in the job's own folder (`requestJob`), outside the checkout. Short whatever the checkout's path is, so the sockets Claude Code makes in it fit a socket's address (108 bytes); removed when the job ends (`finish`). */ tmpDir: string; /** Claude Code whose sandbox cannot start on this machine (`JobDeps.claudeSandbox`): it only reads and runs no tests. */ readOnly?: true });
 
 export type JobDeps = {
   db: Db;
@@ -80,7 +82,9 @@ export type JobDeps = {
   app?: () => { url: string; tokenFile: string };
   /** The review setting (production: the saved one). The main reviewer of a Task follows from it and the Task's runner. Absent = "other". */
   reviewRunner?: () => "other" | "same";
-  /** The model and thinking effort a review of this runner runs with (production: the runner's saved defaults). Empty = the CLI's own. */
+  /** The recheck and audit setting (production: `recheckSetting` of the saved settings): who reads a recheck, relative to the main reviewer. Absent = the review setting's value. */
+  recheckRunner?: () => "other" | "same";
+  /** The model and thinking effort a review of this runner runs with (production: the saved review model / effort, else the runner's saved Task defaults). Empty = the CLI's own. */
   reviewChoice?: (runner: RunnerId) => { model?: string; effort?: string };
   /** How long a review may print nothing before it is cut (seconds; default 900, SWITCHBOARD_JOB_REVIEW_IDLE_S). */
   reviewIdleS?: number;
@@ -98,6 +102,8 @@ export type JobDeps = {
   pricing?: () => PricingTable;
   /** The login a runner is on now, for the billing kind of a review job's usage; undefined = not known. */
   loginKind?: (runner: RunnerId) => LoginKind | undefined;
+  /** Whether Claude Code's sandbox can start for a review job: bubblewrap and socat on `path`, the PATH of the job's own environment (production: `Bun.which`). Without them Claude Code would run its Bash unsandboxed, so a Claude reviewer then only reads. */
+  claudeSandbox?: (path: string) => boolean;
   /** Whether this machine runs the CI's steps in a build off the host (production: `sb-offload` is on PATH, as `scripts/local-ci.ts` decides). */
   offHost?: () => boolean;
   now?: () => number;
@@ -112,22 +118,44 @@ const CODEX_TAIL = ` < "$JOB_PROMPT" | tee "$J/codex.jsonl" | jq -rR 'fromjson? 
  * `REVIEWER_ISOLATION` (the kit's review-note.ts, the same values the skill's direct commands carry): it reads the review's
  * instructions and material, not the clone's CLAUDE.md / AGENTS.md nor the user's memory, MCP servers, skills and plugins.
  */
-export function jobCommand(req: ResolvedJobRequest, idleS = 900, choice: { model?: string; effort?: string } = {}): JobCommand {
+export function jobCommand(req: ResolvedJobRequest, idleS = 900, choice: { model?: string; effort?: string } = {}, home = homedir()): JobCommand {
   // this repository's PR runs the checkout's own script; another repository's, Switchboard's script from that repository's folder with `--repo`
   // (a change in another workspace runs it from that folder too, with `--change` and no `--repo`: `other.repo` is empty and must not be passed)
   // the tag CI of the commit the job was asked for (its recorded head), run again even when its Release already carries a mark: the record of this job is what a promotion reads. It takes its own heavy slot (or builds off the host)
   // a merge verdict: the daemon's own `scripts/merge-gate.ts` (the code this daemon runs, not the Task's checkout's copy), started in the daemon's own folder (the job's cwd, see `requestJob`) so Bun reads no `bunfig.toml` or `.env` of the checkout, with the checkout named by `--cwd` as the folder it reads the PR's commits and settings in. The verdict goes to `$J/out`, the diagnostics to the log
-  if (req.kind === "gate") return { argv: ["bun", "--no-env-file", DAEMON_MERGE_GATE, ...(req.change ? ["--change", String(req.pr)] : [String(req.pr)]), ...(req.repo ? ["--repo", req.repo] : []), ...(req.allowLarge ? ["--allow-large"] : []), ...(req.merge ? [`--${req.merge}`] : []), ...(req.scope ? ["--scope"] : []), "--cwd", req.cwd], tail: ` > "$J/out"` };
+  if (req.kind === "gate") return { argv: ["bun", "--no-env-file", DAEMON_MERGE_GATE, ...(req.change ? ["--change", String(req.pr)] : [String(req.pr)]), ...(req.repo ? ["--repo", req.repo] : []), ...(req.allowLarge ? ["--allow-large"] : []), ...(req.merge ? [`--${req.merge}`] : []), ...(req.scope ? ["--scope"] : []), ...(req.viewpoints ? ["--viewpoints"] : []), "--cwd", req.cwd], tail: ` > "$J/out"` };
   if (req.kind === "tag-ci") return { argv: ["bun", req.other!.script, "--sha", req.head!, ...(req.other!.repo ? ["--repo", req.other!.repo] : [])], tail: "" };
   if (req.kind === "local-ci") return { argv: ["bun", req.other?.script ?? "scripts/local-ci.ts", ...(req.change ? ["--change"] : []), String(req.pr), ...(req.other && !req.change ? ["--repo", req.other.repo] : []), ...(req.local ? ["--local"] : [])], tail: "" };
   // a recheck whose pass is a command: the kind picks `scripts/recheck.ts`'s table in the PR's checkout, in a heavy slot
   if (req.kind === "recheck") return { argv: ["ops-kit", "heavy", "--", "bun", "scripts/recheck.ts", req.recheck, ...(req.head ? ["--head", req.head] : [])], tail: "" };
   // a review takes no heavy slot, only waits for the memory floor (the kit README, Heavy-process slots): local CI keeps its slot
   const head = ["ops-kit", "heavy", "--memory-only", "--name", `review ${req.runner}`, "--", "ops-kit", "idle-run", "--idle", String(idleS), "--"];
-  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", ...REVIEWER_ISOLATION.codex.args, "--json", ...(choice.model ? ["-m", choice.model] : []), ...(choice.effort ? ["-c", `model_reasoning_effort="${choice.effort}"`] : []), "-o", req.outFile, "-"], tail: CODEX_TAIL };
+  // A reviewer may write tests in its checkout and run them, in a heavy slot (the note says where and how: review-note.ts).
+  // Codex: its sandbox writes in the checkout (the job's cwd), in the job's TMPDIR, named by its path (not whatever $TMPDIR says),
+  // and in the slots' folder of the job's home, which `ops-kit heavy` needs to take a slot (without it, it runs the test without
+  // one); not /tmp, no network
+  if (req.runner === "codex") return { argv: [...head, "codex", "exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "--add-dir", heavyStateDir(home), "--add-dir", req.tmpDir, "--skip-git-repo-check", "--ephemeral", ...REVIEWER_ISOLATION.codex.args, "--json", ...(choice.model ? ["-m", choice.model] : []), ...(choice.effort ? ["-c", `model_reasoning_effort="${choice.effort}"`] : []), "-o", req.outFile, "-"], tail: CODEX_TAIL };
+  // Claude Code: dontAsk refuses every tool use the rules do not allow (reading in its working folder still works). It may edit and write
+  // under `_review/tests/` only — not elsewhere in the checkout, such as `.git/config`, which a later git call there would act on —
+  // and the one command it may run is a test in a heavy slot. That test is code the reviewer wrote, so it runs in Claude Code's sandbox
+  // (bubblewrap): it writes in the checkout and in the slots' folder, not its `.git`, not /tmp or home, with
+  // no network, and no command may leave the sandbox. failIfUnavailable: a sandbox that cannot start ends the run instead of running
+  // the test unsandboxed. Its temporary files: Claude Code gives the sandboxed command `claude-<uid>` in the job's TMPDIR as its own
+  // TMPDIR and lets it write there, so `allowWrite` names no more of it. Without bubblewrap the reviewer only reads (`readOnly`, as `requestJob` decides). `--allowedTools` takes every word up to the next flag
+  // real paths: a checkout reached through a link still has its `.git` denied
+  const sandbox = { sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, filesystem: { allowWrite: [realOr(heavyStateDir(home))], denyWrite: [join(realOr(req.cwd), ".git")] }, network: { allowedDomains: [] } } };
+  const may = req.readOnly ? ["--permission-mode", "plan"] : ["--permission-mode", "dontAsk", "--settings", JSON.stringify(sandbox), "--allowedTools", "Bash(ops-kit heavy -- bun test:*)", "Edit(_review/tests/**)", "Write(_review/tests/**)"];
   // stream-json: text output says nothing until the end, and idle-run would cut it
-  return { argv: [...head, "env", ...REVIEWER_ISOLATION.claude.env, "claude", "-p", "--permission-mode", "plan", ...REVIEWER_ISOLATION.claude.args, "--output-format", "stream-json", "--verbose", ...(choice.model ? ["--model", choice.model] : []), ...(choice.effort ? ["--effort", choice.effort] : [])], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
+  return { argv: [...head, "env", ...REVIEWER_ISOLATION.claude.env, "claude", "-p", ...may, ...REVIEWER_ISOLATION.claude.args, "--output-format", "stream-json", "--verbose", ...(choice.model ? ["--model", choice.model] : []), ...(choice.effort ? ["--effort", choice.effort] : [])], tail: ` < "$JOB_PROMPT" | tee "$J/claude.jsonl" | jq -r 'select(.type=="result").result' > "$JOB_OUT"` };
 }
+
+const realOr = (p: string): string => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p; // not made yet
+  }
+};
 
 type UsageEvent = Extract<AgentEvent, { t: "usage" }>;
 
@@ -172,6 +200,11 @@ export function jobUsage(runner: RunnerId, jobDir: string): UsageEvent[] {
   if (!u || typeof u !== "object") return [];
   const model = lines.find((e) => e.type === "system" && typeof e.model === "string")?.model as string | undefined;
   return [{ t: "usage", source: "reported", model, inputTokens: n(u.input_tokens), outputTokens: n(u.output_tokens), cacheReadTokens: n(u.cache_read_input_tokens), cacheWriteTokens: n(u.cache_creation_input_tokens) }];
+}
+
+/** The model a Claude review's events name (the `system` line of `claude.jsonl`, the line `jobUsage` reads it from); undefined when none does. */
+export function claudeJobModel(jobDir: string): string | undefined {
+  return jsonLines(join(jobDir, "claude.jsonl")).find((e) => e.type === "system" && typeof e.model === "string")?.model as string | undefined;
 }
 
 const WRAPPER = (tail: string) => `set -o pipefail; "$@"${tail}; echo $? > "$J/exit.tmp" && mv "$J/exit.tmp" "$J/exit"`;
@@ -327,10 +360,64 @@ export const auditResult = (text: string): JobResult["review"] | null => {
   return first === undefined ? null : { findings: [], firstLine: first.slice(0, MAX_FIRST_LINE) };
 };
 
-/** A review job that passed leaves its findings in its record: its output is read once, from the file `requestJob` named in the job's folder (an audit job: its first line). An output that cannot be read leaves no result; the job's end is not failed for it. */
+/**
+ * The copy of a review's output, run as a short child whose working folder is the folder of the place the request named.
+ * Entering the folder pins it: a link put in place of a folder on the way afterwards changes nothing for the child. The child
+ * reads where that folder really is (`process.cwd()` is the kernel's path of the pinned folder) and refuses one outside the
+ * checkout; it then makes a new file by a relative name (`O_EXCL|O_NOFOLLOW`) and renames it over the output (rename replaces
+ * a link or a hard link; it does not write through it). It removes only the temporary file it made itself.
+ * The child runs outside any sandbox in a folder the reviewer could write to, so Bun is told not to read that folder's
+ * `.env` and is given the daemon's own `bunfig.toml` (a `preload` there is code), as the gate's front of `gh` is.
+ */
+const COPY_CHILD = `
+const fs = require("node:fs");
+const { ROOT, NAME, TMP } = process.env;
+const here = process.cwd();
+if (here !== ROOT && !here.startsWith(ROOT + "/")) { console.error("the folder is not inside the checkout: " + here); process.exit(3); }
+const fd = fs.openSync(TMP, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o644);
+try {
+  try { fs.writeSync(fd, fs.readFileSync(0)); } finally { fs.closeSync(fd); }
+  fs.renameSync(TMP, NAME);
+} catch (e) {
+  try { fs.unlinkSync(TMP); } catch {}
+  throw e;
+}
+`;
+
+/**
+ * A review's output, written by the reviewer to the job's own folder (`$J/out.md`), goes to the place the request named (`out-path`).
+ * The reviewer could write in the checkout until it ended (and a process it left may still run), so the copy is made by
+ * `COPY_CHILD`, which nothing done to the path after it entered the folder can send outside the checkout.
+ * A copy that cannot be made is said in the job's log; it never throws, and the job's end is not failed for it.
+ */
+export function deliverReview(job: Job, jobDir: string): void {
+  const src = join(jobDir, "out.md");
+  try {
+    if (!existsSync(src)) return;
+    const dest = readFileSync(join(jobDir, "out-path"), "utf8").trim();
+    const name = basename(dest);
+    const r = Bun.spawnSync([process.execPath, "--no-env-file", `--config=${join(DAEMON_ROOT, "bunfig.toml")}`, "-e", COPY_CHILD], {
+      cwd: dirname(dest),
+      env: { ROOT: realpathSync(job.cwd), NAME: name, TMP: `.${name}.job${job.id}.tmp` },
+      stdin: readFileSync(src),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    if (r.exitCode !== 0) throw new Error(r.stderr.toString().trim().split("\n").slice(-3).join(" ") || `exit ${r.exitCode}`);
+  } catch (e) {
+    try {
+      writeFileSync(join(jobDir, "log"), `review: the output was not copied from ${src}: ${String((e as Error)?.message ?? e)}\n`, { flag: "a" });
+    } catch {}
+  }
+}
+
+/**
+ * A review job that passed leaves its findings in its record: its output is read once, from the job's own copy (an audit job: its first line),
+ * never from the checkout the reviewer could write to. An output that cannot be read leaves no result; the job's end is not failed for it.
+ */
 function recordReview(deps: JobDeps, job: Job, jobDir: string): void {
   try {
-    const text = readFileSync(readFileSync(join(jobDir, "out-path"), "utf8").trim(), "utf8");
+    const text = readFileSync(join(jobDir, "out.md"), "utf8");
     const result = reviewResult(text) ?? (job.as === "audit" ? auditResult(text) : null);
     if (result) deps.db.setJobResult(job.id, { result: { review: result } });
   } catch {
@@ -403,6 +490,9 @@ function recordGate(deps: JobDeps, job: Job, jobDir: string): void {
 
 function finish(deps: JobDeps, id: number): Job | null {
   const jobDir = join(deps.dir, String(id));
+  // before the end is recorded: a Task that sees the job ended finds its output in place
+  const before = deps.db.getJob(id);
+  if (before?.kind === "review" && before.status === "running") deliverReview(before, jobDir);
   const code = readExit(jobDir);
   const status = code === null ? "aborted" : code === 0 ? "pass" : "fail";
   const log = join(jobDir, "log");
@@ -410,23 +500,83 @@ function finish(deps: JobDeps, id: number): Job | null {
   const endedAt = (deps.now ?? Date.now)();
   const job = deps.db.finishJob(id, { status, exitCode: code, summary, endedAt });
   if (job?.kind === "review" && job.runner) recordUsage(deps, job, jobDir, endedAt);
+  // a Claude review started on the CLI's own model: its events name the model it ran on (Codex's say none, so its record stays null)
+  if (job?.kind === "review" && job.runner === "claude" && job.model === null) {
+    const model = claudeJobModel(jobDir);
+    if (model) deps.db.setJobModel(id, model);
+  }
   if (job?.kind === "review" && status === "pass") recordReview(deps, job, jobDir);
   if (job?.kind === "local-ci") recordCi(deps, job, jobDir);
   if (job?.kind === "tag-ci") recordTagCi(deps, job, jobDir);
   if (job?.kind === "gate") recordGate(deps, job, jobDir);
   pruneQuietly(deps);
+  // the reviewer's TMPDIR, which its sandbox could write in, goes with the job: after the end is recorded, so what the reviewer
+  // left there (a folder it made read-only) cannot keep the review's result from being recorded
+  removeTmp(join(jobDir, "tmp"));
   const ended = job ? deps.db.getJob(id) : null;
   if (ended) deps.onFinish?.(ended);
   return ended;
 }
 
+/** Removes a folder a reviewer wrote in; a folder it left without write permission is made writable first. Best effort. */
+function removeTmp(dir: string): void {
+  const writable = (d: string): void => {
+    chmodSync(d, 0o700);
+    for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) writable(join(d, e.name));
+  };
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    try {
+      writable(dir);
+      rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`[jobs] ${dir}: ${String((e as Error)?.message ?? e)}`);
+    }
+  }
+}
+
 /**
- * The runner that does the attacking-side review of a Task's PR: a runner other than the implementer when the setting is
- * `other`, the implementer's own (a new session) when it is `same`. Null for a runner that reviews nothing.
+ * `finish` for the job's exit and the daemon's start: an error in one job's end is logged and does not stop the other jobs'
+ * recovery or the daemon's start. A job whose end could not be recorded is ended as aborted, so the Task waiting on it does not wait forever.
+ */
+function finishQuietly(deps: JobDeps, id: number): void {
+  // a step after the end was recorded can throw too: the Task is told of the end once, whether `finish` told it or not
+  let told = false;
+  const onFinish = deps.onFinish;
+  try {
+    finish({ ...deps, onFinish: onFinish && ((j) => ((told = true), onFinish(j))) }, id);
+  } catch (e) {
+    const why = String((e as Error)?.message ?? e);
+    console.error(`[jobs] job#${id} end: ${why}`);
+    try {
+      const cur = deps.db.getJob(id);
+      if (!cur || told) return;
+      const ended = cur.status === "running" ? deps.db.finishJob(id, { status: "aborted", exitCode: null, summary: `aborted（終了を記録できませんでした: ${why}）`, endedAt: (deps.now ?? Date.now)() }) : cur;
+      if (ended) onFinish?.(ended);
+    } catch (e2) {
+      console.error(`[jobs] job#${id} end: ${String((e2 as Error)?.message ?? e2)}`);
+    }
+  }
+}
+
+/**
+ * The runner that does the attacking-side review of a Task's PR first: a runner other than the implementer when the setting is
+ * `other`, the implementer's own (a new session) when it is `same`. The other one may stand in when that runner is at its usage limit
+ * (`requestJob` accepts either and does not check the limit, as for `fallback`), so the review does not wait on one runner. Null for a runner that reviews nothing.
  */
 export function attackReviewer(taskRunner: string, setting: "same" | "other"): "claude" | "codex" | null {
   return primaryReviewer(taskRunner, setting);
 }
+
+/** The runner that reads a recheck: the main reviewer's own (a new session) when the recheck setting is `same`, the other one when it is `other`. */
+export function recheckReviewer(primary: "codex" | "claude", setting: "other" | "same"): "codex" | "claude" {
+  if (setting === "same") return primary;
+  return primary === "claude" ? "codex" : "claude";
+}
+
+/** A Task in one of these may still work in its folder: every status but the ended ones. */
+const LIVE_TASK = TaskStatus.options.filter((s) => s !== "done" && s !== "error" && s !== "aborted");
 
 /**
  * Starts a job for a Task: checks the request, records the job and starts it as the daemon's detached child.
@@ -434,7 +584,8 @@ export function attackReviewer(taskRunner: string, setting: "same" | "other"): "
  *
  * A review's runner is the app's to decide: the main reviewer follows from the review setting as it is now and the Task's
  * runner (`primaryReviewer`). A request that names another runner is refused unless it says why (`as`: a usage-limit
- * fallback, a recheck, an audit). The attacking-side review (`as: "attack"`) is the exception: it must name `attackReviewer`'s runner — which runner does the main review is not left to what the Task read earlier.
+ * fallback, an audit). A recheck (`as: "recheck"`) is read by the runner the recheck setting names (`recheckReviewer`): the app
+ * picks it when the request names none, and refuses another one. The attacking-side review (`as: "attack"`) names its runner: `attackReviewer`'s, or the other one standing in when that one is at its usage limit (the caller's reason; the limit is not checked). It is refused for a Task whose runner reviews nothing, where `attackReviewer` names none.
  */
 export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } = {}): Job {
   // `app`: a tag CI run the app asks for itself (the promotion check) has no Task: its checkout must be a registered workspace's.
@@ -454,21 +605,48 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
     const setting = deps.reviewRunner?.() ?? "other";
     const primary = primaryReviewer(taskRunner, setting);
     if (!req.runner && !primary) throw new JobError(`この Task のランナー（${taskRunner}）からは主レビュアーを決められません。--runner codex|claude で名指ししてください`, 400);
-    if (req.as && !req.runner) throw new JobError("as（主レビューでない回の理由）は runner の名指しが要ります", 400);
+    if (req.as && req.as !== "recheck" && !req.runner) throw new JobError("as（主レビューでない回の理由）は runner の名指しが要ります", 400);
     if (req.runner && primary && req.runner !== primary && !req.as) {
       throw new JobError(`設定（レビューのランナー: ${setting}）では、この Task（${taskRunner}）の主レビュアーは ${primary} です。主レビューは --runner ${primary} で頼んでください。主レビュアーでないランナーに頼むのは、理由を --as で名指ししたときだけです（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー）`, 400);
     }
     if (req.as === "attack") {
       const attacker = attackReviewer(taskRunner, setting);
+      // either runner: the other one stands in when attackReviewer's is at its usage limit (runner is required above)
       if (!attacker) throw new JobError(`この Task のランナー（${taskRunner}）では、攻める側のレビューを頼むランナーを決められません`, 400);
-      if (req.runner !== attacker) throw new JobError(`攻める側のレビューは ${attacker} で頼んでください（設定 ${setting}、実装 ${taskRunner}）`, 400);
+    }
+    let rechecker: "codex" | "claude" | null = null;
+    if (req.as === "recheck" && primary) {
+      const recheck = deps.recheckRunner?.() ?? setting;
+      rechecker = recheckReviewer(primary, recheck);
+      if (req.runner && req.runner !== rechecker) throw new JobError(`設定（再チェック・監査のランナー: ${recheck}）では、この Task（${taskRunner}）の再チェックは ${rechecker} です。--runner を省けばアプリが選びます`, 400);
     }
     if (req.as === "recheck") {
       const bad = (req.kinds ?? []).filter((k) => !(RECHECK_KINDS as string[]).includes(k));
       // no kinds is recorded as none (it counts for no kind's pass); a word that is not a kind is a mistake
       if (bad.length) throw new JobError(`kinds に再チェックの種類でない語があります: 知らない種類 ${bad.join(", ")}（${RECHECK_KINDS.join(" / ")}）`, 400);
     } else if (req.kinds?.length) throw new JobError("kinds は as: recheck のときだけ渡します", 400);
-    reviewer = req.runner ?? primary!;
+    // the reviewer may write in its checkout: not in the Task's own working folder, a registered workspace's checkout or the
+    // working tree of any Task not ended (someone's work in progress), nor in a folder under them. Another Task counts by the
+    // working tree that holds its folder (a Task in a package folder protects the whole tree); a folder in no working tree (the
+    // home folder) counts for nothing, so a Task working there does not refuse every review
+    const real = realpathSync(cwd);
+    const live = LIVE_TASK.flatMap((s) => deps.db.listTasksByStatus(s).map((t) => t.cwd)).flatMap((d) => {
+      try {
+        const top = git(realpathSync(d), "rev-parse", "--show-toplevel");
+        return top ? [top] : [];
+      } catch {
+        return [];
+      }
+    });
+    const mine = [task!.cwd, ...deps.db.listWorkspaces().map((w) => w.path), ...live].find((d) => {
+      try {
+        return inside(realpathSync(d), real);
+      } catch {
+        return false;
+      }
+    });
+    if (mine) throw new JobError(`レビューの checkout（cwd）が Task の作業フォルダ・登録した workspace の checkout・終わっていない Task の作業フォルダ（${mine}）か、その中です。レビュアーはそこに書けるので、別の clone か worktree を --cwd で渡してください: ${req.cwd}`, 400);
+    reviewer = req.runner ?? rechecker ?? primary!;
     const prompt = resolve(cwd, req.promptFile);
     if (!existsSync(prompt)) throw new JobError(`promptFile not found: ${req.promptFile}`, 400);
     // the review reads and writes only inside the checkout (`_review/` in cross-runner-review): a path that leads out,
@@ -477,6 +655,9 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
     if (!within(cwd, prompt) || !within(cwd, out)) throw new JobError("promptFile and outFile must be inside cwd", 400);
     files.JOB_PROMPT = prompt;
     files.JOB_OUT = out;
+    // the reviewer writes its tests under `_review/tests/`: a `_review` that leads out of the checkout through a link is refused, as the prompt and output are
+    const review = join(cwd, "_review");
+    if (lstatSync(review, { throwIfNoEntry: false }) && !within(cwd, review)) throw new JobError("_review must be inside cwd", 400);
   }
   if (req.kind === "local-ci" && req.fixtures) {
     if (!isAbsolute(req.fixtures)) throw new JobError(`fixtures must be absolute: ${req.fixtures}`, 400);
@@ -534,6 +715,7 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
     // `--change` judges the app's change and takes no PR number's repository, nor a merge (the local merge is `scripts/local-merge.ts`)
     if (req.change && (req.repo || req.merge)) throw new JobError("変更（change）の判定は --repo と --merge / --merge-stack を取りません（変更のマージは scripts/local-merge.ts）", 400);
     if (req.scope && req.merge) throw new JobError("--scope は判定もマージもしません", 400);
+    if (req.viewpoints && req.merge) throw new JobError("--viewpoints は判定もマージもしません", 400);
   }
   // what the record says the job ran on: the repository (a change the app holds is its workspace's; a gate job for another repository's PR, the one it was asked for) and, for a review or a recheck, the head it reads
   const repo = change ? `local:${ws!.id.toLowerCase()}` : req.kind === "gate" && req.repo ? req.repo.toLowerCase() : repoKeyOf(cwd, ws);
@@ -546,20 +728,30 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
   const head = req.kind === "local-ci" || req.kind === "gate" ? null : req.kind === "tag-ci" ? (req.sha ? (hasTag(req.sha) ? req.sha : null) : newestTag ? git(tagRoot, "rev-list", "-n", "1", newestTag) : null) : git(cwd, "rev-parse", "HEAD");
   if (req.kind === "tag-ci" && !head) throw new JobError(req.sha ? `${req.sha} は ${tagRoot} のタグ（v*）のコミットではありません` : `cwd にタグ（v*）がありません: ${req.cwd}`, 400);
   if (req.kind !== "local-ci" && req.kind !== "gate" && !head) throw new JobError(`cwd の HEAD を読めません: ${req.cwd}`, 400);
-  const resolved: ResolvedJobRequest = req.kind === "review" ? { ...req, runner: reviewer!, cwd, promptFile: files.JOB_PROMPT!, outFile: files.JOB_OUT! } : { ...req, cwd, ...(other ? { other } : {}), ...(req.kind === "recheck" || req.kind === "tag-ci" ? { head: head! } : {}) };
-  const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.kind === "tag-ci" ? 0 : req.pr, runner: reviewer, cwd, startedAt: (deps.now ?? Date.now)(), repo, head, as: req.kind === "review" ? req.as ?? null : null, kinds: req.kind === "review" ? req.kinds ?? [] : req.kind === "recheck" ? [req.recheck] : [] });
-  const jobDir = join(deps.dir, String(job.id));
-  // what the reviewer reads: the Task's instructions (left as written) and the note of the runner that reviews, in the job's folder
-  const prompt = resolved.kind === "review" ? reviewPrompt(readFileSync(resolved.promptFile, "utf8"), resolved.runner) : null;
-  if (prompt !== null) files.JOB_PROMPT = join(jobDir, "prompt.md");
-  const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS, resolved.kind === "review" ? deps.reviewChoice?.(resolved.runner) : undefined);
   // not the Task's: without its mark (the Task's end stops what carries it) and without SWITCHBOARD_SUPERVISED
   // (a Task's variable; local CI's tests fail with it), and without Claude Code's session markers and the OTEL_*
   // destinations, as the Task's own claude gets it (`childEnv`). OPS_KIT_TASK_ID still names the Task to `ops-kit heavy`.
   const env = childEnv(deps.env);
   delete env[TASK_MARK];
   delete env.SWITCHBOARD_SUPERVISED;
-  Object.assign(env, files, workspaceConfigEnv(ws), { J: jobDir, OPS_KIT_TASK_ID: req.taskId });
+  Object.assign(env, files, workspaceConfigEnv(ws), { OPS_KIT_TASK_ID: req.taskId });
+  // a Claude reviewer runs its tests in Claude Code's sandbox, which needs bubblewrap and socat on the job's own PATH; without them Claude Code would run them unsandboxed, so it only reads
+  const readOnly = reviewer === "claude" && !(deps.claudeSandbox ?? ((path: string) => ["bwrap", "socat"].every((b) => Bun.which(b, { PATH: path }) !== null)))(env.PATH ?? "");
+  // the model and effort a review starts with, read once: the job's record keeps what its runner was given (empty = the CLI's own = null)
+  const choice = req.kind === "review" ? deps.reviewChoice?.(reviewer!) : undefined;
+  const job = deps.db.insertJob({ kind: req.kind, taskId: req.taskId, pr: req.kind === "tag-ci" ? 0 : req.pr, runner: reviewer, cwd, startedAt: (deps.now ?? Date.now)(), repo, head, as: req.kind === "review" ? req.as ?? null : null, kinds: req.kind === "review" ? req.kinds ?? [] : req.kind === "recheck" ? [req.recheck] : [], model: choice?.model || null, effort: choice?.effort || null });
+  const jobDir = join(deps.dir, String(job.id));
+  // the reviewer writes its output in the job's own folder, not in the checkout it may write in (`deliverReview` copies it there at the end).
+  // Its TMPDIR is in the job's folder too, not in the checkout: Claude Code makes sockets there, and a checkout's path can be too long
+  // for a socket's address. A real path, as the sandbox's other folders are: the jobs' folder is made first, so the first job's is real too
+  if (req.kind === "review") mkdirSync(deps.dir, { recursive: true });
+  const resolved: ResolvedJobRequest = req.kind === "review" ? { ...req, runner: reviewer!, cwd, promptFile: files.JOB_PROMPT!, outFile: join(jobDir, "out.md"), tmpDir: join(realOr(deps.dir), String(job.id), "tmp"), ...(readOnly ? { readOnly: true as const } : {}) } : { ...req, cwd, ...(other ? { other } : {}), ...(req.kind === "recheck" || req.kind === "tag-ci" ? { head: head! } : {}) };
+  if (resolved.kind === "review") Object.assign(env, { JOB_OUT: resolved.outFile, TMPDIR: resolved.tmpDir });
+  // what the reviewer reads: the Task's instructions (left as written) and the note of the runner that reviews, in the job's folder
+  const prompt = resolved.kind === "review" ? reviewPrompt(readFileSync(resolved.promptFile, "utf8"), resolved.runner, resolved.readOnly) : null;
+  if (prompt !== null) env.JOB_PROMPT = join(jobDir, "prompt.md");
+  const { argv, tail } = deps.command ? deps.command(resolved) : jobCommand(resolved, deps.reviewIdleS, choice, deps.env.HOME || homedir());
+  env.J = jobDir;
   if (req.kind === "gate") {
     // the daemon's own place for its records: what `scripts/merge-gate.ts` reads them at is not the Task's to name. The Task's own
     // addresses and marks are not in this environment (the front of `gh` that stops a merge is the Task shell's, and this run merges)
@@ -580,7 +772,9 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
     if (prompt !== null) writeFileSync(join(jobDir, "prompt.md"), prompt);
     // where a review's output will be, for the job's end to read (a daemon started again has no request to ask)
     if (files.JOB_OUT) writeFileSync(join(jobDir, "out-path"), files.JOB_OUT);
+    if (resolved.kind === "review") mkdirSync(resolved.tmpDir);
     log = openSync(join(jobDir, "log"), "w");
+    if (readOnly) writeSync(log, "review: Claude Code's sandbox cannot start here (bwrap or socat is not on PATH): the reviewer only reads and runs no tests\n");
     proc = Bun.spawn(["bash", "-c", WRAPPER(tail), "job", ...argv], { cwd: req.kind === "gate" ? DAEMON_ROOT : cwd, env, stdin: "ignore", stdout: log, stderr: log, detached: true });
   } catch (e) {
     if (log !== null) closeSync(log);
@@ -591,11 +785,7 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
   deps.db.setJobPid(job.id, proc.pid, (deps.bootId ?? readBootId)());
   proc.unref();
   // a daemon stopping closes its database first: the job stays running and the next start's recoverJobs ends it
-  void proc.exited.then(() => {
-    try {
-      finish(deps, job.id);
-    } catch {}
-  });
+  void proc.exited.then(() => finishQuietly(deps, job.id));
   return { ...job };
 }
 
@@ -617,7 +807,7 @@ export function recoverJobs(deps: JobDeps): void {
   const pollMs = deps.pollMs ?? 5000;
   const watch = (id: number, pid: number) => {
     const t = setTimeout(() => {
-      if (readExit(join(deps.dir, String(id))) !== null || !alive(pid)) finish(deps, id);
+      if (readExit(join(deps.dir, String(id))) !== null || !alive(pid)) finishQuietly(deps, id);
       else watch(id, pid);
     }, pollMs);
     (t as unknown as { unref?: () => void }).unref?.();
@@ -630,7 +820,7 @@ export function recoverJobs(deps: JobDeps): void {
     // a job of another boot is not running whatever its pid is now (a reboot hands pids out again)
     const sameBoot = bootId === null || boot === null || bootId === boot;
     if (readExit(join(deps.dir, String(job.id))) !== null || pid === null || !sameBoot || !alive(pid)) {
-      finish(deps, job.id);
+      finishQuietly(deps, job.id);
       // only a local-ci that is gone left its build to collect; a live one (a restart in the same boot) writes its own result
       if (job.kind === "local-ci") ciLeft = true;
     } else watch(job.id, pid);

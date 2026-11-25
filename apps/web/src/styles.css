@@ -105,6 +105,16 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .row.stuck { background: var(--amber-soft); border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; }
 .row.stuck .t, .main .row.stuck:not(.head) > .t { white-space: normal; display: block; -webkit-line-clamp: unset; overflow-wrap: anywhere; }
 .row.stuck .why { font-size: 12px; color: var(--ink3); }
+/* the stalled queue's notice: first under 要対応 on Home, and on its card in the questions; lines wrap, links stay whole */
+.stall-card { background: var(--amber-soft); border: 1px solid var(--amber); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+.stall-q { font-weight: 600; overflow-wrap: anywhere; }
+.stall-sub { font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
+.stall-rows { margin: 4px 0 8px; }
+.stall-group { font-size: 12px; color: var(--ink3); margin-top: 6px; }
+.stall-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; font-size: 13px; border-top: 1px dashed var(--line); }
+.stall-row .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.stall-row a, .stall-row button.link { white-space: nowrap; font-size: 12px; flex: none; color: var(--acc); text-decoration: underline; padding: 0; border: 0; background: none; }
+.stall-row .badge.stall-head-moved { display: inline-block; margin-left: 4px; padding: 0 5px; background: var(--red); font-family: inherit; font-weight: 500; white-space: nowrap; }
 /* 要対応: a group = the first Task's row, and under it the same-cause line with its 確認済み; 待ち folds below */
 .attn-group { border-bottom: 1px solid var(--line2); }
 .attn-group:last-child { border-bottom: 0; }
@@ -328,6 +338,9 @@ button.copy { font: 400 10px/1.4 var(--mono); padding: 2px 6px; }
 .art-full-bar { display: flex; gap: 8px; padding: 6px 8px; }
 .art-full > :last-child { flex: 1; width: 100%; overflow: auto; border: 0; }
 .terminal-pane { flex: 1; min-height: 0; display: flex; }
+/* On the Task screen the sections under the tabs (the stop list, …) share the column: a floor of its own keeps the terminal
+   from being squeezed into them, and it is not the rows xterm drew, so a shorter window still makes it shorter. */
+.main.task .terminal-pane { min-height: 260px; }
 /* display: flex beats the UA's [hidden] rule — without this the transcript stays visible under the diff / terminal tab */
 .transcript[hidden], .terminal-pane[hidden] { display: none; }
 .terminal { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -443,7 +456,7 @@ label.toggle.off { opacity: .45; cursor: default; }
 /* Feedback stays reachable even when the task list overflows. */
 .rail-list { flex: 1; min-height: 0; overflow-y: auto; }
 .rail .rail-feedback { flex: none; margin-top: 8px; border-top: 1px solid var(--line); }
-.feedback-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.feedback-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
 .feedback-dialog::backdrop { background: #0006; }
 /* 並べて見る: a fork's parent and one fork, two columns; one under the other on a phone */
 .fork-compare { width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
@@ -458,22 +471,28 @@ label.toggle.off { opacity: .45; cursor: default; }
 .fork-reply { flex: 1; min-height: 60px; max-height: 50vh; overflow: auto; overflow-wrap: anywhere; }
 .fork-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 @media (max-width: 767px) { .fork-cols { grid-template-columns: minmax(0, 1fr); } .fork-actions button { min-height: 40px; } }
-.feedback-dialog h2 { margin: 0; font-size: 18px; }
-.feedback-dialog fieldset { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
-.feedback-dialog textarea { display: block; margin: 6px 0 10px; }
-.feedback-dialog .row { flex-wrap: wrap; }
-.feedback-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* the dialog's form is Home's `.compose`, only without a card of its own around it */
+.feedback-dialog .compose { border: 0; padding: 0; background: transparent; }
+.feedback-dialog .compose textarea { box-sizing: border-box; }
+.compose-hint { margin-top: 6px; }
+.compose-capture { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.compose-save { margin-top: 8px; }
+.compose-save > summary { cursor: pointer; font-size: 12px; color: var(--ink2); padding: 4px 0; }
+.compose-save select, .compose-save input, .compose-save textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; }
+.compose-save button { margin-top: 6px; }
+.compose-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.compose > .row { flex-wrap: wrap; }
 .backlog pre.wrap { white-space: pre-wrap; }
 .backlog .backlog-report { margin: 0 0 8px 16px; }
 .backlog .sync[data-sync="conflict"], .backlog .sync[data-sync="error"] { color: var(--amber); }
 .backlog .backlog-syncline { margin: 0 0 4px 16px; overflow-wrap: anywhere; }
-.backlog .backlog-editor, .backlog .backlog-new { margin: 0 0 8px 16px; }
+.backlog .backlog-editor { margin: 0 0 8px 16px; }
 .backlog .backlog-sync .backlog-editor { margin: 0 0 4px 16px; overflow-wrap: anywhere; }
 .backlog .backlog-sync .backlog-edit { color: var(--ink); font-size: 13px; }
 .backlog .backlog-edit { display: flex; flex-direction: column; gap: 6px; max-width: 100%; }
-.backlog .backlog-edit input, .backlog .backlog-edit textarea, .backlog .backlog-new input, .backlog .backlog-new textarea { width: 100%; box-sizing: border-box; }
+.backlog .backlog-edit input, .backlog .backlog-edit textarea { width: 100%; box-sizing: border-box; }
 .backlog .backlog-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-@media (max-width: 600px) { .backlog .backlog-sides { grid-template-columns: 1fr; } .backlog .backlog-editor, .backlog .backlog-new { margin-left: 0; } }
+@media (max-width: 600px) { .backlog .backlog-sides { grid-template-columns: 1fr; } .backlog .backlog-editor { margin-left: 0; } }
 .backlog [data-state="stopped"] { color: var(--amber); }
 .backlog .backlog-ws { margin-left: 0; flex-wrap: wrap; margin-top: 6px; }
 /* a row's facts wrap under its title when the width runs out: kept on one line they widened the page past the screen */
@@ -542,6 +561,16 @@ label.toggle.off { opacity: .45; cursor: default; }
 .backlog .queue-btn { font-size: 12px; padding: 3px 10px; white-space: nowrap; }
 .backlog .queue-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; border: 1px dashed var(--line); border-radius: 8px; padding: 6px 8px; margin: 4px 0 8px; }
 .backlog .queue-ended { margin-top: 8px; }
+/* the row's box sits in front of the title; the bar sticks to the foot of the screen while anything is chosen */
+.backlog .select-box { width: 18px; height: 18px; margin: 0 6px 0 0; vertical-align: middle; flex: none; }
+.backlog .select-bar { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.12); }
+.backlog .select-bar .select-reason { flex: 1 1 100%; margin: 0; overflow-wrap: anywhere; }
+dialog.bundle-confirm { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+dialog.bundle-confirm::backdrop { background: #0006; }
+dialog.bundle-confirm h2 { margin: 0 0 8px; font-size: 16px; }
+.bundle-confirm-list { margin: 0 0 8px; padding-left: 1.2em; overflow-wrap: anywhere; }
+.bundle-confirm-warn { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--warn, #c60); border-radius: 6px; overflow-wrap: anywhere; }
+.bundle-confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 /* ≡ is dragged with the mouse or a finger (no scrolling from it), the row follows it */
 .backlog .queue-handle { cursor: grab; touch-action: none; user-select: none; width: 1.2em; text-align: center; font-size: 18px; color: var(--ink3); flex: none; }
 .backlog .queue-row.dragging { position: relative; z-index: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
@@ -552,6 +581,7 @@ label.toggle.off { opacity: .45; cursor: default; }
   .backlog .queue-row[data-outside] .queue-main { grid-template-columns: minmax(0, 1fr); }
   .backlog .queue-actions { grid-column: 1 / -1; }
   .backlog .queue-btn { min-height: 36px; }
+  .bundle-confirm-actions button { min-height: 36px; }
 }
 .backlog .backlog-tile-detail { margin-top: 4px; min-width: 0; overflow-wrap: anywhere; }
 .backlog .backlog-tile .row .m { white-space: normal; }
@@ -650,19 +680,23 @@ label.toggle.off { opacity: .45; cursor: default; }
   .body, .body:has(.side) { display: flex; flex-direction: column-reverse; }
   .body > .side { display: none; }
   .rail { flex: none; flex-direction: row; border-right: 0; border-top: 1px solid var(--line); padding: 6px 8px; }
-  .rail .rail-list, .rail .rail-feedback { display: none; }
+  .rail .rail-list { display: none; }
+  .rail .rail-feedback { flex: none; margin: 0; border-top: 0; min-height: 44px; } /* 「＋ 指示」 is the third of the lower band's buttons */
   .term-keys { display: flex; gap: 4px; overflow-x: auto; flex: none; }
   .term-keys button { flex: none; min-width: 40px; min-height: 40px; }
   .terminal-host { min-height: 160px; }
+  /* A Task's terminal is a fixed 40svh (the phone's keyboard covers about 44% and does not shrink the layout), so the row of keys under it stays above the keyboard. */
+  .main.task .terminal-pane { flex: none; }
+  .main.task .terminal-host { flex: none; height: 40svh; }
   .rail-approvals, .rail-tasks { margin: 0; flex: 1; min-height: 44px; }
   .ask-facts { grid-template-columns: minmax(0, 1fr); }
   .ask-fact dd { margin-bottom: 4px; }
   .rail .rail-tasks { display: flex; }
   /* 一覧 open: the rail takes the body, its list above the two buttons. */
   .body:has(> .rail.open) > :not(.rail) { display: none; }
-  .rail.open { flex: 1; min-height: 0; display: grid; grid-template: 1fr auto / 1fr 1fr; gap: 0 8px; }
-  .rail.open .rail-list { display: block; grid-area: 1 / 1 / 2 / 3; overflow-y: auto; min-height: 0; }
-  .rail.open .rail-approvals, .rail.open .rail-tasks { grid-row: 2; }
+  .rail.open { flex: 1; min-height: 0; display: grid; grid-template: 1fr auto / 1fr 1fr auto; gap: 0 8px; }
+  .rail.open .rail-list { display: block; grid-area: 1 / 1 / 2 / 4; overflow-y: auto; min-height: 0; }
+  .rail.open .rail-approvals, .rail.open .rail-tasks, .rail.open .rail-feedback { grid-row: 2; }
   .rail.open .rail-list .it { min-height: 44px; }
   .main { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
   /* The task screen: the question card stacks its buttons under the text, the composer puts its buttons under the
@@ -712,7 +746,8 @@ label.toggle.off { opacity: .45; cursor: default; }
   .compose-details > .runners > label:not(.toggle) { min-width: 0; flex: 1 1 100%; }
   .compose-details > .runners > label:not(.toggle) > input { width: 100%; min-width: 0; }
   .compose label.toggle, .settings label.toggle { white-space: normal; }
-  .compose > .row > button { flex: 1; min-height: 44px; white-space: nowrap; }
+  .compose > .row > button { flex: 1 1 auto; min-height: 44px; white-space: nowrap; padding-left: 6px; padding-right: 6px; }
+  .feedback-dialog { width: calc(100vw - 16px); padding: 8px; }
   /* Knowledge: the list, the note and its details one under another, with the page as the one scroll (a scroll
      inside a scroll is hard to move with a finger); a long line already scrolls inside the note (`overflow: auto`). */
   .knowledge { grid-template-columns: 1fr; }
@@ -728,6 +763,8 @@ label.toggle.off { opacity: .45; cursor: default; }
   .backlog .backlog-item { justify-content: flex-start; column-gap: 12px; row-gap: 2px; }
   .backlog .backlog-item .t { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .backlog .backlog-item > button:last-child { margin-left: auto; }
+  /* a ticked row keeps its title beside the tick and the opener: the title gives up the room the tick takes */
+  .backlog .backlog-listrow > .row.backlog-item > .select-box ~ .t { flex-basis: 16em; }
   .schedules .fields { grid-template-columns: 1fr; }
   .schedules .fields > * { min-width: 0; }
   .schedules .fields select, .schedules .fields input { width: 100%; min-width: 0; }

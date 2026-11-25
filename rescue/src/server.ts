@@ -481,7 +481,9 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
           if (body.ifNoRestart === true) {
             // The caller (the daemon's automatic promotion) wants a switch that does not stop its tasks: say no before any build when this one would restart.
             const sha = typeof body.expectSha === "string" ? body.expectSha : await resolveCommit(ctx.repo, commit).catch(() => null);
-            if (!sha || !(await switchesWithoutRestart(ctx, sha))) return Response.json({ error: "this release needs a restart", restart: true }, { status: 409 });
+            const quiet = sha ? await switchesWithoutRestart(ctx, sha) : { ok: false, files: [] as string[] };
+            // the first few files that need the restart (the daemon records them with the refusal); none when it could not compare
+            if (!quiet.ok) return Response.json({ error: "this release needs a restart", restart: true, files: quiet.files.slice(0, 5), fileCount: quiet.files.length }, { status: 409 });
             // Tasks run while this builds and checks its candidate: only inside one of the machine's heavy-process slots.
             // None free (another heavy job runs, or the free memory is under the floor): said now, before anything is built
             if (busy) return Response.json({ error: `busy: ${busy}` }, { status: 409 });

@@ -65,9 +65,14 @@ describe("screens-audit", () => {
   });
 
   test("screens: every header tab and the Backlog's three layouts; the Task only when there is one", () => {
-    expect(screens("task_1").map((s) => s.name)).toEqual(["home", "task", "ledger", "insights", "backlog-list", "backlog-board", "backlog-queue", "resources", "schedules", "approvals", "settings"]);
+    expect(screens("task_1").map((s) => s.name)).toEqual(["home", "task", "ledger", "insights", "backlog-list", "backlog-board", "backlog-queue", "backlog-list-selected", "backlog-queue-selected", "backlog-bundle-confirm", "resources", "schedules", "approvals", "settings"]);
     expect(screens(null).map((s) => s.name)).not.toContain("task");
     expect(screens(null).find((s) => s.name === "backlog-queue")).toEqual({ name: "backlog-queue", path: "/backlog", layout: "queue" });
+    // the selected states open on the layout they select in, and only they have something to run before the measuring
+    const prepared = screens(null).filter((s) => s.prepare);
+    expect(prepared.map((s) => [s.name, s.layout])).toEqual([["backlog-list-selected", "list"], ["backlog-queue-selected", "queue"], ["backlog-bundle-confirm", "list"]]);
+    expect(prepared.map((s) => s.prepare!.includes("[data-select-bundle]"))).toEqual([false, false, true]);
+    expect(prepared.every((s) => !s.prepare!.includes("data-bundle-start"))).toBe(true);
   });
 
   test("frameCount pages through with 60 px shown twice, at least one, at most the cap", () => {

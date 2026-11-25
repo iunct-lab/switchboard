@@ -29,6 +29,23 @@ export const ciSteps: Step[] = [
   // An issue number in a comment or a test's name of the code that goes public (the publicSync range) fails: the public
   // side cannot open it, so the reason is written in words. A number as a value (a string, a code span) is not a hit.
   { name: "no issue numbers in code comments", run: "bun ops-kit/src/cli.ts issue-refs" },
+  // main, for the two steps that compare with it: file sizes (the ceilings of STILL_OVER against the base's list) and the perf
+  // steps below (the bundle and the ceilings against main's tip). Before file sizes, so that Actions' shallow checkout has
+  // origin/main by then. A PR's local CI drops this step with the perf ones (withoutPerf in scripts/local-ci.ts): it gives file
+  // sizes the default branch's tip it fetched (FILE_SIZE_BASE_REF), and off the host that ref's list (FILE_SIZE_BASE_LIST).
+  // --depth=1 only in Actions' shallow checkout: in local-ci's worktree it would make the developer's clone shallow
+  {
+    name: "fetch main",
+    // off the host the build has no credentials (PERF_ENV=offload, which the offload script exports): the compared tag came as a tree
+    // (PERF_BASE_TREE), or could not be unpacked and perf goes uncompared; either way nothing is fetched and the build goes on
+    // (perf is a record and a warning). The offload script runs git init and adds an origin with no credentials, so the
+    // "not a git work tree" line below does not catch it and a fetch of a private repo would exit 128
+    run: `if [ -n "\${PERF_BASE_TREE:-}" ]; then echo "PERF_BASE_TREE is given: main is not fetched"; exit 0; fi
+if [ "\${PERF_ENV:-}" = offload ]; then echo "off the host (PERF_ENV=offload): main is not fetched"; exit 0; fi
+if ! git rev-parse --git-dir >/dev/null 2>&1; then echo "not a git work tree: main is not fetched"; exit 0; fi
+if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi
+git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`, // the tag CI compares perf (PERF_BASE_REF) and file sizes (FILE_SIZE_BASE_REF) with the tag before, not this tip
+  },
   // A file of the product's code (packages/core/src, packages/protocol/src, apps/web/src) over 1,000 lines, or a test
   // file there over 2,000, fails: one feature's change stays in that feature's file. The files still over are listed in the script.
   { name: "file sizes", run: "bun scripts/file-size.ts" },
@@ -41,21 +58,8 @@ export const ciSteps: Step[] = [
   // perf-bench measures this build; bun test does not depend on it
   { name: "bun run --cwd apps/web build", run: "bun run --cwd apps/web build" },
   // perf ratchet: the counts of the four journeys against scripts/perf-budget.json, and the bundle against main's
-  // tip built in a worktree next to the checkout. check also compares the ceilings with main's, so main is fetched. 5 runs: the medians move by the bands perf-ratchet allows, a single
+  // tip built in a worktree next to the checkout. check also compares the ceilings with main's (main is fetched before file sizes). 5 runs: the medians move by the bands perf-ratchet allows, a single
   // run by more. Chrome is on ubuntu-latest; perf-bench finds it.
-  // --depth=1 only in Actions' shallow checkout: in local-ci's worktree it would make the developer's clone shallow
-  {
-    name: "fetch main",
-    // off the host the build has no credentials (PERF_ENV=offload, which the offload script exports): the compared tag came as a tree
-    // (PERF_BASE_TREE), or could not be unpacked and perf goes uncompared; either way nothing is fetched and the build goes on
-    // (perf is a record and a warning). The offload script runs git init and adds an origin with no credentials, so the
-    // "not a git work tree" line below does not catch it and a fetch of a private repo would exit 128
-    run: `if [ -n "\${PERF_BASE_TREE:-}" ]; then echo "PERF_BASE_TREE is given: main is not fetched"; exit 0; fi
-if [ "\${PERF_ENV:-}" = offload ]; then echo "off the host (PERF_ENV=offload): main is not fetched"; exit 0; fi
-if ! git rev-parse --git-dir >/dev/null 2>&1; then echo "not a git work tree: main is not fetched"; exit 0; fi
-if [ "$(git rev-parse --is-shallow-repository)" = true ]; then depth=--depth=1; else depth=; fi
-git fetch $depth origin +refs/heads/main:refs/remotes/origin/main`, // the tag CI compares perf with the tag before (PERF_BASE_REF), not this tip
-  },
   // perf-bench shows Chrome only Noto Sans + Noto Sans CJK (the same text size everywhere); ubuntu-latest has neither
   {
     name: "Noto fonts for perf-bench",

@@ -1,18 +1,24 @@
 import { msgs } from "../i18n.ts";
 
-/** The Backlog's bundle section and the line shown while a bundle holds the daemon: `components/BundleSection.tsx`, `bundle.ts`. */
+/** The Backlog's bundle button and confirmation, and the line shown while a bundle holds the daemon: `components/BundleSection.tsx`, `bundle.ts`. */
 export const bundle = msgs({
-  sectionTitle: { ja: "まとめて入れる（複数の PBI を 1 本の枝で）", en: "Put in together (several PBIs on one branch)" },
-  sectionHeld: { ja: "束の作業中は始められません", en: "cannot start while a bundle is under way" },
-  hint: {
-    ja: "重なりで後回しが続く PBI の束や構造の変更を、1 つの Task が 1 本の枝で並行に実装し、レビュー（安全に関わるまとまりは別ランナーが攻める側から）を通してスタックで入れます。始めると、有効な定期実行を全部止め、入れ切るまで昇格を止めます。",
-    en: "A Task implements PBIs that keep being deferred by overlap, or a structural change, in parallel on one branch, passes review (another runner reads the safety-marked groups as an attacker) and puts them in as a stack. Starting stops every enabled schedule and holds promotion until it is all in.",
+  button: { ja: "1 本の枝でまとめて実装…", en: "Implement together on one branch…" },
+  confirmTitle: { ja: "1 本の枝でまとめて実装", en: "Implement together on one branch" },
+  confirmWarn: { ja: "始めると、有効な定期実行を全部止め、入れ切るまで昇格を止めます。", en: "Starting stops every enabled schedule and holds promotion until it is all in." },
+  confirmNote: {
+    ja: "向かないもの（判断待ち・保留・外の関門）は Task が外して理由を PBI に書きます。",
+    en: "Ones that do not fit (waiting for a decision, on hold, behind an outside gate) are left out by the Task, with the reason written on the PBI.",
   },
-  inputLabel: { ja: "PBI の番号", en: "PBI numbers" },
-  inputHint: {
-    ja: "PBI の番号を 2 つ以上（カンマか空白で区切る）。向かないもの（判断待ち・保留・外の関門）は Task が外して理由を PBI に書きます。",
-    en: "Two or more PBI numbers (separated by commas or spaces). Ones that do not fit (waiting for a decision, on hold, behind an outside gate) are left out by the Task, with the reason written on the PBI.",
+  cancel: { ja: "やめる", en: "Cancel" },
+  gateOther: {
+    ja: "まとめて実装は、Switchboard 自身の PBI を 2 件以上選んだときだけ使えます（{workspace} の #{n} が入っています）",
+    en: "Implementing together works only with two or more PBIs of Switchboard itself ({workspace} #{n} is in the selection)",
   },
+  gateOne: {
+    ja: "まとめて実装は、Switchboard 自身の PBI を 2 件以上選んだときだけ使えます（1 件だけ選んでいます）",
+    en: "Implementing together works only with two or more PBIs of Switchboard itself (only one is selected)",
+  },
+  gateHeld: { ja: "束の作業中は始められません", en: "Cannot start while a bundle is under way" },
   start: { ja: "まとめて始める", en: "Start the bundle" },
   startFailed: { ja: "束を始められませんでした: {error}", en: "Could not start the bundle: {error}" },
   holdLine: {

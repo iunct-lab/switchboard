@@ -5,8 +5,10 @@ import { personWait, type Workspace, type AnswerPolicy, type Ask, type AskAnswer
 import { subjectsOf } from "../approval.ts";
 import { unusableWorkspaces } from "../workspace-clone.ts";
 import { grantHeadKey, parseMergeGrants, type GrantHeads } from "../merge-grants.ts";
+import { readQueue } from "../backlog-queue.ts";
+import { queueStallAsk, staleGrant } from "../queue-stall.ts";
 import { DECISION_HEADING, proceedAnswerLine, stoppedAnswerLine } from "../backlog-comments.ts";
-import { storedEnds, storedProceedRefusal } from "../backlog-stored.ts";
+import { readStoredRecords, storedEnds, storedProceedRefusal } from "../backlog-stored.ts";
 import { ACTION_FOR_STAGE } from "../backlog-item.ts";
 import { answerStoredConfirmation, answerStoredDecision, BacklogEditError, holdStoredDecision, setAnswerHeads } from "../backlog-edit.ts";
 import { overlapLine, isOverlapped } from "../backlog-overlap.ts";
@@ -115,7 +117,46 @@ export const currentNotices = (sc: Pick<ServerContext, "db" | "opts" | "NOTICES_
   return noticed.asks;
 };
 
-export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" | "policyEnv" | "tasks" | "failed" | "mockupsOf" | "approvalPendingOf" | "tieAnswers" | "headMisses" | "batchAnswers" | "currentNotices">): Promise<{ backlog: Backlog; asks: Ask[]; batches: AskBatch[] }> => {
+/**
+ * The notice of a stalled backlog queue (queue-stall.ts), with the PBIs and links read from the stored records of the
+ * workspaces it names, and whether a stop asks again for a PR the person allowed its Task (`staleGrant`: the person's
+ * grant to that Task is on record with a head, so its head has moved). None while the queue is not stalled, and
+ * none when a record cannot be read (as the other notices).
+ */
+const queueStallNotice = (sc: Pick<ServerContext, "db" | "settings" | "queueRunning">, asks: Ask[], now: number): Ask[] => {
+  try {
+    const queue = readQueue(sc.db);
+    if (!queue.enabled || !queue.stall) return [];
+    const stored = new Map<string, ReturnType<typeof readStoredRecords>>();
+    const recordsOf = (id: string) => {
+      if (!stored.has(id)) {
+        const w = sc.db.getWorkspace(id);
+        stored.set(id, w ? readStoredRecords(sc.db, w) : null);
+      }
+      return stored.get(id)!;
+    };
+    const issueOf = (w: string, n: number) => recordsOf(w)?.issues.find((i) => i.number === n) ?? null;
+    const pbiOf = (w: string, n: number) => {
+      const i = issueOf(w, n);
+      return i ? { number: i.number, title: i.title, url: i.url } : null;
+    };
+    const refUrl = (w: string, ref: string) => {
+      const m = /^(?:(PR|Task) )?#(\d+)/.exec(ref);
+      if (!m) return null;
+      if (m[1] !== "PR") return issueOf(w, Number(m[2]))?.url ?? null;
+      const source = sc.db.getWorkspaceBacklogSource(w);
+      return source?.service === "github" ? `https://${source.host}/${source.repository}/pull/${m[2]}` : null;
+    };
+    const staleOf = (a: Ask) => staleGrant(a, a.workspace ? (sc.db.getWorkspaceBacklogSource(a.workspace.id)?.repository ?? null) : null, (taskId, repo, kind, target) => sc.db.lastOwnerGrant(taskId, repo, kind, target));
+    const ask = queueStallAsk({ queue, running: sc.queueRunning(queue), limitMs: sc.settings().quotaAndResume.queueStallMs, now, asks, pbiOf, refUrl, staleGrant: staleOf, workspaceName: (id) => sc.db.getWorkspace(id)?.name ?? null });
+    return ask ? [ask] : [];
+  } catch (e) {
+    console.warn(`queue: could not read the stall: ${String((e as Error).message ?? e)}`);
+    return [];
+  }
+};
+
+export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" | "policyEnv" | "tasks" | "failed" | "mockupsOf" | "approvalPendingOf" | "tieAnswers" | "headMisses" | "batchAnswers" | "currentNotices" | "settings" | "queueRunning">): Promise<{ backlog: Backlog; asks: Ask[]; batches: AskBatch[] }> => {
   const now = Date.now();
   const b = await sc.readBacklog(false);
   const live = new Map([...sc.db.listTasksUpdatedSince(now - ASK_HISTORY_MS), ...sc.db.listTasksWithResume(), ...sc.db.listTasksByStatus("waiting"), ...sc.db.listTasksByStatus("running"), ...sc.db.listTasksWithWaits()].map((t) => [t.id, t]));
@@ -159,7 +200,7 @@ export const currentAsks = async (sc: Pick<ServerContext, "readBacklog" | "db" |
   // the same stop records as above, each Task's own
   const batches = sc.batchAnswers.decorate(approvalBatches([...live.values()].map((t) => ({ task: t, records: recordsOf(t.id) })), asks));
   // the daemon's notices last: one of them reads the batches
-  return { backlog: b, asks: rankAsks(dedupeAsks([...asks, ...sc.currentNotices(now, batches, asks), ...configAsks(sc, now)]), b.items), batches };
+  return { backlog: b, asks: rankAsks(dedupeAsks([...asks, ...sc.currentNotices(now, batches, asks), ...queueStallNotice(sc, asks, now), ...configAsks(sc, now)]), b.items), batches };
 };
 
 /** A stage Task's permission stop with a tool approval waiting is answered by that approval, not refused. */

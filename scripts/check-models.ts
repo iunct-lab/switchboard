@@ -3,7 +3,8 @@
  * installed CLIs carry. The tables are local data, never a vendor API and never an API key (
  * Switchboard holds no key): claude — the model table embedded in the installed executable; codex — `codex debug models
  * --bundled`, the table shipped in the binary (without `--bundled` it refreshes over the network, so the flag is always
- * given). The one network read is the version check against the public npm registry (below), still with no key.
+ * given). Nothing is read over the network. How far behind the installed CLIs are is the daemon's to say (it takes
+ * the vendors' releases, docs/design/cli-update.md), not this script's.
  *
  * Prints one line per runner and finding:
  *   <runner> stale: <ids>   — listed in the UI but not in the CLI's table (an old or mistyped id)
@@ -14,10 +15,6 @@
  *   unpriced (ledger): ...       — the claude / codex model names the ledger could not price, split into new (in the CLI's
  *                                  table: the price table lags behind) and unknown (not in it: a wrong name?). Report only:
  *                                  past ledger rows cannot be fixed, so they do not change the exit code
- *   <runner> outdated: <installed> → <latest> — the installed CLI is behind the npm registry's latest (an old CLI
- *                                  carries an old table, so a new model shows as "no drift"; it happened with Haiku 5.5). Drift (exit 1)
- *   <runner> version: <installed>（最新） / <runner> latest: 分からない（<why>） — the registry could not be read: report
- *                                  only, the exit code is the table comparison's. The CLI is never updated here.
  * Exit 0 = no drift / 1 = drift / 2 = cannot tell (a CLI is missing, or its table read as empty = its format changed).
  *
  * --file-request (the daily schedule, docs/design/check-models.md): on exit 1 also file a request Issue (type:request)
@@ -127,59 +124,10 @@ export function classifyUnpriced(names: { runner: Runner; model: string }[], cat
   return out;
 }
 
-/** The npm package each CLI ships as; its `latest` dist-tag is the newest version. */
-export const PACKAGES: Record<Runner, string> = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex" };
-
-/** Where the installed and the newest version of each CLI come from. */
-export interface VersionReaders {
-  /** The installed CLI's version (`x.y.z`); null when the CLI is not on PATH. Throws when `--version` fails or shows no version. */
-  installed(runner: Runner): Promise<string | null>;
-  /** The newest published version; throws when the registry cannot be read (no network, a changed response). */
-  latest(runner: Runner): Promise<string>;
-}
-
-const SEMVER = /\b(\d+)\.(\d+)\.(\d+)\b/;
-
-/** -1 / 0 / 1 as `a` is older than / the same as / newer than `b` (numeric major.minor.patch; anything after is ignored). */
-export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => {
-    const m = SEMVER.exec(v);
-    if (!m) throw new Error(`not a version: ${v}`);
-    return [Number(m[1]), Number(m[2]), Number(m[3])];
-  };
-  const [x, y] = [parse(a), parse(b)];
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! < y[i]! ? -1 : 1;
-  return 0;
-}
-
-/** The host's CLIs (`<bin> --version`) and the npm registry (one GET per runner, 10 s; no key, nothing cached). */
-export function hostVersions(path = process.env.PATH ?? ""): VersionReaders {
-  return {
-    async installed(runner) {
-      const bin = Bun.which(runner, { PATH: path });
-      if (!bin) return null;
-      const p = Bun.spawn([bin, "--version"], { stdout: "pipe", stderr: "pipe" });
-      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-      if (code !== 0) throw new Error(`${runner} --version exited ${code}: ${err.trim().slice(0, 80)}`);
-      const m = SEMVER.exec(out);
-      if (!m) throw new Error(`${runner} --version shows no version: ${out.trim().slice(0, 80)}`);
-      return m[0];
-    },
-    async latest(runner) {
-      const r = await fetch(`https://registry.npmjs.org/${PACKAGES[runner]}/latest`, { signal: AbortSignal.timeout(10_000) });
-      if (!r.ok) throw new Error(`registry.npmjs.org answered ${r.status}`);
-      const v = ((await r.json()) as { version?: unknown }).version;
-      if (typeof v !== "string" || !SEMVER.test(v)) throw new Error("registry.npmjs.org: no version in the answer");
-      return v;
-    },
-  };
-}
-
 const HOME = process.env.SWITCHBOARD_HOME || join(homedir(), ".switchboard");
 
 export interface Sources {
   read: Readers;
-  versions: VersionReaders;
   /** pricing.json's table; the settings screen's price rows are laid over it from dbPath. */
   pricing: PricingTable;
   /** switchboard.db, whose settings row (model list, prices) and ledger are read. */
@@ -188,11 +136,11 @@ export interface Sources {
 
 export function hostSources(): Sources {
   const pricing = loadPricing([join(HOME, "pricing.json"), join(import.meta.dir, "..", "packages", "core", "config", "pricing.json")]).table;
-  return { read: hostReaders(), versions: hostVersions(), pricing, dbPath: join(HOME, "switchboard.db") };
+  return { read: hostReaders(), pricing, dbPath: join(HOME, "switchboard.db") };
 }
 
 /** One kind of drift for one runner. The order of KINDS is the order in a request's title. */
-export const KINDS = ["stale", "unseen", "価格表未整備", "outdated"] as const;
+export const KINDS = ["stale", "unseen", "価格表未整備"] as const;
 export interface Finding {
   runner: Runner;
   kind: (typeof KINDS)[number];
@@ -259,31 +207,6 @@ export async function checkModels(src: Sources = hostSources()): Promise<Report>
     if (!stale.length && !unseen.length) lines.push(`${runner}: ズレなし（${catalog.length} 件）`);
     else if (code === 0) code = 1;
   }
-  // The CLI's version against the registry's latest: an old CLI carries an old table, which the comparison
-  // above cannot see. Only when the CLI is there; the registry not answering is reported, not counted.
-  for (const runner of ["claude", "codex"] as Runner[]) {
-    let installed: string | null;
-    try {
-      installed = await src.versions.installed(runner);
-    } catch (e) {
-      lines.push(`${runner} version: 分からない（${(e as Error).message}）`);
-      continue;
-    }
-    if (installed === null) continue;
-    let latest: string;
-    try {
-      latest = await src.versions.latest(runner);
-    } catch (e) {
-      lines.push(`${runner} latest: 分からない（${(e as Error).message}）`);
-      continue;
-    }
-    if (compareVersions(installed, latest) < 0) {
-      lines.push(`${runner} outdated: ${installed} → ${latest}`);
-      // the id is the installed version only: the title then stays the same while the CLI stays, however many versions npm publishes meanwhile (one open request, not one per release)
-      findings.push({ runner, kind: "outdated", ids: [installed] });
-      if (code === 0) code = 1;
-    } else lines.push(`${runner} version: ${installed}（最新）`);
-  }
   // A row stays 'unpriced' after its model is priced (nothing re-prices the ledger): only names still unpriced count.
   const stillUnpriced = unpricedLedgerNames(src.dbPath).filter((n) => !resolveModel(pricing, n.model, n.runner));
   const ledger = classifyUnpriced(stillUnpriced, catalogs);
@@ -319,7 +242,6 @@ export function requestFor(report: Report, source: { date: string; versions: str
     "- `stale`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で古い / 誤った ID を外す・直す（保存していないランナーの一覧は同梱の `CLAUDE_MODELS` / `CODEX_MODELS`。設定画面で直すとその一覧が保存される）",
     "- `unseen`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で「CLI の表を読む」を押し、候補を「足す」か「載せない」を選ぶ（PR は要らない。次の実行で設定を読む）",
     "- `価格表未整備`: 設定画面の「モデルの価格」で公式の価格を入れる（`pricing.json` の PR は要らない。次の実行で設定の価格を読む）",
-    "- `outdated`: CLI を更新する（Switchboard は更新しない。更新した次の実行で `version: …（最新）` になる）",
     "",
     "## 出典",
     "- 誰の言葉: 定期の検査",

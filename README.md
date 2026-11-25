@@ -133,7 +133,7 @@ The shortest path from an install to a Ready PBI, on one repository of your own,
 
 1. Install it as in "Use it" above and open `http://localhost:47831/`.
 2. Open Settings. In the Workspace card under `追加`, choose `ホストにあるディレクトリを追加`, enter the path of your repository, tick `GitHub と連携しない` and press `追加`. Issues and the Project are kept inside Switchboard, so you need no GitHub Project and no repository variables.
-3. Open Backlog and pick your repository's tab, press `要望を登録` (its `登録先` must name your repository; on the `すべて` tab it starts on Switchboard itself), write the request and press `登録`. A Task on your runner files the request, writes the PBI and its Tasks, and the PBI shows up under Ready.
+3. Press `＋ 指示` (from Backlog with your repository's tab picked, it starts on that repository; on the `すべて` tab it starts on `自動`, which files in Switchboard itself), choose your repository in the form, write the request and press `バックログに積む`. A Task on your runner files the request, writes the PBI and its Tasks, and the PBI shows up under Ready.
 4. If that Task stops on the way, the row waits in its stage and its button starts the stage again: `PBI にする` on a request under `要望のまま`, `Task に分解` on a PBI under `分解待ち`. Each one also runs on to Ready.
 
 Your repository needs no `ops.config.json`; without one the choices come from the kit's template `ops-kit/template/ops.config.json`. Install a runner and log in to it first (the list below). A runner that is not logged in gets a banner at the top of every screen with its login button (`Claude アカウントでログイン`, `ログインする`).

@@ -8,7 +8,7 @@ import { CODEX_MODELS } from "../packages/adapters/codex/src/index.ts";
 import { Database } from "bun:sqlite";
 import { loadPricing } from "../packages/core/src/pricing.ts";
 import { hostReaders, SHIPPED_HIDDEN_MODELS, type Readers } from "../packages/core/src/model-catalog.ts";
-import { checkModels, listedModels, classifyUnpriced, compareModels, compareVersions, hiddenModels, hostVersions, KINDS, requestFor, settingsPrices, unpricedLedgerNames, unpricedListed, type Report, type VersionReaders } from "./check-models";
+import { checkModels, listedModels, classifyUnpriced, compareModels, hiddenModels, KINDS, requestFor, settingsPrices, unpricedLedgerNames, unpricedListed, type Report } from "./check-models";
 import { alreadyFiled } from "./file-request";
 
 // An excerpt of codex-cli 0.159.2's `debug models --bundled`.
@@ -27,10 +27,8 @@ const KNOWN = {
   codex: [...CODEX_MODELS.map((m) => m.value), ...SHIPPED_HIDDEN_MODELS.codex],
 };
 const PRICING = loadPricing([join(import.meta.dir, "..", "packages", "core", "config", "pricing.json")]).table;
-/** No CLI on PATH as far as the version check is concerned: nothing is compared, no line. */
-const NO_VERSIONS: VersionReaders = { installed: async () => null, latest: async () => { throw new Error("not asked"); } };
-const sources = (read: Readers, pricing = PRICING, versions: VersionReaders = NO_VERSIONS) => ({ read, versions, pricing, dbPath: join(tmpdir(), "switchboard.check-models.no-such.db") });
-/** Tables that match the UI's lists exactly: no drift of their own, so a test of the version check sees only its lines. */
+const sources = (read: Readers, pricing = PRICING) => ({ read, pricing, dbPath: join(tmpdir(), "switchboard.check-models.no-such.db") });
+/** Tables that match the UI's lists exactly: no drift of their own, so a test sees only the drift it sets up. */
 const CLEAN: Readers = {
   claude: async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(","),
   codex: async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) }),
@@ -127,7 +125,7 @@ describe("check-models", () => {
       db.close();
       const claude = async () => KNOWN.claude.map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
       const codex = async () => JSON.stringify({ models: KNOWN.codex.filter((id) => id !== CODEX_MODELS[0]!.value).map((slug) => ({ slug, visibility: "list" })) });
-      const r = await checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      const r = await checkModels({ read: { claude, codex }, pricing: PRICING, dbPath });
       expect(r.findings).toContainEqual({ runner: "claude", kind: "stale", ids: ["claude-x"] });
       expect(r.findings).toContainEqual({ runner: "claude", kind: "価格表未整備", ids: ["claude-x"] });
       expect(r.findings).toContainEqual({ runner: "codex", kind: "stale", ids: [CODEX_MODELS[0]!.value] }); // the bundled list
@@ -147,7 +145,7 @@ describe("check-models", () => {
       expect(hiddenModels(dbPath)).toEqual(SHIPPED_HIDDEN_MODELS); // no row
       const claude = async () => [...KNOWN.claude, "claude-opus-6"].map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
       const codex = async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) });
-      const run = () => checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      const run = () => checkModels({ read: { claude, codex }, pricing: PRICING, dbPath });
       expect((await run()).findings).toEqual([{ runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]);
       // 載せない on the settings screen: the saved list replaces the shipped one for that runner only
       db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ hiddenModels: { claude: ["claude-opus-6"] } }));
@@ -166,7 +164,7 @@ describe("check-models", () => {
       const db = new Database(dbPath);
       db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, json TEXT NOT NULL)");
       db.query("INSERT INTO settings VALUES ('settings', ?)").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] } }));
-      const run = () => checkModels({ read: CLEAN, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      const run = () => checkModels({ read: CLEAN, pricing: PRICING, dbPath });
       expect(settingsPrices(dbPath)).toEqual({});
       expect((await run()).findings).toContainEqual({ runner: "claude", kind: "価格表未整備", ids: ["claude-x"] });
       db.query("UPDATE settings SET json = ? WHERE key = 'settings'").run(JSON.stringify({ models: { claude: [{ value: "claude-x", label: "X" }] }, prices: { "claude-x": { input: 1, output: 2 } } }));
@@ -189,7 +187,7 @@ describe("check-models", () => {
       db.close();
       const claude = async () => [...KNOWN.claude, "claude-opus-6"].map((id) => `{id:"${id}",family:"x",display_name:"X"}`).join(",");
       const codex = async () => JSON.stringify({ models: KNOWN.codex.map((slug) => ({ slug, visibility: "list" })) });
-      const r = await checkModels({ read: { claude, codex }, versions: NO_VERSIONS, pricing: PRICING, dbPath });
+      const r = await checkModels({ read: { claude, codex }, pricing: PRICING, dbPath });
       expect(r.lines).toContain("unpriced (ledger) new（価格表未整備）: claude claude-opus-6");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -199,50 +197,11 @@ describe("check-models", () => {
   const SOURCE = { date: "2026-09-30", versions: ["claude 2.1.285 (Claude Code)", "codex 0.159.2"] };
   const drift = (findings: Report["findings"]): Report => ({ lines: ["codex unseen: gpt-6.1-sol"], code: 1, findings });
 
-  test("compareVersions: numeric major.minor.patch, anything after ignored", () => {
-    expect(compareVersions("2.1.289", "2.1.293")).toBe(-1);
-    expect(compareVersions("2.1.293", "2.1.289")).toBe(1);
-    expect(compareVersions("0.162.1", "0.162.1")).toBe(0);
-    expect(compareVersions("2.1.296 (Claude Code)", "2.1.296")).toBe(0);
-    expect(compareVersions("codex-cli 0.9.10", "0.10.0")).toBe(-1); // numeric, not lexical
-    expect(compareVersions("3.0.0", "2.99.99")).toBe(1);
-    expect(() => compareVersions("latest", "1.0.0")).toThrow("not a version");
-  });
-
-  test("outdated: an installed CLI behind the registry's latest is drift (exit 1) with a finding; the same or newer is a version line", async () => {
-    const versions = (installed: Record<string, string | null>, latest: Record<string, string>): VersionReaders => ({ installed: async (r) => installed[r] ?? null, latest: async (r) => latest[r]! });
-    const r = await checkModels(sources(CLEAN, PRICING, versions({ claude: "2.1.289", codex: "0.162.1" }, { claude: "2.1.293", codex: "0.162.1" })));
-    expect(r.lines).toContain("claude outdated: 2.1.289 → 2.1.293");
-    expect(r.lines).toContain("codex version: 0.162.1（最新）");
-    expect(r.findings).toContainEqual({ runner: "claude", kind: "outdated", ids: ["2.1.289"] }); // the installed version only: one request while the CLI stays, whatever npm publishes
-    expect(r.code).toBe(1);
-    // a CLI not on PATH for the version check: no line, nothing asked of the registry
-    const none = await checkModels(sources(CLEAN, PRICING, versions({ claude: null, codex: null }, {})));
-    expect(none.lines.filter((l) => /version|outdated|latest/.test(l))).toEqual([]);
-    expect(none.code).toBe(0);
-    // the table comparison's result stands: both up to date and the tables clean → 0; an exit 2 stays 2 with an outdated CLI
-    expect((await checkModels(sources(CLEAN, PRICING, versions({ claude: "2.1.296", codex: "0.162.1" }, { claude: "2.1.296", codex: "0.162.1" })))).code).toBe(0);
-    expect((await checkModels(sources({ claude: async () => null, codex: async () => CODEX_JSON }, PRICING, versions({ claude: "1.0.0", codex: "0.1.0" }, { claude: "2.0.0", codex: "0.1.0" })))).code).toBe(2);
-  });
-
-  test("latest unknown: the registry not answering, or --version failing, is reported and changes neither the exit code nor the findings", async () => {
-    const versions: VersionReaders = {
-      installed: async (r) => (r === "claude" ? "2.1.289" : (() => { throw new Error("codex --version exited 9"); })()),
-      latest: async () => { throw new Error("registry.npmjs.org answered 503"); },
-    };
-    const r = await checkModels(sources(CLEAN, PRICING, versions));
-    expect(r.lines).toContain("claude latest: 分からない（registry.npmjs.org answered 503）");
-    expect(r.lines).toContain("codex version: 分からない（codex --version exited 9）");
-    expect(r.lines.some((l) => l.includes("outdated"))).toBe(false);
-    expect(r.code).toBe(0);
-    expect(r.findings).toEqual([]);
-  });
-
-  test("outdated is the last kind in a request title, and the body says the CLI is updated by hand", () => {
-    expect(KINDS).toEqual(["stale", "unseen", "価格表未整備", "outdated"]);
-    const req = requestFor(drift([{ runner: "claude", kind: "outdated", ids: ["2.1.289"] }, { runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]), SOURCE)!;
-    expect(req.title).toBe("モデル一覧のズレ: claude unseen claude-opus-6 / claude outdated 2.1.289");
-    expect(req.body).toContain("`outdated`: CLI を更新する");
+  test("the request's fixes are the kinds the script reports, all on the settings screen; none is a CLI update", () => {
+    expect(KINDS).toEqual(["stale", "unseen", "価格表未整備"]);
+    const req = requestFor(drift([{ runner: "claude", kind: "unseen", ids: ["claude-opus-6"] }]), SOURCE)!;
+    expect(req.body.split("\n").filter((l) => l.startsWith("- `")).map((l) => l.slice(3, l.indexOf("`", 3)))).toEqual([...KINDS]);
+    expect(req.body).not.toContain("CLI を更新");
     expect(req.body).toContain("`unseen`: 設定画面の「ランナー」のまとまりの、そのランナーの「モデルの選択肢」で「CLI の表を読む」を押し"); // the fix is on the screen, no REVIEWED
     expect(req.body).not.toContain("REVIEWED");
   });
@@ -306,7 +265,7 @@ describe("check-models", () => {
       chmodSync(join(dir, "codex"), 0o755);
     };
 
-    test("no network: the tables are read and compared without it; only the version check asks the registry, and says 分からない when it fails", async () => {
+    test("no network: the tables are read and compared without it, whether they drift or not", async () => {
       const real = globalThis.fetch;
       let called = 0;
       globalThis.fetch = Object.assign(() => {
@@ -316,41 +275,16 @@ describe("check-models", () => {
       try {
         install(KNOWN.claude, KNOWN.codex);
         expect(await checkModels(sources(hostReaders(dir)))).toEqual({ lines: ["claude: ズレなし（22 件）", "codex: ズレなし（9 件）", "unpriced (ledger): なし"], code: 0, findings: [] });
-        expect(called).toBe(0); // the table comparison alone never touches the network
         install(KNOWN.claude.filter((id) => id !== "claude-opus-5-5"), [...KNOWN.codex, "gpt-7"]);
-        expect(await checkModels(sources(hostReaders(dir), PRICING, hostVersions(dir)))).toEqual({
-          lines: ["claude stale: claude-opus-5-5", "codex unseen: gpt-7", "claude latest: 分からない（no network in check-models）", "codex latest: 分からない（no network in check-models）", "unpriced (ledger): なし"],
+        expect(await checkModels(sources(hostReaders(dir)))).toEqual({
+          lines: ["claude stale: claude-opus-5-5", "codex unseen: gpt-7", "unpriced (ledger): なし"],
           code: 1,
           findings: [
             { runner: "claude", kind: "stale", ids: ["claude-opus-5-5"] },
             { runner: "codex", kind: "unseen", ids: ["gpt-7"] },
           ],
         });
-        expect(called).toBe(2); // one GET per runner, after `--version` answered
-      } finally {
-        globalThis.fetch = real;
-      }
-    });
-
-    test("hostVersions reads `--version` of the CLIs on PATH, and the registry's latest through fetch", async () => {
-      install(KNOWN.claude, KNOWN.codex);
-      const v = hostVersions(dir);
-      expect(await v.installed("claude")).toBe("2.1.296");
-      expect(await v.installed("codex")).toBe("0.162.1");
-      expect(await hostVersions(join(dir, "no-such-dir")).installed("claude")).toBeNull();
-      const real = globalThis.fetch;
-      const urls: string[] = [];
-      globalThis.fetch = Object.assign(async (url: string | URL | Request) => {
-        urls.push(String(url));
-        return new Response(JSON.stringify({ version: "9.9.9" }), { status: 200 });
-      }, real) as typeof fetch;
-      try {
-        expect(await v.latest("claude")).toBe("9.9.9");
-        expect(urls).toEqual(["https://registry.npmjs.org/@anthropic-ai/claude-code/latest"]);
-        globalThis.fetch = Object.assign(async () => new Response("down", { status: 503 }), real) as typeof fetch;
-        await expect(v.latest("codex")).rejects.toThrow("registry.npmjs.org answered 503");
-        globalThis.fetch = Object.assign(async () => new Response(JSON.stringify({}), { status: 200 }), real) as typeof fetch;
-        await expect(v.latest("codex")).rejects.toThrow("no version in the answer");
+        expect(called).toBe(0);
       } finally {
         globalThis.fetch = real;
       }

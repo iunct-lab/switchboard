@@ -2,7 +2,7 @@
 // 件数・課金の分数・重複・続いた呼び出しを数える。手で回すときだけ使い、デーモンは読まない。額は出さない。
 
 import { fileLog, offloadRecordPath, type OffloadRecord } from "./offload-record.ts";
-import type { OffloadSize } from "./local-ci.ts";
+import type { OffloadSize } from "./local-ci-offload.ts";
 
 export interface BuildTime { start: number; end?: number; size: OffloadSize }
 export interface UsageRow { caller: string; builds: number; minutes: Record<OffloadSize, number>; dupBuilds: number; dupMinutes: number; soon: number; running: number }

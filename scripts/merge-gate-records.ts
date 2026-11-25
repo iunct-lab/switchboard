@@ -78,8 +78,8 @@ function newestCi(jobs: MergeRecordJob[], pr: number) {
 /**
  * Whether the newest recorded local CI run of the stack's top `top` (the PR itself when alone) passed, with the steps the
  * person confirmed, at a head the PR's commits are in (`covers`), and with no shared file the PR touches moved on the
- * base since (`moved`); else why not. A run that left no record (from a terminal, or whose head or base moved before it
- * posted) is not counted. The base's tip is not compared: a conflict with another PR is mergeStateStatus's, a fault of two
+ * base since (`moved`); else why not. A run that left no record (from a terminal, or whose head moved before it posted) is
+ * not counted. The base's tip is not compared: a conflict with another PR is mergeStateStatus's, a fault of two
  * PRs together the tag CI's.
  */
 export async function ciOf(jobs: MergeRecordJob[], top: number, covers: Covers, moved: (passHead: string, passBase: string) => Promise<string[]>, held?: HeldSettings): Promise<{ pass: boolean; note?: string }> {

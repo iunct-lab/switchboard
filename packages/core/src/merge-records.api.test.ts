@@ -176,7 +176,13 @@ describe("the merge verdict reads the jobs the app ran", () => {
       for (let i = 0; i < 200 && c.db.getJob(id)!.status === "running"; i++) await Bun.sleep(25);
       return c.db.getJob(id)!;
     };
-    const review = (over: object = {}) => ask({ kind: "review", promptFile: "prompt.md", outFile: "_review/out.md", ...over });
+    // a review reads a checkout of its own (a worktree), not the Task's folder: the reviewer may write in it
+    const clone = join(h, "review");
+    git("worktree", "add", "-q", "--detach", clone);
+    if (config) writeFileSync(join(clone, "ops.config.json"), JSON.stringify(config));
+    mkdirSync(join(clone, "_review"));
+    writeFileSync(join(clone, "prompt.md"), "review it\n");
+    const review = (over: object = {}) => ask({ kind: "review", cwd: clone, promptFile: "prompt.md", outFile: "_review/out.md", ...over });
     const records = (repoName: string, prs: number[], at?: string) => mergeRecords({ MERGE_RECORDS_URL: b, MERGE_RECORDS_TOKEN_FILE: join(h, "client-token") }, { repo: repoName, prs, ...(at ? { head: at } : {}) });
     const jobs = (repoName: string, prs: number[]) => records(repoName, prs).then((r) => r.jobs);
     return { b, c, h, repo, head, ask, review, jobs, records, stop: async () => { await c.stop(); rmSync(h, { recursive: true, force: true }); } };

@@ -329,11 +329,11 @@ test("a web-only promotion is told apart from the core: two lines only when the 
   expect(runningParts({ managed: true, running: a, current: a })).toBeNull();
   expect(runningParts({ managed: true, running: null, current: b })).toBeNull();
   expect(runningParts({ managed: true, current: b })).toBeNull();
-  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: null, history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "Web UI と既定の設定: bbbbbbb（再起動なしで入った）"]);
+  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: null, history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "再起動なしで入った版: bbbbbbb（デーモンは起動した版のまま）"]);
   // sb-rescue busy (another promotion, or between a switch and its restart): both lines stay, without the "no restart" note
-  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: "promote", history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "Web UI と既定の設定: bbbbbbb"]);
+  expect(releasePanel({ managed: true, running: a, current: b, ahead: 0, busy: "promote", history: [] })!.lines.slice(0, 2).map((l) => l.text)).toEqual(["core（デーモン）: aaaaaaa", "入っている版: bbbbbbb"]);
   expect(releasePanel({ managed: true, running: a, current: a, ahead: 0, busy: null, history: [] })!.lines[0]!.text).toBe("動いている版: aaaaaaa");
-  expect(describeRelease({ ...entry, action: "promote-web", ok: true, reason: "checked" })).toEqual({ text: "画面と既定の設定を再起動なしで昇格: bbbbbbb — checked", ok: true });
+  expect(describeRelease({ ...entry, action: "promote-web", ok: true, reason: "checked" })).toEqual({ text: "再起動なしで昇格: bbbbbbb — checked", ok: true });
 });
 
 describe("drainBanner", () => {

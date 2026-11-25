@@ -59,6 +59,15 @@ export class GrantQueries extends AskAnswerQueries {
     return (this.sqlite.query(`SELECT task_id, target, head, at FROM task_grant_heads WHERE repo = ? AND kind IN ('answer', 'merge') AND by = ? AND head != '' AND target IN (${marks}) ORDER BY at`).all(repo.toLowerCase(), OWNER, ...prs) as Array<{ task_id: string; target: number; head: string; at: number }>).map((r) => ({ taskId: r.task_id, target: r.target, head: r.head, at: r.at }));
   }
 
+  /**
+   * The person's newest grant (`by = 'owner'`) answering `kind` for a PR of a repository given to the task, recorded with
+   * a head (a grant answers only the task it was given to, for that head, and a merge grant answers an answer question
+   * too: `mergeGrantAt`): when, and the head. null = none.
+   */
+  lastOwnerGrant(taskId: string, repo: string, kind: string, target: number): { at: number; head: string } | null {
+    return (this.sqlite.query("SELECT at, head FROM task_grants WHERE task_id = ? AND repo = ? AND kind IN (?, ?) AND target = ? AND by = ? AND head != '' ORDER BY at DESC LIMIT 1").get(taskId, repo.toLowerCase(), kind, kind === "answer" ? "merge" : kind, target, OWNER) as { at: number; head: string } | null) ?? null;
+  }
+
   hasMergeGrant(taskId: string, repo: string, kind: string, target: number, head?: string): boolean {
     return this.mergeGrantAt(taskId, repo, kind, target, head) !== null;
   }

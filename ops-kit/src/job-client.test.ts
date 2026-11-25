@@ -69,6 +69,10 @@ describe("ops-kit job", () => {
     expect(alone.code).toBe(1);
     expect(alone.err).toContain("--runner");
     expect(alone.calls).toEqual([]);
+    // a recheck leaves the runner to the app (the recheck setting)
+    const recheck = await run(["request", "review", "12", "--as", "recheck", ...files], () => job({ kind: "review", runner: "claude" }));
+    expect(recheck.code).toBe(0);
+    expect(recheck.calls[0]!.body).toEqual({ kind: "review", taskId: "task_1", pr: 12, as: "recheck", cwd: "/tmp/clone", promptFile: "/tmp/clone/p.md", outFile: "/tmp/clone/o.md" });
   });
 
   test("request review --as attack sends as in the body and needs --runner", async () => {
@@ -142,10 +146,10 @@ describe("ops-kit job", () => {
     expect(down.err).toContain("届きません");
   });
 
-  test("list prints a line per job", async () => {
-    const r = await run(["list"], () => Response.json([{ id: 7, kind: "review", taskId: "task_1", pr: 12, runner: "codex", status: "fail", exitCode: 1 }]));
+  test("list prints a line per job, a review's with the model / effort it ran with", async () => {
+    const r = await run(["list"], () => Response.json([{ id: 7, kind: "review", taskId: "task_1", pr: 12, runner: "codex", status: "fail", exitCode: 1, as: null, model: "m1", effort: null }, { id: 8, kind: "local-ci", taskId: "task_1", pr: 12, runner: null, status: "pass", exitCode: 0, as: null, model: null, effort: null }]));
     expect(r.code).toBe(0);
     expect(r.calls[0]).toMatchObject({ url: "http://127.0.0.1:4777/api/jobs", method: "GET" });
-    expect(r.out).toBe("job#7\treview(codex)\tPR #12\tfail(1)\ttask_1");
+    expect(r.out).toBe("job#7\treview(codex m1 / -)\tPR #12\tfail(1)\ttask_1\njob#8\tlocal-ci\tPR #12\tpass(0)\ttask_1");
   });
 });

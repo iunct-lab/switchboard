@@ -371,14 +371,14 @@ const withPolicy = (a: Ask, subject: PolicySubject | null, confirmHit: ApprovalR
 
 /** The answer fields of a built question: what it takes, and nothing in the way or going on yet. */
 const noPolicy: AskPolicy = { scopes: [], note: null, defaults: null, applied: null, previous: null };
-export const unanswered = { questions: [] as AskQuestion[], grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], waiting: [] as Ask["waiting"], priority: null, lastReply: null };
+export const unanswered = { questions: [] as AskQuestion[], grants: [] as Array<string | null>, grant: null, answers: [] as AskAnswerKind[], mockups: [] as Artifact[], place: null, blockers: [] as AskBlocker[], resume: null, subject: null, policy: noPolicy, unblocks: [] as Ask["unblocks"], waiting: [] as Ask["waiting"], priority: null, lastReply: null, stall: null };
 /** Fills `answers` once the rest is known. */
 const withAnswers = (a: Ask): Ask => ({ ...a, answers: answersOf(a) });
 
 const issueUrl = (i: BacklogItem, n: number) => i.url.replace(/\d+$/, String(n));
 
 /** The fields every question of a backlog item shares. */
-const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "questions" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "waiting" | "priority" | "lastReply"> => ({
+const base = (i: BacklogItem): Pick<Ask, "workspace" | "pbi" | "issue" | "task" | "choices" | "questions" | "grants" | "grant" | "recommendation" | "conditions" | "answers" | "mockups" | "place" | "blockers" | "resume" | "subject" | "policy" | "unblocks" | "waiting" | "priority" | "lastReply" | "stall"> => ({
   ...unanswered,
   workspace: { id: i.workspaceId, name: i.workspaceName },
   pbi: { number: i.number, title: i.title, url: i.url },

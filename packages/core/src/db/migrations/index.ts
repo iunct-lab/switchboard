@@ -56,6 +56,9 @@ import { migration as m0054 } from "./0054-stage-auto.ts";
 import { migration as m0055 } from "./0055-stage-auto-history.ts";
 import { migration as m0056 } from "./0056-job-facts.ts";
 import { migration as m0057 } from "./0057-task-grant-heads.ts";
+import { migration as m0058 } from "./0058-backlog-queue-stall.ts";
+import { migration as m0059 } from "./0059-job-model.ts";
+import { migration as m0060 } from "./0060-promotion-decisions.ts";
 
 /**
  * Every migration, in the order `migrate` runs them: the order they were written in. A new one is a new file with the next
@@ -67,5 +70,6 @@ export const MIGRATIONS: readonly Migration[] = [
   m0013, m0014, m0015, m0016, m0017, m0018, m0019, m0020, m0021, m0022, m0023, m0024,
   m0025, m0026, m0027, m0028, m0029, m0030, m0031, m0032, m0033, m0034, m0035, m0036,
   m0037, m0038, m0039, m0040, m0041, m0042, m0043, m0044, m0045, m0046, m0047, m0048,
-  m0049, m0050, m0051, m0052, m0053, m0054, m0055, m0056, m0057,
+  m0049, m0050, m0051, m0052, m0053, m0054, m0055, m0056, m0057, m0058, m0059,
+  m0060,
 ];

@@ -376,8 +376,26 @@ if (MODE_BROWSER) {
       await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail");
       await press(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Backlog')`, "Backlog");
       await until(() => evaluate(`document.querySelectorAll('.backlog section[data-stage]').length === 5 && !document.querySelector('.backlog .head .hint')?.textContent.includes('読み込み中')`), "the list");
-      // the new Issue form is drawn once the workspaces' own request is back, which can be after the list (a run failed on it)
-      await until(() => evaluate(`!!document.querySelector('details.backlog-new')`), "the new Issue form");
+      await until(() => evaluate(`!!document.querySelector('.rail-feedback')`), "the ＋ 指示 button");
+    };
+    // the new Issue form lives in the 指示 dialog: ＋ 指示 → 詳細 → 自分で書いて保存 (it is drawn once the workspaces' own request is back)
+    const newForm = `document.querySelector('dialog.feedback-dialog[open] details.compose-save')`;
+    const wsSelect = `${newForm}.querySelectorAll('select')[0]`;
+    const kindSelect = `${newForm}.querySelectorAll('select')[1]`;
+    const titleOf = `${newForm}.querySelector('input')`;
+    const bodyOf = `${newForm}.querySelector('textarea')`;
+    const openNew = async () => {
+      if (!(await evaluate(`!!document.querySelector('dialog.feedback-dialog[open]')`))) await press(`document.querySelector('.rail-feedback')`, "＋ 指示");
+      await until(() => evaluate(`!!document.querySelector('dialog.feedback-dialog[open] details.compose-details')`), "the 指示 dialog");
+      const details = `document.querySelector('dialog.feedback-dialog[open] details.compose-details')`;
+      if (!(await evaluate(`${details}.open`))) await press(`${details}.querySelector('summary')`, "詳細");
+      await until(() => evaluate(`!!${newForm}`), "自分で書いて保存");
+      if (!(await evaluate(`${newForm}.open`))) await press(`${newForm}.querySelector('summary')`, "自分で書いて保存を開く");
+      await until(() => evaluate(`${newForm}.open`), "the new Issue form is open");
+    };
+    const closeNew = async () => {
+      if (await evaluate(`!!document.querySelector('dialog.feedback-dialog[open]')`)) await press(button(`document.querySelector('dialog.feedback-dialog[open]')`, "やめる"), "やめる");
+      await until(() => evaluate(`!document.querySelector('dialog.feedback-dialog[open]')`), "the 指示 dialog closes");
     };
     // an Issue only on the sync line sits under the folded 同期 line: open it as a person would
     const unfold = async (n: number) => {
@@ -420,11 +438,11 @@ if (MODE_BROWSER) {
     await fill(`${editor(13)}.querySelectorAll('textarea')[1]`, "画面からのコメント");
     await press(button(editor(13), "コメントを保存"), "コメントを保存");
     await until(async () => (await detail(13)).comments.some((x) => x.body === "画面からのコメント"), "the comment is kept");
-    await press(button(`document.querySelector('details.backlog-new')`, "手元に保存"), "新しい Issue").catch(() => undefined);
-    await press(`document.querySelector('details.backlog-new summary')`, "新しい Issue を開く");
-    await fill(`document.querySelector('details.backlog-new input')`, "PBI: 画面で作った");
-    await press(button(`document.querySelector('details.backlog-new')`, "手元に保存"), "手元に保存");
+    await openNew();
+    await fill(titleOf, "PBI: 画面で作った");
+    await press(button(newForm, "手元に保存"), "手元に保存");
     await until(async () => (await text(`document.querySelector('.backlog-sync')`)).includes("番号なし"), "the new Issue is listed without a number");
+    await closeNew(); // the dialog is modal: the page under it is pressed with it closed
     await press(`(${cardOf(12)}).querySelector('details.decision summary')`, "判断待ちを開く");
     await fill(`${cardOf(12)}.querySelector('textarea')`, "画面から B で");
     await press(button(cardOf(12), "回答する"), "回答する");
@@ -577,16 +595,7 @@ if (MODE_BROWSER) {
     await fetch(`${base}/api/backlog?refresh=1`);
     await until(async () => (await api("GET", `/api/backlog/21?workspaceId=${wsA}`)).status === 200, "#21 is read");
     await open();
-    const newForm = `document.querySelector('details.backlog-new')`;
-    const wsSelect = `${newForm}.querySelectorAll('select')[0]`;
-    const kindSelect = `${newForm}.querySelectorAll('select')[1]`;
-    const titleOf = `${newForm}.querySelector('input')`;
-    const bodyOf = `${newForm}.querySelector('textarea')`;
     const valueOf = (find: string) => evaluate(`(${find}).value`) as Promise<string>;
-    const openNew = async () => {
-      if (!(await evaluate(`${newForm}.open`))) await press(`${newForm}.querySelector('summary')`, "新しい Issue を開く");
-      await until(() => evaluate(`${newForm}.open`), "the new Issue form is open");
-    };
     const draftsWith = (needle: string) => evaluate(`Object.keys(localStorage).filter(k => k.startsWith('switchboard.backlog.text.new:') && localStorage.getItem(k).includes(${JSON.stringify(needle)}))`) as Promise<string[]>;
     await openNew();
 
@@ -684,14 +693,19 @@ if (MODE_BROWSER) {
     // 4j. the workspace chosen above the list is where a new Issue goes, also after the form was opened on another
     await open();
     const wsButton = (pick: string) => `[...document.querySelectorAll('.backlog-ws button')].find(b => ${pick})`;
+    // the dialog is modal, so the narrowing is done with it closed; the next opening takes the workspace shown
     await press(wsButton(`b.textContent.trim().startsWith('second')`), "second の絞り込み（フォームを開く前）");
     await openNew();
     await until(async () => (await valueOf(wsSelect)) === wsB, "a form opened after choosing B is for B");
+    await closeNew();
     await press(wsButton(`!b.textContent.trim().startsWith('すべて') && !b.textContent.trim().startsWith('second')`), "A の絞り込み");
+    await openNew();
     await until(async () => (await valueOf(wsSelect)) === wsA, "the form is for the workspace shown (A)");
+    await closeNew();
     await press(wsButton(`b.textContent.trim().startsWith('second')`), "second の絞り込み");
-    await until(async () => (await valueOf(wsSelect)) === wsB, "the new Issue form follows the workspace shown above (B), after it was opened on A");
-    check("the form follows the workspace shown above", (await valueOf(wsSelect)) === wsB, await valueOf(wsSelect));
+    await openNew();
+    await until(async () => (await valueOf(wsSelect)) === wsB, "the new Issue form takes the workspace shown above (B)");
+    check("the form takes the workspace shown above", (await valueOf(wsSelect)) === wsB, await valueOf(wsSelect));
     await fill(titleOf, "要望: B に作る");
     const createdOnB = await hold("POST", "/api/backlog");
     await press(button(newForm, "手元に保存"), "手元に保存 (B)");

@@ -139,7 +139,7 @@ export interface SkillSyncOptions {
   runner?: string;
   /** The review setting now (default `other`). */
   review?: "same" | "other";
-  /** The recheck and audit setting now (default `other`). */
+  /** The recheck and audit setting now (unset = the review setting). */
   recheck?: "same" | "other";
   /** Where the backlog of the repository at `root` is kept (default `github`); asked for the Task's repository and for the meta checkout. */
   backlog?: (root: string) => "github" | "switchboard";
@@ -148,7 +148,7 @@ export interface SkillSyncOptions {
 }
 
 export function syncSkills(opts: SkillSyncOptions): SkillSyncResult {
-  const { metaPath, cwd, runner, review = "other", recheck = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
+  const { metaPath, cwd, runner, review = "other", recheck = review, backlog = () => "github" as const, savedConfig = () => "" } = opts;
   const result: SkillSyncResult = { linked: [], unchanged: [], removed: [], skipped: [] };
   const top = git(cwd, "rev-parse", "--show-toplevel");
   if (top === null) return result;
@@ -252,7 +252,7 @@ export function syncSkills(opts: SkillSyncOptions): SkillSyncResult {
  * of Switchboard's. It throws when the source cannot be rendered — the copies are then not verified.
  */
 export function skillCopiesCurrent(opts: SkillSyncOptions): boolean {
-  const { metaPath, cwd, runner, review = "other", recheck = "other", backlog = () => "github" as const, savedConfig = () => "" } = opts;
+  const { metaPath, cwd, runner, review = "other", recheck = review, backlog = () => "github" as const, savedConfig = () => "" } = opts;
   const top = git(cwd, "rev-parse", "--show-toplevel");
   if (top === null) return true;
   const root = realpathSync(top);

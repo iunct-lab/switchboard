@@ -82,7 +82,8 @@ const adapter: RunnerAdapter = {
   },
 };
 // Releases: the meta checkout is tagged v0.1.0 and a fake sb-rescue runs that commit, so no promotion waits
-// until the last step tags v0.2.0.
+// until the last step tags v0.2.0. The fake checkout has no scripts/tag-ci.ts, so the tag CI answers `pass` through the server's `tagCi`
+// option (the one the promotion tests use) instead of the app asking for a job it cannot start.
 const repo = join(home, "app");
 mkdirSync(repo);
 // a stage start reads the candidate from the meta checkout (`ops-kit/processes/p0-pipeline.md`), as the backlog tests give their fake one (api-test-harness.ts's withProcesses)
@@ -105,7 +106,7 @@ const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(hom
 let projectUnreadable = false;
 const imports = importing(sending(gh), () => openPulls);
 const gated: GhRunner = async (args, cwd) => (projectUnreadable && cwd === libDir && args.some((a) => a.includes("ProjectV2FieldCommon{ name dataType }")) ? { code: 0, stdout: '{"data":{"repositoryOwner":{"projectV2":null}}}', stderr: "" } : imports(args, cwd));
-const core = await startServer(cfg, [adapter, { ...adapter, id: "codex" }], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: gated });
+const core = await startServer(cfg, [adapter, { ...adapter, id: "codex" }], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: gated, tagCi: async () => "pass" });
 const base = `http://127.0.0.1:${core.server.port}`;
 await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: libDir, name: "lib" }) });
 await fetch(`${base}/api/backlog?refresh=1`); // both workspaces imported before the screen first reads what is stored
@@ -275,11 +276,16 @@ try {
   await click("再読込");
   await until(() => graphqlCalls > before, "再読込 asks GitHub again");
 
-  await click("要望を登録");
+  // the header card holds no new-Issue form and no 要望を登録: a request is written in the 指示 dialog (＋ 指示)
+  const headerCard = await evaluate(`(() => { const c = document.querySelector('main.backlog > section.card:first-of-type'); return { found: !!c, newForms: c ? c.querySelectorAll('details.backlog-new').length : -1, fileRequest: c ? [...c.querySelectorAll('button')].filter(b => b.textContent.trim() === '要望を登録').length : -1 }; })()`) as { found: boolean; newForms: number; fileRequest: number };
+  assert(headerCard.found && headerCard.newForms === 0 && headerCard.fileRequest === 0, `header card: ${JSON.stringify(headerCard)}`);
+  await click("＋ 指示");
   await until(() => evaluate(`!!document.querySelector('dialog.feedback-dialog[open]')`), "feedback dialog");
   const feedbackOpened = true;
-  // the dialog's own: `#307`'s row has a 閉じる too
-  await press(`[...document.querySelectorAll('dialog.feedback-dialog[open] button')].find(b => b.textContent.trim() === "閉じる")`, "the dialog's 閉じる");
+  await until(() => evaluate(`!![...document.querySelectorAll('dialog.feedback-dialog[open] button')].find(b => b.textContent.trim() === "バックログに積む")`), "the dialog's バックログに積む");
+  // the dialog's own: `#307`'s row has a やめる/閉じる too
+  await press(`[...document.querySelectorAll('dialog.feedback-dialog[open] button')].find(b => b.textContent.trim() === "やめる")`, "the dialog's やめる");
+  await until(() => evaluate(`!document.querySelector('dialog.feedback-dialog[open]')`), "the dialog closes");
 
   // A row's stage button: Ready → 実装する → the Task screen → back on the backlog the row says 実行中
   const buttons = await evaluate(`Object.fromEntries([...document.querySelectorAll('.backlog section[data-stage]')].map(s => [s.dataset.stage, [...s.querySelectorAll('.backlog-item button:not([data-open-row])')].map(b => b.textContent)]))`) as Record<string, string[]>;
@@ -373,9 +379,10 @@ try {
   await click("再読込");
   const reviewed305 = await until(async () => { const t = await rowText(305); return t.includes("止まっている: 最後の工程 Task は完了") && t.includes("最後の Task: 完了（") && !t.includes("返事待ち") ? t : null; }, "#305 back to 完了 once reviewed");
   const replyWaiting: Record<string, unknown> = { inProgress: asked305.includes("止まっている: 返事待ち"), inProgressReviewed: !!reviewed305 };
-  // 待ち: `#307` stopped on an overlap with PR `#778` and Task `#30501` of `#305`, which itself waits for PR `#779`.
+  // 待ち: `#307` stopped on an overlap with PR `#778` and Task `#30501` of `#305`; `#305` still records a wait on PR `#779`,
+  // which the line no longer reaches (the chain behind `#30501` is not followed once that wait is met).
   // The line under the row names them with their states and links, how it comes undone, and whether backlog-next goes
-  // on by itself (an enabled バックログを進める); the chain folds under a <details>
+  // on by itself (an enabled バックログを進める); no session works on `#305`, so the wait on `#30501` is met and has no chain
   const comments = (n: number) => ((decisions.data.repository[`i${n}`] as { comments: { nodes: Array<{ body: string; createdAt: string }> } }).comments.nodes);
   // after `#305`'s 実装 above: an 実装 started after the waits would make them old
   let at = Date.now();
@@ -395,12 +402,13 @@ try {
     await click("再読込");
     return until(async () => ((await waitsText(307)).includes(text) ? waitsText(307) : null), label);
   };
-  const open307 = await waitsSay("待ち: PR #778（開いている） ← 不明・#30501（開いている） ← #305 PBI: 実装中の PBI の Task task_e2e305", "#307 waits");
+  // `#30501` is open, but no session works on `#305` (its stage Task is finished, no claim): an overlap wait on it is met,
+  // and nothing is followed behind it
+  const open307 = await waitsSay("待ち: PR #778（開いている） ← 不明・#30501（完了） ← #305 PBI: 実装中の PBI の Task task_e2e305", "#307 waits");
   const links307 = await evaluate(`[...${waitsOf(307)}.children[0].querySelectorAll('a')].map(a => [a.textContent, a.href, a.target].join(' '))`) as string[];
   assert(open307.includes("相手が閉じてファイルの重なりが解けたら") && open307.includes("待ちが解けたら再開") && JSON.stringify(links307) === JSON.stringify(["PR #778 https://github.com/acme/app/pull/778 _blank", "#30501 https://github.com/acme/app/issues/30501 _blank", "#305 PBI: 実装中の PBI https://github.com/acme/app/issues/305 _blank"]), `#307 waits: ${open307} ${JSON.stringify(links307)}`);
-  await evaluate(`${waitsOf(307)}.querySelector('details').open = true`);
-  const chain307 = await evaluate(`${waitsOf(307)}.querySelector('details').textContent`) as string;
-  assert(chain307.includes("待ちの先（1）") && chain307.includes("#30501 の先: #305 が待つ PR #779（開いている）"), `chain: ${chain307}`);
+  const chain307 = await evaluate(`${waitsOf(307)}.querySelector('details')?.textContent ?? ""`) as string;
+  assert(chain307 === "", `chain: ${chain307}`);
   // 相手の PBI: PR `#778` closes `#30501` of `#305`, whose stage Task task_e2e305 has stopped → its Task opens, and
   // 続きを始める resumes `#305` (complete); while that runs the line only opens it, with no second start
   Object.assign(waitStates.w778!, { body: "Closes #30501", headRefName: "sb/30501-link" });
@@ -450,7 +458,7 @@ try {
   const done307 = await waitsSay("待ちが解けた: PR #778（完了）", "#307 waits closed");
   // a closed wait still names its PBI and Task, with no 続きを始める
   assert(done307.includes("待ちが解けたら再開") && done307.includes("PR #778（完了） ← #305 PBI: 実装中の PBI の Task") && !done307.includes("続きを始める") && (await evaluate(`${waitsOf(307)}.dataset.done`)) === "true", `done: ${done307}`);
-  const waits = { open307, chain: chain307.includes("#305 が待つ"), off: off307.includes("定期実行が無効"), unread: unread307.includes("未取得"), done307 };
+  const waits = { open307, off: off307.includes("定期実行が無効"), unread: unread307.includes("未取得"), done307 };
   // (d) 状況を確認 on `#307`, its wait still recorded (the button starts all the same) → its check Task's screen;
   // back on the backlog the row is 実行中 without the button
   await clickIn(ipRow(307), "状況を確認");
@@ -566,7 +574,7 @@ try {
   await until(() => evaluate(`!!document.querySelector('main.schedules .fields select')`), "the new schedule form");
   const setField = (selector: string, value: string) => evaluate(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) throw new Error(${JSON.stringify(`no field ${selector}`)}); const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); })()`);
   await until(() => evaluate(`document.querySelector('main.schedules .fields select[aria-label="モデル"]')?.value === "m-e2e"`), "the form's model starts at the saved default");
-  await setField("main.schedules .fields select", "backlog-next");
+  await setField(`main.schedules .fields select:has(option[value="backlog-next"])`, "backlog-next");
   await until(() => evaluate(`!!document.querySelector('.backlog-next-hint') && !document.querySelector('main.schedules .fields textarea')`), "hint instead of the prompt box");
   await setField("main.schedules .fields input", "バックログを進める");
   await click("作成");
@@ -643,12 +651,12 @@ try {
   const afterBlank = await sweepOf();
   assert(JSON.stringify(afterBlank) === JSON.stringify({ implement: 2, plan: 1 }), `after a blank: ${JSON.stringify(afterBlank)}`);
 
-  // the kinds of 自動で始まる Task (the 10 kinds): 10 lines on 共通 with the common selects only; 変える on 実装 → codex; a reload
+  // the kinds of 自動で始まる Task (the 11 kinds): 11 lines on 共通 with the common selects only; 変える on 実装 → codex; a reload
   // shows the selects on 実装 alone. lib's 実装する below then starts on codex
   // the two lists of kinds (フィードバック / バックログの工程); the third .auto-start-kinds is 上限のときの代わり
   const kindLines = `[...document.querySelectorAll('.auto-start-kinds')].slice(0, 2).flatMap(d => [...d.querySelectorAll('.row')]).map(r => r.textContent.trim())`;
   const runnerSelects = `[...document.querySelector('.auto-start-kinds').closest('.card').querySelectorAll('select')].map(s => s.getAttribute('aria-label')).filter(l => l.endsWith('のランナー') || l === '自動で始まる Task（共通）: ランナー')`;
-  const kindsBefore = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 ? l : null; }, "10 kind lines") as string[];
+  const kindsBefore = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 11 ? l : null; }, "11 kind lines") as string[];
   assert(kindsBefore.every((l) => l.endsWith("共通変える")) && JSON.stringify(await evaluate(runnerSelects)) === JSON.stringify(["自動で始まる Task（共通）: ランナー"]), `kinds: ${kindsBefore.join(" / ")}`);
   await clickIn(`[...document.querySelectorAll('.auto-start-kinds .row')].find(r => r.textContent.startsWith('実装'))`, "変える");
   await until(() => evaluate(`!!document.querySelector('select[aria-label="実装 のランナー"]')`), "実装's selects");
@@ -658,11 +666,11 @@ try {
   await until(() => evaluate(`!!document.querySelector('.rail')`), "Rail after the reload");
   await click("Settings");
   for (const c of ["バックログを進める", "どの仕事をどのランナーで"]) await openSettingsCard(c);
-  const kindsAfter = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 ? l : null; }, "10 kind lines after the reload") as string[];
+  const kindsAfter = await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 11 ? l : null; }, "11 kind lines after the reload") as string[];
   const selectsAfter = await evaluate(runnerSelects) as string[];
   const kindRunner = await evaluate(`document.querySelector('select[aria-label="実装 のランナー"]')?.value`);
   const savedKinds = (await (await fetch(`${base}/api/settings`)).json() as { autoStart: { byKind: unknown } }).autoStart.byKind;
-  assert(kindsAfter.filter((l) => l.endsWith("共通変える")).length === 9 && JSON.stringify(selectsAfter) === JSON.stringify(["自動で始まる Task（共通）: ランナー", "実装 のランナー"]) && kindRunner === "codex" && JSON.stringify(savedKinds) === JSON.stringify({ complete: { runner: "codex", model: "", effort: "" } }), `after the reload: ${kindsAfter.join(" / ")} ${JSON.stringify(selectsAfter)} ${kindRunner} ${JSON.stringify(savedKinds)}`);
+  assert(kindsAfter.filter((l) => l.endsWith("共通変える")).length === 10 && JSON.stringify(selectsAfter) === JSON.stringify(["自動で始まる Task（共通）: ランナー", "実装 のランナー"]) && kindRunner === "codex" && JSON.stringify(savedKinds) === JSON.stringify({ complete: { runner: "codex", model: "", effort: "" } }), `after the reload: ${kindsAfter.join(" / ")} ${JSON.stringify(selectsAfter)} ${kindRunner} ${JSON.stringify(savedKinds)}`);
 
   // another workspace's stage button: the Task runs in that repository and reads the skills from the meta workspace
   await stopAll();
@@ -673,14 +681,14 @@ try {
   await click("実装する");
   await until(() => evaluate(`!document.querySelector('.backlog')`), "lib's Task screen");
   const libTask = await until(() => core.db.listTasks().find((t) => t.workspaceId === libId && isWorkingStatus(t.status)) ?? null, "lib stage Task");
-  assert(libTask.title.startsWith("#304 実装: ") && libTask.runner === "codex" && libTask.cwd === libDir && prompts.at(-1)!.includes(".claude/skills/pbi-complete/SKILL.md に従い、PBI #304") && prompts.at(-1)!.includes("Switchboard のリポジトリ"), `lib task: ${libTask.title} ${libTask.cwd} ${prompts.at(-1)}`);
+  assert(libTask.title.startsWith("#304 実装: ") && libTask.runner === "codex" && libTask.cwd === libDir && prompts.at(-1)!.includes(".agents/skills/pbi-complete/SKILL.md に従い、PBI #304") && prompts.at(-1)!.includes("Switchboard のリポジトリ"), `lib task: ${libTask.title} ${libTask.cwd} ${prompts.at(-1)}`);
   await stopAll();
   // 共通に戻す: 実装 is one word again and the saved byKind is empty
   await click("Settings");
   for (const c of ["バックログを進める", "どの仕事をどのランナーで"]) await openSettingsCard(c);
   await until(() => evaluate(`!!document.querySelector('select[aria-label="実装 のランナー"]')`), "実装's selects again");
   await click("共通に戻す");
-  await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 10 && l.every((x) => x.endsWith("共通変える")); }, "every kind on 共通 again");
+  await until(async () => { const l = await evaluate(kindLines) as string[]; return l.length === 11 && l.every((x) => x.endsWith("共通変える")); }, "every kind on 共通 again");
   const resetKinds = (await (await fetch(`${base}/api/settings`)).json() as { autoStart: { byKind: unknown } }).autoStart.byKind;
   assert(JSON.stringify(resetKinds) === "{}", `after 共通に戻す: ${JSON.stringify(resetKinds)}`);
   // 承認モード・予算・並走 of one kind: 状況確認 → 変える → 承認モード 計画 and 予算 5; after a reload 状況確認 alone shows its selects (no runner of
@@ -708,7 +716,7 @@ try {
   const checkAfter = await savedCheck();
   const modeShown = await evaluate(`document.querySelector('${modeBox}').value + "/" + document.querySelector('select[aria-label="状況確認 のランナー"]').selectedOptions[0].textContent`);
   const othersAfter = await evaluate(kindLines) as string[];
-  assert(checkAfter?.permissionMode === "plan" && checkAfter.shadow === "codex" && checkAfter.runner === undefined && modeShown === "plan/共通" && othersAfter.filter((l) => l.endsWith("共通変える")).length === 9 && !(await evaluate(`!!document.querySelector('select[aria-label="実装 の承認モード"]')`)), `状況確認: ${JSON.stringify(checkAfter)} ${modeShown} ${othersAfter.join(" / ")}`);
+  assert(checkAfter?.permissionMode === "plan" && checkAfter.shadow === "codex" && checkAfter.runner === undefined && modeShown === "plan/共通" && othersAfter.filter((l) => l.endsWith("共通変える")).length === 10 && !(await evaluate(`!!document.querySelector('select[aria-label="実装 の承認モード"]')`)), `状況確認: ${JSON.stringify(checkAfter)} ${modeShown} ${othersAfter.join(" / ")}`);
   // an emptied budget removes it (null); 並走 back to 全体の設定に従う removes that
   await setField('input[aria-label="状況確認 の予算"]', "");
   await evaluate(`document.querySelector('input[aria-label="状況確認 の予算"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
@@ -836,8 +844,165 @@ try {
   assert(failed.text === "昇格に失敗した版のまま: v0.2.0 救援画面 →" && failed.href === `${rescueUrl}/` && failed.target === "_blank" && promoted.length === 0, `failed: ${JSON.stringify(failed)}`);
   const promotionLine = { waiting: waiting.text, failed: failed.text, rescueLink: failed.href };
 
+  // 自分で書いて保存 (＋ 指示 → 詳細): saved while the Backlog is open, the list is read again and the row appears
+  {
+    const newTitle = "PBI: 指示の欄から保存した";
+    await until(async () => (await evaluate(read)) || null, "backlog before the new Issue");
+    await click("＋ 指示");
+    await until(() => evaluate(`!!document.querySelector('dialog.feedback-dialog[open] details.compose-details')`), "the 指示 dialog for the new Issue");
+    const saveForm = `document.querySelector('dialog.feedback-dialog[open] details.compose-save')`;
+    if (!(await evaluate(`document.querySelector('dialog.feedback-dialog[open] details.compose-details').open`))) await press(`document.querySelector('dialog.feedback-dialog[open] details.compose-details > summary')`, "詳細");
+    await until(() => evaluate(`!!${saveForm}`), "自分で書いて保存");
+    if (!(await evaluate(`${saveForm}.open`))) await press(`${saveForm}.querySelector('summary')`, "自分で書いて保存を開く");
+    await until(() => evaluate(`${saveForm}.open`), "自分で書いて保存 is open");
+    await evaluate(`(() => { const set = (e, v) => { Object.getOwnPropertyDescriptor(e.constructor.prototype, 'value').set.call(e, v); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); }; const f = ${saveForm}; set(f.querySelectorAll('select')[1], 'type:pbi'); set(f.querySelector('input'), ${JSON.stringify(newTitle)}); })()`);
+    await press(`[...${saveForm}.querySelectorAll('button')].find(b => b.textContent.trim() === '手元に保存')`, "手元に保存");
+    await until(() => evaluate(`!![...${saveForm}.querySelectorAll('*')].find(e => e.textContent.includes('手元に保存しました'))`), "the save answered");
+    await press(`[...document.querySelectorAll('dialog.feedback-dialog[open] button')].find(b => b.textContent.trim() === "やめる")`, "the dialog's やめる");
+    await until(() => evaluate(`!document.querySelector('dialog.feedback-dialog[open]')`), "the dialog closes after saving");
+    await until(() => evaluate(`!!document.querySelector('.backlog') && document.querySelector('.backlog').textContent.includes(${JSON.stringify(newTitle)})`), "the saved Issue's row appears with the Backlog still open");
+  }
+
+  // 選択バー: rows are ticked, the bar sends them to the queue or into a bundle. Clicks only, no key input. Last, because (e) starts a real
+  // bundle, which holds the schedules and the promotion until it is released (nothing after this reads either)
+  const selKeys = (prefix = "") => evaluate(`[...new Set([...document.querySelectorAll('[data-select]')].map(b => b.dataset.select).filter(k => k.startsWith(${JSON.stringify(prefix)})))]`) as Promise<string[]>;
+  const selCount = () => evaluate(`Number(document.querySelector('[data-select-bar] [data-select-count], [data-select-count]')?.textContent.match(/\\d+/)?.[0] ?? 0)`) as Promise<number>;
+  const barShown = () => evaluate(`!!document.querySelector('[data-select-bar]')`) as Promise<boolean>;
+  const queueNow = async () => ((await (await fetch(`${base}/api/backlog/queue`)).json()) as { items: Array<{ workspaceId: string; number: number }> }).items.map((i) => ({ workspaceId: i.workspaceId, number: i.number }));
+  const keyOf = (k: string) => ({ workspaceId: k.slice(0, k.lastIndexOf(":")), number: Number(k.slice(k.lastIndexOf(":") + 1)) });
+  const showLayout = async (label: string) => {
+    await evaluate(`(() => { const d = document.querySelector('.backlog details.backlog-view'); if (d) d.open = true; })()`);
+    await press(`[...document.querySelectorAll('.backlog .backlog-view .chip')].find(b => b.textContent.trim() === ${JSON.stringify(label)})`, `layout ${label}`);
+    await until(() => evaluate(`${read} && [...document.querySelectorAll('.backlog .backlog-view .chip')].some(b => b.textContent.trim() === ${JSON.stringify(label)} && b.getAttribute('aria-pressed') === 'true')`), `layout ${label} shown`);
+  };
+  const tick = async (key: string) => {
+    await evaluate(`document.querySelector('[data-select="${key}"]')?.scrollIntoView({ block: 'center' })`);
+    await press(`document.querySelector('[data-select="${key}"]')`, `row box ${key}`);
+  };
+  const clearSelection = async () => {
+    if (await barShown()) await press(`document.querySelector('[data-select-clear]')`, "選択を外す");
+    await until(async () => !(await barShown()), "the select bar gone");
+  };
+  const countIs = (n: number, label: string) => until(async () => ((await selCount()) === n ? true : null), label);
+  const dialogText = () => evaluate(`document.querySelector('dialog[data-bundle-confirm]')?.textContent ?? ''`) as Promise<string>;
+  const pbiTitle = async (workspaceId: string, number: number) => ((await (await fetch(`${base}/api/backlog`)).json()) as { items: Array<{ workspaceId: string; number: number; title: string }> }).items.find((i) => i.workspaceId === workspaceId && i.number === number)!.title;
+  await click("Backlog");
+  await until(() => evaluate(`${read} && !!document.querySelector('[data-select]')`), "the backlog with row boxes");
+  const selectBar: Record<string, unknown> = {};
+  // (a) in each of the three views two ticks make a count of 2, the count stays through a change of view, 選択を外す removes the bar
+  const views = ["一覧", "ボード", "キュー"];
+  for (const [i, view] of views.entries()) {
+    await showLayout(view);
+    await clearSelection();
+    await until(async () => ((await selKeys()).length >= 2 ? true : null), `two row boxes in ${view}`);
+    for (const key of (await selKeys()).slice(0, 2)) await tick(key);
+    await countIs(2, `${view}: count 2`);
+    await showLayout(views[(i + 1) % views.length]!);
+    await countIs(2, `${view}: count 2 after the view changed`);
+    await clearSelection();
+  }
+  selectBar.views = views.length;
+  await showLayout("一覧");
+  const metaKeys = await selKeys(`${metaId}:`);
+  const libKeys = await selKeys(`${libId}:`);
+  assert(metaKeys.length >= 3 && libKeys.length >= 1, `row boxes: ${metaKeys.length} of ${metaName}, ${libKeys.length} of lib`);
+  // (b) acme/app's row, then acme/lib's: the queue's end holds them in that order; the same two again change nothing
+  const [appKey, appKey2] = [metaKeys[0]!, metaKeys[1]!];
+  const libKey = libKeys[0]!;
+  const queueBefore = await queueNow();
+  assert(!queueBefore.some((q) => [appKey, libKey].some((k) => q.workspaceId === keyOf(k).workspaceId && q.number === keyOf(k).number)), `already queued: ${JSON.stringify(queueBefore)}`);
+  await tick(appKey);
+  await tick(libKey);
+  await countIs(2, "two rows of two workspaces");
+  await press(`document.querySelector('[data-select-queue]')`, "キューに入れる");
+  const queued = await until(async () => { const q = await queueNow(); return q.length === queueBefore.length + 2 ? q : null; }, "the queue holds the two rows");
+  assert(JSON.stringify(queued.slice(-2)) === JSON.stringify([keyOf(appKey), keyOf(libKey)]), `queue end: ${JSON.stringify(queued.slice(-2))}`);
+  assert(metaId !== libId && queued.at(-2)!.workspaceId === metaId && queued.at(-1)!.workspaceId === libId, "each item names its workspace");
+  await clearSelection();
+  await tick(appKey);
+  await tick(libKey);
+  await countIs(2, "the same two rows again");
+  await evaluate(`document.querySelector('[data-select-queue]')?.click()`); // may be disabled when nothing would be added: then nothing happens
+  await Bun.sleep(1_500);
+  assert(JSON.stringify(await queueNow()) === JSON.stringify(queued), `the same rows queued twice: ${JSON.stringify(await queueNow())}`);
+  await clearSelection();
+  selectBar.queued = queued.slice(-2).map((q) => q.number);
+  // (c) 条件で選ぶ (選ぶ) only ticks rows: the queue stays, the count is what it ticked
+  await showLayout("キュー");
+  await clearSelection();
+  const queueBeforePick = await queueNow();
+  await press(`(() => { const b = document.querySelector('[data-queue-pick-add]'); b?.closest('details')?.setAttribute('open', ''); return b; })()`, "選ぶ");
+  const picked = await until(() => selCount(), "rows ticked by 選ぶ");
+  await Bun.sleep(500);
+  assert(JSON.stringify(await queueNow()) === JSON.stringify(queueBeforePick), `選ぶ changed the queue: ${JSON.stringify(await queueNow())}`);
+  const ticked = await evaluate(`document.querySelectorAll('[data-select]:checked').length`) as number;
+  assert(picked === ticked, `選ぶ: count ${picked}, ticked ${ticked}`);
+  await clearSelection();
+  selectBar.picked = picked;
+  // (d) a row of acme/app and one of acme/lib: no bundle (the API takes Switchboard's own PBIs); the line under the button names lib and its number
+  await showLayout("一覧");
+  await tick(appKey);
+  await tick(libKey);
+  await countIs(2, "one row of each workspace");
+  const mixed = await evaluate(`(() => { const b = document.querySelector('[data-select-bundle]'); return { disabled: b?.disabled ?? null, reason: document.querySelector('[data-select-bundle-reason]')?.textContent ?? '' }; })()`) as { disabled: boolean | null; reason: string };
+  assert(mixed.disabled === true && mixed.reason.includes("lib") && mixed.reason.includes(`#${keyOf(libKey).number}`), `mixed bundle: ${JSON.stringify(mixed)}`);
+  await clearSelection();
+  // (e) two of acme/app: the button opens the confirmation (both titles, the warning); やめる starts nothing; まとめて始める starts the bundle
+  const [pa, pb] = [keyOf(appKey).number, keyOf(appKey2).number];
+  const titles = [await pbiTitle(metaId, pa), await pbiTitle(metaId, pb)];
+  const openConfirm = async () => {
+    await clearSelection();
+    await tick(appKey);
+    await tick(appKey2);
+    await countIs(2, "two rows of acme/app");
+    await press(`document.querySelector('[data-select-bundle]')`, "the bundle button");
+    await until(() => evaluate(`!!document.querySelector('dialog[data-bundle-confirm]')?.open`), "the bundle confirmation");
+  };
+  assert((await (await fetch(`${base}/api/bundle`)).json()) === null, "no bundle before");
+  await openConfirm();
+  const confirmText = await dialogText();
+  const warning = "始めると、有効な定期実行を全部止め、入れ切るまで昇格を止めます";
+  assert(titles.every((t) => confirmText.includes(t)) && confirmText.includes(warning), `confirmation: ${confirmText}`);
+  const confirmShape = await evaluate(`(() => { const d = document.querySelector('dialog[data-bundle-confirm]'); const w = [...d.querySelectorAll('*')].find((e) => e.children.length === 0 && e.textContent.includes(${JSON.stringify(warning)})); return { inputs: d.querySelectorAll('input, textarea').length, warningShown: !!w && w.checkVisibility() && !w.closest('details'), right: d.getBoundingClientRect().right }; })()`) as { inputs: number; warningShown: boolean; right: number };
+  assert(confirmShape.inputs === 0 && confirmShape.warningShown, `confirmation shape: ${JSON.stringify(confirmShape)}`);
+  await press(`document.querySelector('dialog[data-bundle-confirm] [data-bundle-cancel]')`, "やめる");
+  await until(() => evaluate(`!document.querySelector('dialog[data-bundle-confirm]')?.open`), "the confirmation closed");
+  await Bun.sleep(1_000);
+  assert((await (await fetch(`${base}/api/bundle`)).json()) === null, "やめる started a bundle");
+  await openConfirm();
+  await press(`document.querySelector('dialog[data-bundle-confirm] [data-bundle-start]')`, "まとめて始める");
+  const hold = await until(async () => ((await (await fetch(`${base}/api/bundle`)).json()) as { taskId: string } | null), "the bundle's hold") as { taskId: string };
+  const bundleTitle = `まとめて入れる: #${pa}, #${pb}`;
+  const bundleTask = await until(async () => ((await (await fetch(`${base}/api/tasks`)).json()) as Array<{ id: string; title: string }>).find((t) => t.title === bundleTitle) ?? null, "the bundle's Task");
+  assert(bundleTask.id === hold.taskId, `hold ${hold.taskId} / Task ${bundleTask.id}`);
+  // (f) the hold's line stays above the list with 止めを解く (not pressed: it asks for a confirmation), and a new bundle is refused with its reason
+  // starting opens the bundle's Task like every start: back to the Backlog for the hold's line
+  await click("Backlog");
+  await until(() => evaluate(`${read} && !!document.querySelector('[data-select]')`), "the backlog after the bundle's Task");
+  await click("再読込");
+  await until(() => evaluate(`${read} && !!document.querySelector('[data-bundle-hold]')`), "the hold line");
+  const holdLine = await evaluate(`(() => { const h = document.querySelector('[data-bundle-hold]'); const b = [...h.querySelectorAll('button')].find((x) => x.textContent.trim() === '止めを解く'); return { release: b ? !b.disabled : null, text: h.textContent }; })()`) as { release: boolean | null; text: string };
+  assert(holdLine.release === true, `hold line: ${JSON.stringify(holdLine)}`);
+  await clearSelection();
+  await tick(appKey);
+  await tick(appKey2);
+  await countIs(2, "two rows while the bundle works");
+  const heldGate = await evaluate(`(() => ({ disabled: document.querySelector('[data-select-bundle]')?.disabled ?? null, reason: document.querySelector('[data-select-bundle-reason]')?.textContent ?? '' }))()`) as { disabled: boolean | null; reason: string };
+  assert(heldGate.disabled === true && heldGate.reason.includes("束の作業中は始められません"), `held gate: ${JSON.stringify(heldGate)}`);
+  await clearSelection();
+  selectBar.bundle = { task: bundleTask.title, hold: hold.taskId };
+  // (g) the old doors are gone: no folded bundle section, no per-row queue button, and 「まとめて入れる」 is on no screen but in the Task's title
+  const oldDoors = async () => evaluate(`(() => ({ queueAdd: document.querySelectorAll('[data-queue-add]').length, bundleSections: [...document.querySelectorAll('.backlog details.backlog-new, .backlog details')].filter((d) => /まとめて/.test(d.querySelector('summary')?.textContent ?? '')).length, text: document.body.innerText.replace(/まとめて入れる: #\\d+(, #\\d+)*/g, '').includes('まとめて入れる') }))()`) as Promise<{ queueAdd: number; bundleSections: number; text: boolean }>;
+  for (const view of ["一覧", "キュー"]) {
+    await showLayout(view);
+    const doors = await oldDoors();
+    assert(doors.queueAdd === 0 && doors.bundleSections === 0 && !doors.text, `old doors in ${view}: ${JSON.stringify(doors)}`);
+  }
+  selectBar.oldDoors = 0;
+  console.log(`select bar: ${JSON.stringify(selectBar)}`);
+
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
-  console.log(JSON.stringify({ columns: Object.fromEntries(Object.entries(columns).map(([k, v]) => [k, v.length])), workspaceNames, workspaceSwitch, libTask: libTask.title, feedbackOpened, startedTitle, rowShowsRunning, approvalsLink, decisionShown, answered, ghCalls, scheduleLog, slotsAfterReload, kinds: { after: kindsAfter, selects: selectsAfter, saved: savedKinds, libRunner: libTask.runner, reset: resetKinds }, failures: failures.length, shownVar, slowGitHub, overlappingAnswers: cardsWhileReading, inProgress, replyWaiting, closable, waitOwner, prereqs, overlap: overlapShown.text, taskDecision: taskDecision.line, taskAnswer, promotionLine, mockups: { buttons: mockupButtons, opened: mockupOpened.trim(), button390Right: mockup390, scroll390: mockupScroll390 }, consoleErrors: errors.length }));
+  console.log(JSON.stringify({ columns: Object.fromEntries(Object.entries(columns).map(([k, v]) => [k, v.length])), workspaceNames, workspaceSwitch, libTask: libTask.title, feedbackOpened, startedTitle, rowShowsRunning, approvalsLink, decisionShown, answered, ghCalls, scheduleLog, slotsAfterReload, kinds: { after: kindsAfter, selects: selectsAfter, saved: savedKinds, libRunner: libTask.runner, reset: resetKinds }, failures: failures.length, shownVar, slowGitHub, overlappingAnswers: cardsWhileReading, inProgress, replyWaiting, closable, waitOwner, prereqs, overlap: overlapShown.text, taskDecision: taskDecision.line, taskAnswer, promotionLine, mockups: { buttons: mockupButtons, opened: mockupOpened.trim(), button390Right: mockup390, scroll390: mockupScroll390 }, selectBar, consoleErrors: errors.length }));
 } finally {
   ws?.close();
   chrome.kill();

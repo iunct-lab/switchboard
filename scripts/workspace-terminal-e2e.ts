@@ -44,7 +44,9 @@ const adapter: RunnerAdapter = {
     // the one Task of the last step: it answers and ends; only its terminal tab is looked at
     let exit!: (c: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
-    queueMicrotask(() => { emit({ t: "message.delta", role: "assistant", text: "ok", messageId: "m1" }); emit({ t: "session.end", status: "ok", summary: "ok" }); });
+    // its reply holds stop reports (the Stops list under the terminal takes height there, which a phone's pane must not give up)
+    const stops = ["a", "b", "c", "d"].map((id) => "```switchboard-stop\n" + JSON.stringify({ id, op: "gh pr merge", target: `PR #${id}`, reason: "depends", evidence: "CI pending" }) + "\n```\n").join("");
+    queueMicrotask(() => { emit({ t: "message.delta", role: "assistant", text: `ok\n${stops}`, messageId: "m1" }); emit({ t: "session.end", status: "ok", summary: "ok" }); });
     return { send() {}, respondPermission() {}, async abort() { exit(null); }, async close() { exit(0); }, exited };
   },
 };
@@ -145,6 +147,13 @@ try {
     results[label] = { path: workspacePath, afterReconnect: "pwd output shown" };
     if (!mobile) {
       assert(await evaluate(`!!document.querySelector('.term-keys')`) && !(await visible(".term-keys")), `${label}: the row of keys is shown on a PC`);
+      // A shorter window makes the terminal shorter (the pane is not held at the rows xterm drew), and it still fits on the screen.
+      const paneHeight = () => evaluate(`document.querySelector('.terminal-pane').getBoundingClientRect().height`) as Promise<number>;
+      const tall = await paneHeight();
+      await call("Emulation.setDeviceMetricsOverride", { width, height: height - 300, deviceScaleFactor: 1, mobile: false });
+      await until(async () => (await paneHeight()) < tall - 100, `${label}: the Workspace's terminal gets shorter with the window (${tall}px before)`);
+      assert(await evaluate(`document.querySelector('.terminal-pane').getBoundingClientRect().bottom <= document.querySelector('.main').getBoundingClientRect().bottom + 1`), `${label}: the shorter terminal runs past the screen`);
+      await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
     } else {
       // The row on a phone: `cat -vT` prints each key's bytes (arrows in the normal cursor mode: ESC [ x).
       assert(await visible(".term-keys"), `${label}: the row of keys is not shown`);
@@ -176,12 +185,33 @@ try {
   const taskScreen = () => evaluate(`document.querySelector('.terminal-pane .terminal')?.textContent ?? ''`) as Promise<string>;
   await until(async () => (await taskScreen()).includes("$"), "the Task shell's prompt");
   assert(await visible(".terminal-pane .term-keys"), "the Task's row of keys is not shown");
+  // The Stops list is under the terminal: the pane keeps its content's height (the keys do not run into the list) and the screen scrolls instead.
+  await until(() => visible(".backlog-stops"), "the Task's stop list");
+  const layout = await evaluate(`(() => { const pane = document.querySelector('.terminal-pane'); const keys = document.querySelector('.terminal-pane .term-keys').getBoundingClientRect(); const next = document.querySelector('.backlog-stops').getBoundingClientRect(); return { keysBottom: keys.bottom, nextTop: next.top, scrollHeight: pane.scrollHeight, clientHeight: pane.clientHeight }; })()`) as { keysBottom: number; nextTop: number; scrollHeight: number; clientHeight: number };
+  assert(layout.keysBottom <= layout.nextTop + 0.5, `the row of keys runs into the stop list: ${JSON.stringify(layout)}`);
+  assert(layout.scrollHeight <= layout.clientHeight + 1, `the terminal pane is lower than its content: ${JSON.stringify(layout)}`);
+  // A phone's keyboard does not change the layout's height and covers about the lower 44% of the screen (a user's Android screenshot):
+  // with the pane's top scrolled into view, the row of keys must end above 56% of 844 px, or the keyboard hides it.
+  // The temporary-directory banner of this run's home is not on a real instance: hidden while measuring, then shown again.
+  const keyboard = await evaluate(`(() => { const banners = [...document.querySelectorAll('.banner')]; banners.forEach((b) => (b.style.display = 'none')); document.querySelector('.terminal-pane').scrollIntoView({ block: "start" }); const r = { keysBottom: document.querySelector('.terminal-pane .term-keys').getBoundingClientRect().bottom, edge: window.innerHeight * 0.56 }; banners.forEach((b) => (b.style.display = '')); return r; })()`) as { keysBottom: number; edge: number };
+  assert(keyboard.keysBottom <= keyboard.edge, `the row of keys ends below the keyboard's top edge (${keyboard.keysBottom}px > ${keyboard.edge}px)`);
   await typeInTerminal("cat -v", true);
   await Bun.sleep(300);
   await pressKey("↓");
   await pressKey("Enter");
   await until(async () => (await taskScreen()).split("^[[B").length > 2, "the Task's terminal: ↓ arrives as ^[[B (printed by cat)");
   results.task = { keys: "row shown at 390x844, ↓ printed as ^[[B" };
+  // The same Task on a PC, with the stop list under it: the terminal keeps a height of its own and does not run into the list,
+  // and a shorter window still makes it shorter.
+  const pcPane = () => evaluate(`(() => { const p = document.querySelector('.terminal-pane').getBoundingClientRect(); return { height: p.height, bottom: p.bottom, nextTop: document.querySelector('.backlog-stops').getBoundingClientRect().top }; })()`) as Promise<{ height: number; bottom: number; nextTop: number }>;
+  await call("Emulation.setTouchEmulationEnabled", { enabled: false });
+  for (const h of [900, 600]) {
+    await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: h, deviceScaleFactor: 1, mobile: false });
+    await until(async () => !(await visible(".terminal-pane .term-keys")), `the Task's terminal at 1280x${h}: the row of keys is hidden`);
+    const pc = await pcPane();
+    assert(pc.height >= 259 && pc.bottom <= pc.nextTop + 0.5, `the Task's terminal at 1280x${h} is squeezed or runs into the stop list: ${JSON.stringify(pc)}`);
+    results[`task 1280x${h}`] = { paneHeight: Math.round(pc.height) };
+  }
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ ...results, tasks: await taskCount(), consoleErrors: errors.length }));
 } finally {

@@ -150,8 +150,8 @@ describe("ops resources", () => {
         "null/null/judge/50000000/1",
       ]);
       expect(r.jobs).toEqual([
-        { id: ended.id, kind: "local-ci", taskId: "t_unknown", taskTitle: null, pr: 2, runner: null, status: "fail", exitCode: 1, startedAt: at - 9 * 24 * 3600_000, endedAt: at - 3600_000 },
-        { id: running.id, kind: "local-ci", taskId: "t_ci", taskTitle: "PBI の local-ci", pr: 1, runner: null, status: "running", exitCode: null, startedAt: at - 9 * 24 * 3600_000, endedAt: null },
+        { id: ended.id, kind: "local-ci", taskId: "t_unknown", taskTitle: null, pr: 2, runner: null, status: "fail", exitCode: 1, startedAt: at - 9 * 24 * 3600_000, endedAt: at - 3600_000, as: null, model: null, effort: null },
+        { id: running.id, kind: "local-ci", taskId: "t_ci", taskTitle: "PBI の local-ci", pr: 1, runner: null, status: "running", exitCode: null, startedAt: at - 9 * 24 * 3600_000, endedAt: null, as: null, model: null, effort: null },
       ]);
       expect(procs).not.toHaveBeenCalled();
       // no meminfo (macOS): no memory, the rest as before

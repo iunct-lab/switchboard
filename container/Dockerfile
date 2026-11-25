@@ -10,9 +10,9 @@ RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq dif
 
 # pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256). The unsuffixed sha256 are the arm64 ones the
 # host pins; <NAME>_SHA256_X86_64 is the same version's x86-64 file from the same upstream release
-ARG DOCKER_VERSION=29.9.3
-ARG DOCKER_SHA256=1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2
-ARG DOCKER_SHA256_X86_64=3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2e6922c973
+ARG DOCKER_VERSION=29.10.0
+ARG DOCKER_SHA256=6e5159e8b5615e0c0c2954a2a1a2a12bc65f5d9b603595dba24a10cb367408cd
+ARG DOCKER_SHA256_X86_64=7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def
 ARG COMPOSE_VERSION=5.7.1
 ARG COMPOSE_SHA256=f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5
 ARG COMPOSE_SHA256_X86_64=af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf

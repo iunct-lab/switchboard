@@ -3,7 +3,7 @@
  * The phone layout: at 390 × 844 (iPhone 14), 844 × 390 (its landscape) and a PC window narrowed to 390px, the task list
  * opens from the bottom bar, a task opens from it, and the list opens again to go to another task. On a phone the task screen
  * does not scroll sideways with long lines in it, a reply and an approval reach the runner, and 詳細 opens the task's Brief.
- * Home's new-task form fits a phone and 開始 starts a task from it. Knowledge (a folded card in Settings) stacks its list, the note and its
+ * Home's new-task form fits a phone and 今すぐ始める starts a task from it. Knowledge (a folded card in Settings) stacks its list, the note and its
  * details, and a note picked from the list can be read. Ledger, Backlog and Schedules (its form open too) do not
  * scroll sideways, and a schedule is added from a phone. Settings does not either, its toggles' labels wrapping inside
  * the screen, with the LLM suggestions' "not detected" note shown too; its folded cards' titles are 44px or taller. At 1280 and 390 the top bar's Rescue opens the rescue page
@@ -69,7 +69,7 @@ const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
 const rescueOrigin = `http://127.0.0.1:${rescue.port}`;
 const rescuePage = `${rescueOrigin}/rescue/`;
 const cfg = loadConfig({ SWITCHBOARD_RESCUE_URL: rescueOrigin, SWITCHBOARD_WEB_URL: rescueOrigin, SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
-const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true });
+const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, titleSuggester: async (input) => ({ title: `named: ${input.prompt}`, runner: "claude", model: "fake" }) });
 const base = `http://127.0.0.1:${core.server.port}`;
 // LLM suggestions on with a runner that has no adapter, so Settings shows its "not detected" note in the toggle's label.
 // Written to the store: PATCH /api/settings refuses a runner that is not installed.
@@ -114,7 +114,17 @@ try {
   const heading = () => evaluate(`document.querySelector('.main.task h2')?.textContent ?? null`) as Promise<string | null>;
   /** A tap on a phone, a click on a PC — at the element's centre, so something drawn over it gets the event instead. */
   const tap = async (expression: string, touch: boolean) => {
-    const point = await evaluate(`(() => { const e = ${expression}; e.scrollIntoView({ block: "center" }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    const measure = () => evaluate(`(() => { const e = ${expression}; e.scrollIntoView({ block: "center" }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`) as Promise<{ x: number; y: number }>;
+    // Data that lands after a screen opens (the nightly rows above Schedules' form) moves what is under the finger: tap once two measures agree.
+    let point = await measure();
+    let still = false;
+    for (let i = 0; i < 40 && !still; i++) {
+      await Bun.sleep(50);
+      const again = await measure();
+      still = Math.abs(again.x - point.x) < 1 && Math.abs(again.y - point.y) < 1;
+      point = again;
+    }
+    if (!still) throw new Error(`tap: still moving after 40 measures: ${expression}`);
     if (touch) {
       await call("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
       await call("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
@@ -167,7 +177,7 @@ try {
     const link = await until(() => evaluate(`(() => { const a = document.querySelector('header.chrome a.rescue-link'); if (!a || !document.querySelector('.main.home')) return null; const r = a.getBoundingClientRect(); return { href: a.href, text: a.textContent, inView: a.checkVisibility() && r.left >= 0 && r.right <= ${width} && r.top >= 0 && r.bottom <= ${height} }; })()`), `${label}: the link on Home`);
     assert(link.href === rescuePage && link.text === "Rescue" && link.inView, `${label}: ${JSON.stringify(link)}`);
     await tap(`document.querySelector('header.chrome a.rescue-link')`, mobile);
-    await until(() => evaluate(`location.href === ${JSON.stringify(rescuePage)} && !!document.querySelector('h1')?.textContent.includes('救援画面') && !!document.querySelector('button')?.textContent.includes('作り直す')`), `${label}: the rescue page opens`);
+    await until(() => evaluate(`location.href === ${JSON.stringify(rescuePage)} && !!document.querySelector('h1')?.textContent.includes('救援画面') && !!document.querySelector('button')?.textContent.includes('作り直す')`).catch((e: Error) => { if (e.message.includes("Inspected target navigated or closed")) return false; throw e; }), `${label}: the rescue page opens`);
     results[label] = { ...link, opened: rescuePage };
   }
   {
@@ -266,7 +276,7 @@ try {
     results[label] = { scrollWidth, sent: reply, answered: answered.at(-1), brief: "詳細 → Brief → 閉じる" };
   }
 
-  // Home: the new-task form is one column that fits the screen, and 開始 starts a task from it.
+  // Home: the new-task form is one column that fits the screen, and 今すぐ始める starts a task from it.
   for (const [width, height] of [[390, 844], [844, 390]] as const) {
     const label = `home ${width}x${height}`;
     await size(width, height, true);
@@ -275,15 +285,15 @@ try {
     const short = await evaluate(`[...document.querySelectorAll('.compose > .row > button')].filter(b => b.getBoundingClientRect().height < 44).map(b => b.textContent)`) as string[];
     assert(short.length === 0, `${label}: shorter than 44px: ${JSON.stringify(short)}`);
     if (shots) await shoot(`home-${width}x${height}.png`);
-    // A registered Workspace, so 開始 does not ask a runner to pick one.
+    // A registered Workspace, so 今すぐ始める does not ask a runner to pick one.
     assert(await evaluate(`document.querySelector('.compose .fields select').options.length > 1`), `${label}: no registered Workspace to pick`);
     await evaluate(`(() => { const s = document.querySelector('.compose .fields select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, s.options[1].value); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     const text = `started from Home at ${width}x${height}`;
     await tap(`document.querySelector('.compose textarea')`, true);
     await call("Input.insertText", { text });
     await tap(`document.querySelector('.compose > .row > button.pri')`, true);
-    await until(() => started.some((p) => p.includes(text)), `${label}: 開始 reaches the runner`);
-    await until(async () => (await heading()) === text, `${label}: the new task opens`); // untitled: the title is the prompt (Home.tsx takes its first 48 characters)
+    await until(() => started.some((p) => p.includes(text)), `${label}: 今すぐ始める reaches the runner`);
+    await until(async () => (await heading()) === `named: ${text}`, `${label}: the new task opens`); // the heading is the title the first turn's naming gives (the suggester above), not the prompt
     results[label] = { sideways: sideways.over, started: text };
   }
 
@@ -292,6 +302,7 @@ try {
     const label = `knowledge ${width}x${height}`;
     await size(width, height, true);
     await tap(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === 'Settings')`, true);
+    await until(() => evaluate(`!!document.querySelector('#knowledge > summary')`), `${label}: the Knowledge card`); // Settings paints its cards after the tab opens
     await tap(`document.querySelector('#knowledge > summary')`, true); // Knowledge is a folded card in Settings
     await until(() => evaluate(`!!document.querySelector('.kn-tree button.it')`), `${label}: the list`);
     await tap(`[...document.querySelectorAll('.kn-tree button.it')].find(b => b.textContent.includes('mobile note'))`, true);

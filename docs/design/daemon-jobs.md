@@ -19,7 +19,7 @@ the job runs, so the session closes at the timeout like any other finished turn.
 
 ```bash
 ops-kit job request local-ci <PR> [--cwd <dir>] [--fixtures <dir>] [--local] [--change]
-ops-kit job request review <PR> [--runner codex|claude [--as fallback|recheck|audit|attack]] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
+ops-kit job request review <PR> [--runner codex|claude] [--as fallback|recheck|audit|attack] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
 ops-kit job request recheck <PR> --kind migration|rescue|security:lockfile [--cwd <dir>] [--change]
 ops-kit job list [--json]
 ```
@@ -31,9 +31,15 @@ A review's runner is the daemon's to decide. The main reviewer follows from the 
 asked for and from the Task's runner (`primaryReviewer` in `ops-kit/src/conditions.ts`): the Task's own runner for `same`,
 the other one for `other`. Without `--runner` the job runs with that reviewer. A `--runner` that names another one is
 refused with a message that names the right one, unless `--as` says why another runner reads the PR: `fallback` (it
-stands in for a main reviewer at its usage limit), `recheck` (the second reader of a recheck) or `audit` (the
-post-merge audit, whose reader is decided from who implemented the merged PR). `attack` (the attacking-side review, its instruction printed by `ops-kit review-attack prompt`) is the one reason that does not free the choice: the runner must be the one `attackReviewer` names, the main reviewer's runner (another runner than the implementer under `other`, the implementer's own new session under `same`), and any other is refused with a message that names it. A Task once asked Codex for a review while the setting said "same", because the text it had read
-described the other side; the choice is no longer left to what the Task read. A Task whose runner reviews nothing (not
+stands in for a main reviewer at its usage limit) or `audit` (the post-merge audit, whose reader is decided from who
+implemented the merged PR and the recheck setting, `auditorOf` in `scripts/post-audit.ts`). `recheck` (the second reader
+of a recheck) needs no `--runner`, and the app picks its runner from the setting: its reader follows from the recheck
+setting (`recheckRunner`, the `再チェック・マージ後の監査` (`Recheck and post-merge audit` in English) row of Settings, `OPS_KIT_RECHECK_RUNNER` in a Task; unset = the
+review setting's value) and the main reviewer — the main reviewer's own
+runner in a new session for `same`, the other one for `other` — and a `--runner` that names another one is refused with a
+message that names it. Every review job runs with the saved review model and effort of its runner (`reviewModel` /
+`reviewEffort`), and with the runner's Task defaults where those are empty. A Task once asked Codex for a review while the setting said "same", because the text it had read
+described the other side; the choice of the main reviewer is no longer left to what the Task read. `attack` (the attacking-side review, its instruction printed by `ops-kit review-attack prompt`) names its runner like `fallback`: first the one `attackReviewer` names, the main reviewer's runner (another runner than the implementer under `other`, the implementer's own new session under `same`), and the other runner when that one is at its usage limit, so the attacking-side review does not wait on one runner. Either runner is accepted: the app does not check the usage limit, as for `fallback`. A Task whose runner reviews nothing (not
 Claude Code or Codex) must name the runner, and cannot ask for `attack` at all (no runner can be named for it).
 
 With `--fixtures <dir>` (an absolute path, local CI only) the folder becomes the job's `SWITCHBOARD_FIXTURES`, so missing
@@ -63,7 +69,7 @@ waiting for the slot is "waiting" in the resource view; the job's own status doe
 
 ## The gate: a Task's merge verdict and merge are the app's
 
-In a Task, `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]` (and `--change <n>`, `--scope`) does not judge in the Task's shell. It posts a `gate` job (the PR's number and the flags; no command, no environment) and reads `GET /api/jobs/<id>` every 2 seconds until the job ends, prints what the job printed and ends with the job's exit code (0 merge, 1 stop or a failed merge). The wait is `SWITCHBOARD_GATE_WAIT_MS` (default 10 minutes), and the Task's turn is not ended: a verdict takes 10 to 60 seconds and the Task needs it at once. A daemon that does not answer, a request it refuses (an older daemon that does not know the kind), a wait that runs out, or a job that ended without its exit code is not a verdict: exit 2, and the merge is not made by the Task.
+In a Task, `bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]` (and `--change <n>`, `--scope`, `--viewpoints`) does not judge in the Task's shell. It posts a `gate` job (the PR's number and the flags; no command, no environment) and reads `GET /api/jobs/<id>` every 2 seconds until the job ends, prints what the job printed and ends with the job's exit code (0 merge, 1 stop or a failed merge). The wait is `SWITCHBOARD_GATE_WAIT_MS` (default 10 minutes), and the Task's turn is not ended: a verdict takes 10 to 60 seconds and the Task needs it at once. A daemon that does not answer, a request it refuses (an older daemon that does not know the kind), a wait that runs out, or a job that ended without its exit code is not a verdict: exit 2, and the merge is not made by the Task.
 
 The job runs the daemon's own `scripts/merge-gate.ts`, the code of the version that is running. It is started in the daemon's own folder with Bun's `.env` loading off (`bun --no-env-file`), so a `bunfig.toml` (a `preload` is code) or a `.env` in the Task's checkout is not read by it; the checkout is named by `--cwd` and is only the folder the script reads the PR's commits and settings in (git and `gh` run in the checkout: the front of `gh` reads its refusals to write, `ops-kit.noWrite` and the like, from the working tree it runs in, and `gh stack merge` acts on it; the front is started with Bun told not to read that folder's `.env` and `bunfig.toml`). A PR that changes the rules of the gate is therefore judged by the rules that are running, not by its own copy. The job's environment is the daemon's: the records are read at the daemon's own address (`cfg.host`, the loopback address by default) with its own key (`MERGE_RECORDS_URL`, `MERGE_RECORDS_TOKEN_FILE`), and the Task's own addresses and variables are not in it. The consent to an ask reason is read for the Task that asked (`OPS_KIT_TASK_ID`), so the person's grant held for that Task and that head is what `--allow-large` needs, as before. The front of `gh` that stops a Task's merge is on only where `BACKLOG_URL` is set, and the job has none (a `--change` job has the daemon's backlog address, to read the change; it only judges), so the merge the job makes needs no grant of the person outside the gate: it is made only at a `merge` verdict of the app's copy, and a sync PR of the local main (`--merge-sync`, a Merge commit, only for a branch `sb/sync-main-<7>`) the same way. No variable of the Task's shell stands for it. This is the one merge a Task can ask for without the person's grant outside the gate; the other jobs (`local-ci`, `recheck`) run a script of the Task's checkout as the host's user, as before. A Task's local merge of a change (`scripts/local-merge.ts`, a git operation of the Task's shell) takes its judgement from a `--change` gate job in the same way.
 
@@ -92,8 +98,44 @@ the user's model choice), and removing files from the clone (a tracked file chan
 reviewer sees of the diff). The repository's design rules still reach the reviewer, as material (`_review/design-rules.md`).
 There is no setting to turn this off: a reviewer never needs the implementer's rules.
 
-Whether a reviewer may run anything depends on how its runner is started (Codex in a read-only sandbox, Claude Code in
-plan mode), so the instructions do not say it. The daemon writes `<jobs dir>/<id>/prompt.md` — the Task's instructions
+What a reviewer may write and run depends on how its runner is started, so the instructions do not say it: it may
+write tests in its checkout and run them in a heavy slot (`ops-kit heavy -- bun test <file>`), and write nothing outside
+the checkout. Codex runs in a `workspace-write` sandbox without network, `/tmp` and `$TMPDIR`, with the heavy slots'
+folder as the one other writable place (without it, `ops-kit heavy` runs the test without a slot). Claude Code runs with
+`--permission-mode dontAsk` (a tool use no rule allows is refused) and `--allowedTools "Bash(ops-kit heavy -- bun test:*)"
+"Edit(_review/tests/**)" "Write(_review/tests/**)"`: it edits only its tests, not other files of the checkout such as
+`.git/config` that a later `git` call there would act on (an unscoped `Edit` or `Write` would allow them anywhere). The test
+it runs is code the reviewer wrote, so it runs in Claude Code's sandbox (bubblewrap and socat; `--settings` with
+`sandbox.enabled`): it writes in the checkout and the heavy slots' folder but not the checkout's `.git`, not `/tmp` or the
+home folder, and has no network; `allowUnsandboxedCommands: false` keeps every command in it, and `failIfUnavailable`
+ends the run when the sandbox cannot start, because Claude Code otherwise runs the command unsandboxed. When `bwrap` or
+`socat` is not on the job's `PATH`, the daemon starts the Claude reviewer in plan mode instead: it only reads, its note
+says that no test was run because the sandbox is unavailable, and the job's log says so too. The job's
+`TMPDIR` is the job's own folder (`tmp` in the job's folder under the daemon's jobs), not a folder in the checkout:
+Claude Code makes its sockets under it, and a socket's address holds at most 108 bytes, which a checkout with a long
+path left no room for (the sandbox then did not start). Codex names it with `--add-dir`; Claude Code writes in its own
+`claude-<uid>` under it; the daemon removes it when the job ends. The daemon refuses a `_review` that leads out of the
+checkout through a link. Because the reviewer may write in its checkout, that
+checkout must be a separate clone or worktree: the daemon refuses a review whose `--cwd` is the Task's own working
+folder, a registered workspace's checkout or the working tree of any Task that has not ended, or a folder inside
+one of them, by their real paths. Another Task counts by the git working tree that holds its folder (a Task in a package folder protects the whole
+tree); a folder in no working tree counts for nothing, so a Task that works in a broad folder such as the home folder
+does not refuse every review. The reviewer writes its output in the job's own folder (`<jobs dir>/<id>/out.md`,
+which it cannot write to), not at `--out`. When the job ends, the daemon copies the output to `--out` in a short child
+process started in the folder of `--out`. That child runs outside any sandbox in a folder the reviewer could write to, so it
+is started with Bun's `.env` loading off and the daemon's own `bunfig.toml` (`--no-env-file --config=…`): a
+`bunfig.toml` (a `preload` is code) or a `.env` the reviewer left there is not read. Entering the folder pins it, so a folder on the way that is swapped for a link
+afterwards (by a process the reviewer's test left running) changes nothing for the child. The child reads where its
+folder really is (the kernel's path of its working folder) and refuses a folder outside the checkout. It then creates
+a new temporary file by a relative name, without following a link, and renames it over `--out`. A rename replaces a
+link or a hard link put at `--out`; it does not write through it. A reviewer cannot move a folder of the checkout to
+somewhere outside it, because its sandbox does not write outside the checkout. A copy that cannot be made is noted in
+the job's log; the job still ends. One job whose end cannot be recorded is ended as aborted and does not stop the
+other jobs' recovery when the daemon starts. The findings are read only from the job's own copy, never from the
+checkout. Claude Code's Edit and Write tools do not write through a link either: in
+a run of Claude Code 2.1.330 with these flags, a write to a link under `_review/tests/` that pointed outside the
+checkout was refused. A reviewer's test waits for a heavy slot like any other; one
+that was cut or did not run is reported as not run. The daemon writes `<jobs dir>/<id>/prompt.md` — the Task's instructions
 followed by the note of the runner that actually reviews (`REVIEWER_NOTE`) — and the job reads that file; the Task's own
 file is not changed. The note is added at the start, not written into the instructions or chosen by the skill's
 condition blocks, because a usage-limit fallback changes the reviewer after the instructions were written. A person who

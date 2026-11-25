@@ -24,33 +24,89 @@ export const releasesDir = (home: string) => join(home, "releases");
  * The environment is passed as it is now: without it Bun starts the child (and looks the command up) with the one the
  * process started with, and a PATH set since (a test without git) would not reach it.
  */
-export async function run(argv: string[], cwd: string): Promise<string> {
+export async function run(argv: string[], cwd: string, raw = false): Promise<string> {
   const proc = Bun.spawn(argv, { cwd, env: process.env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`${argv.join(" ")} exited ${code}: ${(err || out).trim().slice(-2000)}`);
-  return out.trim();
+  return raw ? out : out.trim();
 }
 
 export const resolveCommit = (repo: string, rev: string) => run(["git", "-C", repo, "rev-parse", "--verify", `${rev}^{commit}`], repo);
 
 /**
  * What a daemon reads again on SIGHUP without restarting: the Web UI it serves and the default settings it ships with.
- * A release whose difference from the one the daemon started from stays inside these needs no restart.
+ * A file that differs under these needs no restart, whatever else the daemon reads.
  */
 export const NO_RESTART_PREFIXES = ["apps/web/", "packages/core/config/"];
 
+/** What a daemon reads from the release it started from (paths relative to the release root; `dirs` end with `/`). */
+export interface DaemonReads {
+  files: Set<string>;
+  dirs: string[];
+}
+
+/**
+ * Ask the release at `releaseDir` what its daemon reads from it, by running that release's own
+ * `packages/core/src/daemon-reads.ts` (not a copy in sb-rescue: this bundle stays as it was installed, and the release
+ * knows its own code). Null when that cannot be known: the release has no such command (an older one), it fails,
+ * it does not answer within `timeoutMs` (it is killed), its output is not the expected JSON, or it says it is not complete.
+ */
+export async function daemonReadsOf(releaseDir: string, timeoutMs: number): Promise<DaemonReads | null> {
+  const cli = join(releaseDir, "packages/core/src/daemon-reads.ts");
+  if (!existsSync(cli)) return null;
+  try {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    // sb-rescue's own secret for 作り直す: like the daemon and the candidate, the release's code does not get it
+    delete env.SWITCHBOARD_STARTER_TOKEN;
+    const proc = Bun.spawn([process.execPath, cli], { cwd: releaseDir, env, stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    const answer = Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    const done = await Promise.race([answer, Bun.sleep(timeoutMs).then(() => null)]);
+    if (!done) {
+      proc.kill();
+      return null;
+    }
+    const [out, code] = done;
+    if (code !== 0) return null;
+    const r = JSON.parse(out) as { complete?: unknown; files?: unknown; dirs?: unknown };
+    const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+    if (r?.complete !== true || !strings(r.files) || !strings(r.dirs)) return null;
+    return { files: new Set(r.files), dirs: r.dirs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The rule of `restartNeeded` on the files that differ: a restart unless every one lies under NO_RESTART_PREFIXES or,
+ * with `reads`, is a file the daemon does not read. No files (nothing differs) is a restart as well.
+ */
+export function restartNeededFor(files: string[], reads: DaemonReads | null): boolean {
+  return files.length === 0 || restartFilesOf(files, reads).length > 0;
+}
+
+/** The files that differ which need the restart: not under NO_RESTART_PREFIXES, and (with `reads`) read by the daemon. */
+export function restartFilesOf(files: string[], reads: DaemonReads | null): string[] {
+  const notRead = (f: string) => reads !== null && !reads.files.has(f) && !reads.dirs.some((d) => f.startsWith(d));
+  return files.filter((f) => !(NO_RESTART_PREFIXES.some((p) => f.startsWith(p)) || notRead(f)));
+}
+
 /**
  * Does switching the running daemon (started from `running`) to `sha` need a restart? False only when every file that
- * differs lies under NO_RESTART_PREFIXES. True when there is nothing to compare with (`running` is null, git fails,
- * the commit is not in `repo`) or nothing differs: the safe answer is the restart that always worked.
+ * differs lies under NO_RESTART_PREFIXES or, with `reads` (what the daemon reads from `running`), is a file it does not
+ * read. Without `reads` (it could not be known) only NO_RESTART_PREFIXES count. True when there is nothing to compare
+ * with (`running` is null, git fails, the commit is not in `repo`) or nothing differs: the safe answer is the restart
+ * that always worked. `files` are the ones that need it (all of them; empty when there was nothing to compare).
  */
-export async function restartNeeded(repo: string, running: string | null, sha: string): Promise<boolean> {
-  if (!running) return true;
+export async function restartNeeded(repo: string, running: string | null, sha: string, reads: DaemonReads | null): Promise<{ restart: boolean; files: string[] }> {
+  if (!running) return { restart: true, files: [] };
   try {
-    const files = (await run(["git", "-C", repo, "diff", "--name-only", running, sha], repo)).split("\n").filter(Boolean);
-    return files.length === 0 || !files.every((f) => NO_RESTART_PREFIXES.some((p) => f.startsWith(p)));
+    // -z: the paths as they are (git quotes a name with non-ASCII or special characters otherwise, and a quoted name matches nothing read)
+    const diff = (await run(["git", "-C", repo, "diff", "--name-only", "-z", "--no-renames", running, sha], repo, true)).split("\0").filter(Boolean);
+    const files = restartFilesOf(diff, reads);
+    return { restart: diff.length === 0 || files.length > 0, files };
   } catch {
-    return true;
+    return { restart: true, files: [] };
   }
 }
 

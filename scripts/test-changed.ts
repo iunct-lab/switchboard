@@ -14,7 +14,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
-import { type Deps, parseBuild, runBuild, testRun, type Offload } from "./local-ci.ts";
+import { type Deps, parseBuild, testRun } from "./local-ci.ts";
+import { runBuild, type Offload } from "./local-ci-offload.ts";
 import { reusedLine, reuseHours } from "./offload-record.ts";
 import { offloadFor } from "./tag-ci.ts";
 import { currentRepo } from "./repo.ts";

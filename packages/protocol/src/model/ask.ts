@@ -117,6 +117,21 @@ export const Ask = z.object({
   proceeding: z.boolean().optional(),
   /** Only a question for a wait past its limit (`waitover:`): which wait of the Task it is — its kind and its key (`pr#12`, `job#3`, …). */
   wait: z.object({ kind: WaitKind, key: z.string() }).optional(),
+  /**
+   * Only the notice of a stalled backlog queue (`notice:queue-stall@<since>`): since when it started nothing (ms), the
+   * holders holding the most queued PBIs (top 3: `held` = how many, `working` null = a place waited for), and the
+   * questions the person has to answer that hold PBIs back, the most held first (`headMoved` = the stop asks again for a
+   * PR the person allowed its own Task with a head on record: the grant did not let it through, so the head has moved
+   * since). null for every other question.
+   */
+  stall: z
+    .object({
+      since: z.number(),
+      holders: z.array(z.object({ workspace: z.object({ id: z.string(), name: z.string() }), ref: z.string(), url: z.string().nullable(), pbi: z.object({ number: z.number(), title: z.string(), url: z.string() }).nullable(), held: z.number(), working: z.boolean().nullable() })),
+      person: z.array(z.object({ askId: z.string(), workspace: z.object({ id: z.string(), name: z.string() }), pbi: z.object({ number: z.number(), title: z.string(), url: z.string() }), label: z.string(), taskId: z.string().nullable(), url: z.string().nullable(), held: z.number(), headMoved: z.boolean() })),
+    })
+    .nullable()
+    .default(null),
 });
 export type Ask = z.infer<typeof Ask>;
 

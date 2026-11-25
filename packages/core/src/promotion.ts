@@ -134,14 +134,14 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
   if (status.busy) return { action: "wait", reason: `sb-rescue が ${status.busy} の最中なので ${latest.tag} の昇格を待つ` };
   if (s.busyTasks > 0 && status.promoteKeepsTasks && !s.needsRestart) return { action: "promote", tag: latest.tag, sha: latest.sha, ifNoRestart: true };
   if (s.busyTasks > 0) {
-    const why = s.needsRestart ? `${s.busyTasks} 件の Task が動いていて、差分が画面と既定の設定の外にもあるので` : `${s.busyTasks} 件の Task が動いているので`;
+    const why = s.needsRestart ? `${s.busyTasks} 件の Task が動いていて、差分に動いているデーモンが読むファイルがあるか、読むかを確かめられないので` : `${s.busyTasks} 件の Task が動いているので`;
     return { action: "wait", reason: `${why} ${latest.tag} の昇格を待つ`, drain: true };
   }
   return { action: "promote", tag: latest.tag, sha: latest.sha };
 }
 
 /**
- * A promotion that needs a restart and has not come yet, in memory only (a daemon starts with none).
+ * A promotion that needs a restart and has not come yet, in memory only (a daemon starts with none; that it waited is kept in `promotion_decisions`).
  * `since`: when a version first had to wait for Tasks. It is the one clock of the wait: a newer tag replaces `tag`, not
  * `since`, so Tasks that keep running cannot hold new starts for one limit per tag.
  * `state`: `drain` = it waits for the Tasks a restart would cut, and no new turn or Task starts until `since` + the limit

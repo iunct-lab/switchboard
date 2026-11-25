@@ -6,7 +6,8 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
-import { OffloadStartError, stepWithIdle, type Offload } from "./local-ci";
+import { stepWithIdle } from "./local-ci";
+import { OffloadStartError, type Offload } from "./local-ci-offload";
 import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, judgesNewest, writeJobResult, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
@@ -1324,6 +1325,31 @@ describe("tag-ci: the build off the host", () => {
     };
     await tagCi(d, "o/r", "/repo", CACHE);
     expect(contents.find((c) => c.includes("layoutCount"))!.split("\n").filter((l) => l.includes("\tjourneys.new-task.layoutCount\t"))).toEqual([expect.stringMatching(/^\S+\toffload\tv1\.0\.0\t[0-9a-f]{40}\tjourneys\.new-task\.layoutCount\t6$/)]);
+  });
+
+  test("previous tag: FILE_SIZE_BASE_REF is the tag before, in the host's steps' env and for the list a build off the host gets; the first tag gets none", async () => {
+    // on the host: every step's env
+    const f = fake([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }]);
+    const refs = new Set<string | undefined>();
+    await tagCi({ ...f.d, step: (script, cwd, env) => (refs.add(env?.FILE_SIZE_BASE_REF), f.d.step(script, cwd, env)) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect([...refs]).toEqual(["v1.0.0"]);
+    const g = fake([{ tag: "v1.0.0", body: "" }]);
+    const first = new Set<string | undefined>();
+    await tagCi({ ...g.d, step: (script, cwd, env) => (first.add(env?.FILE_SIZE_BASE_REF), g.d.step(script, cwd, env)) }, "o/r", "/repo", CACHE, NO_HOST);
+    expect([...first]).toEqual([undefined]);
+    // off the host: the list is read from that ref of the host's clone and goes in the build's script
+    const shown: string[] = [];
+    const listAt = (ref: string) => `export const STILL_OVER: Record<string, number> = {\n  "apps/web/src/A.tsx": ${ref === "v1.0.0" ? 1100 : 1200},\n};\n`;
+    for (const tags of [[{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], [{ tag: "v1.0.0", body: "" }]]) {
+      const o = fakeOffload();
+      const h = offloaded(tags, o);
+      shown.length = 0;
+      await tagCi({ ...h.d, sh: async (cmd, cwd, input) => (cmd.includes("show") ? (shown.push(cmd.at(-1)!), listAt(cmd.at(-1)!.split(":")[0]!)) : h.d.sh(cmd, cwd, input)) }, "o/r", "/repo", CACHE, NO_HOST);
+      if (tags.length === 2) {
+        expect(shown).toEqual(["v1.0.0:scripts/file-size.ts"]);
+        expect(o.started[0]!.script).toContain(`export FILE_SIZE_BASE_LIST='{"apps/web/src/A.tsx":1100}'\n`);
+      } else expect(shown).toEqual(["origin/main:scripts/file-size.ts"]);
+    }
   });
 
   describe("pending: a build started and its run gone", () => {

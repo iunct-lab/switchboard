@@ -1,4 +1,4 @@
-// test-reads: apps/web/src/components/Settings.tsx
+// test-reads: apps/web/src/components/Settings.tsx apps/web/src/components/ReviewJobCells.tsx
 import { describe, expect, test } from "bun:test";
 import { Settings } from "@switchboard/protocol";
 import { RESETTABLE_CARDS, resetCard, type ResettableCard } from "./settingsDefaults.ts";
@@ -7,6 +7,8 @@ import { settings } from "./i18n/settings.ts";
 import { jobRows } from "./runnerSettings.ts";
 
 const source = await Bun.file(new URL("./components/Settings.tsx", import.meta.url)).text();
+/** The review's rows of 「どの仕事を」 save in their own component: what they save is the jobs card's. */
+const reviewCells = await Bun.file(new URL("./components/ReviewJobCells.tsx", import.meta.url)).text();
 const defaults = Settings.parse({});
 const cards = Object.keys(RESETTABLE_CARDS) as ResettableCard[];
 
@@ -32,7 +34,8 @@ describe("RESETTABLE_CARDS", () => {
   test("a card resets the keys it saves, a value is reset by one card only, and every card is one of the screen's list", () => {
     const drawn = drawnCards();
     for (const card of cards) {
-      const saved = new Set([...drawn[card]!.matchAll(/\bsave\(\{ ?(\w+):/g)].map((m) => m[1]!));
+      const src = card === "jobsCard" ? drawn[card]! + reviewCells : drawn[card]!;
+      const saved = new Set([...src.matchAll(/\bsave\(\{ ?(\w+):/g)].map((m) => m[1]!));
       const reset = new Set(RESETTABLE_CARDS[card].map((p) => p.split(".")[0]!));
       for (const key of saved) expect({ card, key, reset: reset.has(key) }).toEqual({ card, key, reset: true });
     }
@@ -45,7 +48,8 @@ describe("RESETTABLE_CARDS", () => {
   });
 
   test("every value listed has a default in the settings", () => {
-    for (const path of cards.flatMap((c) => RESETTABLE_CARDS[c])) {
+    // recheckRunner has no default value: unset is its default (it follows the review setting), and null puts it back
+    for (const path of cards.flatMap((c) => RESETTABLE_CARDS[c]).filter((p) => p !== "recheckRunner")) {
       const v = path.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown> | undefined)?.[k], defaults);
       expect({ path, has: v !== undefined }).toEqual({ path, has: true });
     }
@@ -63,8 +67,9 @@ describe("quotaAndResume", () => {
 
 describe("the default shown next to a value", () => {
   test("each 「どの仕事を」 row shows the runner its row reads from the defaults", () => {
-    for (const r of jobRows(defaults)) expect(r.runner).not.toBe("");
-    expect(source).toContain("jobRows(d).find((r) => r.id === j.id)?.runner");
+    // the recheck row says its own default: an unset recheck has no runner
+    for (const r of jobRows(defaults, ["claude", "codex"]).filter((r) => r.id !== "recheck")) expect(r.runner).not.toBe("");
+    expect(source).toContain("jobRows(d, reviewers).find((r) => r.id === j.id)?.runner");
   });
   test("the cap's box follows the saved value, and SweepSlots' own save of it reaches the screen's settings", () => {
     expect(source).toContain("flowLimit={qr.flowShareLimit}");

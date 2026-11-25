@@ -113,10 +113,10 @@ describe("ci", () => {
     }
   });
 
-  test("the steps: home paths, install, public tree check, licenses, Codex CLI, typecheck, public docs, web build, perf, then test — in that order; only the perf steps keep going", () => {
+  test("the steps: home paths, install, public tree check, fetch main, file sizes, licenses, Codex CLI, typecheck, public docs, web build, perf, then test — in that order; only the perf steps keep going", () => {
     const first = ciSteps.map((s) => s.run.split("\n")[0]!.trim());
     const at = (cmd: string) => first.findIndex((r) => r === cmd || r.startsWith(`${cmd} `) || (cmd.endsWith(" ") && r.startsWith(cmd)));
-    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "bun run licenses:check", "if command -v codex ", "bun run typecheck", "bun scripts/public-docs.ts check", "bun run --cwd apps/web build", "if [ -n \"${PERF_BASE_TREE:-}\" ]; then bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
+    const order = ["rc=0; git grep ", "bun install --frozen-lockfile", "bun ops-kit/src/cli.ts public-sync --check", "if [ -n \"${PERF_BASE_TREE:-}\" ]; then echo ", "bun scripts/file-size.ts", "bun run licenses:check", "if command -v codex ", "bun run typecheck", "bun scripts/public-docs.ts check", "bun run --cwd apps/web build", "if [ -n \"${PERF_BASE_TREE:-}\" ]; then bun scripts/perf-ratchet.ts base ", "bun scripts/perf-bench.ts", "bun scripts/perf-ratchet.ts check ", "bun test"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(ciSteps.filter((s) => s.keepGoing).map((s) => s.name)).toEqual(["bun scripts/perf-ratchet.ts base origin/main perf-base.json", "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", "bun scripts/perf-ratchet.ts check perf-result.json"]);

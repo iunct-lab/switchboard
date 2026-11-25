@@ -676,6 +676,27 @@ describe("skills by runner and review setting", () => {
     expect(read()).toContain("再チェックは同じ");
     expect(read()).not.toContain("再チェックは別");
   });
+
+  test("without a recheck setting, OPS_KIT_RECHECK_RUNNER and the skills follow the review setting", async () => {
+    const meta = join(home, "meta-follow");
+    const repo = join(home, "repo-follow");
+    for (const d of [meta, repo]) {
+      mkdirSync(d, { recursive: true });
+      spawnSync("git", ["init", "-q"], { cwd: d });
+    }
+    mkdirSync(join(meta, "ops-kit/skills/demo"), { recursive: true });
+    writeFileSync(join(meta, "ops-kit/skills/demo/SKILL.md"), ["# demo", "<!-- when recheck=other -->", "再チェックは別", "<!-- end when -->", "<!-- when recheck=same -->", "再チェックは同じ", "<!-- end when -->", ""].join("\n"));
+    db.upsertWorkspace({ name: "meta", path: meta, kind: "meta" });
+    const wsId = db.upsertWorkspace({ name: "w", path: repo, kind: "repo" }).id;
+    let env: Record<string, string> | undefined;
+    const claude = fakeAdapter([]);
+    const m = new TaskManager(db, new Map<RunnerId, RunnerAdapter>([["claude", { ...claude, start: (opts, emit) => ((env = opts.env), claude.start(opts, emit)) }]]), () => undefined, { idleMs: IDLE_MS, reviewRunner: () => "same" });
+    m.create({ workspaceId: wsId, cwd: repo, title: "t", prompt: "p", runner: "claude" });
+    await sleep(0);
+    expect(env?.OPS_KIT_REVIEW_RUNNER).toBe("same");
+    expect(env?.OPS_KIT_RECHECK_RUNNER).toBe("same");
+    expect(readFileSync(join(repo, ".claude/skills/demo/SKILL.md"), "utf8")).toContain("再チェックは同じ");
+  });
 });
 
 describe("kitPath", () => {

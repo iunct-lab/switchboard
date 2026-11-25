@@ -38,6 +38,12 @@ test("changeMarks: none / the pass of the head and base now / a base moved since
   expect(changeMarks([{ body: "[dak] review", createdAt: at(1) }], refs).review).toBeNull();
 });
 
+test("changeMarks reads a gate-support recheck pass of the head, and not one of another head", () => {
+  const refs = { head: H, base: B };
+  expect(changeMarks([{ body: `[recheck] security:gate-support pass ${H}`, createdAt: at(1) }], refs).rechecks).toEqual(["security:gate-support"]);
+  expect(changeMarks([{ body: `[recheck] security:gate-support pass ${B}`, createdAt: at(1) }], refs).rechecks).toEqual([]);
+});
+
 test("changeStateLabel: open, merged, closed without a merge", () => {
   expect(changeStateLabel({ state: "OPEN", mergeCommit: null })).toBe("開いている");
   expect(changeStateLabel({ state: "CLOSED", mergeCommit: H })).toBe("マージ済み");

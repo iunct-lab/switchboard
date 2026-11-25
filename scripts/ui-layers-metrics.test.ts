@@ -1,4 +1,4 @@
-// test-reads: apps/web/src/components/Home.tsx apps/web/src/components/Settings.tsx apps/web/src/screen.ts apps/web/src/route.ts
+// test-reads: apps/web/src/components/Compose.tsx apps/web/src/components/Settings.tsx apps/web/src/screen.ts apps/web/src/route.ts
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { countUiMetrics, readUiMetrics } from "./ui-layers-metrics.ts";
@@ -6,7 +6,7 @@ import { countUiMetrics, readUiMetrics } from "./ui-layers-metrics.ts";
 const home = `
 <div>
   <button>outside the card</button>
-  <section className="card compose">
+  <section className="card compose" data-compose>
     <select value={a} />
     <textarea />
     <section className="inner"><input /></section>

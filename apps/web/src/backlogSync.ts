@@ -236,6 +236,14 @@ export const createWord = (state: BacklogSyncState) =>
 /** One free-text draft (a comment, a new Issue) kept across a failed save and a reload. */
 export const textDraftKey = (scope: string) => `switchboard.backlog.text.${scope}`;
 
+/** Told on `window` when something was saved from outside the Backlog screen (a new Issue from the instruction form): an open Backlog reads its list again. */
+export const BACKLOG_CHANGED_EVENT = "switchboard:backlog-changed";
+
+/** Where a workspace's new-Issue draft is kept (an earlier release wrote it here, and it is read as it is). */
+export const newIssueDraftKey = (workspaceId: string) => textDraftKey(`new:${workspaceId}`);
+/** Told on the window when a new Issue's stored draft is written or cleared (`detail`: its key and who wrote it), so a second form on the same page shows it. */
+export const NEW_ISSUE_DRAFT_EVENT = "switchboard:new-issue-draft";
+
 /** A new Issue's draft: what is typed and the kind chosen, kept per workspace. */
 export interface NewIssueDraft {
   title: string;

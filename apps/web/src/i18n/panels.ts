@@ -206,32 +206,20 @@ export const panels = msgs({
   unavailable: { ja: " — 取得できません", en: " — cannot fetch it" },
   lightboxClose: { ja: " · クリックか Esc で閉じる", en: " · Click or Esc to close" },
 
-  // Feedback.tsx
+  // Feedback.tsx, Compose.tsx
   captureFailed: { ja: "画面を撮れませんでした。貼り付けかドロップで添付してください", en: "Could not capture the screen. Attach it by pasting or dropping" },
-  feedback: { ja: "フィードバック", en: "Feedback" },
-  sendHow: { ja: "送り方", en: "How to send" },
-  modeRequest: { ja: "要望として登録", en: "File as a request" },
-  modeFix: { ja: "すぐ直す", en: "Fix now" },
   requestHintUpstream: { ja: "Switchboard への要望は、この環境では Task にしません。送ると、Switchboard の取得元（origin）のリポジトリの要望フォームを本文入りで開くリンクを出します。Issue は自動では作らず、出すかはフォームで決めます。", en: "A request for Switchboard is not made into a Task here. Sending shows a link that opens the request form of the repository Switchboard came from (its origin) with your text; no Issue is created automatically, and you decide on the form whether to file it." },
   upstreamOpen: { ja: "{repo} の要望フォームを開く（GitHub。まだ出していません）", en: "Open the request form of {repo} (GitHub; nothing has been filed yet)" },
   upstreamCopyHint: { ja: "取得元（origin）が GitHub ではない（または読めない）ので、何も出していません。本文をコピーして、そこの要望の受け口に貼ってください。", en: "The origin is not on GitHub (or could not be read), so nothing has been filed: copy the text and paste it into its request channel." },
-  fileTo: { ja: "登録先", en: "File to" },
   fixHint: { ja: "Switchboard を直す Task をすぐ始めます（要望 Issue は作りません）。", en: "Starts a Task that fixes Switchboard right away (no request Issue is made)." },
-  requestHint: { ja: "要望や不具合を送ると、{target} のリポジトリに要望 Issue と PBI・Task が作られます。", en: "Sending a request or a bug makes a request Issue, a PBI and Tasks in the repository of {target}." },
-  targetFallback: { ja: "登録先", en: "the target" },
   sentFromTask: { ja: "Task「{title}」({id})", en: "Task \"{title}\" ({id})" },
   sentFrom: { ja: "送信元: {screen}", en: "Sent from: {screen}" },
   sentFromArtifact: { ja: "送信元: {screen}・成果物「{title}」", en: "Sent from: {screen}, artifact \"{title}\"" },
   sentFromTaskArtifact: { ja: "送信元: {screen}・Task「{task}」の成果物「{title}」", en: "Sent from: {screen}, artifact \"{title}\" of the Task \"{task}\"" },
-  bodyLabel: { ja: "本文（必須）", en: "Text (required)" },
-  bodyPlaceholder: { ja: "気づいたこと、できるようにしたいこと", en: "What you noticed, what you want to be able to do" },
   capture: { ja: "画面を撮る", en: "Capture the screen" },
   pasteHint: { ja: "画像は貼り付け・ドロップもできます", en: "Images can also be pasted or dropped" },
   capturing: { ja: "画面を撮っています…", en: "Capturing the screen…" },
   close: { ja: "閉じる", en: "Close" },
-  sending: { ja: "送信中…", en: "Sending…" },
-  fix: { ja: "直す", en: "Fix" },
-  file: { ja: "登録", en: "File" },
 });
 
 /**

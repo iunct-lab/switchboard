@@ -8,6 +8,7 @@ import { overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { SLOT_OF_ACTION } from "../backlog-item.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
 import { resumeDepends } from "../depends-resume.ts";
+import { nextStall, stallHolders } from "../queue-stall.ts";
 
 /**
  * A queued PBI's stored Issue: its title, and whether it is closed; null when not stored. Made once per call that
@@ -90,9 +91,11 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
   const queue = sc.prunedQueue();
   if (!queue.enabled) return;
   const lines: string[] = [];
-  const finish = () => {
+  // a firing that returns early (empty, at the concurrency, every runner at its usage limit) is not a stall: it ends one
+  const finish = (firing: Parameters<typeof nextStall>[1] = { stalled: false, holders: [] }) => {
     sc.scheduler.notes(lines.map((l) => `キュー: ${l} (${reason})`));
-    noteQueue(sc.db, lines);
+    const now = Date.now();
+    noteQueue(sc.db, lines, now, nextStall(readQueue(sc.db).stall, firing, now));
   };
   if (!queue.items.length) return (lines.push("キューが空"), finish());
   const meta = sc.metaWorkspace();
@@ -139,6 +142,8 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
   const dueSoon = (ws: Workspace) => dueSoonBy.get(ws.id) ?? (dueSoonBy.set(ws.id, dueSoonOf(ws.path)), dueSoonBy.get(ws.id)!);
   const flowOf = (ws: Workspace, counted: number[], stopped: number): FlowLimit => flowLimitOf(sc.settings().quotaAndResume.flowLimit, [...new Set([...counted, ...[...flowStarted].filter((k) => k.startsWith(`${ws.id}:`)).map((k) => Number(k.slice(ws.id.length + 1)))])], stopped);
   let startedAny = false;
+  // a PBI left for its runner's usage limit: the firing waits for the limit's reset, not for the person
+  let usageHeld = false;
   const reread = new Set<string>();
   for (;;) {
     // the queue as it is now: an entry taken out or moved, the queue disabled or the number lowered while the backlog was read count
@@ -158,6 +163,7 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
     picked.add(sc.queueKey(ws.id, p.item.number));
     const why = sc.queueUsage(p.action);
     if (why) {
+      usageHeld = true;
       lines.push(`${ws.name}: #${p.item.number} を始めない: ${why}`);
       continue;
     }
@@ -199,8 +205,10 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
     if (flowLine) lines.push(`${ws.name}: ${flowLine}`);
   }
   const after = readQueue(sc.db);
-  if (!startedAny && after.enabled && sc.queueRunning(after) < after.concurrency) lines.push("進められる項目が無い");
-  finish();
+  const running = sc.queueRunning(after);
+  const nothing = !startedAny && after.enabled && running < after.concurrency;
+  if (nothing) lines.push("進められる項目が無い");
+  finish({ stalled: nothing && running === 0 && !usageHeld, holders: stallHolders(read.map(({ ws, items }) => ({ workspaceId: ws.id, items }))) });
 };
 
 /**

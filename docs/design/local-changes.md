@@ -1,7 +1,7 @@
 # Local changes: review and merge without a forge
 
 A workspace whose backlog is kept in Switchboard only, and whose repository has no remote, can still go from a request
-to a merge into `main`: a Task's branch becomes a *change* kept in Switchboard instead of a pull request, another runner
+to a merge into `main`: a Task's branch becomes a *change* kept in Switchboard instead of a pull request, the main reviewer
 reviews it, the local CI and the merge gate judge it by the same rules as a PR, and a script merges it the way GitHub's
 Rebase and merge does. Nothing calls GitHub, fetches or pushes.
 
@@ -35,7 +35,7 @@ is the merge gate's), the body and every comment (`apps/web/src/changes.ts`).
 
 ## Review
 
-As for a PR, another runner reviews (`cross-runner-review`), with a worktree of the branch instead of a clone,
+As for a PR, the main reviewer the review setting (`reviewRunner`) names reviews (`cross-runner-review`), with a worktree of the branch instead of a clone,
 `git diff main...<branch>` as the diff and `ops-kit backlog view <change>` as the description. The summary is one
 comment whose first line is `[<runner>] review`. There are no review threads: the triage of each finding and its reply go
 in one comment as a table.
@@ -45,7 +45,8 @@ in one comment as a table.
 `bun scripts/local-ci.ts --change <n>` runs the same steps as for a PR: the head merged into the base's tip in a
 throwaway worktree. The result's first line is the same `[local-ci] pass|fail <head> base=<base>`, posted as a comment
 on the change through the `app` row of `reportResult`'s services (`ops-kit/src/forge-app.ts`). It re-reads the change
-before posting and posts nothing if a branch moved. A pass of the same head and base is not run again (`--force`).
+before posting and posts nothing if the head moved; if only the base moved, it posts with the base it ran on, and the
+merge gate does not count that pass (it asks for a run on the base's current tip). A pass of the same head and base is not run again (`--force`).
 
 The steps are read from `ops.config.json`'s `ci.steps` in the checkout; without that key they come from
 `.github/workflows/ci.yml`. With neither, it exits 2 with one line naming where they go and posts nothing. A repository

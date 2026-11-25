@@ -29,7 +29,18 @@ export interface Screen {
   name: string;
   path: string;
   layout?: "list" | "board" | "queue";
+  /** An expression run once after the screen is open and read, before it is measured (a click that selects rows, say). */
+  prepare?: string;
 }
+
+/** Waits until the page has what the next click needs, then runs `body`: a screen reads the daemon after it opens. */
+const afterRows = (selector: string, body: string) => `(async () => { for (let i = 0; i < 100 && !document.querySelector(${JSON.stringify(selector)}); i++) await new Promise((r) => setTimeout(r, 100)); ${body} })()`;
+/** The first two row boxes of the Backlog, ticked. */
+const SELECT_TWO = afterRows("[data-select]", "for (const b of [...document.querySelectorAll('[data-select]')].slice(0, 2)) b.click(); await new Promise((r) => setTimeout(r, 300)); if (document.querySelectorAll('[data-select]:checked').length !== 2) throw new Error('two rows are not ticked');");
+/** The queue's 選ぶ (marks the rows the conditions pick; the queue itself stays as it is). */
+const PICK_FOR_QUEUE = afterRows("[data-queue-pick-add]", "document.querySelector('[data-queue-pick-add]')?.click(); await new Promise((r) => setTimeout(r, 300)); if (!document.querySelector('[data-select-bar]')) throw new Error('no selection bar after 選ぶ');");
+/** Two rows of the meta workspace (the one a bundle can start in), ticked, then the bundle button, which opens its confirmation; 「まとめて始める」 is not pressed. */
+const OPEN_BUNDLE_CONFIRM = afterRows("[data-select]", `const metaId = (await (await fetch('/api/workspaces')).json()).find((w) => w.kind === 'meta')?.id; for (const b of [...document.querySelectorAll('[data-select]')].filter((b) => b.dataset.select.startsWith(metaId + ':')).slice(0, 2)) b.click(); await new Promise((r) => setTimeout(r, 300)); document.querySelector('[data-select-bundle]:not([disabled])')?.click(); await new Promise((r) => setTimeout(r, 300)); if (!document.querySelector('dialog[data-bundle-confirm][open]')) throw new Error('the bundle confirmation did not open (a hold standing in this data, or fewer than two PBIs of the meta workspace)');`);
 
 /** The header's screens and the Backlog's three layouts; `task` opens the newest stage Task (`taskId`). */
 export function screens(taskId: string | null): Screen[] {
@@ -41,6 +52,9 @@ export function screens(taskId: string | null): Screen[] {
     { name: "backlog-list", path: "/backlog", layout: "list" as const },
     { name: "backlog-board", path: "/backlog", layout: "board" as const },
     { name: "backlog-queue", path: "/backlog", layout: "queue" as const },
+    { name: "backlog-list-selected", path: "/backlog", layout: "list" as const, prepare: SELECT_TWO },
+    { name: "backlog-queue-selected", path: "/backlog", layout: "queue" as const, prepare: PICK_FOR_QUEUE },
+    { name: "backlog-bundle-confirm", path: "/backlog", layout: "list" as const, prepare: OPEN_BUNDLE_CONFIRM },
     { name: "resources", path: "/resources" },
     { name: "schedules", path: "/schedules" },
     { name: "approvals", path: "/approvals" },
@@ -226,6 +240,8 @@ async function main() {
   let core: Awaited<ReturnType<typeof import("../packages/core/src/server.ts").startServer>> | null = null;
   let chrome: ReturnType<typeof Bun.spawn> | null = null;
   let ws: WebSocket | undefined;
+  // prepared screens whose state did not come up (said in their line, not pictured)
+  const unprepared: string[] = [];
   try {
     if (!home) {
       home = join(work, "home");
@@ -266,7 +282,7 @@ async function main() {
     ws = new WebSocket(url);
     await new Promise<void>((r) => (ws!.onopen = () => r()));
     let seq = 0;
-    const pending = new Map<number, (m: { result?: { result?: { value?: unknown }; data?: string } }) => void>();
+    const pending = new Map<number, (m: { result?: { result?: { value?: unknown }; data?: string }; error?: { message?: string } }) => void>();
     let release: object = RELEASE_AS_MANAGED;
     ws.onmessage = (e) => {
       const m = JSON.parse(String(e.data));
@@ -275,8 +291,16 @@ async function main() {
       else if (m.method === "Fetch.requestPaused")
         ws!.send(JSON.stringify({ id: ++seq, method: "Fetch.fulfillRequest", params: { requestId: m.params.requestId, responseCode: 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(JSON.stringify(release)).toString("base64") } }));
     };
-    const call = (method: string, params: object = {}) => new Promise<{ result?: { result?: { value?: unknown }; data?: string } }>((r) => { const id = ++seq; pending.set(id, r); ws!.send(JSON.stringify({ id, method, params })); });
-    const evaluate = async <T>(expression: string) => (await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.result?.value as T;
+    const call = (method: string, params: object = {}) => new Promise<{ result?: { result?: { value?: unknown }; data?: string }; error?: { message?: string } }>((r) => { const id = ++seq; pending.set(id, r); ws!.send(JSON.stringify({ id, method, params })); });
+    // an expression that throws is an error here, not an empty result (a prepared screen's is caught by the loop below, which says so and leaves the screen out; any other ends the audit)
+    const evaluate = async <T>(expression: string) => {
+      const answer = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+      // Chrome could not run it at all (the page's context went away): not an empty result
+      if (answer.error) throw new Error(`Chrome: ${answer.error.message ?? "the expression was not evaluated"}`);
+      const r = answer.result as { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } } | undefined;
+      if (r?.exceptionDetails) throw new Error(`in the page: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "an exception"}`);
+      return r?.result?.value as T;
+    };
     await call("Page.enable");
     await call("Runtime.enable");
     await call("Fetch.enable", { patterns: [{ urlPattern: "*/api/daemon/release*", requestStage: "Request" }] });
@@ -293,6 +317,16 @@ async function main() {
         await call("Page.navigate", { url: base + s.path });
         // the screens read the daemon after they open: wait for the requests to settle
         await Bun.sleep(5000);
+        if (s.prepare) {
+          // a state that cannot come up on this data (a bundle hold standing, too few PBIs) is said and left out: nothing is measured as if it had, and the screens after it are still audited
+          const why = await evaluate(s.prepare).then(() => null, (e) => String((e as Error).message ?? e).split("\n")[0]!);
+          if (why !== null) {
+            console.log(`${w} ${s.name}: 用意できなかったので撮らない（${why}）`);
+            unprepared.push(`${w} ${s.name}`);
+            continue;
+          }
+          await Bun.sleep(500);
+        }
         const verdict = judge(await evaluate<Box[]>(MEASURE), size.width);
         const extra = ((await evaluate<Band[]>(MEASURE_BANDS)) ?? []).reduce((n, b) => n + extraRows(b), 0);
         const sc = await evaluate<{ sh: number; ch: number }>(SCROLLER);
@@ -307,14 +341,16 @@ async function main() {
         console.log(`${w} ${s.name}: はみ出し ${verdict.overflow} / 1 字幅の縦書き ${verdict.squeezed} / 帯の余分な段 ${extra} / ${frames} 枚${needed > frames ? `（全体は ${needed} 枚分。--max-frames ${needed} で全部）` : ""}`);
       }
       // the header once more with 新しい版 in it (the screens' own answer has none): its rows and a picture
-      if (list.length) {
+      // on a screen that was pictured at this width (one left out above is not shown here either)
+      const first = list.find((s) => !unprepared.includes(`${w} ${s.name}`));
+      if (first) {
         release = RELEASE_WITH_NEW_VERSION;
-        await call("Page.navigate", { url: base + list[0]!.path });
+        await call("Page.navigate", { url: base + first.path });
         await Bun.sleep(5000);
         const extra = ((await evaluate<Band[]>(MEASURE_BANDS)) ?? []).reduce((n, b) => n + extraRows(b), 0);
         const shot = await call("Page.captureScreenshot", { format: "png" });
         await Bun.write(join(out, `${w}-header-new-version.png`), Buffer.from(shot.result!.data!, "base64"));
-        console.log(`${w} ヘッダー（新しい版あり、${list[0]!.name}）: 帯の余分な段 ${extra}`);
+        console.log(`${w} ヘッダー（新しい版あり、${first.name}）: 帯の余分な段 ${extra}`);
         release = RELEASE_AS_MANAGED;
       }
     }
@@ -328,7 +364,8 @@ async function main() {
     if (!args.home) rmSync(join(work, "home"), { recursive: true, force: true });
     removeIfEmpty(work);
   }
-  process.exit(0);
+  // asked for by name and not pictured: not a success. In the run of every screen it is one line among the others
+  process.exit(args.screens && unprepared.length ? 1 : 0);
 }
 
 if (import.meta.main) await main();

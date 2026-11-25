@@ -1,4 +1,4 @@
-// test-reads: rescue/src/ rescue/install.ts rescue/package.json
+// test-reads: rescue/src/ rescue/install.ts rescue/package.json packages/core/src/promotion-log.ts
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, createHmac, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import type { Ctx } from "./promote.ts";
-import { buildRelease, currentOf, listReleases, readHistory, switchTo } from "./releases.ts";
+import { buildRelease, currentOf, listReleases, readHistory, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { sweepTmp } from "./tmp.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -75,7 +75,7 @@ test("status shows version, state, history and the log; the page is one self-con
   expect(html).toContain("強制クリア"); // the /tmp section
   expect(html).toContain("api/tmp/clean");
   expect(html).toContain('id="core-row"'); // the core line, shown only when it differs from the current version
-  expect(html).toContain("画面と既定の設定だけ（再起動なし）");
+  expect(html).toContain("昇格した（再起動なし）");
   expect(() => new Function(html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")))).not.toThrow(); // the script parses
   expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/); // nothing to fetch from a daemon that may be down
 });
@@ -117,8 +117,27 @@ test("ifNoRestart: a release that needs a restart is refused with 409 before any
   const core = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v3"), "third version (core)");
   const built = listReleases(f.home).sort();
   const r = await post("/api/promote", { commit: core, ifNoRestart: true });
-  expect([r.status, await r.json()]).toEqual([409, { error: "this release needs a restart", restart: true }]);
+  expect([r.status, await r.json()]).toEqual([409, { error: "this release needs a restart", restart: true, files: ["packages/core/src/main.ts"], fileCount: 1 }]);
   expect([listReleases(f.home).sort(), (await status()).busy]).toEqual([built, null]);
+});
+
+test("ifNoRestart refused: the answer names the files that need the restart, and the daemon's reader takes exactly those", async () => {
+  // Switchboard's own reader of the answer, loaded by a computed path: the bundle itself shares no code with it (the test above)
+  const { refusedFiles } = (await import(join(import.meta.dir, "..", "..", "packages", "core", "src", "promotion-log.ts"))) as typeof import("../../packages/core/src/promotion-log.ts");
+  const running = ctx.sup.running!;
+  for (const n of [1, 2, 3, 4, 5, 6]) await commitFile(f.repo, `scripts/named-${n}.ts`, `export const n = ${n};\n`, `file ${n}`);
+  await commitFile(f.repo, "packages/core/src/main.ts", `${daemonSource("v3")}\n// named\n`, "a file the daemon reads");
+  const sha = await commitFile(f.repo, "apps/web/src/only-the-ui.ts", "export const ui = 1;\n", "a Web UI file");
+  const differ = (await run(["git", "-C", f.repo, "diff", "--name-only", "-z", "--no-renames", running, sha], f.repo, true)).split("\0").filter(Boolean);
+  const needs = differ.filter((x) => !x.startsWith("apps/web/"));
+  expect(needs).toContain("packages/core/src/main.ts");
+  expect(needs.length).toBeGreaterThanOrEqual(7); // the seven above, and what earlier tests changed when the file runs whole
+  const r = await post("/api/promote", { commit: sha, ifNoRestart: true });
+  const body = (await r.json()) as { restart: boolean; files: string[]; fileCount: number };
+  expect([r.status, body.restart]).toEqual([409, true]);
+  // the daemon's own reader, on the real answer
+  expect(refusedFiles(body)).toEqual({ files: needs.slice(0, 5), fileCount: needs.length });
+  expect(body.files.some((x) => x.startsWith("apps/web/"))).toBe(false);
 });
 
 test("bad input and foreign origins are refused before anything runs", async () => {
@@ -397,7 +416,7 @@ test("the core line shows only when the daemon runs from another version than th
   };
   expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).hidden).toBe(false);
   expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).running).toContain("bbbbbbb");
-  expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).label).toBe("Web UI と既定の設定"); // the current version is then only the UI's
+  expect((await shown({ current: "a".repeat(40), running: "b".repeat(40) })).label).toBe("再起動なしで入った版"); // the current version then went in without a restart
   expect((await shown({ current: "a".repeat(40), running: "a".repeat(40) })).hidden).toBe(true);
   expect((await shown({ current: "a".repeat(40), running: "a".repeat(40) })).label).toBe("今の版");
   expect((await shown({ current: "a".repeat(40), running: null })).hidden).toBe(true);

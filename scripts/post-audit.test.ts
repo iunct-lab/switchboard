@@ -40,14 +40,21 @@ describe("auditorOf", () => {
     expect(auditorOf("codex")).toBe("claude");
     expect(auditorOf(null)).toBe("codex");
   });
-  test("auditorOf: the recheck setting same names the implementer's main reviewer; an unknown or missing environment value is other", () => {
+  test("auditorOf: the recheck setting same names the implementer's main reviewer", () => {
     expect(auditorOf("claude", { review: "same", recheck: "same" })).toBe("claude");
     expect(auditorOf("claude", { review: "other", recheck: "same" })).toBe("codex");
     expect(auditorOf("codex", { review: "same", recheck: "same" })).toBe("codex");
     expect(auditorOf("codex", { review: "other", recheck: "same" })).toBe("claude");
     expect(auditorOf("claude", { review: "same", recheck: "other" })).toBe("codex");
+  });
+  test("settingFromEnv: a missing or unknown review value is other; a missing or unknown recheck value follows the review value", () => {
     expect(settingFromEnv({})).toEqual({ review: "other", recheck: "other" });
-    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same", OPS_KIT_RECHECK_RUNNER: "bogus" })).toEqual({ review: "same", recheck: "other" });
+    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same" })).toEqual({ review: "same", recheck: "same" });
+    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same", OPS_KIT_RECHECK_RUNNER: "bogus" })).toEqual({ review: "same", recheck: "same" });
+    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same", OPS_KIT_RECHECK_RUNNER: "other" })).toEqual({ review: "same", recheck: "other" });
+    expect(settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "bogus", OPS_KIT_RECHECK_RUNNER: "same" })).toEqual({ review: "other", recheck: "same" });
+    // the audit of a Task under the review setting same, with no recheck setting, is read by the implementer's runner
+    expect(auditorOf("codex", settingFromEnv({ OPS_KIT_REVIEW_RUNNER: "same" }))).toBe("codex");
   });
 });
 

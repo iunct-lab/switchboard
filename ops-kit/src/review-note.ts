@@ -42,19 +42,22 @@ export const REVIEW_RULES = [
 ].join("\n");
 
 /**
- * The lines added after the review's instructions for the runner that actually reviews: whether it may run anything
- * depends on how that runner is started (Codex in a read-only sandbox, Claude Code in plan mode), then `REVIEW_RULES`.
+ * The lines added after the review's instructions for the runner that actually reviews: what it may write and run
+ * depends on how that runner is started (Codex in a workspace-write sandbox, Claude Code in dontAsk mode with edits under
+ * `_review/tests/` and one command allowed; `jobCommand` in packages/core/src/jobs.ts), then `REVIEW_RULES`.
  * It is added when the review is started, not written into the instructions, because a usage-limit fallback changes the reviewer.
  */
 const HOW_IT_RUNS: Record<Reviewer, string> = {
   codex:
-    "You run in a read-only sandbox. Do not run commands that write or install anything (tests, type checks, dependency installs). Verify each claim by reading the code; when something could only be confirmed by running it, say so in a finding.",
+    "You run in a workspace-write sandbox: it writes only in the checkout and in `$TMPDIR`, without network. You may write tests under `_review/tests/` and run one with `ops-kit heavy -- bun test <file>` to see it fail. Do not change any other file of the checkout, write nothing outside the checkout and `$TMPDIR`, and do not install dependencies again. Temporary files go under `$TMPDIR` (a folder of this review only, removed after it; `tmpdir()` gives it). The test waits while the machine's heavy slots are busy; if it was cut or did not run, say that it did not run, and do not call the code broken for that. When something could only be confirmed by running more than such a test, say so in a finding.",
   claude:
-    "You run in plan mode. Do not change files and do not run tests, type checks or dependency installs. Verify each claim by reading the code; when something could only be confirmed by running it, say so in a finding.",
+    "You run in dontAsk mode: you may edit and write files only under `_review/tests/`, and besides read-only commands the one command you may run is `ops-kit heavy -- bun test <file>`, in a sandbox that writes only in the checkout and in `$TMPDIR`, without network. You may write tests under `_review/tests/` and run one that way to see it fail. Do not change any other file of the checkout, write nothing outside the checkout and `$TMPDIR`, and do not install dependencies again. Temporary files go under `$TMPDIR` (a folder of this review only, removed after it; `tmpdir()` gives it). The test waits while the machine's heavy slots are busy; if it was cut or did not run, say that it did not run, and do not call the code broken for that. When something could only be confirmed by running more than such a test, say so in a finding.",
 };
 export const REVIEWER_NOTE: Record<Reviewer, string> = { codex: `${HOW_IT_RUNS.codex}\n\n${REVIEW_RULES}`, claude: `${HOW_IT_RUNS.claude}\n\n${REVIEW_RULES}` };
+/** Claude Code on a machine where its sandbox cannot start (no bubblewrap): it is started in plan mode and runs nothing. */
+export const READ_ONLY_NOTE = `You run in plan mode: the sandbox your tests would run in cannot start on this machine, so do not change files and do not run tests, type checks or dependency installs. Verify each claim by reading the code; when something could only be confirmed by running it, say so in a finding, and say in your output that no test was run because the sandbox is unavailable.\n\n${REVIEW_RULES}`;
 
 export const isReviewer = (v: unknown): v is Reviewer => v === "codex" || v === "claude";
 
-/** The instructions a reviewer reads: the review's own, then the note of the runner that reviews. */
-export const reviewPrompt = (instructions: string, runner: Reviewer) => `${instructions.trimEnd()}\n\n${REVIEWER_NOTE[runner]}\n`;
+/** The instructions a reviewer reads: the review's own, then the note of the runner that reviews (`readOnly`: Claude Code without its sandbox). */
+export const reviewPrompt = (instructions: string, runner: Reviewer, readOnly = false) => `${instructions.trimEnd()}\n\n${readOnly ? READ_ONLY_NOTE : REVIEWER_NOTE[runner]}\n`;

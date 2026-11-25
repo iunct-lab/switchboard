@@ -141,6 +141,11 @@ CREATE TABLE IF NOT EXISTS task_grant_heads (task_id TEXT NOT NULL, repo TEXT NO
 -- the link pointed at before, sha256 the checksum the file was checked against (NULL = none was published)
 CREATE TABLE IF NOT EXISTS cli_updates (id INTEGER PRIMARY KEY, runner TEXT NOT NULL, at INTEGER NOT NULL, from_version TEXT, to_version TEXT NOT NULL, outcome TEXT NOT NULL, sha256 TEXT, reason TEXT NOT NULL, by TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS cli_updates_runner ON cli_updates (runner, id);
+-- what the automatic promotion decided that sb-rescue's history does not hold (promotion-log.ts): one row per version (sha) and
+-- kind (waited / refused / no-restart); a repeated decision advances last_at and times. files: the names that made sb-rescue
+-- ask for a restart (at most 5), file_count how many there were; rows older than 90 days are dropped when one is written
+CREATE TABLE IF NOT EXISTS promotion_decisions (sha TEXT NOT NULL, kind TEXT NOT NULL, tag TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, times INTEGER NOT NULL, tasks INTEGER NOT NULL, reason TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]', file_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (sha, kind));
+CREATE INDEX IF NOT EXISTS promotion_decisions_last ON promotion_decisions (last_at);
 -- not read any more; kept because a rolled-back release reads it (like merge_scope_stops)
 CREATE TABLE IF NOT EXISTS task_scope_stops (task_id TEXT NOT NULL, repo TEXT NOT NULL, issue INTEGER NOT NULL, pr INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, repo, issue));
 -- every change asked of a workspace's settings kept here (workspaces.config), whoever asked: what the settings were
@@ -184,11 +189,13 @@ CREATE INDEX IF NOT EXISTS schedule_log_ts ON schedule_log (ts);
 -- a job a Task asked the daemon to run as the daemon's child (jobs.ts): local CI or a review. pid = the wrapper shell.
 -- repo = owner/name in lower case (the app's own change: local:<workspaceId>; '' = not read), head = the checkout's head a review
 -- read (null = none / a job from before), base = what the result was measured against, as_reason = why a review is not the plain
--- main review, kinds = the kinds of a recheck (comma-separated), result = JSON of what the end recorded of the output
+-- main review, kinds = the kinds of a recheck (comma-separated), result = JSON of what the end recorded of the output,
+-- model / effort = what a review ran with (null = the CLI's own, or a job from before)
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, task_id TEXT NOT NULL, pr INTEGER NOT NULL, runner TEXT, cwd TEXT NOT NULL,
   pid INTEGER, boot_id TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER, summary TEXT,
-  repo TEXT NOT NULL DEFAULT '', head TEXT, base TEXT, as_reason TEXT, kinds TEXT NOT NULL DEFAULT '', result TEXT
+  repo TEXT NOT NULL DEFAULT '', head TEXT, base TEXT, as_reason TEXT, kinds TEXT NOT NULL DEFAULT '', result TEXT,
+  model TEXT, effort TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended_at);
 `;

@@ -25,7 +25,7 @@ export interface ReleaseStatus {
   busyTasks?: number;
   dirty?: boolean;
   current?: string | null;
-  /** The version the daemon was started from. Differs from `current` after a promotion that read the Web UI and defaults again without a restart. */
+  /** The version the daemon was started from. Differs from `current` after a promotion that switched without a restart. */
   running?: string | null;
   previous?: string | null;
   state?: string;

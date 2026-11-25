@@ -8,9 +8,9 @@
  * recordings directory only when supplied (a daemon's SWITCHBOARD_* would change what the tests see).
  * The result goes on the PR whether or not Actions ran: all green → `[local-ci] pass <head sha> base=<base sha>`, which
  * merge-gate takes in place of an Actions CI that never started; a failure or a conflict → `[local-ci] fail <head sha>
- * base=<base sha>` and exit 1. Before posting, head and base are read again: either moved → nothing posted, exit 1
- * (run again). Each failed step's whole output stays in a log dir under ~/.cache (a perf step's failure does not stop
- * `bun test`, so a run can have two); the perf steps do not run here (the tag CI's).
+ * base=<base sha>` and exit 1. Before posting, head and base are read again: a head that moved → nothing posted, exit 1
+ * (run again); a base that alone moved → posted with the base it ran on (merge-gate reads that `base=`). Each failed
+ * step's whole output stays in a log dir under ~/.cache (a perf step's failure does not stop `bun test`, so a run can have two); the perf steps do not run here (the tag CI's).
  * After every step passed, the type check's and bun test's seconds are compared with the `local` ceilings of the checkout's
  * scripts/perf-budget.json, bun test's only when every test ran: over one → still a pass, with the `over:`
  * lines as a warning in the comment (`warnings`). A checkout without that file or those ceilings is not compared.
@@ -34,8 +34,11 @@
  * origin), run in that clone.
  * On the cloud host (`sb-offload` on PATH) every step of the CI runs off the host in one build, in the CI's order: here only the
  * work tree is made and the result read (docs/design/local-ci-offload.md).
+ * What does not decide the result goes in support files (merge-gate's `security:gate-support`): the tag CI's records in
+ * scripts/local-ci-records.ts, the lines added to a comment in scripts/local-ci-notes.ts, the tools that run the build off
+ * the host in scripts/local-ci-offload.ts.
  */
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { forgeOf, forgeTargetOf, LOCAL_SERVICE, originOf, runForgeOperation } from "../ops-kit/src/forge.ts";
@@ -46,60 +49,23 @@ import { appForge } from "../ops-kit/src/forge-app.ts";
 import { CiConfig, CONFIG_FILE, ciStepsHash } from "../ops-kit/src/config.ts";
 import { type WorkspaceSettings, workspaceSettingsOf } from "./workspace-settings.ts";
 import { IDLE_KILLED_LINE, runIdle } from "../ops-kit/src/idle-run.ts";
-import { hostAws, type HostAws } from "../ops-kit/src/secrets.ts";
+import { hostAws } from "../ops-kit/src/secrets.ts";
 import { ciExit, runCi, STEP_IDLE_SECONDS, type Step } from "./ci.ts";
-import { BYTES_RECORDS_HEADER, BYTES_RECORDS_PATH, bytesRows, COUNTS_RECORDS_HEADER, COUNTS_RECORDS_PATH, countsRows, type Env, envOf, judgeDurations, recordRow, RECORDS_BRANCH, RECORDS_HEADER, RECORDS_PATH, type Budget, type Budgets, type JourneyBytes } from "./perf-ratchet.ts";
+import { durationOver, notStartedLines, perfVerdict, type PerfVerdict, SECONDS_STEPS, type StepSeconds, stepSeconds } from "./local-ci-notes.ts";
 import { readChangeDetail, sharedMoved } from "./merge-gate.ts";
 import { sharedFilesOf } from "../ops-kit/src/config.ts";
 import { mergeRecords, type MergeRecordJob } from "../ops-kit/src/merge-records.ts";
 import { homeOf } from "../packages/core/src/config.ts";
 import { mergeRecordsEnv } from "./merge-records-env.ts";
 import { isTest } from "./test-select.ts";
-import { buildKey, fileLog, findReusable, offloadRecordPath, reusableOutput, type OffloadCaller, type OffloadLog } from "./offload-record.ts";
+import { BUILD_LOG_KEEP_MS, bootId, buildFiles, buildSpoke, clearPending, hostOffload, offloadReason, type Offload, type Pending, pendingDirOf, pendingFor, readPendingFile, recordLive, runBuild, writePending } from "./local-ci-offload.ts";
+import { listedIn } from "./file-size.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 
 export type { Step };
 
 /** A result's first line: pass or fail, the head, then the base it was merged into. A mark without the base is none. */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
-
-/** A pass's line after the first line: the type check's and bun test's seconds as JSON, hidden in GitHub's view. */
-export const LOCAL_CI_SECONDS = /^<!-- local-ci-seconds (\{.*\}) -->$/m;
-
-/** The type check's and bun test's seconds of a run. */
-export interface StepSeconds { typecheck: number; test: number }
-
-/** The steps whose seconds a pass carries, by their name (a narrowed `bun test` has another `run`). */
-const SECONDS_STEPS: Record<keyof StepSeconds, string> = { typecheck: "bun run typecheck", test: "bun test" };
-
-/** The seconds of the two steps, to one decimal; either missing throws (the CI changed them: the seconds would silently go). */
-export function stepSeconds(results: StepResult[]): StepSeconds {
-  const of = (run: string) => {
-    const r = results.find((x) => x.name === run);
-    if (!r) throw new Error(`CI の手順に \`${run}\` が無い（stepSeconds）`);
-    return Math.round(r.seconds * 10) / 10;
-  };
-  return { typecheck: of(SECONDS_STEPS.typecheck), test: of(SECONDS_STEPS.test) };
-}
-
-/** The seconds a result's body carries, or undefined when it has none. */
-export function markerSeconds(body: string): StepSeconds | undefined {
-  const m = LOCAL_CI_SECONDS.exec(body);
-  if (!m) return undefined;
-  const v = JSON.parse(m[1]!) as Partial<StepSeconds>;
-  return typeof v.typecheck === "number" && typeof v.test === "number" ? { typecheck: v.typecheck, test: v.test } : undefined;
-}
-
-/** A result's machine line of its tests: how many files ran, null = all of them, of how many. */
-export const LOCAL_CI_TESTS = /^<!-- local-ci-tests (\{.*\}) -->$/m;
-
-/** The tests a result's body carries, or undefined when it has none (a run from before the tests were narrowed, `--all`). */
-export function testsOf(body: string): { ran: number | null; total: number } | undefined {
-  const m = LOCAL_CI_TESTS.exec(body);
-  if (!m) return undefined;
-  const v = JSON.parse(m[1]!) as { ran?: unknown; total?: unknown };
-  return (typeof v.ran === "number" || v.ran === null) && typeof v.total === "number" ? { ran: v.ran, total: v.total } : undefined;
-}
 
 /** `log` = where the whole output of a step that failed was kept, `fails` = its failLines; passing steps keep nothing. */
 export interface StepResult extends Step { code: number; seconds: number; tail: string; log?: string; fails?: string[] }
@@ -110,28 +76,33 @@ export function failLines(output: string): string[] {
   return [...new Set(output.split("\n").filter((l) => l.startsWith("(fail)") || perf(l) || l.startsWith("無進捗で打ち切り") || l.startsWith("sb-offload: exit ")))];
 }
 
-/** What perf-ratchet's check said: its `ceilings:` environment and its over / improved / raised / grew lines as printed (grew = the bundle 1% or more above main's tip). `unknown` = none of the four (the bench failed, or the check stopped before judging). */
-export interface PerfVerdict { env: string | null; over: string[]; improved: string[]; raised: string[]; grew: string[]; unknown: boolean }
-
-export function perfVerdict(output: string): PerfVerdict {
-  const lines = output.split("\n");
-  const of = (kind: string) => lines.filter((l) => l.startsWith(`${kind}: `));
-  const [over, improved, raised, grew] = [of("over"), of("improved"), of("raised"), of("grew")];
-  const env = lines.map((l) => /^ceilings: (\S+)$/.exec(l)?.[1]).find(Boolean) ?? null;
-  return { env, over, improved, raised, grew, unknown: over.length + improved.length + raised.length + grew.length === 0 };
-}
-
 /** The perf bench, main's measure (`perf-ratchet.ts base`) or the ratchet's check: their failure gets a verdict (a bench or base failure is one with no judgement). */
 export const isPerfStep = (s: Step) => /scripts\/perf-(bench|ratchet)\.ts/.test(s.run);
 /** The ratchet's check alone: the step whose output has the verdict and the bundle lines. */
 export const isPerfCheck = (s: Step) => s.run.includes("perf-ratchet") && s.run.includes(" check ");
 
-/** The steps without the perf ones (the web build up to the last perf step; the install stays, bun test and the rest are not between). A CI without them is returned as it is. */
+/**
+ * The steps without the perf ones (the web build up to the last perf step; the install stays, bun test and the rest are
+ * not between) and without `fetch main`, which comes before file sizes: a PR's run compares file sizes with the default
+ * branch's tip that localCi fetched (FILE_SIZE_BASE_REF), and off the host with its list, so it fetches nothing. A CI without them is returned as it is.
+ */
 export function withoutPerf(steps: Step[]): Step[] {
   const build = steps.findIndex((s) => s.run.trim() === "bun run --cwd apps/web build");
   const last = steps.map((s) => isPerfStep(s)).lastIndexOf(true);
   if (build < 0 || last < build) return steps;
-  return [...steps.slice(0, build), ...steps.slice(last + 1)];
+  return [...steps.slice(0, build), ...steps.slice(last + 1)].filter((s) => s.name !== "fetch main");
+}
+
+/** The base's list of over-limit files (`STILL_OVER` of scripts/file-size.ts at `ref` in `dir`), or undefined with a line of the log saying why there is none. */
+export async function fileSizeBaseOf(dir: string, ref: string, d: Pick<Deps, "sh" | "log">): Promise<Record<string, number> | undefined> {
+  const text = await d.sh(["git", "-C", dir, "show", `${ref}:scripts/file-size.ts`]).catch((e: unknown) => {
+    d.log(`file sizes: ${ref}:scripts/file-size.ts を読めない: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}`);
+    return undefined;
+  });
+  if (text === undefined) return undefined;
+  const list = listedIn(text);
+  if (!list) d.log(`file sizes: ${ref}:scripts/file-size.ts に STILL_OVER が無い`);
+  return list ?? undefined;
 }
 
 /** The step of ci.yml that runs scripts/ci.ts: Actions runs those steps in one go, local-ci one by one. */
@@ -331,110 +302,12 @@ function lateRecord(job: string | undefined, env: Record<string, string | undefi
   };
 }
 
-/** The size of an off-host build, `sb-offload --size`. */
-export type OffloadSize = "small" | "medium" | "large";
-
-/** What a build is given besides its script: its size, the directory of recordings (`--fixtures`), the file of the host's AWS names (`--names`, a path only: its content is in no script, argument or log) the tar of the tag a perf run compares with (`--base-tree`) and the tree whose container/Dockerfile is the ci image's source (`--image-root`; none = the work tree that is sent). */
-export interface OffloadRun { size: OffloadSize; fixtures?: string; names?: string; baseTree?: string; imageRoot?: string }
-
-/** `start` could not start the build: sb-offload's exit code and what it printed (`runBuild` hands it back as `notStarted`: no step ran, so it is nobody's failed step). */
-export class OffloadStartError extends Error {
-  constructor(readonly code: number, readonly output: string) {
-    super(`sb-offload: ビルドを始められなかった（exit ${code}）`);
-  }
-}
-
-/**
- * `start`: one build of `script` with `cwd`'s work tree in the ci image (`sb-offload --ci --detach`), returning its id as soon as it has started (throws `OffloadStartError` when it did not).
- * `collect`: waits for that build (`sb-offload --collect <id>`, from any process, later too): its code is sb-offload's (the script's, or 124 timed out / 130 stopped / 1 failed before it) and its log.
- * `start` also returns `image` (the id of the image build it had to start first) when there was one.
- * `fixtures`: the recordings the build reads (read only there) and whether the run needs them (`required`: `SWITCHBOARD_FIXTURES` given here, so a missing recording fails a test).
- */
-export interface Offload {
-  fixtures?: { dir: string; required: boolean };
-  start: (script: string, cwd: string, o: OffloadRun) => Promise<{ build: string; image?: string }>;
-  /** 外のビルドを始めるたびに 1 行足す記録（`hostOffload` だけが持つ。無ければ記録も入力の鍵の計算もしない）。 */
-  log?: OffloadLog;
-  collect: (build: string) => Promise<{ code: number; output: string }>;
-  /** Whether the installed `sb-offload` takes `flag` (`--base-tree`, `--image-root`: its usage names it; the host's is replaced only at boot, so an older one may not). Not given = it does. */
-  knows?: (flag: string) => Promise<boolean>;
-}
-
-const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+export const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 /** `bun test` of those files (a step's script), or a line saying none were selected. */
 export const testRun = (files: string[]) => (files.length ? `bun test ${files.map((f) => quote(`./${f}`)).join(" ")}` : 'echo "no test files selected"');
 
 /** A step's marks in a build's log: `sb-step: <i> begin <epoch s>` and `sb-step: <i> exit <code> <epoch s>`. */
 const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
-
-/**
- * One build's script, run by `sb-offload --ci` in the ci image (git with PCRE, Bun, Codex CLI, Chromium are the image's):
- * as root, a tmpfs TMPDIR and the work tree's owner; then, in a new PID namespace, as the image's user `switchboard` (a login `su -`, so the
- * build's own environment, its credentials included, does not reach the steps; only the image's CHROME_BIN and
- * PLAYWRIGHT_BROWSERS_PATH are passed) the work tree as one commit with `origin` (a URL, no credentials), the install,
- * and every step in `bash -e -c` between its marks, stopping at the first that fails (a `keepGoing` step does not stop it).
- * `fixtures`: the build has the recordings in the user's `~/.switchboard/fixtures`; `required` exports SWITCHBOARD_FIXTURES so that a missing recording fails a test.
- * The host's AWS names reach the build as the user's `~/.aws/config`, written by the build's setup from `--names` (`runBuild`); the script holds none of them.
- * Nothing of this host's environment goes in (no token, no recordings' place). docs/design/local-ci-offload.md.
- * Why the PID namespace: the build's PID 1 does not reap orphans, so a killed child stays a zombie that `kill(pid, 0)` finds
- * alive and the child-cleanup tests fail. The namespace's init is a bash that reaps them; `exit $?` keeps bash from
- * replacing itself with su (then su would be PID 1 and reap nothing).
- */
-export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { required: boolean }; perf?: true }): string {
-  const lastPerf = o.perf ? steps.map((s) => isPerfStep(s)).lastIndexOf(true) : -1;
-  const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
-  const user = [
-    "set -u",
-    "cd /sb/work",
-    'export CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
-    ...(o.fixtures?.required ? ["export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures"] : []),
-    ...(o.perf ? ["export PERF_ENV=offload"] : []),
-    "git config --global user.name local-ci && git config --global user.email local-ci@localhost && git config --global init.defaultBranch main",
-    `{ git init -q${origin} && git add -A && git commit -qm local-ci; } || { echo "sb-setup: git の作業ツリーを作れない"; exit 1; }`,
-    'bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }',
-    ...steps.flatMap((s, i) => [
-      `echo "sb-step: ${i} begin $(date +%s.%N)"`,
-      `bash -e -c ${quote(s.run)}; c=$?; echo; echo "sb-step: ${i} exit $c $(date +%s.%N)"${s.keepGoing ? "" : '; [ "$c" -eq 0 ] || exit "$c"'}`,
-      // after the last perf step: the files the host's records and judgement read, one line each (a missing file or a failure here changes no step's result)
-      ...(i === lastPerf ? [`for f in ${BUILD_FILES.join(" ")}; do [ -f "$f" ] && echo "sb-file: $f $(base64 -w0 "$f")"; done; true`] : []),
-    ]),
-  ].join("\n");
-  return [
-    "set -u",
-    "cat > /tmp/sb-local-ci.sh <<'SB_LOCAL_CI_EOF'",
-    user,
-    "SB_LOCAL_CI_EOF",
-    'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
-    'chown -R switchboard /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: 作業ツリーの持ち主を switchboard にできない"; exit 1; }',
-    'unshare --pid --fork --mount-proc true || { echo "sb-setup: PID 名前空間を作れない"; exit 1; }',
-    `unshare --pid --fork --mount-proc bash -c 'su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=\${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"; exit $?'`,
-  ].join("\n");
-}
-
-/** The files a perf build gives back in its log (`sb-file: <name> <base64>`); no other name is taken. */
-const BUILD_FILES = ["perf-result.json", "perf-base.json"];
-
-/** The files a build's log carries (`ciScript` with `perf`) by name, the last line of a name winning; a name that is not one of `BUILD_FILES` (a path included) is ignored. */
-export function buildFiles(output: string): Record<string, Buffer> {
-  const files: Record<string, Buffer> = {};
-  for (const l of output.split("\n")) {
-    const m = /^sb-file: (\S+) ([A-Za-z0-9+/=]*)$/.exec(l.trim());
-    if (!m || !BUILD_FILES.includes(m[1]!)) continue;
-    const bytes = Buffer.from(m[2]!, "base64");
-    // a line the log cut or split decodes to broken JSON: leave the file out (perf then reads as not measured) instead of writing it
-    try {
-      JSON.parse(bytes.toString("utf8"));
-    } catch {
-      console.error(`sb-file: ${m[1]} is not JSON (the log line was cut?): left out`);
-      continue;
-    }
-    files[m[1]!] = bytes;
-  }
-  return files;
-}
-
-/** What sb-offload's own exit means when a step has no exit mark. */
-const offloadReason = (code: number) => `sb-offload: exit ${code}（${code === 124 ? "時間切れ" : code === 130 ? "中断" : "ビルドの失敗"}）`;
 
 /**
  * The steps of the build from its log, by their marks: each one's output, code and seconds. A step that began without
@@ -474,122 +347,6 @@ export function parseBuild(output: string, steps: Step[], code: number): Array<S
     out[out.length - 1] = { ...last, code, output: text, tail: text.split("\n").slice(-30).join("\n") };
   }
   return out;
-}
-
-/**
- * The one build of every step of a CI (`ciScript`): the host's AWS names go in a JSON of mode 600 in a directory of its own, given by path as
- * `names` and removed once the build has started (sb-offload has sent it by then); the value is in no script, argument other than that path, environment or log.
- * A host with no AWS config (or a `host` with none, as test-changed passes: its build runs no public-tree check) gives no file.
- * `started` is told the build's id before the wait, to be written down (`writePending`). A build that could not be started comes back with
- * `notStarted` (sb-offload's code and output): no step ran, so the caller must not read it as a step's failure.
- * `imageRoot`: the tree whose container/Dockerfile the ci image is (another repository's work tree has none, or has its own); an
- * `sb-offload` that does not know the flag yet starts nothing.
- * `reuse`: a build of exactly the same input key (the script, the size, every file of the work tree, the recordings) recorded within
- * `hours` is not started again: its result is collected (a running one is waited for) and comes back with `reused`. A build that
- * did not run to its command's end (stopped, timed out, failed before it, a log that is gone) is not reused.
- */
-export async function runBuild(offload: Offload, steps: Step[], cwd: string, o: { caller: OffloadCaller; repo?: string; size?: OffloadSize; host?: HostAws; perf?: true; baseTree?: string; imageRoot?: string; reuse?: { hours: number; now?: number }; started?: (build: string) => void }): Promise<{ code: number; output: string; notStarted?: true; reused?: { build: string; at: string } }> {
-  const host = o.host ?? hostAws();
-  const hasNames = host.names.length + host.accountIds.length > 0;
-  const script = ciScript(steps, { ...(o.repo ? { repo: o.repo } : {}), ...(offload.fixtures ? { fixtures: { required: offload.fixtures.required } } : {}), ...(o.perf ? { perf: true as const } : {}) });
-  const size = o.size ?? "small";
-  // the key is read from the work tree as it is when the build starts
-  const key = offload.log ? await buildKey(cwd, script, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}) }).catch(() => undefined) : undefined;
-  if (o.reuse && offload.log && key) {
-    // a record that cannot be read is no reason to fail the run: a new build
-    const prev = (() => {
-      try {
-        return findReusable(offload.log!, key, o.reuse!.hours, o.reuse!.now ?? Date.now());
-      } catch {
-        return undefined;
-      }
-    })();
-    if (prev) {
-      const out = await offload.collect(prev.build);
-      if (reusableOutput(out.output)) return { ...out, reused: { build: prev.build, at: prev.at } };
-    }
-  }
-  // an sb-offload from before the flag would take it for the command: nothing is started, and it says what is missing
-  if (o.imageRoot && (await offload.knows?.("--image-root")) === false) {
-    return { code: 2, output: "sb-offload が --image-root を知らない（ホストの次の起動で入る）", notStarted: true };
-  }
-  const dir = hasNames ? mkdtempSync(join(tmpdir(), "switchboard.names.")) : undefined;
-  let build: string;
-  let image: string | undefined;
-  try {
-    let names: string | undefined;
-    if (dir) {
-      names = join(dir, "names.json");
-      writeFileSync(names, JSON.stringify({ names: host.names, accountIds: host.accountIds }), { mode: 0o600 });
-    }
-    const started = await offload.start(script, cwd, { size, ...(offload.fixtures ? { fixtures: offload.fixtures.dir } : {}), ...(names ? { names } : {}), ...(o.baseTree ? { baseTree: o.baseTree } : {}), ...(o.imageRoot ? { imageRoot: o.imageRoot } : {}) });
-    build = started.build;
-    image = started.image;
-    if (offload.log) {
-      const at = new Date().toISOString();
-      try {
-        if (image) offload.log.append({ at, caller: o.caller, kind: "image", build: image, size, tree: cwd });
-        offload.log.append({ at, caller: o.caller, kind: "ci", build, size, ...(key ? { key } : {}), tree: cwd });
-      } catch (e) {
-        console.error(`offload-record: 記録を書けなかった（${e instanceof Error ? e.message : String(e)}）`);
-      }
-    }
-  } catch (e) {
-    if (e instanceof OffloadStartError) return { code: e.code, output: e.output, notStarted: true };
-    throw e;
-  } finally {
-    if (dir) rmSync(dir, { recursive: true, force: true });
-  }
-  o.started?.(build);
-  return offload.collect(build);
-}
-
-/** The lines of a build that could not be started, for the log: what happened, then what sb-offload printed. */
-export const notStartedLines = (n: { code: number; output: string }): string => `外のビルドを始められなかった（exit ${n.code}）${n.output.trim() ? `\n${n.output.trim()}` : ""}`;
-
-/**
- * The real build when `sb-offload` is on PATH (the cloud host), else none. Its environment has no GitHub token and no recordings' place.
- * The recordings go by `--fixtures`: `SWITCHBOARD_FIXTURES` here when given (the run needs them: `required`), else `~/.switchboard/fixtures` when it exists.
- */
-export function hostOffload(): Offload | undefined {
-  const bin = Bun.which("sb-offload", { PATH: process.env.PATH ?? "" });
-  if (!bin) return undefined;
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k, v]) => v !== undefined && !["GH_TOKEN", "GITHUB_TOKEN", "SWITCHBOARD_FIXTURES"].includes(k))) as Record<string, string>;
-  const given = process.env.SWITCHBOARD_FIXTURES;
-  const usual = join(process.env.HOME || homedir(), ".switchboard", "fixtures");
-  const fixtures = given ? { dir: given, required: true } : existsSync(usual) ? { dir: usual, required: false } : undefined;
-  let usage: Promise<string> | undefined;
-  return {
-    ...(fixtures ? { fixtures } : {}),
-    log: fileLog(offloadRecordPath()),
-    // called with no arguments sb-offload prints its usage (stderr, exit 2): read once per process
-    knows: async (flag) =>
-      (await (usage ??= (async () => {
-        try {
-          const p = Bun.spawn([bin], { env, stdout: "pipe", stderr: "pipe" });
-          const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-          return `${out}${err}`;
-        } catch {
-          // it cannot be run: no flag is known; the build's start then fails and says why
-          return "";
-        }
-      })())).includes(flag),
-    start: async (script, cwd, o) => {
-      const p = Bun.spawn([bin, "--ci", "--detach", ...(o.fixtures ? ["--fixtures", o.fixtures] : []), ...(o.names ? ["--names", o.names] : []), ...(o.baseTree ? ["--base-tree", o.baseTree] : []), ...(o.imageRoot ? ["--image-root", o.imageRoot] : []), "--size", o.size, script], { cwd, env, stdout: "pipe", stderr: "pipe" });
-      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-      // the image build's log may come before it: only the started line names the build
-      const build = out.split("\n").map((l) => /^sb-offload: started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
-      if (code !== 0 || !build) throw new OffloadStartError(code === 0 ? 1 : code, `${out}${err}`);
-      // sb-offload writes the image build's started line to stderr (only the ci build's goes to stdout)
-      const image = `${out}\n${err}`.split("\n").map((l) => /^sb-offload: no ci image \S+ yet; building it, started (\S+)$/.exec(l.trim())?.[1]).find((b) => b);
-      return { build, ...(image ? { image } : {}) };
-    },
-    collect: async (build) => {
-      const p = Bun.spawn([bin, "--collect", build], { env, stdout: "pipe", stderr: "pipe" });
-      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-      return { code, output: `${out}${err}` };
-    },
-  };
 }
 
 /**
@@ -707,114 +464,12 @@ export function incrementalSteps(steps: Step[], files: string[]): Step[] | undef
   return keep.every((k) => kept.some((s) => s.run.trim() === k)) ? narrowTestStep(kept, files) : undefined;
 }
 
-/** The seconds over the `local` ceilings of the budget in `dir`, as `over:` lines (failLines' form); none without that budget. */
-export async function durationOver(dir: string, seconds: StepSeconds): Promise<string[]> {
-  const path = join(dir, "scripts/perf-budget.json");
-  if (!existsSync(path)) return [];
-  const { local } = (await Bun.file(path).json()) as Partial<Budgets>;
-  return judgeDurations(seconds, local ?? { journeys: {} }).map((i) => `over: ${i.key} = ${i.value} > ceiling ${i.ceiling}`);
-}
-
 /**
  * A local change instead of a PR: its head and base read from the app with the checkout's own branches (no
  * fetch: there is no remote), `label` naming its worktrees and logs. Its tests are chosen against the base's tip, and
  * no bundle row is recorded (that is a GitHub records branch).
  */
 export interface ChangeTarget { label: string; read: () => Promise<{ head: string; base: string }> }
-
-/**
- * A build started and not yet written to its PR: what writing the mark needs, no more (no token, no AWS name: the build's id is all that names the build).
- * One file per PR under `pendingDirOf`, written when the build has started and removed once its result was posted (or was not to be posted), so a local-ci
- * that is gone (the daemon restarted, the host stopped) leaves the result to `--collect`.
- */
-export interface Pending {
-  repo: string;
-  pr: number;
-  /** The clone the result is posted through (`resolveTarget`'s root). */
-  root: string;
-  head: string;
-  base: string;
-  build: string;
-  /** When the build started (ms): its log is kept 7 days. */
-  at: number;
-  steps: Step[];
-  selection?: TestSelection;
-  incremental?: { pass: string; commits: number; files: number };
-  /** The checkout has scripts/ci.ts: a pass carries its step seconds. */
-  ciTs: boolean;
-  /** The steps came from the workspace's settings (the comment names them). */
-  source?: StepsSource;
-  /** The local-ci process waiting for this build and this boot's id (null when unreadable): while it is alive it writes the result itself, and `--collect` leaves the record. */
-  pid: number;
-  boot: string | null;
-  /** The job (its id) the local-ci that started this build ran as: a result written after that job ended goes to its folder. */
-  job?: string;
-}
-
-/** This boot's id, or null when it cannot be read. */
-export const bootId = (): string | null => {
-  try {
-    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
-  } catch {
-    return null;
-  }
-};
-
-/** Is the process that wrote this record still alive, in the same boot? (a pid means nothing after a reboot) */
-export const recordLive = (p: Pending, boot = bootId(), cmdline: (pid: number) => string | null = procCmdline): boolean => {
-  if (p.pid === process.pid || boot === null || p.boot !== boot) return false;
-  // the pid may be another process's by now: it must still be a local-ci (unreadable = gone)
-  return cmdline(p.pid)?.includes("local-ci") ?? false;
-};
-
-/** The command line of a process (/proc/<pid>/cmdline, its arguments joined by spaces), or null when it cannot be read. */
-const procCmdline = (pid: number): string | null => {
-  try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ");
-  } catch {
-    return null;
-  }
-};
-
-/** Does a collected build's output say anything about the build? A build that is not there (`no build`), a read that failed, and a SUCCEEDED build whose log is gone (`ended SUCCEEDED without the command's exit code`: its log is kept 7 days, the build's record longer) say nothing; one that ended before its steps (`ended FAILED / FAULT / STOPPED / TIMED_OUT without the command's exit code`) is a failed build. */
-export const buildSpoke = (output: string): boolean => /^(sb-step: |sb-offload: exit \d+$)/m.test(output) || /^sb-offload: \S+ ended (FAILED|FAULT|STOPPED|TIMED_OUT) without the command's exit code$/m.test(output);
-
-/**
- * Where the pending records are: `switchboard.local-ci-pending` under `cache` (~/.cache). The same place as `localCiPendingDir` in
- * packages/core/src/jobs.ts, which the daemon looks in at its start to run `--collect`; scripts/ do not import packages/core, so the name is written in both.
- */
-export const pendingDirOf = (cache: string): string => join(cache, "switchboard.local-ci-pending");
-const pendingFile = (cache: string, repo: string, pr: number): string => join(pendingDirOf(cache), `${repo.replaceAll("/", "_")}-${pr}.json`);
-/** How long the build's log is kept (CodeBuild's, 7 days). */
-export const BUILD_LOG_KEEP_MS = 7 * 24 * 3600 * 1000;
-
-export function writePending(cache: string, p: Pending): void {
-  mkdirSync(pendingDirOf(cache), { recursive: true });
-  const file = pendingFile(cache, p.repo, p.pr);
-  writeFileSync(`${file}.tmp`, JSON.stringify(p), { mode: 0o600 });
-  renameSync(`${file}.tmp`, file);
-}
-
-/** Removes the PR's record only when it is still of `build` (another run may have written its own build's since). */
-export function clearPending(cache: string, repo: string, pr: number, build: string): void {
-  const file = pendingFile(cache, repo, pr);
-  if (readPendingFile(file)?.build === build) rmSync(file, { force: true });
-}
-
-const readPendingFile = (file: string): Pending | undefined => {
-  try {
-    const p = JSON.parse(readFileSync(file, "utf8")) as Partial<Pending>;
-    return typeof p.repo === "string" && Number.isInteger(p.pr) && typeof p.root === "string" && typeof p.head === "string" && typeof p.base === "string" && typeof p.build === "string" && typeof p.at === "number" && Array.isArray(p.steps) ? ({ ...p, job: typeof p.job === "string" && /^\d+$/.test(p.job) ? p.job : undefined } as Pending) : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-/** The PR's record when it is of this head and base (a build that already runs or ran for them). */
-export function pendingFor(cache: string, repo: string, pr: number, head: string, base: string): Pending | undefined {
-  const p = readPendingFile(pendingFile(cache, repo, pr));
-  return p && p.head === head && p.base === base ? p : undefined;
-}
 
 /** The comment's result from a collected build: the steps read by their marks, as a run here reads them. */
 async function resultOf(p: Pending, out: { code: number; output: string }, d: Pick<Deps, "log" | "sh">, cache: string, today?: string): Promise<LocalCiResult> {
@@ -825,6 +480,9 @@ async function resultOf(p: Pending, out: { code: number; output: string }, d: Pi
   return ok ? r : withKnown(r, outputs, d.sh, p.root, today);
 }
 
+/** The only step whose registered failures are subtracted (withKnown). Kept here, not in the notes, because it decides a result. */
+const KNOWN_FAILURES_STEP = "bun test";
+
 /**
  * A failed result whose only failed step is bun test with (fail) lines: what the registry at the base (known-failures.json) names, in date, is no
  * failure (subtractKnown; never the head's registry, a PR does not excuse its own failures). All taken off = a pass without seconds (a failed run's
@@ -832,7 +490,7 @@ async function resultOf(p: Pending, out: { code: number; output: string }, d: Pi
  */
 async function withKnown(r: LocalCiResult, outputs: Record<string, string>, sh: Deps["sh"], repoRoot: string, today = new Date().toISOString().slice(0, 10)): Promise<LocalCiResult> {
   const failed = r.results.filter((x) => x.code !== 0);
-  const step = failed.length === 1 && failed[0]!.name === SECONDS_STEPS.test ? failed[0]! : undefined;
+  const step = failed.length === 1 && failed[0]!.name === KNOWN_FAILURES_STEP ? failed[0]! : undefined;
   const output = step ? outputs[step.name] : undefined;
   if (!step || output === undefined || !(step.fails ?? []).some((l) => l.startsWith("(fail) "))) return r;
   let known;
@@ -849,7 +507,7 @@ async function withKnown(r: LocalCiResult, outputs: Record<string, string>, sh: 
 
 /**
  * `--collect`: for each pending record, waits for its build (`offload.collect`), reads the steps and posts the result as the run would have (`notify`: nothing
- * posted when the head or base moved), then removes the record. A build whose log is gone (older than 7 days) is said and removed. Exit 0 = every record was
+ * posted when the head moved; a base that alone moved is posted with the base it ran on), then removes the record. A build whose log is gone (older than 7 days) is said and removed. Exit 0 = every record was
  * written or not needed, 1 = a record is left (the post failed, head and base could not be read, or the build has no log yet).
  */
 export async function collectPending(d: Deps, cache: string, post = reportResult, live: (p: Pending) => boolean = recordLive): Promise<number> {
@@ -945,10 +603,13 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
         d.log(`✗ head ${sha.slice(0, 7)} を base ${base.slice(0, 7)} にマージできない（衝突）`);
         return { sha, base, results: [], ok: false, conflict: true };
       }
-      const env = stepEnv(tmp);
+      // the default branch's tip as it is now (a PR only): file sizes compares the ceilings with its list, not with the clone's
+      // origin/main, which nothing here fetches and which may be behind a main that has lowered a ceiling since
+      const fresh = change ? undefined : await defaultTip(pr, repoRoot, repo, d).catch(() => undefined);
+      const env = { ...stepEnv(tmp), ...(fresh ? { FILE_SIZE_BASE_REF: fresh } : {}) };
       // the commits since the PR's newest pass, when there is one to build on (never for --all or a local change)
       // a stack's base is the PR below, so the commits are counted from the default branch's tip (a fix added below is one the top's pass must hold)
-      const tip = opts.all || opts.force || change ? undefined : await defaultTip(pr, repoRoot, repo, d).catch(() => undefined);
+      const tip = opts.all || opts.force ? undefined : fresh;
       const since = tip ? await incrementalBase(pr, repo, repoRoot, sha, tip, d) : undefined;
       // no commit added (a rebase only) has no files to choose tests from: every step, as without a pass
       const inc = since && since.commits.length > 0 ? since : undefined;
@@ -1000,89 +661,6 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
 }
 
 /**
- * Appends one row (when, js, css, main's sha) to bundle.tsv on the records branch of `repo`, from the
- * perf-base.json the CI wrote in `dir` (main's tip measured in the same run); "none" without that file. A measure is a
- * row: the same main measured twice is two rows.
- */
-export async function recordBundle(repo: string, dir: string, measuredAt: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
-  const file = join(dir, "perf-base.json");
-  if (!existsSync(file)) return "none";
-  const row = recordRow(measuredAt, JSON.parse(readFileSync(file, "utf8")) as { sha: string; bundle: { js: number; css: number } });
-  await appendRecord(repo, RECORDS_PATH, RECORDS_HEADER, [row], `${RECORDS_BRANCH}: bundle ${measuredAt}`, sh);
-  return "recorded";
-}
-
-/**
- * Appends main's `bytes` of the same measure to bytes.tsv on the records branch, a row per response's path
- * (`bytesRows`); "none" without perf-base.json or without its `journeys` (a main measured before perf-ratchet measured them).
- */
-export async function recordBytes(repo: string, dir: string, measuredAt: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
-  const file = join(dir, "perf-base.json");
-  if (!existsSync(file)) return "none";
-  const base = JSON.parse(readFileSync(file, "utf8")) as { sha: string; journeys?: Record<string, JourneyBytes> };
-  if (!base.journeys) return "none";
-  await appendRecord(repo, BYTES_RECORDS_PATH, BYTES_RECORDS_HEADER, bytesRows(measuredAt, { sha: base.sha, journeys: base.journeys }), `${RECORDS_BRANCH}: bytes ${measuredAt}`, sh);
-  return "recorded";
-}
-
-/**
- * Appends the counts of `dir`'s perf-result.json (the median of `--runs 5` this run measured) to counts.tsv on the records
- * branch, a row per count of `tag` at `sha` (`countsRows`); "none" without that file.
- */
-export async function recordCounts(repo: string, dir: string, measuredAt: string, env: Env, tag: string, sha: string, sh: Deps["sh"]): Promise<"recorded" | "none"> {
-  const file = join(dir, "perf-result.json");
-  if (!existsSync(file)) return "none";
-  await appendRecord(repo, COUNTS_RECORDS_PATH, COUNTS_RECORDS_HEADER, countsRows(measuredAt, env, tag, sha, JSON.parse(readFileSync(file, "utf8")) as Budget), `${RECORDS_BRANCH}: counts ${tag} ${measuredAt}`, sh);
-  return "recorded";
-}
-
-/**
- * Appends `rows` to `path` on the records branch of `repo`, with `header` when the file is new. The branch is made once
- * (a root commit with a README, never merged). The file goes by the contents API with its sha; a 409 or 422 (another run
- * wrote first, or made the file first) reads it again and puts once more. A file the API no longer returns in base64
- * (over 1 MB) is an error, not an empty file: putting a row on it would replace every row.
- */
-async function appendRecord(repo: string, path: string, header: string, rows: string[], message: string, sh: Deps["sh"]): Promise<void> {
-  const api = (...a: string[]) => sh(["gh", "api", ...a]);
-  const http = (code: number) => (e: unknown) => new RegExp(`HTTP ${code}\\b`).test(e instanceof Error ? e.message : String(e));
-  const absent = <T>(e: unknown): T | undefined => {
-    if (http(404)(e)) return undefined;
-    throw e;
-  };
-  if (!(await api(`repos/${repo}/git/ref/heads/${RECORDS_BRANCH}`).then(() => true, absent<boolean>))) {
-    const sha = async (...a: string[]) => (await api(...a, "-q", ".sha")).trim();
-    const blob = await sha(`repos/${repo}/git/blobs`, "-f", "content=perf records; never merged", "-f", "encoding=utf-8");
-    const tree = await sha(`repos/${repo}/git/trees`, "-f", "tree[][path]=README", "-f", "tree[][mode]=100644", "-f", "tree[][type]=blob", "-f", `tree[][sha]=${blob}`);
-    const commit = await sha(`repos/${repo}/git/commits`, "-f", `message=${RECORDS_BRANCH}: root`, "-f", `tree=${tree}`);
-    // 422: another run made the branch in between
-    await api(`repos/${repo}/git/refs`, "-f", `ref=refs/heads/${RECORDS_BRANCH}`, "-f", `sha=${commit}`).catch((e: unknown) => {
-      if (!http(422)(e)) throw e;
-    });
-  }
-  const work = mkdtempSync(join(tmpdir(), "switchboard.perf-record."));
-  try {
-    for (let attempt = 1; ; attempt++) {
-      type File = { sha: string; content: string; encoding?: string };
-      const now = await api(`repos/${repo}/contents/${path}?ref=${RECORDS_BRANCH}`).then((o) => JSON.parse(o) as File, absent<File>);
-      if (now && now.encoding !== "base64") throw new Error(`${RECORDS_BRANCH}/${path} を contents API で読めない（encoding ${now.encoding ?? "なし"}。1 MB を超えたら分ける）。書かない`);
-      const text = now ? Buffer.from(now.content.replace(/\s/g, ""), "base64").toString("utf8") : `${header}\n`;
-      const body = { message, branch: RECORDS_BRANCH, content: Buffer.from(`${text}${text.endsWith("\n") ? "" : "\n"}${rows.join("\n")}\n`).toString("base64"), ...(now ? { sha: now.sha } : {}) };
-      // the body by a file: the whole file in base64 does not fit in the arguments for long
-      const input = join(work, "put.json");
-      writeFileSync(input, JSON.stringify(body));
-      try {
-        await api("-X", "PUT", `repos/${repo}/contents/${path}`, "--input", input);
-        return;
-      } catch (e) {
-        if (attempt > 1 || !(http(409)(e) || http(422)(e))) throw e;
-      }
-    }
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-}
-
-/**
  * A checkout's CI in `dir` (local-ci's merge, tag-ci's tag): its steps (`checkoutSteps`) run with `env` until one
  * without `keepGoing` fails (`runCi`). Each failed step's whole output goes to one log dir `switchboard.<label>-log.*`
  * under `cache` (the latest of a label only: earlier ones go, the host's disk is small) and, for a perf step, its verdict
@@ -1118,7 +696,10 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
   // sb-offload: every step in one build, whatever the CI's step names are; here only the work tree is made and the result read (no step, no slot)
   else {
     d.log(`▶ 外: ${steps.map((s) => s.name).join(" → ")}`);
-    const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(x.imageRoot ? { imageRoot: x.imageRoot } : {}), ...(started ? { started: (build) => started(build, steps, !!inc, ci.source) } : {}) });
+    // the build has no base ref: the base's list of scripts/file-size.ts goes with it (none when it cannot be read here: the step
+    // then fails off the host, and why it could not be read here is this line of the host's log)
+    const base = steps.some((s) => s.run.includes("scripts/file-size.ts")) ? await fileSizeBaseOf(dir, env.FILE_SIZE_BASE_REF || "origin/main", d) : undefined;
+    const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(x.imageRoot ? { imageRoot: x.imageRoot } : {}), ...(base ? { fileSizeBase: base } : {}), ...(started ? { started: (build) => started(build, steps, !!inc, ci.source) } : {}) });
     // not a step's failure: the first step would otherwise carry sb-offload's own exit as if the code had failed
     if (r.notStarted) return { steps, results: [], ok: false, outputs: {}, bundle: [], offloaded: [], incremental: !!inc, ...from, notStarted: { code: r.code, output: r.output } };
     ran = parseBuild(r.output, steps, r.code);
@@ -1288,17 +869,20 @@ export async function reportResult(t: { pr: number; repo: string; root: string; 
 }
 
 /**
- * Posts the run's result only if it still names the PR's head and base: either moved since the run → nothing
- * posted (a pass for an old head or base would be taken for the new one), false. Which PRs of a stack the pass covers is
+ * Posts the run's result only if it still names the PR's head: a head that moved since the run → nothing posted (a
+ * pass for an old head would be taken for the new one), false. A base that alone moved does not drop it: the mark keeps
+ * the base it ran on (`base=`), and each counting side reads that base (GitHub's does not compare it; a local change's
+ * and GitLab's ask it to be the base's tip, so they ask for a new run). Which PRs of a stack the pass covers is
  * merge-gate's to work out with git, not written here.
  */
 export async function notify(t: { pr: number; repo: string; root: string }, r: LocalCiResult, d: Pick<Deps, "sh" | "log">, post = reportResult, read = () => readTarget(t.pr, t.root, t.repo, d), record: (r: LocalCiResult) => void = (r) => writeJobResult(process.env.J, r, d.log)): Promise<boolean> {
   const now = await read().catch((e: unknown) => (d.log(`head / base を読み直せない: ${e instanceof Error ? e.message : String(e)}`), undefined));
   if (!now) return false;
-  if (now.head !== r.sha || now.base !== r.base) {
+  if (now.head !== r.sha) {
     d.log(`実行中に変わった（head ${r.sha.slice(0, 7)} → ${now.head.slice(0, 7)}、base ${r.base.slice(0, 7)} → ${now.base.slice(0, 7)}）。結果を投稿しない（回し直す）`);
     return false;
   }
+  if (now.base !== r.base) d.log(`base が実行中に進んだ（${r.base.slice(0, 7)} → ${now.base.slice(0, 7)}）。実行した base ${r.base.slice(0, 7)} の結果として投稿する`);
   const body = resultComment(r);
   await post(t, body, d.sh);
   // after the post: a record of a pass with no comment would be reused, and the comment never written
@@ -1398,7 +982,7 @@ function sameClone(a: string, b: string): boolean {
 
 /**
  * The command: its exit code. 2 = the target cannot be run, its checkout has no CI steps, or the build off the host could not be started (nothing posted), 1 = a failure, a conflict, a result not
- * posted (moved, or the post failed), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
+ * posted (the head moved during the run, or the post failed; a base that alone moved is still posted), 0 = a pass posted or one already there. `scriptRoot`: the clone without --repo.
  * `cache`: where the run's worktrees and logs go (~/.cache; tests give their own).
  */
 export async function main(args: string[], cwd: string, d: Deps, post = reportResult, scriptRoot = join(import.meta.dir, ".."), cache?: string, backlog: BacklogAccess = { env: process.env }, live?: (p: Pending) => boolean): Promise<number> {

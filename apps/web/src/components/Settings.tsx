@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { lang, setLang, t, type Lang, type Msg } from "../i18n.ts";
 import { settings } from "../i18n/settings.ts";
-import type { CustomRunner, AutoStartKind, Backlog, BacklogAllocation, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, ReviewRunnerChoice, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace, WorkspaceMode } from "@switchboard/protocol";
+import type { CustomRunner, AutoStartKind, Backlog, BacklogAllocation, HistoryStatus, JudgeSettings, LlmRoutingSettings, ModelCandidates, ModelOption, Preset, RunnerId, RunnerInfo, Settings as SettingsData, SettingsPrice, Task, TaskSummary, Workspace, WorkspaceMode } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
 import { type Health } from "../api/daemon.ts";
 import { type SettingsResponse } from "../api/settings.ts";
@@ -14,6 +14,7 @@ import { ReleaseAutoFields } from "./ReleaseAutoFields.tsx";
 import { PolicySettings } from "./PolicySettings.tsx";
 import { CliUpdateSettings } from "./CliUpdateSettings.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
+import { isReviewRow, ReviewJobCells } from "./ReviewJobCells.tsx";
 import { notifyPermission } from "../notify.ts";
 import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from "../priceForm.ts";
 import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
@@ -44,6 +45,8 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
   const [perm, setPerm] = useState(() => notifyPermission(typeof Notification === "undefined" ? undefined : Notification));
   const runners = props.health?.runners ?? [];
   const info = (id: RunnerId) => runners.find((r) => r.id === id);
+  /** The detected runners a review job runs on (claude, codex): each gets a 「レビューで使うモデル」 row. */
+  const reviewers = runners.filter((r) => r.available && (r.id === "claude" || r.id === "codex")).map((r) => r.id);
   useEffect(() => {
     api.settings().then(setS).catch((e) => props.onError(String(e.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -175,25 +178,16 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
       <SettingsCard title={t(settings.jobsCard)} className="jobs">
         <div className="muted">{t(settings.jobsHint)}</div>
         <div className="muted">{t(settings.autoStartHint)}</div>
-        {jobRows(s).filter((j) => !j.id.startsWith("kind:")).map((j) => (
+        {jobRows(s, reviewers).filter((j) => !j.id.startsWith("kind:")).map((j) => (
           <Fragment key={j.id}>
             <div className="job-row">
               <span className="job-name">
-                {t(j.label)}
+                {t(j.label, { runner: j.runner })}
                 {j.id === "judge" && !judge.enabled && s.evals.judge.enabled && <span className="hint"> {t(settings.usedByRubric)}</span>}
-                {j.id !== "review" && <span className="muted" style={{ display: "block" }}>{t(settings.defaultValue, { value: jobRows(d).find((r) => r.id === j.id)?.runner ?? "" })}</span>}
+                <span className="muted" style={{ display: "block" }}>{j.id.startsWith("reviewModel:") ? t(settings.jobReviewModelScope) : !isReviewRow(j) && t(settings.defaultValue, { value: jobRows(d, reviewers).find((r) => r.id === j.id)?.runner ?? "" })}</span>
               </span>
-              {j.id === "review" ? (
-                <>
-                  <select className="mode" value={s.reviewRunner} disabled={saving} aria-label={`${t(j.label)}: ${t(settings.runner)}`} onChange={(e) => void save({ reviewRunner: e.target.value as ReviewRunnerChoice })}>
-                    {(Object.entries(REVIEW_RUNNER_LABELS) as [ReviewRunnerChoice, Msg][]).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {t(label)}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="muted" style={{ gridColumn: "span 2" }}>{t(settings.defaultValue, { value: t(REVIEW_RUNNER_LABELS[d.reviewRunner]) })}</span>
-                </>
+              {isReviewRow(j) ? (
+                <ReviewJobCells row={j} s={s} d={d} info={info} saving={saving} save={save} />
               ) : (
                 <>
                   <select className="mode" value={j.runner} disabled={saving} aria-label={`${t(j.label)}: ${t(settings.runner)}`} onChange={(e) => void jobPatch(j.id, { runner: e.target.value as RunnerId })}>
@@ -274,7 +268,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         <div className="muted">{t(settings.maxRunnersHint)}</div>
         {reset.sweep}
       </SettingsCard>
-
       {/* the tunables: saved on blur / Enter; 既定に戻す puts back the values this card shows (RESETTABLE_CARDS) */}
       <SettingsCard title={t(settings.usage)} className="tunables">
         <div className="hint">{t(settings.usageWait)}</div>
@@ -287,6 +280,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         <NumberField label={t(settings.maxStopResumes)} unit={t(settings.unitTimes)} value={qr.maxStopResumes} def={d.quotaAndResume.maxStopResumes} disabled={saving} onSave={(v) => save({ quotaAndResume: { maxStopResumes: v } })} />
         <NumberField label={t(settings.silentAfter)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.silentAfterHint)} value={qr.silentAfterMs} def={d.quotaAndResume.silentAfterMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { silentAfterMs: v } })} />
         <NumberField label={t(settings.waitLimit)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.waitLimitHint)} value={qr.waitLimitMs} def={d.quotaAndResume.waitLimitMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { waitLimitMs: v } })} />
+        <NumberField label={t(settings.queueStall)} unit={t(settings.unitMinutes)} scale={60_000} min={1} max={1440} hint={t(settings.queueStallHint)} value={qr.queueStallMs} def={d.quotaAndResume.queueStallMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { queueStallMs: v } })} />
         <NumberField label={t(settings.dependsLimit)} unit={t(settings.unitMinutes)} scale={60_000} hint={t(settings.dependsLimitHint)} value={qr.dependsLimitMs} def={d.quotaAndResume.dependsLimitMs} disabled={saving} onSave={(v) => save({ quotaAndResume: { dependsLimitMs: v } })} />
         <NumberField label={t(settings.thinSample)} unit={t(settings.unitItems)} hint={t(settings.thinSampleHint)} value={qr.thinSample} def={d.quotaAndResume.thinSample} disabled={saving} onSave={(v) => save({ quotaAndResume: { thinSample: v } })} />
         <NumberField label={t(settings.flowLimit)} unit={t(settings.unitItems)} min={0} hint={t(settings.flowLimitHint)} value={qr.flowLimit} def={d.quotaAndResume.flowLimit} disabled={saving} onSave={(v) => save({ quotaAndResume: { flowLimit: v } })} />
@@ -451,9 +445,6 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
     </main>
   );
 }
-
-/** The choices of レビューのランナー, in the order shown: the default first. */
-const REVIEW_RUNNER_LABELS: Record<ReviewRunnerChoice, Msg> = { other: settings.reviewRunnerOther, same: settings.reviewRunnerSame };
 
 /** The Tasks a Workspace MCP endpoint can be issued for: not ended and not a cloud Task (the cases where `GET /api/tasks/:id/mcp` answers 409 or has no local scope), not archived, newest first. */
 export function mcpTaskChoices(tasks: TaskSummary[]): TaskSummary[] {

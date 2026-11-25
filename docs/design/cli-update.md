@@ -33,3 +33,12 @@ A host without the installers' link, a candidate daemon and a work machine chang
 ## What this does not guard
 
 A version the distributor itself publishes and signs with bad intent passes; `waitHours` only gives time to notice. A Task runs as the same OS user and can run an installer itself, outside these checks.
+
+## Known limits
+
+The one read-only turn starts the placed file directly, through an adapter with no runner settings: it does not go through anything that stands in front of `claude` on PATH, and it does not use the Bedrock switch of Settings. Two kinds of host therefore cannot pass it, and with `smoke` at `turn` a new version of that runner is refused there (it fails closed: the version in use stays, nothing new goes in):
+
+- A host whose `claude` gets its sign-in from `scripts/host/claude-wrapper.sh` (installed ahead of the real `claude` on PATH, reading a `claude setup-token` token from Parameter Store): the placed file starts without that token.
+- A host where Claude or Codex runs only on Amazon Bedrock (switched in Settings, `docs/design/bedrock.md`): the turn does not get the Bedrock settings.
+
+On such a host, set `Settings.cliUpdate.smoke` to `version`: the distributor, checksum and signature checks still apply, and a version refused under the other setting is checked again. Nothing tries a turn in its place.
