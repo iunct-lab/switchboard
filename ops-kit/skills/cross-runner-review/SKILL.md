@@ -25,7 +25,8 @@ description: PR を「実装したのと同じランナーの新しいセッシ�
 
 <!-- when task=out -->
 主レビュアーは、アプリのレビューの設定（別のランナー / 同じランナー）と実装したランナーで決まる。アプリの Task が読む写しには、その Task に合う側だけが入る。
-アプリの Task の外では設定が届かないので、`review=other`（実装したのとは別のランナー）の側を読む。`reviewer` は主レビュアー（Claude Code が実装したら `codex`、Codex が実装したら `claude`）、`runner` は実装したランナー。
+再チェック（2 の「再チェック」）を読むランナーは、アプリの再チェックの設定（主レビュアーでないランナー / 主レビューと同じランナー。未設定ならレビューの設定の値）で決まる。
+アプリの Task の外では設定が届かないので、設定の既定の値として `review=other`・`recheck=other` の側を読む（ランナーの決まりではなく、設定が無いときの読み方）。`reviewer` は主レビュアー（`review=other` では実装していない方のランナー）、`runner` は実装したランナー。
 <!-- end when -->
 <!-- when review=other reviewer=codex -->
 主レビュアーは **Codex**（実装したのは Claude Code。実装したのとは別のランナー）。
@@ -74,22 +75,24 @@ main との比較（5）も設定どおり実装したランナーの別セッ�
 - 材料と指示は 1 と同じ fresh clone と `_review/` だけ（**実装時の会話・判断の要約・memory は渡さない**）。別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する。
 <!-- end when -->
 <!-- when review=other reviewer=codex task=in -->
-- 仕事で代替するなら、代替のランナーを名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
+- 仕事で代替するなら、主レビュアーでない方（実装したランナー）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
 <!-- end when -->
 <!-- when review=other reviewer=claude task=in -->
-- 仕事で代替するなら、代替のランナーを名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner codex --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/codex.md"`
+- 仕事で代替するなら、主レビュアーでない方（実装したランナー）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner codex --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/codex.md"`
 <!-- end when -->
 <!-- when review=other task=out -->
 - 直接走らせて代替するなら、2 の代替のランナーの側のコマンド。
 <!-- end when -->
 <!-- when review=other -->
 - 転記は 3 の `post_review` で実際のランナーを who にし、要約の 1 行目を `[<runner>] review（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）` にする（4 つ目の引数）。自己レビューだけでこの印を付けない。
-- 4 の修正後の見直しも同じ代替を使い、`WHO` は今回のレビュアー、`PREV` は前回のレビューが実際に書かれたファイルにする（ランナーを替えても `PREV` を今回の名前に替えない）。責務などの再チェックで指定ランナーが上限なら、上限でない側の新しいセッションに、その手順が定める材料を渡す。主レビューとは別のセッションで行う。
+- 4 の修正後の見直しも同じ代替を使い、`WHO` は今回のレビュアー、`PREV` は前回のレビューが実際に書かれたファイルにする（ランナーを替えても `PREV` を今回の名前に替えない）。
 - 代替も利用上限なら、未レビューのままマージせず、運用の確認として Task の会話で止める。追加認証が要るレビューを自動で選ばない。
 <!-- end when -->
 <!-- when review=same -->
 主レビュアーは実装したランナーと同じ枠を使うので、上限の代替は無い（別のランナーへ替えない。設定が同じランナーを選んでいる）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、レビューの実行が上限で止まったらその出力を優先する。上限なら、未レビューのままマージせず、利用上限で止まったと報告して止まる。追加認証が要るレビューを自動で選ばない。
 <!-- end when -->
+
+再チェック（2）のランナーが上限なら代替せず、`usage-limit` で戻る時刻まで待つ（ランナーは設定が決め、違うランナーはアプリが断る）。
 
 ## 1. 材料を用意する（会話の文脈は渡さない）
 
@@ -102,7 +105,7 @@ clone の前に、切れたセッションが残した clone のうち終わっ�
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-NAME=${REPO#*/}; MIN_KB=512000   # 同じリポジトリ名の分だけ。閾値 500 MB
+NAME=${REPO#*/}; MIN_KB=716800   # 同じリポジトリ名の分だけ。閾値 700 MB（clone と依存）
 REVIEW_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/ops-kit/review"; mkdir -p "$REVIEW_ROOT"
 for d in "$REVIEW_ROOT/$NAME".review[0-9]* "$REVIEW_ROOT/$NAME".recheck[0-9]*; do  # 終わった PR の分だけ消す
   [ -d "$d" ] || continue
@@ -121,6 +124,7 @@ R="${REVIEW_ROOT:?}/${NAME:?}.${KIND:?}${N:?}"; echo "$R"   # 再開して新し
 rm -rf "$R"   # 初回だけ: 同じ PR のやり直しは前のものを消して 1 つのまま。clone が作るので mkdir しない
 HEAD_REF=$(gh pr view $N --json headRefName -q .headRefName); BASE_REF=$(gh pr view $N --json baseRefName -q .baseRefName)
 gh repo clone "$REPO" "$R" -- -q --branch "$HEAD_REF"
+( cd "$R" && <依存の準備> ) || echo "依存の準備が失敗"   # CLAUDE.md の、install scripts を走らせないコマンド（無ければ流さない）。失敗は PR に書く
 M="$R/_review"; mkdir -p "$M"   # untracked。レビュアーはここを読む
 gh pr view $N --json number,title,body,url -q '"# PR #\(.number) \(.title)\n\(.url)\n\n\(.body)"' > "$M/pr.md"
 gh pr diff $N > "$M/diff.patch"
@@ -139,10 +143,15 @@ ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"; [ -s "$M/handled.md"
 ```
 
 <!-- when mergeGate=on -->
-マージ判定が名指しの外のファイルを数えるリポジトリでは、その一覧も材料にする（`<マージ判定>` は CLAUDE.md のコマンド。空なら作らない。ローカルの変更では `--change <変更> --scope`）:
+マージ判定が名指しの外のファイルを数えるリポジトリでは、その一覧も材料にする（`<マージ判定>` は CLAUDE.md のコマンド。空なら作らない。ローカルの変更では `--change <変更> --scope`）。主レビュー（`KIND=review`）では、その PR に求める観点（`--viewpoints`。ローカルの変更でも `--change <変更>` を付ける）と、観点があればその指示が読む元要望（`request.md`。再チェックと同じ作り方）も材料にする（再チェックは種類ごとの指示で見るので、観点の材料を作らない）:
 
 ```bash
 <マージ判定> $N --scope > "$M/scope.md"; grep -q . "$M/scope.md" || rm -f "$M/scope.md"
+[ "$KIND" = review ] && <マージ判定> $N --viewpoints > "$M/viewpoints.md"; grep -q . "$M/viewpoints.md" 2>/dev/null || rm -f "$M/viewpoints.md"
+if [ -f "$M/viewpoints.md" ]; then   # PBI の ## 元要望 の番号（「なし（PR #N のレビュー）」なら作らない）
+  REQ=$(awk '/^## 元要望/{f=1;next} /^## /{f=0} f && /^なし/{exit} f && match($0,/#[0-9]+/){print substr($0,RSTART+1,RLENGTH-1); exit}' "$M/pbi.md")
+  [ -n "$REQ" ] && ops-kit backlog view "$REQ" --fresh > "$M/request.md"
+fi
 ```
 <!-- end when -->
 
@@ -159,7 +168,9 @@ beyond what the files below say. Read, in this order, under `_review/`: `pr.md` 
 issue it closes), `pbi.md` (the parent PBI: user story, acceptance criteria, out of scope, decision log), `design-rules.md`
 (the repository's design rules), `handled.md`, `old-paths.md` and `scope.md` when they exist, then `diff.patch`. Then read the surrounding code in the working tree (this checkout is the
 PR's head branch) and any `docs/design/*.md` that covers the touched area (`_review/design-docs.txt` lists them). Do not skim.
-Do not install dependencies (no `bun install` / `npm install`): review without `node_modules`.
+<!-- when mergeGate=on -->
+When `_review/viewpoints.md` exists, also read it and, when it exists, `request.md` (the original request; when it is missing, say so in the viewpoint's line) before `diff.patch`. Finish each viewpoint it lists (`## 観点: <kind>`) in this one review, its findings under Findings, and list it under `### Viewpoints covered`.
+<!-- end when -->
 
 Judge the PR on these, in this order:
 1. Intent: does the diff do what the Task's 手順 and the PBI's acceptance criteria ask — no less, and nothing beyond it?
@@ -196,7 +207,7 @@ Judge the PR on these, in this order:
 Output exactly this Markdown, nothing else:
 
 ### Findings
-- [blocker|should-fix|nit|question] `path/from/repo/root.ts:LINE` — one sentence. Scenario: what input/state leads to what wrong result.
+- [blocker|should-fix|nit|question] `path/from/repo/root.ts:LINE` — one sentence. Scenario: what input/state leads to what wrong result. Evidence: a test that shows the break, or the written rule relied on (`path:line` or section) — on blocker and should-fix lines only. Test: _review/tests/<file> — when you wrote a test that shows the break, leave it there and name it (before any `Repeat of:`); the implementer runs it before fixing.
 (one line per finding; LINE is a line in the new file; write `- none` if there are no findings)
 ### Intent and design
 (3–8 sentences: what the PR is for, whether it stays inside the Task, contradictions found or "none")
@@ -207,6 +218,10 @@ Output exactly this Markdown, nothing else:
 - public readers: none | finding
 ### Read outside the diff
 - `path:function` (or `- none`)
+<!-- when mergeGate=on -->
+### Viewpoints covered
+- `<kind>` — what you checked (one line per viewpoint; `- none` without `viewpoints.md`)
+<!-- end when -->
 ### Verdict
 (one line: mergeable as is / mergeable after the should-fix items / not mergeable — and why)
 PROMPT
@@ -233,22 +248,53 @@ ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt.md"
 <!-- when task=in -->
 
 request が出す `job#<id>` と JSON を止まりの報告に書き（reason `depends`・conditions に `job#<id>`）、ターンを終える。レビューが終わるとアプリが結果の要約を添えて再開するので、`--out` のファイルを読んで 3 の転記に進む。
-主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（再チェックは `--as recheck --kinds <kind>`（`--kinds` の無い依頼は受けられるが種類なしで記録され、判定でどの再チェックも満たさない）、マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。
+主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。
 
 マージ判定が数えるのは、レビューの仕事の記録（head と、出力の `### Findings` の節の指摘）。PR への投稿（`post_review`）は人が読むため。主レビュー・攻める側・再チェックを仕事で頼まず自分のシェルで回した結果は判定に数えられない。アプリが持つ変更（ローカルの変更）のレビューと `local-ci` は `--change` を付けて頼む。
 <!-- end when -->
+
+**再チェック**（判定の `[再チェック <kind>]` のうちレビューで見る種類。材料と指示は CLAUDE.md の `<再チェック>`）: 1 を `KIND=recheck` の clone で流して材料を作る。会話の文脈と主レビューの結果は渡さない。
+<!-- when recheck=same -->
+再チェックは主レビューと同じランナーの新しいセッションが読む（再チェックの設定の値）。
+<!-- end when -->
+<!-- when recheck=other -->
+再チェックは主レビュアーでないランナーの新しいセッションが読む（再チェックの設定の値）。
+<!-- end when -->
+<!-- when task=in -->
+ランナーは名指ししない（アプリが設定から選び、違うランナーは断る）。`--kinds` が無いと種類なしで記録され、どの再チェックも満たさない:
+
+```bash
+ops-kit job request review $N --as recheck --kinds <kind,…> --cwd "$R" --prompt "$M/prompt.md" --out "$M/recheck.md"
+```
+
+転記は 3 の `post_review` の 1 行目を `[<runner>] recheck <kind,…>` に替え（2b と同じ替え方）、5 つ目の引数にこの仕事の id。`<runner>` は仕事の記録（`ops-kit job list --json` のその id の `runner`）。
+<!-- end when -->
 <!-- when task=out -->
-アプリの Task の外では直接走らせる。読み取り専用 sandbox、会話は保存しない、出力はファイルへ。1 のとおり clone の決まりと利用者の MCP・スキルを読ませない引数を付け、指示の後ろに `ops-kit review-note <runner>` の文を足す（アプリに仕事として頼むレビューには、アプリが同じ引数と文を付ける）。Codex がレビュアーのとき:
+アプリの Task の外では上の側のランナーで 2 の直接の実行を流し（出力は `$M/recheck.md`）、転記の 1 行目は `[<runner>] recheck <kind,…>`。
+<!-- end when -->
+<!-- when task=out -->
+アプリの Task の外では直接走らせる。読むだけでなくテストも書いて走らせられるよう、アプリのレビューの仕事と同じ引数で（レビュアーは clone の中だけに書け、ネットワークは無く、テストは `_review/tests/` に書いて重い処理の枠の中で走らせられる）。会話は保存しない、出力はファイルへ。1 のとおり clone の決まりと利用者の MCP・スキルを読ませない引数を付け、指示の後ろに `ops-kit review-note <runner>` の文を足す（アプリに仕事として頼むレビューには、アプリが同じ引数と文を付ける）。先にどちらのランナーでも:
+
+```bash
+H="$HOME/.local/state/ops-kit/heavy"; mkdir -p "$H"; T=$(mktemp -d "${TMPDIR:-/tmp}/${NAME:?}.rv.XXXXXX")   # 重い処理の枠の置き場（レビュアーが枠を取るのに書く）と、レビュアーの $TMPDIR（Claude Code のソケットが 108 バイトに収まる短いパス。4 の後に $R と一緒に消す）
+```
+
+Codex がレビュアーのとき（workspace-write の sandbox。/tmp と $TMPDIR の既定の書き込みを外し、枠の置き場と `$T` を足す）:
 
 ```bash
 CODEX=$(command -v codex)
-( cd "$R" && { cat "$M/prompt.md"; echo; ops-kit review-note codex; } | ops-kit heavy --memory-only --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -c project_doc_max_bytes=0 -c 'mcp_servers={}' --disable plugins --disable apps -o "$M/codex.md" - ) > "$M/codex.log" 2>&1
+( cd "$R" && { cat "$M/prompt.md"; echo; ops-kit review-note codex; } | TMPDIR="$T" ops-kit heavy --memory-only --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox workspace-write -c sandbox_workspace_write.network_access=false -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --add-dir "$H" --add-dir "$T" --skip-git-repo-check --ephemeral -c project_doc_max_bytes=0 -c 'mcp_servers={}' --disable plugins --disable apps -o "$M/codex.md" - ) > "$M/codex.log" 2>&1
 ```
 
-Claude Code がレビュアーのとき（plan モード、読み取り専用）:
+Claude Code がレビュアーのとき（dontAsk。書けるのは `_review/tests/` だけで、走らせてよいのは `ops-kit heavy -- bun test` だけ。それを Claude Code の sandbox（bubblewrap）の中で走らせる。bwrap か socat が無いと sandbox が立たないので、plan で読むだけにする）。`MAY` はこのシェルで 4 の見直しにも使う:
 
 ```bash
-( set -o pipefail; cd "$R" && ops-kit heavy --memory-only --name "review claude" -- ops-kit idle-run --idle 900 -- env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p --permission-mode plan --strict-mcp-config --disable-slash-commands --output-format stream-json --verbose "$(cat "$M/prompt.md"; echo; ops-kit review-note claude)" | tee "$M/claude.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/claude.md" 2> "$M/claude.log"
+if command -v bwrap >/dev/null && command -v socat >/dev/null; then
+  MAY=(--permission-mode dontAsk --settings "$(jq -cn --arg w "$(realpath "$H")" --arg g "$(realpath "$R")/.git" '{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:false,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$w],denyWrite:[$g]},network:{allowedDomains:[]}}}')" --allowedTools "Bash(ops-kit heavy -- bun test:*)" "Edit(_review/tests/**)" "Write(_review/tests/**)")
+else
+  MAY=(--permission-mode plan)   # 読むだけ。指示の後ろの文はテストを書いてよいと言うが書けず、走らせなかったと出力に書く
+fi
+( set -o pipefail; cd "$R" && TMPDIR="$T" ops-kit heavy --memory-only --name "review claude" -- ops-kit idle-run --idle 900 -- env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "${MAY[@]}" --strict-mcp-config --disable-slash-commands --output-format stream-json --verbose "$(cat "$M/prompt.md"; echo; ops-kit review-note claude)" | tee "$M/claude.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/claude.md" 2> "$M/claude.log"
 ```
 <!-- end when -->
 
@@ -292,51 +338,58 @@ gh pr comment $N --body "[<runner>] 無進捗で打ち切り（<秒> 秒出力�
 PR を出した直後、主レビューを頼むのと同じ時点で `bun scripts/merge-gate.ts <PR>`（`--merge` なし。ローカルの変更では `--change <変更>`）を流し、出力の JSON の `attack`（当たったパスの一覧）が空でなく、reasons に攻める側のレビューが無いという行があれば、主レビューと同時にもう 1 回、攻める側のレビューを頼む。`attack` が無い PR では頼まない。スタックではその PR を出した直後に頼み、最後にまとめない。主レビューの `prompt.md` に混ぜない（5 項目の 1 行に戻り、主レビューと同じ材料で薄まる）。
 
 - 材料は 1 の同じ clone と `_review/`。指示だけを `ops-kit review-attack prompt` で作る（指示の文をここに写さない）: `ops-kit review-attack prompt > "$M/attack-prompt.md" && [ -s "$M/attack-prompt.md" ]`。失敗か空なら頼まず止まって報告する
-<!-- when review=other -->
-- レビュアーは主レビュアーと同じ（実装したのとは別のランナー）。別ランナーが上限なら同じランナーに替えず、戻る時刻まで停止の報告 `usage-limit` で待つ
-<!-- end when -->
-<!-- when review=same -->
-- レビュアーは主レビュアーと同じ（設定どおり、同じランナーの新しいセッション）
-<!-- end when -->
+- レビュアーは主レビュアーと同じランナーの新しいセッション。上限なら設定によらず（0 と別に）待たずにもう一方のランナーの新しいセッションで代替し、両方が上限のときだけ `usage-limit` で待つ（2026-11-24 の利用者の指摘）
 <!-- when task=in -->
-- 仕事として頼む（理由は `--as attack`。2 と同じ止まり方）: `ops-kit job request review $N --runner <主レビュアーのランナー> --as attack --cwd "$R" --prompt "$M/attack-prompt.md" --out "$M/attack.md"`
+- 仕事として頼む（理由は `--as attack`。2 と同じ止まり方）: `ops-kit job request review $N --runner <主レビュアーのランナー> --as attack --cwd "$R" --prompt "$M/attack-prompt.md" --out "$M/attack.md"`。代替は `--runner <もう一方>`（`--as attack` のまま）
 <!-- end when -->
 <!-- when task=out -->
 - 直接走らせる（2 のコマンドの `prompt.md` を `attack-prompt.md` に、出力を `attack.md` に替える）
 <!-- end when -->
 - 出力に `### Findings` が無ければ転記しない（空でも要約が付く。判定が数えるのは仕事の記録で、Findings の節の無い出力は満たさない）。2 と同じく一度だけやり直す
-- 転記は 3 の `post_review` を、1 行目だけ `[<runner>] attack` にして（`printf '[%s] review%s\n\n'` を `printf '[%s] attack%s\n\n'` に替えた関数を、使う呼び出しの中で定義する）: `post_review_attack $N <runner> "$M/attack.md"`。`[<runner>] review` では転記しない（マージ判定は主レビューと攻める側を別に数える）。ローカルの変更では、転記先は変更へのコメント（`ops-kit backlog comment <変更> --body-file -`）で、1 行目は同じ `[<runner>] attack`
-- 4 の修正後の見直しと同じく、修正を積んだら修正の差分（`fix.range-diff`）で攻める側の見直しを頼み直す（判定は、PR の今の head かそのコミットが同じ差分で入った head で合格した攻める側の仕事の記録を求める）。4 のブロックで `prompt.md`→`attack-prompt.md`、`prompt-fix.md`→`attack-prompt-fix.md`、`PREV=_review/attack.md`、出力 `attack-fix.md`、`--as attack`、`post_review_attack` に替える
+- 転記は 3 の `post_review` を、1 行目だけ `[<runner>] attack` にして（`printf '[%s] review%s\n\n'` を `printf '[%s] attack%s\n\n'` に替えた関数を、使う呼び出しの中で定義する）: `post_review_attack $N <runner> "$M/attack.md" '' <攻める側の仕事の id>`。代替なら 4 つ目の引数に `（<上限のランナー> が利用上限のため代替）`（1 行目が `[<runner>] attack（…）`）。`[<runner>] review` では転記しない（マージ判定は主レビューと攻める側を別に数える）。ローカルの変更では、転記先は変更へのコメント（`ops-kit backlog comment <変更> --body-file -`）で、1 行目は同じ `[<runner>] attack`
+- 4 の修正後の見直しと同じく、修正を積んだら修正の差分（`fix.range-diff`）で攻める側の見直しを頼み直す（判定は、PR の今の head かそのコミットが同じ差分で入った head で合格した攻める側の仕事の記録を求める）。4 のブロックで `prompt.md`→`attack-prompt.md`、`prompt-fix.md`→`attack-prompt-fix.md`、`PREV=_review/attack.md`、出力 `attack-fix.md`、`--as attack`、`post_review_attack` に替える。follow-up の文（Follow-up rounds）は 4 のまま
 
 ## 3. PR に転記する
 
-レビュアーはファイルを変えず PR にも書かない。**自分がレビュアーの名前の接頭辞つきで転記する**（`[<runner>]`。下の `post_review` の 2 つ目の引数）。Findings の各行はインラインに、残りは要約コメントに:
+レビュアーは `_review/tests/` のテストのほかにファイルを変えず、PR にも書かない。**自分がレビュアーの名前の接頭辞つきで転記する**（`[<runner>]`。下の `post_review` の 2 つ目の引数）。Findings の各行はインラインに、残りは要約コメントに。
+要約の 1 行目の下に使ったモデルの 1 行（`model: <model> / effort <effort>`）を出す。値は仕事の記録から読む（レビュアーは自分のモデルを確かには知らないので書かせない）。仕事の id は 5 つ目の引数か、呼び出しの前の `JOB=<id>`
+<!-- when task=in -->
+（2 で頼んだ仕事。0 の代替ならその仕事）。
+<!-- end when -->
+<!-- when task=out -->
+。アプリの Task の外の直接の実行には仕事が無いので付けない（`model: 不明（仕事の口の外）`）。
+<!-- end when -->
 
 ```bash
-post_review() { # <pr> <who> <file> [1 行目の印の続き]   ※ スクリプトとして保存せず、使う呼び出しの中で定義する（別のセッションに上書きされる）。※ 変数名に path を使わない（zsh では $path が PATH に結ばれ、local path で全コマンドが見えなくなる）
-  local pr=$1 who=$2 f=$3 note=${4:-} sha line rel ln
+post_review() { # <pr> <who> <file> [1 行目の印の続き] [仕事の id]   ※ スクリプトとして保存せず、使う呼び出しの中で定義する（別のセッションに上書きされる）。※ 変数名に path を使わない（zsh では $path が PATH に結ばれ、local path で全コマンドが見えなくなる）
+  local pr=$1 who=$2 f=$3 note=${4:-} job=${5:-${JOB:-}} sha line rel ln model='model: 不明（仕事の口の外）'
+  job=${job#job#}
+  if [ -n "$job" ]; then
+    model=$(ops-kit job list --json | jq -r --argjson id "$job" '.[] | select(.id==$id) | "model: \(.model // "CLI の既定") / effort \(.effort // "既定")"')
+    [ -n "$model" ] || model="model: 不明（job#$job が仕事の記録に無い）"
+  fi
   sha=$(gh pr view "$pr" --json headRefOid -q .headRefOid)
   grep -E '^- \[(blocker|should-fix|nit|question)\] `[^`]+:[0-9]+`' "$f" | while IFS= read -r line; do
     rel=$(sed -E 's/^- \[[^]]+\] `([^`]+):([0-9]+)`.*/\1/' <<<"$line"); ln=$(sed -E 's/^- \[[^]]+\] `([^`]+):([0-9]+)`.*/\2/' <<<"$line")
     gh api "repos/{owner}/{repo}/pulls/$pr/comments" -f path="$rel" -F line="$ln" -f side=RIGHT -f commit_id="$sha" -f body="[$who] $line" >/dev/null 2>&1 \
       || gh pr comment "$pr" --body "[$who] $line（差分外の行のため一般コメント）" >/dev/null
   done
-  { printf '[%s] review%s\n\n' "$who" "$note"; sed -n '/^### Intent and design/,$p' "$f"; } | gh pr comment "$pr" --body-file - >/dev/null
+  { printf '[%s] review%s\n\n' "$who" "$note"; printf '%s\n\n' "$model"; sed -n '/^### Intent and design/,$p' "$f"; } | gh pr comment "$pr" --body-file - >/dev/null
 }
 <!-- when review=other reviewer=codex -->
-post_review $N codex "$M/codex.md"   # 0 の代替で頼んだときは、実際のランナーとそのファイル、4 つ目の引数に代替の印
+JOB=<id> post_review $N codex "$M/codex.md"   # 0 の代替で頼んだときは、実際のランナーとそのファイル、4 つ目の引数に代替の印
 <!-- end when -->
 <!-- when review=other reviewer=claude -->
-post_review $N claude "$M/claude.md"   # 0 の代替で頼んだときは、実際のランナーとそのファイル、4 つ目の引数に代替の印
+JOB=<id> post_review $N claude "$M/claude.md"   # 0 の代替で頼んだときは、実際のランナーとそのファイル、4 つ目の引数に代替の印
 <!-- end when -->
 <!-- when review=same reviewer=codex -->
-post_review $N codex "$M/codex.md" '（同じランナーの別セッション。設定による選択）'
+JOB=<id> post_review $N codex "$M/codex.md" '（同じランナーの別セッション。設定による選択）'
 <!-- end when -->
 <!-- when review=same reviewer=claude -->
-post_review $N claude "$M/claude.md" '（同じランナーの別セッション。設定による選択）'
+JOB=<id> post_review $N claude "$M/claude.md" '（同じランナーの別セッション。設定による選択）'
 <!-- end when -->
 <!-- when extra=on -->
-post_review $N <extra> "$M/<extra>.md"
+post_review $N <extra> "$M/<extra>.md"   # 仕事ではないので JOB を付けない
 <!-- end when -->
 ```
 
@@ -358,7 +411,8 @@ git -C "$R" range-diff "$(git -C "$R" merge-base "$OLD" "origin/$BASE_REF")..$OL
 # range-diff は足しただけのコミットを 1 行でしか出さないので、修正の中身も同じファイルに足す
 { printf '\n# git diff %s %s (after a rebase this also carries base changes; the range-diff above has only this PR commits)\n' "$OLD" "$NEW"; git -C "$R" diff "$OLD" "$NEW"; } >> "$M/fix.range-diff"
 git -C "$R" checkout -q "$NEW"
-# 1 と同じ 2 行
+( cd "$R" && <依存の準備> ) || echo "依存の準備が失敗"   # 1 と同じ
+# 次の 2 行も 1 と同じ
 ops-kit review-handled $N --kind review > "$M/handled.md"; [ -s "$M/handled.md" ] || rm -f "$M/handled.md"
 ( cd "$R" && ops-kit old-paths check "origin/$BASE_REF" "$M/pr.md" ) > "$M/old-paths.md"
 <!-- when reviewer=codex -->
@@ -367,25 +421,25 @@ PREV=_review/codex.md   # 前回のレビューが実際に書かれたファイ
 <!-- when reviewer=claude -->
 PREV=_review/claude.md   # 前回のレビューが実際に書かれたファイル（0 の代替で書かれたならそのファイル）
 <!-- end when -->
-{ cat "$M/prompt.md"; echo; echo "This is a follow-up review. The PR was already reviewed at $OLD; your previous review is $PREV."; \
-  echo "Review only _review/fix.range-diff (this PR's commits since then): do the fixes address the findings, and do they introduce new problems?"; \
+{ cat "$M/prompt.md"; echo; echo "This is a follow-up round (see Follow-up rounds below). The PR was already reviewed at $OLD; your previous review is $PREV."; \
+  echo "Its job: are earlier findings closed, and do the fixes add new problems? Start from _review/fix.range-diff (this PR's commits since then)."; \
   echo "Use the same output format."; } > "$M/prompt-fix.md"
 rm -f "$M/fix-review.md"   # 切れたときに前回の出力を転記しない
 <!-- when task=in reviewer=codex -->
-# ここで仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える（この下の行はまだ流さない）。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し（R は 1 の代入の行まで。`rm -rf "$R"` の行は流さない）、WHO=codex、RC=<結果の要約の exit> を置いて、下の最後の行（転記）から続ける:
+# ここで仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える（この下の行はまだ流さない）。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し（R は 1 の代入の行まで。`rm -rf "$R"` の行は流さない）、WHO=codex、RC=<結果の要約の exit>、JOB=<この見直しの仕事の id> を置いて、下の最後の行（転記）から続ける:
 #   ops-kit job request review $N --runner codex --cwd "$R" --prompt "$M/prompt-fix.md" --out "$M/fix-review.md"
 <!-- end when -->
 <!-- when task=in reviewer=claude -->
-# ここで仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える（この下の行はまだ流さない）。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し（R は 1 の代入の行まで。`rm -rf "$R"` の行は流さない）、WHO=claude、RC=<結果の要約の exit> を置いて、下の最後の行（転記）から続ける:
+# ここで仕事に頼み（2 と同じ）、job#<id> を止まりの報告に書いてターンを終える（この下の行はまだ流さない）。再開したら、新しいシェルで R・M・N と下の NOTE を作り直し（R は 1 の代入の行まで。`rm -rf "$R"` の行は流さない）、WHO=claude、RC=<結果の要約の exit>、JOB=<この見直しの仕事の id> を置いて、下の最後の行（転記）から続ける:
 #   ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt-fix.md" --out "$M/fix-review.md"
 <!-- end when -->
 <!-- when task=out -->
-# アプリの Task の外では直接走らせる（引数と指示の後ろの文は 2 と同じ）
+# アプリの Task の外では直接走らせる（引数と指示の後ろの文は 2 と同じ。新しいシェルなら 2 の H の行と、Claude Code なら MAY の if の行を先に流す）
 CODEX=$(command -v codex)
 # Codex がレビュアーのとき
-( cd "$R" && { cat "$M/prompt-fix.md"; echo; ops-kit review-note codex; } | ops-kit heavy --memory-only --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox read-only --skip-git-repo-check --ephemeral -c project_doc_max_bytes=0 -c 'mcp_servers={}' --disable plugins --disable apps -o "$M/fix-review.md" - ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
+( cd "$R" && { cat "$M/prompt-fix.md"; echo; ops-kit review-note codex; } | TMPDIR="$T" ops-kit heavy --memory-only --name "review codex" -- ops-kit idle-run --idle 900 -- "$CODEX" exec --sandbox workspace-write -c sandbox_workspace_write.network_access=false -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --add-dir "$H" --add-dir "$T" --skip-git-repo-check --ephemeral -c project_doc_max_bytes=0 -c 'mcp_servers={}' --disable plugins --disable apps -o "$M/fix-review.md" - ) > "$M/fix-review.log" 2>&1; RC=$?; WHO=codex
 # Claude Code がレビュアーのときは上の代わりに:
-# ( set -o pipefail; cd "$R" && ops-kit heavy --memory-only --name "review claude" -- ops-kit idle-run --idle 900 -- env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p --permission-mode plan --strict-mcp-config --disable-slash-commands --output-format stream-json --verbose "$(cat "$M/prompt-fix.md"; echo; ops-kit review-note claude)" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
+# ( set -o pipefail; cd "$R" && TMPDIR="$T" ops-kit heavy --memory-only --name "review claude" -- ops-kit idle-run --idle 900 -- env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "${MAY[@]}" --strict-mcp-config --disable-slash-commands --output-format stream-json --verbose "$(cat "$M/prompt-fix.md"; echo; ops-kit review-note claude)" | tee "$M/fix-review.jsonl" | jq -r 'select(.type=="result").result' ) > "$M/fix-review.md" 2> "$M/fix-review.log"; RC=$?; WHO=claude
 <!-- end when -->
 <!-- when review=other -->
 NOTE=   # 0 の代替で頼んだ見直しは、0 の転記と同じ 1 行目の印の続きを入れる
@@ -393,13 +447,13 @@ NOTE=   # 0 の代替で頼んだ見直しは、0 の転記と同じ 1 行目の
 <!-- when review=same -->
 NOTE='（同じランナーの別セッション。設定による選択）'
 <!-- end when -->
-[ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" "$NOTE" \
+[ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" "$NOTE" "${JOB:-}" \
   || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
 ```
 
 exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも要約を書き、人には見直し済みに見える）。
 rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（判定は同じ差分で入った head も数える）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
-見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
+見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（2 の `$T` も。`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
 
 ## 5. main との比較（指摘が収束しないとき）
 

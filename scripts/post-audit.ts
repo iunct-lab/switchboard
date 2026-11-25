@@ -54,10 +54,11 @@ export function auditorOf(implementer: "claude" | "codex" | null, setting: Runne
   return who === "claude" ? "codex" : "claude";
 }
 
-/** The two settings a Task carries in its environment; a missing or unknown value is `other` (today's behaviour). */
+/** The two settings a Task carries in its environment: a missing or unknown review value is `other` (today's behaviour); a missing or unknown recheck value follows the review value. */
 export function settingFromEnv(env: Record<string, string | undefined>): RunnerSetting {
-  const side = (v: string | undefined): "same" | "other" => (v === "same" ? "same" : "other");
-  return { review: side(env.OPS_KIT_REVIEW_RUNNER), recheck: side(env.OPS_KIT_RECHECK_RUNNER) };
+  const side = (v: string | undefined): "same" | "other" | undefined => (v === "same" || v === "other" ? v : undefined);
+  const review = side(env.OPS_KIT_REVIEW_RUNNER) ?? "other";
+  return { review, recheck: side(env.OPS_KIT_RECHECK_RUNNER) ?? review };
 }
 
 export interface Selected { pr: number; route: Route; mergeSha: string }

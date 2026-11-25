@@ -36,6 +36,9 @@ test("file size: against the base's list a ceiling may go down or go away, never
   // the base's list is read from the script's own text: this checkout's text gives this checkout's list
   expect(listedIn(readFileSync(join(import.meta.dir, "file-size.ts"), "utf8"))).toEqual(STILL_OVER);
   expect(listedIn("export const ROOTS = [];\n")).toBeNull();
+  // a list emptied to one line is an empty list, not a text without one: every later run would otherwise fail
+  expect(listedIn("export const STILL_OVER: Record<string, number> = {};\nexport const ROOTS = [];\n")).toEqual({});
+  expect(listedIn("export const STILL_OVER: Record<string, number> = {};\nexport const X = {\n};\n")).toEqual({});
 });
 
 test("file size: the command fails a change that raises a ceiling with its file, or lists a new file, and passes one that lowers both", () => {
@@ -53,7 +56,8 @@ test("file size: the command fails a change that raises a ceiling with its file,
     for (const [p, n] of Object.entries(lines)) writeFileSync(join(dir, p), "x\n".repeat(n));
   };
   const run = (ref = "HEAD") => {
-    const p = Bun.spawnSync([process.execPath, "scripts/file-size.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, FILE_SIZE_BASE_REF: ref } });
+    const { FILE_SIZE_BASE_LIST: _, ...env } = process.env;
+    const p = Bun.spawnSync([process.execPath, "scripts/file-size.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...env, FILE_SIZE_BASE_REF: ref } });
     return { code: p.exitCode, out: p.stdout.toString() };
   };
   try {
@@ -62,10 +66,10 @@ test("file size: the command fails a change that raises a ceiling with its file,
     git("init", "-q");
     git("add", "-A");
     git("commit", "-q", "-m", "base");
-    expect(run()).toEqual({ code: 0, out: "files: 2 / over: 0 / still over (listed): 1\n" });
+    expect(run()).toEqual({ code: 0, out: "the ceilings are compared with HEAD\nfiles: 2 / over: 0 / still over (listed): 1\n" });
     // the file grows and its ceiling is raised to match: each alone would fail too, and both together still do
     put({ "packages/core/src/big.ts": 1300 }, { "packages/core/src/big.ts": 1300 });
-    expect(run()).toEqual({ code: 1, out: "packages/core/src/big.ts: its ceiling 1300 > the base's 1200: a ceiling only goes down\nfiles: 2 / over: 1 / still over (listed): 1\n" });
+    expect(run()).toEqual({ code: 1, out: "packages/core/src/big.ts: its ceiling 1300 > the base's 1200: a ceiling only goes down\nthe ceilings are compared with HEAD\nfiles: 2 / over: 1 / still over (listed): 1\n" });
     // another file grows over the limit and is put on the list
     put({ "packages/core/src/big.ts": 1200, "packages/core/src/other.ts": 1001 }, { "packages/core/src/big.ts": 1200, "packages/core/src/other.ts": 1001 });
     expect(run().code).toBe(1);
@@ -75,10 +79,36 @@ test("file size: the command fails a change that raises a ceiling with its file,
     expect(run().out).toContain("lower the ceiling to 1100");
     put({ "packages/core/src/big.ts": 1100 }, {});
     expect(run().code).toBe(0);
-    // a base that cannot be read: said in one line, the rest of the check still decides
+    // a base that cannot be read fails, with why in one line: the comparison is not skipped (the files themselves are within their ceilings here)
     const none = run("no-such-ref");
-    expect(none.code).toBe(0);
-    expect(none.out).toContain("the ceilings are not compared with the base's (no-such-ref:scripts/file-size.ts: ");
+    expect(none.code).toBe(1);
+    expect(none.out).toStartWith("the ceilings cannot be compared with the base's (no-such-ref:scripts/file-size.ts: ");
+    expect(none.out).toEndWith(")\nfiles: 2 / over: 0 / still over (listed): 1\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file size: FILE_SIZE_BASE_LIST is the base's list where there is no git: a ceiling above it fails, and the run says what it compared with; a value that is not such a JSON fails", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard.file-size."));
+  const script = readFileSync(join(import.meta.dir, "file-size.ts"), "utf8");
+  const run = (given: string) => {
+    const { FILE_SIZE_BASE_REF: _, ...env } = process.env;
+    const p = Bun.spawnSync([process.execPath, "scripts/file-size.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...env, FILE_SIZE_BASE_LIST: given } });
+    return { code: p.exitCode, out: p.stdout.toString() };
+  };
+  try {
+    for (const d of ["scripts", "packages/core/src", "packages/protocol/src", "apps/web/src"]) mkdirSync(join(dir, d), { recursive: true });
+    // no .git: only the given list can be compared with
+    writeFileSync(join(dir, "scripts/file-size.ts"), script.replace(/^(export const STILL_OVER\b[^=]*=\s*\{)[\s\S]*?^\};/m, (_, head: string) => `${head}\n  "packages/core/src/big.ts": 1200,\n};`));
+    writeFileSync(join(dir, "packages/core/src/big.ts"), "x\n".repeat(1200));
+    expect(run(JSON.stringify({ "packages/core/src/big.ts": 1200 }))).toEqual({ code: 0, out: "the ceilings are compared with FILE_SIZE_BASE_LIST\nfiles: 1 / over: 0 / still over (listed): 1\n" });
+    expect(run(JSON.stringify({ "packages/core/src/big.ts": 1199 }))).toEqual({ code: 1, out: "packages/core/src/big.ts: its ceiling 1200 > the base's 1199: a ceiling only goes down\nthe ceilings are compared with FILE_SIZE_BASE_LIST\nfiles: 1 / over: 1 / still over (listed): 1\n" });
+    expect(run(JSON.stringify({})).out).toContain("packages/core/src/big.ts: added to STILL_OVER");
+    const notJson = run("{nope");
+    expect(notJson.code).toBe(1);
+    expect(notJson.out).toContain("the ceilings cannot be compared with the base's (FILE_SIZE_BASE_LIST: not JSON (");
+    expect(run("[1200]")).toEqual({ code: 1, out: "the ceilings cannot be compared with the base's (FILE_SIZE_BASE_LIST: not a JSON object of path → ceiling)\nfiles: 1 / over: 0 / still over (listed): 1\n" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

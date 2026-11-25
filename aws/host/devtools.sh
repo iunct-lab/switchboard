@@ -12,9 +12,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 as_user() { sudo -u "$SB_HOST_USER" -H env HOME="$SB_HOST_HOME" PATH="$SB_HOST_HOME/.local/bin:$SB_HOST_HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin" "$@"; }
 
 # pinned by version and sha256 of the downloads: the distributor's published checksum where there is one, else the sha256 of the file itself
-DOCKER_VERSION=29.9.3
-DOCKER_SHA256=1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2
-DOCKER_ROOTLESS_SHA256=867bbb01a3df1566681ccf53da8255434d4ca2cc84a304111604b6ee6130c349
+DOCKER_VERSION=29.10.0
+DOCKER_SHA256=6e5159e8b5615e0c0c2954a2a1a2a12bc65f5d9b603595dba24a10cb367408cd
+DOCKER_ROOTLESS_SHA256=6d08caae6a61e58f86c21dc94bcbf87f2b7a82bb634ef051243004a7f92f9e07
 COMPOSE_VERSION=5.7.1
 COMPOSE_SHA256=f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5
 UV_VERSION=0.13.8
@@ -32,8 +32,9 @@ PLAYWRIGHT_MCP_VERSION=0.0.85
 GH_STACK_VERSION=v0.3.0
 DOCKER_BIN=/usr/local/lib/docker-rootless/bin
 
-# --- from the distribution (signed): sqlite3, pasta and iptables for rootless docker, Chromium's libraries, CJK fonts ---
-dnf install -y -q sqlite passt iptables-nft fontconfig google-noto-sans-cjk-ttc-fonts \
+# --- from the distribution (signed): sqlite3, pasta and iptables for rootless docker, Chromium's libraries, CJK fonts,
+# bubblewrap and socat for Claude Code's sandbox (a Claude review job runs its tests in it; without them it only reads) ---
+dnf install -y -q sqlite passt iptables-nft fontconfig google-noto-sans-cjk-ttc-fonts bubblewrap socat \
   nss atk at-spi2-atk cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib
 
 # fetch <url> <sha256> <file>: download and refuse anything whose checksum differs

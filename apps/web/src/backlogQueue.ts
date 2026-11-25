@@ -26,9 +26,6 @@ export function queueSections(queue: BacklogQueue, items: BacklogItem[]): { runn
   };
 }
 
-/** The queue's entries with `entry` at the end (once). */
-export const withAdded = (queue: BacklogQueue, entry: BacklogQueueEntry): BacklogQueueEntry[] => [...queue.items.filter((e) => !same(e, entry)), { workspaceId: entry.workspaceId, number: entry.number }];
-
 /** The queue's entries without `entry`. */
 export const withRemoved = (queue: BacklogQueue, entry: BacklogQueueEntry): BacklogQueueEntry[] => queue.items.filter((e) => !same(e, entry));
 
@@ -36,7 +33,8 @@ export const withRemoved = (queue: BacklogQueue, entry: BacklogQueueEntry): Back
  * How the queue view saves: each change is shown at once (`show`, on what is shown now) and sent after the one
  * before it has been answered, so two quick changes do not send two lists made from the same old queue. Only the
  * newest answer is shown. A save that fails says so (`failed`); the stored queue is read back (`reread`) only when no
- * later change is waiting to be sent — that one was made on what was shown and its answer takes the place.
+ * later change is waiting to be sent — that one was made on what was shown and its answer takes the place. When the
+ * read back fails too, no queue is shown.
  */
 export function queueSaver<Q, I>(deps: { send: (input: I) => Promise<Q>; show: (apply: (q: Q | null) => Q | null) => void; apply: (q: Q, input: I) => Q; reread: () => Promise<Q>; failed: (e: unknown) => void }): (input: I) => Promise<void> {
   let chain: Promise<unknown> = Promise.resolve();
@@ -50,7 +48,8 @@ export function queueSaver<Q, I>(deps: { send: (input: I) => Promise<Q>; show: (
         (e) => {
           deps.failed(e);
           // a change made while it is read back is newer than what it reads: its own answer takes the place
-          if (n === seq) return deps.reread().then((q) => void (n === seq && deps.show(() => q)), () => undefined);
+          // when it cannot be read back either, what is shown is not what is stored: show none (the next read brings it), so nothing is decided on rows that were never saved
+          if (n === seq) return deps.reread().then((q) => void (n === seq && deps.show(() => q)), () => void (n === seq && deps.show(() => null)));
         },
       ),
     );

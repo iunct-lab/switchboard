@@ -167,9 +167,9 @@ Actions が始まらないリポジトリのローカル CI（CLAUDE.md のコ�
 マージ判定のコマンドが無いリポジトリでは、`review-triage-and-merge` の 5 のチェックリストを自分で確かめる。
 <!-- end when -->
 **各 PR のマージ直前にマージ判定**（CLAUDE.md が名指しするコマンド。以下 `<マージ判定>`）。スタックは最初のマージの前に全部の PR を `<マージ判定> <n>`（マージなし）で判定し、下の分岐で片づける。`notes` の名指しの外のファイル（付いてくるファイルは除く）は、`（Task #k が名指し）` ならその Task の枝へ移し、無ければ Task の結果コメントに逸脱として 1 行書く（本文には足さない）。exit 1（stop）なら:
-- large の理由が `[再チェック <kind>]` だけ（`[聞く]` が無い。マージ判定が large の理由をこの 2 つに分ける仕組みのとき。`rescue/**` と README の Design rules もここ）→ **利用者に聞かずに**、出力の `recheck` の種類ごとに再チェック（CLAUDE.md が名指しする手順。以下 `<再チェック>`）をアプリの仕事として頼む（材料と指示の中身は `<再チェック>` の種類ごとの行。頼み方は次の段落）。合格の印と patch-id は投稿しない（判定は仕事の記録の head と結果を読む）。仕事が終わったらマージ判定をもう一度通してマージする。再チェックでマージしたら PBI の決定ログに 1 行「YYYY-MM-DD: 自動マージ: PR #n（<種類>、再チェック合格）、戻すなら <tag>」（`<tag>` は CI を通ったタグの中の最新。見方は `<再チェック>`）。通らなければ指摘を直して（`review-triage-and-merge` の 2〜4。同じ論点なら先に 3 の「同じ論点が続いたら」）回し直す。再チェックのランナーが使用上限なら `<再チェック>` の代わりの回し方（CLAUDE.md が名指しする手順にあれば）で回す。直せない・代わりの回し方も無く待てないときだけ、下の `[聞く]` と同じく運用の確認で聞く。CI など large 以外の理由が一緒に出ていれば、それは次の「それ以外の理由」と同じく先に片づける
+- large の理由が `[再チェック <kind>]` だけ（`[聞く]` が無い。マージ判定が large の理由をこの 2 つに分ける仕組みのとき。`rescue/**` と README の Design rules もここ）→ **利用者に聞かずに**、出力の `recheck` の種類ごとに再チェック（CLAUDE.md が名指しする手順。以下 `<再チェック>`）をアプリの仕事として頼む（材料と指示の中身は `<再チェック>` の種類ごとの行。頼み方は次の段落）。合格の印と patch-id は投稿しない（判定は仕事の記録の head と結果を読む）。仕事が終わったらマージ判定をもう一度通してマージする。再チェックでマージしたら PBI の決定ログに 1 行「YYYY-MM-DD: 自動マージ: PR #n（<種類>、再チェック合格）、戻すなら <tag>」（`<tag>` は CI を通ったタグの中の最新。見方は `<再チェック>`）。通らなければ指摘を直して（`review-triage-and-merge` の 2〜4。同じ論点なら先に 3 の「同じ論点が続いたら」）回し直す。再チェックのランナーが使用上限なら、替えずに戻る時刻まで待つ。直せない・待てないときだけ、下の `[聞く]` と同じく運用の確認で聞く。CI など large 以外の理由が一緒に出ていれば、それは次の「それ以外の理由」と同じく先に片づける
 <!-- when task=in -->
-再チェックの頼み方（`job#<id>` を止まりの理由に書いてターンを終える）: レビューで見る種類は `ops-kit job request review <PR> --runner <主レビュアーのランナー> --as recheck --kinds <種類,…> --cwd … --prompt … --out …`、コマンドの種類（`migration`・`rescue`・`security:lockfile`）は `ops-kit job request recheck <PR> --kind <種類> [--cwd <PR の head の checkout>]`（未コミットの変更のある checkout は断られる）。`rescue` は両方が要る。`--kinds` の無い `--as recheck` はどの再チェックも満たさない。GitLab の MR も、利用者が Task の会話で `PR #<iid> をマージしてよい` と答えると、その MR の head に許可が記録され、聞く理由が外れる（`MR !<iid>` の形では記録されない）。
+再チェックの頼み方（`job#<id>` を止まりの理由に書いてターンを終える）: レビューで見る種類は `ops-kit job request review <PR> --as recheck --kinds <種類,…> --cwd … --prompt … --out …`（`--runner` は付けない。アプリが再チェックの設定からランナーを選び、違うランナーの名指しは断られる。`cross-runner-review` の 2 の「再チェック」）、コマンドの種類（`migration`・`rescue`・`security:lockfile`）は `ops-kit job request recheck <PR> --kind <種類> [--cwd <PR の head の checkout>]`（未コミットの変更のある checkout は断られる）。`rescue` は両方が要る。`--kinds` の無い `--as recheck` はどの再チェックも満たさない。GitLab の MR も、利用者が Task の会話で `PR #<iid> をマージしてよい` と答えると、その MR の head に許可が記録され、聞く理由が外れる（`MR !<iid>` の形では記録されない）。
 <!-- end when -->
 <!-- when task=out -->
 Task の外では再チェックを直接回す。
@@ -187,10 +187,10 @@ Task の外では再チェックを直接回す。
 <!-- when mergeGate=off -->
 マージ判定のコマンドに `--merge` / `--merge-stack` が無いリポジトリ（CLAUDE.md がマージ判定を名指ししない、またはその引数が無い）では、`<マージ判定> <PR> && gh stack merge <PR> --rebase -y`、単発は `gh pr merge <n> --rebase --delete-branch` にする。
 <!-- end when -->
-判定が stop の PR（CI の理由も）を、利用者が Task の会話で判定の外でマージしてよいと認めたときは、その PR だけを `gh pr merge <n> --rebase --delete-branch --match-head-commit <head>`（スタックは一番下の PR だけ）でマージし、PBI の決定ログに「YYYY-MM-DD: 判定の外のマージ: PR #n（利用者が OK。<stop の理由>）」を書く。
-判定の外のマージ（`gh pr merge` / `gh stack merge`。CI やレビューを飛ばす）の同意は、聞く理由の許可 `PR #<n> をマージしてよい` とは別の、より強い `PR #<n> を判定の外でマージしてよい` で、前者では通らない。
+判定が stop の PR（CI の理由も）を、利用者が Task の会話で判定の外でマージしてよいと認めたときは、その PR だけを `gh pr merge <n> --rebase --delete-branch --match-head-commit <head>`（スタックは最下段から 1 本ずつ、`--delete-branch` なし。`stacked-pr-delivery` の 6）でマージし、PBI の決定ログに「YYYY-MM-DD: 判定の外のマージ: PR #n（利用者が OK。<stop の理由>）」を書く。
+判定の外のマージ（`gh pr merge --match-head-commit`。CI やレビューを飛ばす）の同意は、聞く理由の許可 `PR #<n> をマージしてよい` とは別の、より強い `PR #<n> を判定の外でマージしてよい` で、前者では通らない。
 <!-- when mergeGate=on task=in -->
-`gh pr merge` / `gh stack merge` などの判定の外のマージは `gh` の前段が止める（`ops.config.json` に `mergeGate` があるリポジトリのアプリの Task）。通るのは判定のコマンド自身のマージと、利用者が選んだ `PR #<n> を判定の外でマージしてよい` の許可文が記録されている PR だけ。許可文は PR ごとにその Task の会話の中だけで、選択肢に添えて聞く。昇格と Release の作成は前段が止めない。
+`gh pr merge` などの判定の外のマージは `gh` の前段が止める（`ops.config.json` に `mergeGate` があるリポジトリのアプリの Task）。通るのは判定のコマンド自身のマージと、利用者が選んだ `PR #<n> を判定の外でマージしてよい` の許可文が記録されている PR だけ（`gh stack merge` は head を渡せず通らない）。許可文は PR ごとにその Task の会話の中だけで、選択肢に添えて聞く。昇格と Release の作成は前段が止めない。
 <!-- end when -->
 
 

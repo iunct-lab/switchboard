@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import type { OffloadSize } from "./local-ci.ts";
+import type { OffloadSize } from "./local-ci-offload.ts";
 
 export type OffloadCaller = "local-ci" | "tag-ci" | "test-changed" | "typecheck";
 

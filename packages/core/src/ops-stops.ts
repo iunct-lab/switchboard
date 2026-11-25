@@ -153,7 +153,7 @@ export function endDaemonRun(db: Db, id: number, end: { cleanExit: CleanExit; en
  * `GET /api/ops/stops`: the runs that ended within the last `days` JST days (as `ledgerDaily`), per day of the
  * end × cause. `turns` adds up each run's cut tasks; `taskIds` is the distinct tasks.
  */
-export function opsStops(db: Db, days: number, now = Date.now()): OpsStops {
+export function opsStops(db: Db, days: number, now = Date.now()): Omit<OpsStops, "promotions"> {
   const rows = db.sqlite.query("SELECT ended_at, end_reason, interrupted_task_ids FROM daemon_runs WHERE end_reason IS NOT NULL AND ended_at >= ? ORDER BY ended_at").all(jstDayStart(now, days - 1)) as Array<{ ended_at: number; end_reason: StopReason; interrupted_task_ids: string }>;
   const acc = new Map<string, OpsStopsRow>();
   for (const r of rows) {

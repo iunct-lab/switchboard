@@ -40,7 +40,7 @@ describe("runnerRows", () => {
 });
 
 describe("jobRows", () => {
-  const rows = jobRows(Settings.parse({ autoStart: { byKind: { fix: { runner: "codex", model: "m", effort: "e" }, complete: {} } } }));
+  const rows = jobRows(Settings.parse({ autoStart: { byKind: { fix: { runner: "codex", model: "m", effort: "e" }, complete: {} } } }), ["claude", "codex"]);
   test("every row has a runner, a model and an effort", () => {
     for (const r of rows) {
       expect(typeof r.runner).toBe("string");
@@ -49,7 +49,7 @@ describe("jobRows", () => {
     }
   });
   test("order: manual, common, only the kinds with their own choice, then the rest", () => {
-    expect(rows.map((r) => r.id)).toEqual(["manual", "autoStart", "kind:fix", "kind:complete", "review", "judge", "judgeFallback", "routing", "titles"]);
+    expect(rows.map((r) => r.id)).toEqual(["manual", "autoStart", "kind:fix", "kind:complete", "review", "recheck", "reviewModel:claude", "reviewModel:codex", "judge", "judgeFallback", "routing", "titles"]);
     expect(rows.find((r) => r.id === "kind:fix")).toMatchObject({ runner: "codex", model: "m", effort: "e" });
     expect(rows.find((r) => r.id === "kind:complete")?.runner).toBe("same");
     const kinds = AUTO_START_KINDS.map(([k]) => k);
@@ -57,6 +57,19 @@ describe("jobRows", () => {
   });
   test("review is a runner choice only", () => {
     expect(rows.find((r) => r.id === "review")).toMatchObject({ runner: "other", model: "", effort: "", runnerOnly: true });
+  });
+  test("jobRows: recheck and review model rows", () => {
+    // the defaults: the recheck is unset (it follows the review setting), and each review runner's model / effort is the runner's default
+    expect(rows.find((r) => r.id === "recheck")).toMatchObject({ runner: "", model: "", effort: "", runnerOnly: true });
+    expect(rows.find((r) => r.id === "reviewModel:claude")).toMatchObject({ runner: "claude", model: "", effort: "" });
+    expect(rows.find((r) => r.id === "reviewModel:codex")).toMatchObject({ runner: "codex", model: "", effort: "" });
+    // the saved values come out as they are, each on its own runner's row
+    const saved = jobRows(Settings.parse({ recheckRunner: "same", reviewModel: { codex: "gpt-6" }, reviewEffort: { claude: "high", codex: "low" } }), ["claude", "codex"]);
+    expect(saved.find((r) => r.id === "recheck")?.runner).toBe("same");
+    expect(saved.find((r) => r.id === "reviewModel:claude")).toMatchObject({ runner: "claude", model: "", effort: "high" });
+    expect(saved.find((r) => r.id === "reviewModel:codex")).toMatchObject({ runner: "codex", model: "gpt-6", effort: "low" });
+    // only the runners passed in get a row
+    expect(jobRows(Settings.parse({ reviewModel: { codex: "gpt-6" } }), ["claude"]).filter((r) => r.id.startsWith("reviewModel:")).map((r) => r.id)).toEqual(["reviewModel:claude"]);
   });
   test("the titles row reads the saved titles setting", () => {
     expect(rows.find((r) => r.id === "titles")).toMatchObject({ runner: "codex", model: "gpt-6-luna" });
@@ -116,8 +129,8 @@ describe("jobPatchOf", () => {
     expect(jobPatchOf("titles", c)).toEqual({ titles: c });
     expect(jobPatchOf("judge", { model: "" })).toEqual({ judge: { model: "" } });
   });
-  test("every job row but the kinds' and the review's (saved by their own controls) has its own setting", () => {
-    const ids = jobRows(Settings.parse({})).map((r) => r.id).filter((id) => !id.startsWith("kind:") && id !== "review");
+  test("every job row but the kinds', the review's, the recheck's and the review models' (saved by their own controls) has its own setting", () => {
+    const ids = jobRows(Settings.parse({}), ["claude"]).map((r) => r.id).filter((id) => !id.startsWith("kind:") && !id.startsWith("reviewModel:") && id !== "review" && id !== "recheck");
     const keys = ids.map((id) => Object.keys(jobPatchOf(id, { model: "x" }))[0]);
     expect(keys).toEqual(ids.map((id) => ({ manual: "newDefaults", autoStart: "autoStart", judge: "judge", judgeFallback: "judgeAndChoice", routing: "routing", titles: "titles" })[id as string]));
   });
@@ -163,7 +176,7 @@ describe("kindChoice", () => {
   });
   test("jobRows reads a kind the same way", () => {
     const s = Settings.parse({ autoStart: { runner: "claude", model: "opus", effort: "high", byKind: { complete: { permissionMode: "plan" } } } });
-    expect(jobRows(s).find((r) => r.id === "kind:complete")).toMatchObject({ runner: "same", model: "opus", effort: "high" });
+    expect(jobRows(s, []).find((r) => r.id === "kind:complete")).toMatchObject({ runner: "same", model: "opus", effort: "high" });
   });
 });
 

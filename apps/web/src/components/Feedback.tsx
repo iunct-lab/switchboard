@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { Task, Workspace } from "@switchboard/protocol";
-import { api } from "../api/index.ts";
+import { useEffect, useRef, useState } from "react";
+import type { CreateTaskInput, RunnerId, Task, Workspace } from "@switchboard/protocol";
+import { type Health } from "../api/daemon.ts";
 import { type FeedbackSource, type FeedbackUpstream } from "../api/feedback.ts";
-import { developSelfPerOpening, feedbackModes, feedbackTargets, sentMode, type FeedbackTarget } from "../feedbackTarget.ts";
-import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Attachments.tsx";
+import { type FeedbackTarget } from "../feedbackTarget.ts";
+import { useAttachments } from "./Attachments.tsx";
+import { Compose } from "./Compose.tsx";
 import { copyText } from "../clipboard.ts";
 import { t } from "../i18n.ts";
+import { home } from "../i18n/home.ts";
 import { task as taskMsgs } from "../i18n/task.ts";
 import { feedbackScreens, panels as m } from "../i18n/panels.ts";
 
@@ -76,46 +78,26 @@ export function requestFeedback(prefill: FeedbackPrefill): void {
 }
 
 /**
- * `workspaces` / `workspace`: where 要望として登録 files the request (that workspace's repository and Project); the
- * dialog opens on `workspace` (the backlog's narrowed workspace), else the meta workspace. すぐ直す always fixes Switchboard.
+ * The instruction form in a dialog, for every screen but Home (Home draws `Compose` itself). Drawn only while open: a closed
+ * dialog would leave a second `.compose` on the page. What the dialog keeps for itself is what a close must not lose: the
+ * text (a draft that came with a source is dropped on a close without sending, so the next plain opening cannot send it
+ * under that source) and the attachments. `workspace` is where the form starts (the Backlog's narrowed repository).
  */
-export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, onClose, onSent, onError }: { open: boolean; screen: string; workspaces: Workspace[]; workspace?: FeedbackTarget; prefill?: FeedbackPrefill; onClose: () => void; onSent: (task: Task) => void; onError: (message: string) => void }) {
+export function FeedbackDialog({ open, screen, health, workspaces, runnerOk, workspace, prefill, onCreate, onOpenSettings, onClose, onSent, onError }: { open: boolean; screen: string; health: Health | null; workspaces: Workspace[]; runnerOk: Set<RunnerId>; workspace?: FeedbackTarget; prefill?: FeedbackPrefill; onCreate: (input: CreateTaskInput) => Promise<void>; onOpenSettings: () => void; onClose: () => void; onSent: (task: Task) => void; onError: (message: string) => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const textarea = useRef<HTMLTextAreaElement>(null);
   // The prop now, not when capture() began: whatever closes the dialog meanwhile must win over the reopen.
   const isOpen = useRef(open);
   isOpen.current = open;
   const [text, setText] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [capturing, setCapturing] = useState(false);
-  // Not remembered: every dialog starts on 要望として登録.
-  const [mode, setMode] = useState<"request" | "fix">("request");
-  const [target, setTarget] = useState("");
-  // opened before the list was read: the meta workspace, where the daemon files a request that names none
-  const targets = feedbackTargets(workspaces, workspace);
-  const shown = target || targets.initial;
-  // the setting is read at each opening, so a change in Settings counts from the next one (no reload); unread = off
-  const [developSelf, setDevelopSelf] = useState(false);
-  const modes = feedbackModes(developSelf, shown ? { id: shown, name: "" } : undefined, workspaces);
-  // the answer of a request for Switchboard itself on an instance that does not develop it: a link or the text, no Task
-  const [upstream, setUpstream] = useState<FeedbackUpstream["upstream"] | null>(null);
-  const submitting = useRef(false);
-  // made once: each opening resets the setting to off and keeps only its own answer
-  const [readDevelopSelf] = useState(() => developSelfPerOpening(() => api.settings().then((s) => s.developSelf), setDevelopSelf));
+  const attach = useAttachments(onError);
+  // a send or a capture under way: Esc does not close the dialog meanwhile
+  const locked = useRef(false);
   // whether the text came from a prefill, so a close without sending clears it
   const prefilled = useRef(false);
-  const attach = useAttachments(setMessage);
-  const drop = useDropZone(attach.add, setMessage);
-  const locked = sending || capturing;
   useEffect(() => {
     if (open) {
-      setMode("request"); // every opening starts on 要望として登録, also after closing without sending
-      setTarget(targets.initial);
-      setUpstream(null);
-      readDevelopSelf().catch((e) => onError(String((e as Error).message ?? e)));
       // a draft from a task's evaluations goes in once, when the dialog opens, over whatever was kept from a closed dialog; the
-      // person edits it from there, and closing unsent drops it (the next plain open must not send it without its 出典)
+      // person edits it from there, and closing unsent drops it
       if (prefill) {
         setText(prefill.text);
         prefilled.current = true;
@@ -130,91 +112,39 @@ export function FeedbackDialog({ open, screen, workspaces, workspace, prefill, o
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-  async function capture() {
-    setCapturing(true);
-    setMessage(null);
-    // Out of the way while the tab is captured, or the dialog and its backdrop are what the picture shows.
-    // close() fires no `cancel`, so App's feedbackOpen stays true and the text and attachments are kept.
+  // Out of the way while the tab is captured, or the dialog and its backdrop are what the picture shows.
+  // close() fires no `cancel`, so App's feedbackOpen stays true and the text and attachments are kept.
+  async function capture(): Promise<File> {
     dialog.current?.close();
     try {
       for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
-      await attach.add([await captureTab()]);
-    }
-    catch { setMessage(t(m.captureFailed)); }
-    finally {
+      return await captureTab();
+    } finally {
       if (isOpen.current && !dialog.current?.open) dialog.current?.showModal();
-      setCapturing(false);
-      // the fieldset is still disabled until that state renders: focus the text once it has
-      requestAnimationFrame(() => textarea.current?.focus());
     }
-  }
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!text.trim() || attach.busy || locked || submitting.current) return;
-    submitting.current = true;
-    setSending(true);
-    setMessage(null);
-    try {
-      const how = sentMode(modes, mode);
-      const sent = await api.feedback(text, attach.ids, screen, how, how === "request" && shown ? shown : undefined, how === "request" ? prefill?.source : undefined);
-      attach.clear();
-      prefilled.current = false;
-      setMode("request");
-      if ("upstream" in sent) {
-        // no Task: the dialog stays to show where to file it, with the text still there to copy
-        setUpstream(sent.upstream);
-        return;
-      }
-      setText("");
-      onClose();
-      onSent(sent);
-    } catch (e) {
-      const error = String((e as Error).message ?? e);
-      setMessage(error);
-      onError(error);
-    } finally { submitting.current = false; setSending(false); }
   }
   return (
-    <dialog ref={dialog} className="feedback-dialog" aria-labelledby="feedback-title" onCancel={(e) => { e.preventDefault(); if (!locked) onClose(); }}>
-      <form onSubmit={submit}>
-        <h2 id="feedback-title">{t(m.feedback)}</h2>
-        {modes.fix && (
-        <fieldset disabled={locked} className="row feedback-mode">
-          <legend className="hint">{t(m.sendHow)}</legend>
-          <label><input type="radio" name="feedback-mode" value="request" checked={mode === "request"} onChange={() => setMode("request")} /> {t(m.modeRequest)}</label>
-          <label><input type="radio" name="feedback-mode" value="fix" checked={mode === "fix"} onChange={() => setMode("fix")} /> {t(m.modeFix)}</label>
-        </fieldset>
-        )}
-        {mode === "request" && targets.list.length > 1 && (
-          <fieldset disabled={locked} className="row feedback-target">
-            <label htmlFor="feedback-workspace">{t(m.fileTo)}</label>
-            <select id="feedback-workspace" value={shown} onChange={(e) => setTarget(e.target.value)}>
-              {targets.list.map((w) => (
-                <option key={w.id} value={w.id}>{w.name}</option>
-              ))}
-            </select>
-          </fieldset>
-        )}
-        <p className="hint">{mode === "fix" && modes.fix ? t(m.fixHint) : modes.upstream ? t(m.requestHintUpstream) : t(m.requestHint, { target: targets.list.find((w) => w.id === shown)?.name ?? t(m.targetFallback) })}</p>
-        <p className="hint feedback-screen">{prefill?.artifact ? sentFromArtifact(screen, prefill.artifact) : t(m.sentFrom, { screen: shownScreen(screen) })}</p>
-        <fieldset disabled={locked} className={`dropzone ${drop.dropping ? "dropping" : ""}`} {...(!locked ? drop.handlers : {})}>
-          <label htmlFor="feedback-text">{t(m.bodyLabel)}</label>
-          <textarea ref={textarea} id="feedback-text" rows={7} required maxLength={20_000} value={text} onChange={(e) => { setText(e.target.value); setUpstream(null); }} onPaste={drop.onPaste} placeholder={t(m.bodyPlaceholder)} />
-          <div className="row">
-            <button type="button" onClick={capture}>{t(m.capture)}</button>
-            <AttachButton onFiles={attach.add} />
-            <span className="hint">{t(m.pasteHint)}</span>
-          </div>
-          <AttachmentBar items={attach.items} onRemove={attach.remove} busy={attach.busy} />
-        </fieldset>
-        {upstream && <FeedbackUpstreamBox upstream={upstream} onCopyError={setMessage} />}
-        {capturing && <p role="status">{t(m.capturing)}</p>}
-        {message && <p className="error" role="alert">{message}</p>}
-        <div className="feedback-actions">
-          <button type="button" className="ghost" disabled={locked} onClick={onClose}>{t(m.close)}</button>
-          <button type="submit" className="pri" disabled={!text.trim() || attach.busy || locked}>{sending ? t(m.sending) : mode === "fix" ? t(m.fix) : t(m.file)}</button>
-        </div>
-      </form>
+    <dialog ref={dialog} className="feedback-dialog" aria-label={t(home.newTaskHeading)} onCancel={(e) => { e.preventDefault(); if (!locked.current) onClose(); }}>
+      {open && (
+        <Compose
+          health={health}
+          workspaces={workspaces}
+          runnerOk={runnerOk}
+          onCreate={onCreate}
+          onError={onError}
+          onOpenSettings={onOpenSettings}
+          screen={screen}
+          onSent={(task) => { prefilled.current = false; onClose(); onSent(task); }}
+          initialWorkspace={workspace}
+          prefill={prefill}
+          draft={{ text, onText: setText }}
+          attach={attach}
+          capture={capture}
+          onCancel={onClose}
+          onBusy={(busy) => { locked.current = busy; }}
+          note={prefill?.artifact ? sentFromArtifact(screen, prefill.artifact) : t(m.sentFrom, { screen: shownScreen(screen) })}
+        />
+      )}
     </dialog>
   );
 }

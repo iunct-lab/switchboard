@@ -187,7 +187,7 @@ export interface TaskManagerOptions {
   dockerEnv?: (taskId: string) => Record<string, string>;
   /** The review setting (`settings.reviewRunner`): the skills placed at a start or resume are rendered with it. Absent = "other". */
   reviewRunner?: () => "other" | "same";
-  /** The recheck and post-merge audit setting: rendered into the skills and passed as `OPS_KIT_RECHECK_RUNNER`. Absent = "other". */
+  /** The recheck and post-merge audit setting: rendered into the skills and passed as `OPS_KIT_RECHECK_RUNNER`. Absent = the review setting's value. */
   recheckRunner?: () => "other" | "same";
   /** How many daemon stops in a row a turn is resumed after (`quotaAndResume.maxStopResumes`). Absent = `MAX_STOP_RESUMES`. */
   maxStopResumes?: () => number;

@@ -4,7 +4,7 @@ The model choices in the UI (the list saved on the settings screen's `モデル�
 
 ## What it reads
 
-The model tables come from what the installed CLIs carry locally — no vendor API, no API key, no network. The one read over the network is the version check (last item), against the public npm registry, still with no key:
+The check reads only what is on the machine — no vendor API, no API key, no network (filing a request, below, is the one step that goes out):
 
 - **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (reading it whole can exhaust memory on a small host).
 - **codex**: `codex debug models --bundled`, the table shipped in the binary. Without `--bundled` codex refreshes the list over the network with the ChatGPT login, so the flag is always given. Only `visibility: "list"` entries count (`"hide"` ones are internal).
@@ -12,7 +12,6 @@ The model tables come from what the installed CLIs carry locally — no vendor A
 - **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner; and from the same row the `載せない` list (`hiddenModels`), else `SHIPPED_HIDDEN_MODELS`.
 - **the price table** as the daemon layers it: the rows saved on the settings screen's `モデルの価格` (the settings row's `prices`) over `pricing.json` — `~/.switchboard/pricing.json` (or `$SWITCHBOARD_HOME/pricing.json`) first, then the bundled one.
 - **the ledger** in `switchboard.db`, read-only: the claude / codex model names recorded as `source = 'unpriced'` that the price table still does not price.
-- **the CLIs' versions**: `claude --version` / `codex --version` against the npm registry's `latest` of `@anthropic-ai/claude-code` / `@openai/codex` (`PACKAGES`; one GET per runner, 10 s, no key). This is the one read that uses the network: an old CLI carries an old table, so a new model looks like "no drift" until someone notices — check the version with `claude --version` (or `codex --version`) and compare it with the registry's `latest`. The script never updates a CLI itself: the daemon does ([cli-update.md](cli-update.md)); a CLI still behind here is a version the daemon has not taken yet (its reason is in the daemon's record of CLI updates, `GET /api/runners/updates`). A CLI not on PATH is skipped here (the table line already says so); the registry not answering is reported, not counted.
 
 ## What it reports
 
@@ -21,9 +20,6 @@ The model tables come from what the installed CLIs carry locally — no vendor A
 <runner> unseen: <ids>         in the CLI's table, neither listed nor hidden (nobody has looked at it yet)
 <runner> 価格表未整備: <ids>    offered in the UI (saved list, else bundled), priced by no row of the settings' prices or pricing.json
 unpriced (ledger) new / unknown  past unpriced names: in the CLI's table (the price table lags) / not in it (a wrong name?)
-<runner> outdated: <installed> → <latest>   the installed CLI is behind the registry (drift, exit 1)
-<runner> version: <installed>（最新）        the same or newer
-<runner> version / latest: 分からない（<why>）  `--version` failed / the registry could not be read (report only; exit unchanged)
 ```
 
 "New in the CLI" is measured against the ids a person has looked at and decided to list or leave out — the model choices as above, plus the settings row's `hiddenModels` (the `載せない` list of `モデルの選択肢`), else `SHIPPED_HIDDEN_MODELS` in `packages/core/src/model-catalog.ts` (the ids the bundled list leaves out) — not against "the newest of each family": some models are left out on purpose (`gpt-5.6-terra`), and they would otherwise be reported every day. The ledger line is report only: past rows cannot be fixed.
@@ -52,7 +48,9 @@ The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the
 - `stale`: remove or fix the old / mistyped id in `モデルの選択肢` (the runner's block in the `ランナー` group) on the `設定` tab (no PR: the next run reads the saved list).
 - `unseen`: press `CLI の表を読む` in `モデルの選択肢` (the runner's block in the `ランナー` group) on the `設定` tab and choose `足す` or `載せない` for each candidate (no PR: the next run reads the saved list and `載せない` list).
 - `価格表未整備`: enter the official price in `モデルの価格` on the `設定` tab (no PR: the next run reads the saved prices).
-- `outdated`: the daemon has not taken the newest version yet. Its reason is in the daemon's record of CLI updates (`GET /api/runners/updates`: waiting for the hours set, waiting for Tasks to end, or refused, with why). Do not update by hand: the next version that passes the checks goes in by itself. The request's title carries the installed version only, so one open request stands while the CLI stays, whatever npm publishes meanwhile. The next run says `version: …（最新）` and, if the new table carries a model nobody reviewed, `unseen` follows.
-- Close the request once it is fixed (a `stale`, an `unseen` or a `価格表未整備` on the settings screen); the next run confirms (exit 0). An `outdated` request has no PR: once the daemon has taken the version, the next run prints `version: …（最新）`; then close the request by hand (the script never closes one).
+- Close the request once it is fixed (a `stale`, an `unseen` or a `価格表未整備` on the settings screen); the next run confirms (exit 0).
+- A request written before the script stopped comparing versions may still list an `outdated` line. The script no longer reports that kind, so close such a request by hand.
+
+An old CLI carries an old table, so a new model shows as "no drift" until the CLI is updated. The script does not compare versions: the daemon keeps the CLIs current and records each decision, including why a version waits or was refused ([cli-update.md](cli-update.md), `GET /api/runners/updates`).
 
 The model list is a setting since 2026-10-27; offering a model the installed CLI carries as a candidate on the settings screen, and the `載せない` list, since 2026-11-04.

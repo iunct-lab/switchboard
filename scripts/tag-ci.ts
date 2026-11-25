@@ -27,7 +27,7 @@
  * that is gone (the daemon restarted, the host stopped) leaves the result to the next run, which reads it before running the tag, writes the mark and starts no
  * build. A record of another commit (the tag moved) is not used and the build's own record replaces it; one whose build's log is gone (kept 7 days) is removed; either way the tag runs again. Nothing picks it up at the daemon's start.
  * A run here (not in a build off the host: its seconds are another machine's) whose steps all ran and whose `bun test` passed (a perf-only fail too) also compares the type check's and bun
- * test's seconds with the `local.durations` ceilings of scripts/perf-budget.json (local-ci's `durationOver`): the `over:`
+ * test's seconds with the `local.durations` ceilings of scripts/perf-budget.json (scripts/local-ci-notes.ts's `durationOver`): the `over:`
  * lines stay in the Release's `## CI` under `所要時間が上限を超えた（結果は変えない）:`, and the result, the exit code and
  * the requests do not change (a budget that cannot be read compares nothing).
  * A red `bun test` also gets a `selection:` line in the Release: of the test files that failed, how many a PR's narrowed
@@ -59,7 +59,10 @@ import { requireRecordings } from "./recordings.ts";
 import { must, repairReleases, withReleaseLock } from "./release-tag.ts";
 import { knownLines, readKnownFailures, subtractKnown, type Subtracted } from "./known-failures.ts";
 import { workspaceSettingsOf } from "./workspace-settings.ts";
-import { BUILD_LOG_KEEP_MS, buildSpoke, durationOver, hostOffload, imageRootFor, isPerfStep, notStartedLines, recordBundle, recordBytes, recordCounts, remoteRepo, runCheckout, selectTests, step, stepEnv, stepSeconds, TargetError, type Deps, type Offload } from "./local-ci.ts";
+import { imageRootFor, isPerfStep, remoteRepo, runCheckout, selectTests, step, stepEnv, TargetError, type Deps } from "./local-ci.ts";
+import { BUILD_LOG_KEEP_MS, buildSpoke, hostOffload, type Offload } from "./local-ci-offload.ts";
+import { durationOver, notStartedLines, stepSeconds } from "./local-ci-notes.ts";
+import { recordBundle, recordBytes, recordCounts } from "./local-ci-records.ts";
 
 /** A result's line in a Release's body: pass or fail, then the tag's commit. */
 export const TAG_CI_RESULT = /^\[tag-ci\] (pass|fail) ([0-9a-f]{40})(?=\s|$)/m;
@@ -335,8 +338,9 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
   const tmp = mkdtempSync(join(tmpdir(), `switchboard.tag-ci-${tag}-tmp.`));
   try {
     await d.sh(["git", "-C", root, "worktree", "add", "-q", "--detach", dir, sha]);
-    // the host's run compares with the tag before by ref; off the host the build gets no env from here (the compared tag goes as a tar, `baseTreeTar`)
-    const env = { ...stepEnv(tmp), ...(before && !d.offload ? { PERF_BASE_REF: before } : {}) };
+    // the host's run compares with the tag before by ref; off the host the build gets no env from here (the compared tag goes as a tar, `baseTreeTar`).
+    // The file sizes' ceilings too are compared with the tag before: by ref here, and off the host by the list `runCheckout` reads from that ref
+    const env = { ...stepEnv(tmp), ...(before ? { FILE_SIZE_BASE_REF: before } : {}), ...(before && !d.offload ? { PERF_BASE_REF: before } : {}) };
     // a build of this tag left by a run that is gone: its result is read, no build starts (a tag that moved since is not the one it built)
     const prior = d.offload ? readTagPending(cache, repo, tag) : undefined;
     let run: Awaited<ReturnType<typeof runCheckout>> | undefined;

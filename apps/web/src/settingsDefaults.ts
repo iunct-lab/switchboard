@@ -13,6 +13,9 @@ export const RESETTABLE_CARDS = {
   jobsCard: [
     "autoStart",
     "reviewRunner",
+    "recheckRunner",
+    "reviewModel",
+    "reviewEffort",
     "newDefaults.taskRunner",
     "newDefaults.taskModel",
     "newDefaults.taskEffort",
@@ -32,7 +35,7 @@ export const RESETTABLE_CARDS = {
   dakDefault: ["shadowRunner"],
   developSelfCard: ["developSelf"],
   sweep: ["maxRunners", "quotaAndResume.flowShareLimit"],
-  usage: ["quotaAndResume.backlogQuotaLimit", "quotaAndResume.retryDelayMs", "quotaAndResume.retryMaxDelayMs", "quotaAndResume.maxLimitStops", "quotaAndResume.resumePrompt", "quotaAndResume.maxStopResumes", "quotaAndResume.thinSample", "quotaAndResume.flowLimit", "quotaAndResume.silentAfterMs", "quotaAndResume.waitLimitMs", "quotaAndResume.dependsLimitMs"],
+  usage: ["quotaAndResume.backlogQuotaLimit", "quotaAndResume.retryDelayMs", "quotaAndResume.retryMaxDelayMs", "quotaAndResume.maxLimitStops", "quotaAndResume.resumePrompt", "quotaAndResume.maxStopResumes", "quotaAndResume.thinSample", "quotaAndResume.flowLimit", "quotaAndResume.silentAfterMs", "quotaAndResume.waitLimitMs", "quotaAndResume.queueStallMs", "quotaAndResume.dependsLimitMs"],
   newSchedule: ["newDefaults.scheduleCron"],
   judgeAndChoice: ["judge.enabled", "evals.judge.enabled", "judgeAndChoice.judgeTimeoutMs", "judgeAndChoice.workspaceChoiceTimeoutMs"],
   llm: ["routing.llm.enabled", "routing.llm.timeoutMs"],

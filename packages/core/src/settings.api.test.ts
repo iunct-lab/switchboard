@@ -39,6 +39,36 @@ describe("core daemon", () => {
     }
   }, 20000);
 
+  test("settings: recheckRunner and the review model / effort are saved by PATCH and shown by GET; null unsets them", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-recheck-runner-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT), fakeAdapter(SCRIPT, { id: "codex", models: ["m-a"], efforts: ["low", "high"] })], { port: 0 });
+    const b = `http://${"127.0.0.1"}:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const get = async () => (await fetch(`${b}/api/settings`).then(j)) as Settings;
+    try {
+      // nothing saved: no recheck setting of its own (it follows the review setting), no review model or effort (the Task's default)
+      const fresh = await get();
+      expect(fresh).not.toHaveProperty("recheckRunner");
+      expect(fresh.reviewModel).toEqual({});
+      expect(fresh.reviewEffort).toEqual({});
+      expect((await patch({ recheckRunner: "same", reviewModel: { codex: "m-a" }, reviewEffort: { codex: "high" } })).status).toBe(200);
+      expect(await get()).toMatchObject({ recheckRunner: "same", reviewModel: { codex: "m-a" }, reviewEffort: { codex: "high" } });
+      // an effort the runner does not list, a runner that is not installed and a value that is not a choice are refused
+      expect((await patch({ reviewEffort: { codex: "nope" } })).status).toBe(400);
+      expect((await patch({ reviewModel: { gone: "x" } })).status).toBe(400);
+      expect((await patch({ recheckRunner: "codex" })).status).toBe(400);
+      expect(await get()).toMatchObject({ recheckRunner: "same", reviewModel: { codex: "m-a" }, reviewEffort: { codex: "high" } });
+      expect((await patch({ recheckRunner: null, reviewModel: { codex: null }, reviewEffort: { codex: null } })).status).toBe(200);
+      const back = await get();
+      expect(back).not.toHaveProperty("recheckRunner");
+      expect(back.reviewModel).toEqual({});
+      expect(back.reviewEffort).toEqual({});
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  }, 20000);
+
   test("autoStart: the default is claude with the CLI's model; PATCH is partial, refuses an undetected runner and resets the model with the runner", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-autostart-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
@@ -480,7 +510,7 @@ describe("core daemon", () => {
       // (a) the defaults are today's constants, and GET says what they are
       const first = await get();
       const constants = {
-        quotaAndResume: { backlogQuotaLimit: QUOTA_LIMIT, retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: MAX_CONSECUTIVE_STOPS, resumePrompt: first.quotaAndResume.resumePrompt, maxStopResumes: MAX_STOP_RESUMES, silentAfterMs: SILENT_AFTER_MS, waitLimitMs: WAIT_LIMIT_MS, dependsLimitMs: DEPENDS_LIMIT_MS, thinSample: 5, flowLimit: 1, flowShareLimit: 0.25, defaultBudgetUsd: null, fableBudgetUsd: null },
+        quotaAndResume: { backlogQuotaLimit: QUOTA_LIMIT, retryDelayMs: FALLBACK_DELAY_MS, retryMaxDelayMs: MAX_FALLBACK_DELAY_MS, maxLimitStops: MAX_CONSECUTIVE_STOPS, resumePrompt: first.quotaAndResume.resumePrompt, maxStopResumes: MAX_STOP_RESUMES, silentAfterMs: SILENT_AFTER_MS, waitLimitMs: WAIT_LIMIT_MS, queueStallMs: 3_600_000, dependsLimitMs: DEPENDS_LIMIT_MS, thinSample: 5, flowLimit: 1, flowShareLimit: 0.25, defaultBudgetUsd: null, fableBudgetUsd: null },
         judgeAndChoice: { judgeFallbackRunner: JUDGE_FALLBACK.runner, judgeFallbackModel: JUDGE_FALLBACK.model, judgeFallbackEffort: "", judgeTimeoutMs: JUDGE_TIMEOUT_MS, workspaceChoiceTimeoutMs: 60_000 },
         newDefaults: { taskRunner: "claude", taskModel: "", taskEffort: "", scheduleCron: "0 3 * * *" },
       };

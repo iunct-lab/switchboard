@@ -1,5 +1,5 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +8,10 @@ import { type CoreServer } from "./server.ts";
 import { localBacklogSource, type GhRunner } from "./backlog-gh.ts";
 import { tagCi } from "./server/promotion.ts";
 import { Db } from "./db.ts";
+import { loadConfig } from "./config.ts";
 import { JobError, jobCommand, requestJob, type JobDeps } from "./jobs.ts";
 import { promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, drainNote, tagCiOf, tagCiPlan, TAG_CI_ATTEMPTS, TAG_CI_RETRY_MS, reportPromoteFailure, type PromotionDrain, type ReleaseState } from "./promotion.ts";
-import { CHECK, STOPPED, backlogNextSchedule, boot, endableClaude, fakeGh, holdingClaude, metaId, refreshed, releaseBody, releaseHold, releasedDaemon, runSchedule, scheduleLog, scheduleLogAll, settle, start, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
+import { CHECK, STOPPED, backlogNextSchedule, boot, endableClaude, fakeGh, holdingClaude, metaId, refreshed, releaseBody, releaseHold, releasedDaemon, runSchedule, scheduleLog, scheduleLogAll, settle, start, startServer, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -63,7 +64,7 @@ test("promote: promotionStep — under Tasks a restart would cut, only a switch 
   // a promotion in flight is not asked again, and is no wait for the Tasks
   expect(promotionStep({ status: released({ promoteKeepsTasks: true, busy: "promote" }), latest: v2, busyTasks: 2 })).toEqual({ action: "wait", reason: "sb-rescue が promote の最中なので v0.2.0 の昇格を待つ" });
   // sb-rescue answered that this tag needs a restart: it waits while any Task would be cut — one is enough, whatever it is doing
-  expect(promotionStep({ status: knows, latest: v2, busyTasks: 3, needsRestart: true })).toEqual({ action: "wait", reason: "3 件の Task が動いていて、差分が画面と既定の設定の外にもあるので v0.2.0 の昇格を待つ", drain: true });
+  expect(promotionStep({ status: knows, latest: v2, busyTasks: 3, needsRestart: true })).toEqual({ action: "wait", reason: "3 件の Task が動いていて、差分に動いているデーモンが読むファイルがあるか、読むかを確かめられないので v0.2.0 の昇格を待つ", drain: true });
   expect(promotionStep({ status: knows, latest: v2, busyTasks: 1, needsRestart: true })).toMatchObject({ action: "wait", drain: true });
   expect(promotionStep({ status: knows, latest: v2, busyTasks: 0, needsRestart: true })).toEqual({ action: "promote", tag: "v0.2.0", sha: "bbb" });
   // a failed tag is never asked for, that way either
@@ -654,7 +655,7 @@ describe("promotion without cutting or waiting on the Tasks", () => {
       expect((await runSchedule(base, id)).status).toBe(202);
       expect(r.asks).toEqual([{ commit: r.sha, ifNoRestart: true }]);
       expect(r.promoted).toEqual([]);
-      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1, reason: "1 件の Task が動いていて、差分が画面と既定の設定の外にもあるので v0.2.0 の昇格を待つ" });
+      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1, reason: "1 件の Task が動いていて、差分に動いているデーモンが読むファイルがあるか、読むかを確かめられないので v0.2.0 の昇格を待つ" });
       expect(await health(base)).toMatchObject({ tag: "v0.2.0", tasks: 1, queued: 0, limitMs: 60 * 60_000 });
       // while it waits: a reply to B and a new Task C queue instead of starting
       expect((await fetch(`${base}/api/tasks/${b.id}/send`, { method: "POST", body: JSON.stringify({ text: "続き" }) })).ok).toBe(true);
@@ -910,6 +911,92 @@ describe("promotion without cutting or waiting on the Tasks", () => {
       await settle(() => r.promoted.length > 0);
       expect(r.promoted).toEqual([r.sha]);
     } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  const decisions = async (base: string, days = 1) => (await (await fetch(`${base}/api/ops/stops?days=${days}`)).json()) as { promotions: { noRestartAsked: number; waited: number; refused: number; recent: Array<{ kind: string; tag: string; firstAt: number; reason: string; files: string[]; fileCount: number }> } };
+
+  test("the automatic promotion's waits, refusals and switches without a restart are kept with tag, time and reason, and are read after a restart", async () => {
+    const r = await releasedDaemon([], false, { restartFiles: ["packages/core/src/a.ts", "packages/core/src/b.ts"] });
+    const claude = endableClaude();
+    try {
+      let base = await boot(fakeGh().gh, claude.adapter, r.env);
+      expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+      await claude.started(1);
+      const id = await backlogNextSchedule(base);
+      // 1. sb-rescue cannot switch while Tasks run (no promoteKeepsTasks): the promotion waits
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect(r.asks).toEqual([]);
+      // 2. it can, and says this release needs a restart: refused, then waits
+      r.state.withoutRestart = true;
+      r.state.restartNeeded = true;
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect(r.asks).toEqual([{ commit: r.sha, ifNoRestart: true }]);
+      // 3. it takes the switch that keeps the Tasks
+      r.state.restartNeeded = false;
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect(r.asks).toHaveLength(2);
+      // the daemon stops and starts again on the same home
+      await core!.stop();
+      const cfg = loadConfig({ SWITCHBOARD_HOME: home!, SWITCHBOARD_KNOWLEDGE: join(home!, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home!, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", ...r.env });
+      core = await startServer(cfg, [claude.adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: fakeGh().gh, tagCi: async () => "pass" as const });
+      base = `http://127.0.0.1:${core.server.port}`;
+      const { promotions } = await decisions(base);
+      expect({ waited: promotions.waited, refused: promotions.refused, noRestartAsked: promotions.noRestartAsked }).toEqual({ waited: 1, refused: 1, noRestartAsked: 1 });
+      const refusal = promotions.recent.find((d) => d.kind === "refused")!;
+      expect(refusal).toMatchObject({ tag: "v0.2.0", files: ["packages/core/src/a.ts", "packages/core/src/b.ts"], fileCount: 2 });
+      expect(refusal.firstAt).toBeGreaterThan(Date.now() - 60_000);
+      expect(refusal.reason).toContain("this release needs a restart");
+      expect(promotions.recent.find((d) => d.kind === "waited")!.reason).toContain("v0.2.0");
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("the same tag held for the same reason stays one row however often it is decided", async () => {
+    const r = await releasedDaemon();
+    const claude = endableClaude();
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+      await claude.started(1);
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      const first = core!.db.promotionDecisions(0);
+      expect(first).toHaveLength(1);
+      await Bun.sleep(5);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      const rows = core!.db.promotionDecisions(0);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ kind: "waited", tag: "v0.2.0", times: 3, firstAt: first[0]!.firstAt });
+      expect(rows[0]!.lastAt).toBeGreaterThan(first[0]!.firstAt);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("a record that cannot be written changes nothing of the promotion", async () => {
+    const r = await releasedDaemon([], false, { withoutRestart: true, restartNeeded: true });
+    const claude = endableClaude();
+    const logged = spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      core!.db.sqlite.exec("DROP TABLE promotion_decisions");
+      expect((await start(base, 304, { action: "complete" })).status).toBe(201);
+      await claude.started(1);
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      // what the same firing does with the table there (the test of a release that needs a restart above)
+      expect(r.asks).toEqual([{ commit: r.sha, ifNoRestart: true }]);
+      expect(await releaseHold(base)).toMatchObject({ tag: "v0.2.0", failed: false, busyTasks: 1 });
+      expect(logged.mock.calls.some((c) => String(c[0]).includes("could not be recorded"))).toBe(true);
+      claude.end(0);
+      await settle(() => r.promoted.length > 0);
+      expect(r.asks).toEqual([{ commit: r.sha, ifNoRestart: true }, { commit: r.sha }]);
+    } finally {
+      logged.mockRestore();
       stop(r);
     }
   }, 30_000);
@@ -1179,7 +1266,7 @@ describe("a bundle's hold on promotion", () => {
 describe("promote: the app's own tag CI job", () => {
   const REPO = "acme/app"; // the origin of the repository `setup` makes
   const SHA = "a".repeat(40);
-  const job = (o: Partial<Job>): Job => ({ id: 1, kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", status: "pass", exitCode: 0, startedAt: 0, endedAt: 1, summary: null, repo: "", head: SHA, base: null, as: null, kinds: [], result: null, ...o });
+  const job = (o: Partial<Job>): Job => ({ id: 1, kind: "tag-ci", taskId: APP_JOB_TASK, pr: 0, runner: null, cwd: "/x", status: "pass", exitCode: 0, startedAt: 0, endedAt: 1, summary: null, repo: "", head: SHA, base: null, as: null, kinds: [], result: null, model: null, effort: null, ...o });
 
   test("the newest tag-ci job of the sha decides: fail holds, pass promotes", () => {
     const failed = job({ id: 1, status: "fail", result: { tagCi: { ok: false } } });

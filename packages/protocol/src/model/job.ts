@@ -38,7 +38,7 @@ export const JobResult = z.object({
   }).optional(),
 });
 export type JobResult = z.infer<typeof JobResult>;
-/** Why a review is not the plain main review (`JobRequest`'s `as`): another runner for `fallback` / `recheck` / `audit`; `attack` is a second review, by the runner `attackReviewer` names. */
+/** Why a review is not the plain main review (`JobRequest`'s `as`): another runner for `fallback` / `audit`; `recheck` is read by the runner the recheck setting names; `attack` is a second review, by the runner `attackReviewer` names or by the other one when that one is at its usage limit. */
 export const ReviewAs = z.enum(["fallback", "recheck", "audit", "attack"]);
 export type ReviewAs = z.infer<typeof ReviewAs>;
 
@@ -68,6 +68,10 @@ export const Job = z.object({
   kinds: z.array(z.string()),
   /** What the job's end recorded about its output; null until it ends, and when its output could not be read. */
   result: JobResult.nullable(),
+  /** The model a review ran with: the one the app passed to the runner, or, for a Claude review on the CLI's own, the one its events named at the end. Null: the CLI's own and not known (a Codex review), not a review, or a job from before this was recorded. */
+  model: z.string().nullable(),
+  /** The thinking effort the app passed to a review's runner; null: the CLI's own, not a review, or a job from before this was recorded. */
+  effort: z.string().nullable(),
 });
 export type Job = z.infer<typeof Job>;
 
@@ -87,11 +91,11 @@ export const JobRequest = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("review"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1), promptFile: z.string().min(1), outFile: z.string().min(1),
-    /** Omitted: the app picks the main reviewer from the review setting and the Task's runner. Named: it must be that reviewer, unless `as` says why not. */
+    /** Omitted: the app picks the main reviewer from the review setting and the Task's runner (for `as: "recheck"`, the recheck reader from the recheck setting). Named: it must be that reviewer, unless `as` says why not (a recheck's must be the recheck reader). */
     runner: z.enum(["codex", "claude"]).optional(),
     /**
      * Why this is not the plain main review: it stands in for one at its usage limit (`fallback`), it is the second
-     * reader of a recheck (`recheck`), it reads a merged PR again (`audit`), or it is the attacking-side review, by the runner `attackReviewer` names (`attack`). Without it, only the main reviewer runs.
+     * reader of a recheck (`recheck`), it reads a merged PR again (`audit`), or it is the attacking-side review, by the runner `attackReviewer` names or the other one at that one's usage limit (`attack`). Without it, only the main reviewer runs.
      */
     as: ReviewAs.optional(),
     /** The kinds a recheck reads (`as: "recheck"`, each one a recheck kind). Without them the review is recorded with none, and satisfies no kind's recheck. */
@@ -119,6 +123,8 @@ export const JobRequest = z.discriminatedUnion("kind", [
     merge: z.enum(["merge", "merge-stack", "merge-sync"]).optional(),
     /** `--scope`: the Task-scope material of the PR; no judgement. */
     scope: z.boolean().optional(),
+    /** `--viewpoints`: the viewpoints of the recheck kinds the PR asks for, as review material; no judgement. */
+    viewpoints: z.boolean().optional(),
   }),
   z.object({
     kind: z.literal("tag-ci"), taskId: z.string().min(1), cwd: z.string().min(1),

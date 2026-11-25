@@ -18,7 +18,7 @@
       "effect": "repository",
       "beforeObserved": true,
       "answer": "compensable",
-      "why": "Only documents change (the instructions Tasks follow are other kinds), so a recheck by another runner reads that the diff is documents and inside the PBI before the merge, and a revert restores them."
+      "why": "Only documents change (the instructions Tasks follow are other kinds), so a recheck (by the recheck runner the settings choose, in a session other than the main review's) reads that the diff is documents and inside the PBI before the merge, and a revert restores them."
     },
     {
       "op": "merge: security tests",
@@ -26,7 +26,7 @@
       "effect": "repository",
       "beforeObserved": true,
       "answer": "compensable",
-      "why": "Only test files, fixtures and comment lines of the host scripts change (none of it runs in production nor as root on the host), so a recheck by another runner reads that the diff is tests or comments only and does not weaken a check that guards auth, approval or the sandbox before the merge, and a revert restores them."
+      "why": "Only test files, fixtures and comment lines of the host scripts change (none of it runs in production nor as root on the host), so a recheck (by the recheck runner the settings choose, in a session other than the main review's) reads that the diff is tests or comments only and does not weaken a check that guards auth, approval or the sandbox before the merge, and a revert restores them."
     },
     {
       "op": "merge: security words",
@@ -59,6 +59,14 @@
       "beforeObserved": false,
       "answer": "irreversible",
       "why": "The gate itself decides what is asked, so a bad change here weakens the check on every later merge."
+    },
+    {
+      "op": "merge: security gate support",
+      "gateKind": "security:gate-support",
+      "effect": "repository",
+      "beforeObserved": true,
+      "answer": "compensable",
+      "why": "A recheck (by the recheck runner the settings choose, in a session other than the main review's) reads whether the change alters an input of the decision, and a revert takes it back. The lines that decide stay in gates."
     },
     {
       "op": "merge: security host",

@@ -123,13 +123,16 @@ export function consumerRows(c: NonNullable<OpsResources["consumers"]>): Array<{
 }
 
 /**
- * A job's row on the resources screen: its kind (with the review's runner), its status in words (not by color
- * alone; a failure with its exit code), and how long it has run or ran.
+ * A job's row on the resources screen: its kind (a review's with why it is not the main review, its runner, and the model / effort it
+ * ran with — none recorded is the CLI's own), its status in words (not by color alone; a failure with its exit code), and how long it has run or ran.
  */
 export function jobRow(job: OpsJob, now: number): { kind: string; status: string; elapsed: string } {
   const status =
     job.status === "running" ? t(common.resJobRunning) : job.status === "pass" ? t(common.resJobPass) : job.status === "fail" ? t(common.resJobFail, { code: job.exitCode ?? "-" }) : t(common.resJobAborted);
-  return { kind: job.runner ? `${job.kind} (${job.runner})` : job.kind, status, elapsed: duration((job.endedAt ?? now) - job.startedAt) };
+  const cli = t(common.resJobCliDefault);
+  const ran = job.model === null && job.effort === null ? cli : `${job.model ?? cli} / ${job.effort ?? cli}`;
+  const kind = job.kind === "review" && job.runner ? `${job.kind}${job.as ? `（${job.as}）` : ""} (${job.runner}, ${ran})` : job.runner ? `${job.kind} (${job.runner})` : job.kind;
+  return { kind, status, elapsed: duration((job.endedAt ?? now) - job.startedAt) };
 }
 
 /** 「15:31 時点」: the minute the sampler's rows are from, in this browser's clock. */

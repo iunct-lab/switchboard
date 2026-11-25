@@ -536,7 +536,7 @@ export function moreReadyGh(...numbers: number[]): GhRunner {
 }
 
 /** A checkout with one commit tagged v0.2.0, and a fake sb-rescue whose current release is another commit. */
-export async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0, origin, source, newer = true, treeFails = false, withoutRestart = false, oldWithoutRestart = false, restartNeeded = false, building = false }: { oldWithoutRestart?: boolean; building?: boolean; busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number; origin?: string; source?: boolean; newer?: boolean; treeFails?: boolean; withoutRestart?: boolean; restartNeeded?: boolean } = {}) {
+export async function releasedDaemon(history: ReleaseState["history"] = [], runningNewer = false, { busy = null, promoteDelayMs = 0, refuse = false, statusDelayMs = 0, origin, source, newer = true, treeFails = false, withoutRestart = false, oldWithoutRestart = false, restartNeeded = false, building = false, restartFiles }: { oldWithoutRestart?: boolean; building?: boolean; busy?: string | null; promoteDelayMs?: number; refuse?: boolean; statusDelayMs?: number; origin?: string; source?: boolean; newer?: boolean; treeFails?: boolean; withoutRestart?: boolean; restartNeeded?: boolean; restartFiles?: string[] } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "sb-backlog-repo-"));
   withProcesses(repo);
   const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();
@@ -559,7 +559,7 @@ export async function releasedDaemon(history: ReleaseState["history"] = [], runn
   const asks: Array<{ commit: string; ifNoRestart?: boolean }> = [];
   const statusAsked = { pending: 0 };
   // building: a promotion that was taken stays in flight (`busy: "promote"`, `current` unchanged) until the test sets `state.busy` to null
-  const state = { busy, refuse };
+  const state = { busy, refuse, withoutRestart, restartNeeded };
   // source: a sb-rescue that builds from an update source (no git). Its newest release is not the tag in the checkout, so a
   // decision made from git would show; release-tree answers with a folder of its own, as the real one does under <home>/release-review.
   const fromSource = source ? { tag: "v0.3.0", sha: "a".repeat(40), asked: [] as Array<{ commit: string; expectSha?: string }>, trees: [] as string[] } : null;
@@ -576,8 +576,8 @@ export async function releasedDaemon(history: ReleaseState["history"] = [], runn
       writeFileSync(join(dir, "diff.patch"), "diff -ru a/x b/x\n");
       return Response.json({ tag, sha: fromSource.sha, tree: join(dir, "tree"), diffFile: join(dir, "diff.patch"), stat: ["Files a/x and b/x differ"] });
     }
-    if (url.pathname === "/api/status") return Response.json({ current, previous: null, ...(fromSource ? { source: "o/n" } : {}), state: "running", busy: state.busy, lastError: null, ...(withoutRestart ? { promoteWithoutRestart: true, promoteKeepsTasks: true } : {}), ...(oldWithoutRestart ? { promoteWithoutRestart: true } : {}), history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
-    if (url.pathname === "/api/promote") { if (state.refuse) return Response.json({ error: "refused" }, { status: 409 }); if (promoteDelayMs) await Bun.sleep(promoteDelayMs); const asked = (await req.json()) as { commit: string; expectSha?: string; ifNoRestart?: boolean }; asks.push(asked); if (asked.ifNoRestart && restartNeeded) return Response.json({ error: "this release needs a restart", restart: true }, { status: 409 }); fromSource?.asked.push(asked); const commit = asked.expectSha ?? asked.commit; promoted.push(commit); if (building) state.busy = "promote"; else current = commit; return Response.json({ started: "promote" }, { status: 202 }); }
+    if (url.pathname === "/api/status") return Response.json({ current, previous: null, ...(fromSource ? { source: "o/n" } : {}), state: "running", busy: state.busy, lastError: null, ...(state.withoutRestart ? { promoteWithoutRestart: true, promoteKeepsTasks: true } : {}), ...(oldWithoutRestart ? { promoteWithoutRestart: true } : {}), history: history.map((h) => ({ ...h, to: h.to === "SHA" ? sha : h.to, from: h.from === "SHA" ? sha : h.from })) });
+    if (url.pathname === "/api/promote") { if (state.refuse) return Response.json({ error: "refused" }, { status: 409 }); if (promoteDelayMs) await Bun.sleep(promoteDelayMs); const asked = (await req.json()) as { commit: string; expectSha?: string; ifNoRestart?: boolean }; asks.push(asked); if (asked.ifNoRestart && state.restartNeeded) return Response.json({ error: "this release needs a restart", restart: true, ...(restartFiles ? { files: restartFiles, fileCount: restartFiles.length } : {}) }, { status: 409 }); fromSource?.asked.push(asked); const commit = asked.expectSha ?? asked.commit; promoted.push(commit); if (building) state.busy = "promote"; else current = commit; return Response.json({ started: "promote" }, { status: 202 }); }
     return new Response("no", { status: 404 });
   } });
   return { repo, sha, promoted, asks, statusAsked, state, rescue, fromSource, env: { SWITCHBOARD_REPO_ROOT: repo, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}` } };

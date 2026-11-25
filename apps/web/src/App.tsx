@@ -55,6 +55,8 @@ export function App() {
   const [feedbackWorkspace, setFeedbackWorkspace] = useState<FeedbackTarget | undefined>();
   // 改善要望にする: the draft the dialog opens with, from a task's evaluations
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | undefined>();
+  // the repository the Backlog is narrowed to (it tells App), where 「＋ 指示」 opened from the Backlog starts
+  const [backlogNarrow, setBacklogNarrow] = useState<FeedbackTarget | undefined>();
   const [health, setHealth] = useState<Health | null>(null);
   // a pill anywhere shows a custom runner by its label: read from the last health before the children render
   rememberRunnerLabels(health?.runners);
@@ -636,7 +638,7 @@ export function App() {
       <div className="body">
         {authorized && (
           <>
-        <Rail onFeedback={() => openFeedback()} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} onOpenTerminal={health?.features?.pty === false ? undefined : (workspaceId) => setView({ name: "terminal", workspaceId })} terminalWorkspaceId={view.name === "terminal" ? view.workspaceId : undefined} terminals={terminals} stopMarks={stopMarks} />
+        <Rail onFeedback={() => openFeedback(view.name === "backlog" ? backlogNarrow : undefined)} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} onOpenTerminal={health?.features?.pty === false ? undefined : (workspaceId) => setView({ name: "terminal", workspaceId })} terminalWorkspaceId={view.name === "terminal" ? view.workspaceId : undefined} terminals={terminals} stopMarks={stopMarks} />
 
         {view.name === "home" && (
           <Home
@@ -651,6 +653,8 @@ export function App() {
             stopRev={stopRev}
             stopMarks={stopMarks}
             onOpenSettings={() => setView({ name: "settings" })}
+            screen={screenLabel(view, currentTask)}
+            onSent={(task) => { upsertTask(task); openTask(task.id); }}
             onOpenWorkspaces={() => openSettingsAt("workspace")}
             onOpenReport={(id) => setView({ name: "evals", report: id })}
             onOpenArtifacts={() => setView({ name: "evals", artifacts: true })}
@@ -721,7 +725,7 @@ export function App() {
         })()}
         {view.name === "ledger" && <Ledger ledger={ledger} runners={health?.runners ?? []} onOpenTask={openTask} onOpenInsights={() => setView({ name: "evals" })} onError={setError} />}
         {view.name === "evals" && <Evals workspaces={workspaces} runners={health?.runners} onOpenTask={openTask} onRateTask={rateTask} onError={setError} rev={evalsAnyRev} onImprove={improveFromEvals} openReport={view.report} scope={view.artifacts ? "all" : "reports"} onScope={(s) => setView({ name: "evals", artifacts: s === "all" })} onOpenArtifact={(taskId, artifactId) => setView({ name: "task", id: taskId, artifact: artifactId })} />}
-        {view.name === "backlog" && <Backlog onFeedback={openFeedback} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
+        {view.name === "backlog" && <Backlog onNarrow={setBacklogNarrow} onError={setError} onStarted={(task) => { upsertTask(task); openTask(task.id); }} onOpenTask={openTask} onOpenSchedules={() => setView({ name: "schedules" })} />}
         {view.name === "approvals" && (
           <Approvals
             approvals={approvals.map((a) => ({ ...a, taskTitle: tasks.find((t) => t.id === a.taskId)?.title ?? a.taskTitle }))}
@@ -754,7 +758,7 @@ export function App() {
         )}
       </div>
 
-      <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask, view.name === "terminal" ? workspaces.find((w) => w.id === view.workspaceId)?.name : undefined)} workspaces={workspaces} workspace={feedbackWorkspace} prefill={feedbackPrefill} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />
+      <FeedbackDialog open={feedbackOpen} screen={screenLabel(view, currentTask, view.name === "terminal" ? workspaces.find((w) => w.id === view.workspaceId)?.name : undefined)} health={health} workspaces={workspaces} runnerOk={runnerOk} workspace={feedbackWorkspace} prefill={feedbackPrefill} onCreate={async (input) => { await createTask(input); setFeedbackOpen(false); }} onOpenSettings={() => { setFeedbackOpen(false); setView({ name: "settings" }); }} onClose={() => setFeedbackOpen(false)} onSent={(task) => { upsertTask(task); openTask(task.id); }} onError={setError} />
 
       <footer className="statusbar">
         {health?.session && (

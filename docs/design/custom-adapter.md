@@ -192,9 +192,9 @@ Line numbers are as of 2026-10-31. These are the known places, not a complete li
 - `apps/web/src/runners.ts:6`: the list already comes from the daemon's `runners`, which `RunnerInfo` (`packages/protocol/src/model/runner.ts:63`) feeds. Only the fallback literal stays fixed.
 - `apps/web/src/components/ui.tsx:8`: done: `RunnerInfo` carries the label, and every runner pill shows it.
 - `apps/web/src/quota.ts:21`: the fixed order already appends other runners; no change unless custom runners report quota, which AG-UI does not.
-- `apps/web/src/components/Home.tsx:476`: without a `note`, the picker's unavailable hint treats every other runner as DAK, so the adapter's `detect` must always set one. The list itself (`apps/web/src/components/Home.tsx:472`) already works, and `apps/web/src/components/Schedules.tsx:251` and `apps/web/src/components/Ledger.tsx:61` likewise.
+- `apps/web/src/components/Compose.tsx`: without a `note`, the picker's unavailable hint treats every other runner as DAK, so the adapter's `detect` must always set one. The list itself (`apps/web/src/components/Compose.tsx`) already works, and `apps/web/src/components/Schedules.tsx:251` and `apps/web/src/components/Ledger.tsx:61` likewise.
 - `apps/web/src/components/Settings.tsx:207`: done: auto-resume is not offered for `dak` or `custom:` ids.
-- `apps/web/src/components/Home.tsx:521`: done: a custom primary offers no shadow toggle, and the daemon skips the saved shadow default for it.
-- `apps/web/src/components/Home.tsx:516`: done: the hint for a runner without permission modes names the runner's label.
+- `apps/web/src/components/Compose.tsx`: done: a custom primary offers no shadow toggle, and the daemon skips the saved shadow default for it.
+- `apps/web/src/components/Compose.tsx`: done: the hint for a runner without permission modes names the runner's label.
 - `apps/web/src/components/Settings.tsx:175`: the model editor lists only runners with models, and `apps/web/src/components/ModelSelect.tsx:15` says an empty list is DAK's. Both need to admit an `agui` entry.
 - `apps/web/src/components/Settings.tsx`: done for ADK: a section to add and remove an ADK server (name, label, URL, app name, token variable name); no edit, remove and add again. An `agui` entry needs its own fields there.

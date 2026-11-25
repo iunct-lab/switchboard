@@ -1,7 +1,8 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, viewpointsMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
+import { VIEWPOINTS } from "./review-viewpoints";
 import { Db } from "../packages/core/src/db";
 import { mergeRecordsOf } from "../packages/core/src/merge-records";
 import { changeRepoOf, grantHeadKey } from "../packages/core/src/merge-grants";
@@ -64,7 +65,7 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
 });
 const off = { allowLarge: false };
 /** The security groups the owner moved from asking to a recheck (docs/design/merge-gate.md). */
-const MOVED: string[] = ["security:docs", "security:tests", "security:lockfile"];
+const MOVED: string[] = ["security:docs", "security:tests", "security:lockfile", "security:gate-support"];
 const HEAD = "a".repeat(40);
 /** The facts with the person's grant of the head in the app's record (--allow-large lifts nothing without it); `_kinds` says what the test means the person allowed (the record has no kinds). */
 const yes = (_kinds: string, over: Partial<PrFacts> = {}) => base({ ...over, head: HEAD, granted: true });
@@ -691,6 +692,46 @@ describe("approved security sub-kind rechecks", () => {
   });
 });
 
+describe("gate-support", () => {
+  // the files that support the gates without deciding a merge: read by a recheck, not asked
+  const SUPPORT = ["scripts/local-ci-notes.ts", "scripts/local-ci-records.ts", "scripts/local-ci-offload.ts", "scripts/forge-resync-report.ts"];
+  const files = (...paths: string[]) => paths.map((path) => ({ path, additions: 1, deletions: 0, status: "modified" as const }));
+  const marked = (paths: string[], rechecks: RecheckKind[]) => judge(base({ files: files(...paths), rechecks }), off);
+
+  test("a PR of the support files only is not asked: it needs the security:gate-support recheck", () => {
+    expect(marked(SUPPORT, [])).toEqual({
+      verdict: "stop",
+      impact: "large",
+      reasons: [`[再チェック security:gate-support] セキュリティ（security:gate-support）: ${SUPPORT.join(", ")}`],
+      ask: [],
+      recheck: ["security:gate-support"],
+      required: ["security:gate-support"],
+      attack: SUPPORT,
+    });
+    // the support files feed the gates (the build's exit marks), so they keep the attacking review the gates have
+    expect(marked(SUPPORT, ["security:gate-support"]).reasons).toEqual([]);
+    expect(judge(base({ files: files(...SUPPORT), rechecks: ["security:gate-support"], attacked: undefined }), off).verdict).toBe("stop");
+  });
+
+  test("a PR of a support file and a gate file is still asked as security:gates, and the support recheck's mark does not lift it", () => {
+    const j = marked(["scripts/local-ci-notes.ts", "scripts/local-ci.ts"], ["security:gate-support"]);
+    expect(j).toMatchObject({ verdict: "stop", ask: ["security:gates"], recheck: [], required: ["security:gate-support"] });
+    expect(j.reasons).toEqual(["[聞く] セキュリティ（security:gates）: scripts/local-ci.ts"]);
+  });
+
+  test("the security:gate-support mark of the head merges a PR of the support files, and another kind's mark does not", () => {
+    expect(marked(SUPPORT, ["security:gate-support"])).toEqual({ verdict: "merge", impact: "large", reasons: [], ask: [], recheck: [], required: ["security:gate-support"], attack: SUPPORT });
+    expect(marked(SUPPORT, ["security:docs"]).verdict).toBe("stop");
+  });
+
+  test("a gate file renamed to a support file is still asked as security:gates: moving judging lines out is asked", () => {
+    const moved = [{ path: "scripts/local-ci-notes.ts", previous: "scripts/local-ci.ts", additions: 0, deletions: 0, status: "renamed" as const }];
+    const j = judge(base({ files: moved, rechecks: ["security:gate-support"] }), off);
+    expect(j).toMatchObject({ verdict: "stop", ask: ["security:gates"] });
+    expect(j.reasons).toEqual(["[聞く] セキュリティ（security:gates）: scripts/local-ci-notes.ts（改名前: scripts/local-ci.ts）"]);
+  });
+});
+
 describe("instructions", () => {
   const file = (path: string, over: Partial<PrFacts["files"][number]> = {}) => ({ path, additions: 1, deletions: 0, ...over });
 
@@ -1001,6 +1042,28 @@ describe("task scope", () => {
   test("no task: a PR without one judges as before; a Task with no path does not stop and says so in notes", () => {
     expect(judge(base(), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [] });
     expect(judge(base({ task: task([]) }), off)).toEqual({ verdict: "merge", impact: "small", reasons: [], ask: [], recheck: [], notes: ["Task #2346 の本文からパスが読めない（範囲の検査をしていない）"] });
+  });
+});
+
+describe("viewpoints", () => {
+  const file = (path: string, additions = 1) => ({ path, additions, deletions: 0, status: "modified" });
+
+  test("viewpoints: the kinds of the PR's [再チェック] reasons, each under its heading; none is empty; a kind already rechecked is still a viewpoint", () => {
+    // size alone: a change over the line limit
+    expect(viewpointsMaterial(base({ files: [file("scripts/a.ts", 400)] }))).toBe(`## 観点: size\n\n${VIEWPOINTS.size}\n`);
+    // nothing large: no viewpoint
+    expect(viewpointsMaterial(base({ files: [file("scripts/a.ts")] }))).toBe("");
+    // a document that meets a security word, and the responsibility file: two sections, nothing else
+    const two = viewpointsMaterial(base({ files: [file("docs/design/session-sandbox.md"), file("ops.config.json")] }));
+    expect(two.match(/^## 観点: .*/gm)?.sort()).toEqual(["## 観点: responsibility", "## 観点: security:docs"]);
+    expect(two).toContain(VIEWPOINTS.responsibility);
+    expect(two).toContain(VIEWPOINTS["security:docs"]);
+    // the main review reads it whether or not the recheck has passed already
+    expect(viewpointsMaterial(base({ files: [file("scripts/a.ts", 400)], rechecks: ["size"] }))).toBe(`## 観点: size\n\n${VIEWPOINTS.size}\n`);
+  });
+
+  test("viewpoints: a kind a command decides has no viewpoint (migration)", () => {
+    expect(viewpointsMaterial(base({ files: [file("packages/core/src/db/migrations/0099_x.ts")] }))).toBe("");
   });
 });
 
@@ -1519,16 +1582,20 @@ describe("merge-gate readPr", () => {
       expect(seen.some((a) => a.some((x) => x.includes("issue(number")))).toBe(false);
     });
 
-    test("a file no Task names is a note, not a reason, and nothing is recorded in the app; --scope prints the material and judges nothing", async () => {
+    test("a file no Task names is a note, not a reason, and nothing is recorded in the app; --scope and --viewpoints print the material and judge nothing", async () => {
       const posts: string[] = [];
       // the app answers its records (the PR's main review); any other call to it would be a record written
       const records = appWith([reviewJob("abc123", { pr: 12 })]);
       const fetchApp = async (url: string, init?: RequestInit) => (String(url).includes("/api/merge-records") ? records.fetch(url, init) : (posts.push(url), Response.json({ recorded: true })));
       const env = { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", BACKLOG_TOKEN_FILE: records.env.MERGE_RECORDS_TOKEN_FILE, OPS_KIT_TASK_ID: "t1" };
-      const run = async (path: string, extra: string[] = []) => {
+      const run = async (path: string, extra: string[] = [], additions = 1) => {
         const g = gate({ body: "Closes #5", headRefName: "sb/5-a" });
         const out: string[] = [];
-        const code = await main(["12", "--repo", REPO, ...extra], async (a) => (a[0] === "pr" && a[1] === "view" ? JSON.stringify({ ...JSON.parse(await g(a)), files: [{ path, additions: 1, deletions: 0 }] }) : g(a)), (l) => out.push(l), () => {}, () => REPO, undefined, process.cwd(), { env, fetch: fetchApp as unknown as typeof fetch });
+        const code = await main(["12", "--repo", REPO, ...extra], async (a) => {
+          // --merge with --viewpoints never merges
+          if (a[0] === "pr" && a[1] === "merge") throw new Error("merged");
+          return a[0] === "pr" && a[1] === "view" ? JSON.stringify({ ...JSON.parse(await g(a)), files: [{ path, additions, deletions: 0 }] }) : g(a);
+        }, (l) => out.push(l), () => {}, () => REPO, undefined, process.cwd(), { env, fetch: fetchApp as unknown as typeof fetch });
         return { code, out: out.join("\n") };
       };
       const outside = await run("zzz/other.ts");
@@ -1541,6 +1608,9 @@ describe("merge-gate readPr", () => {
       expect(material.out).toContain("- zzz/other.ts");
       expect(material.out).not.toContain("verdict");
       expect((await run("scripts/a.ts", ["--scope"])).out).toBe("");
+      // --viewpoints prints the viewpoints of the kinds the PR asks for, judges nothing and merges nothing
+      expect(await run("scripts/a.ts", ["--viewpoints", "--merge"], 400)).toEqual({ code: 0, out: `## 観点: size\n\n${VIEWPOINTS.size}\n` });
+      expect(await run("scripts/a.ts", ["--viewpoints"])).toEqual({ code: 0, out: "" });
       expect(posts).toEqual([]);
     });
 
@@ -2304,16 +2374,17 @@ describe("in a Task the gate is the app's job", () => {
     const other = jobsApp({ status: "pass", exitCode: 0 });
     await go(["9", "--repo", "acme/app", "--merge-stack"], other);
     await go(["9", "--scope"], other);
-    expect(other.posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, repo: "acme/app", merge: "merge-stack" }, { kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, scope: true }]);
+    await go(["9", "--viewpoints"], other);
+    expect(other.posts).toEqual([{ kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, repo: "acme/app", merge: "merge-stack" }, { kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, scope: true }, { kind: "gate", taskId: "task_1", cwd: "/work/task", pr: 9, viewpoints: true }]);
     // not judged (exit 2), nothing printed as a verdict: the app not reached, a daemon that does not know the kind, a job that does not end in the wait or ends without its exit code
     expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { down: true }))).toMatchObject({ code: 2, out: [], errs: [expect.stringContaining("判定できなかった")] });
     expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { post: 400 }))).toMatchObject({ code: 2, errs: [expect.stringContaining("アプリが 400 を返した")] });
     expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }, { polls: 100_000 }), { SWITCHBOARD_GATE_WAIT_MS: "30" })).toMatchObject({ code: 2, errs: [expect.stringContaining("終わらなかった")] });
     expect(await go(["7"], jobsApp({ status: "aborted", exitCode: null }))).toMatchObject({ code: 2, errs: [expect.stringContaining("終わりを残さずに止まった")] });
-    // the Task's own address is needed; a form the gate does not take is not sent
+    // the Task's own address is needed; a form the gate does not take is not sent (--viewpoints with a merge mode too: a daemon that does not know the flag would drop it and merge)
     expect(await go(["7"], jobsApp({ status: "pass", exitCode: 0 }), { BACKLOG_URL: undefined })).toMatchObject({ code: 2 });
     const bad = jobsApp({ status: "pass", exitCode: 0 });
-    for (const args of [[], ["x"], ["7", "8"], ["7", "--merge", "--merge-stack"], ["--change", "3", "4"], ["7", "--repo", "-x/y"]]) expect([args, (await go(args, bad)).code]).toEqual([args, 2]);
+    for (const args of [[], ["x"], ["7", "8"], ["7", "--merge", "--merge-stack"], ["--change", "3", "4"], ["7", "--repo", "-x/y"], ["7", "--viewpoints", "--merge"], ["7", "--viewpoints", "--merge-stack"]]) expect([args, (await go(args, bad)).code]).toEqual([args, 2]);
     expect(bad.posts).toEqual([]);
   });
 });
@@ -2901,9 +2972,9 @@ describe("reversibility table", () => {
   const table = () => JSON.parse(require("node:fs").readFileSync(REVERSIBILITY_PATH, "utf8"));
   const write = (name: string, t: unknown) => { const p = join(W, name); writeFileSync(p, JSON.stringify(t)); return p; };
 
-  test("derives the ask and recheck kinds from the table (the owner moved security:docs, security:tests and security:lockfile to a recheck)", () => {
+  test("derives the ask and recheck kinds from the table (the owner moved security:docs, security:tests and security:lockfile to a recheck, and gate-support is one)", () => {
     expect(ASK_KINDS).toEqual([...SECURITY_KINDS.filter((k) => !MOVED.includes(k)), "instructions", "limits"]);
-    expect(RECHECK_KINDS).toEqual(["security:docs", "security:tests", "security:lockfile", "size", "responsibility", "migration", "rescue", "design-rules"]);
+    expect(RECHECK_KINDS).toEqual(["security:docs", "security:tests", "security:lockfile", "security:gate-support", "size", "responsibility", "migration", "rescue", "design-rules"]);
   });
 
   test("moving a kind to irreversible moves it to the ask side", () => {

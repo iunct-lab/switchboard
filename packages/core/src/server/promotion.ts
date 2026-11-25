@@ -3,6 +3,7 @@ import { isPublicCopy, type ReleaseReview } from "../release-review.ts";
 import { APP_JOB_TASK, type Workspace } from "@switchboard/protocol";
 import { JobError, repoKeyOf, requestJob } from "../jobs.ts";
 import { latestTag, promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, tagCiOf, tagCiPlan, type TagCiState, type DrainView, type PromotionDrain, type PromotionStep, type TagCi, reportPromoteFailure, RESCUE_IN_CONTAINER, type ReleaseState } from "../promotion.ts";
+import { refusedFiles, type PromotionDecisionKind } from "../promotion-log.ts";
 import { call, runGh } from "../backlog-gh.ts";
 import { nextWakeFrom } from "../hostidle.ts";
 import type { RescueStatus, ServerContext, ServerContextInit } from "./context.ts";
@@ -14,6 +15,8 @@ export const askedHoldMs = (sc: Pick<ServerContext, "opts">) => sc.opts.promotio
 
 /** How often sb-rescue's status is read while a restart is awaited; a request counts as on its way for twice that before sb-rescue shows it. */
 const askedPollMs = (sc: Pick<ServerContext, "opts">) => sc.opts.promotionAskedPollMs ?? 5_000;
+/** How much of a decision's reason is kept: sb-rescue's refusal is its whole answer, file names included. */
+const REASON_CHARS = 300;
 
 export const setDrain = (sc: Pick<ServerContext, "promotionDrain" | "tasks" | "stopped">, next: PromotionDrain) => {
   const held = drainHeld(sc.promotionDrain);
@@ -227,12 +230,12 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   const settle = (tag: string | null, mode: Parameters<typeof nextDrain>[2]) => { if (!foreign) sc.setDrain(nextDrain(sc.promotionDrain, tag, mode, Date.now())); };
   // counted after the last await before each decision: a Task that ends while git runs either counts as ended here or finds the hold set
   const decide = (needsRestart = false) => promotionStep({ status: status as ReleaseState, latest, busyTasks: sc.drainBusy(), latestInCurrent, review, auto, needsRestart, bundle: sc.bundleHold(), ci, requireCi: sc.settings().release.tagCi });
-  const send = async (p: Extract<PromotionStep, { action: "promote" }>): Promise<{ status: number; restart: boolean; heavy: boolean; error: string }> => {
+  const send = async (p: Extract<PromotionStep, { action: "promote" }>): Promise<{ status: number; restart: boolean; heavy: boolean; error: string; files: string[]; fileCount: number }> => {
     try {
       const r = await (source ? sc.requestPromote(p.tag, p.sha, !!p.ifNoRestart) : sc.requestPromote(p.sha, undefined, !!p.ifNoRestart));
-      return { status: r.status, restart: (r.body as { restart?: unknown }).restart === true, heavy: (r.body as { heavy?: unknown }).heavy === true, error: JSON.stringify(r.body) };
+      return { status: r.status, restart: (r.body as { restart?: unknown }).restart === true, heavy: (r.body as { heavy?: unknown }).heavy === true, error: JSON.stringify(r.body), ...refusedFiles(r.body) };
     } catch (e) {
-      return { status: 0, restart: false, heavy: false, error: String((e as Error).message ?? e) };
+      return { status: 0, restart: false, heavy: false, error: String((e as Error).message ?? e), files: [], fileCount: 0 };
     }
   };
   // A request that restarts: new starts are held from the count (no await between `decide` and here) until the restart, so
@@ -250,18 +253,31 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
       if (sc.promotionDrain?.state === "asked") sc.watchAsked();
     }
   };
+  // what this decision was is kept for the operator (promotion_decisions): it is not read by any decision, and a record that cannot be written changes nothing
+  const keep = (kind: PromotionDecisionKind, tag: string, sha: string, reason: string, files: { files: string[]; fileCount: number } = { files: [], fileCount: 0 }) => {
+    try {
+      sc.db.recordPromotionDecision({ sha, tag, kind, tasks: sc.drainBusy(), reason: reason.slice(0, REASON_CHARS), ...files });
+    } catch (e) {
+      console.error(`[promotion] the ${kind} decision for ${tag} could not be recorded: ${String((e as Error)?.message ?? e)}`);
+    }
+  };
   let step = decide();
   let answer: Awaited<ReturnType<typeof send>> | null = null;
+  let refused = false;
   if (step.action === "promote" && step.ifNoRestart) {
     answer = await send(step);
+    if (answer.status === 202) keep("no-restart", step.tag, step.sha, `${step.tag} の昇格を依頼（Task を切らない切り替え）`);
     // asked as a switch that keeps the Tasks, and this release needs a restart: decided again — it waits for the Tasks, or goes in now when none is left
     if (answer.status === 409 && answer.restart) {
+      refused = true;
+      keep("refused", step.tag, step.sha, answer.error, answer);
       step = decide(true);
       answer = null;
     }
   }
   if (step.action === "promote" && !step.ifNoRestart) answer = await askRestart(step);
   const accepted = answer?.status === 202;
+  if (!refused && step.action === "wait" && step.drain) keep("waited", latest!.tag, latest!.sha, step.reason);
   // the drain after this decision (a restart that was asked for has set its own above); no await since the last count
   if (step.action === "pick") settle(null, "done");
   else if (step.action === "review") settle(latest!.tag, "off");
@@ -365,6 +381,7 @@ export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleR
   /**
    * Why the last promotionFirst held the newest tag: Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
+   * That it waited is kept in `promotion_decisions`.
    * `since`: when it began to hold that tag, kept while the same tag is held (promoteWhenIdle clears the hold
    * before it asks again, so the first sight is kept apart in `heldSince`).
    */
@@ -373,7 +390,7 @@ export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleR
   sc.askedWatch = null;
   sc.idleRetry = null;
   /**
-   * The last promotion this daemon asked sb-rescue for — or why it could not ask. Memory only, like promotionHold:
+   * The last promotion this daemon asked sb-rescue for — or why it could not ask. Memory only, like promotionHold (what was decided is also kept in `promotion_decisions`):
    * a promotion restarts the daemon, and sb-rescue's `history` has the result after that. `GET /api/daemon/release` shows it.
    */
   sc.promotionAsked = null;

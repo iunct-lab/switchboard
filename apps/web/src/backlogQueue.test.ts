@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem, BacklogQueue } from "@switchboard/protocol";
-import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withAdded, withRemoved, withWaiting } from "./backlogQueue.ts";
+import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, pickTop, queueFacts, queueSaver, queueSections, withRemoved, withWaiting } from "./backlogQueue.ts";
 
 const item = (number: number, over: Partial<BacklogItem> = {}): BacklogItem =>
   ({ number, title: `題 ${number}`, type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", activeTaskId: null, workspaceId: "w1", workspaceName: "one", ...over }) as BacklogItem;
-const queue = (over: Partial<BacklogQueue> = {}): BacklogQueue => ({ enabled: false, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, ...over });
+const queue = (over: Partial<BacklogQueue> = {}): BacklogQueue => ({ enabled: false, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, stall: null, ...over });
 const e = (number: number, workspaceId = "w1") => ({ workspaceId, number });
 
 describe("queueSections", () => {
@@ -36,18 +36,11 @@ describe("queueSections", () => {
   });
 });
 
-describe("withAdded / withRemoved", () => {
-  test("adds at the end once, the same number of another workspace is another entry; removes only the one named", () => {
+describe("withRemoved", () => {
+  test("removes only the entry named; the same number of another workspace is another entry", () => {
     const q = queue({ items: [e(1), e(2)] });
-    expect(withAdded(q, e(3))).toEqual([e(1), e(2), e(3)]);
-    expect(withAdded(q, e(1))).toEqual([e(2), e(1)]);
-    expect(withAdded(q, e(1, "w2"))).toEqual([e(1), e(2), e(1, "w2")]);
     expect(withRemoved(q, e(1))).toEqual([e(2)]);
     expect(withRemoved(q, e(1, "w2"))).toEqual([e(1), e(2)]);
-  });
-
-  test("withAdded keeps only the entry's own fields (a row passed as the entry)", () => {
-    expect(withAdded(queue(), item(5) as unknown as ReturnType<typeof e>)).toEqual([e(5)]);
   });
 });
 
@@ -60,17 +53,18 @@ describe("queueSaver", () => {
     let shown: Q | null = { items: [] };
     const failures: unknown[] = [];
     let slowReread = false;
+    let failReread = false;
     let rereadLater = () => {};
     const save = queueSaver<Q, Q>({
       send: (input) =>
         new Promise((resolve, reject) => sent.push({ items: input.items, answer: (ok) => (ok ? ((stored = input), resolve(input)) : reject(new Error("refused"))) })),
       show: (f) => void (shown = f(shown)),
       apply: (_q, input) => input,
-      reread: () => (slowReread ? new Promise<Q>((resolve) => (rereadLater = () => resolve(stored))) : Promise.resolve(stored)),
+      reread: () => (failReread ? Promise.reject(new Error("unreachable")) : slowReread ? new Promise<Q>((resolve) => (rereadLater = () => resolve(stored))) : Promise.resolve(stored)),
       failed: (e) => void failures.push(e),
     });
     const tick = () => new Promise((r) => setTimeout(r, 0));
-    return { sent, save, shown: () => shown, stored: () => stored, failures, tick, slow: () => void (slowReread = true), answerReread: () => rereadLater() };
+    return { sent, save, shown: () => shown, stored: () => stored, failures, tick, slow: () => void (slowReread = true), unreachable: () => void (failReread = true), answerReread: () => rereadLater() };
   }
 
   test("two quick changes: shown at once, the second sent only after the first is answered, both kept", async () => {
@@ -110,6 +104,19 @@ describe("queueSaver", () => {
     await c;
     expect(r.stored()).toEqual({ items: [1, 2, 3] });
     expect(r.shown()).toEqual({ items: [1, 2, 3] });
+  });
+
+  test("a failed save that cannot be read back either shows no queue (the unsaved rows are not shown as saved)", async () => {
+    const r = rig();
+    r.unreachable();
+    const a = r.save({ items: [1] });
+    expect(r.shown()).toEqual({ items: [1] });
+    await r.tick();
+    r.sent[0]!.answer(false);
+    await a;
+    expect(r.failures.length).toBe(1);
+    expect(r.shown()).toBeNull();
+    expect(r.stored()).toEqual({ items: [] });
   });
 
   test("a change made while a failed save reads back is not overwritten by that read", async () => {

@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, issueArtifactsShown, labelList, loadDraft, loadNewIssueDraft, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, issueArtifactsShown, labelList, loadDraft, loadNewIssueDraft, newIssueDraftKey, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -97,6 +97,12 @@ describe("drafts and values", () => {
     expect(loadNewIssueDraft(store, "pbi")).toEqual({ title: "t", body: "b", kind: "type:pbi" });
     expect(loadNewIssueDraft(store, "old")).toEqual({ title: "t", body: "b", kind: "type:request" });
     expect(loadNewIssueDraft(store, "bad")).toBeNull();
+  });
+  test("the new-Issue draft is read from the key an earlier release wrote it to, so a draft kept there shows in 自分で書いて保存", () => {
+    expect(newIssueDraftKey("ws_1")).toBe("switchboard.backlog.text.new:ws_1");
+    const store = { getItem: (k: string) => (k === "switchboard.backlog.text.new:ws_1" ? JSON.stringify({ title: "下書きの題", body: "下書きの本文", kind: "type:pbi" }) : null) };
+    expect(loadNewIssueDraft(store, newIssueDraftKey("ws_1"))).toEqual({ title: "下書きの題", body: "下書きの本文", kind: "type:pbi" });
+    expect(loadNewIssueDraft(store, newIssueDraftKey("ws_2"))).toBeNull();
   });
   test("labels are split, trimmed and deduplicated; values are shown as text, an unread one says so", () => {
     expect(labelList(" a, b ,a,, c")).toEqual(["a", "b", "c"]);

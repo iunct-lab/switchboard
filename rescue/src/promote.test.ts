@@ -1,4 +1,4 @@
-// test-reads: ops-kit/bin/ops-kit ops-kit/src/cli.ts ops-kit/src/heavy.ts
+// test-reads: ops-kit/bin/ops-kit ops-kit/src/cli.ts ops-kit/src/heavy.ts packages/core/src/daemon-reads.ts
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
 import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
-import { appendHistory, buildRelease, currentOf, previousOf, readHistory, releasesDir, restartNeeded, run, switchTo } from "./releases.ts";
+import { appendHistory, buildRelease, currentOf, daemonReadsOf, previousOf, readHistory, releasesDir, restartNeeded, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -465,23 +465,104 @@ afterAll(async () => {
   rmSync(w.root, { recursive: true, force: true });
 });
 
-test("restartNeeded: only files under apps/web/ and packages/core/config/ are read again; anything else, or no way to compare, means a restart", async () => {
-  const g = await webFixture();
-  const base = g.v1;
-  const ui = await g.web("ui0");
-  const config = await commitFile(g.repo, "packages/core/config/routing.yaml", "a: 1\n", "config");
-  const mixed = await commitFile(g.repo, "bun.lock-ish.txt", "x", "outside");
-  const core = await commitFile(g.repo, "packages/core/src/main.ts", daemonSource("v1", "// touched"), "core touched");
-  expect(await restartNeeded(g.repo, base, ui)).toBe(false);
-  expect(await restartNeeded(g.repo, base, config)).toBe(false); // the default settings count as the Web UI
-  expect(await restartNeeded(g.repo, base, mixed)).toBe(true); // one file outside is enough, though the others are inside
-  expect(await restartNeeded(g.repo, ui, config)).toBe(false);
-  expect(await restartNeeded(g.repo, base, core)).toBe(true);
-  expect(await restartNeeded(g.repo, ui, ui)).toBe(true); // nothing differs: nothing to read again
-  expect(await restartNeeded(g.repo, null, ui)).toBe(true); // the daemon is not known to have started from anything
-  expect(await restartNeeded(g.repo, "0".repeat(40), ui)).toBe(true); // git cannot compare
-  expect(await restartNeeded(join(g.root, "not-a-repo"), base, ui)).toBe(true);
-  await run(["git", "reset", "-q", "--hard", base], g.repo); // the other tests build on the first release, not on these commits
+/** A git repository with one commit; `commit(paths)` makes a commit on top of that first one that adds or changes `paths`. */
+async function diffRepo() {
+  const root = mkdtempSync(join(tmpdir(), "sb-rescue-reads-"));
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  await run(["git", "init", "-q", "-b", "main"], repo);
+  const base = await commitFile(repo, "README.txt", "base", "base");
+  let n = 0;
+  const commit = async (paths: string[]) => {
+    await run(["git", "checkout", "-q", "--detach", base], repo);
+    for (const p of paths) {
+      mkdirSync(join(repo, p, ".."), { recursive: true });
+      writeFileSync(join(repo, p), `changed ${++n}`);
+    }
+    await run(["git", "add", "-A"], repo);
+    await run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", paths.join(" ")], repo);
+    return run(["git", "rev-parse", "HEAD"], repo);
+  };
+  return { root, repo, base, commit };
+}
+
+/** Only the yes or no of `restartNeeded`; the files it names have their own checks. */
+const needsRestart = async (...a: Parameters<typeof restartNeeded>) => (await restartNeeded(...a)).restart;
+
+test("restartNeeded with the real list of what the daemon reads: tests, CI settings and documents it does not read need no restart; a skill, an imported script and scratch-apps.md do", async () => {
+  // this repository's root stands for the running release: the list is what its own command says
+  const reads = await daemonReadsOf(join(import.meta.dir, "..", ".."), 10_000);
+  expect(reads).not.toBeNull();
+  const g = await diffRepo();
+  try {
+    const unread = ["packages/core/src/x.test.ts", ".github/workflows/ci.yml", "docs/design/local-ci.md"];
+    expect(await needsRestart(g.repo, g.base, await g.commit(unread), reads)).toBe(false);
+    // the files named are the ones that need it: not the unread ones, nor the Web UI
+    expect(await restartNeeded(g.repo, g.base, await g.commit([...unread, "apps/web/src/a.ts", "scripts/parallel-guard.ts"]), reads)).toEqual({ restart: true, files: ["scripts/parallel-guard.ts"] });
+    expect(await restartNeeded(g.repo, null, g.base, reads)).toEqual({ restart: true, files: [] });
+    expect(await needsRestart(g.repo, g.base, await g.commit([...unread, "apps/web/src/a.ts"]), reads)).toBe(false);
+    for (const read of ["ops-kit/skills/pbi-to-tasks/SKILL.md", "scripts/parallel-guard.ts", "docs/design/scratch-apps.md", "packages/core/src/main.ts"]) {
+      expect([read, await needsRestart(g.repo, g.base, await g.commit([...unread, read]), reads)]).toEqual([read, true]);
+    }
+    // a read file moved away shows up under its old path as well
+    await run(["git", "checkout", "-q", "--detach", g.base], g.repo);
+    await commitFile(g.repo, "scripts/parallel-guard.ts", "export const guard = 1;\n".repeat(20), "add");
+    const added = await run(["git", "rev-parse", "HEAD"], g.repo);
+    await run(["git", "mv", "scripts/parallel-guard.ts", "scripts/x.test.ts"], g.repo);
+    await run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "move"], g.repo);
+    expect(await needsRestart(g.repo, added, await run(["git", "rev-parse", "HEAD"], g.repo), reads)).toBe(true);
+    // a read file whose name git would quote (not ASCII) is still matched by its real path
+    expect(await needsRestart(g.repo, g.base, await g.commit([...unread, "ops-kit/skills/スキル/SKILL.md"]), reads)).toBe(true);
+    // with a list as well, nothing to compare with is a restart
+    const tests = await g.commit(unread);
+    expect(await needsRestart(g.repo, tests, tests, reads)).toBe(true); // nothing differs
+    expect(await needsRestart(g.repo, null, tests, reads)).toBe(true); // the daemon is not known to have started from anything
+    expect(await needsRestart(g.repo, "0".repeat(40), tests, reads)).toBe(true); // git cannot compare
+    expect(await needsRestart(join(g.root, "not-a-repo"), g.base, tests, reads)).toBe(true);
+  } finally {
+    rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test("restartNeeded: no list (an older release without the command, a failure, a timeout, an incomplete answer) keeps the two reloadable places only", async () => {
+  const g = await diffRepo();
+  const release = (name: string, cli?: string) => {
+    const dir = join(g.root, name);
+    mkdirSync(join(dir, "packages", "core", "src"), { recursive: true });
+    if (cli !== undefined) writeFileSync(join(dir, "packages", "core", "src", "daemon-reads.ts"), cli);
+    return dir;
+  };
+  try {
+    const cases = {
+      "older release": release("older"),
+      failure: release("fails", "process.exit(3);"),
+      timeout: release("slow", "await Bun.sleep(60_000);"),
+      incomplete: release("incomplete", `console.log(JSON.stringify({ complete: false, files: [], dirs: [], unknown: ["x.ts"] }));`),
+    };
+    // the release's command does not get sb-rescue's starter token, like the daemon and the candidate
+    const before = process.env.SWITCHBOARD_STARTER_TOKEN;
+    process.env.SWITCHBOARD_STARTER_TOKEN = "tok";
+    try {
+      const env = release("env", `console.log(JSON.stringify({ complete: true, files: [process.env.SWITCHBOARD_STARTER_TOKEN ? "token-present" : "token-absent"], dirs: [], unknown: [] }));`);
+      expect(await daemonReadsOf(env, 10_000)).toEqual({ files: new Set(["token-absent"]), dirs: [] });
+    } finally {
+      if (before === undefined) delete process.env.SWITCHBOARD_STARTER_TOKEN;
+      else process.env.SWITCHBOARD_STARTER_TOKEN = before;
+    }
+    // the same command answering completely is taken, so the four below are refused for what they are
+    expect(await daemonReadsOf(release("whole", `console.log(JSON.stringify({ complete: true, files: ["a.ts"], dirs: ["b/"], unknown: [] }));`), 10_000)).toEqual({ files: new Set(["a.ts"]), dirs: ["b/"] });
+    const tests = await g.commit(["packages/core/src/x.test.ts"]);
+    const web = await g.commit(["apps/web/src/a.ts", "packages/core/config/routing.yaml"]);
+    for (const [why, dir] of Object.entries(cases)) {
+      const started = Date.now();
+      const reads = await daemonReadsOf(dir, 1000);
+      expect([why, reads, Date.now() - started < 5000]).toEqual([why, null, true]);
+      expect([why, await needsRestart(g.repo, g.base, tests, reads)]).toEqual([why, true]);
+      expect([why, await needsRestart(g.repo, g.base, web, reads)]).toEqual([why, false]);
+    }
+  } finally {
+    rmSync(g.root, { recursive: true, force: true });
+  }
 });
 
 test("a Web UI only release is read again by the running daemon: same process, new page, history says so; a later release with core changes restarts it", async () => {
@@ -548,7 +629,7 @@ test("a daemon that does not report its web release is not sent SIGHUP: the rele
     const ui = await g.web("UI old daemon");
     const ask = await fetch(`http://127.0.0.1:${rescue.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commit: ui, ifNoRestart: true }) });
     expect(ask.status).toBe(409);
-    expect(await ask.json()).toEqual({ error: "this release needs a restart", restart: true });
+    expect(await ask.json()).toEqual({ error: "this release needs a restart", restart: true, files: [], fileCount: 0 });
     expect(currentOf(g.home)).not.toBe(ui);
     // the question is asked again after the build and the candidate: a caller that asked for no restart never gets one
     const was = currentOf(g.home);
@@ -662,3 +743,30 @@ test("a daemon that dies on SIGHUP and is started again by the supervisor is not
   }
   expect((await until(() => health(g.ctx.port), "started again"))!.pid).not.toBe(pid);
 });
+
+test("a promotion asked with ifNoRestart whose difference is a test file switches without a restart and the daemon keeps its pid", async () => {
+  const g = await webFixture();
+  // a release whose own command says what its daemon reads; switching to it is a restart (the running one has no such command)
+  const cli = `console.log(JSON.stringify({ complete: true, files: ["package.json", "packages/core/src/main.ts"], dirs: ["apps/web/dist/"], unknown: [] }));`;
+  const listed = await commitFile(g.repo, "packages/core/src/daemon-reads.ts", cli, "daemon reads");
+  expect(await promote(g.ctx, listed, webTimes)).toMatchObject({ action: "promote", ok: true, to: listed });
+  const pid = (await until(() => health(g.ctx.port), "restarted on the release with the list"))!.pid;
+  expect(g.ctx.sup.running).toBe(listed);
+  writeFileSync(join(g.home, "busy"), ""); // a task is running: a restart would stop it
+  const rescue = startRescue(g.ctx, { port: 0 });
+  try {
+    const ask = (commit: string) => fetch(`http://127.0.0.1:${rescue.server.port}/api/promote`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ commit, ifNoRestart: true }) });
+    const tests = await commitFile(g.repo, "packages/core/src/x.test.ts", "// a test", "a test only");
+    expect((await ask(tests)).status).toBe(202);
+    expect(await until(() => readHistory(g.home).find((e) => e.to === tests), "promoted", 30_000)).toMatchObject({ action: "promote-web", ok: true, from: listed });
+    expect([(await health(g.ctx.port))!.pid, g.ctx.sup.running, currentOf(g.home)]).toEqual([pid, listed, tests]);
+    // a file the list names is a restart, refused before anything is built
+    const read = await commitFile(g.repo, "packages/core/src/main.ts", daemonSource("v1", "// read by the daemon"), "core");
+    const refused = await ask(read);
+    expect([refused.status, await refused.json()]).toEqual([409, { error: "this release needs a restart", restart: true, files: ["packages/core/src/main.ts"], fileCount: 1 }]);
+    expect(existsSync(join(releasesDir(g.home), read))).toBe(false);
+  } finally {
+    await rescue.stop();
+    rmSync(join(g.home, "busy"), { force: true });
+  }
+}, 60_000);

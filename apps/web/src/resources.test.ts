@@ -130,9 +130,18 @@ test("resources: eta line", () => {
 
 test("resources: a job's row — its kind with the review's runner, its status in words, how long it ran or has run", () => {
   const t0 = Date.parse("2026-11-06T10:00:00Z");
-  const job = (o: Partial<OpsJob>): OpsJob => ({ id: 7, kind: "local-ci", taskId: "t1", taskTitle: "仕事の口", pr: 12, runner: null, status: "running", exitCode: null, startedAt: t0, endedAt: null, ...o });
+  const job = (o: Partial<OpsJob>): OpsJob => ({ id: 7, kind: "local-ci", taskId: "t1", taskTitle: "仕事の口", pr: 12, runner: null, status: "running", exitCode: null, startedAt: t0, endedAt: null, as: null, model: null, effort: null, ...o });
   expect(jobRow(job({}), t0 + 125_000)).toEqual({ kind: "local-ci", status: "実行中", elapsed: "2 分" });
-  expect(jobRow(job({ kind: "review", runner: "codex", status: "pass", exitCode: 0, endedAt: t0 + 45_000 }), t0 + 3600_000)).toEqual({ kind: "review (codex)", status: "成功", elapsed: "45 秒" });
+  expect(jobRow(job({ kind: "review", runner: "codex", status: "pass", exitCode: 0, endedAt: t0 + 45_000 }), t0 + 3600_000)).toEqual({ kind: "review (codex, CLI の既定)", status: "成功", elapsed: "45 秒" });
   expect(jobRow(job({ status: "fail", exitCode: 1, endedAt: t0 + 3900_000 }), t0 + 9e9).status).toBe("失敗（終了コード 1）");
   expect(jobRow(job({ status: "aborted", endedAt: t0 + 1000 }), t0).status).toBe("中断");
+});
+
+test("jobRow: a review's row says why it is not the main review and the model / effort it ran with; local CI's stays as it was", () => {
+  const t0 = Date.parse("2026-11-06T10:00:00Z");
+  const job = (o: Partial<OpsJob>): OpsJob => ({ id: 7, kind: "review", taskId: "t1", taskTitle: "仕事の口", pr: 12, runner: "claude", status: "pass", exitCode: 0, startedAt: t0, endedAt: t0, as: null, model: null, effort: null, ...o });
+  expect(jobRow(job({ model: "m1", effort: "high" }), t0).kind).toBe("review (claude, m1 / high)");
+  expect(jobRow(job({ as: "recheck", model: "m1", effort: "high" }), t0).kind).toBe("review（recheck） (claude, m1 / high)");
+  expect(jobRow(job({ as: "audit", runner: "codex", effort: "low" }), t0).kind).toBe("review（audit） (codex, CLI の既定 / low)");
+  expect(jobRow(job({ kind: "local-ci", runner: null }), t0).kind).toBe("local-ci");
 });

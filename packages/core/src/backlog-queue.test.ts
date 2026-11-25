@@ -40,7 +40,7 @@ describe("backlog queue", () => {
       expect(readQueue(first)).toEqual(EMPTY_QUEUE);
       first.close();
       const again = new Db(join(h, "db.sqlite"));
-      expect(readQueue(again)).toEqual({ ...old, lastNoteAt: null });
+      expect(readQueue(again)).toEqual({ ...old, lastNoteAt: null, stall: null });
       again.close();
     } finally {
       rmSync(h, { recursive: true, force: true });

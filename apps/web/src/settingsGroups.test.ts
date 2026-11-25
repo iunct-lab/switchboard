@@ -1,10 +1,12 @@
-// test-reads: apps/web/src/components/Settings.tsx apps/web/src/components/WorkspaceCard.tsx apps/web/src/components/PolicySettings.tsx apps/web/src/components/CliUpdateSettings.tsx apps/web/src/App.tsx
+// test-reads: apps/web/src/components/Settings.tsx apps/web/src/components/ReviewJobCells.tsx apps/web/src/components/WorkspaceCard.tsx apps/web/src/components/PolicySettings.tsx apps/web/src/components/CliUpdateSettings.tsx apps/web/src/App.tsx
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { SETTINGS_GROUPS, settingsGroup } from "./settingsGroups.ts";
 import { settings } from "./i18n/settings.ts";
 
 const source = await Bun.file(new URL("./components/Settings.tsx", import.meta.url)).text();
+/** The cells of the review's rows of 「どの仕事を」 (the review's runner, the recheck's, the review models), drawn by their own component. */
+const reviewCells = await Bun.file(new URL("./components/ReviewJobCells.tsx", import.meta.url)).text();
 /** The Settings screen's own body: from its <main> to the end of it. */
 const body = source.slice(source.indexOf('<main className="main settings">\n'), source.indexOf("    </main>\n  );\n}\n"));
 
@@ -116,8 +118,9 @@ describe("SETTINGS_GROUPS", () => {
   test("the values that can be set are the same as before the reordering", () => {
     // the top-level keys of every save({ … }) in Settings.tsx: the regrouping into seven groups moved cards and changed none of them
     // (maxRunners was saved by its own component before and is a box of バックログを進める now)
-    const keys = new Set([...source.matchAll(/save\(\{ ?(\w+):/g)].map((m) => m[1]));
-    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "cliUpdate", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "release", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
+    // (the review's rows save in ReviewJobCells.tsx; recheckRunner, reviewModel and reviewEffort were added with them)
+    const keys = new Set([...(source + reviewCells).matchAll(/save\(\{ ?(\w+):/g)].map((m) => m[1]));
+    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "cliUpdate", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "recheckRunner", "release", "reviewEffort", "reviewModel", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
   });
 
   test("レビュー is a row of どの仕事をどのランナーで and saves reviewRunner with its two choices", () => {
@@ -125,8 +128,11 @@ describe("SETTINGS_GROUPS", () => {
     const from = body.indexOf("<SettingsCard title={t(settings.jobsCard)}");
     expect(from).toBeGreaterThan(-1);
     const card = body.slice(from, body.indexOf("</SettingsCard>", from));
-    expect(source).toContain("{ other: settings.reviewRunnerOther, same: settings.reviewRunnerSame }");
-    expect(card).toContain("save({ reviewRunner: e.target.value as ReviewRunnerChoice })");
+    expect(card).toContain("<ReviewJobCells row={j} ");
+    expect(reviewCells).toContain("{ other: settings.reviewRunnerOther, same: settings.reviewRunnerSame }");
+    expect(reviewCells).toContain("save({ reviewRunner: e.target.value as ReviewRunnerChoice })");
+    // the recheck's empty choice (follow the review setting) is sent as null: the PATCH refuses ""
+    expect(reviewCells).toContain("save({ recheckRunner: (e.target.value || null) as ReviewRunnerChoice | null })");
     expect(settings.jobsHint.ja).toContain("次の開始・再開から効きます");
   });
 
@@ -171,7 +177,7 @@ describe("SETTINGS_GROUPS", () => {
     const from = body.indexOf("<SettingsCard title={t(settings.jobsCard)}");
     const card = body.slice(from, body.indexOf("</SettingsCard>", from));
     const kindRow = source.slice(source.indexOf("function KindRow("), source.indexOf("\n}\n", source.indexOf("function KindRow(")));
-    for (const src of [card, kindRow]) {
+    for (const src of [card, kindRow, reviewCells]) {
       const selects = [...src.matchAll(/<(ModelSelect|EffortSelect) [\s\S]*?\/>/g)].map((m) => m[0]);
       expect(selects).toHaveLength(2);
       for (const sel of selects) expect(sel).toMatch(/emptyLabel=\{runnerDefaultLabel\("(model|effort)", /);

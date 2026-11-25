@@ -13,10 +13,11 @@ export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures 
       --local は外のビルドを使えるホストでも全手順をこのマシンで回す（既定は外。外のビルドが無ければ指定せずにここで回る）
       --fixtures は録画庫（絶対パス）。仕事の環境に録画庫として渡り（変数の名前はアプリが決める）、録画の不足を失敗にする
       --change は <PR> がアプリが持つ変更（GitHub の PR でないローカルの変更）の番号のとき
-  job request review <PR> [--runner codex|claude [--as fallback|recheck|audit|attack]] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
+  job request review <PR> [--runner codex|claude] [--as fallback|recheck|audit|attack] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
       アプリにレビュー（cross-runner-review の codex exec / claude -p）を仕事として頼む。--prompt を読み --out に書く（どちらも --cwd の中）
       --runner を省くとアプリが設定と Task のランナーから主レビュアーを決める。主レビュアーでないランナーの名指しは断られる。
-      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー。attack は設定が other なら実装したのと別のランナーだけが通る）
+      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー。attack は主レビュアーのランナーで頼み、そのランナーが使用上限ならもう一方で代替する。アプリは上限を確かめず、どちらのランナーも通す）
+      --as recheck は --runner を省くとアプリが設定（再チェックのランナー）から選ぶ。設定と違うランナーの名指しは断られる。ほかの --as は --runner が要る
       --kinds は再チェックの種類（security:docs など。カンマ区切り）で --as recheck のときだけ渡す（無いと種類なしで記録され、どの再チェックの合格にも数えられない）。--change は <PR> がアプリが持つ変更の番号のとき
       アプリは --prompt の指示の後ろに、レビューするランナーの動き方（読み取り専用のサンドボックス / plan モード）の文を足して渡す
       request は仕事の id を job#<id> の 1 行で出し、続けて止まりの記録（アプリが Task に渡す止まりの報告の書式）に書く JSON の例を出す。待たずにそれを書いてターンを終えると、
@@ -36,7 +37,7 @@ export interface JobIo {
   out: (s: string) => void;
   err: (s: string) => void;
 }
-type Job = { id: number; kind: string; taskId: string; pr: number; runner: string | null; status: string; exitCode: number | null };
+type Job = { id: number; kind: string; taskId: string; pr: number; runner: string | null; status: string; exitCode: number | null; model: string | null; effort: string | null };
 
 class Usage extends Error {}
 
@@ -98,7 +99,7 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
         if (fixtures !== undefined || local || recheckKind !== undefined) throw new Usage("review は --fixtures / --local / --kind を取りません");
         if ((runner !== undefined && runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --prompt <file> と --out <file> が要ります（--runner は codex|claude）");
         if (why !== undefined && !["fallback", "recheck", "audit", "attack"].includes(why)) throw new Usage(`--as は fallback / recheck / audit / attack のどれかです: ${why}`);
-        if (why && !runner) throw new Usage("--as（主レビューでない回の理由）は --runner codex|claude と一緒に渡してください");
+        if (why && why !== "recheck" && !runner) throw new Usage("--as（主レビューでない回の理由）は --runner codex|claude と一緒に渡してください（--as recheck は省けばアプリが選ぶ）");
         const kinds = kindsArg === undefined ? [] : kindsArg.split(",").map((k) => k.trim());
         if (kinds.some((k) => !k)) throw new Usage("--kinds は再チェックの種類をカンマ区切りで渡してください");
         if (why !== "recheck" && kindsArg !== undefined) throw new Usage("--kinds は --as recheck のときだけ渡します");
@@ -114,7 +115,8 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       if (args.some((a) => a !== "--json")) throw new Usage(`使い方:\n${JOB_USAGE}`);
       const jobs = (await jobsApi(env, opts.fetch ?? fetch)("GET", "")) as Job[];
       if (asJson) io.out(JSON.stringify(jobs, null, 2));
-      else for (const j of jobs) io.out([`job#${j.id}`, j.kind + (j.runner ? `(${j.runner})` : ""), `PR #${j.pr}`, j.status + (j.exitCode === null ? "" : `(${j.exitCode})`), j.taskId].join("\t"));
+      // a review's runner with the model / effort it ran with ("-": the CLI's own, or not recorded)
+      else for (const j of jobs) io.out([`job#${j.id}`, j.kind + (j.runner ? `(${j.runner}${j.kind === "review" ? ` ${j.model ?? "-"} / ${j.effort ?? "-"}` : ""})` : ""), `PR #${j.pr}`, j.status + (j.exitCode === null ? "" : `(${j.exitCode})`), j.taskId].join("\t"));
       return 0;
     }
     throw new Usage(`job のコマンドではありません: ${sub ?? "(なし)"}\n${JOB_USAGE}`);

@@ -14,6 +14,7 @@ import { heldSettingsOf, type HeldSettings } from "./workspace-settings.ts";
 import { mergeRecords, type MergeRecordJob, type MergeRecords } from "../ops-kit/src/merge-records.ts";
 import { mergeRecordsEnv } from "./merge-records-env.ts";
 import { attackedOf, ciAtTips, ciOf, rechecksOf, reviewedOf } from "./merge-gate-records.ts";
+import { viewpointsOf } from "./review-viewpoints.ts";
 
 export const LARGE_LINES = 300;
 
@@ -50,7 +51,7 @@ export const SECURITY_WORDS = ["auth", "approval", "permission", "permissions", 
  * fixture, or a host file that differs only in comment and blank lines (`commentOnlyChange`; decided before words and
  * host, alone). A file is judged by its path before a rename too, and only when how it changed is known (`fileSecurityKinds`).
  */
-export const SECURITY_KINDS = ["security:docs", "security:tests", "security:words", "security:lockfile", "security:github", "security:gates", "security:host"] as const;
+export const SECURITY_KINDS = ["security:docs", "security:tests", "security:words", "security:lockfile", "security:github", "security:gates", "security:gate-support", "security:host"] as const;
 export type SecurityKind = (typeof SECURITY_KINDS)[number];
 const glob = (ps: string[]) => ps.map((p) => new Bun.Glob(p));
 /** Secrets files: in the words group (they hold the secrets the words name). */
@@ -59,8 +60,10 @@ export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "se
   "security:lockfile": glob(["**/{bun.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,go.sum,Cargo.lock}", "**/requirements*.txt"]),
   "security:github": glob([".github/**"]),
   // the gate and local CI decide merges like CI does, local-merge makes them and forge-resync pushes the sync branch that becomes a PR:
-  // a small change to them is still the user's to approve
+  // a small change to them is still the user's to approve. The lines that decide stay in gates; the files that support
+  // them (notes, records, the outside build, the --report of a local change) are gate-support, read by a recheck
   "security:gates": glob(["scripts/merge-gate.ts", "scripts/merge-gate-limits.ts", "scripts/merge-gate-rules.ts", "ops-kit/reversibility.json", "scripts/local-ci.ts", "scripts/local-merge.ts", "scripts/forge-resync.ts"]),
+  "security:gate-support": glob(["scripts/local-ci-notes.ts", "scripts/local-ci-records.ts", "scripts/local-ci-offload.ts", "scripts/forge-resync-report.ts"]),
   // Switchboard's own (a --repo without aws/host never meets it): the cloud host runs main's host scripts as root at
   // every start (sb-host-update)
   "security:host": glob(["aws/host/**"]),
@@ -87,9 +90,9 @@ const DESIGN_RULES = "README.md の ## Design rules";
  * irreversible. Recheck: a passing recheck job of the app at the head (or the same diff) lifts it, per kind (size: line count and the other
  * protected paths; responsibility: ops.config.json; migration: MIGRATION; rescue: RESCUE, the rollback itself;
  * design-rules: README.md's Design rules; security:docs, security:tests and security:lockfile: the security groups the
- * owner moved to a recheck, docs/design/merge-gate.md).
+ * owner moved to a recheck; security:gate-support: the files that support the gates, docs/design/merge-gate.md).
  */
-export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules" | "security:docs" | "security:tests" | "security:lockfile";
+export type RecheckKind = "size" | "responsibility" | "migration" | "rescue" | "design-rules" | "security:docs" | "security:tests" | "security:lockfile" | "security:gate-support";
 export type AskKind = SecurityKind | "instructions" | "limits";
 /** The words of the record marks, in this order: who lifted which kind of a large PR. */
 export const MERGE_KINDS = [...SECURITY_KINDS, "rescue", "design-rules", "size", "instructions", "responsibility", "migration", "limits"] as const;
@@ -270,7 +273,7 @@ export function fileSecurityKinds(x: PrFacts["files"][number]): SecurityKind[] {
   return hard.length > 0 ? hard : all;
 }
 
-const ATTACK_KINDS: SecurityKind[] = ["security:words", "security:lockfile", "security:github", "security:gates", "security:host"];
+const ATTACK_KINDS: SecurityKind[] = ["security:words", "security:lockfile", "security:github", "security:gates", "security:gate-support", "security:host"];
 
 /**
  * The changed files that need an attacking review: those in a security group other than documents and tests (a file is
@@ -586,6 +589,14 @@ export function scopeMaterial(f: PrFacts): string {
     ...(s.along.length ? ["", `付いてくるファイル（名指しは要らない）: ${s.along.join(", ")}`] : []),
     "",
   ].join("\n");
+}
+
+/**
+ * The material the main review gets of the viewpoints the PR asks for: the text of each recheck kind a reader decides
+ * (`scripts/review-viewpoints.ts`) among the kinds the judgement requires, those already rechecked too. Empty when none.
+ */
+export function viewpointsMaterial(f: PrFacts): string {
+  return viewpointsOf(judge(f, { allowLarge: false }).required ?? []);
 }
 
 /** --allow-large lifts the large reasons only with the app's record of the person's grant of the head (`PrFacts.granted`); no comment is read. */
@@ -1407,7 +1418,7 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   await run(["stack", "merge", String(n), "--rebase", "-y"], marked);
 }
 
-const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)";
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)\n       bun scripts/merge-gate.ts <PR> --viewpoints | --change <n> --viewpoints   (the review material of the viewpoints the PR asks for; no judgement)";
 
 /**
  * What a run as the app's job leaves for its record: `$J/result.json` (the judged head and the verdict's parts), which the daemon reads when
@@ -1465,9 +1476,10 @@ export async function requestGate(args: string[], env: Record<string, string | u
   const repo = value("--repo");
   const allowLarge = take("--allow-large");
   const scope = take("--scope");
+  const viewpoints = take("--viewpoints");
   const modes = (["merge", "merge-stack", "merge-sync"] as const).filter((m) => take(`--${m}`));
   const number = change !== undefined ? change : rest[0];
-  if ((change !== undefined ? rest.length > 0 : rest.length !== 1) || !/^\d+$/.test(number ?? "") || Number(number) < 1 || modes.length > 1 || (repo !== undefined && !/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(repo))) {
+  if ((change !== undefined ? rest.length > 0 : rest.length !== 1) || !/^\d+$/.test(number ?? "") || Number(number) < 1 || modes.length > 1 || (viewpoints && modes.length > 0) || (repo !== undefined && !/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(repo))) {
     err(USAGE);
     return 2;
   }
@@ -1479,7 +1491,7 @@ export async function requestGate(args: string[], env: Record<string, string | u
   const origin = new URL(env.BACKLOG_URL).origin;
   const wait = Number(env.SWITCHBOARD_GATE_WAIT_MS) > 0 ? Number(env.SWITCHBOARD_GATE_WAIT_MS) : 600_000;
   const every = Number(env.SWITCHBOARD_GATE_POLL_MS) > 0 ? Number(env.SWITCHBOARD_GATE_POLL_MS) : 2_000;
-  const body = { kind: "gate", taskId, cwd, pr: Number(number), ...(change !== undefined ? { change: true } : {}), ...(repo !== undefined ? { repo } : {}), ...(allowLarge ? { allowLarge } : {}), ...(modes[0] ? { merge: modes[0] } : {}), ...(scope ? { scope } : {}) };
+  const body = { kind: "gate", taskId, cwd, pr: Number(number), ...(change !== undefined ? { change: true } : {}), ...(repo !== undefined ? { repo } : {}), ...(allowLarge ? { allowLarge } : {}), ...(modes[0] ? { merge: modes[0] } : {}), ...(scope ? { scope } : {}), ...(viewpoints ? { viewpoints } : {}) };
   type Polled = { job: { id: number; status: string; exitCode: number | null; summary: string | null; result?: { gate?: { head: string | null } } | null }; out: string | null };
   const call = async (method: "GET" | "POST", path: string, payload?: unknown): Promise<unknown> => {
     const r = await f(`${origin}${path}`, { method, headers: { authorization: `Bearer ${readFileSync(env.BACKLOG_TOKEN_FILE!, "utf8").trim()}`, ...(payload === undefined ? {} : { "content-type": "application/json" }) }, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }), signal: AbortSignal.timeout(30_000) });
@@ -1573,6 +1585,10 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
     log(scopeMaterial(facts));
     return 0;
   }
+  if (args.includes("--viewpoints")) {
+    log(viewpointsMaterial(facts));
+    return 0;
+  }
   const allowLarge = args.includes("--allow-large");
   const j = judge(facts, { allowLarge });
   const mode = modes[0];
@@ -1635,7 +1651,7 @@ export async function main(args: string[], run: Run = gh, log = console.log, err
 async function changeMain(args: string[], at: number, log: (s: string) => void, err: (s: string) => void, cwd: string, backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> }): Promise<number> {
   const value = args[at + 1] ?? "";
   const rest = args.filter((_, i) => i !== at && i !== at + 1);
-  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--allow-large" && a !== "--scope")) {
+  if (!/^\d+$/.test(value) || rest.some((a) => a !== "--allow-large" && a !== "--scope" && a !== "--viewpoints")) {
     err(USAGE);
     return 2;
   }
@@ -1652,6 +1668,10 @@ async function changeMain(args: string[], at: number, log: (s: string) => void, 
   }
   if (args.includes("--scope")) {
     log(scopeMaterial(facts));
+    return 0;
+  }
+  if (args.includes("--viewpoints")) {
+    log(viewpointsMaterial(facts));
     return 0;
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });
@@ -1675,6 +1695,10 @@ async function gitlabMain(n: number, target: ForgeTarget, args: string[], modes:
   }
   if (args.includes("--scope")) {
     log(scopeMaterial(facts));
+    return 0;
+  }
+  if (args.includes("--viewpoints")) {
+    log(viewpointsMaterial(facts));
     return 0;
   }
   const j = judge(facts, { allowLarge: args.includes("--allow-large") });

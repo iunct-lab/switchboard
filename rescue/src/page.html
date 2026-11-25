@@ -102,7 +102,7 @@ const $ = (id) => document.getElementById(id);
 const token = new URLSearchParams(location.search).get("token");
 const headers = { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) };
 const short = (sha) => (sha ? sha.slice(0, 7) : "なし");
-const ACTIONS = { install: "最初の版", promote: "昇格した", rejected: "昇格を却下", "auto-rollback": "自動で戻した", rollback: "戻した", restart: "再起動", "restore-db": "DB を戻した", "promote-web": "画面と既定の設定だけ（再起動なし）" };
+const ACTIONS = { install: "最初の版", promote: "昇格した", rejected: "昇格を却下", "auto-rollback": "自動で戻した", rollback: "戻した", restart: "再起動", "restore-db": "DB を戻した", "promote-web": "昇格した（再起動なし）" };
 let subjects = {};
 let tags = {};
 /** Why this page's last action failed: shown over the 2 s refresh, before the service's (older) lastError, until the next action. */
@@ -133,8 +133,8 @@ function render(s) {
   $("state").className = "state " + (up ? "ok" : "bad");
   $("current").textContent = name(s.current);
   $("core-row").hidden = !s.running || s.running === s.current;
-  // the two differ after a promotion without a restart: the current version is then only what the Web UI and the defaults come from
-  $("current-label").textContent = $("core-row").hidden ? "今の版" : "Web UI と既定の設定";
+  // the two differ after a promotion without a restart: the current version then went in without one, and the core line is what runs
+  $("current-label").textContent = $("core-row").hidden ? "今の版" : "再起動なしで入った版";
   $("running").textContent = name(s.running);
   $("previous").textContent = name(s.previous);
   $("busy").textContent = s.busy ? "実行中: " + s.busy + "…" : "";

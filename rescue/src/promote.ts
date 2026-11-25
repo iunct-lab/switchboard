@@ -11,7 +11,7 @@ import { basename, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip, constants } from "node:zlib";
 import { extractTarball, fetchTarball, shaOfTag } from "./github-release.ts";
-import { appendHistory, buildFromTree, buildRelease, currentOf, previousOf, pruneReleases, releasesDir, restartNeeded, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
+import { appendHistory, buildFromTree, buildRelease, currentOf, daemonReadsOf, previousOf, pruneReleases, releasesDir, restartNeeded, restoreLinks, switchTo, type HistoryEntry } from "./releases.ts";
 import type { Supervisor } from "./supervisor.ts";
 
 export interface Ctx {
@@ -84,6 +84,8 @@ export interface PromoteTimes {
   settleMs?: number;
   /** A switch without a restart: the daemon must report the new release in `/api/health` within this after SIGHUP. */
   webMs?: number;
+  /** How long the running release may take to say what its daemon reads (`daemonReadsOf`); past it, the switch is a restart. */
+  readsMs?: number;
 }
 
 /** Older states come back from Litestream (point in time) or the daily archive in S3 (docs/design/releases-and-rescue.md, Promotion). */
@@ -285,10 +287,19 @@ export async function webReleaseOf(port: number, home: string): Promise<string |
   }
 }
 
-/** Can the running daemon take `sha` by reading it again (SIGHUP) instead of restarting? The difference stays in the Web UI and the default settings, and the daemon says which release it serves. */
-export async function switchesWithoutRestart(ctx: Ctx, sha: string): Promise<boolean> {
-  if (await restartNeeded(ctx.repo, ctx.sup.running, sha)) return false;
-  return (await webReleaseOf(ctx.port, ctx.home)) !== null;
+/**
+ * Can the running daemon take `sha` by reading it again (SIGHUP) instead of restarting? Every file that differs from the
+ * release it started from is in the Web UI or the default settings, or is one it does not read (asked of that release,
+ * not of the candidate: a candidate cannot declare itself unread), and the daemon says which release it serves.
+ * `files` are the files that need the restart (as `restartNeeded`); empty when the difference needs none and only the
+ * daemon's missing web release says no, or when there was nothing to compare.
+ */
+export async function switchesWithoutRestart(ctx: Ctx, sha: string, readsMs = 10_000): Promise<{ ok: boolean; files: string[] }> {
+  const running = ctx.sup.running;
+  const reads = running ? await daemonReadsOf(join(releasesDir(ctx.home), running), readsMs) : null;
+  const { restart, files } = await restartNeeded(ctx.repo, running, sha, reads);
+  if (restart) return { ok: false, files };
+  return { ok: (await webReleaseOf(ctx.port, ctx.home)) !== null, files: [] };
 }
 
 async function freePort(): Promise<number> {
@@ -426,13 +437,13 @@ async function buildFromSource(source: string, tag: string, home: string, expect
  * it) is the daemon started again, on the older release.
  */
 export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string, ifNoRestart = false, held?: HeavyHold): Promise<HistoryEntry> {
-  const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000, webMs = 10_000 } = times;
+  const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000, webMs = 10_000, readsMs = 10_000 } = times;
   const from = currentOf(ctx.home);
   const before = previousOf(ctx.home);
   const slot = ifNoRestart ? (held ?? (await holdHeavy(ctx.heavy, times.heavyWaitMs ?? 15_000))) : null;
   if (slot && "busy" in slot) throw new Error(`no heavy-process slot for a build under running tasks (${slot.busy}); nothing was built`);
   try {
-    return await promoteHeld(ctx, rev, { candidateMs, confirmMs, settleMs, webMs }, expectSha, ifNoRestart, from, before, slot);
+    return await promoteHeld(ctx, rev, { candidateMs, confirmMs, settleMs, webMs, readsMs }, expectSha, ifNoRestart, from, before, slot);
   } finally {
     await slot?.release();
   }
@@ -440,7 +451,7 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, e
 
 /** `promote` once its heavy-process slot is held (`slot`; null = a promotion that takes none): the slot is given back as soon as the candidate has been checked. */
 async function promoteHeld(ctx: Ctx, rev: string, times: Required<Omit<PromoteTimes, "heavyWaitMs">>, expectSha: string | undefined, ifNoRestart: boolean, from: string | null, before: string | null, slot: HeavyHold | null): Promise<HistoryEntry> {
-  const { candidateMs, confirmMs, settleMs, webMs } = times;
+  const { candidateMs, confirmMs, settleMs, webMs, readsMs } = times;
   let sha: string;
   try {
     sha = ctx.source ? await buildFromSource(ctx.source, rev, ctx.home, expectSha) : await buildRelease(ctx.repo, rev, ctx.home);
@@ -466,10 +477,10 @@ async function promoteHeld(ctx: Ctx, rev: string, times: Required<Omit<PromoteTi
   if (refused) return appendHistory(ctx.home, { action: "rejected", from, to: sha, ok: false, reason: refused });
   // the heavy part is over: the reload and its checks are the running daemon's own work
   await slot?.release();
-  const quiet = from !== null && (await switchesWithoutRestart(ctx, sha));
+  const quiet = from !== null && (await switchesWithoutRestart(ctx, sha, readsMs)).ok;
   if (!quiet && ifNoRestart) throw new Error(`${sha.slice(0, 7)} needs a restart now; asked without one, so nothing was switched`);
   if (quiet && from) {
-    // Only the Web UI and the default settings differ from what the daemon started from: it reads them again, and keeps its tasks.
+    // What differs from what the daemon started from is the Web UI and the default settings, which it reads again, or files it does not read: it keeps its tasks.
     switchTo(ctx.home, sha);
     const pid = ctx.sup.pid;
     const reloaded = ctx.sup.reload();
@@ -480,7 +491,7 @@ async function promoteHeld(ctx: Ctx, rev: string, times: Required<Omit<PromoteTi
     }
     // Asked without a restart: the tasks that run are not this promotion's to stop, whatever went wrong with the reload.
     // The links go back and the same process reads the older release again; it is not restarted when that cannot be
-    // confirmed either (what differs is the Web UI and the default settings: the person can restart from the rescue page).
+    // confirmed either (what differs is the Web UI, the default settings or files the daemon does not read: the person can restart from the rescue page).
     if (ifNoRestart && ctx.sup.pid === pid && ctx.sup.state === "running") {
       restoreLinks(ctx.home, from, before);
       ctx.sup.reload();

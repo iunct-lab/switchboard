@@ -3,6 +3,7 @@
 import { SizeClass } from "@switchboard/protocol";
 import type { LoadKind, Journey, PerfSample, PerfSummaryRow } from "@switchboard/protocol";
 import { CheckRunQueries } from "./check-runs.ts";
+import type { PromotionDecision, PromotionDecisionKind } from "@switchboard/protocol";
 
 /** How long the everyday journey timings are kept: older rows go when new ones are saved. */
 const PERF_KEEP_MS = 30 * 24 * 3600 * 1000;
@@ -10,6 +11,10 @@ const PERF_KEEP_MS = 30 * 24 * 3600 * 1000;
 const PERF_PERIOD_MS = 7 * 24 * 3600 * 1000;
 const OPS_LOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
 const API_REQUESTS_KEEP_MS = 7 * 24 * 3600 * 1000;
+/** How long the automatic promotion's decisions are kept: the longest period `/api/ops/stops` reads. */
+const PROMOTION_KEEP_MS = 90 * 24 * 3600 * 1000;
+/** A row of promotion_decisions: one version's decision of one kind, with how often it was made. */
+export type PromotionDecisionRow = PromotionDecision;
 /** A row of api_requests. `bytes` = the response's content-length, null when it has none. */
 export type ApiRequestRow = { ts: number; method: string; route: string; status: number; ms: number; bytes: number | null };
 /** A row of ops_load: the unit's cgroup at one minute; `top` is the JSON of the 10 largest processes. */
@@ -18,6 +23,24 @@ export type OpsLoadGroupRow = { taskId: string | null; owner: "task" | "daemon" 
 
 /** The measurements kept for the operator: load, API requests, journey timings. One link of the chain of classes that ends in `Db` (db.ts): the methods are reached as `db.<method>()`. */
 export class OpsQueries extends CheckRunQueries {
+  /** One decision of the automatic promotion: the same version and kind advance `last_at` and `times` instead of adding a row; rows past 90 days go, in one transaction. */
+  recordPromotionDecision(d: { sha: string; tag: string; kind: PromotionDecisionKind; tasks: number; reason: string; files: string[]; fileCount: number }, now = Date.now()) {
+    this.sqlite.transaction(() => {
+      this.sqlite
+        .query(
+          "INSERT INTO promotion_decisions (sha, kind, tag, first_at, last_at, times, tasks, reason, files, file_count) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?) ON CONFLICT(sha, kind) DO UPDATE SET last_at = excluded.last_at, times = times + 1, tag = excluded.tag, tasks = excluded.tasks, reason = excluded.reason, files = excluded.files, file_count = excluded.file_count",
+        )
+        .run(d.sha, d.kind, d.tag, now, now, d.tasks, d.reason, JSON.stringify(d.files), d.fileCount);
+      this.sqlite.query("DELETE FROM promotion_decisions WHERE last_at < ?").run(now - PROMOTION_KEEP_MS);
+    })();
+  }
+
+  /** The promotion decisions last made at or after `since`, the newest first. */
+  promotionDecisions(since: number): PromotionDecisionRow[] {
+    const rows = this.sqlite.query("SELECT * FROM promotion_decisions WHERE last_at >= ? ORDER BY last_at DESC, first_at DESC").all(since) as Array<{ sha: string; kind: PromotionDecisionKind; tag: string; first_at: number; last_at: number; times: number; tasks: number; reason: string; files: string; file_count: number }>;
+    return rows.map((r) => ({ sha: r.sha, kind: r.kind, tag: r.tag, firstAt: r.first_at, lastAt: r.last_at, times: r.times, tasks: r.tasks, reason: r.reason, files: JSON.parse(r.files) as string[], fileCount: r.file_count }));
+  }
+
   /** One minute of the host's load and its groups, dropping both tables' rows older than 7 days, in one transaction. */
   insertOpsLoad(row: OpsLoadRow, groups: OpsLoadGroupRow[], now = Date.now()) {
     const group = this.sqlite.query("INSERT INTO ops_load_groups (ts, task_id, owner, kind, rss, cpu_ms, procs) VALUES (?, ?, ?, ?, ?, ?, ?)");

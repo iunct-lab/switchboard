@@ -1,5 +1,5 @@
 /**
- * The instruction of the attacking-side review: a runner other than the implementer reads the diff for the checks that are
+ * The instruction of the attacking-side review: another session (by the review setting's runner, or the other runner at its usage limit) reads the diff for the checks that are
  * missing at the entries it changed. One place, printed by `ops-kit review-attack prompt`, so the cross-runner-review skill
  * does not carry a copy. It asks for where a check is missing and what already guards it, never for how to get past it.
  */

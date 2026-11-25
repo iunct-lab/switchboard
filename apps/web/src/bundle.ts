@@ -1,22 +1,26 @@
-import type { BundleHold } from "@switchboard/protocol";
+import type { BacklogItem, BundleHold } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { bundle as m } from "./i18n/bundle.ts";
 import { jstClock } from "./time.ts";
 
-/** The PBI numbers in what was typed: commas, spaces and a leading `#` allowed; each once, in the order typed; anything that is not a positive integer is dropped. */
-export function parsePbiNumbers(text: string): number[] {
-  const out: number[] = [];
-  for (const word of text.split(/[\s,、]+/)) {
-    const w = word.replace(/^#/, "");
-    if (!/^\d+$/.test(w)) continue;
-    const n = Number(w);
-    if (n > 0 && !out.includes(n)) out.push(n);
-  }
-  return out;
-}
+/** Whether a bundle can start, with the PBI numbers in the order chosen, or why not (empty = nothing to say yet). */
+export type BundleGate = { ok: true; pbis: number[] } | { ok: false; reason: string };
 
-/** A bundle can be started with two or more PBIs and no hold standing (one bundle at a time). */
-export const canStartBundle = (nums: number[], hold: BundleHold | null): boolean => nums.length >= 2 && hold === null;
+/**
+ * Whether the selected rows can start a bundle, and why not when they cannot. The API reads the numbers in the
+ * Switchboard workspace only, so the rows are judged by `workspaceId` (a number alone would start the bundle on a
+ * different PBI of the same number): a hold standing, a row of another workspace, or fewer than two rows says no.
+ * `metaId` null = the workspace list is not read yet, `hold` undefined = the hold is not read yet (unknown is not
+ * "none"): no, with no reason to show.
+ */
+export function bundleGate(selected: BacklogItem[], metaId: string | null, hold: BundleHold | null | undefined): BundleGate {
+  if (metaId === null || hold === undefined) return { ok: false, reason: "" };
+  if (hold) return { ok: false, reason: t(m.gateHeld) };
+  const other = selected.find((i) => i.workspaceId !== metaId);
+  if (other) return { ok: false, reason: t(m.gateOther, { workspace: other.workspaceName, n: other.number }) };
+  if (selected.length < 2) return { ok: false, reason: t(m.gateOne) };
+  return { ok: true, pbis: selected.map((i) => i.number) };
+}
 
 /** A hold whose record the daemon could not read: it still holds, but has no Task, time or version to show (`since` 0). */
 export const unreadableHold = (hold: BundleHold): boolean => hold.since === 0;

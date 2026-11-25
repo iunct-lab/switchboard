@@ -219,4 +219,5 @@ export const common = msgs({
   resJobPass: { ja: "成功", en: "Passed" },
   resJobFail: { ja: "失敗（終了コード {code}）", en: "Failed (exit {code})" },
   resJobAborted: { ja: "中断", en: "Aborted" },
+  resJobCliDefault: { ja: "CLI の既定", en: "CLI default" },
 });

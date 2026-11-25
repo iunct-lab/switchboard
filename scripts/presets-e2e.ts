@@ -1,7 +1,7 @@
 /**
  * Run after `bun run --cwd apps/web build`: bun scripts/presets-e2e.ts. Requires Chrome (CHROME_BIN overrides).
  * 定型の指示 end to end on a daemon with a fake runner and a fake gh: saved, listed and
- * edited in 設定, kept over a reload, put into the request box with a target and started with one 開始, refused when
+ * edited in 設定, kept over a reload, put into the request box with a target and started with one 今すぐ始める, refused when
  * the target is empty / 自動 / another repository / the Workspace changed, put into a reply, and deleted. The Task it
  * starts still stops on the runner's write approval with 許可 / 拒否 (a preset is not a standing permission).
  * The call is the box itself: the cursor in the request / reply box lays the 3 most sent presets over it, typing narrows them,
@@ -194,7 +194,7 @@ try {
   assert(otherRepo.includes(`other/repo#3 は Workspace dev のリポジトリ ${REPO} ではありません`), `another repository: ${otherRepo}`);
   assert((await evaluate(`document.querySelector('.compose textarea').value`)) === "", "the request box stays empty on a refusal");
 
-  // 3. 新規依頼 (acceptance 2): the target swapped into the text, the title named after it, one 開始
+  // 3. 新規依頼 (acceptance 2): the target swapped into the text, the title named after it, one 今すぐ始める
   await page(`set(document.querySelector('.preset-target input'), '#12')`);
   await sleep();
   await press("Enter");
@@ -205,15 +205,15 @@ try {
   assert(chosenMode === "default", `the request box's approval mode stays as chosen: ${chosenMode}`);
   await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsOther.id)})`);
   await sleep();
-  const stale = await page(`return ({ start: button(document.querySelector('.compose'), '開始').disabled, warn: document.querySelector('.compose > .warn')?.textContent ?? null })`);
+  const stale = await page(`return ({ start: button(document.querySelector('.compose'), '今すぐ始める').disabled, warn: document.querySelector('.compose > .warn')?.textContent ?? null })`);
   assert(stale.start && stale.warn?.includes("入れ直して"), `changed Workspace: ${JSON.stringify(stale)}`);
   assert((await tasks()).length === before, "nothing was sent by the refusals");
   await page(`set(document.querySelector('.compose select'), ${JSON.stringify(wsDev.id)})`);
   await sleep();
   await shot("home-1280.png");
-  await page(`button(document.querySelector('.compose'), '開始').click()`);
+  await page(`button(document.querySelector('.compose'), '今すぐ始める').click()`);
   const task = await until(async () => (await tasks()).find((t) => t.title === box.title), "the Task");
-  assert((await tasks()).length === before + 1, "one 開始 made one Task");
+  assert((await tasks()).length === before + 1, "one 今すぐ始める made one Task");
   await until(() => received.length >= 1, "the runner's first prompt");
   assert(received[0] === box.text, `the runner got the request box's text: ${received[0]}`);
 

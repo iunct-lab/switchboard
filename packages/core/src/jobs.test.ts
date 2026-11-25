@@ -1,15 +1,18 @@
 // test-reads: scripts/merge-gate.ts
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Job, JobRequest, Task } from "@switchboard/protocol";
+import { Settings, type Job, type JobRequest, type RunnerId, type Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { mergeRecordsOf } from "./merge-records.ts";
-import { DAEMON_MERGE_GATE, spawnCollectPending, jobCommand, JobError, reviewResult, auditResult, JOBS_KEEP_MS, type JobDeps, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { DAEMON_MERGE_GATE, deliverReview, spawnCollectPending, jobCommand, JobError, reviewResult, auditResult, JOBS_KEEP_MS, type JobDeps, type ResolvedJobRequest, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { fakeAdapter } from "./api-test-harness.ts";
 import { startServer } from "./server.ts";
+import { runnerChoice } from "./server/routing.ts";
+import { setupJobs } from "./server/setup.ts";
 import { workspaceConfigFile, writeWorkspaceConfigs } from "./workspace-config.ts";
 
 // Jobs a Task asks the daemon to run: the daemon's child, not the Task's; its end is recorded once.
@@ -36,8 +39,10 @@ beforeAll(() => {
   sh(repo, "git", "init", "-q");
   sh(repo, "git", "remote", "add", "origin", ORIGIN);
   sh(repo, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+  // the Task works in a worktree of its own; `repo` stands for a review's separate checkout (a reviewer may write there)
+  sh(repo, "git", "worktree", "add", "-q", "--detach", join(root, "task"));
   db = new Db(join(root, "db.sqlite"));
-  db.insertTask(mkTask("t1", repo));
+  db.insertTask(mkTask("t1", join(root, "task")));
 });
 afterAll(() => {
   db.close();
@@ -48,7 +53,7 @@ afterAll(() => {
 function fake(script: string) {
   let done!: (j: Job) => void;
   const ended = new Promise<Job>((r) => (done = r));
-  const deps: JobDeps = { db, dir: join(root, "jobs"), env: { ...process.env, SWITCHBOARD_TASK_ID: "t1", SWITCHBOARD_SUPERVISED: "1" }, command: () => ({ argv: ["sh", "-c", script], tail: "" }), onFinish: done, pollMs: 50 };
+  const deps: JobDeps = { db, dir: join(root, "jobs"), env: { ...process.env, SWITCHBOARD_TASK_ID: "t1", SWITCHBOARD_SUPERVISED: "1" }, command: () => ({ argv: ["sh", "-c", script], tail: "" }), onFinish: done, pollMs: 50, claudeSandbox: () => true };
   return { deps, ended };
 }
 const local = (cwd = repo): Extract<JobRequest, { kind: "local-ci" }> => ({ kind: "local-ci", taskId: "t1", pr: 12, cwd });
@@ -111,6 +116,7 @@ describe("jobs", () => {
     expect(jobCommand({ ...gate(), cwd: repo })).toEqual({ argv: ["bun", "--no-env-file", DAEMON_MERGE_GATE, "7", "--cwd", repo], tail: ' > "$J/out"' });
     expect(jobCommand({ ...gate({ repo: "acme/lib", allowLarge: true, merge: "merge-stack" }), cwd: repo }).argv).toEqual(["bun", "--no-env-file", DAEMON_MERGE_GATE, "7", "--repo", "acme/lib", "--allow-large", "--merge-stack", "--cwd", repo]);
     expect(jobCommand({ ...gate({ change: true, scope: true }), cwd: repo }).argv).toEqual(["bun", "--no-env-file", DAEMON_MERGE_GATE, "--change", "7", "--scope", "--cwd", repo]);
+    expect(jobCommand({ ...gate({ viewpoints: true }), cwd: repo }).argv).toEqual(["bun", "--no-env-file", DAEMON_MERGE_GATE, "7", "--viewpoints", "--cwd", repo]);
 
     // a run in the job's environment: the daemon's own place for its records, nothing of the Task's or of the shell's that reaches the front of gh
     const run = async (script: string, req = gate(), env: Record<string, string> = {}) => {
@@ -489,7 +495,7 @@ describe("jobs", () => {
     const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "out-fail.md" });
     await ended;
     expect(db.getJob(job.id)).toMatchObject({ status: "fail", result: null });
-    const recheck = (kinds?: string[]) => requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", as: "recheck", kinds, cwd: repo, promptFile: "prompt.md", outFile: "out-r.md" });
+    const recheck = (kinds?: string[]) => requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", as: "recheck", kinds, cwd: repo, promptFile: "prompt.md", outFile: "out-r.md" });
     expect(recheck()).toMatchObject({ as: "recheck", kinds: [] });
     expect(recheck(["size"])).toMatchObject({ as: "recheck", kinds: ["size"] });
     expect(() => recheck(["no-such-kind"])).toThrow("知らない種類");
@@ -505,6 +511,12 @@ describe("jobs", () => {
       if (origin) sh(dir, "git", "remote", "add", "origin", origin);
       return dir;
     };
+    const reviewTree = (dir: string) => {
+      const tree = `${dir}-review`;
+      sh(dir, "git", "worktree", "add", "-q", "--detach", tree);
+      writeFileSync(join(tree, "prompt.md"), "review");
+      return tree;
+    };
     const [metaDir, libDir, freeDir] = [mk("chg-meta", "https://github.com/acme/switchboard.git"), mk("chg-lib", "git@github.com:acme/lib.git"), mk("chg-free", "https://github.com/acme/free.git")];
     const db3 = new Db(join(root, "db3.sqlite"));
     try {
@@ -516,8 +528,8 @@ describe("jobs", () => {
       const ci = requestJob(deps, { kind: "local-ci", taskId: "c-meta", pr: 7, cwd: metaDir, change: true });
       expect(ci.repo).toBe(`local:${metaWs.id}`);
       expect(jobCommand(got.at(-1)!).argv).toEqual(["bun", "scripts/local-ci.ts", "--change", "7"]);
-      writeFileSync(join(metaDir, "prompt.md"), "review");
-      const review = requestJob(deps, { kind: "review", taskId: "c-meta", pr: 7, runner: "codex", cwd: metaDir, promptFile: "prompt.md", outFile: "out.md", change: true });
+      // a review reads a worktree of its own, not the workspace's checkout (the reviewer may write in it)
+      const review = requestJob(deps, { kind: "review", taskId: "c-meta", pr: 7, runner: "codex", cwd: reviewTree(metaDir), promptFile: "prompt.md", outFile: "out.md", change: true });
       expect(review.repo).toBe(`local:${metaWs.id}`);
       const refused = (req: JobRequest) => {
         try {
@@ -535,8 +547,7 @@ describe("jobs", () => {
       expect(jobCommand(got.at(-1)!).argv).toEqual(["bun", join(metaDir, "scripts/local-ci.ts"), "--change", "7"]);
       expect(got.at(-1)!.cwd).toBe(libDir);
       // a review of a change in a checkout no workspace owns has no repository to record
-      writeFileSync(join(freeDir, "prompt.md"), "review");
-      const free = refused({ kind: "review", taskId: "c-free", pr: 7, runner: "codex", cwd: freeDir, promptFile: "prompt.md", outFile: "out.md", change: true });
+      const free = refused({ kind: "review", taskId: "c-free", pr: 7, runner: "codex", cwd: reviewTree(freeDir), promptFile: "prompt.md", outFile: "out.md", change: true });
       expect([free.status, free.message]).toEqual([400, expect.stringContaining("workspace")]);
     } finally {
       db3.close();
@@ -562,7 +573,7 @@ describe("jobs", () => {
     symlinkSync(join(root, "victim.md"), join(repo, "link.md"));
     expect(review("link.md")).toThrow("inside cwd");
     expect(review("_review/missing-dir/out.md")).toThrow("inside cwd");
-    const codex = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
+    const codex = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" });
     expect(codex.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]); // no slot, only the memory floor
     expect(codex.argv).toContain("/o.md");
     expect(codex.argv).toContain("--json"); // its events are what the usage is read from
@@ -575,14 +586,14 @@ describe("jobs", () => {
     expect(tailRun.stdout.toString()).toBe("codex: usage limit\n");
     expect(readFileSync(join(j, "codex.jsonl"), "utf8")).toContain("thread.started");
     rmSync(j, { recursive: true, force: true });
-    const claude = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" });
+    const claude = jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" });
     expect(claude.argv).toContain("stream-json");
     expect(claude.tail).toContain('> "$JOB_OUT"');
     expect(claude.argv.slice(0, 3)).toEqual(["ops-kit", "heavy", "--memory-only"]);
     expect(jobCommand({ kind: "local-ci", taskId: "t1", pr: 12, cwd: repo, local: true }).argv).toEqual(["bun", "scripts/local-ci.ts", "12", "--local"]);
     expect(jobCommand(local()).argv).toEqual(["bun", "scripts/local-ci.ts", "12"]); // local CI takes its own slot: no --memory-only
     // a saved model / effort go to the CLI; empty ones leave the CLI's own
-    const argvOf = (runner: "claude" | "codex", choice?: { model?: string; effort?: string }) => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 900, choice).argv;
+    const argvOf = (runner: "claude" | "codex", choice?: { model?: string; effort?: string }) => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" }, 900, choice).argv;
     expect(argvOf("claude", { model: "m1", effort: "high" })).toEqual(expect.arrayContaining(["--model", "m1", "--effort", "high"]));
     expect(argvOf("codex", { model: "m2", effort: "low" })).toEqual(expect.arrayContaining(["-m", "m2", "-c", 'model_reasoning_effort="low"']));
     expect(argvOf("codex", { model: "m2", effort: "low" }).at(-1)).toBe("-"); // stdin stays last
@@ -594,20 +605,309 @@ describe("jobs", () => {
     }
     expect(codex.argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "900"]);
     // the host may need longer (SWITCHBOARD_JOB_REVIEW_IDLE_S)
-    expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md" }, 1800).argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
+    expect(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" }, 1800).argv.slice(6, 10)).toEqual(["ops-kit", "idle-run", "--idle", "1800"]);
+  });
+
+  test("a review's checkout is neither the Task's own folder, a registered workspace's checkout nor another live Task's folder, nor a folder in them, by their real paths", () => {
+    const dir = join(root, "own");
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    sh(dir, "git", "init", "-q");
+    sh(dir, "git", "remote", "add", "origin", ORIGIN);
+    sh(dir, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+    const ws = join(root, "own-ws");
+    sh(dir, "git", "worktree", "add", "-q", "--detach", ws);
+    mkdirSync(join(ws, "deep"));
+    symlinkSync(dir, join(root, "own-link"));
+    const db6 = new Db(join(root, "db6.sqlite"));
+    try {
+      db6.insertTask(mkTask("t-own", dir));
+      db6.upsertWorkspace({ name: "own", path: ws, kind: "repo" });
+      const deps = { ...fake("true").deps, db: db6 };
+      const ask = (cwd: string) => {
+        writeFileSync(join(cwd, "prompt.md"), "review");
+        return () => requestJob(deps, { kind: "review", taskId: "t-own", pr: 12, runner: "codex", cwd, promptFile: "prompt.md", outFile: "out.md" });
+      };
+      for (const cwd of [dir, join(dir, "sub"), join(root, "own-link"), ws, join(ws, "deep")]) {
+        expect(ask(cwd)).toThrow("--cwd");
+        expect(existsSync(join(cwd, "_review"))).toBe(false);
+      }
+      // a separate checkout of the same repository is the reviewer's to write in
+      expect(ask(repo)().runner).toBe("codex");
+      // unless a Task not ended works there; one that has ended does not keep it
+      db6.insertTask({ ...mkTask("t-other", repo), status: "waiting" });
+      expect(ask(repo)).toThrow("--cwd");
+      db6.updateTask("t-other", { status: "done" });
+      expect(ask(repo)().runner).toBe("codex");
+      // a live Task in a folder in no git working tree (a broad folder holding the checkout) does not refuse it
+      db6.insertTask({ ...mkTask("t-broad", root), status: "idle" });
+      expect(ask(repo)().runner).toBe("codex");
+      // one in a git working tree that holds the checkout does
+      const outer = join(root, "outer");
+      const nested = join(outer, "rv");
+      mkdirSync(nested, { recursive: true });
+      sh(outer, "git", "init", "-q");
+      sh(nested, "git", "init", "-q");
+      sh(nested, "git", "remote", "add", "origin", ORIGIN);
+      sh(nested, "git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+      expect(ask(nested)().runner).toBe("codex");
+      // a live Task in a folder below a working tree's top protects that whole working tree
+      mkdirSync(join(nested, "pkg"));
+      db6.insertTask({ ...mkTask("t-pkg", join(nested, "pkg")), status: "running" });
+      expect(ask(nested)).toThrow("--cwd");
+      db6.updateTask("t-pkg", { status: "done" });
+      expect(ask(nested)().runner).toBe("codex");
+      db6.insertTask({ ...mkTask("t-outer", outer), status: "running" });
+      expect(ask(nested)).toThrow("--cwd");
+    } finally {
+      db6.close();
+    }
+  });
+
+  test("a reviewer writes its output in the job's folder; the daemon copies it to outFile at the end, not through a link or a hard link put there meanwhile", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const victim = join(root, "victim-out.md");
+    const run = async (name: string, meanwhile: string) => {
+      writeFileSync(victim, "keep\n");
+      rmSync(join(repo, name), { force: true });
+      const { deps, ended } = fake(`printf 'the review\n' > "$JOB_OUT"; ${meanwhile}`);
+      let got: ResolvedJobRequest | undefined;
+      const job = requestJob({ ...deps, env: { ...deps.env, VICTIM: victim }, command: (r) => ((got = r), { argv: ["sh", "-c", `printf 'the review\n' > "$JOB_OUT"; ${meanwhile}`], tail: "" }) }, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: name });
+      const end = await ended;
+      const J = join(root, "jobs", String(job.id));
+      expect(got!.kind === "review" && got!.outFile).toBe(join(J, "out.md")); // what Codex's -o names: a file the reviewer cannot write
+      return { end, J, log: readFileSync(join(J, "log"), "utf8") };
+    };
+    const plain = await run("out-plain.md", "true");
+    expect(readFileSync(join(repo, "out-plain.md"), "utf8")).toBe("the review\n");
+    expect(plain.log).not.toContain("not copied");
+    // the reviewer made the place a link to a file outside the checkout: the copy replaces the link, nothing is written through it
+    await run("out-linked.md", `ln -sf "$VICTIM" out-linked.md`);
+    expect(readFileSync(victim, "utf8")).toBe("keep\n");
+    expect(lstatSync(join(repo, "out-linked.md")).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(repo, "out-linked.md"), "utf8")).toBe("the review\n");
+    // a hard link to that file: the copy replaces the name, the file outside stays as it was
+    await run("out-hard.md", `ln -f "$VICTIM" out-hard.md`);
+    expect(readFileSync(victim, "utf8")).toBe("keep\n");
+    expect(readFileSync(join(repo, "out-hard.md"), "utf8")).toBe("the review\n");
+    expect(readdirSync(repo).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("a folder on the way to outFile swapped for a link to outside the checkout is not written through", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const outside = join(root, "outside-dir");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(repo, "swap"), { recursive: true });
+    const { deps, ended } = fake(`printf 'the review\n' > "$JOB_OUT"; rm -rf swap; ln -s "$OUTSIDE" swap`);
+    const job = requestJob({ ...deps, env: { ...deps.env, OUTSIDE: outside } }, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "swap/out.md" });
+    const end = await ended;
+    expect(readdirSync(outside)).toEqual([]);
+    expect(end.status).toBe("pass");
+    expect(readFileSync(join(root, "jobs", String(job.id), "log"), "utf8")).toContain("not inside the checkout");
+    rmSync(join(repo, "swap"));
+  });
+
+  test("the copy reads where the folder it entered really is: a link to a folder outside is refused, one to a folder inside is followed", () => {
+    const outside = join(root, "outside-direct");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(repo, "inner"), { recursive: true });
+    symlinkSync(outside, join(repo, "to-outside"));
+    symlinkSync(join(repo, "inner"), join(repo, "to-inner"));
+    const J = join(root, "deliver-direct");
+    mkdirSync(J, { recursive: true });
+    writeFileSync(join(J, "out.md"), "the review\n");
+    const job = { id: 999, cwd: repo } as Job;
+    try {
+      writeFileSync(join(J, "out-path"), join(repo, "to-outside", "out.md"));
+      deliverReview(job, J);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(readFileSync(join(J, "log"), "utf8")).toContain("not inside the checkout");
+      writeFileSync(join(J, "out-path"), join(repo, "to-inner", "out.md"));
+      deliverReview(job, J);
+      expect(readFileSync(join(repo, "inner", "out.md"), "utf8")).toBe("the review\n");
+    } finally {
+      for (const f of ["to-outside", "to-inner", "inner"]) rmSync(join(repo, f), { recursive: true, force: true });
+    }
+  });
+
+  test("the copy does not read a bunfig.toml (a preload is code) or a .env left in the folder of outFile", () => {
+    const folder = join(repo, "planted");
+    mkdirSync(folder, { recursive: true });
+    const marker = join(root, "planted-preload-ran");
+    // were they read, the preload would run outside any sandbox and write outside the checkout, with the .env's variable
+    writeFileSync(join(folder, "x.js"), `require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.env.PLANTED));\n`);
+    writeFileSync(join(folder, "bunfig.toml"), 'preload = ["./x.js"]\n');
+    writeFileSync(join(folder, ".env"), "PLANTED=from-env\n");
+    const J = join(root, "deliver-planted");
+    mkdirSync(J, { recursive: true });
+    writeFileSync(join(J, "out.md"), "the review\n");
+    writeFileSync(join(J, "out-path"), join(folder, "out.md"));
+    try {
+      deliverReview({ id: 998, cwd: repo } as Job, J);
+      expect(existsSync(marker)).toBe(false);
+      expect(readFileSync(join(folder, "out.md"), "utf8")).toBe("the review\n");
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+      rmSync(marker, { force: true });
+    }
+  });
+
+  test("a folder already at the copy's temporary name leaves the folder, says so in the log and still ends the job", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const { deps, ended } = fake(`printf 'the review\n' > "$JOB_OUT"; mkdir ".out-taken.md.job$(basename "$J").tmp"`);
+    const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: repo, promptFile: "prompt.md", outFile: "out-taken.md" });
+    const end = await ended;
+    const tmpName = join(repo, `.out-taken.md.job${job.id}.tmp`);
+    expect(end.status).toBe("pass");
+    expect(db.getJob(job.id)!.status).toBe("pass");
+    expect(lstatSync(tmpName).isDirectory()).toBe(true);
+    expect(existsSync(join(repo, "out-taken.md"))).toBe(false);
+    expect(readFileSync(join(root, "jobs", String(job.id), "log"), "utf8")).toContain("the output was not copied");
+    rmSync(tmpName, { recursive: true });
+  });
+
+  test("whether Claude Code's sandbox can start is read on the PATH the job itself gets", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const { deps, ended } = fake('printf %s "$PATH" > "$J/path"');
+    let seen: string | undefined;
+    const job = requestJob({ ...deps, env: { ...deps.env, PATH: `/sandbox-probe:${deps.env.PATH}` }, reviewRunner: () => "same", claudeSandbox: (path) => ((seen = path), true) }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+    await ended;
+    expect(seen).toStartWith("/sandbox-probe:");
+    expect(seen).toBe(readFileSync(join(root, "jobs", String(job.id), "path"), "utf8"));
+  });
+
+  test("a refused review makes nothing in its checkout; the sandbox's paths are real paths", () => {
+    const empty = join(root, "no-head");
+    mkdirSync(empty);
+    sh(empty, "git", "init", "-q");
+    sh(empty, "git", "remote", "add", "origin", ORIGIN);
+    writeFileSync(join(empty, "prompt.md"), "review");
+    expect(() => requestJob(fake("true").deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", cwd: empty, promptFile: "prompt.md", outFile: "out.md" })).toThrow("HEAD");
+    expect(existsSync(join(empty, "_review"))).toBe(false);
+    // a checkout reached through a link still has its `.git` denied to the reviewer's test
+    symlinkSync(repo, join(root, "repo-link"));
+    const settings = (cwd: string) => JSON.parse(jobCommand({ kind: "review", taskId: "t1", pr: 12, runner: "claude", cwd, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" }).argv.find((a) => a.startsWith('{"sandbox"'))!);
+    expect(settings(join(root, "repo-link")).sandbox.filesystem.denyWrite).toEqual([join(realpathSync(repo), ".git")]);
   });
 
   test("review: the reviewer reads neither CLAUDE.md / AGENTS.md nor the user's MCP and skills", () => {
-    const argvOf = (runner: "claude" | "codex") => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md" }).argv;
+    const argvOf = (runner: "claude" | "codex") => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t" }).argv;
     const claude = argvOf("claude");
     // the variables go in front of the command, the flags after `-p`
     expect(claude.slice(claude.indexOf("env"), claude.indexOf("claude") + 1)).toEqual(["env", "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", "claude"]);
-    expect(claude).toEqual(expect.arrayContaining(["--permission-mode", "plan", "--strict-mcp-config", "--disable-slash-commands"]));
+    expect(claude).toEqual(expect.arrayContaining(["--permission-mode", "dontAsk", "--strict-mcp-config", "--disable-slash-commands"]));
     expect(claude).not.toContain("--bare"); // it would drop the sign-in the host uses
     const codex = argvOf("codex").join(" ");
-    for (const part of ["--sandbox read-only", "-c project_doc_max_bytes=0", "-c mcp_servers={}", "--disable plugins", "--disable apps"]) expect(codex).toContain(part);
+    for (const part of ["--sandbox workspace-write", "-c project_doc_max_bytes=0", "-c mcp_servers={}", "--disable plugins", "--disable apps"]) expect(codex).toContain(part);
     expect(codex).not.toContain("--ignore-user-config"); // the user's model choice stays
     expect(argvOf("codex").at(-1)).toBe("-");
+  });
+
+  test("a review job may write only in its checkout and runs tests through the heavy slot", async () => {
+    // the runners are fakes on PATH; `ops-kit heavy` / `ops-kit idle-run` in front of them and the one the reviewer calls are the kit's own,
+    // with a home of the test's (its slots, its history; no memory floor, so the test does not wait on this machine's free memory)
+    const home = mkdtempSync(join(tmpdir(), "jobs.review-home."));
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(home, ".config", "ops-kit"), { recursive: true });
+    writeFileSync(join(home, ".config", "ops-kit", "heavy.json"), JSON.stringify({ max: 1, minFreeMb: 0 }));
+    // a fake runner records where it runs and its arguments, then runs a test as the note tells the reviewer to
+    for (const runner of ["codex", "claude"]) writeFileSync(join(bin, runner), `#!/bin/sh\ncat > /dev/null\npwd > "$J/runner-cwd"\necho "$TMPDIR" > "$J/runner-tmp"\nprintf '%s\\n' "$@" > "$J/runner-args"\nops-kit heavy -- bun test _review/tests/probe.test.ts > "$J/runner-test" 2>&1\n`, { mode: 0o755 });
+    mkdirSync(join(repo, "_review", "tests"), { recursive: true });
+    // the test makes a folder in tmpdir(), as this repository's tests do: it is in the job's own folder
+    writeFileSync(join(repo, "_review", "tests", "probe.test.ts"), 'import { expect, test } from "bun:test";\nimport { mkdtempSync, realpathSync } from "node:fs";\nimport { tmpdir } from "node:os";\nimport { join } from "node:path";\ntest("probe", () => expect(realpathSync(mkdtempSync(join(tmpdir(), "p.")))).toStartWith(join(realpathSync(process.env.J!), "tmp")));\n');
+    writeFileSync(join(repo, "prompt.md"), "Review this PR.\n");
+    const slots = join(home, ".local", "state", "ops-kit", "heavy");
+    const kit = join(import.meta.dir, "../../../ops-kit/bin");
+    try {
+      const run = async (runner: "codex" | "claude") => {
+        const { deps, ended } = fake("true");
+        const job = requestJob({ ...deps, command: undefined, reviewRunner: () => (runner === "claude" ? "same" : "other"), env: { ...deps.env, HOME: home, PATH: `${bin}:${kit}:${process.env.PATH}` } }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+        await ended;
+        const J = join(root, "jobs", String(job.id));
+        return { J, cwd: readFileSync(join(J, "runner-cwd"), "utf8").trim(), tmp: readFileSync(join(J, "runner-tmp"), "utf8").trim(), args: readFileSync(join(J, "runner-args"), "utf8").trimEnd().split("\n"), test: readFileSync(join(J, "runner-test"), "utf8") };
+      };
+      const codex = await run("codex");
+      const claude = await run("claude");
+      for (const r of [codex, claude]) {
+        expect(r.cwd).toBe(realpathSync(repo)); // the runner's own folder is the checkout
+        expect(r.tmp).toBe(join(realpathSync(r.J), "tmp")); // its temporary files go to the job's own folder
+        expect(r.test).toContain("1 pass");
+        expect(r.test).not.toContain("heavy:"); // it neither ran without a slot nor inside the review's own memory-only run
+      }
+      // Codex: its sandbox writes in the checkout, the job's TMPDIR and the slots' folder only (not /tmp, not whatever $TMPDIR says), with no network
+      const value = (args: string[], flag: string) => args.flatMap((a, i) => (a === flag ? [args[i + 1]!] : []));
+      expect(value(codex.args, "--sandbox")).toEqual(["workspace-write"]);
+      expect(value(codex.args, "-c")).toEqual(expect.arrayContaining(["sandbox_workspace_write.network_access=false", "sandbox_workspace_write.exclude_slash_tmp=true", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]));
+      expect(value(codex.args, "--add-dir")).toEqual([slots, codex.tmp]);
+      expect(codex.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+      // Claude Code: what the rules do not allow is refused; it edits and writes under `_review/tests/` only (not `.git/config`), and
+      // the one command it may run is a test in a heavy slot. `--allowedTools` takes every word up to the next flag: an unscoped Edit / Write
+      // there would allow them outside the checkout
+      expect(value(claude.args, "--permission-mode")).toEqual(["dontAsk"]);
+      const allowed = claude.args.slice(claude.args.indexOf("--allowedTools") + 1);
+      expect(allowed.slice(0, allowed.findIndex((a) => a.startsWith("-")))).toEqual(["Bash(ops-kit heavy -- bun test:*)", "Edit(_review/tests/**)", "Write(_review/tests/**)"]);
+      expect(claude.args).not.toContain("--add-dir");
+      expect(claude.args).not.toContain("--dangerously-skip-permissions");
+      // and that test, code the reviewer wrote, runs in Claude Code's sandbox: it writes in the checkout and the slots' folder (not the checkout's
+      // `.git`), with no network; no command leaves it, and a sandbox that cannot start ends the run rather than running the test unsandboxed
+      expect(value(claude.args, "--settings").map((v) => JSON.parse(v))).toEqual([{ sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, filesystem: { allowWrite: [slots], denyWrite: [join(realpathSync(repo), ".git")] }, network: { allowedDomains: [] } } }]);
+      // both tests took a slot of the test's home and gave it back
+      expect(readFileSync(join(slots, "history.jsonl"), "utf8").split("\n").filter((l) => l.includes('"name":"bun test _review/tests/probe.test.ts"'))).toHaveLength(2);
+      expect(readdirSync(slots).filter((f) => f.startsWith("slot"))).toEqual([]);
+      // without bubblewrap / socat Claude Code would run the test unsandboxed: the reviewer is started read-only, told so, and the job's log says so
+      const { deps, ended } = fake("true");
+      let gone: ResolvedJobRequest | undefined;
+      const job = requestJob({ ...deps, command: (r) => ((gone = r), { argv: ["sh", "-c", 'cp "$JOB_PROMPT" "$J/seen"'], tail: "" }), claudeSandbox: () => false, reviewRunner: () => "same" }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+      await ended;
+      const readOnly = jobCommand(gone!).argv;
+      expect(value(readOnly, "--permission-mode")).toEqual(["plan"]);
+      for (const flag of ["--settings", "--allowedTools"]) expect(readOnly).not.toContain(flag);
+      expect(readFileSync(join(root, "jobs", String(job.id), "seen"), "utf8")).toContain("no test was run because the sandbox is unavailable");
+      expect(readFileSync(join(root, "jobs", String(job.id), "log"), "utf8")).toContain("the reviewer only reads and runs no tests");
+      // Codex has its own sandbox: no bubblewrap does not change its launch
+      const other = fake("true");
+      expect(requestJob({ ...other.deps, command: (r) => ((gone = r), { argv: ["true"], tail: "" }), claudeSandbox: () => false }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md" }).runner).toBe("codex");
+      await other.ended;
+      expect(gone!.kind === "review" && gone!.readOnly).toBeFalsy();
+      // a `_review` that leads out of the checkout is refused before anything is made through it
+      rmSync(join(repo, "_review"), { recursive: true, force: true });
+      symlinkSync(home, join(repo, "_review"));
+      expect(() => requestJob(fake("true").deps, { kind: "review", taskId: "t1", pr: 12, runner: "codex", as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out.md" })).toThrow("_review must be inside cwd");
+      expect(existsSync(join(home, "tmp"))).toBe(false);
+    } finally {
+      rmSync(join(repo, "_review"), { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a review's TMPDIR is the job's own folder: short enough for Claude Code's sockets whatever the checkout's path, and gone with the job", async () => {
+    // a checkout whose own `_review/tmp` would leave no room in a socket's address (108 bytes with its NUL) for Claude Code's sockets
+    const long = join(root, "c".repeat(110));
+    sh(repo, "git", "worktree", "add", "-q", "--detach", long);
+    writeFileSync(join(long, "prompt.md"), "Review this PR.\n");
+    expect(Buffer.byteLength(join(long, "_review", "tmp"))).toBeGreaterThan(107);
+    try {
+      for (const runner of ["claude", "codex"] as const) {
+        // what it leaves includes a folder it made read-only (a test cut before it put the mode back)
+        const { deps, ended } = fake('echo "$TMPDIR" > "$J/tmp-seen"; touch "$TMPDIR/left"; mkdir -p "$TMPDIR/d/e"; touch "$TMPDIR/d/e/f"; chmod 500 "$TMPDIR/d/e" "$TMPDIR/d"');
+        let got: ResolvedJobRequest | undefined;
+        const job = requestJob({ ...deps, command: (r) => ((got = r), deps.command!(r)), reviewRunner: () => (runner === "claude" ? "same" : "other") }, { kind: "review", taskId: "t1", pr: 12, cwd: long, promptFile: "prompt.md", outFile: "out.md" });
+        await ended;
+        expect(job.runner).toBe(runner);
+        expect(db.getJob(job.id)!.status).toBe("pass"); // the review's end and result are recorded
+        const J = join(root, "jobs", String(job.id));
+        const tmp = readFileSync(join(J, "tmp-seen"), "utf8").trim();
+        expect(tmp).toBe(join(realpathSync(J), "tmp"));
+        expect(got!.kind === "review" && got!.tmpDir).toBe(tmp); // the folder the runner's sandbox is told of is the one it gets
+        // the longest name Claude Code gives a socket there (`claude-socks-<16 hex>.sock`) still fits
+        expect(Buffer.byteLength(join(tmp, "claude-socks-0123456789abcdef.sock"))).toBeLessThanOrEqual(107);
+        // what the reviewer left there goes with the job, and nothing was made in the checkout for it
+        expect(existsSync(tmp)).toBe(false);
+        expect(existsSync(join(long, "_review"))).toBe(false);
+      }
+    } finally {
+      sh(repo, "git", "worktree", "remove", "--force", long);
+    }
   });
 
   describe("review runner from the setting", () => {
@@ -650,43 +950,103 @@ describe("jobs", () => {
       await audit.ended;
     });
 
-    test("attack refuses the implementing runner when the setting is other", async () => {
-      const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
-      let refusal: unknown;
-      try {
-        ask("other", { runner: "claude", as: "attack" }); // the Task's runner is claude
-      } catch (e) {
-        refusal = e;
+    test("attack takes either runner under either setting, so one runner's usage limit does not stop it, and still needs one named", async () => {
+      // the Task's runner is claude: attackReviewer names codex under other and claude under same; the other one stands in at a usage limit
+      for (const setting of ["other", "same"] as const) {
+        for (const runner of ["codex", "claude"] as const) {
+          const accepted = ask(setting, { runner, as: "attack" });
+          expect(accepted.job.runner).toBe(runner);
+          expect(accepted.job.as).toBe("attack");
+          await accepted.ended;
+        }
+        const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
+        expect(() => ask(setting, { as: "attack" })).toThrow("runner の名指し");
+        expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before); // refused before a job is recorded
       }
-      expect(refusal).toBeInstanceOf(JobError);
-      expect((refusal as JobError).status).toBe(400);
-      expect((refusal as JobError).message).toContain("攻める側のレビューは codex で頼んでください");
-      expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before);
-      const accepted = ask("other", { runner: "codex", as: "attack" });
-      expect(accepted.job.runner).toBe("codex");
-      await accepted.ended;
-      expect(() => ask("other", { as: "attack" })).toThrow("runner の名指し");
-    });
-
-    test("attack under the same setting runs only the implementing runner", async () => {
-      expect(() => ask("same", { runner: "codex", as: "attack" })).toThrow("攻める側のレビューは claude で頼んでください");
-      const accepted = ask("same", { runner: "claude", as: "attack" });
-      expect(accepted.job.runner).toBe("claude");
-      await accepted.ended;
     });
 
     test("attack for a Task whose runner reviews nothing cannot be decided", () => {
-      db.insertTask({ ...mkTask("t-adk2", repo), runner: "dak" });
+      db.insertTask({ ...mkTask("t-adk2", join(root, "task")), runner: "dak" });
       expect(() => ask("other", { runner: "claude", as: "attack" }, "t-adk2")).toThrow("決められません");
     });
 
     test("a Task whose runner reviews nothing must name the reviewer", async () => {
-      db.insertTask({ ...mkTask("t-adk", repo), runner: "dak" });
+      db.insertTask({ ...mkTask("t-adk", join(root, "task")), runner: "dak" });
       expect(() => ask("other", {}, "t-adk")).toThrow("主レビュアーを決められません");
       const named = ask("other", { runner: "claude" }, "t-adk");
       expect(named.job.runner).toBe("claude");
       await named.ended;
     });
+  });
+
+  describe("recheck runner from the setting", () => {
+    // the Task t1 is claude's; under the review setting other its main reviewer is codex
+    const ask = (recheck: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "recheck" } = { as: "recheck" }) => {
+      writeFileSync(join(repo, "prompt.md"), "review");
+      const { deps, ended } = fake("true");
+      const resolved: ResolvedJobRequest[] = [];
+      const job = requestJob({ ...deps, reviewRunner: () => "other", recheckRunner: () => recheck, command: (r) => (resolved.push(r), deps.command!(r)) }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md", ...extra });
+      return { job, ended, resolved };
+    };
+    const refusal = (f: () => unknown) => {
+      const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
+      try {
+        f();
+      } catch (e) {
+        expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before); // refused before a job is recorded
+        expect(e).toBeInstanceOf(JobError);
+        expect((e as JobError).status).toBe(400);
+        return (e as JobError).message;
+      }
+      throw new Error("not refused");
+    };
+    // a recheck is a new session whatever the setting: neither its request nor its argv resumes a conversation
+    const fresh = (r: ResolvedJobRequest) => {
+      const argv = jobCommand(r).argv;
+      expect(argv.filter((a) => a === "resume" || a.startsWith("--resume") || a === "--continue")).toEqual([]);
+    };
+
+    test("other: the runner that is not the main reviewer reads it without being named, and naming the main reviewer is refused", async () => {
+      const none = ask("other");
+      expect(none.job.runner).toBe("claude");
+      expect(none.job.as).toBe("recheck");
+      fresh(none.resolved[0]!);
+      await none.ended;
+      expect(refusal(() => ask("other", { runner: "codex", as: "recheck" }))).toContain("再チェックは claude");
+    });
+
+    test("same: the main reviewer's runner reads it in a new session; naming the other runner is refused; the main review is asked as before", async () => {
+      const none = ask("same");
+      expect(none.job.runner).toBe("codex");
+      expect(none.resolved[0]).toMatchObject({ runner: "codex", as: "recheck" });
+      fresh(none.resolved[0]!);
+      await none.ended;
+      expect(refusal(() => ask("same", { runner: "claude", as: "recheck" }))).toContain("再チェックは codex");
+      const main = ask("same", { runner: "codex" });
+      expect(main.job).toMatchObject({ runner: "codex", as: null });
+      await main.ended;
+    });
+  });
+
+  test("review model from the setting: the saved review model / effort go to the CLI, an empty one falls to the runner's Task default", () => {
+    const argvOf = (runner: "claude" | "codex", choice: { model?: string; effort?: string }) => jobCommand({ kind: "review", taskId: "t1", pr: 12, runner, cwd: repo, promptFile: "/p.md", outFile: "/o.md", tmpDir: "/t", as: "recheck" }, 900, choice).argv;
+    expect(argvOf("codex", { model: "m1", effort: "high" })).toEqual(expect.arrayContaining(["-m", "m1", "-c", 'model_reasoning_effort="high"']));
+    expect(argvOf("claude", { model: "m1", effort: "high" })).toEqual(expect.arrayContaining(["--model", "m1", "--effort", "high"]));
+    // the daemon's own wiring (setupJobs): settings → runnerChoice, read on every request
+    let saved = Settings.parse({ defaultModel: { codex: "task-m" }, defaultEffort: { codex: "low" }, reviewModel: { codex: "m1" }, reviewEffort: { codex: "high" } });
+    const sc = { db, tasks: {}, savedAutoResume: () => false, settings: () => saved, githubBudget: { get: () => undefined }, cfg: { candidate: true, home: root, jobReviewIdleS: 900 }, opts: {}, localUrl: () => "http://127.0.0.1:1" } as unknown as Parameters<typeof setupJobs>[0];
+    const choice = (r: RunnerId, m: string, e: string) => runnerChoice({ settings: () => saved, tasks: { checkEffort: () => undefined } } as never, r, m, e);
+    Object.assign(sc, { runnerChoice: choice });
+    setupJobs(sc);
+    expect(sc.jobDeps.reviewChoice!("codex")).toMatchObject({ model: "m1", effort: "high" });
+    saved = Settings.parse({ defaultModel: { codex: "task-m" }, defaultEffort: { codex: "low" } });
+    expect(sc.jobDeps.reviewChoice!("codex")).toMatchObject({ model: "task-m", effort: "low" });
+    // the recheck setting it hands the jobs: unset follows the review setting, a saved one wins
+    expect(sc.jobDeps.recheckRunner!()).toBe("other");
+    saved = Settings.parse({ reviewRunner: "same" });
+    expect(sc.jobDeps.recheckRunner!()).toBe("same");
+    saved = Settings.parse({ reviewRunner: "same", recheckRunner: "other" });
+    expect(sc.jobDeps.recheckRunner!()).toBe("other");
   });
 
   describe("review prompt by runner", () => {
@@ -701,13 +1061,29 @@ describe("jobs", () => {
         expect(readFileSync(join(repo, "prompt.md"), "utf8")).toBe("Review this PR.\n");
       }
       expect(seen.codex).toStartWith("Review this PR.\n\n");
-      expect(seen.codex).toContain("read-only sandbox");
-      expect(seen.codex).not.toContain("plan mode");
-      expect(seen.claude).toContain("plan mode");
-      expect(seen.claude).not.toContain("sandbox");
+      expect(seen.codex).toContain("workspace-write sandbox");
+      expect(seen.codex).not.toContain("dontAsk");
+      expect(seen.claude).toContain("dontAsk mode");
+      expect(seen.claude).not.toContain("workspace-write");
       // the rules every review is told reach the runner whole, the use of a comparison with main included
       for (const text of Object.values(seen)) expect(text).toContain("`_review/compared.md`");
     });
+  });
+
+  test("a Claude review on the CLI default records the model it ran on; a model it was given, and a Codex review's none, stay", async () => {
+    writeFileSync(join(repo, "prompt.md"), "review");
+    const system = `printf '%s\n' '{"type":"system","model":"x"}' > "$J/claude.jsonl"`;
+    const run = async (runner: "claude" | "codex", choice: { model?: string; effort?: string }) => {
+      const { deps, ended } = fake(system);
+      deps.reviewChoice = () => choice;
+      const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out-model.md" });
+      expect(job).toMatchObject({ model: choice.model || null, effort: choice.effort || null });
+      return (await ended).model;
+    };
+    expect(await run("claude", {})).toBe("x");
+    expect(await run("claude", { model: "", effort: "" })).toBe("x"); // empty is the CLI's own
+    expect(await run("claude", { model: "m1" })).toBe("m1");
+    expect(await run("codex", {})).toBeNull();
   });
 
   test("review job usage goes to the ledger under the task", async () => {
@@ -770,6 +1146,66 @@ describe("jobs", () => {
     expect(db.getJob(live.id)).toMatchObject({ status: "fail", exitCode: 1 });
     expect(ended.map((j) => j.id).sort()).toEqual([exited.id, gone.id, live.id, rebooted.id].sort());
     proc.kill();
+  });
+
+  test("a job whose end cannot be recorded is ended as aborted, and recoverJobs goes on to the next job", () => {
+    const dir = join(root, "jobs-recover-throw");
+    const ended: Job[] = [];
+    let calls = 0;
+    // the first end's clock fails, as any step of one job's end could
+    const deps: JobDeps = { db, dir, env: {}, onFinish: (j) => ended.push(j), bootId: () => "boot-now", now: () => (++calls === 1 ? (() => { throw new Error("clock"); })() : Date.now()) };
+    const mk = () => db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
+    const first = mk();
+    const second = mk();
+    for (const j of [first, second]) db.setJobPid(j.id, 999_999_999, "boot-now");
+    expect(() => recoverJobs(deps)).not.toThrow();
+    // both ended: the one whose end failed says why
+    expect([first, second].map((j) => db.getJob(j.id)!.status)).toEqual(["aborted", "aborted"]);
+    expect([first, second].filter((j) => db.getJob(j.id)!.summary?.includes("終了を記録できませんでした: clock"))).toHaveLength(1);
+    expect(ended.map((j) => j.id)).toEqual(expect.arrayContaining([first.id, second.id]));
+  });
+
+  test("a job whose end was recorded before a later step threw is still told to the Task, once", () => {
+    const dir = join(root, "jobs-recover-late-throw");
+    const ended: Job[] = [];
+    let armed = false;
+    // the read after the end is recorded fails, as any step after `finishJob` could
+    const flaky = new Proxy(db, {
+      get(t, k) {
+        const v = Reflect.get(t, k, t);
+        if (typeof v !== "function") return v;
+        if (k === "finishJob") return (...a: unknown[]) => ((armed = true), v.apply(t, a));
+        if (k === "getJob") return (...a: unknown[]) => {
+          if (armed) {
+            armed = false;
+            throw new Error("read after end");
+          }
+          return v.apply(t, a);
+        };
+        return v.bind(t);
+      },
+    });
+    const deps: JobDeps = { db: flaky, dir, env: {}, onFinish: (j) => ended.push(j), bootId: () => "boot-now" };
+    const job = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
+    // its process is gone and it left no folder (so no step between the end and that read reads the job)
+    db.setJobPid(job.id, 999_999_999, "boot-now");
+    expect(() => recoverJobs(deps)).not.toThrow();
+    expect(db.getJob(job.id)!.status).toBe("aborted");
+    expect(ended.filter((j) => j.id === job.id).map((j) => j.status)).toEqual(["aborted"]);
+  });
+
+  test("a Task's handler that throws at a job's end is not called again", () => {
+    const dir = join(root, "jobs-recover-handler-throw");
+    let calls = 0;
+    const deps: JobDeps = { db, dir, env: {}, onFinish: () => {
+      calls++;
+      throw new Error("handler");
+    }, bootId: () => "boot-now" };
+    const job = db.insertJob({ kind: "local-ci", taskId: "t1", pr: 1, runner: null, cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
+    db.setJobPid(job.id, 999_999_999, "boot-now");
+    expect(() => recoverJobs(deps)).not.toThrow();
+    expect(db.getJob(job.id)!.status).toBe("aborted");
+    expect(calls).toBe(1);
   });
 });
 
@@ -896,6 +1332,38 @@ describe("/api/jobs", () => {
       expect(list.map((j) => j.id)).toContain(job.id);
       for (let i = 0; i < 50 && core.db.getJob(job.id)!.status === "running"; i++) await Bun.sleep(20);
       expect(core.db.getJob(job.id)!.status).toBe("pass");
+    } finally {
+      await core.stop();
+    }
+  });
+
+  test("a review job records its model and effort from the setting, and why it is not the main review", async () => {
+    const home = join(root, "home-model");
+    const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+    // a Claude adapter that is installed and lists the efforts (the settings PATCH and runnerChoice check them); only the job's process is a fake
+    const core = await startServer(cfg, [fakeAdapter([], { id: "claude", models: ["m1", "task-m"], efforts: ["low", "high"] })], { port: 0, selfdevChecks: false, dryRunRestart: true, jobCommand: () => ({ argv: ["true"], tail: "" }) });
+    try {
+      // the Task works in its own worktree; the review reads the separate checkout
+      core.db.insertTask(mkTask("t7", join(root, "task")));
+      writeFileSync(join(repo, "prompt.md"), "review");
+      const base = `http://127.0.0.1:${core.server.port}`;
+      const patch = async (body: unknown) => {
+        const r = await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify(body) });
+        expect([r.status, r.status === 200 ? "" : await r.text()]).toEqual([200, ""]);
+      };
+      const review = async (extra: Record<string, unknown> = {}) => {
+        const r = await fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "review", taskId: "t7", pr: 21, cwd: repo, promptFile: "prompt.md", outFile: "out-model.md", ...extra }) });
+        expect(r.status).toBe(202);
+        const id = ((await r.json()) as Job).id;
+        return ((await fetch(`${base}/api/jobs`).then((x) => x.json())) as Job[]).find((j) => j.id === id)!;
+      };
+      // the main reviewer is the Task's own runner (claude), with the review's own model / effort
+      await patch({ reviewRunner: "same", reviewModel: { claude: "m1" }, reviewEffort: { claude: "high" } });
+      expect(await review()).toMatchObject({ kind: "review", runner: "claude", model: "m1", effort: "high", as: null });
+      expect(await review({ as: "recheck" })).toMatchObject({ runner: "claude", model: "m1", effort: "high", as: "recheck" });
+      // none saved for the review: the runner's Task default is what it ran with
+      await patch({ reviewModel: null, reviewEffort: null, defaultModel: { claude: "task-m" } });
+      expect(await review()).toMatchObject({ runner: "claude", model: "task-m", as: null });
     } finally {
       await core.stop();
     }

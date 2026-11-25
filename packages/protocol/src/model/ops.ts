@@ -7,8 +7,16 @@ export type StopReason = z.infer<typeof StopReason>;
 /** One JST day × cause: the stops, the turns they cut (one per task per stop) and the tasks. */
 export const OpsStopsRow = z.object({ day: z.string(), reason: StopReason, stops: z.number(), turns: z.number(), taskIds: z.array(z.string()) });
 export type OpsStopsRow = z.infer<typeof OpsStopsRow>;
-/** `GET /api/ops/stops?days=`: the closed runs of the period, and the run in progress. */
-export const OpsStops = z.object({ days: z.number(), rows: z.array(OpsStopsRow), running: z.object({ startedAt: z.number(), version: z.string().nullable() }).nullable() });
+/** What the automatic promotion decided: `waited` = held for Tasks without a refusal first (a refused request that then waits is `refused` only), `refused` = sb-rescue said the release needs a restart, `no-restart` = asked for and taken as a switch that keeps the Tasks. */
+export const PromotionDecisionKind = z.enum(["waited", "refused", "no-restart"]);
+export type PromotionDecisionKind = z.infer<typeof PromotionDecisionKind>;
+export const PromotionDecision = z.object({ sha: z.string(), kind: PromotionDecisionKind, tag: z.string(), firstAt: z.number(), lastAt: z.number(), times: z.number(), tasks: z.number(), reason: z.string(), files: z.array(z.string()), fileCount: z.number() });
+export type PromotionDecision = z.infer<typeof PromotionDecision>;
+/** The decisions of the period: `noRestartSwitched` is every switch sb-rescue's history says went in without a restart, the ones asked for by hand and the automatic ones asked for with no Task running included (a request that was taken can come back); `recent` is the newest 20 rows. */
+export const OpsPromotions = z.object({ noRestartAsked: z.number(), noRestartSwitched: z.number(), waited: z.number(), refused: z.number(), recent: z.array(PromotionDecision) });
+export type OpsPromotions = z.infer<typeof OpsPromotions>;
+/** `GET /api/ops/stops?days=`: the closed runs of the period, the run in progress, and the automatic promotion's decisions. */
+export const OpsStops = z.object({ days: z.number(), rows: z.array(OpsStopsRow), running: z.object({ startedAt: z.number(), version: z.string().nullable() }).nullable(), promotions: OpsPromotions });
 export type OpsStops = z.infer<typeof OpsStops>;
 
 /** What a process of the daemon's unit is doing. */
@@ -48,7 +56,7 @@ export type ResourceWait = z.infer<typeof ResourceWait>;
 export const TaskWait = z.object({ taskId: z.string(), taskTitle: z.string().nullable(), queuedAt: z.string(), reason: z.literal("memory") });
 export type TaskWait = z.infer<typeof TaskWait>;
 /** A job as the resources screen lists it: without its summary and folder, with its Task's title (null: a Task this daemon does not know). */
-export const OpsJob = Job.omit({ summary: true, cwd: true, repo: true, head: true, base: true, as: true, kinds: true, result: true }).extend({ taskTitle: z.string().nullable() });
+export const OpsJob = Job.omit({ summary: true, cwd: true, repo: true, head: true, base: true, kinds: true, result: true }).extend({ taskTitle: z.string().nullable() });
 export type OpsJob = z.infer<typeof OpsJob>;
 /**
  * `GET /api/ops/resources`: now. `memory` null: no /proc/meminfo (macOS). `consumers` is the latest minute of

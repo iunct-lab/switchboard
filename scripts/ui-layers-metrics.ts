@@ -1,10 +1,10 @@
 /**
  * bun scripts/ui-layers-metrics.ts [--root <dir>] — the floor / ceiling / walls measures (docs/design/ui-layers.md), counted
- * from the web sources the same way every time: a static read of four files (no rendering, no DB, no Git history), so one
+ * from the web sources the same way every time: a static read of four files (the instruction form is `components/Compose.tsx`) (no rendering, no DB, no Git history), so one
  * commit always gives the same numbers. Prints one JSON line with the keys in a fixed order.
  *
- * - homeComposeVisible: the `<select` / `<input` / `<textarea` / `<button` opening tags written in Home's compose card
- *   (`<section className="card compose">` to its `</section>`) outside any `<details>`. A tag drawn only on a condition
+ * - homeComposeVisible: the `<select` / `<input` / `<textarea` / `<button` opening tags written in the Compose form's card
+ *   (`<section className="card compose"` to its `</section>`) outside any `<details>`. A tag drawn only on a condition
  *   counts once, as written: this counts what the form can show without opening anything, not what one render shows.
  * - settingsSections: the `<section className="card` opening tags in Settings.
  * - screens: the kinds of `name:` in screen.ts' `View` union.
@@ -62,7 +62,7 @@ function viewNames(screen: string): string[] {
 }
 
 export function countUiMetrics(files: { home: string; settings: string; screen: string; route: string | null }): UiMetrics {
-  const at = files.home.indexOf('<section className="card compose">');
+  const at = files.home.indexOf('<section className="card compose"');
   const compose = at < 0 ? "" : withoutDetails(element(files.home, at, "section"));
   const names = viewNames(files.screen);
   const route = files.route;
@@ -79,7 +79,7 @@ export function readUiMetrics(root: string): UiMetrics {
   const web = join(root, "apps/web/src");
   const route = join(web, "route.ts");
   return countUiMetrics({
-    home: readFileSync(join(web, "components/Home.tsx"), "utf8"),
+    home: readFileSync(join(web, "components/Compose.tsx"), "utf8"),
     settings: readFileSync(join(web, "components/Settings.tsx"), "utf8"),
     screen: readFileSync(join(web, "screen.ts"), "utf8"),
     route: existsSync(route) ? readFileSync(route, "utf8") : null,

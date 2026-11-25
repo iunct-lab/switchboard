@@ -150,6 +150,8 @@ const quotaAndResumeFields = {
   silentAfterMs: z.number().int().min(60_000).max(86_400_000),
   /** The longest a wait for something this machine does itself may last before the person is told: a job, a run slot, a resume that is due (`WAIT_BOUNDS.ownMs`). */
   waitLimitMs: z.number().int().min(60_000).max(30 * 86_400_000),
+  /** How long the backlog queue may start nothing (enabled, none of its 実装 Tasks running, not for the usage limit) before the person is told. */
+  queueStallMs: z.number().int().min(60_000).max(86_400_000),
   /** The longest a wait for someone else's work may last before the person is told: a PR or an Issue of another Task, a stop with no end of its own (`WAIT_BOUNDS.othersMs`). */
   dependsLimitMs: z.number().int().min(60_000).max(30 * 86_400_000),
   /** The runner comparison marks a row with fewer Tasks than this as a thin sample (`THIN_SAMPLE` in web). */
@@ -251,6 +253,7 @@ export const QuotaAndResumeSettings = z
     maxStopResumes: quotaAndResumeFields.maxStopResumes.default(2),
     silentAfterMs: quotaAndResumeFields.silentAfterMs.default(10 * 60_000),
     waitLimitMs: quotaAndResumeFields.waitLimitMs.default(6 * 3600_000),
+    queueStallMs: quotaAndResumeFields.queueStallMs.default(3_600_000),
     dependsLimitMs: quotaAndResumeFields.dependsLimitMs.default(3 * 86_400_000),
     thinSample: quotaAndResumeFields.thinSample.default(5),
     flowLimit: quotaAndResumeFields.flowLimit.default(1),
@@ -319,6 +322,14 @@ export const Settings = z.object({
   autoStart: AutoStartSettings.prefault({}),
   /** Main reviewer of a PR (`ReviewRunnerChoice` says where it takes effect). */
   reviewRunner: ReviewRunnerChoice.default("other"),
+  /**
+   * Who reads a recheck and a post-merge audit, relative to the main reviewer: `other` = the runner that is not the main
+   * reviewer, `same` = a new session of the main reviewer's runner. Unset = the review setting's value (`recheckSetting`).
+   */
+  recheckRunner: ReviewRunnerChoice.optional(),
+  /** runner → model / thinking effort a review job (main review, recheck, audit) runs with. Absent = the Task's default (`defaultModel` / `defaultEffort`). */
+  reviewModel: z.record(z.string(), z.string()).default({}),
+  reviewEffort: z.record(z.string(), z.string()).default({}),
   /** How many local Tasks the daemon lets be running / waiting at once; the rest wait for a free slot. */
   maxRunners: z.number().int().min(1).max(8).default(3),
   /** The rubric judge. */
@@ -359,6 +370,9 @@ export const Settings = z.object({
   outbound: z.object({ classifierLog: z.boolean().default(false), runnerTelemetry: z.boolean().default(false) }).prefault({}),
 });
 export type Settings = z.infer<typeof Settings>;
+
+/** The recheck and post-merge audit setting in effect: the saved one, else the review setting's value. */
+export const recheckSetting = (s: Pick<Settings, "recheckRunner" | "reviewRunner">): ReviewRunnerChoice => s.recheckRunner ?? s.reviewRunner;
 
 /**
  * GET /api/settings/model-candidates: per runner, the models of the installed CLI's table that are neither
@@ -436,6 +450,11 @@ export const SettingsPatch = z.object({
     .partial()
     .nullable().optional(),
   reviewRunner: ReviewRunnerChoice.nullable().optional(),
+  /** null = unset again (the review setting's value). */
+  recheckRunner: ReviewRunnerChoice.nullable().optional(),
+  /** runner → model / effort of a review job; a value null removes it (back to the Task's default). */
+  reviewModel: z.record(z.string(), z.string().nullable()).nullable().optional(),
+  reviewEffort: z.record(z.string(), z.string().nullable()).nullable().optional(),
   maxRunners: z.number().int().min(1).max(8).nullable().optional(),
   /** `{ evals: { judge: { enabled: false } } }` switches the rubric judge off. */
   evals: z.object({ judge: z.object({ enabled: z.boolean() }).partial().optional() }).partial().nullable().optional(),

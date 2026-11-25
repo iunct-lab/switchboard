@@ -10,7 +10,7 @@ export const QUEUE_KEY = "backlogQueue";
 /** How many of the PBIs that left the queue are kept. */
 export const ENDED_KEEP = 20;
 
-export const EMPTY_QUEUE: BacklogQueue = { enabled: false, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null };
+export const EMPTY_QUEUE: BacklogQueue = { enabled: false, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, stall: null };
 
 const keyOf = (e: BacklogQueueEntry) => `${e.workspaceId}#${e.number}`;
 
@@ -37,7 +37,10 @@ export function saveQueue(db: Db, input: BacklogQueueInput, titleOf: (e: Backlog
   const items = input.items ? unique(input.items) : before.items;
   const kept = new Set(items.map(keyOf));
   const removed = before.items.filter((e) => !kept.has(keyOf(e))).map((e): BacklogQueueEnded => ({ ...e, title: titleOf(e) ?? `#${e.number}`, at: now, reason: "removed" }));
-  const queue: BacklogQueue = { ...before, enabled: input.enabled ?? before.enabled, concurrency: input.concurrency ?? before.concurrency, items, ended: withEnded(before.ended, removed) };
+  const enabled = input.enabled ?? before.enabled;
+  // a queue turned on or off starts its stall afresh: the time it could start nothing is counted while it is enabled
+  const stall = enabled === before.enabled ? before.stall : null;
+  const queue: BacklogQueue = { ...before, enabled, concurrency: input.concurrency ?? before.concurrency, items, ended: withEnded(before.ended, removed), stall };
   db.setSetting(QUEUE_KEY, queue);
   return queue;
 }
@@ -61,9 +64,10 @@ export function pruneClosed(queue: BacklogQueue, closed: (e: BacklogQueueEntry) 
   };
 }
 
-/** Keeps what the queue's last start decided, on the queue as stored now. */
-export function noteQueue(db: Db, lines: string[], now = Date.now()): BacklogQueue {
-  const queue = { ...readQueue(db), lastNote: lines.join("\n"), lastNoteAt: now };
+/** Keeps what the queue's last start decided, on the queue as stored now; and its stall when given (left out, it stays). */
+export function noteQueue(db: Db, lines: string[], now = Date.now(), stall?: BacklogQueue["stall"]): BacklogQueue {
+  const before = readQueue(db);
+  const queue = { ...before, lastNote: lines.join("\n"), lastNoteAt: now, stall: stall === undefined ? before.stall : stall };
   db.setSetting(QUEUE_KEY, queue);
   return queue;
 }

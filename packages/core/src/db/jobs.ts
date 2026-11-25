@@ -7,11 +7,17 @@ import { ScheduleQueries } from "./schedules.ts";
 export class JobQueries extends ScheduleQueries {
   /* ---------- jobs the daemon runs for Tasks ---------- */
 
-  insertJob(j: { kind: JobKind; taskId: string; pr: number; runner: "codex" | "claude" | null; cwd: string; startedAt: number; repo: string; head: string | null; as: ReviewAs | null; kinds: string[] }): Job {
+  /** `model` / `effort`: what a review's runner was started with; left out = null (the CLI's own, or not a review). */
+  insertJob(j: { kind: JobKind; taskId: string; pr: number; runner: "codex" | "claude" | null; cwd: string; startedAt: number; repo: string; head: string | null; as: ReviewAs | null; kinds: string[]; model?: string | null; effort?: string | null }): Job {
     const r = this.sqlite
-      .query("INSERT INTO jobs (kind, task_id, pr, runner, cwd, status, started_at, repo, head, as_reason, kinds) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?) RETURNING *")
-      .get(j.kind, j.taskId, j.pr, j.runner, j.cwd, j.startedAt, j.repo, j.head, j.as, j.kinds.join(",")) as JobRow;
+      .query("INSERT INTO jobs (kind, task_id, pr, runner, cwd, status, started_at, repo, head, as_reason, kinds, model, effort) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?) RETURNING *")
+      .get(j.kind, j.taskId, j.pr, j.runner, j.cwd, j.startedAt, j.repo, j.head, j.as, j.kinds.join(","), j.model ?? null, j.effort ?? null) as JobRow;
     return rowToJob(r);
+  }
+
+  /** The model a job ran on, read after it ended (a Claude review started on the CLI's own); a model already recorded stays. */
+  setJobModel(id: number, model: string) {
+    this.sqlite.query("UPDATE jobs SET model = ? WHERE id = ? AND model IS NULL").run(model, id);
   }
 
   /** What a job's end recorded of its output; a `head` or `base` given replaces the one recorded, one left out stays. */
@@ -77,5 +83,5 @@ export class JobQueries extends ScheduleQueries {
   }
 }
 
-type JobRow = { id: number; kind: string; task_id: string; pr: number; runner: string | null; cwd: string; status: string; exit_code: number | null; started_at: number; ended_at: number | null; summary: string | null; repo: string; head: string | null; base: string | null; as_reason: string | null; kinds: string; result: string | null };
-const rowToJob = (r: JobRow): Job => ({ id: r.id, kind: r.kind as JobKind, taskId: r.task_id, pr: r.pr, runner: r.runner as Job["runner"], cwd: r.cwd, status: r.status as JobStatus, exitCode: r.exit_code, startedAt: r.started_at, endedAt: r.ended_at, summary: r.summary, repo: r.repo, head: r.head, base: r.base, as: r.as_reason as ReviewAs | null, kinds: r.kinds ? r.kinds.split(",") : [], result: r.result ? (JSON.parse(r.result) as JobResult) : null });
+type JobRow = { id: number; kind: string; task_id: string; pr: number; runner: string | null; cwd: string; status: string; exit_code: number | null; started_at: number; ended_at: number | null; summary: string | null; repo: string; head: string | null; base: string | null; as_reason: string | null; kinds: string; result: string | null; model: string | null; effort: string | null };
+const rowToJob = (r: JobRow): Job => ({ id: r.id, kind: r.kind as JobKind, taskId: r.task_id, pr: r.pr, runner: r.runner as Job["runner"], cwd: r.cwd, status: r.status as JobStatus, exitCode: r.exit_code, startedAt: r.started_at, endedAt: r.ended_at, summary: r.summary, repo: r.repo, head: r.head, base: r.base, as: r.as_reason as ReviewAs | null, kinds: r.kinds ? r.kinds.split(",") : [], result: r.result ? (JSON.parse(r.result) as JobResult) : null, model: r.model, effort: r.effort });

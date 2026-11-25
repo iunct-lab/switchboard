@@ -4,7 +4,7 @@ import { stopEndedTasksProcesses } from "../detached.ts";
 import { homedir, tmpdir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { APP_JOB_TASK, type TeleportProgress, type TerminalStatus } from "@switchboard/protocol";
+import { APP_JOB_TASK, recheckSetting, type TeleportProgress, type TerminalStatus } from "@switchboard/protocol";
 import { memoryHeadroom } from "../ops-load.ts";
 import { recoverJobs } from "../jobs.ts";
 import { ArtifactStore } from "../artifacts.ts";
@@ -94,7 +94,7 @@ export async function setupTasks(sc: Pick<ServerContextInit, "leaseGate" | "task
         writePolicies(sc.db, recordUse(readPolicies(sc.db), id, { at: Date.now(), askId: `approval:${task.id}:${ask.id}`, taskId: task.id, issue: issueOf(task), subject: { kind: "approval", op: ask.kind, target: v.match.subject, conditions: [], head: null } }));
       }
       return v;
-    }, pricing: sc.pricingTable, loginKind: (task) => sc.loginKindOf(task.runner, task.id), defaultPermissionMode: sc.savedDefaultMode, subagentEffort: (r) => sc.settings().subagentEffort[r], subagentModel: (r) => sc.settings().subagentModel[r], runnerDefaults: (r) => ({ model: sc.settings().defaultModel[r], effort: sc.settings().defaultEffort[r] }), defaultShadowRunner: () => sc.settings().shadowRunner, defaultFableBudget: () => sc.settings().quotaAndResume.fableBudgetUsd, attachments: sc.attachments, privateTmpRoot: join(sc.cfg.home, "tmp"), waitsDir: waitsDirOf(sc.cfg.home), heavyStateDir: sc.opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${sc.localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: sc.cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: sc.cfg.home, OPS_KIT_WAITS_DIR: waitsDirOf(sc.cfg.home), BACKLOG_URL: `${sc.localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: sc.cfg.tokenPath, ...sc.localBacklogEnv(id), ...workspaceConfigEnv({ id: sc.db.getTask(id)?.workspaceId ?? "" }) }), otelFor: (id) => (sc.settings().outbound.classifierLog ? { endpoint: `${sc.localUrl()}/otel/${id}/v1/logs`, token: sc.mcp.issue(id).token } : undefined), runnerTelemetry: () => sc.settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(sc.dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => sc.settings().quotaAndResume.maxStopResumes, maxRunners: () => sc.settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: sc.cfg.candidate, workMachine: isWorkMachine(sc.cfg), admissionHold: sc.drainHold, reviewRunner: () => sc.settings().reviewRunner, mcpServers: sc.startMcpServers, bedrock: (task) => { const b = sc.bedrockOf(task.runner); if (b) sc.bedrockTasks.add(task.id); else sc.bedrockTasks.delete(task.id); return b; } });
+    }, pricing: sc.pricingTable, loginKind: (task) => sc.loginKindOf(task.runner, task.id), defaultPermissionMode: sc.savedDefaultMode, subagentEffort: (r) => sc.settings().subagentEffort[r], subagentModel: (r) => sc.settings().subagentModel[r], runnerDefaults: (r) => ({ model: sc.settings().defaultModel[r], effort: sc.settings().defaultEffort[r] }), defaultShadowRunner: () => sc.settings().shadowRunner, defaultFableBudget: () => sc.settings().quotaAndResume.fableBudgetUsd, attachments: sc.attachments, privateTmpRoot: join(sc.cfg.home, "tmp"), waitsDir: waitsDirOf(sc.cfg.home), heavyStateDir: sc.opts.heavyStateDir ?? heavyStateDir(homedir()), deviceAuthEnv: (id) => ({ DEVICE_AUTH_URL: `${sc.localUrl()}/api/tasks/${id}/device-auth`, DEVICE_AUTH_TOKEN_FILE: sc.cfg.tokenPath, SWITCHBOARD_DAEMON_HOME: sc.cfg.home, OPS_KIT_WAITS_DIR: waitsDirOf(sc.cfg.home), BACKLOG_URL: `${sc.localUrl()}/api/backlog`, BACKLOG_TOKEN_FILE: sc.cfg.tokenPath, ...sc.localBacklogEnv(id), ...workspaceConfigEnv({ id: sc.db.getTask(id)?.workspaceId ?? "" }) }), otelFor: (id) => (sc.settings().outbound.classifierLog ? { endpoint: `${sc.localUrl()}/otel/${id}/v1/logs`, token: sc.mcp.issue(id).token } : undefined), runnerTelemetry: () => sc.settings().outbound.runnerTelemetry, dockerEnv: (id) => ({ DOCKER_MARK_LABEL: `${LABEL_KEY}=${id}`, DOCKER_MARK_LOG: join(sc.dockerLogDir, `${id}.jsonl`) }), maxStopResumes: () => sc.settings().quotaAndResume.maxStopResumes, maxRunners: () => sc.settings().maxRunners, memoryHeadroom: () => (process.env.NODE_ENV === "test" ? null : memoryHeadroom()) /* the test daemons do not wait on the host's memory */, holdQueue: sc.cfg.candidate, workMachine: isWorkMachine(sc.cfg), admissionHold: sc.drainHold, reviewRunner: () => sc.settings().reviewRunner, recheckRunner: () => recheckSetting(sc.settings()), mcpServers: sc.startMcpServers, bedrock: (task) => { const b = sc.bedrockOf(task.runner); if (b) sc.bedrockTasks.add(task.id); else sc.bedrockTasks.delete(task.id); return b; } });
   // Terminal sessions: what Claude Code wrote to ~/.claude/projects while nobody in Switchboard was watching.
   const claudeDanger = new Set((sc.adapters.find((a) => a.id === "claude")?.permissionModes ?? []).filter((m) => m.danger).map((m) => m.value));
   sc.history = new HistoryImporter(sc.db, { projectsDir: sc.cfg.claudeProjectsDir, pollMs: sc.cfg.historyPollMs, pricing: sc.pricingTable, broadcast: sc.broadcast, isLive: (id) => sc.tasks.isLive(id), dangerModes: claudeDanger, log: (m) => console.warn(m) });
@@ -129,8 +129,13 @@ export function setupJobs(sc: Pick<ServerContextInit, "resumer" | "db" | "tasks"
     command: sc.opts.jobCommand,
     // a gate job reads the daemon's records at the daemon's own loopback address with the daemon's own key
     app: () => ({ url: sc.localUrl(), tokenFile: sc.cfg.tokenPath }),
-    reviewChoice: (runner) => sc.runnerChoice(runner, "", ""),
+    // the review's own model / effort, read on every request; an empty one is the Task's default (`runnerChoice`)
+    reviewChoice: (runner) => {
+      const s = sc.settings();
+      return sc.runnerChoice(runner, s.reviewModel[runner] ?? "", s.reviewEffort[runner] ?? "");
+    },
     reviewRunner: () => sc.settings().reviewRunner,
+    recheckRunner: () => recheckSetting(sc.settings()),
     pricing: sc.pricingTable,
     loginKind: sc.loginKindOf,
     reviewIdleS: sc.cfg.jobReviewIdleS,

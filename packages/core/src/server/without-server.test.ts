@@ -30,7 +30,7 @@ const notes = () => {
   const lines: string[] = [];
   return { lines, scheduler: { note: (line: string) => void lines.push(line), notes: (texts: string[]) => void lines.push(...texts) } as never };
 };
-const queue = (over: Partial<BacklogQueue>): BacklogQueue => ({ enabled: true, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, ...over });
+const queue = (over: Partial<BacklogQueue>): BacklogQueue => ({ enabled: true, concurrency: 1, items: [], ended: [], lastNote: null, lastNoteAt: null, stall: null, ...over });
 const ask = (over: Partial<Ask>) => ({ id: "notice:scan@1", kind: "notice", state: "open", answers: ["dismiss"], blockers: [], task: null, issue: null, ...over }) as unknown as Ask;
 
 describe("queueOnce without a server", () => {

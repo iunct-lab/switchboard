@@ -1,4 +1,4 @@
-// test-reads: scripts/forge-resync.ts scripts/local-merge.ts
+// test-reads: scripts/forge-resync.ts scripts/forge-resync-report.ts scripts/local-merge.ts
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -614,7 +614,7 @@ test("origin on another host (GitLab) or a path is not GitHub's: no repository t
 
 // `--report`: what was done locally is left on GitHub once per change. A fake app (the changes, their comments) and a
 // fake gh; origin is the bare repository of `setup`, so "GitHub's main has the commit" is git's own answer.
-import { changeSummary } from "./forge-resync.ts";
+import { changeSummary } from "./forge-resync-report.ts";
 
 type Listed = { number: number; title?: string; state?: "OPEN" | "CLOSED"; head: string; mergeCommit: string | null; pr: number | null; reportedAt?: string | null; body?: string; comments?: string[] };
 

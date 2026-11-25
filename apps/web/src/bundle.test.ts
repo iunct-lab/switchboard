@@ -1,24 +1,52 @@
 // test-reads: apps/web/src/i18n.ts apps/web/src/i18n/bundle.ts apps/web/src/time.ts
 import { describe, expect, test } from "bun:test";
-import type { BundleHold } from "@switchboard/protocol";
-import { canStartBundle, holdLine, parsePbiNumbers, unreadableHold } from "./bundle.ts";
+import type { BacklogItem, BundleHold } from "@switchboard/protocol";
+import { bundleGate, holdLine, unreadableHold } from "./bundle.ts";
 import { jstClock } from "./time.ts";
 
 const hold = (over: Partial<BundleHold> = {}): BundleHold => ({ taskId: "task_x", since: Date.UTC(2026, 10, 18, 11, 40), schedules: ["a", "b", "c"], base: "v1.529.4", ...over });
 
-describe("bundle input and line", () => {
-  test("parsePbiNumbers reads commas, spaces and #", () => {
-    expect(parsePbiNumbers("5232, 5233 #5354,#5355")).toEqual([5232, 5233, 5354, 5355]);
-    expect(parsePbiNumbers("7 7 8")).toEqual([7, 8]);
-    expect(parsePbiNumbers("abc 0 -3 4.5 9")).toEqual([9]);
-    expect(parsePbiNumbers("")).toEqual([]);
+const META = "ws_meta";
+const pbi = (number: number, workspaceId = META, workspaceName = "Switchboard"): BacklogItem => ({ workspaceId, workspaceName, number, title: `t${number}`, type: "pbi", stage: "ready" }) as BacklogItem;
+
+describe("bundle gate and line", () => {
+  test("bundleGate: Switchboard の PBI が 2 件で止めが無ければ押せて、選んだ順の番号を返す", () => {
+    expect(bundleGate([pbi(9), pbi(4)], META, null)).toEqual({ ok: true, pbis: [9, 4] });
   });
 
-  test("canStartBundle needs two and no hold", () => {
-    expect(canStartBundle([1, 2], null)).toBe(true);
-    expect(canStartBundle([1], null)).toBe(false);
-    expect(canStartBundle([], null)).toBe(false);
-    expect(canStartBundle([1, 2], hold())).toBe(false);
+  test("bundleGate: ほかのリポジトリの PBI が入っていると押せず、その workspace の名前と番号を理由に出す", () => {
+    const g = bundleGate([pbi(1), pbi(2, "ws_other", "Other")], META, null);
+    expect(g.ok).toBe(false);
+    if (!g.ok) {
+      expect(g.reason).toContain("Other");
+      expect(g.reason).toContain("#2");
+    }
+  });
+
+  test("bundleGate: 1 件だけでは押せない", () => {
+    const g = bundleGate([pbi(1)], META, null);
+    expect(g.ok).toBe(false);
+    if (!g.ok) expect(g.reason).toContain("1 件だけ");
+    expect(bundleGate([], META, null).ok).toBe(false);
+  });
+
+  test("bundleGate: 束の作業中は押せない", () => {
+    const g = bundleGate([pbi(1), pbi(2)], META, hold());
+    expect(g).toEqual({ ok: false, reason: "束の作業中は始められません" });
+  });
+
+  test("bundleGate: ほかのリポジトリの PBI は、Switchboard に同じ番号の PBI があっても押せない", () => {
+    expect(bundleGate([pbi(1), pbi(2, "ws_other", "Other")], META, null).ok).toBe(false);
+    expect(bundleGate([pbi(1, "ws_other", "Other"), pbi(2, "ws_other", "Other")], META, null).ok).toBe(false);
+    expect(bundleGate([pbi(1), pbi(1, "ws_other", "Other")], META, null).ok).toBe(false);
+  });
+
+  test("bundleGate: workspace の一覧を読めていない間は押せず、理由も出さない", () => {
+    expect(bundleGate([pbi(1), pbi(2)], null, null)).toEqual({ ok: false, reason: "" });
+  });
+
+  test("bundleGate: 止めをまだ読めていない間は押せず、理由も出さない", () => {
+    expect(bundleGate([pbi(1), pbi(2)], META, undefined)).toEqual({ ok: false, reason: "" });
   });
 
   test("holdLine names the schedules, the time and the version", () => {

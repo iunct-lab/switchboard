@@ -7,6 +7,8 @@ import { WaitGroups, type WaitFailure } from "./WaitGroups.tsx";
 import { mcpHintLabel, summarize } from "../approvals.ts";
 import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
+import { home as hm } from "../i18n/home.ts";
+import { stallRows } from "../queueStall.ts";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
 import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitChoices, waitersLine, waitGroups, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
@@ -229,6 +231,7 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
       {parts.question && !live && <AskQuestion text={parts.question} />}
       {/* a stop, and a wait past its limit, have no question: the reason is what is read first */}
       {(x.kind === "stop" || x.kind === "wait") && x.needs === "person" && x.reason && (x.state === "open" || x.state === "held") && !live && <div className="ask-question ask-stop-reason">{x.reason}</div>}
+      {x.stall && <StallRows ask={x} onOpenTask={props.onOpenTask} />}
       {props.liveHead}
       {was?.changes && (
         <div className={`hint ${was.changed ? "warn " : ""}ask-changes`}>
@@ -298,6 +301,49 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
         {parts.unknown.length > 0 && <div className="hint ask-unknown">{t(m.unknownFacts, { labels: parts.unknown.join("・") })}</div>}
       </details>
     </section>
+  );
+}
+
+/**
+ * The lines of a stalled queue's notice (queueStall.ts), on Home's card and on the notice's card here: what waits for the
+ * person, each opening its Task (else its Issue), then what holds the queue, each opening its PR / Issue in a new tab.
+ */
+export function StallRows(props: { ask: Ask; onOpenTask: (id: string) => void }) {
+  const { person, holders } = stallRows(props.ask);
+  return (
+    <div className="stall-rows">
+      {person.length > 0 && <div className="stall-group">{t(hm.stallPersonHeading)}</div>}
+      {person.map((r, i) => (
+        <div key={`p${i}`} className="stall-row">
+          <span className="t">
+            {r.text}
+            {r.badge && <span className="badge stall-head-moved">{r.badge}</span>}
+          </span>
+          {r.taskId ? (
+            <button className="ghost link" onClick={() => props.onOpenTask(r.taskId!)}>
+              {t(hm.stallOpenTask)}
+            </button>
+          ) : (
+            r.href && (
+              <a href={r.href} target="_blank" rel="noreferrer">
+                {t(hm.stallOpenIssue)}
+              </a>
+            )
+          )}
+        </div>
+      ))}
+      {holders.length > 0 && <div className="stall-group">{t(hm.stallHoldersHeading)}</div>}
+      {holders.map((r, i) => (
+        <div key={`h${i}`} className="stall-row">
+          <span className="t">{r.text}</span>
+          {r.href && (
+            <a href={r.href} target="_blank" rel="noreferrer">
+              {t(hm.stallOpen)}
+            </a>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

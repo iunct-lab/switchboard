@@ -82,8 +82,8 @@ describe("export-copy", () => {
     expect(copy).toBe(readFileSync(join(KIT, "skills/cross-runner-review/SKILL.md"), "utf8"));
     const lines = parseConditions(copy, "cross-runner-review");
     const outside = lines.filter((l) => !l.mark && l.when?.task === "out").map((l) => l.text).join("\n");
-    expect(outside).toContain("exec --sandbox read-only");
-    expect(outside).toContain("claude -p --permission-mode plan");
+    expect(outside).toContain("exec --sandbox workspace-write");
+    expect(outside).toContain('claude -p "${MAY[@]}"');
     expect(lines.some((l) => l.when?.task === "in" && l.text.includes("ops-kit job request review"))).toBe(true);
     // what renders and checks the marks travels with the copy
     expect(all(dest)).toContain("src/conditions.ts");

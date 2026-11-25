@@ -8,7 +8,7 @@ import { common } from "./i18n/common.ts";
  * cannot go in the web bundle, so it is written here and changes.test.ts holds them equal. `RECHECK_PASS`'s kinds are held equal to merge-gate's `RECHECK_KINDS` by the same test; `REVIEW` is the screen's alone.
  */
 export const LOCAL_CI_RESULT = /^\[local-ci\] (pass|fail) ([0-9a-f]{40}) base=([0-9a-f]{40})(?=\s|$)/;
-export const RECHECK_PASS = /^\[recheck\] (security:docs|security:tests|security:lockfile|size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
+export const RECHECK_PASS = /^\[recheck\] (security:docs|security:tests|security:lockfile|security:gate-support|size|responsibility|migration|rescue|design-rules) pass ([0-9a-f]{40})\b/;
 /** A main review: the other runner's. */
 export const REVIEW = /^\[(codex|claude)\] review/;
 

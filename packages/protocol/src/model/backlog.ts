@@ -311,6 +311,14 @@ export type BacklogQueueEnded = z.infer<typeof BacklogQueueEnded>;
 export const BacklogQueueConcurrency = z.union([z.literal(1), z.literal(2), z.literal(3)]);
 
 /**
+ * Other work that holds queued PBIs back on an overlap, as the queue's stall keeps it: `ref` = `Task #N` / `PR #N`, or
+ * `#N の順番` for the place of PBI N that yielded earlier (then `pbi` = N and `working` = null). `held` = the queued PBIs it
+ * holds; `pbi` = the PBI of the work (null = none found).
+ */
+export const QueueStallHolder = z.object({ workspaceId: z.string(), ref: z.string(), pbi: z.number().int().nullable(), held: z.array(z.number().int()), working: z.boolean().nullable() });
+export type QueueStallHolder = z.infer<typeof QueueStallHolder>;
+
+/**
  * The backlog queue: the PBIs to implement, in order, kept in the daemon (`GET /api/backlog/queue`). `enabled`
  * off (the default) starts nothing from it.
  */
@@ -323,6 +331,12 @@ export const BacklogQueue = z.object({
   lastNote: z.string().nullable(),
   /** When `lastNote` was written (ms). null = never. */
   lastNoteAt: z.number().nullable(),
+  /**
+   * The queue could start nothing: enabled, none of its PBIs' 実装 Tasks running, and a firing that started nothing and
+   * left nothing for the usage limit. `since` = the first such firing (ms; kept while it lasts), `holders` = what holds
+   * the PBIs back at the latest one, the most held first (at most 10). null = not stalled.
+   */
+  stall: z.object({ since: z.number(), holders: z.array(QueueStallHolder) }).nullable(),
 });
 export type BacklogQueue = z.infer<typeof BacklogQueue>;
 
