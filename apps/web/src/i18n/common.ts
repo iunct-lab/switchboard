@@ -63,6 +63,19 @@ export const common = msgs({
 
   // loginRow.ts / components/LoginSettings.tsx: a runner's own login
   loginBedrock: { ja: "使用中: サードパーティのプラットフォーム（Amazon Bedrock）", en: "In use: a third-party platform (Amazon Bedrock)" },
+  loginBedrockCli: { ja: "使用中: Amazon Bedrock（CLI の設定）", en: "In use: Amazon Bedrock (the CLI's own setting)" },
+  loginBedrockCliWhere: {
+    ja: "{where}。外すには CLI の設定から外してください。",
+    en: "{where}. To turn it off, remove it from the CLI's own settings.",
+  },
+  loginBedrockCliWhereClaude: { ja: "~/.claude/settings.json の env の CLAUDE_CODE_USE_BEDROCK", en: "CLAUDE_CODE_USE_BEDROCK in env of ~/.claude/settings.json" },
+  loginBedrockCliWhereCodex: { ja: "~/.codex/config.toml の model_provider", en: "model_provider in ~/.codex/config.toml" },
+  bedrockStillRunning: {
+    ja: "Amazon Bedrock で始めた Task が {n} 件、まだ Bedrock で動いています（次に始める Task から {login}）",
+    en: "{n} Task(s) started on Amazon Bedrock are still running on Bedrock (Tasks started from now on use {login})",
+  },
+  bedrockNextClaude: { ja: "Claude アカウントで動きます", en: "the Claude account" },
+  bedrockNextPlan: { ja: "定額の契約で動きます", en: "the subscription" },
   loginClaudeAccount: { ja: ": Claude アカウント", en: ": Claude account" },
   loggedIn: { ja: "ログイン中{kind}", en: "Logged in{kind}" },
   loggedOut: { ja: "ログアウト中", en: "Logged out" },

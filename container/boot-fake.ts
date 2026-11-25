@@ -1,5 +1,5 @@
-// The fake daemon of container/e2e.sh, in the stand-alone image in place of container/entrypoint.sh: the relay
-// on 47831 and a daemon on 47832 with one fake runner (a copy of the boot.ts of .claude/skills/verify-live-ui, the
+// The fake daemon of container/e2e.sh, in the stand-alone image in place of container/entrypoint.sh: a daemon
+// on 47831 (the container shares the machine's network) with one fake runner (a copy of the boot.ts of .claude/skills/verify-live-ui, the
 // runner of packages/core/src/devproxy.test.ts). SWITCHBOARD_HOME is the daemon's default, the sb-home volume.
 // SWITCHBOARD_CANDIDATE=1 comes from the override file of e2e.sh. The turn writes a marked session file as a real
 // runner would, to ~/.claude/projects/<cwd folder>/<session id>.jsonl, which the run after a recreate looks for.
@@ -10,7 +10,6 @@ import { claudeProjectDirName } from "../packages/adapters/claude/src/history.ts
 import type { AgentEvent, RunnerAdapter } from "@switchboard/protocol";
 import { loadConfig } from "../packages/core/src/config.ts";
 import { startServer } from "../packages/core/src/server.ts";
-import { startRelay } from "./relay.ts";
 
 export const SESSION_ID = "e2e-session-1";
 
@@ -49,8 +48,7 @@ const adapter: RunnerAdapter = {
 };
 
 if (import.meta.main) {
-  const port = 47832;
+  const port = 47831;
   await startServer(loadConfig({ ...process.env, SWITCHBOARD_PORT: String(port), SWITCHBOARD_CANDIDATE: "1", SWITCHBOARD_HISTORY_POLL_MS: "0" }), [adapter], { port, judge: never, rubricJudge: never, titleSuggester: never });
-  startRelay(47831, port);
   console.log("fake daemon up");
 }

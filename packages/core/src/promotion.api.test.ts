@@ -10,7 +10,7 @@ import { tagCi } from "./server/promotion.ts";
 import { Db } from "./db.ts";
 import { loadConfig } from "./config.ts";
 import { JobError, jobCommand, requestJob, type JobDeps } from "./jobs.ts";
-import { promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, drainNote, tagCiOf, tagCiPlan, TAG_CI_ATTEMPTS, TAG_CI_RETRY_MS, reportPromoteFailure, type PromotionDrain, type ReleaseState } from "./promotion.ts";
+import { promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, sawRescueBusy, askedExpiry, drainNote, tagCiOf, tagCiPlan, TAG_CI_ATTEMPTS, TAG_CI_RETRY_MS, reportPromoteFailure, type PromotionDrain, type ReleaseState } from "./promotion.ts";
 import { CHECK, STOPPED, backlogNextSchedule, boot, endableClaude, fakeGh, holdingClaude, metaId, refreshed, releaseBody, releaseHold, releasedDaemon, runSchedule, scheduleLog, scheduleLogAll, settle, start, startServer, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
@@ -145,11 +145,26 @@ test("promote: the drain — one clock for the whole wait: a newer tag replaces 
   expect(askedInFlight(asked, false, 4050, 100)).toBe(true);
   expect(askedInFlight(asked, false, 4100, 100)).toBe(false);
   expect(askedInFlight(d, true, 4100, 100)).toBe(false);
-  // a restart that never comes holds nothing after its own bound (the wait's limit does not apply to it)
-  expect(expireDrain(asked, 1, 500, 4500)).toBe(asked);
-  const lapsed = expireDrain(asked, 1, 500, 4501);
+  // a restart sb-rescue never answers busy to holds nothing after the quiet bound, counted from the request
+  expect(expireDrain(asked, 99_999, 500, 4500)).toBe(asked);
+  expect(askedExpiry(asked, 99_999, 500, 4501)).toBe("quiet");
+  const lapsed = expireDrain(asked, 99_999, 500, 4501);
   expect(lapsed).toEqual({ tag: "v4", since: 1000, state: "off", lifted: 1501 });
   expect(drainHeld(lapsed)).toBe(false);
+  // each busy answer counts the quiet bound again: a busy sb-rescue keeps the hold past it
+  const busy = sawRescueBusy(asked, 4400);
+  expect(busy).toEqual({ ...asked!, busyAt: 4400 });
+  expect(sawRescueBusy(d, 4400)).toBe(d);
+  expect(sawRescueBusy(null, 4400)).toBeNull();
+  expect(expireDrain(busy, 99_999, 500, 4900)).toBe(busy);
+  expect(askedExpiry(busy, 99_999, 500, 4901)).toBe("quiet");
+  // the limit counts from the request whatever sb-rescue answers
+  expect(askedExpiry(sawRescueBusy(asked, 6900), 3000, 500, 7000)).toBeNull();
+  expect(askedExpiry(sawRescueBusy(asked, 7000), 3000, 500, 7001)).toBe("limit");
+  const over = expireDrain(sawRescueBusy(asked, 7000), 3000, 500, 7001);
+  expect(over).toEqual({ tag: "v4", since: 1000, state: "off", lifted: 1501 });
+  expect(drainHeld(over)).toBe(false);
+  expect(askedExpiry(d, 1, 1, 99_999)).toBeNull();
 });
 
 test("promote: the notice of a wait past its limit names the minutes and the Tasks that hold it, and is there only while they do", () => {
@@ -211,6 +226,19 @@ test("promote: a failed version is reported once on the stored PBI behind its PR
     expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", failure)).toBe(499);
     expect(f.comments()).toHaveLength(1);
     expect(f.labelOps()).toHaveLength(1);
+  } finally {
+    f.done();
+  }
+});
+
+test("promote: a failed version with no rescue page to name (no SWITCHBOARD_RESCUE_URL) says nothing of one", async () => {
+  const f = reportStore(githubSource, { pr: true });
+  try {
+    expect(await reportPromoteFailure(f.db, githubSource, f.gh, "/repo", { ...failure, rescueUrl: undefined })).toBe(499);
+    const [c] = f.comments();
+    expect(c!.body).toContain("**止めた場所**: 定期実行（backlog-next）\n");
+    expect(c!.body).not.toContain("救援画面: ");
+    expect(c!.body).not.toContain("undefined");
   } finally {
     f.done();
   }
@@ -825,6 +853,26 @@ describe("promotion without cutting or waiting on the Tasks", () => {
     }
   }, 30_000);
 
+  test("while sb-rescue still works on the restart it took, new starts stay held past the asked hold", async () => {
+    const r = await releasedDaemon([], false, { building: true });
+    const claude = endableClaude();
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, { promotionAskedPollMs: 50, promotionAskedHoldMs: 600 });
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect((await newTask(base, "held")).status).toBe(201);
+      // sb-rescue stays busy with the build for several times the asked hold: the start is still held
+      await Bun.sleep(2000);
+      expect(r.state.busy).toBe("promote");
+      expect(claude.count()).toBe(0);
+      expect(core!.db.listQueuedTasks()).toHaveLength(1);
+      expect(await health(base)).toMatchObject({ tag: "v0.2.0", asked: expect.any(Number), queued: 1 });
+      expect(await scheduleLogAll(base)).not.toContainEqual(expect.stringContaining("再起動が来ないので"));
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
   test("a restart that was asked for and never comes does not hold new starts for ever", async () => {
     const r = await releasedDaemon([], false, { building: true });
     const claude = endableClaude();
@@ -834,11 +882,32 @@ describe("promotion without cutting or waiting on the Tasks", () => {
       expect((await runSchedule(base, id)).status).toBe(202);
       expect((await newTask(base, "held")).status).toBe(201);
       expect(core!.db.listQueuedTasks()).toHaveLength(1);
-      // sb-rescue stays busy and no restart comes
+      // sb-rescue went away in the middle of the promotion: it answers nothing and no restart comes
+      r.rescue.stop(true);
+      await claude.started(1);
+      expect(await health(base)).toBeNull();
+      expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("たっても再起動が来ないので、新しい開始の保留を外した: v0.2.0"));
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("a restart sb-rescue still works on past the drain limit lifts the hold and tells the person", async () => {
+    const r = await releasedDaemon([], false, { building: true });
+    const claude = endableClaude();
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env, undefined, undefined, { promotionAskedPollMs: 50, promotionAskedHoldMs: 600, promotionDrainLimitMs: 1000 });
+      const id = await backlogNextSchedule(base);
+      expect((await runSchedule(base, id)).status).toBe(202);
+      expect((await newTask(base, "held")).status).toBe(201);
+      expect(core!.db.listQueuedTasks()).toHaveLength(1);
+      // sb-rescue stays busy, but the hold is not kept for ever: the limit, counted from the request, lifts it
       await claude.started(1);
       expect(r.state.busy).toBe("promote");
       expect(await health(base)).toBeNull();
-      expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("たっても再起動が来ないので、新しい開始の保留を外した: v0.2.0"));
+      const log = await scheduleLogAll(base);
+      expect(log).toContainEqual(expect.stringContaining("たっても終わらないので、新しい開始の保留を外した: v0.2.0"));
+      expect(log).not.toContainEqual(expect.stringContaining("再起動が来ないので"));
     } finally {
       stop(r);
     }
@@ -1564,4 +1633,140 @@ describe("promote: the app's own tag CI job", () => {
       expect(t.argvs.at(-1)).toEqual(["bun", join(t.sc.metaWorkspace()!.path, "scripts/tag-ci.ts"), "--sha", t.sha]);
     } finally { t.done(); }
   });
+});
+
+describe("a pressed update: the check first, then the promotion, for the tag pressed only", () => {
+  const remote = (name: string) => { const d = join(mkdtempSync(join(tmpdir(), "sb-origin-")), name); mkdirSync(d, { recursive: true }); Bun.spawnSync(["git", "init", "-q", "--bare", d]); return d; };
+  const PUBLIC = remote("o/pub");
+  const PLAN = [{ value: "plan", label: "plan", description: "" }];
+  const reviews = () => core!.db.listTasks().filter((t) => t.origin === "release-review");
+  const fence = (j: object) => "確認した。\n```switchboard-release-review\n" + JSON.stringify(j) + "\n```";
+  const press = (base: string) => fetch(`${base}/api/daemon/release/review`, { method: "POST", body: JSON.stringify({ promote: true }) });
+  const release = async (base: string) => (await (await fetch(`${base}/api/daemon/release`)).json()) as { review: { state: string } | null; pressed: { tag: string; stopped?: string } | null; hold: { tasks: boolean } | null };
+  const stop = (r: Awaited<ReturnType<typeof releasedDaemon>>) => { r.rescue.stop(true); rmSync(r.repo, { recursive: true, force: true }); };
+  const reviewAt = (claude: ReturnType<typeof endableClaude>, tag: string) => claude.prompts.map((p, i) => (p.includes(tag) && p.includes("diff.patch") ? i : -1)).filter((i) => i >= 0).at(-1)!;
+  const off = async (base: string) => expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ release: { auto: "off" } }) })).status).toBe(200);
+
+  test("off: an unchecked tag pressed starts its check, and once it is ok the promotion is asked for without a second press", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      await off(base);
+      const res = await press(base);
+      expect([res.status, await res.json()]).toEqual([202, { started: "review", tag: "v0.2.0" }]);
+      expect((await release(base)).pressed).toMatchObject({ tag: "v0.2.0" });
+      await settle(() => reviews().length === 1);
+      expect(r.promoted).toEqual([]); // not before the check has answered
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      await settle(() => r.promoted.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+      expect((await release(base)).pressed).toBeNull();
+      // a version already found ok is not a press's: its button is the update
+      const again = await press(base);
+      expect([again.status, ((await again.json()) as { error: string }).error]).toEqual([409, "この版は確認済みです。「この版に更新」から"]);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("off: a pressed tag whose check ends with a concern or could not be checked is not promoted, and the release answer says the press was stopped", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      await off(base);
+      expect((await press(base)).status).toBe(202);
+      await settle(() => reviews().length === 1);
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: fence({ verdict: "concern", findings: [{ path: "a.ts", why: "x" }] }) });
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      for (let i = 0; i < 100 && (await release(base)).pressed?.stopped !== "concern"; i++) await Bun.sleep(20);
+      expect(await release(base)).toMatchObject({ review: { state: "concern" }, pressed: { tag: "v0.2.0", stopped: "concern" } });
+      // pressed again: a new check, and this one cannot be read
+      expect((await press(base)).status).toBe(202);
+      await settle(() => reviews().length === 2);
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: "読めない返答" });
+      for (let i = 0; i < 100 && (await release(base)).pressed?.stopped !== "failed"; i++) await Bun.sleep(20);
+      expect(await release(base)).toMatchObject({ review: { state: "failed" }, pressed: { tag: "v0.2.0", stopped: "failed" } });
+      await Bun.sleep(300);
+      expect(r.promoted).toEqual([]);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("only promote: true is a press, and a check that waits to resume after a usage limit does not stop the press", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      await off(base);
+      const loose = await fetch(`${base}/api/daemon/release/review`, { method: "POST", body: JSON.stringify({ promote: "false" }) });
+      expect(loose.status).toBe(202);
+      expect((await release(base)).pressed).toBeNull();
+      await settle(() => reviews().length === 1);
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: "読めない返答" });
+      for (let i = 0; i < 100 && (await release(base)).review?.state !== "failed"; i++) await Bun.sleep(20);
+      // pressed: a new check, which stops at a usage limit and waits to resume
+      expect((await press(base)).status).toBe(202);
+      await settle(() => reviews().length === 2);
+      const limited = reviews().at(-1)!;
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "error", summary: "You've hit your session limit · resets 4:10am (Asia/Tokyo)" });
+      await settle(() => core!.db.getTask(limited.id)?.resumeAt != null);
+      // the next firing reads the check as failed (waiting to resume), and the press stays
+      await (await fetch(`${base}/api/daemon/release`)).json();
+      await Bun.sleep(300);
+      expect(await release(base)).toMatchObject({ review: { state: "failed" }, pressed: { tag: "v0.2.0" } });
+      expect((await release(base)).pressed?.stopped).toBeUndefined();
+      expect(r.promoted).toEqual([]);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("a newer tag that comes while the pressed one is checked is not promoted by the press", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      await off(base);
+      expect((await press(base)).status).toBe(202);
+      await settle(() => reviews().length === 1);
+      const git = (...a: string[]) => Bun.spawnSync(["git", "-C", r.repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]);
+      git("commit", "-q", "--allow-empty", "-m", "feat(core): y");
+      git("tag", "v0.3.0");
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      for (let i = 0; i < 100 && (await release(base)).pressed !== null; i++) await Bun.sleep(20);
+      await Bun.sleep(300);
+      expect(r.promoted).toEqual([]);
+      expect(reviews()).toHaveLength(1); // nor is the new tag checked by the press
+      expect((await release(base)).pressed).toBeNull();
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
+
+  test("a pressed tag waits for busy Tasks as an automatic promotion does", async () => {
+    const r = await releasedDaemon([], false, { origin: PUBLIC, oldWithoutRestart: true });
+    const claude = endableClaude(PLAN);
+    try {
+      const base = await boot(fakeGh().gh, claude.adapter, r.env);
+      await off(base);
+      expect((await press(base)).status).toBe(202);
+      await settle(() => reviews().length === 1);
+      expect((await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title: "busy", prompt: "busy", runner: "claude" }) })).status).toBe(201);
+      await settle(() => claude.count() === 2);
+      claude.emit(reviewAt(claude, "v0.2.0"), { t: "session.end", status: "ok", summary: fence({ verdict: "ok", findings: [] }) });
+      await settle(() => core!.db.lastReply(reviews()[0]!.id) !== null);
+      for (let i = 0; i < 100 && (await release(base)).hold?.tasks !== true; i++) await Bun.sleep(20);
+      expect((await release(base)).hold).toMatchObject({ tasks: true });
+      expect(r.promoted).toEqual([]);
+      claude.end(claude.prompts.findIndex((p) => p.includes("busy") && !p.includes("diff.patch")));
+      await settle(() => r.promoted.length > 0);
+      expect(r.promoted).toEqual([r.sha]);
+    } finally {
+      stop(r);
+    }
+  }, 30_000);
 });

@@ -3,7 +3,7 @@ import type { ReleaseState } from "../promotion.ts";
 import type { Routes, ServerContext } from "../server/context.ts";
 
 /** The routes under /api/daemon. */
-export function daemonRoutes(sc: Pick<ServerContext, "callingTask" | "strong" | "readJson" | "restarting" | "bad" | "db" | "selfdev" | "logOp" | "opts" | "json" | "broadcast" | "performRestart" | "releaseStatus" | "latestRelease" | "git" | "releaseReviewFor" | "cfg" | "busyTasks" | "promotionAsked" | "promotionHold" | "drainBusy" | "drainView" | "nextPromotionCheckAt" | "rechecking" | "tasks" | "startReleaseReview" | "askPromotion" | "latestOfSource" | "UPSTREAM_FAILED" | "clientOf" | "requestPromote" | "holdForRestart">): Routes {
+export function daemonRoutes(sc: Pick<ServerContext, "callingTask" | "strong" | "readJson" | "restarting" | "bad" | "db" | "selfdev" | "logOp" | "opts" | "json" | "broadcast" | "performRestart" | "releaseStatus" | "latestRelease" | "git" | "releaseReviewFor" | "cfg" | "busyTasks" | "promotionAsked" | "updatePressed" | "promotionHold" | "drainBusy" | "drainView" | "nextPromotionCheckAt" | "rechecking" | "tasks" | "startReleaseReview" | "askPromotion" | "latestOfSource" | "UPSTREAM_FAILED" | "clientOf" | "requestPromote" | "holdForRestart">): Routes {
   return {
     // Restart the daemon on the current code. Gate: no task running/waiting, no check in flight, and a *current*
     // passing check run for the task — `force: true` skips the gates. Under scripts/dev.ts the daemon exits with
@@ -64,20 +64,25 @@ export function daemonRoutes(sc: Pick<ServerContext, "callingTask" | "strong" | 
         // a public copy's clone: the newest release and the check of its diff (null on a development origin)
         const latest = await sc.latestRelease(s.current, s.source).catch(() => null);
         const review = latest ? sc.releaseReviewFor(latest) : null;
-        return sc.json({ managed: true, latestRelease: latest, review, rescuePage: sc.cfg.rescuePageUrl, rescueInContainer: sc.cfg.rescueInContainer || undefined, head, headSubject, ahead, behind, busyTasks: sc.busyTasks(), dirty: dirty !== "", current: s.current, running: s.running ?? null, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: sc.promotionAsked, hold: sc.promotionHold ? { ...sc.promotionHold, busyTasks: sc.drainBusy() } : null, drain: sc.drainView(), nextCheckAt: sc.nextPromotionCheckAt });
+        return sc.json({ managed: true, latestRelease: latest, review, rescuePage: sc.cfg.rescuePageUrl, head, headSubject, ahead, behind, busyTasks: sc.busyTasks(), dirty: dirty !== "", current: s.current, running: s.running ?? null, previous: s.previous, state: s.state, busy: s.busy, lastError: s.lastError ?? null, history: s.history.slice(0, 5), asked: sc.promotionAsked, pressed: sc.updatePressed, hold: sc.promotionHold ? { ...sc.promotionHold, busyTasks: sc.drainBusy() } : null, drain: sc.drainView(), nextCheckAt: sc.nextPromotionCheckAt });
       } catch (e) {
         return sc.json({ managed: false, error: `sb-rescue did not answer at ${sc.cfg.rescueUrl}: ${String((e as Error).message ?? e)}` });
       }
     },
-    // Check the newest release's diff again after it could not be checked or found a concern. Promotion itself stays
-    // `/api/daemon/promote`: the dialog on the screen is the confirmation (a mark on the API would not stop a caller of it).
+    // Check the newest release's diff again after it could not be checked or found a concern, or check a version never
+    // checked. With `promote: true` (the person's 確かめて更新する) the tag is promoted once this check finds it ok, and only
+    // then — the same callers as `/api/daemon/promote` may send it, and it never skips the check. Promoting a version whose
+    // check found a concern or could not be made stays `/api/daemon/promote`, behind the dialog on the screen.
     "/api/daemon/release/review": {
-      POST: sc.strong(async () => {
+      POST: sc.strong(async (req) => {
+        // `promote`: the person's 確かめて更新する — the check, and the promotion of this tag once the check finds it ok
+        const body = await sc.readJson(req, (x) => ({ promote: (x as { promote?: unknown } | null)?.promote === true }));
         const s = await sc.releaseStatus();
         if (!s.managed) return sc.bad("this daemon does not run from a release (start it with sb-rescue)", 409);
         const latest = await sc.latestRelease(s.current, s.source).catch(() => null);
         if (!latest) return sc.bad("this clone has no public release to check", 409);
         const review = sc.releaseReviewFor(latest);
+        if (body.promote && review?.state === "ok") return sc.bad("この版は確認済みです。「この版に更新」から", 409);
         if (review?.state === "running" || sc.rechecking) return sc.bad(`${latest.tag} の差分を確認中です`, 409);
         // never checked (the automatic check is switched off, or has not come yet), or checked and not cleared
         if (review ? review.state !== "failed" && review.state !== "concern" : !latest.newer) return sc.bad(`${latest.tag} は確かめ直す状態ではありません`, 409);
@@ -88,6 +93,7 @@ export function daemonRoutes(sc: Pick<ServerContext, "callingTask" | "strong" | 
           const why = await sc.startReleaseReview(latest.tag, latest.sha, s.current!, s.source);
           if (why) return sc.bad(why, 500);
           sc.promotionHold = null;
+          sc.updatePressed = body.promote ? { tag: latest.tag, sha: latest.sha, at: Date.now() } : null;
           await sc.askPromotion("idle").catch(() => undefined); // the hold now says the check is running
           return sc.json({ started: "review", tag: latest.tag }, 202);
         } finally {

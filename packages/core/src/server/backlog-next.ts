@@ -8,7 +8,7 @@ import { listProcesses } from "../process-defs.ts";
 import { readQueue } from "../backlog-queue.ts";
 import { allocationOf, sweepOrder, weekWindowStart } from "../allocation.ts";
 import { askWithdrawnPrereqs } from "../backlog-waits.ts";
-import { awaitingReply, failedIn, failedSince, plannedResumeLine, checksOnlyLine, checkingLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, spinningIn, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
+import { awaitingReply, failedIn, failedSince, plannedResumeLine, checksOnlyLine, claimedLine, checkingLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, spinningIn, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
 import { storedFlowIssues, canStartStoredBacklog } from "../backlog-stored.ts";
 import { overlapLine, overlapHolderLines, overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { runGh } from "../backlog-gh.ts";
@@ -50,6 +50,8 @@ export const leftLines = (_sc: unknown, items: BacklogItem[], slot: Slot, flow?:
   if (failed.length) out.push(`前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
   const planned = plannedResumeLine(unheld, slot, Date.now(), fmtTime);
   if (planned) out.push(planned);
+  const claimed = claimedLine(unheld, slot);
+  if (claimed) out.push(claimed);
   const checksOnly = checksOnlyLine(unheld, slot);
   if (checksOnly) out.push(checksOnly);
   const checking = checkingLine(unheld, slot);

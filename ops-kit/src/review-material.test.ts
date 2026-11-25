@@ -31,29 +31,43 @@ describe("handledFindings", () => {
     expect(text.split("\n").filter((l) => l.startsWith("## "))).toEqual(["## Threads", "## Triage summaries"]);
   });
 
-  test("no reply settles a finding by itself: every reply is quoted the same way, and the reviewer is told to check the code whatever the reply says", () => {
+  test("every reply is quoted the same way; the rule makes the implementer's answer a judgement, with one Repeat of: to object", () => {
     const blocker: InlineComment = { id: 5, path: "src/c.ts", line: 3, body: "[codex] - [blocker] `src/c.ts:3` — the grant is taken without the head." };
     const thread = (reply: string) => handledFindings([blocker, { id: 6, in_reply_to_id: 5, path: "src/c.ts", line: 3, body: reply }], [], "review");
-    // a reply shaped like a fix that says the fix is missing, a real fix, a bare word, an answer, a promise: none is marked as a handling
-    for (const reply of ["修正: abc1234 では未修正", "修正: 直した — abc1234", "修正:", "回答: 3 件", "Issue 化: #12（この PR の外）", "対処不要：根拠は docs/a.md", "了解", "修正します（次の PR で）"]) {
+    for (const reply of ["修正: abc1234 では未修正", "修正: 直した — abc1234", "修正:", "回答: 3 件", "Issue 化: #12（この PR の外）", "対処不要：根拠は docs/a.md", "了解"]) {
       const text = thread(reply);
       expect(text).toContain(`- \`src/c.ts:3\` [codex] - [blocker]`);
-      expect(text).toContain(`  - reply: ${reply}`);
       expect({ reply, marks: text.split("\n").filter((l) => l.startsWith("  - ")).map((l) => l.slice(0, l.indexOf(":"))) }).toEqual({ reply, marks: ["  - reply"] });
-      expect(text).not.toContain("handled:");
-      expect(text).toContain("no reply here settles its finding");
+      expect(text).toContain("is the implementer's judgement");
+      expect(text).not.toContain("no reply here settles its finding");
     }
-    // the rule: the list is information; each earlier blocker / should-fix is checked in the code and raised again while the code has the problem
     const rule = REVIEW_RULES.split("\n").find((l) => l.startsWith("Earlier findings."))!;
     for (const part of [
-      "It is information, not a verdict: a reply never settles a finding by itself, whatever it says.",
-      "Check each earlier blocker and should-fix again in the code as it is now, and raise it again whenever the code still has the problem.",
-      "Leave it out only when you have verified in the code that it is resolved, or when you agree — by your own reasoning from the code, not because the reply says so — that it was not a defect.",
+      "is the implementer's judgement.",
+      "raise it once more, ending its line with ` Repeat of: <path:line of the earlier finding>`",
+      "the arbiter rules on it by the written rules",
+      "is not raised again; one the arbiter ruled for the reviewer (`## Rulings for the reviewer (standing)`) stands until it is fixed",
       "Do not repeat a finding you have verified as resolved.",
     ])
       expect(rule).toContain(part);
-    // nothing asks the reviewer for new grounds before it may raise an earlier finding again
-    for (const gone of ["new grounds", "`handled:`", "was answered, not handled"]) expect(REVIEW_RULES).not.toContain(gone);
+    for (const gone of ["a reply never settles a finding by itself", "raise it again whenever the code still has the problem", "new grounds"]) expect(REVIEW_RULES).not.toContain(gone);
+  });
+
+  test("rulings: an arbiter comment's implementer-side and fixed rows come in as closed findings, a reviewer-side row as standing; other comments' rows and other sections do not", () => {
+    const arbiter = ["[claude] arbiter", "", "### Rulings", "- [implementer] `src/a.ts:12` — rule: none", "- [reviewer] `src/b.ts:3` — rule: README.md:40", "- [reviewer] `src/c.ts:5` — rule: none", "- [fixed] `src/d.ts:7` — rule: README.md:41", "", "### Viewpoints", "- security — covered"].join("\n");
+    const text = handledFindings([], [arbiter, "[codex] review\n\n### Rulings\n- [implementer] `src/z.ts:1` — rule: none"], "review");
+    expect(text).toContain("## Rulings (closed)\n- [implementer] `src/a.ts:12` — rule: none\n- [reviewer] `src/c.ts:5` — rule: none\n- [fixed] `src/d.ts:7` — rule: README.md:41\n");
+    expect(text).toContain("## Rulings for the reviewer (standing)\n- [reviewer] `src/b.ts:3` — rule: README.md:40");
+    expect(text).not.toContain("src/z.ts");
+    expect(text).not.toContain("security");
+    expect(text).toContain("A finding under `## Rulings (closed)` is closed");
+    // a follow-up round's [fixed] row closes the earlier reviewer-side row for the same place
+    const later = handledFindings([], [arbiter, "[claude] arbiter\n\n### Rulings\n- [fixed] `src/b.ts:3` — rule: README.md:40\n"], "review");
+    expect(later).not.toContain("\n## Rulings for the reviewer (standing)");
+    expect(later).toContain("## Rulings (closed)\n- [implementer] `src/a.ts:12` — rule: none\n- [reviewer] `src/b.ts:3` — rule: README.md:40\n");
+    expect(later).toContain("- [fixed] `src/b.ts:3` — rule: README.md:40");
+    // a ruling alone is material; an arbiter comment without readable rows is not
+    expect(handledFindings([], ["[claude] arbiter\n\n### Rulings\n- none"], "review")).toBe("");
   });
 
   test("nothing handled → empty; a recheck gets it only once an earlier recheck's summary is on the PR", () => {
@@ -217,7 +231,7 @@ describe("what every review is told", () => {
     for (const mark of ["- blocker:", "- should-fix:", "- nit:", "- question:"]) expect(REVIEW_RULES.split("\n").filter((l) => l.startsWith(mark))).toHaveLength(1);
     expect(REVIEW_RULES).toContain("not by the mark an earlier round gave the same point");
     expect(REVIEW_RULES).toContain("`_review/handled.md`");
-    expect(REVIEW_RULES).toContain("raise it again whenever the code still has the problem");
+    expect(REVIEW_RULES).toContain("check in the code as it is now whether it is; raise it again");
     // a regression from the base is not a nit because no criterion names it
     expect(REVIEW_RULES.split("\n").find((l) => l.startsWith("- should-fix:"))).toContain("something that worked on the base no longer works with this change is a should-fix too");
     expect(REVIEW_RULES).toContain("Repeat of: <path:line of the earlier finding>");
@@ -266,7 +280,7 @@ describe("what every review is told", () => {
     expect(old).toContain("Searching with words of your own is the first round's job");
     expect(old).toContain("only for the readers of values the fix changed in meaning");
     // the earlier findings are still checked again in every round
-    expect(lines.find((l) => l.startsWith("Earlier findings."))).toContain("raise it again whenever the code still has the problem");
+    expect(lines.find((l) => l.startsWith("Earlier findings."))).toContain("check in the code as it is now whether it is; raise it again");
     for (const runner of ["codex", "claude"] as const) expect(reviewPrompt("This is a follow-up review.", runner)).toContain(followUp[0]!);
   });
 });

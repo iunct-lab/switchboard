@@ -198,7 +198,7 @@ test("start: a local workspace without a remote (localForge) gets local changes,
     expect(p).toContain("この workspace の変更はアプリに置く（リモートは使わない）");
     // a recheck is asked of the app as a job on the change; the gate reads the job's record, not a comment
     expect(p).toContain(`${scripts}docs/merge-gate.md` + "\` の「Recheck」");
-    expect(p).toContain("\`ops-kit job request review <変更> --change --as recheck --kinds <種類> --prompt <指示> --out <出力>\`");
+    expect(p).toContain("\`ops-kit job request review <変更> --change --as arbiter --prompt <指示> --out <出力>\`");
     expect(p).toContain("--head <枝> --base main");
     expect(p).toContain("Backlog-Task: <Task>");
     for (const cmd of [`bun ${scripts}scripts/local-ci.ts --change <変更>`, `bun ${scripts}scripts/merge-gate.ts --change <変更>`, `bun ${scripts}scripts/local-merge.ts <変更>`]) expect(p).toContain(cmd);

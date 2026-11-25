@@ -109,6 +109,17 @@ test("issue artifacts: names are made plain and distinct", () => {
   expect(artifactOperations(db, S, "I_12", 12, [13]).map((x) => (x.payload as { name: string }).name)).toEqual(["結果のレポート", "画面 案 2", "art_link", "結果のレポート 2"]);
 });
 
+test("issue artifacts: a numbered name of a 100-character title keeps its number when the send makes it to gh's rule again", () => {
+  reports();
+  const long = "a".repeat(120);
+  for (const [id, at] of [["art_long1", 100], ["art_long2", 101]] as const)
+    db.insertArtifact({ id, taskId: "t_pbi", title: long, kind: "url", source: `https://example.com/${id}`, entry: null, mime: "text/uri-list", size: 0, removedAt: null, createdAt: at, updatedAt: at, appDays: 0, appRequestTaskId: null });
+  const names = artifactOperations(db, S, "I_12", 12, [13]).map((x) => (x.payload as { name: string }).name).slice(-2);
+  expect(names).toEqual(["a".repeat(100), `${"a".repeat(98)} 2`]);
+  // what the send passes to gh: the same names, still two
+  expect(names.map(artifactName)).toEqual(names);
+});
+
 test("issue artifacts: the command's shape is in one place", () => {
   expect(issueArtifactGh.list("acme/app", 12)).toEqual(["issue", "artifact", "list", "12", "-R", "acme/app", "--json", "name"]);
   expect(issueArtifactGh.create("acme/app", 12, { name: "レポート", file: "/a/report.md" })).toEqual(["issue", "artifact", "create", "12", "-R", "acme/app", "/a/report.md#レポート"]);
@@ -200,4 +211,34 @@ test("issue artifacts: one removed after it was queued is skipped; with the sync
   expect(g.artifacts.get(12)!.map((a) => a.name)).toEqual(["結果のレポート", "art_link"]);
   expect(r.ops().map((x) => x.status)).toEqual(["done", "done", "done"]);
   expect(forgeKind({ kind: "artifact", field: null, targetKind: "issue" })).toBe("artifact");
+});
+
+test("issue artifacts: a name queued with a colon is made to gh's rule when sent, and a name gh refuses fails with gh's reason", async () => {
+  const r = reports();
+  const g = fakeGithub();
+  editStoredIssue(db, S, 12, { state: "CLOSED" });
+  // queued before the rule: the stored name has a colon and a trailing mark
+  const [first] = r.ops();
+  db.sqlite.query("UPDATE backlog_operations SET payload = ? WHERE id = ?").run(JSON.stringify({ ...(first!.payload as object), name: "画面イメージ: テスト!" }), first!.id);
+  await r.sendAll(g.gh);
+  expect(g.artifacts.get(12)!.map((a) => a.name)).toContain("画面イメージ テスト");
+  expect(r.ops()[0]!.status).toBe("done");
+  // a name the fake gh still refuses (its rule, stdout `failed`): failed with the reason, not unknown
+  const g2 = fakeGithub();
+  const bad: GhRunner = async (args, cwd) => (args[1] === "artifact" && args[2] === "create" ? { code: 1, stdout: "failed\tx\t/f\tname must start and end with a letter or number\n", stderr: "" } : g2.gh(args, cwd));
+  for (const x of r.ops()) db.setBacklogOperationResult(x.id, { status: "pending" }, t);
+  await r.sendAll(bad);
+  const ops = r.ops();
+  expect(ops[1]!.status).toBe("failed");
+  expect(ops[1]!.error).toBe("name must start and end with a letter or number");
+});
+
+test("issue artifacts: artifactName keeps letters, numbers and Japanese, drops the rest at the ends and turns it to a space inside", () => {
+  expect(artifactName("画面イメージ: テスト")).toBe("画面イメージ テスト");
+  expect(artifactName("(a) b [c]")).toBe("a b c");
+  expect(artifactName("--x_y.z--")).toBe("x_y.z");
+  expect(artifactName("!!!")).toBe("");
+  expect(artifactName(`${"a".repeat(99)}: b`)).toBe("a".repeat(99));
+  expect(issueArtifactGh.refusal("failed\tn\tf\twhy\n")).toBe("why");
+  expect(issueArtifactGh.refusal("created\t1\tn\tf\t\n")).toBeNull();
 });

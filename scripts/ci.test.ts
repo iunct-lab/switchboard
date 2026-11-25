@@ -1,5 +1,5 @@
 // test-reads: .github/workflows/ci.yml scripts/ci.ts
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
@@ -153,6 +153,25 @@ describe("ci", () => {
     const without = withoutPerf(ciSteps);
     expect(without.some((s) => isPerfStep(s) || s.name === "fetch main")).toBe(false);
     expect(without.at(-1)!.name).toBe("bun test");
+  });
+
+  test("perf base off the host without a tree", () => {
+    const base = ciSteps.find((s) => s.name.startsWith("bun scripts/perf-ratchet.ts base"))!;
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.ci-base."));
+    try {
+      // a git on PATH that must not be called: the base of an offload build is the tree it was given, never a ref to read
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      writeFileSync(join(bin, "git"), `#!/bin/sh\necho called >> "${dir}/git-called"\nexit 99\n`, { mode: 0o755 });
+      writeFileSync(join(bin, "bun"), `#!/bin/sh\necho "bun $*" >> "${dir}/bun-called"\n`, { mode: 0o755 });
+      const run = Bun.spawnSync(["bash", "-e", "-c", base.run], { cwd: dir, env: { PATH: `${bin}:/usr/bin:/bin`, PERF_ENV: "offload", PERF_BASE_TREE: "" } });
+      expect(run.stdout.toString()).toBe("perf-base: 比べるタグの木がビルドに渡らなかった（PERF_BASE_TREE が無い。外のビルドの buildspec が古い可能性: aws/template.yaml を配備する）\n");
+      expect(run.exitCode).toBe(1);
+      expect(existsSync(join(dir, "git-called"))).toBe(false);
+      expect(existsSync(join(dir, "bun-called"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("the Codex CLI step installs it with npm when codex is not on PATH, and does not touch npm when it is", async () => {

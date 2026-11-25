@@ -110,7 +110,7 @@ Codex は `AGENTS.md` を読む（中身は CLAUDE.md を指す）。
 ```
 
 **会話で返事を受けたら**: 画面で答えたときと同じ記録をエージェントが作る。
-- 「確認した」: `ops-kit backlog view <PBI> --json | jq -r .issue.body` で本文を取り、その行だけを `- [ ]` → `- [x]` にして `ops-kit backlog edit <PBI> --body-file …`。`ops-kit backlog comment <PBI> --body-file -` で `## 回答` を書く: `受け入れ条件 <n>「<行の文>」を確認しました。` と、会話での利用者の返事の引用
+- 「確認した」: `ops-kit backlog view <PBI> --json > "$W/v.json"` の `.issue.body` のその行だけを `- [ ]` → `- [x]` にして `ops-kit backlog edit <PBI> --body-file … --rev <版>`（版は同じ `$W/v.json` の `.bodyRevision`）。`ops-kit backlog comment <PBI> --body-file -` で `## 回答` を書く: `受け入れ条件 <n>「<行の文>」を確認しました。` と、会話での利用者の返事の引用
 - 「違う」: チェックしない。`## 回答` に `受け入れ条件 <n>「<行の文>」は違います: <理由>`（利用者の返事の引用）を書き、その理由を直す Task を切る（`pbi-to-tasks`）
 - 返事が「確認した」か「違う」か読めない（どの行への返事か分からないも同じ）: 記録せず聞き直す
 
@@ -280,7 +280,7 @@ ops-kit backlog edit <n> --add-label needs-decision     # 止めて待つ問い�
 
 `## 判断待ち` には `**進め方**:` の行を必ず 1 行書く（フェンスの外。行の無い問いは `ops-kit lint` が違反にする。要望 Issue の問いにも書く（lint は見ない）。`lint.ts` の `PROCEED_LINE_SINCE` より前の問いは行が無くても止めて待つ問いとして読む）。行を忘れたら、コメントは直せないので、行のある `## 判断待ち` を出し直す（より新しい行のある問いがあれば、それより前の行の無い問いは lint が数えない）。
 
-- `**進め方**: 推奨で進める（種類: <種類>）`: 推奨の案で続ける。コメントだけ書き、ラベルは付けない。`## 回答` が推奨と違えばその答えで直す（閉じた Task は開き直し、閉じた PBI は `pbi-complete` の 6 の 4 で直す Task を切る）。進めてよいかは表 `ops-kit/reversibility.json` が決める。`<種類>` は `compensable` の `askKind` だけ: `implementation-choice`（実装の選び方）・`wording`（文言）は Task の Issue に書き、挙げるパスは全部その Task の名指しの中。`task-order`（1 つの PBI の Task の順序・分け方）はファイルも、その PBI と Task 以外の `#N` も挙げない。`askStops` の語（マージ・公開・権限など。コードブロックの中も）があれば通らない。通らない問いは lint が違反にし、アプリが止めて待つ問いにして、書いた工程 Task を止める。迷ったら「止めて待つ」（表に種類を足すのは利用者に聞く変更）
+- `**進め方**: 推奨で進める（種類: <種類>）`: 推奨の案で続ける。コメントだけ書き、ラベルは付けない。`## 回答` が推奨と違えばその答えで直す（閉じた Task は開き直し、閉じた PBI は `pbi-complete` の 6 の 4 で直す Task を切る）。進めてよいかは表 `ops-kit/reversibility.json` が決める。`<種類>` は `compensable` の `askKind` だけ: `implementation-choice`（実装の選び方）・`wording`（文言）は Task の Issue に書き、パスは 1 つ以上、全部 Task の名指しの中。`task-order`（1 つの PBI の Task の順序・分け方）はファイル無し・`#N` は PBI と Task のみで Task を 1 つ以上。`askStops` の語（マージ・公開・権限など。コードブロックの中も）があれば通らない。通らない問いは lint が違反にし、アプリが止めて待つ問いにして、書いた工程 Task を止める。迷ったら「止めて待つ」（表に種類を足すのは利用者に聞く変更）
 - `**進め方**: 止めて待つ — <理由>`: ラベル `needs-decision` を付けて作業を終え、`## 回答` を待つ。次は必ずこちらにする: お金が動く案、破壊的な操作、公開、セキュリティの穴を残す案、CLAUDE.md の前提と矛盾する価値、`irreversible` の操作を含む案
 
 ランナーの自動承認に拒まれうる操作（定期実行の登録、設定の変更など）を含む選択肢にだけ、行の末尾に ` — 許可: <操作・対象・内容を名指しした 1 文>` を書ける（許可文。例 `- B: 登録する — 影響: 毎日 PR が出る — 許可: 定期実行 <名前> を enabled: false で POST /api/schedules に登録することだけ許可します`）。選ぶと選択肢の行が許可文ごと利用者の返信として 1 回だけ届き、自動承認が利用者の名指しした同意として数える。ほかの操作にも次回にも広がらない。許可文に値（秘密・アカウント ID）を書かない。自分が拒まれて止まったとき（reason `permission`）は、停止の報告の `grant` に同じ形の許可文を書く。設定の許可ルールを足す案は、利用者に頼まれたときだけ出す（以後の同じ操作が全部通る）。
@@ -390,7 +390,7 @@ ops-kit backlog create --title "要望: <題>" --body-file "$W/request.md" --lab
 <!-- end when -->
 ops-kit backlog create --title "PBI: <題>" --body-file "$W/pbi.md" --label type:pbi --field Status=Backlog
 ops-kit backlog create --title "Task: <題>" --body-file "$W/task.md" --label type:task --parent <PBI> --field Status=Backlog
-ops-kit backlog edit <num> --body-file "$W/body.md" | --add-label needs-decision | --state closed
+ops-kit backlog edit <num> --body-file "$W/body.md" --rev <版> | --add-label needs-decision | --state closed
 ops-kit backlog edit <num> --state closed --reason not-planned   # 重複・やらないと決めた Issue（--reason completed|not-planned。閉じている Issue の理由の付け替えも同じ）
 ops-kit backlog edit <num> --parent <PBI> | --no-parent   # sub-issue の付け替え
 ops-kit backlog comment <num> --body-file <書いたファイルの絶対パス>   # 単独のコマンドで送る（下の箇条）
@@ -419,9 +419,9 @@ ops-kit lint --fresh                           # 規約の検査（「Ready の�
   ```bash
   set -euo pipefail
   N=$(ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)')
-  ops-kit backlog view "$N" --fresh --json | jq -r '.issue.body' > "$W/orig.md"; <直す> "$W/orig.md" > "$W/body.md"
+  ops-kit backlog view "$N" --fresh --json > "$W/view.json"; jq -r '.issue.body' "$W/view.json" > "$W/orig.md"; REV=$(jq -r .bodyRevision "$W/view.json"); <直す> "$W/orig.md" > "$W/body.md"
   [ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## ' || { echo "本文が空か ## で始まらない" >&2; exit 1; }
-  ops-kit backlog edit "$N" --body-file "$W/body.md"
+  ops-kit backlog edit "$N" --body-file "$W/body.md" --rev "$REV"   # 本文が変わっていれば「本文が変わりました」で断られる。読み直して書き足し直す
   ```
 
 - **`--fresh` が要るとき**: 最新の `## 回答` を読むとき（工程の開始・再開）、着手・マージ・閉じるの判断の前。アプリに送信と取込みを済ませてから答える。正本はアプリの保存データで、GitHub は同期先: アプリが GitHub に届かない（上限・障害）ときは保存値と「GitHub 未同期」（最終同期の時刻つき、stderr）で答えて exit 0 なので、その値でそのまま進める。exit 2 はアプリに届かない・未取得だけで「判定できない」（下の「GitHub の接続・認証の切り分け」をしてから止める）。マージ判定は毎回 GitHub を読む

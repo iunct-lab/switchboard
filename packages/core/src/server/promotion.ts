@@ -2,7 +2,7 @@ import { isWorkMachine } from "../machine.ts";
 import { isPublicCopy, type ReleaseReview } from "../release-review.ts";
 import { APP_JOB_TASK, type Workspace } from "@switchboard/protocol";
 import { JobError, repoKeyOf, requestJob } from "../jobs.ts";
-import { latestTag, promotionStep, nextDrain, expireDrain, drainHeld, askedInFlight, tagCiOf, tagCiPlan, type TagCiState, type DrainView, type PromotionDrain, type PromotionStep, type TagCi, reportPromoteFailure, RESCUE_IN_CONTAINER, type ReleaseState } from "../promotion.ts";
+import { latestTag, promotionStep, nextDrain, expireDrain, askedExpiry, sawRescueBusy, drainHeld, askedInFlight, tagCiOf, tagCiPlan, type TagCiState, type DrainView, type PromotionDrain, type PromotionStep, type TagCi, reportPromoteFailure, type ReleaseState } from "../promotion.ts";
 import { refusedFiles, type PromotionDecisionKind } from "../promotion-log.ts";
 import { call, runGh } from "../backlog-gh.ts";
 import { nextWakeFrom } from "../hostidle.ts";
@@ -10,7 +10,7 @@ import type { RescueStatus, ServerContext, ServerContextInit } from "./context.t
 
 export const drainLimitMs = (sc: Pick<ServerContext, "opts" | "settings">) => sc.opts.promotionDrainLimitMs ?? sc.settings().release.drainMinutes * 60_000;
 
-/** How long a restart that was asked for keeps new starts held when it never comes (sb-rescue went away in the middle of the promotion): longer than a build and its checks take. */
+/** How long sb-rescue may stay silent (not answer busy) while a restart that was asked for keeps new starts held: it went away in the middle of the promotion. Longer than a status read takes; a busy answer starts the count again, and the drain limit bounds the whole hold. */
 export const askedHoldMs = (sc: Pick<ServerContext, "opts">) => sc.opts.promotionAskedHoldMs ?? 30 * 60_000;
 
 /** How often sb-rescue's status is read while a restart is awaited; a request counts as on its way for twice that before sb-rescue shows it. */
@@ -32,11 +32,15 @@ export const setDrain = (sc: Pick<ServerContext, "promotionDrain" | "tasks" | "s
  */
 export const drainHold = (sc: Pick<ServerContext, "promotionDrain" | "drainLimitMs" | "askedHoldMs" | "setDrain" | "scheduler">): { wait: string; detail: string } | null => {
   const was = sc.promotionDrain;
-  const now = expireDrain(was, sc.drainLimitMs(), sc.askedHoldMs(), Date.now());
+  const at = Date.now();
+  const now = expireDrain(was, sc.drainLimitMs(), sc.askedHoldMs(), at);
   if (now !== was && was) {
     sc.setDrain(now);
+    const why = askedExpiry(was, sc.drainLimitMs(), sc.askedHoldMs(), at);
     const text = was.state === "asked"
-      ? `昇格を頼んでから ${Math.round(sc.askedHoldMs() / 60_000)} 分たっても再起動が来ないので、新しい開始の保留を外した: ${was.tag}`
+      ? why === "limit"
+        ? `昇格を頼んでから ${Math.round(sc.drainLimitMs() / 60_000)} 分たっても終わらないので、新しい開始の保留を外した: ${was.tag}`
+        : `昇格を頼んでから ${Math.round(sc.askedHoldMs() / 60_000)} 分たっても再起動が来ないので、新しい開始の保留を外した: ${was.tag}`
       : `昇格の保留が上限 ${Math.round(sc.drainLimitMs() / 60_000)} 分を超えたので外した: ${was.tag}。新しいターンは始まる。昇格は待ったままで、動いている・待っている Task は切らない（判断待ちに知らせる。切って入れるのは「待たずに昇格する」を押したときだけ）`;
     queueMicrotask(() => sc.scheduler.note(text));
   }
@@ -72,7 +76,9 @@ export const watchAsked = (sc: Pick<ServerContext, "askedWatch" | "opts" | "prom
     try {
       const s = await sc.releaseStatus();
       if (sc.stopped) return;
-      sc.drainHold(); // the longest it is held without an answer
+      // a busy sb-rescue is working on the restart it took: that answer is counted before time is applied
+      if (s.managed && (s as RescueStatus).busy && sc.promotionDrain) sc.setDrain(sawRescueBusy(sc.promotionDrain, Date.now()));
+      sc.drainHold(); // the longest it is held without an answer, and the drain limit
       const d = sc.promotionDrain;
       if (d?.state !== "asked") return;
       const rescue = s.managed ? (s as RescueStatus) : null;
@@ -205,7 +211,7 @@ export const latestOfSource = async (sc: Pick<ServerContext, "sourceLatest" | "a
 };
 
 /** Before picking: bring the app up to the newest tag, or hold everything while that tag failed to start. */
-export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "latestOfSource" | "git" | "cfg" | "releaseReviewFor" | "drainBusy" | "db" | "settings" | "requestPromote" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "startReleaseReview" | "heldSince" | "promotionHold" | "drainHold" | "setDrain" | "promotionDrain" | "promotionAsked" | "opts" | "backlog" | "tagCi" | "watchAsked" | "bundleHold">, meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
+export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "latestOfSource" | "git" | "cfg" | "releaseReviewFor" | "drainBusy" | "db" | "settings" | "requestPromote" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "startReleaseReview" | "heldSince" | "promotionHold" | "drainHold" | "setDrain" | "promotionDrain" | "promotionAsked" | "opts" | "backlog" | "tagCi" | "watchAsked" | "bundleHold" | "updatePressed">, meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle" }): Promise<string | null> => {
   const status = await sc.releaseStatus();
   if (!status.managed) return null;
   // an update source (sb-rescue builds from tarballs, no git): the newest release comes from it, and it is a public copy by being the source
@@ -229,7 +235,11 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   const foreign = askedInFlight(sc.promotionDrain, !!(status as RescueStatus).busy, Date.now(), 2 * askedPollMs(sc));
   const settle = (tag: string | null, mode: Parameters<typeof nextDrain>[2]) => { if (!foreign) sc.setDrain(nextDrain(sc.promotionDrain, tag, mode, Date.now())); };
   // counted after the last await before each decision: a Task that ends while git runs either counts as ended here or finds the hold set
-  const decide = (needsRestart = false) => promotionStep({ status: status as ReleaseState, latest, busyTasks: sc.drainBusy(), latestInCurrent, review, auto, needsRestart, bundle: sc.bundleHold(), ci, requireCi: sc.settings().release.tagCi });
+  // the press belongs to the tag it was made for: a newer tag, or the tag's commit running already, ends it
+  // (a newest tag that could not be read this time does not end it: the read is asked again on the next firing)
+  if (sc.updatePressed && latest && (sc.updatePressed.tag !== latest.tag || sc.updatePressed.sha !== latest.sha || latest.sha === current || latestInCurrent)) sc.updatePressed = null;
+  const pressed = sc.updatePressed && !sc.updatePressed.stopped ? { tag: sc.updatePressed.tag, sha: sc.updatePressed.sha } : undefined;
+  const decide = (needsRestart = false) => promotionStep({ status: status as ReleaseState, latest, busyTasks: sc.drainBusy(), latestInCurrent, review, auto, pressed, needsRestart, bundle: sc.bundleHold(), ci, requireCi: sc.settings().release.tagCi });
   const send = async (p: Extract<PromotionStep, { action: "promote" }>): Promise<{ status: number; restart: boolean; heavy: boolean; error: string; files: string[]; fileCount: number }> => {
     try {
       const r = await (source ? sc.requestPromote(p.tag, p.sha, !!p.ifNoRestart) : sc.requestPromote(p.sha, undefined, !!p.ifNoRestart));
@@ -277,6 +287,12 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   }
   if (step.action === "promote" && !step.ifNoRestart) answer = await askRestart(step);
   const accepted = answer?.status === 202;
+  // the check of the pressed tag ended without clearing it: the press is stopped, and only the dialog's button goes on from here
+  // The check is read again here, after the awaits above: a press made meanwhile has started a new check, and the old
+  // result must not stop it. A check that could not finish but waits to resume (a usage limit) has not ended yet.
+  const ended = pressed && sc.updatePressed && !sc.updatePressed.stopped && step.action === "wait" && step.review && latest ? sc.releaseReviewFor(latest) : null;
+  if (ended && sc.updatePressed && (ended.state === "concern" || (ended.state === "failed" && sc.db.getTask(ended.taskId)?.resumeAt == null))) sc.updatePressed = { ...sc.updatePressed, stopped: ended.state };
+  if (accepted && pressed) sc.updatePressed = null;
   if (!refused && step.action === "wait" && step.drain) keep("waited", latest!.tag, latest!.sha, step.reason);
   // the drain after this decision (a restart that was asked for has set its own above); no await since the last count
   if (step.action === "pick") settle(null, "done");
@@ -318,7 +334,7 @@ export const promotionFirst = async (sc: Pick<ServerContext, "releaseStatus" | "
   if (step.failed) {
     const subject = await sc.git(["log", "-1", "--format=%s", step.failed.sha]).catch(() => "");
     const source = sc.db.getWorkspaceBacklogSource(meta.id);
-    const pbi = source ? await reportPromoteFailure(sc.db, source, sc.opts.gh ?? runGh, meta.path, { ...step.failed, subject, rescueUrl: sc.cfg.rescuePageUrl ?? RESCUE_IN_CONTAINER }).catch(() => null) : null;
+    const pbi = source ? await reportPromoteFailure(sc.db, source, sc.opts.gh ?? runGh, meta.path, { ...step.failed, subject, rescueUrl: sc.cfg.rescuePageUrl }).catch(() => null) : null;
     if (pbi) sc.backlog.send(meta);
     return `${step.reason}${pbi ? `（判断待ち: #${pbi}）` : ""}`;
   }
@@ -377,7 +393,7 @@ export const armPromotionCheck = (sc: Pick<ServerContext, "cfg" | "promotionTime
 
 export const nextWakeAt = (sc: Pick<ServerContext, "db" | "savedAutoResume">) => nextWakeFrom(sc.db.listTasksWithResume().map((t) => ({ resumeAt: t.resumeAt ?? null, auto: sc.savedAutoResume(t.runner) })), sc.db.listSchedules());
 
-export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleRetry" | "promotionHold" | "heldSince" | "promotionAsked" | "tasks" | "releaseReviewEnded" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "sourceLatest" | "rechecking" | "releaseKnown" | "promotionAsking" | "promoteWhenIdle">): void {
+export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleRetry" | "promotionHold" | "heldSince" | "promotionAsked" | "updatePressed" | "tasks" | "releaseReviewEnded" | "reviewStartFailed" | "REVIEW_RETRY_MS" | "sourceLatest" | "rechecking" | "releaseKnown" | "promotionAsking" | "promoteWhenIdle">): void {
   /**
    * Why the last promotionFirst held the newest tag: Tasks running (asked again once they end) or a tag that
    * failed. Memory only: a restart forgets it and the next firing makes it again. `GET /api/daemon/release` shows it.
@@ -394,6 +410,7 @@ export function setupPromotion(sc: Pick<ServerContextInit, "askedWatch" | "idleR
    * a promotion restarts the daemon, and sb-rescue's `history` has the result after that. `GET /api/daemon/release` shows it.
    */
   sc.promotionAsked = null;
+  sc.updatePressed = null;
   sc.tasks.onTurnEnd(sc.releaseReviewEnded);
   sc.tasks.onTaskEnd(sc.releaseReviewEnded);
   /**

@@ -32,7 +32,7 @@ export const RESETTABLE_CARDS = {
     "titles.model",
     "titles.effort",
   ],
-  dakDefault: ["shadowRunner"],
+  shadowDefault: ["shadowRunner"],
   developSelfCard: ["developSelf"],
   sweep: ["maxRunners", "quotaAndResume.flowShareLimit"],
   usage: ["quotaAndResume.backlogQuotaLimit", "quotaAndResume.retryDelayMs", "quotaAndResume.retryMaxDelayMs", "quotaAndResume.maxLimitStops", "quotaAndResume.resumePrompt", "quotaAndResume.maxStopResumes", "quotaAndResume.thinSample", "quotaAndResume.flowLimit", "quotaAndResume.silentAfterMs", "quotaAndResume.waitLimitMs", "quotaAndResume.queueStallMs", "quotaAndResume.dependsLimitMs"],

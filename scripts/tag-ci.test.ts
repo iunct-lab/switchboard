@@ -7,6 +7,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy";
 import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { stepWithIdle } from "./local-ci";
+import { ciSteps } from "./ci";
 import { OffloadStartError, type Offload } from "./local-ci-offload";
 import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, judgesNewest, writeJobResult, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
@@ -1086,7 +1087,7 @@ describe("tag-ci: the build off the host", () => {
   const lines = (script: string) => [...script.matchAll(/bash -e -c '((?:[^']|'\\'')*)'; c=\$\?(; \[ "\$c" -eq 0 \] \|\| exit "\$c")?/g)].map((m) => ({ run: m[1]!.replaceAll("'\\''", "'"), stops: m[2] !== undefined }));
 
   /** A build that runs nothing: the log it would leave, with `fail`'s step failing (a step that stops the build ends the log) and `files` as the log's `sb-file:` lines. */
-  function fakeOffload(fail?: { at: string; output: string }, files: Record<string, string> = {}) {
+  function fakeOffload(failing?: { at: string; output: string } | Array<{ at: string; output: string }>, files: Record<string, string> = {}) {
     const started: Array<{ script: string; cwd: string; baseTree?: string; imageRoot?: string; size: string }> = [];
     const offload: Offload = {
       start: async (script, cwd, o) => {
@@ -1097,8 +1098,10 @@ describe("tag-ci: the build off the host", () => {
         const script = started[Number(build.slice(1)) - 1]!.script;
         const out: string[] = [];
         let code = 0;
+        const fails = failing === undefined ? [] : Array.isArray(failing) ? failing : [failing];
         for (const [i, s] of lines(script).entries()) {
-          const failed = fail !== undefined && s.run.trim() === fail.at;
+          const fail = fails.find((f) => s.run.trim() === f.at);
+          const failed = fail !== undefined;
           out.push(`sb-step: ${i} begin 1.0`, failed ? fail.output : "ok", "", `sb-step: ${i} exit ${failed ? 1 : 0} 2.0`);
           if (failed && s.stops) {
             code = 1;
@@ -1305,6 +1308,20 @@ describe("tag-ci: the build off the host", () => {
       expect(f.map((x) => `${x.result} ${x.step}`)).toEqual(["fail bun test"]);
       expect(h.f.bodies.get("v1.0.0")).toContain(`${WARNING}\n    over: launch.ms = 900 > 800`);
     });
+  });
+
+  test("a failed perf base keeps the check's lines", async () => {
+    // the base step fails as ci.ts's does without a tree, and the check still judges the ceilings and exits 1 on an improved: line
+    const base = ciSteps.find((x) => x.name.startsWith("bun scripts/perf-ratchet.ts base"))!.run.trim();
+    const reason = "perf-base: 比べるタグの木がビルドに渡らなかった（PERF_BASE_TREE が無い。外のビルドの buildspec が古い可能性: aws/template.yaml を配備する）";
+    const improved = "improved: journeys.launch.requests = 0 < ceiling 13 − 2 × 1: lower it";
+    const h = offloaded([{ tag: "v1.0.0", body: "" }], fakeOffload([{ at: base, output: reason }, { at: CHECK, output: `ceilings: offload\n${improved}\nbundle: not compared (perf-base.json is missing: the base step did not measure)\n` }]));
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r.map((x) => `${x.tag} ${x.result}`)).toEqual(["v1.0.0 pass"]);
+    const body = h.f.bodies.get("v1.0.0")!;
+    expect(body).toContain(`${WARNING}\n    ${improved}\n    perf の bundle・bytes を比べられなかった: 比べるタグの木がビルドに渡らなかった（PERF_BASE_TREE が無い`);
+    expect(body).not.toContain("perf の判定ができなかった");
+    expect(body).toContain("[tag-ci] pass");
   });
 
   test("the counts of a build's run are recorded for the offload environment", async () => {

@@ -13,18 +13,18 @@ export const JOB_USAGE = `  job request local-ci <PR> [--cwd <dir>] [--fixtures 
       --local は外のビルドを使えるホストでも全手順をこのマシンで回す（既定は外。外のビルドが無ければ指定せずにここで回る）
       --fixtures は録画庫（絶対パス）。仕事の環境に録画庫として渡り（変数の名前はアプリが決める）、録画の不足を失敗にする
       --change は <PR> がアプリが持つ変更（GitHub の PR でないローカルの変更）の番号のとき
-  job request review <PR> [--runner codex|claude] [--as fallback|recheck|audit|attack] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
+  job request review <PR> [--runner codex|claude] [--as fallback|recheck|audit|attack|arbiter] [--kinds <k,k>] [--change] --prompt <file> --out <file> [--cwd <dir>]
       アプリにレビュー（cross-runner-review の codex exec / claude -p）を仕事として頼む。--prompt を読み --out に書く（どちらも --cwd の中）
       --runner を省くとアプリが設定と Task のランナーから主レビュアーを決める。主レビュアーでないランナーの名指しは断られる。
-      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー。attack は主レビュアーのランナーで頼み、そのランナーが使用上限ならもう一方で代替する。アプリは上限を確かめず、どちらのランナーも通す）
-      --as recheck は --runner を省くとアプリが設定（再チェックのランナー）から選ぶ。設定と違うランナーの名指しは断られる。ほかの --as は --runner が要る
-      --kinds は再チェックの種類（security:docs など。カンマ区切り）で --as recheck のときだけ渡す（無いと種類なしで記録され、どの再チェックの合格にも数えられない）。--change は <PR> がアプリが持つ変更の番号のとき
+      主レビュアーでないランナーに頼むのは、理由を --as で言うときだけ（fallback = 主レビュアーが使用上限、recheck = 再チェック、arbiter = 監督者の裁定、audit = マージ後の監査、attack = 攻める側のレビュー。attack は主レビュアーのランナーで頼み、そのランナーが使用上限ならもう一方で代替する。アプリは上限を確かめず、どちらのランナーも通す）
+      --as recheck・--as arbiter は --runner を省くとアプリが設定（再チェックのランナー）から選ぶ。設定と違うランナーの名指しは断られる。ほかの --as は --runner が要る
+      --kinds は --as recheck の記録に付ける種類の印（security:docs など。カンマ区切り）。マージ判定は --as recheck のレビューでは種類を外さない（レビューで見る種類は --as arbiter の監督者の裁定で外れる）。--change は <PR> がアプリが持つ変更の番号のとき
       アプリは --prompt の指示の後ろに、レビューするランナーの動き方（読み取り専用のサンドボックス / plan モード）の文を足して渡す
       request は仕事の id を job#<id> の 1 行で出し、続けて止まりの記録（アプリが Task に渡す止まりの報告の書式）に書く JSON の例を出す。待たずにそれを書いてターンを終えると、
       仕事が終わったときにアプリが結果の要約を添えて Task を再開する。--cwd の既定は今の作業フォルダ（Task のリポジトリの checkout）
   job request recheck <PR> --kind migration|rescue|security:lockfile [--cwd <dir>] [--change]
       アプリに、コマンドで合否が決まる再チェック（scripts/recheck.ts <種類>）を仕事として頼む。種類ごとのコマンドはアプリが組む（コマンドは運ばない）。
-      request の出力と待ち方は local-ci と同じ。レビューで見る種類（size など）は job request review --as recheck --kinds で頼む
+      request の出力と待ち方は local-ci と同じ。レビューで見る種類（size など）は監督者の裁定（job request review --as arbiter）で外れる
   job request tag-ci [--cwd <dir>]
       アプリにタグの CI（scripts/tag-ci.ts --sha <最新のタグのコミット>。そのコミットで CI の手順を全部回す）を仕事として頼む。PR は取らない。仕事の記録（そのコミットの合否）を、アプリが昇格の判定で読む。
       request の出力と待ち方は local-ci と同じ
@@ -98,8 +98,8 @@ export async function runJob(argv: string[], env: Record<string, string | undefi
       } else if (kind === "review") {
         if (fixtures !== undefined || local || recheckKind !== undefined) throw new Usage("review は --fixtures / --local / --kind を取りません");
         if ((runner !== undefined && runner !== "codex" && runner !== "claude") || !prompt || !outFile) throw new Usage("review は --prompt <file> と --out <file> が要ります（--runner は codex|claude）");
-        if (why !== undefined && !["fallback", "recheck", "audit", "attack"].includes(why)) throw new Usage(`--as は fallback / recheck / audit / attack のどれかです: ${why}`);
-        if (why && why !== "recheck" && !runner) throw new Usage("--as（主レビューでない回の理由）は --runner codex|claude と一緒に渡してください（--as recheck は省けばアプリが選ぶ）");
+        if (why !== undefined && !["fallback", "recheck", "audit", "attack", "arbiter"].includes(why)) throw new Usage(`--as は fallback / recheck / audit / attack / arbiter のどれかです: ${why}`);
+        if (why && why !== "recheck" && why !== "arbiter" && !runner) throw new Usage("--as（主レビューでない回の理由）は --runner codex|claude と一緒に渡してください（--as recheck と --as arbiter は省けばアプリが選ぶ）");
         const kinds = kindsArg === undefined ? [] : kindsArg.split(",").map((k) => k.trim());
         if (kinds.some((k) => !k)) throw new Usage("--kinds は再チェックの種類をカンマ区切りで渡してください");
         if (why !== "recheck" && kindsArg !== undefined) throw new Usage("--kinds は --as recheck のときだけ渡します");

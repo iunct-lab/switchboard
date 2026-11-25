@@ -447,9 +447,9 @@ describe("questions", () => {
   const FROM = NOW - 7 * DAY;
   const WAIT = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 止めて待つ — 決められない";
   // a PBI's own question about its Tasks' order: the kind a PBI's Issue can carry (its place is checked: backlog-comments.ts askPlaceOf)
-  const GO = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 推奨で進める（種類: task-order） — 戻せる";
+  const GO = "## 判断待ち\n\n**問い**: どちらか\n**進め方**: 推奨で進める（種類: task-order） — 戻せる\n#901 と #902 のどちらを先にするか";
   const TOP = [{ name: "src", dir: true }];
-  const PBI = { number: 1, body: "", labels: ["type:pbi"], parent: null, subIssues: [] } as unknown as IssueInfo["data"];
+  const PBI = { number: 1, body: "", labels: ["type:pbi"], parent: null, subIssues: [901, 902] } as unknown as IssueInfo["data"];
   const ANSWER = "## 回答\n\nそれで";
   const OVERTURN = `## 回答\n\n${PROCEED_OVERTURNED} A → B\nB で`;
   const at = (ms: number) => iso(ms);

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import type { AgentEvent, StartOptions, Task } from "@switchboard/protocol";
 import { TaskSummary } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
-import { CODEX_BEDROCK_MODELS } from "@switchboard/adapter-codex";
+import { claudeBedrockModel } from "@switchboard/adapter-claude";
+import { codexBedrockModel } from "@switchboard/adapter-codex";
 import { NO_GH, NO_HISTORY, SCRIPT, fakeAdapter, j, startServer, useCoreDaemon, waitFor } from "./api-test-harness.ts";
 
 useCoreDaemon();
@@ -115,13 +116,13 @@ describe("core daemon", () => {
     }
   });
 
-  test("bedrock: PATCH saves a region per runner, null goes back, a runner without bedrockModels is 400, the health lists the Bedrock models and the kind", async () => {
+  test("bedrock: PATCH saves a region per runner, null goes back, a runner without bedrockModel is 400, the health lists the Bedrock models and the kind", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-"));
     const cwd = mkdtempSync(join(tmpdir(), "switchboard-bedrock-cwd-"));
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
     // the Claude account's login is expired: the lapse must never turn into Bedrock by itself
-    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModels: ["global.anthropic.claude-haiku-5-5"], detect: () => ({ login: "expired", loginKind: undefined, loginExpiresAt: 1_800_000_000_000 }) });
+    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModel: claudeBedrockModel, detect: () => ({ login: "expired", loginKind: undefined, loginExpiresAt: 1_800_000_000_000 }) });
     const cx = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude, fakeAdapter(script, { id: "dak" })], { port: 0 });
     const b = `http://127.0.0.1:${cx.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -158,6 +159,92 @@ describe("core daemon", () => {
       await cx.stop();
       rmSync(h, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrock from the CLI: health says so and the ledger bills bedrock", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-cli-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    // the CLI's own settings put it on Bedrock: nothing is saved here
+    const claude = fakeAdapter(script, { models: ["claude-haiku-5-5"], detect: () => ({ login: "ok", loginKind: "bedrock", bedrockFrom: "cli" }) });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const run = () => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === "claude"));
+    try {
+      expect(await run()).toMatchObject({ login: "ok", loginKind: "bedrock", bedrockFrom: "cli" });
+      expect((await fetch(`${b}/api/settings`).then(j)).bedrock).toEqual({});
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "claude", model: "claude-haiku-5-5" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      const rows = await fetch(`${b}/api/ledger/tasks?billing=bedrock`).then(j);
+      expect(rows.map((r: { taskId: string }) => r.taskId)).toEqual([t.id]);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrockRunning counts live tasks started on Bedrock", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-running-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const claude = fakeAdapter(script, { models: ["claude-haiku-5-5"], bedrockModel: claudeBedrockModel, gate, detect: () => ({ login: "ok", loginKind: "claude.ai" }) });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const run = () => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === "claude"));
+    try {
+      expect((await run()).bedrockRunning).toBeUndefined();
+      expect((await patch({ bedrock: { claude: { region: "ap-northeast-1" } } })).status).toBe(200);
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "claude" }) }).then(j);
+      await waitFor(async () => (await run()).bedrockRunning === 1);
+      // the setting goes back: the Task still runs on Bedrock, and the count says so
+      expect((await patch({ bedrock: { claude: null } })).status).toBe(200);
+      expect(await run()).toMatchObject({ loginKind: "claude.ai", bedrockRunning: 1 });
+      expect((await run()).bedrockFrom).toBeUndefined();
+      release();
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      expect((await run()).bedrockRunning).toBeUndefined();
+    } finally {
+      release();
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrock models follow the saved list", async () => {
+    const starts: StartOptions[] = [];
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-list-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    const claude = fakeAdapter(script, { starts, models: ["claude-haiku-5-5"], bedrockModel: claudeBedrockModel, detect: () => ({ login: "ok", loginKind: "claude.ai" }) });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const run = () => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === "claude"));
+    const values = (l: { value: string }[]) => l.map((m) => m.value);
+    try {
+      // not on Bedrock: `models` is the list, and there is no separate one to edit
+      expect(values((await run()).models)).toEqual(["claude-haiku-5-5"]);
+      expect((await run()).listModels).toBeUndefined();
+      expect((await patch({ bedrock: { claude: { region: "ap-northeast-1" } } })).status).toBe(200);
+      expect(values((await run()).models)).toEqual(["global.anthropic.claude-haiku-5-5"]);
+      expect(values((await run()).listModels)).toEqual(["claude-haiku-5-5"]);
+      // a model saved in the list shows by its Bedrock id, and the list to edit keeps the original id
+      expect((await patch({ models: { claude: [{ value: "claude-haiku-5-5", label: "haiku" }, { value: "claude-fable-5-2", label: "fable" }] } })).status).toBe(200);
+      expect(values((await run()).models)).toEqual(["global.anthropic.claude-haiku-5-5", "global.anthropic.claude-fable-5-2"]);
+      expect(values((await run()).listModels)).toEqual(["claude-haiku-5-5", "claude-fable-5-2"]);
+      // one added later shows too
+      expect((await patch({ models: { claude: [{ value: "claude-haiku-5-5", label: "haiku" }, { value: "claude-fable-5-2", label: "fable" }, { value: "claude-opus-5-5", label: "opus" }] } })).status).toBe(200);
+      expect(values((await run()).models)).toContain("global.anthropic.claude-opus-5-5");
+      const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "claude", model: "global.anthropic.claude-fable-5-2" }) }).then(j);
+      await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+      expect(starts[0]).toMatchObject({ model: "global.anthropic.claude-fable-5-2", bedrock: { region: "ap-northeast-1" } });
+      // back: the saved list as it is
+      expect((await patch({ bedrock: { claude: null } })).status).toBe(200);
+      expect(values((await run()).models)).toEqual(["claude-haiku-5-5", "claude-fable-5-2", "claude-opus-5-5"]);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
     }
   });
 
@@ -318,7 +405,7 @@ describe("core daemon", () => {
     }
   });
 
-  test("bedrock: codex with bedrockModels can be switched, lists the Bedrock models, shows no expired login and bills at the API price", async () => {
+  test("bedrock: codex with bedrockModel can be switched, lists the Bedrock models, shows no expired login and bills at the API price", async () => {
     const starts: StartOptions[] = [];
     const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-codex-"));
     // a codex-like runner: tokens only, the model it was started with
@@ -328,7 +415,7 @@ describe("core daemon", () => {
       { t: "session.end", status: "ok" },
     ];
     // the OpenAI login is expired: on Bedrock that must not show
-    const codex = fakeAdapter(script, { id: "codex", starts, models: ["gpt-6-luna"], bedrockModels: CODEX_BEDROCK_MODELS.map((m) => m.value), detect: () => ({ login: "expired" }) });
+    const codex = fakeAdapter(script, { id: "codex", starts, models: ["gpt-6-luna"], bedrockModel: codexBedrockModel, detect: () => ({ login: "expired" }) });
     const cx = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [codex], { port: 0, gh: NO_GH });
     const b = `http://127.0.0.1:${cx.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -339,7 +426,7 @@ describe("core daemon", () => {
       expect((await patch({ bedrock: { codex: { region: "ap-northeast-1", apiKey: "x" } } }).then(j)).bedrock).toEqual({ codex: { region: "ap-northeast-1" } });
       expect((await fetch(`${b}/api/settings`).then(j)).bedrock).toEqual({ codex: { region: "ap-northeast-1" } });
       expect(await run()).toMatchObject({ login: "ok", loginKind: "bedrock" });
-      expect((await run()).models.map((x: { value: string }) => x.value)).toEqual(["openai.gpt-6.1-sol", "openai.gpt-6-astra", "openai.gpt-6-luna"]);
+      expect((await run()).models.map((x: { value: string }) => x.value)).toEqual(["openai.gpt-6-luna"]);
       const t = await fetch(`${b}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: h, title: "t", prompt: "p", runner: "codex", model: "openai.gpt-6-luna" }) }).then(j);
       await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
       expect(starts[0]?.bedrock).toEqual({ region: "ap-northeast-1" });

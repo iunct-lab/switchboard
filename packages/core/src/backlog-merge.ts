@@ -10,6 +10,9 @@ import type { BacklogObjectKind } from "@switchboard/protocol";
 /** A body without the marker a post sent from here ends with (backlog-send.ts): what is shown, edited and compared. */
 export const withoutMarker = (body: string) => body.replace(/\r?\n\r?\n<!-- switchboard-op:[0-9a-f-]+ -->\s*$/, "");
 
+/** The version of a body as shown (without the marker): the first 12 hex digits of its SHA-256. Any save, or a change imported from GitHub, moves it. */
+export const bodyRevisionOf = (body: string): string => new Bun.CryptoHasher("sha256").update(withoutMarker(body)).digest("hex").slice(0, 12);
+
 /**
  * One field of a record's data, as an operation's `field` names it (db/backlog.ts applyBacklogField): an Issue's `title` /
  * `body` (without the marker) / `state` / `stateReason` / `milestone` / `parent`, `label:<name>` (on or not; GitHub matches label

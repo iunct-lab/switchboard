@@ -6,7 +6,7 @@
 import type { BacklogAction, BacklogItem } from "@switchboard/protocol";
 import type { RunnerId } from "@switchboard/protocol";
 import { skillPathsFor, type SetupScripts } from "./skillsync.ts";
-import { loadProcess, renderEntry, REVIEWER_WORDS, type ProcessDef, type ReviewSetting } from "./process-defs.ts";
+import { entryConditions, loadProcess, renderEntry, REVIEWER_WORDS, type ProcessDef, type ReviewSetting } from "./process-defs.ts";
 import { actionMerges } from "./backlog-item.ts";
 
 const ACTION_NAME: Record<BacklogAction, string> = { "to-pbi": "PBI にする", "to-tasks": "Task に分解", complete: "実装", check: "状況確認", close: "閉じる", direct: "直行で直す" };
@@ -71,7 +71,7 @@ export const localBacklogRules = (opts: { localForge?: boolean; merges: boolean 
  * Switchboard checkout is (`` in its own, `<meta>/` in another's): its scripts and docs/merge-gate.md.
  */
 export const localChangeRules = (root: string) =>
-  `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「Recheck」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回す。再チェックはアプリの仕事として頼む（レビューで見る種類は \`ops-kit job request review <変更> --change --as recheck --kinds <種類> --prompt <指示> --out <出力>\`、コマンドの種類は \`ops-kit job request recheck <変更> --change --kind <種類>\`）。判定は仕事の記録を読み、変更へのコメントは読まない。聞く理由は利用者の許可の記録（「変更 L<n> をマージしてよい」）で外れる。\`[merge-ask]\` / \`[merge-answer]\` の印は付けない。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
+  `この workspace の変更はアプリに置く（リモートは使わない）。PR の代わりにローカルの「変更」で、レビュー・ローカル CI・マージ判定・マージを行う（各スキルの「ローカルの変更では」の行）。\`gh pr\` / \`gh stack\` / \`git push\` / \`git fetch\`・リリースタグ・\`ops-kit pull-main\` は使わない。枝は \`git checkout -b sb/<Task>-<topic>\` で 1 本ずつ（積まず、マージしてから次の枝を main から切る）。変更は \`ops-kit backlog create --title <題> --body-file <本文> --head <枝> --base main\`（本文の 1 行 \`Backlog-Task: <Task>\`。閉じるキーワードと \`#<番号>\` は書かない）。ローカル CI は \`bun ${root}scripts/local-ci.ts --change <変更>\`、マージ判定は \`bun ${root}scripts/merge-gate.ts --change <変更>\`、マージは \`bun ${root}scripts/local-merge.ts <変更>\`（判定をもう一度通し、Task も閉じる）。どれも \`--repo\` は付けない。マージ判定が \`[再チェック <kind>]\` で止めたら、\`${root}docs/merge-gate.md\` の「Recheck」を、PR の情報を \`ops-kit backlog view <変更>\`、差分を \`git diff main...<枝>\` に読み替えて回す。再チェックはアプリの仕事として頼む（LLM が読む種類は監督者として \`ops-kit job request review <変更> --change --as arbiter --prompt <指示> --out <出力>\`（指示は \`ops-kit review-arbiter prompt\`）、コマンドの種類は \`ops-kit job request recheck <変更> --change --kind <種類>\`）。判定は仕事の記録を読み、変更へのコメントは読まない。聞く理由は利用者の許可の記録（「変更 L<n> をマージしてよい」）で外れる。\`[merge-ask]\` / \`[merge-answer]\` の印は付けない。リリースタグは無いので、決定ログの「戻すなら <tag>」は「戻すなら: タグなし（変更 #<変更> の mergeCommit の前）」と書く。`;
 
 /** The form of a ## 状況, the same in a 状況確認 and in a resume of a stalled PBI. */
 const REPORT_FORMAT = "`## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`（動いているなら「動いている」とその Task）/ `### 次にやること`。";
@@ -115,7 +115,7 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
         ? opts.resume ? "complete-resume" : opts.other || runner !== "claude" ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered; a resume names the skill's file: a slash command is expanded only at the start of a prompt, and only Claude Code has that slash command
         : action;
   // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
-  const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) });
+  const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) }, entryConditions({ runner, review: opts.review ?? "other", local: !!opts.local }));
   // Task ごとの実装のモデル: every complete entry, a resume too; a model without an alias adds nothing, and so does a
   // runner without the Agent tool the paragraph names
   const alias = action === "complete" && runner === "claude" && opts.taskModel ? subagentModelAlias(opts.taskModel) : null;
@@ -165,7 +165,7 @@ function saidOf(answer: { issue: number; text: string } | null | undefined): str
  */
 export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p1-direct")): string {
   const n = item.number;
-  const body = renderEntry(def, "direct", { signal: `#${n}`, reviewer: REVIEWER_WORDS[opts.review ?? "other"] });
+  const body = renderEntry(def, "direct", { signal: `#${n}`, reviewer: REVIEWER_WORDS[opts.review ?? "other"] }, entryConditions({ runner: opts.runner ?? "claude", review: opts.review ?? "other", local: !!opts.local }));
   const elsewhere = opts.local ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${localBacklogRules({ localForge: opts.localForge, merges: true })}` : "";
   return `${skillPathsFor(`${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}`, opts.runner ?? "claude")}${saidOf(opts.answer)}`;
 }

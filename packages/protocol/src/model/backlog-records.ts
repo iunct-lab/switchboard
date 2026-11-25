@@ -165,6 +165,10 @@ export const BacklogHeldEdit = z.object({
 });
 export type BacklogHeldEdit = z.infer<typeof BacklogHeldEdit>;
 
+/** A child Task kept here that its parent's sub-issue list from GitHub does not hold yet (not numbered, or numbered and not listed). */
+export const BacklogWaitingSubIssue = z.object({ localId: z.string().nullable(), number: z.number(), title: z.string(), state: z.enum(["OPEN", "CLOSED"]) });
+export type BacklogWaitingSubIssue = z.infer<typeof BacklogWaitingSubIssue>;
+
 /**
  * One stored Issue (`GET /api/backlog/:number`): its body and fields, every stored comment (oldest first) and its
  * fields in the workspace's Project (null = not in it). `fetchedAt` = when it was last read; `fetchState` = how.
@@ -172,6 +176,8 @@ export type BacklogHeldEdit = z.infer<typeof BacklogHeldEdit>;
 export const BacklogIssueDetail = z.object({
   workspaceId: z.string(),
   issue: BacklogIssueData,
+  /** The version of the body shown: sent back as `expectedBodyRevision`, a save is refused when the body has moved since. */
+  bodyRevision: z.string(),
   /**
    * `id`: the stored record's id (GitHub's comment id, or `sb:<seq>` on a backlog kept here).
    * `seq`: the sequence number of the operation that wrote a comment here, the same before and after it is sent; null for
@@ -196,5 +202,7 @@ export const BacklogIssueDetail = z.object({
   limits: z.string(),
   /** A local change's branch tips now (40 hex; null = the branch is not there); null when it is not a change. */
   changeRefs: z.object({ head: z.string().nullable(), base: z.string().nullable() }).nullable().default(null),
+  /** Its child Tasks kept here and not in GitHub's list of its sub-issues yet; they count in `tasks.total`. */
+  waitingSubIssues: z.array(BacklogWaitingSubIssue).default([]),
 });
 export type BacklogIssueDetail = z.infer<typeof BacklogIssueDetail>;

@@ -155,6 +155,11 @@ export class TaskQueries extends GrantQueries {
     return r ? rowToTask(r) : null;
   }
 
+  /** Whether Task `id` is at work: what `activeStageTask` counts, for one Task whatever Issue it works on. */
+  taskAtWork(id: string): boolean {
+    return !!this.sqlite.query(`SELECT 1 FROM tasks WHERE id = ? AND ${activeStage("dedupe")}`).get(id);
+  }
+
   /** The Issues of a workspace that have a Task workingStageTask finds, in one read: what the overlap judgement of every item asks. */
   workingStageIssues(workspaceId: string): Set<number> {
     return this.stageIssues(workspaceId, "slot");

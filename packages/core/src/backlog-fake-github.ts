@@ -51,9 +51,11 @@ export function fakeGithub(now: () => number) {
       const rest = args.slice(6);
       const named = rest.indexOf("--name");
       const [from, name] = named >= 0 ? [rest[0]!, rest[named + 1]!] : [rest[0]!.slice(0, rest[0]!.lastIndexOf("#")), rest[0]!.slice(rest[0]!.lastIndexOf("#") + 1)];
+      // the real gh checks the name and answers on stdout (stderr empty)
+      if (!/^[\p{L}\p{N}]([\p{L}\p{N} ._-]*[\p{L}\p{N}])?$/u.test(name)) return { code: 1, stdout: `failed\t${name}\t${from}\tname must start and end with a letter or number and contain only letters, numbers, spaces, periods, hyphens, and underscores\n`, stderr: "" };
       artifacts.set(n, [...(artifacts.get(n) ?? []), { name, from }]);
       writes.push(`artifact create ${n} ${name}`);
-      return failure ? lost() : { code: 0, stdout: "", stderr: "" };
+      return failure ? lost() : { code: 0, stdout: `created\t1\t${name}\t${from}\t\n`, stderr: "" };
     }
     if (failure && !failure.after) return answer(null);
     const path = args[1]!;

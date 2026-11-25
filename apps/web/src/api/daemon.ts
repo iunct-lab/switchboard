@@ -73,6 +73,6 @@ export const daemonApi = {
   health: (opts: { recheck?: boolean } = {}) => req<Health>(opts.recheck ? "/api/health?recheck=1" : "/api/health").then((h) => (setLoginMode(h.login), h)),
   restartDaemon: (taskId?: string, force = false) => req<{ restarting: boolean; supervised: boolean; argv: string[] }>("/api/daemon/restart", { method: "POST", body: JSON.stringify({ taskId, force }) }),
   release: () => req<ReleaseStatus>("/api/daemon/release"),
-  recheckRelease: () => req<{ started: "review"; tag: string }>("/api/daemon/release/review", { method: "POST" }),
+  recheckRelease: (promote = false) => req<{ started: "review"; tag: string }>("/api/daemon/release/review", { method: "POST", ...(promote ? { body: JSON.stringify({ promote: true }) } : {}) }),
   promote: (commit: string, force = false) => req<{ started: string; commit: string }>("/api/daemon/promote", { method: "POST", body: JSON.stringify({ commit, force }) }),
 };

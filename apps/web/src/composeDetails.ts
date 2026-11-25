@@ -1,10 +1,11 @@
-import type { ExecutionMode } from "@switchboard/protocol";
+import type { ExecutionMode, RunnerId } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
+import { runnerLabel } from "./runners.ts";
 import { titleToSend } from "./taskTitle.ts";
 
 /** What the 詳細 of Home's compose form holds: the values a request rarely sets. */
-export type ComposeDetails = { title: string; executionMode: ExecutionMode; model: string; effort: string; budget: string; shadow: boolean };
+export type ComposeDetails = { title: string; executionMode: ExecutionMode; model: string; effort: string; budget: string; shadow: RunnerId | null };
 
 const TITLE_CHARS = 20;
 
@@ -12,10 +13,10 @@ const TITLE_CHARS = 20;
  * The line beside a closed 詳細: only what differs from what an untouched form would send, in the form's order.
  * `v` holds what would be sent (the caller passes the untouched values for what a mode does not send, e.g. a Cloud task's
  * model). `defaults.model` is the model an untouched select holds (the rule's proposal, or "" = the CLI's own);
- * `defaults.shadow` whether the saved default runs DAK beside it; `defaults.briefTitle` the prefix 改善 → put in the title,
+ * `defaults.shadow` the runner the saved default runs beside it (null = none); `defaults.briefTitle` the prefix 改善 → put in the title,
  * which alone is not sent (`titleToSend`). Empty when nothing was changed.
  */
-export function detailsSummary(v: ComposeDetails, defaults: { model: string; shadow: boolean; briefTitle?: string }): string {
+export function detailsSummary(v: ComposeDetails, defaults: { model: string; shadow: RunnerId | null; briefTitle?: string }): string {
   const parts: string[] = [];
   const title = titleToSend(v.title, defaults.briefTitle) ?? "";
   if (title) parts.push(t(home.sumTitle, { title: [...title].length > TITLE_CHARS ? `${[...title].slice(0, TITLE_CHARS).join("")}…` : title }));
@@ -23,7 +24,7 @@ export function detailsSummary(v: ComposeDetails, defaults: { model: string; sha
   if (v.model !== defaults.model) parts.push(t(home.sumModel, { model: v.model || t(home.cliDefault) }));
   if (v.effort) parts.push(t(home.sumEffort, { effort: v.effort }));
   if (v.budget.trim()) parts.push(t(home.sumBudget, { budget: v.budget.trim() }));
-  if (v.shadow !== defaults.shadow) parts.push(t(home.sumShadow, { shadow: v.shadow ? "DAK" : t(home.none) }));
+  if (v.shadow !== defaults.shadow) parts.push(t(home.sumShadow, { shadow: v.shadow ? runnerLabel(v.shadow) : t(home.none) }));
   return parts.join(" · ");
 }
 

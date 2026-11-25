@@ -474,7 +474,7 @@ test("ops-kit backlog: a gate PBI is not made Ready without the key table, nor o
   const readied = async () => (await cli(["set", "304", "Status", "Ready"])).code;
   const table = (key: string) => `## ゲートの鍵\n**鍵の変更**: あり\n| 鍵 | 誰が書けるか | どこで読むか | 利用者の操作（1 件あたり） |\n|---|---|---|---|\n| ${key} | a | b | c |\n`;
   const body = async () => ((await detailOf(base, 304)).issue.body).replace(/\n## ゲートの鍵[\s\S]*$/, "");
-  const written = async (key: string) => (await cli(["edit", "304", "--body-file", "-"], `${await body()}\n${table(key)}`)).code;
+  const written = async (key: string) => (await cli(["edit", "304", "--body-file", "-", "--rev", (await detailOf(base, 304)).bodyRevision], `${await body()}\n${table(key)}`)).code;
   const screenAnswer = async () => {
     const at = (await detailOf(base, 304)).comments.filter((c) => c.body.startsWith("## 判断待ち")).at(-1)!.createdAt;
     answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta.id)!, 304, "はい", Date.now() + 5000, { question: { at }, screen: true, heads: {} });

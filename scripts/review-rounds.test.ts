@@ -51,8 +51,8 @@ describe("afterMergeRows", () => {
     const sha = "a".repeat(40);
     const gate = (id: number, verdict: "stop" | "merge", ask: string[], recheck: string[], merged: boolean) => ({ id, kind: "gate", taskId: "t", pr: 5864, runner: null, status: "pass", exitCode: 0, startedAt: Date.parse("2026-10-09T00:00:00Z") + id * 3_600_000, endedAt: Date.parse("2026-10-09T00:00:00Z") + id * 3_600_000, repo: "o/r", head: sha, base: null, as: null, kinds: [], taskRunner: "claude", result: { gate: { verdict, head: sha, ask, recheck, reasons: recheck.map((k) => `[再チェック ${k}] x`), allowLarge: false, reviewSkipped: false, merged } } });
     const records = (grants: MergeHistory["grants"]): MergeHistory => ({
-      // a stop on the kind, a recheck review that passed, the merge; and the audit's comment
-      jobs: [gate(0, "stop", [], ["responsibility"], false), { ...gate(1, "stop", [], [], false), kind: "review", as: "recheck", kinds: ["responsibility"], runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }, gate(2, "merge", [], [], true)] as MergeHistory["jobs"],
+      // a stop on the kind, an arbiter job that passed, the merge; and the audit's comment
+      jobs: [gate(0, "stop", [], ["responsibility"], false), { ...gate(1, "stop", [], [], false), kind: "review", as: "arbiter", runner: "codex", result: { review: { findings: [], firstLine: "[codex] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [] } } } }, gate(2, "merge", [], [], true)] as MergeHistory["jobs"],
       grants,
       pulls: [{ number: 5864, stored: true, state: "MERGED", mergedAt: at, closedAt: at, head: sha, mergeCommit: "b".repeat(40) }],
       comments: [{ issue: 5864, body: `[post-audit] finding ${"b".repeat(40)}`, createdAt: "2026-10-12T00:00:00Z", authorAssociation: "OWNER" }],
@@ -86,6 +86,9 @@ const job = (id: number, pr: number, over: Partial<MergeHistory["jobs"][number]>
   id, kind: "review", taskId: "t", pr, runner: "claude", status: "pass", exitCode: 0, startedAt: Date.parse("2026-11-01T00:00:00Z"), endedAt: Date.parse("2026-11-01T00:10:00Z"),
   repo: "o/r", head: SHA(1), base: null, as: null, kinds: [], taskRunner: "claude", result: findings ? { review: { findings, firstLine: "[claude] review" } } : null, ...over,
 });
+/** An arbiter job as the app records it at its end: no findings, the rulings it left (none on the reviewer's side by default: a pass). */
+const arbiter = (id: number, pr: number, over: Partial<MergeHistory["jobs"][number]> = {}, rulings: { reviewerSide?: string[]; missing?: string[] } = {}) =>
+  job(id, pr, { as: "arbiter", result: { review: { findings: [], firstLine: "[claude] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [], ...rulings } } }, ...over });
 const finding = (path: string, severity = "nit") => ({ severity, path, line: 1 });
 
 describe("roundsOf (the review jobs of two merged PRs, from their real review comments)", () => {
@@ -124,6 +127,11 @@ describe("roundsOf (shapes)", () => {
       .toEqual([["review", 1], ["review", 0]]);
   });
 
+  test("an arbiter job is one round of the rule `arbiter`, with no findings; the rule `recheck` rounds of jobs already recorded stay", () => {
+    expect(rule([arbiter(1, 1), arbiter(2, 1, {}, { reviewerSide: ["a.ts:1 x"] })])).toEqual([["arbiter", 0], ["arbiter", 0]]);
+    expect(rule([job(3, 1, { as: "recheck", kinds: ["size"] }, [finding("a.ts", "blocker")])])).toEqual([["size", 1]]);
+  });
+
   test("a recheck job of several kinds is one round of each kind, counting all its findings; a kind only a user's answer lifts (`limits`) is not a rule", () => {
     expect(rule([job(1, 1, { as: "recheck", kinds: ["size", "responsibility", "limits"] }, [finding("a.ts", "blocker")])])).toEqual([["size", 1], ["responsibility", 1]]);
     expect(rule([job(2, 1, { as: "recheck", kinds: ["security:docs"] }, [finding("docs/a.md", "should-fix")])])).toEqual([["security:docs", 1]]);
@@ -139,34 +147,37 @@ describe("roundsOf (shapes)", () => {
 });
 
 describe("passesOf", () => {
-  test("a passing recheck job, or a recheck review with no blocker and no should-fix; not a failed one, a review of another kind, or one with a blocker", () => {
+  test("a passing recheck command, and the arbiter's pass; not a failed one, a review run as recheck, a ruling for the reviewer, a missing viewpoint or an arbiter with no rulings", () => {
     const passes = passesOf([
       job(1, 1, { kind: "recheck", kinds: ["migration"] }, null),
-      job(2, 1, { as: "recheck", kinds: ["size", "responsibility"] }, [finding("a.ts", "nit")]),
-      job(3, 1, { as: "recheck", kinds: ["rescue"] }, [finding("a.ts", "blocker")]),
+      arbiter(2, 1),
+      job(3, 2, { as: "recheck", kinds: ["rescue"] }, []),
       job(4, 1, { kind: "recheck", kinds: ["security:lockfile"], status: "fail" }, null),
-      job(5, 1, { as: "recheck", kinds: ["design-rules"] }, null),
-      job(6, 1, { kinds: ["size"] }),
+      arbiter(5, 3, {}, { reviewerSide: ["a.ts:1 x"] }),
+      arbiter(6, 4, {}, { missing: ["size"] }),
+      job(7, 5, { as: "arbiter" }),
+      job(8, 6, { kinds: ["size"] }),
     ]);
-    expect(passes.map((p) => p.kind)).toEqual(["migration", "size", "responsibility"]);
-    expect(passes[0]).toEqual({ pr: 1, kind: "migration", at: "2026-11-01T00:10:00Z" });
+    expect(passes.map((p) => [p.pr, p.kind])).toEqual([[1, "arbiter"], [1, "migration"]]);
+    expect(passes[1]).toEqual({ pr: 1, kind: "migration", at: "2026-11-01T00:10:00Z" });
   });
 });
 
 describe("passesOf follows merge-gate's rule per kind", () => {
   const t = (hms: string) => Date.parse(`2026-11-01T${hms}Z`);
   const cmd = (id: number, kind: string, hms: string) => job(id, 1, { kind: "recheck", kinds: [kind], endedAt: t(hms) }, null);
-  const rev = (id: number, kind: string, hms: string) => job(id, 1, { as: "recheck", kinds: [kind], endedAt: t(hms) }, []);
+  const arb = (id: number, hms: string) => arbiter(id, 1, { endedAt: t(hms) });
 
-  test("rescue passes only when both its command and its review have, at the later time", () => {
+  test("rescue passes only when both its command and the arbiter have, at the later time", () => {
     expect(passesOf([cmd(1, "rescue", "00:10:00")])).toEqual([]);
-    expect(passesOf([rev(1, "rescue", "00:10:00")])).toEqual([]);
-    expect(passesOf([cmd(1, "rescue", "00:10:00"), rev(2, "rescue", "00:30:00")])).toEqual([{ pr: 1, kind: "rescue", at: "2026-11-01T00:30:00Z" }]);
-    expect(passesOf([rev(2, "rescue", "00:05:00"), cmd(1, "rescue", "00:10:00")])).toEqual([{ pr: 1, kind: "rescue", at: "2026-11-01T00:10:00Z" }]);
+    expect(passesOf([arb(1, "00:10:00")]).filter((p) => p.kind === "rescue")).toEqual([]);
+    expect(passesOf([cmd(1, "rescue", "00:10:00"), arb(2, "00:30:00")]).filter((p) => p.kind === "rescue")).toEqual([{ pr: 1, kind: "rescue", at: "2026-11-01T00:30:00Z" }]);
+    expect(passesOf([arb(2, "00:05:00"), cmd(1, "rescue", "00:10:00")]).filter((p) => p.kind === "rescue")).toEqual([{ pr: 1, kind: "rescue", at: "2026-11-01T00:10:00Z" }]);
   });
 
-  test("a command kind (migration, security:lockfile) is not passed by a review alone; a review kind is not passed by a command alone", () => {
-    expect(passesOf([rev(1, "migration", "00:10:00"), rev(2, "security:lockfile", "00:10:00"), cmd(3, "size", "00:10:00")])).toEqual([]);
+  test("a command kind (migration, security:lockfile) is not passed by the arbiter alone; the kinds a model reads are the rule `arbiter`, not passed by a command", () => {
+    expect(passesOf([arb(1, "00:10:00")]).map((p) => p.kind)).toEqual(["arbiter"]);
+    expect(passesOf([cmd(3, "size", "00:10:00")])).toEqual([]);
     expect(passesOf([cmd(1, "security:lockfile", "00:10:00")]).map((p) => p.kind)).toEqual(["security:lockfile"]);
   });
 });
@@ -206,27 +217,27 @@ describe("repeatPaths and roundRows", () => {
   const day = { since: "2026-11-01T00:00:00Z", until: "2026-11-02T00:00:00Z" };
   const at = (hms: string) => Date.parse(`2026-11-01T${hms}Z`);
 
-  test("minutes until the pass: a recheck from its first round's start to its pass; the main review to its last round", () => {
+  test("minutes until the pass: the arbiter from its first round's start to its pass; the main review to its last round", () => {
     const js = [
-      job(1, 7, { as: "recheck", kinds: ["size"], startedAt: at("00:00:00"), endedAt: at("00:10:00") }, [finding("a.ts", "should-fix")]),
-      job(2, 7, { as: "recheck", kinds: ["size"], startedAt: at("00:20:00"), endedAt: at("00:30:00") }, [finding("a.ts", "should-fix")]),
-      job(3, 7, { as: "recheck", kinds: ["size"], startedAt: at("00:40:00"), endedAt: at("01:00:00") }, []),
+      arbiter(1, 7, { startedAt: at("00:00:00"), endedAt: at("00:10:00") }, { reviewerSide: ["a.ts:1 x"] }),
+      arbiter(2, 7, { startedAt: at("00:20:00"), endedAt: at("00:30:00") }, { missing: ["size"] }),
+      arbiter(3, 7, { startedAt: at("00:40:00"), endedAt: at("01:00:00") }),
       job(4, 7, { startedAt: at("02:00:00"), endedAt: at("02:20:00") }, [finding("a.ts")]), job(5, 7, { startedAt: at("02:30:00"), endedAt: at("03:30:00") }),
     ];
     const r = roundRows(roundsOf(js), [], passesOf(js), day);
-    expect(r.find((x) => x.rule === "size")).toMatchObject({ roundsMax: 3, untilPassP50: 60 });
+    expect(r.find((x) => x.rule === "arbiter")).toMatchObject({ roundsMax: 3, untilPassP50: 60 });
     expect(r.find((x) => x.rule === "review")).toMatchObject({ roundsMax: 2, untilPassP50: 90 });
   });
 
   test("the time until the pass ends inside the period: a later round or pass does not move it", () => {
     const js = [
       job(1, 8, { startedAt: at("23:00:00"), endedAt: at("23:30:00") }), job(2, 8, { startedAt: Date.parse("2026-11-02T04:00:00Z"), endedAt: Date.parse("2026-11-02T05:00:00Z") }),
-      job(3, 8, { as: "recheck", kinds: ["size"], startedAt: at("23:00:00"), endedAt: at("23:10:00") }, [finding("a.ts", "blocker")]),
-      job(4, 8, { as: "recheck", kinds: ["size"], startedAt: Date.parse("2026-11-02T00:30:00Z"), endedAt: Date.parse("2026-11-02T01:00:00Z") }, []),
+      arbiter(3, 8, { startedAt: at("23:00:00"), endedAt: at("23:10:00") }, { reviewerSide: ["a.ts:1 x"] }),
+      arbiter(4, 8, { startedAt: Date.parse("2026-11-02T00:30:00Z"), endedAt: Date.parse("2026-11-02T01:00:00Z") }),
     ];
     const r = roundRows(roundsOf(js), [], passesOf(js), day);
     expect(r.find((x) => x.rule === "review")).toMatchObject({ roundsMax: 1, untilPassP50: 30 });
-    expect(r.find((x) => x.rule === "size")).toMatchObject({ untilPassP50: null });
+    expect(r.find((x) => x.rule === "arbiter")).toMatchObject({ untilPassP50: null });
   });
 
   test("the time until the pass is the median over the PRs, rounded after it (two PRs of 24 seconds give 0.4)", () => {

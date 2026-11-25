@@ -6,7 +6,7 @@ the OpenAI subscription). It is a choice the user makes on the settings screen, 
 ## What is switched
 
 - The setting is `bedrock` in the daemon settings: runner to `{ region }`. No row (the default) means the runner runs on
-  its own login. Only a runner whose adapter has Bedrock models (`bedrockModels`) can be switched: Claude and Codex;
+  its own login. Only a runner whose adapter can name a model by its Bedrock id (`bedrockModel`) can be switched: Claude and Codex;
   DAK cannot.
 - Only the region is saved. There is no field for a key, a profile or a token, and none is read.
 - It takes effect for the tasks that start after the change; a running task keeps what it started with. A session is not
@@ -25,7 +25,7 @@ The child process gets the Bedrock variables or arguments only when the setting 
 
 With the setting, the `claude` child gets `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_REGION=<region>`; nothing else changes
 (the model still goes through `--model`). Model ids are the Bedrock form of the same models: `global.anthropic.<model>`,
-the global inference profile. A turn on Bedrock says nothing about the Claude login, so the logged-out state is left as it was.
+the global inference profile (an id that already starts with `global.` or `anthropic.` is kept). A turn on Bedrock says nothing about the Claude login, so the logged-out state is left as it was.
 
 ### Codex
 
@@ -39,17 +39,19 @@ on Bedrock says nothing about the OpenAI login, so its state is left as it was.
 ## Credentials
 
 Switchboard holds no AWS key and stores none. The `claude` and `codex` CLIs find AWS credentials the way any AWS tool does
-(environment, shared config, or the instance role on an EC2 host). The cloud-run mode of Claude (Teleport) is not
+(environment, shared config, or the instance role in the EC2 setup). The cloud-run mode of Claude (Teleport) is not
 affected: it runs on Anthropic's side.
 
-## What the host can call
+## What the instance can call
 
-The host's instance role, and the boundary that caps every role of the stack, allow `bedrock:InvokeModel` and
+The instance role, and the boundary that caps every role of the stack, allow `bedrock:InvokeModel` and
 `bedrock:InvokeModelWithResponseStream` on any model and inference profile; the versions are not pinned, so a new
 model needs no deploy. Codex reaches the OpenAI models through Bedrock Mantle rather than `InvokeModel`, so they also
 allow `bedrock-mantle:CreateInference` on the account's projects in any region: an OpenAI model is offered in its own
 regions, which need not include the stack's, so the region set for Codex must be one that offers the model. Key creation and any other Bedrock action are not allowed. The model list on the settings screen shows
-every Bedrock model of the adapter; what the account can call is decided by IAM.
+the saved model list (else the adapter's own) by Bedrock ids, and a model with no Bedrock id is left out. The list is
+kept once, in the model choices: it is edited there under its own ids, and the daemon turns it into Bedrock ids while the
+runner is on Bedrock. What the account can call is decided by IAM.
 
 ## Showing it
 

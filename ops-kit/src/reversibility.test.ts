@@ -28,7 +28,7 @@ test("the line as written: the kind is what its writer proposes, in either kind 
 
 test("the work goes on only for a kind the table lists as compensable: no kind, an unknown kind, a kind listed as irreversible or reversible, and a table that cannot be read all stop and ask", () => {
   const t = table({ "implementation-choice": "compensable", "drop-data": "irreversible", "restart": "reversible" });
-  expect(proceedRefusal(ask(GO), t, TASK)).toBeNull();
+  expect(proceedRefusal(ask(GO, "`src/names.ts` の関数名"), t, TASK)).toBeNull();
   expect(proceedRefusal(ask("**進め方**: 推奨で進める — 戻せる"), t)).toContain("種類が書かれていない");
   expect(proceedRefusal(ask("**進め方**: 推奨で進める（種類: anything-i-like）"), t)).toContain("表に無い");
   expect(proceedRefusal(ask("**進め方**: 推奨で進める（種類: drop-data）"), t)).toContain("irreversible");
@@ -53,7 +53,7 @@ test("the stop words are looked for in the whole question: an operation written 
     expect({ more, proceed: askProceed(ask(GO, more), TASK) }).toEqual({ more, proceed: "wait" });
   }
   // the same question without them goes on
-  expect(proceedRefusal(ask(GO, "```ts\nexport const nameOf = (x: string) => x;\n```"), t, TASK)).toBeNull();
+  expect(proceedRefusal(ask(GO, "`src/names.ts` の\n```ts\nexport const nameOf = (x: string) => x;\n```"), t, TASK)).toBeNull();
 });
 
 test("the kind is a proposal checked against where the question stands: a task-order question names no file and nothing outside one PBI, an implementation or wording question names only paths the Task names; what cannot be checked asks", () => {
@@ -84,6 +84,22 @@ test("the kind is a proposal checked against where the question stands: a task-o
   expect(kindRefusal("new-kind", ask(GO), TASK)).toContain("確かめる規則が無い");
   // the table's part alone (a reader without a checkout) says nothing about the place
   expect(tableRefusal(ask(GO), t)).toBeNull();
+});
+
+test("a question that names nothing cannot show its kind", () => {
+  const t = loadAskTable()!;
+  const order = (more: string) => ask("**進め方**: 推奨で進める（種類: task-order）", more);
+  // task-order: no number at all, or only the PBI itself, names no Task of it
+  for (const more of ["どちらを先にするか", "#20 の中の順序をどうするか"]) {
+    expect(proceedRefusal(order(more), t, PBI)).toContain("PBI #20 の Task を 1 つも名指していない");
+    expect(askProceed(order(more), PBI)).toBe("wait");
+  }
+  // implementation-choice / wording: a Task that names paths, a question that names none
+  for (const kind of ["implementation-choice", "wording"]) {
+    const go = ask(`**進め方**: 推奨で進める（種類: ${kind}）`, "関数の名前をどうするか");
+    expect(proceedRefusal(go, t, TASK)).toContain(`種類 ${kind} の問いがパスを 1 つも名指していない`);
+    expect(askProceed(go, TASK)).toBe("wait");
+  }
 });
 
 test("realistic questions that should go on do: a name inside one file of the Task, the order of two Tasks of a PBI, the wording of a label", () => {
@@ -117,7 +133,7 @@ test("the table in the repository: its question kinds are read, every one the li
   for (const r of rows.filter((x) => !x.askKind)) expect(proceedRefusal(ask(`**進め方**: 推奨で進める（種類: ${r.gateKind ?? "promote"}）`), t)).not.toBeNull();
   for (const [kind, answer] of t.kinds) {
     expect(answer).toBe("compensable");
-    expect(askProceed(ask(`**進め方**: 推奨で進める（種類: ${kind}）`), TASK)).toBe("recommended");
+    expect(askProceed(ask(`**進め方**: 推奨で進める（種類: ${kind}）`, kind === "task-order" ? "#21 と #22 の順序" : "`src/names.ts` の話"), TASK)).toBe("recommended");
   }
   expect(askProceed(ask("**進め方**: 推奨で進める"))).toBe("wait");
   expect(askProceed(ask("**進め方**: 止めて待つ — 理由"))).toBe("wait");

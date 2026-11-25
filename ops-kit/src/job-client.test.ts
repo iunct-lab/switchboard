@@ -73,6 +73,11 @@ describe("ops-kit job", () => {
     const recheck = await run(["request", "review", "12", "--as", "recheck", ...files], () => job({ kind: "review", runner: "claude" }));
     expect(recheck.code).toBe(0);
     expect(recheck.calls[0]!.body).toEqual({ kind: "review", taskId: "task_1", pr: 12, as: "recheck", cwd: "/tmp/clone", promptFile: "/tmp/clone/p.md", outFile: "/tmp/clone/o.md" });
+    // an arbiter does the same, and takes no kinds
+    const arbiter = await run(["request", "review", "12", "--as", "arbiter", ...files], () => job({ kind: "review", runner: "claude" }));
+    expect(arbiter.code).toBe(0);
+    expect(arbiter.calls[0]!.body).toEqual({ kind: "review", taskId: "task_1", pr: 12, as: "arbiter", cwd: "/tmp/clone", promptFile: "/tmp/clone/p.md", outFile: "/tmp/clone/o.md" });
+    expect((await run(["request", "review", "12", "--as", "arbiter", "--kinds", "size", ...files], () => job())).code).toBe(1);
   });
 
   test("request review --as attack sends as in the body and needs --runner", async () => {

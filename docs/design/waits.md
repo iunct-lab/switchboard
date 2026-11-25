@@ -15,7 +15,7 @@ runner that has gone silent — shows up by itself where the person already look
 
 | Field | Meaning |
 |---|---|
-| `kind` | `command`, `output`, `person`, `resume`, `depends`, `job`, `date`, `queue`, `stop` |
+| `kind` | `command`, `output`, `hook`, `person`, `resume`, `depends`, `job`, `date`, `queue`, `stop` |
 | `key` | Tells the Task's waits apart (`pr#12`, `resume`, `command:<pid>`) |
 | `label` | What is waited for, as shown |
 | `since` | When the wait began |
@@ -31,6 +31,7 @@ reads it from where it already is, and gives it a limit:
 |---|---|---|---|
 | A command that checks until something is done | the `ops-kit wait` record file | `command` | the command's own `--timeout` |
 | The runner's next event, in a turn or on its background jobs | the attached runner's last event | `output` | last event + silence limit |
+| A hook the runner runs, while its heartbeats come | the attached runner's last heartbeat | `hook` | last heartbeat + silence limit |
 | An approval, or a turn that ended needing the person | the Task's status and outcome | `person` | start + limit for others' work |
 | A usage limit, GitHub's API limit, a full disk, a cut turn | the Task's planned resume (`resumeAt`) | `resume` | the planned time + grace |
 | A run slot, memory, a promotion letting turns start again; for a queued reply refused at the start (budget, a Teleport Terminal on its folder), that refusal | the Task's place in the queue (`queuedAt`), and the refusal last written for it | `queue` | start + limit for own work |
@@ -79,7 +80,10 @@ and no screen works a wait out by itself.
 
 - **The Task list and the Task's header** show one tag (`WaitTag`): `応答なし 12 分` for a silent runner, else
   `待ち超過: <what> 40 分 / 上限 30 分` for a wait over its limit, else `待ち: <what> 3 分 / 上限 30 分` for the wait whose
-  limit comes first. The tooltip lists every wait. The list uses the short form (`待ち 3/30 分`). A planned resume within
+  limit comes first. While a hook runs and its heartbeats keep arriving, the tag is `hook 実行中 12 分` instead (not red, never
+  over its limit; the tooltip names the hook, when it began and the last heartbeat); once the heartbeats stop for the
+  silence limit it is `応答なし` again. The tooltip lists every wait. The list uses the
+  short form (`待ち 3/30 分`). A planned resume within
   its time keeps its own tag; the person's own waits are shown where they are answered.
 - **The asks screen** lists every wait over its limit that is not already the person's to end, and every silent
   runner, as a question for the person (`待ちが上限を過ぎた: …` / `応答なし: …`), with a link to the Task. Nothing is

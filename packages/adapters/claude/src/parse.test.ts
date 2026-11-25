@@ -15,6 +15,7 @@ const forkToolFixture = recordingText("packages/adapters/claude/fixtures/fork-tu
 const resumeMissingFixture = recordingText("packages/adapters/claude/fixtures/resume-missing.jsonl");
 const resumeCostFixture = recordingText("packages/adapters/claude/fixtures/resume-cost.jsonl");
 const backgroundFixture = recordingText("packages/adapters/claude/fixtures/background-notification.jsonl");
+const hookHeartbeatFixture = recordingText("packages/adapters/claude/fixtures/hook-heartbeat.jsonl");
 const guardUnavailableFixture = recordingText("packages/adapters/claude/fixtures/guard-unavailable.jsonl");
 
 function replay() {
@@ -230,6 +231,21 @@ describe("--resume (recorded against Claude Code 2.1.261)", () => {
     for (const ev of events) expect(() => AgentEvent.parse(ev)).not.toThrow();
     const flow = events.filter((e) => e.t === "session.start" || e.t === "session.end" || e.t === "background").map((e) => (e.t === "background" ? `background ${e.count}` : e.t));
     expect(flow).toEqual(["session.start", "background 1", "session.end", "background 0", "session.start", "session.end"]);
+  });
+
+  test.skipIf(skipRecordings("packages/adapters/claude/fixtures/hook-heartbeat.jsonl"))("hook heartbeat: each tool_progress heartbeat of a long Stop hook replays as hook.progress, the other events are those of a turn without it (Claude Code 2.1.332)", () => {
+    assertRecordings("packages/adapters/claude/fixtures/hook-heartbeat.jsonl");
+    // a `Stop` hook of `sleep 25` with CLAUDE_CODE_HOOK_HEARTBEAT_INTERVAL_MS=5000: five heartbeat lines, no --include-hook-events
+    const lines = hookHeartbeatFixture.split("\n");
+    const p = createClaudeParser();
+    const all = lines.flatMap((l) => p.feed(l));
+    for (const ev of all) expect(() => AgentEvent.parse(ev)).not.toThrow();
+    expect(all.filter((e) => e.t === "hook.progress")).toEqual(Array.from({ length: 5 }, () => ({ t: "hook.progress", hook: "Stop", startedAt: null })));
+    const q = createClaudeParser();
+    const without = lines.filter((l) => !l.includes('"heartbeat":true')).flatMap((l) => q.feed(l));
+    expect<unknown>(all.filter((e) => e.t !== "hook.progress")).toEqual(without);
+    // a progress line of an ordinary tool (no `heartbeat`) is still dropped
+    expect(createClaudeParser().feed('{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","elapsed_time_seconds":3}')).toEqual([]);
   });
 
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/guard-unavailable.jsonl"))("guard unavailable (fixtures/guard-unavailable.jsonl): the blocked Bash replays as tool.result ok:false with the hook's reason (Claude Code 2.1.311)", () => {
@@ -641,6 +657,22 @@ describe("login", () => {
       expect((await kind(`not json`)).loginKind).toBeUndefined();
       expect((await kind(`{"loggedIn":false,"authMethod":"claude.ai"}`, 1))).toMatchObject({ login: "expired" });
       expect((await kind(`{"authMethod":"other"}`)).loginKind).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrock from the CLI", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-login-"));
+    try {
+      // the shape `claude auth status` printed on 2026-11-20 with CLAUDE_CODE_USE_BEDROCK=1
+      const d = await createClaudeAdapter({ bin: fakeClaude(dir, `echo '{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock","loginExpiresAt":null}'; exit 0`) }).detect();
+      expect(d).toMatchObject({ login: "ok", loginKind: "bedrock", bedrockFrom: "cli" });
+      expect(d.loginExpiresAt).toBeUndefined();
+      // another provider or none is not Bedrock
+      const other = await createClaudeAdapter({ bin: fakeClaude(dir, `echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; exit 0`) }).detect();
+      expect(other).toMatchObject({ login: "ok", loginKind: "claude.ai" });
+      expect(other.bedrockFrom).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

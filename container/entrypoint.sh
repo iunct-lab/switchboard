@@ -8,14 +8,9 @@
 #     from its tags, with no check of the diff (the developer's own origin)
 #   - not set: the public repository named in ops.config.json (publicSync.target); the first start downloads its
 #     newest Release and later ones go through the check of their diff
-# The daemon's screen is published on the machine's 127.0.0.1 only (compose.yaml) and reaches the daemon over loopback:
-# the daemon listens on 127.0.0.1:47832 behind a relay on 0.0.0.0:47831.
-# sb-rescue listens on the container's 127.0.0.1:47841 and nothing relays to it: it lets every loopback connection
-# promote, roll back and restart, and a relay on the container's address would hand that to any peer on the docker
-# bridge. Its port is not published either; the daemon reaches it inside the container, and a person does with
-# `docker compose exec` (docs/design/local-container.md, "What can reach the screen and the API").
-# SWITCHBOARD_RESCUE_IN_CONTAINER=1 tells the daemon so (sb-rescue hands its environment on): the screen then shows those
-# commands instead of a link to an address the machine's browser cannot open.
+# The container runs on the machine's network (network_mode: host in compose.yaml), so the daemon (47831) and
+# sb-rescue (47841) listen on the machine's 127.0.0.1 only, as on the EC2 host: a loopback connection is trusted
+# there, and nothing on a docker bridge can reach either port. No relay, no listen address is set.
 # 「GitHub から追加」clones into ~/repos (the repositories' volume), not next to the code in /opt.
 set -eu
 SRC=/opt/switchboard
@@ -41,5 +36,4 @@ else
   fi
 fi
 
-bun "$SRC/container/relay.ts" 47831 47832 &
-SWITCHBOARD_PORT=47832 SWITCHBOARD_RESCUE_PORT=47841 SWITCHBOARD_RESCUE_IN_CONTAINER=1 SWITCHBOARD_REPOS_DIR="$HOME/repos" exec bun "$HOME/.switchboard/rescue/sb-rescue.js"
+SWITCHBOARD_PORT=47831 SWITCHBOARD_RESCUE_PORT=47841 SWITCHBOARD_REPOS_DIR="$HOME/repos" exec bun "$HOME/.switchboard/rescue/sb-rescue.js"

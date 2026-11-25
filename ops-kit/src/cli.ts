@@ -16,6 +16,7 @@ import { IDLE_KILLED_LINE, IDLE_SECONDS_MAX, runIdle } from "./idle-run.ts";
 import { parseWaitArgs, runWait, WAIT_USAGE } from "./wait.ts";
 import { checkCompared, comparePrompt, leftoverRequests, parseCompared } from "./review-compare.ts";
 import { attackPrompt } from "./review-attack.ts";
+import { arbiterPrompt, checkRulings } from "./review-arbiter.ts";
 import { isReviewer, REVIEW_RULES, REVIEWER_NOTE, type Reviewer } from "./review-note.ts";
 import { addedLines, handledFindings, oldPathHits, oldPathsItem, oldPathsReport, type Hit, type InlineComment } from "./review-material.ts";
 import { formatLint, lint } from "./lint.ts";
@@ -138,6 +139,11 @@ ${DEPS_CHECK_USAGE}
   review-attack prompt
       攻める側のレビュー（実装したのとは別のランナーが、差分が変えた入口ごとに認証・認可・宛先・形式・利用者の承認のどの検査が無いかを読む）の指示を出す。
       攻撃の手順（シナリオの列・ペイロード・コマンドの全文）は書かせず、無い検査・入れる場所・既存の防御を書かせる。出力は ### Findings / ### Entries read / ### Verdict。設定ファイルは要らない。exit 2 = 使い方の誤り
+  review-arbiter prompt [--follow-up]
+  review-arbiter check <ファイル>
+      対立した指摘を 1 回で裁定する監督者のサブエージェントのための道具。prompt は指示（材料 _review/ だけを読み PR を読み直さない・観点が見られたか・指摘ごとに書かれたルールで裁定・拠れるルールが無ければ実装者の側）を出し、
+      --follow-up は裁定の後の修正の差分と裁定した指摘だけを見る 2 回目の指示を出す。出力は ### Rulings（- [implementer|reviewer] path:line — rule: <path:line か節の名前|none>）と ### Viewpoints（観点ごとに covered|missing）。
+      check は出力を読み、rule が none の reviewer の行は implementer として読む。reviewer の側の行か missing の観点があればその行を出して exit 1、無ければ exit 0、節が無い・読めない行があれば exit 2（使い方の誤りも 2）。設定ファイルは要らない
   review-compare prompt
   review-compare check <ファイル>
   review-compare leftovers <ファイル> --source <経路> --out <ディレクトリ>
@@ -353,6 +359,28 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
     if (rest.length !== 1 || rest[0] !== "prompt") return usage(err, "review-attack prompt", 2);
     out(attackPrompt());
     return 0;
+  }
+  if (command === "review-arbiter") {
+    const [sub, ...args] = rest;
+    if (sub === "prompt" && (args.length === 0 || (args.length === 1 && args[0] === "--follow-up"))) {
+      out(arbiterPrompt(args.length === 1));
+      return 0;
+    }
+    if (sub !== "check" || args.length !== 1) return usage(err, "review-arbiter prompt [--follow-up] | review-arbiter check <ファイル>", 2);
+    let text: string;
+    try {
+      text = readFileSync(args[0]!, "utf8");
+    } catch (e) {
+      err((e as Error).message);
+      return 2;
+    }
+    const r = checkRulings(text);
+    if (r.unreadable.length) {
+      for (const u of r.unreadable) err(`unreadable: ${u}`);
+      return 2;
+    }
+    for (const l of [...r.reviewerSide, ...r.missing]) out(l);
+    return r.reviewerSide.length || r.missing.length ? 1 : 0;
   }
   if (command === "review-compare") {
     const [sub, file, ...extra] = rest;

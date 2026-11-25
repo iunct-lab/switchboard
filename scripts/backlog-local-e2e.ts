@@ -202,7 +202,8 @@ try {
   // (4) as the to-pbi Task: PBI `#2` and `#1`'s ## 派生 PBI → `#2` under 分解待ち
   const pbi = await kit("create", "--title", "PBI: ローカルで回せる", "--label", "type:pbi", "--field", "Status=Backlog", "--body-file", bodyFile("pbi.md", "## ユーザーストーリー\nx\n\n## 到達点 / 受け入れ条件\n- [ ] 1. x（検証: y）\n\n## スコープ外\nなし\n\n## 元要望\n#1"));
   check("the PBI is #2", pbi.startsWith("#2 を作りました"), pbi);
-  await kit("edit", "1", "--body-file", bodyFile("req2.md", "## 要望\nGitHub 無しで回したい\n\n## 出典\nE2E\n\n## 派生 PBI\n- #2 ローカルで回せる — P2"));
+  const rev = (JSON.parse(await kit("view", "1", "--json")) as { bodyRevision: string }).bodyRevision;
+  await kit("edit", "1", "--body-file", bodyFile("req2.md", "## 要望\nGitHub 無しで回したい\n\n## 出典\nE2E\n\n## 派生 PBI\n- #2 ローカルで回せる — P2"), "--rev", rev);
   await finish(toPbi.id);
   await openBacklog();
   await until(() => listed("needs-tasks", 2), "#2 under 分解待ち");

@@ -43,7 +43,7 @@ git checkout -b <枝> && gh stack init <枝>     # 最初の枝（単発でも i
 - **ついでの整形・改名・リファクタをしない。** Task に無い方針・拒否・機構の追加と、別 Task の修正も同じ（規則の文の追記はこの節の「Task の手順に書いたファイルと名前で作る」の項のとおり PR に入れない）。気づいたことは Issue コメント（`ops-kit backlog comment`）か新しい Task に。そうした変更が要るなら、PR に入れる前に Task へ逸脱としてコメントし（`issue-workflow` の「記録の義務」の 2。`ops-kit backlog comment <Task>`）、PR 本文の「逸脱」に書く
 - **互換層・フラグ・一度しか使わない抽象を足さない**（`pbi-to-tasks` の設計チェック。実装中に必要に見えたら、たいてい設計に戻る印）
 - **既存の型を守る**: 部品のあいだで共有する型を変えるなら、それを読む全員を同じ PR で直す。互換のための optional は足さない
-- **見つけた穴を次の Task に回すときは、受け取る Task の本文に書く**（`ops-kit backlog view <Task> --fresh --json | jq -r .issue.body > "$W/t.md"` → 手順か「守る条件」の行に追記 → `ops-kit backlog edit <Task> --body-file "$W/t.md"`）。自分の PR 本文にだけ書いた穴は、次の Task に届かない
+- **見つけた穴を次の Task に回すときは、受け取る Task の本文に書く**（`ops-kit backlog view <Task> --fresh --json` の `.issue.body` を `$W/t.md` に、`.bodyRevision` を控える → 手順か「守る条件」の行に追記 → `ops-kit backlog edit <Task> --body-file "$W/t.md" --rev <版>`）。自分の PR 本文にだけ書いた穴は、次の Task に届かない
 - 差分の目安 500 行（テスト込み）。超えるなら Task を割って Issue に書く
 - 秘密・絶対パス・ユーザー名を fixture / docs に入れない（`/Users/dev` に洗う）。Issue・PR・コメントにも認証に使える値を書かない（`issue-workflow` の「Issue・PR・コメントに書かない値」）。作業ファイルはスクラッチに置き、`git status --short` を読んでから `git add`。作業ファイルは `/tmp` 直下に固定の名前で置かない（別セッションと固定名を共有すると、上書き・削除される）。作業ごとに `W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.<用途>.XXXXXX")` で自分だけのディレクトリを作り、表示されたパスをそのまま使う（Bash の呼び出しをまたぐとシェル変数は消えるので、パスは文字で控える）。消すときもそのパスだけ（glob で消さない）。置き場はマシンの停止や片付けで消えうるので、再開してから読むもの（PR 本文の下書きなど）はすぐ投稿するか、作り直せる形にする
 <!-- when runner=codex -->

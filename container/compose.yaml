@@ -9,10 +9,9 @@ services:
       dockerfile: container/Dockerfile
     image: sb-local
     restart: unless-stopped
-    ports:
-      # the machine's 127.0.0.1 only; the relay in the container (container/relay.ts) makes the daemon (47831) see
-      # loopback. sb-rescue's port (47841) is not published: it trusts loopback, and stays inside the container
-      - "127.0.0.1:47831:47831"
+    # the container shares the machine's network (Linux Docker): the daemon (47831) and sb-rescue (47841) listen on the
+    # machine's 127.0.0.1 only, as on the EC2 host, and nothing on a docker bridge can reach them
+    network_mode: host
     environment:
       # the role: empty = releases from the public repository; a clone's path in sb-repos = releases from its tags
       # (container/entrypoint.sh)

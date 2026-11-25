@@ -162,6 +162,7 @@
       "docs/design/public-repo.md",
       "docs/design/rate-limit-resume.md",
       "docs/design/repeated-stops.md",
+      "docs/design/review-replay-5378.md",
       "docs/design/scheduler.md",
       "docs/design/shadow-run.md",
       "docs/design/spike-bun-compat.md",

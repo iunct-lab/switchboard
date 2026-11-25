@@ -99,7 +99,7 @@ const median = (xs: number[]): number | null => {
 
 export type Route = "recheck" | "direct" | "review";
 
-/** recheck (a kind lifted by a recheck of the merged head, no yes) → direct (no main review mark: nobody read it) → review. */
+/** recheck (a kind lifted by a recheck record of the merged head: the arbiter's job or a command's, no yes) → direct (no main review mark: nobody read it) → review. */
 export function routeOf(pr: PrRecord): Route {
   if (RECHECK_KINDS.some((k) => recheckMerged(pr, k))) return "recheck";
   return pr.reviewed ? "review" : "direct";
@@ -391,7 +391,7 @@ export async function prViewsOf(h: MergeHistory): Promise<PrView[]> {
       const head = merged.g.head;
       // a recheck kind with a passing record of the merged head that the change asked for: the verdict's `required` (the recheck may have passed before it, so its reason never appeared), or, in a record from before that was kept, a `[再チェック <kind>]` reason of a verdict at that head. A recheck run for nothing the change asked is no recheck merge
       const named = (k: string) => gates.some((x) => x.g.head === head && (x.g.required ? x.g.required.includes(k) : x.g.reasons.some((r) => r.includes(`[再チェック ${k}]`))));
-      const kinds = sortedKinds((await rechecksOf(jobs, head, (x) => x === head)).filter((k) => (RECHECK_KINDS as readonly string[]).includes(k) && named(k)));
+      const kinds = sortedKinds((await rechecksOf(jobs, head, (x) => x === head, RECHECK_KINDS)).filter((k) => (RECHECK_KINDS as readonly string[]).includes(k) && named(k)));
       if (kinds.length > 0) marks.push({ kind: "recheck", kinds, sha: head, at: iso(merged.j.endedAt ?? merged.j.startedAt) });
     }
     // the audit's mark counts only from an owner, member or collaborator, as it did when the comments were read from GitHub; a comment stored with no author is not counted

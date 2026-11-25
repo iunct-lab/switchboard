@@ -753,6 +753,26 @@ describe("parallel-guard on a backlog kept in the app", () => {
     return { board: appBoard({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l" }, fetch), comments, add, calls };
   }
 
+  test("a claim written through the app goes as the Task's: the comment carries the Task's proof, and as nobody's outside a Task", async () => {
+    const posted: Array<{ task: string | null; token: string | null }> = [];
+    const stored: Array<{ id: string; seq: number; body: string; createdAt: string }> = [];
+    const fetch = (async (url: string, init: RequestInit = {}) => {
+      if (url === "http://app/api/tasks/t_1/mcp") return Response.json({ token: "mcp_x" });
+      const path = url.replace("http://app/api/backlog", "");
+      if (path === "/syncs") return Response.json({ syncs: [{ workspaceId: "ws_l", repository: "ws_l", syncedAt: 1, syncing: false, sync: { state: "synced", reason: null, pendingCount: 0 } }], items: [] });
+      if (init.method === "POST") {
+        const h = new Headers(init.headers);
+        posted.push({ task: h.get("x-task-id"), token: h.get("x-task-token") });
+        stored.push({ id: `sb:${stored.length}`, seq: stored.length + 1, body: (JSON.parse(String(init.body)) as { text: string }).text, createdAt: fresh });
+        return Response.json({ operation: "op" }, { status: 202 });
+      }
+      return Response.json({ comments: stored });
+    }) as unknown as typeof globalThis.fetch;
+    await appBoard({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l", OPS_KIT_TASK_ID: "t_1" }, fetch).post(1, "<!-- pbi-complete:claim x -->");
+    await appBoard({ BACKLOG_URL: "http://app/api/backlog", BACKLOG_WORKSPACE: "ws_l" }, fetch).post(1, "<!-- pbi-complete:claim y -->");
+    expect(posted).toEqual([{ task: "t_1", token: "mcp_x" }, { task: null, token: null }]);
+  });
+
   test("lease: an app that runs alone is asked and answers enabled false — claim and release go on as before", async () => {
     const a = app([]);
     expect(await claim(a.board, 1, false)).toMatchObject({ held: true });
@@ -1030,6 +1050,18 @@ describe("parallel-guard overlap turn", () => {
     expect((await run(r, 21, true)).v.verdict).toBe("go");
     // no place kept: as before
     expect((await run(records([]), 31, true)).v.verdict).toBe("go");
+  });
+
+  test("a Task that names the place's path only in its old-assumption list and its 検証 yields to the place; the list alone does not", async () => {
+    const body = (verify: string) => ["## やること", "古い前提を持つ既存の箇所:", "- `packages/core/src/a.ts:5`", "", "## 手順", "1. `packages/core/src/other.ts`: 直す", ...verify.split("\n")].join("\n");
+    const withBody = (b: string) => ({ ...records([first]), issues: records([first]).issues.map((i) => (i.number === 31 ? { ...i, body: b } : i)) });
+    const listOnly = await run(withBody(body("## 検証\n- 動く")), 31, false);
+    expect(listOnly.v.verdict).toBe("go");
+    const both = await run(withBody(body("## 検証\n- `packages/core/src/a.ts` の test が通る")), 31, false);
+    expect(both.v.verdict).toBe("defer");
+    expect(both.v.blocking).toEqual([{ ref: "Task #21", path: "packages/core/src/a.ts", updatedAt: first.since, turn: 20 }]);
+    // the Task's own paths (what the others are compared with) do not grow
+    expect(both.v.paths).toEqual(["packages/core/src/other.ts"]);
   });
 
   test("turnsAhead leaves out a place that yields to the PBI", async () => {

@@ -53,7 +53,7 @@ From [installation requirements](https://docs.gitlab.com/install/requirements/):
 | Disk | 40 GB for the application, plus all repositories, plus 5–12 GB for PostgreSQL; SSD; no NFS / EFS |
 | PostgreSQL | Bundled; its supported range depends on the GitLab major (the requirements page's table) |
 
-The Switchboard host template's default instance (`aws/template.yaml`, `InstanceType`, 4 GB) is below the minimum. Do not put GitLab on the Switchboard host; give it its own host and ask about its cost first.
+The Switchboard host template's default instance (`aws/template.yaml`, `InstanceType`, 4 GB) is below the minimum. Do not put GitLab on the Switchboard machine; give it its own host and ask about its cost first.
 
 ### Methods
 
@@ -88,7 +88,7 @@ GitLab's SSH listens on 22. Either move the host's own SSH to another port, or p
 
 The kit uses only the operator's `glab` login (`gitlabAuth` checks `glab auth status --hostname <host>`). It stores no GitLab credential.
 
-- Log in on the host as the user Switchboard runs as: `glab auth login --hostname <host>`. `--web` uses OAuth in a browser; `--device` is for a headless host (GitLab 17.9 or later); `--stdin` reads a token from standard input ([glab auth login](https://gitlab.com/gitlab-org/cli/-/blob/main/docs/source/auth/login.md)). Never pass the token on the command line or paste it into a Task.
+- Log in on the machine Switchboard runs on, as the user Switchboard runs as: `glab auth login --hostname <host>`. `--web` uses OAuth in a browser; `--device` is for a headless host (GitLab 17.9 or later); `--stdin` reads a token from standard input ([glab auth login](https://gitlab.com/gitlab-org/cli/-/blob/main/docs/source/auth/login.md)). Never pass the token on the command line or paste it into a Task.
 - Without an OS keyring, `glab` keeps the token in plain text in `~/.config/glab-cli/config.yml`. Every Task runs as the same OS user and can read it (the loopback trust model, `docs/design/workspace-mcp.md`). Give the account no more than the next two items.
 - Token scope ([scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/)): `api`, because the kit writes Issues, notes and merge requests through `glab api`. A personal token with `api` also grants Git over HTTP, so pushing over HTTPS needs no further scope (`write_repository` alone does not authenticate API calls); over SSH, a key instead. `docs/design/gitlab-security.md` derives the minimum. Tokens expire after at most 365 days by default ([personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)), so plan the renewal.
 - Role ([permissions](https://docs.gitlab.com/user/permissions/)): Developer pushes to unprotected branches, opens merge requests and writes notes; labels and milestones need Planner or above. `scripts/merge-gate.ts` counts marks only from notes by Developer or above. Merging into the protected default branch follows that branch's "Allowed to merge" (Maintainers by default).
@@ -149,7 +149,7 @@ The kit's side: `docs/design/forge-integration.md` (the GitLab section's table o
 | Reviews | Review threads, approvals | Discussions and notes; Approvals is a paid feature and is not used | Approval state is not carried |
 | Issues | Issues, sub-issues, close reasons | Issues; no sub-issues; one close state | Parents come from the body's `## 親 PBI` section. "Not planned" reads as completed |
 | Project fields (Status, Priority, Story Points) | Project v2 | None | Values stay in Switchboard's store; GitLab gets labels only |
-| CI | `.github/workflows/*` (`ci.yml`, `release-tag.yml`, `secret-scan.yml`, `labels.yml`, `project-autoadd.yml`, `host.yml`) | GitLab CI reads none of them | `scripts/local-ci.ts` already runs a merge request and reports in a note. Tags, Releases, the weekly secret scan and the host deploy have no GitLab path yet |
+| CI | `.github/workflows/*` (`ci.yml`, `release-tag.yml`, `secret-scan.yml`, `labels.yml`, `project-autoadd.yml`, `host.yml`) | GitLab CI reads none of them | `scripts/local-ci.ts` already runs a merge request and reports in a note. Tags, Releases, the weekly secret scan and the EC2 setup deploy have no GitLab path yet |
 | EC2 setup | `aws/host/bootstrap.sh` clones from `github.com` with `/switchboard/github-token` | — | A rebuilt instance still needs GitHub |
 | Public mirror | `ops-kit public-sync` pushes to a GitHub repository | — | Stays on GitHub |
 
@@ -168,7 +168,7 @@ Nothing here touches the main repository, its remotes or GitHub. The only writes
 
 - [ ] The kit's GitLab path passed on hosted gitlab.com
 - [ ] The "Ask first" table is answered: instance, cost, exposure, authentication
-- [ ] Inventory, read only: `git remote -v`, `jq .forge ops.config.json`, `ls .github/workflows`, the open PRs (`gh pr list`), the host's GitHub dependencies (above)
+- [ ] Inventory, read only: `git remote -v`, `jq .forge ops.config.json`, `ls .github/workflows`, the open PRs (`gh pr list`), the EC2 setup's GitHub dependencies (above)
 - [ ] The instance is installed, pinned, signed-up off, on TLS, with a rehearsed restore
 - [ ] Path B on a throwaway project: create an Issue, a merge request, an inline note, resolve it, `bun scripts/local-ci.ts <iid>`, `bun scripts/merge-gate.ts <iid>` (judge only, no `--merge`)
 - [ ] Each "Leaves" item above has an owner: carried by Switchboard's store, done by hand, or accepted as lost

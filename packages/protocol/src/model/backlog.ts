@@ -190,6 +190,12 @@ export const BacklogItem = z.object({
   progress: z.object({ closableByApi: z.boolean(), closesOnAnswer: z.number().nullable(), checking: z.boolean() }),
   /** Labelled `on-hold`: backlog-next leaves it in every slot and stage; only that firing looks at this, its row's buttons do not. */
   onHold: z.boolean(),
+  /**
+   * A Task holds the Issue with a claim no release ended (the parallel guard's `holder`) and is still at work or waits for the
+   * person, so the automatic stages leave it: `taskId` = the Task that wrote the claim, null when that is not known (written
+   * outside the app, or before operations kept their Task). null = no claim that counts.
+   */
+  claim: z.object({ taskId: z.string().nullable() }).nullable(),
   /** Carries the `flow-improvement` label. */
   flow: z.boolean(),
   /** The length of the Issue's body in characters: what a process definition's `auto.maxBodyChars` compares when `requestChars` is null. */

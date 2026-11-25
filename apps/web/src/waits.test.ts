@@ -59,3 +59,22 @@ test("waitTag: the person's own waits and a planned resume within its time have 
   expect(waitTag({ waits: [person, resume] }, T0 + 30 * MIN, false)).toBeNull();
   expect(waitTag({ waits: [person, resume] }, T0 + 2 * HOUR, false)).toMatchObject({ text: "待ち超過: 使用上限の解除 120 分 / 上限 60 分", tone: "over" });
 });
+
+test("a running hook: hook 実行中 and the minutes since it began, not red; the tooltip names the hook, when it began and the last heartbeat", () => {
+  const hook = w({ kind: "hook", key: "hook", label: "bun test", until: T0 + 20 * MIN, progressAt: T0 + 12 * MIN });
+  expect(waitLabel(hook, T0 + 12 * MIN + 30_000, true)).toBe("hook 実行中 12 分");
+  const tag = waitTag({ waits: [hook] }, T0 + 12 * MIN + 30_000, true)!;
+  expect(tag).toEqual({ text: "hook 実行中 12 分", title: "hook 実行中: bun test（09:00 から。最後の心拍 09:12）", tone: "wait" });
+  // still the hook's tag past its own until, and never 応答なし
+  expect(waitTag({ waits: [hook] }, T0 + 25 * MIN, true)).toMatchObject({ text: "hook 実行中 25 分", tone: "wait" });
+  // with another wait still within its limit the hook is shown; the tooltip has both
+  const job = w({ kind: "job", key: "job#5", label: "頼んだ仕事 job#5", until: T0 + 6 * HOUR });
+  const both = waitTag({ waits: [job, hook] }, T0 + 12 * MIN, false)!;
+  expect(both.text).toBe("hook 実行中 12 分");
+  expect(both.title).toBe("待ち: 頼んだ仕事 job#5 0 時間 / 上限 6 時間\nhook 実行中: bun test（09:00 から。最後の心拍 09:12）");
+  // no heartbeat time recorded: the tooltip gives the start for the last heartbeat
+  expect(waitTag({ waits: [{ ...hook, progressAt: null }] }, T0 + 12 * MIN, true)!.title).toBe("hook 実行中: bun test（09:00 から。最後の心拍 09:00）");
+  // the runner's silence still comes first
+  const silent = w({ kind: "output", key: "output", label: "ランナーの出力", until: T0 + 10 * MIN });
+  expect(shownWait({ waits: [hook, silent] }, T0 + 15 * MIN)).toBe(silent);
+});

@@ -95,7 +95,7 @@ export type PromotionStep =
  * tag nothing new is started — the next merges would be built on a version that does not run. A rollback chosen by hand
  * is the person's call, not a failure of the version. `latestInCurrent`: the tag's commit is already part of what runs
  * (a newer commit was promoted by hand) — going back to the tag would undo that.
- * `auto` (default `promote`): `off` leaves a new tag alone and `review` stops after the check of its diff; neither holds
+ * `pressed`: the update the person pressed; for the newest tag it counts as `auto` `promote` (the check of the diff first, and only a version found ok goes in). `auto` (default `promote`): `off` leaves a new tag alone and `review` stops after the check of its diff; neither holds
  * the backlog, and a failed tag still does. A bundle's hold (`bundle`) waits whatever `auto` says and holds the backlog.
  * `ci` (given for a development origin only): the tag CI's result. A tag that failed it is never brought in by itself;
  * one without a result is brought in as any tag is (`requireCi` `no-fail`, the default: a promotion does not wait for
@@ -106,7 +106,7 @@ export type PromotionStep =
  * can switch without ever restarting (`promoteKeepsTasks`), that is asked for (`ifNoRestart`); `needsRestart` =
  * sb-rescue answered that this tag cannot go in that way, so it waits until none is left (`drain`).
  */
-export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; needsRestart?: boolean; bundle?: { taskId: string } | null; ci?: TagCiState; requireCi?: "pass" | "no-fail" }): PromotionStep {
+export function promotionStep(s: { status: ReleaseState; latest: { tag: string; sha: string } | null; busyTasks: number; latestInCurrent?: boolean; review?: ReleaseReview | "start" | null; auto?: PromotionAuto; pressed?: { tag: string; sha: string }; needsRestart?: boolean; bundle?: { taskId: string } | null; ci?: TagCiState; requireCi?: "pass" | "no-fail" }): PromotionStep {
   const { status, latest } = s;
   if (!status.managed || !latest || latest.sha === status.current || s.latestInCurrent) return { action: "pick" };
   const failure = status.history.find((h) =>
@@ -116,7 +116,8 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
   // a bundle of work is under way: nothing is brought in (nor a diff check started) until its hold is released, whatever
   // `auto` says, and no Task ending releases it (the backlog stays held: nothing outside the bundle starts)
   if (s.bundle) return { action: "wait", reason: `束の作業中（Task ${s.bundle.taskId}）`, bundle: true };
-  const auto = s.auto ?? "promote";
+  // the update the person pressed for this very tag goes the way `promote` does (its check first), whatever `auto` says
+  const auto = s.pressed && s.pressed.tag === latest.tag && s.pressed.sha === latest.sha ? "promote" : s.auto ?? "promote";
   if (auto === "off") return { action: "pick" };
   // a public copy's clone (the caller passed `review`): the tag is asked for only once its diff was checked and found ok
   if (s.review === "start") return { action: "review" };
@@ -146,11 +147,11 @@ export function promotionStep(s: { status: ReleaseState; latest: { tag: string; 
  * `since`, so Tasks that keep running cannot hold new starts for one limit per tag.
  * `state`: `drain` = it waits for the Tasks a restart would cut, and no new turn or Task starts until `since` + the limit
  * (they queue, and the next daemon starts them); `asked` = a restart was asked for at `askedAt`, and nothing starts
- * until the restart; `off` = the version is held by something else (its diff's check, the tag CI): no hold.
+ * until the restart (`busyAt`: when sb-rescue last answered that it was busy); `off` = the version is held by something else (its diff's check, the tag CI): no hold.
  * `lifted`: when the wait went past its limit. The hold on new starts ended there and is not set up again; nothing is
  * cut — the promotion stays pending for the first moment no Task would be cut, and the person is told (`drainNote`).
  */
-export type PromotionDrain = { tag: string; since: number; state: "drain" | "asked" | "off"; askedAt?: number; lifted?: number } | null;
+export type PromotionDrain = { tag: string; since: number; state: "drain" | "asked" | "off"; askedAt?: number; busyAt?: number; lifted?: number } | null;
 
 /**
  * The drain after a decision about the newest tag (`tag` null = nothing to bring in: no state is left).
@@ -182,14 +183,31 @@ export function drainHeld(d: PromotionDrain): boolean {
   return !!d && (d.state === "asked" || (d.state === "drain" && d.lifted === undefined));
 }
 
+/** sb-rescue answered busy to a restart that was asked for: the time it stops answering is counted from here (any other state is the same object). */
+export function sawRescueBusy(d: PromotionDrain, now: number): PromotionDrain {
+  return d?.state === "asked" ? { ...d, busyAt: now } : d;
+}
+
+/**
+ * Why a restart that was asked for stops holding new starts, if it does: `limit` = more than `limitMs` passed since it
+ * was asked for (the one bound, however busy sb-rescue is); `quiet` = sb-rescue has not answered busy for `askedMs`
+ * (counted from the request until it first does). null = it still holds.
+ */
+export function askedExpiry(d: PromotionDrain, limitMs: number, askedMs: number, now: number): "limit" | "quiet" | null {
+  if (d?.state !== "asked") return null;
+  if (now - (d.askedAt ?? now) > limitMs) return "limit";
+  return now - (d.busyAt ?? d.askedAt ?? now) > askedMs ? "quiet" : null;
+}
+
 /**
  * What time does to a drain. A wait for Tasks older than `limitMs` is lifted (`lifted`): only the hold on new starts
- * ends, no Task is cut and the promotion stays pending. A restart asked for more than `askedMs` ago that never came
- * (sb-rescue went away in the middle) holds nothing any more. Any other state stays as it is (the same object).
+ * ends, no Task is cut and the promotion stays pending. A restart asked for holds nothing any more once `askedExpiry`
+ * says so: sb-rescue went away in the middle (no busy answer for `askedMs`), or the restart took longer than `limitMs`.
+ * Any other state stays as it is (the same object).
  */
 export function expireDrain(d: PromotionDrain, limitMs: number, askedMs: number, now: number): PromotionDrain {
   if (!d) return d;
-  if (d.state === "asked") return now - (d.askedAt ?? now) > askedMs ? nextDrain(d, d.tag, "off", now) : d;
+  if (d.state === "asked") return askedExpiry(d, limitMs, askedMs, now) ? nextDrain(d, d.tag, "off", now) : d;
   return d.state === "drain" && d.lifted === undefined && now - d.since > limitMs ? { ...d, lifted: now } : d;
 }
 
@@ -260,10 +278,7 @@ const marker = (sha: string) => `<!-- promote-failed:${sha} -->`;
  * and sent by the app (a backlog kept here only too). Only the PR is read from the code host when it is not stored
  * (the PR's `closes` are the parallel guard's rule, closesOf). Null when no stored PBI could be found.
  */
-/** What a failed promotion's report names in place of the rescue page where sb-rescue answers inside the container only (no address a browser opens). */
-export const RESCUE_IN_CONTAINER = "コンテナの中だけ（`docker compose -f container/compose.yaml exec switchboard curl -s http://127.0.0.1:47841/api/status`）";
-
-export async function reportPromoteFailure(db: Db, source: BacklogSource, gh: GhRunner, cwd: string, f: { tag: string; sha: string; subject: string; reason: string; rescueUrl: string }): Promise<number | null> {
+export async function reportPromoteFailure(db: Db, source: BacklogSource, gh: GhRunner, cwd: string, f: { tag: string; sha: string; subject: string; reason: string; rescueUrl?: string }): Promise<number | null> {
   let n = Number(/\(#(\d+)\)\s*$/.exec(f.subject)?.[1]);
   if (!n) return null;
   const records = shownRecords(db, source);
@@ -290,7 +305,7 @@ export async function reportPromoteFailure(db: Db, source: BacklogSource, gh: Gh
     `- A: 直す — 影響: 直した PR がマージされて新しいタグが付くまで、定期実行は新しい項目を始めない`,
     `- B: 救援画面で前の版に戻したままにし、この変更を revert する — 影響: revert の PR が要る`,
     `**推奨**: A — 理由は sb-rescue の履歴: ${f.reason}`,
-    `**止めた場所**: 定期実行（backlog-next）。救援画面: ${f.rescueUrl}`,
+    `**止めた場所**: 定期実行（backlog-next）${f.rescueUrl ? `。救援画面: ${f.rescueUrl}` : ""}`,
     "",
     marker(f.sha),
   ].join("\n"));

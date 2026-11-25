@@ -9,8 +9,9 @@ import { buildStartPrompt } from "./backlog-prompt.ts";
 import { pickNext, notResumed } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine } from "./backlog-overlap.ts";
-import { judge as guardJudge, turnsAhead } from "../../../scripts/parallel-guard.ts";
+import { judge as guardJudge, judgeWithTurns, turnsAhead } from "../../../scripts/parallel-guard.ts";
 import { overlapTurnOf } from "./backlog-overlap.ts";
+import { turnPathsIn } from "../../../ops-kit/src/task-paths.ts";
 import { backlogNextSchedule, boot, closeTried, holdingClaude, item, metaId, metaName, overlapReadyGh, refreshed, releaseBody, runSchedule, scheduleLogAll, start, startedTasks, sweepAll, threeWorkspaces, useBacklogDaemon, waitsGh, waitsOfItem } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
@@ -177,7 +178,7 @@ function overlapWorld(pbis: Record<number, Record<number, string>>) {
   const issues = new Map<number, BacklogIssueData>();
   for (const [pbi, tasks] of Object.entries(pbis)) {
     issues.set(Number(pbi), issue(Number(pbi), ["type:pbi"], null, Object.keys(tasks).map(Number), ""));
-    for (const [task, paths] of Object.entries(tasks)) issues.set(Number(task), issue(Number(task), ["type:task"], Number(pbi), [], `触る場所: ${paths.split(" ").map((p) => `\`${p}\``).join("、")}`));
+    for (const [task, paths] of Object.entries(tasks)) issues.set(Number(task), issue(Number(task), ["type:task"], Number(pbi), [], paths ? `触る場所: ${paths.split(" ").map((p) => `\`${p}\``).join("、")}` : "観測の Task: 集計して報告する"));
   }
   const pr = (number: number, closes: number[], files: string[], more: { isDraft?: boolean; state?: string } = {}) => ({ number, isDraft: false, labels: [], closes, updatedAt: now, files, state: "OPEN", ...more });
   return { root, issues, now, pr, done: () => rmSync(root, { recursive: true, force: true }) };
@@ -328,6 +329,67 @@ describe("overlap turn", () => {
       expect(overlapLine([item({ number: 3, overlap: closed.of(3) })])).toEqual(["重なり: #3（順番待ち: #2（src/a.ts））"]);
       expect(overlapLine([item({ number: 3, overlap: closed.of(3) })]).every(isOverlapLine)).toBe(true);
       expect(overlapHolderLines([item({ number: 3, overlap: closed.of(3) })])).toEqual([]);
+    } finally {
+      w.done();
+    }
+  });
+
+  test("a Task with no path named does not let a PBI past a place ahead", () => {
+    // P (`#2`) yielded on src/a.ts to the merged PR 90; Y (`#3`) came later with Task 31 on src/a.ts and Task 32 naming no path
+    const run = (y: Record<number, string>, startable: number[]) => {
+      const w = overlapWorld({ 2: { 21: "src/a.ts" }, 3: y });
+      const pulls = [w.pr(90, [], ["src/a.ts"], { state: "MERGED" })];
+      const comments: Record<number, { body: string; createdAt: string }[]> = { 2: [mark(releaseBody("重なり", [90], true), 0)] };
+      const items = [item({ number: 2, stage: "ready" }), item({ number: 3, stage: "ready" })];
+      const turns = withOverlap(items, w.issues, new Map([[2, [21]], [3, startable]]), pulls, new Map(), w.root, { commentsOf: (n) => comments[n] ?? [] });
+      return { w, turns, y: items[1]! };
+    };
+    const held = run({ 31: "src/a.ts", 32: "" }, [31, 32]);
+    try {
+      expect(held.y.overlap).toEqual({ hits: [{ ref: "Task #21", path: "src/a.ts", working: false, pbi: null, turn: 2 }], unknown: null });
+      expect(held.y.freeTasks).toBeUndefined();
+      // the guard in Task 31 reads the same places ahead and defers it: the app does not start what the guard sends back
+      const verdict = judgeWithTurns({ paths: ["src/a.ts"], turnPaths: turnPathsIn(held.w.issues.get(31)!.body, [{ name: "src", dir: true }]) }, turnsAhead(held.turns, 3), new Date());
+      expect(verdict.verdict).toBe("defer");
+    } finally {
+      held.w.done();
+    }
+    // when the only startable Task names no path (Task 31 cannot start yet), the PBI goes as before: that Task touches no file
+    const countOnly = run({ 31: "src/a.ts", 32: "" }, [32]);
+    try {
+      expect(countOnly.y.overlap).toBeNull();
+      expect(countOnly.y.freeTasks).toEqual([]);
+    } finally {
+      countOnly.w.done();
+    }
+    // with both Tasks naming a path and one not overlapping, the PBI still starts with that Task
+    const free = run({ 31: "src/a.ts", 32: "src/b.ts" }, [31, 32]);
+    try {
+      expect(free.y.overlap).toBeNull();
+      expect(free.y.freeTasks).toEqual([32]);
+    } finally {
+      free.w.done();
+    }
+  });
+
+  test("a later PBI whose Task names the place's path only in its old-assumption list and its 検証 waits for the place", () => {
+    const w = world();
+    try {
+      const body = (verify: string) => ["## やること", "古い前提を持つ既存の箇所:", "- `src/a.ts:5`（読むだけ）", "", "## 手順", "1. `src/other.ts`: 直す", ...verify.split("\n")].join("\n");
+      // only in the list: the Task does not touch the place, so the PBI starts
+      w.issues.set(31, { ...w.issues.get(31)!, body: body("## 検証\n- 動く") });
+      expect(judgeAll(w, { xOpen: false }).of(3)).toBeNull();
+      // the 検証 names it too: the Task works on or tests the place, so the PBI waits for the one that yielded
+      w.issues.set(31, { ...w.issues.get(31)!, body: body("## 検証\n- `src/a.ts` の test が通る") });
+      expect(judgeAll(w, { xOpen: false }).of(3)).toEqual(turnHit);
+      // once it yielded on that path, it holds a place on it, read the same way (the first place gone: P closed)
+      const comments = { 3: [mark(releaseBody("重なり", [90], true), 10)] };
+      expect(judgeAll(w, { xOpen: false, pClosed: true, comments }).turns).toEqual([{ pbi: 3, since: at(10), task: 31, paths: ["src/a.ts"] }]);
+      // work under way (a PR) is still compared by the body's own paths: the list alone does not count there
+      const pulls = [w.pr(90, [11], ["src/a.ts"])];
+      const items = [item({ number: 3, stage: "ready" })];
+      withOverlap(items, w.issues, new Map([[3, [31]]]), pulls, new Map(), w.root);
+      expect(items[0]!.overlap).toBeNull();
     } finally {
       w.done();
     }

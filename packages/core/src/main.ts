@@ -9,7 +9,9 @@ import type { Suggester } from "./routing.ts";
 import { relocate } from "./relocate.ts";
 import { shutdownOnce } from "./selfdev.ts";
 import { exportHistory, importHistory } from "./transfer.ts";
-import { Db, snapshotBeforeMigrate } from "./db.ts";
+import { Db, needsMigration, snapshotBeforeMigrate } from "./db.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { commitEventsArchive, prepareEventsArchive, readUploaded } from "./events-archive.ts";
 
 const cfg = loadConfig();
@@ -49,6 +51,16 @@ if (cmd === "events-archive") {
   if ((step !== "prepare" && step !== "commit") || !dir || dir.startsWith("--") || (step === "prepare" && (!recipient || recipient.startsWith("--")))) {
     console.error("usage: bun packages/core/src/main.ts events-archive prepare <dir> --encrypt <age recipient>\n       bun packages/core/src/main.ts events-archive commit <dir>");
     process.exit(2);
+  }
+  // A database that still needs a migration is not opened: opening would move its schema without the snapshot before it,
+  // which only the daemon's start takes, so the day's archive is skipped and the next run after that start does it.
+  if (needsMigration(cfg.dbPath)) {
+    if (step === "prepare") {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "manifest.json"), "[]", { mode: 0o600 });
+    }
+    console.log("events-archive: skipped — the database still needs a migration, which the daemon's start takes a snapshot before");
+    process.exit(0);
   }
   // Opening and commit write, and the daemon can hold the write lock for longer than its own 5 s wait (a backlog sync
   // of about 20 s, 2026-11-13): the daily archive waits up to a minute instead of failing (see ARCHIVE_BUSY_TIMEOUT_MS).

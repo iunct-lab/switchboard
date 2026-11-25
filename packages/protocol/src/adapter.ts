@@ -133,6 +133,8 @@ export interface RunnerDetection {
   login?: RunnerLogin;
   /** Which login it is while `login` is `ok`. */
   loginKind?: LoginKind;
+  /** `cli` = the CLI's own settings put the runner on Amazon Bedrock (`loginKind` is then `bedrock`). */
+  bedrockFrom?: "cli";
   /** When the login runs out, epoch ms; absent = not known. */
   loginExpiresAt?: number;
   /** What to type in a terminal tab to log in again. */
@@ -153,8 +155,11 @@ export interface RunnerAdapter {
   readonly defaultPermissionMode?: string;
   /** Models this runner offers, in display order. Omit / empty when the runner picks its model itself (DAK). */
   readonly models?: ModelOption[];
-  /** Models when run on Amazon Bedrock, in display order. Having this = the runner can be switched to Bedrock. */
-  readonly bedrockModels?: ModelOption[];
+  /**
+   * One model by its Amazon Bedrock id, or null when it has none there. Having this = the runner can be switched to
+   * Bedrock. The daemon maps the model list it shows (saved, else `models`) through it while on Bedrock.
+   */
+  readonly bedrockModel?: (m: ModelOption) => ModelOption | null;
   /** Thinking efforts this runner offers, in display order. Omit / empty when the runner decides itself (DAK). */
   readonly efforts?: ModelOption[];
   /** The runner can start from a past turn (`StartOptions.fork`). Omit when it cannot (DAK). */

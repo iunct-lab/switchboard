@@ -69,7 +69,7 @@ sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-core fonts-not
   // main's tip, built and measured for the bundle check: compared with origin/main's tip, not the PR's base branch, so a
   // stack's top compares the whole stack. The tag CI records it (perf-records/bundle.tsv) and compares with the tag before:
   // it passes PERF_BASE_REF, so the growth and raised ceilings are the tag's own
-  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'if [ -n "${PERF_BASE_TREE:-}" ]; then bun scripts/perf-ratchet.ts base --tree "$PERF_BASE_TREE" perf-base.json; else bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json; fi', keepGoing: true },
+  { name: "bun scripts/perf-ratchet.ts base origin/main perf-base.json", run: 'if [ -n "${PERF_BASE_TREE:-}" ]; then bun scripts/perf-ratchet.ts base --tree "$PERF_BASE_TREE" perf-base.json; elif [ "${PERF_ENV:-}" = offload ]; then echo "perf-base: 比べるタグの木がビルドに渡らなかった（PERF_BASE_TREE が無い。外のビルドの buildspec が古い可能性: aws/template.yaml を配備する）"; exit 1; else bun scripts/perf-ratchet.ts base "${PERF_BASE_REF:-origin/main}" perf-base.json; fi', keepGoing: true },
   // the perf steps run before bun test (their result does not wait 5 minutes for it) and keep going: a perf red still
   // runs bun test, so a run says both. Not in parallel: perf-bench is not measured next to another load.
   { name: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", run: "bun scripts/perf-bench.ts --runs 5 --json perf-result.json", keepGoing: true },

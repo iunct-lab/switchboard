@@ -156,10 +156,12 @@ describe("the merge verdict reads the jobs the app ran", () => {
     if (config) writeFileSync(join(repo, "ops.config.json"), JSON.stringify(config));
     git("commit", "-q", "--allow-empty", "-m", "root");
     const head = git("rev-parse", "HEAD");
-    const jobCommand = (req: { kind: string }) => ({
+    const jobCommand = (req: { kind: string; as?: string | null }) => ({
       argv: ["sh", "-c", req.kind === "local-ci"
         ? `printf '{"head":"${head}","base":"${BASE}","ci":{"outcome":"pass"}}' > "$J/result.json"`
-        : `mkdir -p "$(dirname "$JOB_OUT")" && printf '[codex] review\\n\\n### Findings\\n- none\\n' > "$JOB_OUT"`],
+        : req.as === "arbiter"
+          ? `mkdir -p "$(dirname "$JOB_OUT")" && printf '### Rulings\\n- none\\n\\n### Viewpoints\\n- error paths — covered\\n' > "$JOB_OUT"`
+          : `mkdir -p "$(dirname "$JOB_OUT")" && printf '[codex] review\\n\\n### Findings\\n- none\\n' > "$JOB_OUT"`],
       tail: "",
     });
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter([{ t: "session.start", runner: "claude", runnerSessionId: "s", cwd: "/tmp" }, { t: "session.end", status: "ok" }])], { port: 0, selfdevChecks: false, gh: NO_GH, jobCommand });
@@ -188,7 +190,7 @@ describe("the merge verdict reads the jobs the app ran", () => {
     return { b, c, h, repo, head, ask, review, jobs, records, stop: async () => { await c.stop(); rmSync(h, { recursive: true, force: true }); } };
   };
   const view = (head: string, comments: unknown[]) => ({
-    // 400 lines of a path the attacking review looks at: a size recheck, an attacking review, a main review and CI are all asked of it
+    // 400 lines of a path the attacking review looks at: a size recheck (the arbiter's), an attacking review, a main review and CI are all asked of it
     files: [{ path: "scripts/promote.ts", additions: 400, deletions: 0, changeType: "MODIFIED" }],
     baseRefName: "main", baseRefOid: BASE, body: "", headRefName: "work-a", headRefOid: head, mergeStateStatus: "CLEAN", comments,
   });
@@ -201,16 +203,16 @@ describe("the merge verdict reads the jobs the app ran", () => {
     try {
       const owner = (body: string) => ({ body, createdAt: "2026-09-24T11:30:00Z", authorAssociation: "OWNER" });
       // every mark a Task could post by hand, at the head, by the owner
-      const marks = ["[codex] review\n\n### Findings\n- none", "[codex] attack\n\n### Findings\n- none", `[recheck] size pass ${x.head}`, `[local-ci] pass ${x.head} base=${BASE}`].map(owner);
+      const marks = ["[codex] review\n\n### Findings\n- none", "[codex] attack\n\n### Findings\n- none", `[recheck] size pass ${x.head}`, "[claude] arbiter\n\n### Rulings\n- none\n\n### Viewpoints\n- size — covered", `[local-ci] pass ${x.head} base=${BASE}`].map(owner);
       const verdict = async (comments: unknown[]) => judge(await readPr(12, gh(x.head, comments), "acme/app", { root: x.repo, url: "unused" }, undefined, x.records), { allowLarge: false });
       const before = await verdict(marks);
       expect(before.verdict).toBe("stop");
-      expect(before.reasons).toHaveLength(4);
+      expect(before.reasons).toHaveLength(4); // the `[claude] arbiter` comment lifts nothing either
       // the jobs, as the app runs them (the command is a script that leaves what the real one leaves; everything else is the real path)
       await x.ask({ kind: "local-ci" });
       await x.review();
       await x.review({ runner: "codex", as: "attack" });
-      await x.review({ runner: "claude", as: "recheck", kinds: ["size"] });
+      await x.review({ runner: "claude", as: "arbiter" });
       expect(await x.jobs("acme/app", [12])).toHaveLength(4);
       expect(await verdict([])).toMatchObject({ verdict: "merge", reasons: [], recheck: [] });
       // a job of another PR is not this PR's

@@ -314,6 +314,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     postMerge: pbi ? postMergeOf(raw.body).filter((c) => !confirmed.has(c.n)) : [],
     progress: { closableByApi: progress.closableByApi, closesOnAnswer: progress.closesOnAnswer, checking: progress.checking },
     onHold: labels.includes(ON_HOLD_LABEL),
+    claim: null,
     flow: labels.includes(FLOW_LABEL),
     bodyChars: raw.body.length,
     requestChars: requestTextChars(raw.body),

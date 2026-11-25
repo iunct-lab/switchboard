@@ -260,3 +260,20 @@ describe("an envelope is a closed set, checked again on the instance", () => {
     expect(ok.ok && Object.keys(ok.op).sort()).toEqual(["base", "createdAt", "field", "host", "id", "issue", "kind", "payload", "repository", "service", "target", "targetKind", "updatedAt"]);
   });
 });
+
+describe("an envelope proves no Task, so it cannot add a child to a PBI a Task holds", () => {
+  test("an envelope's child of a held PBI is refused: a create and a parent set are told back, one under a PBI nobody holds goes", async () => {
+    ec2.putBacklogSnapshot(S, { records: [
+      { objectKind: "issue", externalId: "I_13", remote: issue(13), fetchState: "fetched" },
+      { objectKind: "comment", externalId: "IC_1", remote: { issue: 12, body: "<!-- pbi-complete:claim 00000000-0000-4000-8000-0000000000aa -->\n開始", createdAt: "2026-11-25T00:00:00Z" }, fetchState: "fetched" },
+    ], cursor: null, syncedAt: 778 });
+    const create = (n: number, parent: number) => op(n, { kind: "create", field: null, issue: `local:${UUID(n)}`, target: `local:${UUID(n)}`, targetKind: "issue", base: null, payload: { title: "子", body: "", state: "OPEN", labels: [], milestone: null, parent, project: null } });
+    await forge({ op: create(1, 12), record: null });
+    await forge({ op: op(2, { issue: "I_13", target: "I_13", field: "parent", payload: 12, base: null }) });
+    await forge({ op: create(3, 13), record: null });
+    await take();
+    expect(reasons()).toHaveLength(2);
+    for (const r of reasons()) expect(r).toContain("#12 は Task （不明）（占有）が扱っています");
+    expect(pending()).toEqual([importedId("pc1", UUID(3))]);
+  });
+});

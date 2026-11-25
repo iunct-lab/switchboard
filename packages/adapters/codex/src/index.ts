@@ -75,12 +75,12 @@ export const CODEX_MODELS: ModelOption[] = [
 ];
 
 /**
- * The same models by Codex's own Amazon Bedrock ids: `openai.<id>`, as the CLI's Bedrock table spells them
- * (codex 0.165.0). GPT-6 Sol has no Bedrock id there, so it is not offered. Offered only while the runner is switched
- * to Bedrock; which of them the account can call is decided by IAM.
+ * A model by Codex's own Amazon Bedrock id: `openai.<id>`, as the CLI's Bedrock table spells them (codex 0.165.0); an
+ * id that already is one is kept. GPT-6 Sol has no Bedrock id there (null). Offered only while the runner is on
+ * Bedrock; which models the account can call is decided by IAM.
  */
 const NO_BEDROCK = new Set(["gpt-6-sol"]);
-export const CODEX_BEDROCK_MODELS: ModelOption[] = CODEX_MODELS.filter((m) => !NO_BEDROCK.has(m.value)).map((m) => ({ value: `openai.${m.value}`, label: m.label }));
+export const codexBedrockModel = (m: ModelOption): ModelOption | null => (NO_BEDROCK.has(m.value) ? null : { value: m.value.startsWith("openai.") ? m.value : `openai.${m.value}`, label: m.label });
 
 /**
  * The model name the session reports. On Bedrock a plain id (the config.toml default, or the model app-server
@@ -146,6 +146,20 @@ export function defaultModelFromConfig(codexHome = join(homedir(), ".codex")): s
     return m?.[1] ?? m?.[2];
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Whether the user's own config.toml puts Codex on Amazon Bedrock: the `model_provider` of the active profile
+ * (`profile = "x"` → `[profiles.x]`), else the top-level one, is `amazon-bedrock`. Nothing in the file is written.
+ */
+export function bedrockFromConfig(codexHome = join(homedir(), ".codex")): boolean {
+  try {
+    const cfg = Bun.TOML.parse(readFileSync(join(codexHome, "config.toml"), "utf8")) as { profile?: unknown; model_provider?: unknown; profiles?: Record<string, { model_provider?: unknown } | undefined> };
+    const provider = typeof cfg.profile === "string" ? cfg.profiles?.[cfg.profile]?.model_provider : cfg.model_provider;
+    return provider === "amazon-bedrock";
+  } catch {
+    return false;
   }
 }
 
@@ -317,7 +331,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
     permissionModes: CODEX_PERMISSION_MODES,
     defaultPermissionMode: CODEX_DEFAULT_PERMISSION_MODE,
     models: CODEX_MODELS,
-    bedrockModels: CODEX_BEDROCK_MODELS,
+    bedrockModel: codexBedrockModel,
     efforts: CODEX_EFFORTS,
     loginArgs: ["login", "--device-auth"],
     logoutArgs: ["logout"],
@@ -335,12 +349,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): RunnerAda
         const available = proc.exitCode === 0;
         const fallbackNote = fallback ? `using the codex bundled with ChatGPT.app (fallback). Prefer the official installer: ${CODEX_INSTALL_HINT}` : undefined;
         const notes = [fallbackNote, available ? await memoryOffNote(exe) : undefined].filter(Boolean);
+        const login = available ? await loginStatus(exe) : undefined;
         return {
           available,
           version,
           path: exe,
           note: notes.length ? notes.join(" / ") : undefined,
-          ...(available ? { login: await loginStatus(exe), loginHint: CODEX_LOGIN_HINT } : {}),
+          ...(available ? { login, loginHint: CODEX_LOGIN_HINT } : {}),
+          ...(login === "ok" && bedrockFromConfig(options.codexHome) ? { loginKind: "bedrock" as const, bedrockFrom: "cli" as const } : {}),
         };
       } catch (e) {
         return { available: false, note: String(e) };

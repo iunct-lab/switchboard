@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS backlog_repositories (
 CREATE TABLE IF NOT EXISTS backlog_operations (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, service TEXT NOT NULL, host TEXT NOT NULL, repository TEXT NOT NULL,
   issue TEXT NOT NULL, target_kind TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, field TEXT, payload TEXT NOT NULL, base TEXT,
-  status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, remote_id TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, overwritten TEXT
+  status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, remote_id TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, overwritten TEXT, task_id TEXT
 );
 CREATE INDEX IF NOT EXISTS backlog_operations_issue ON backlog_operations (service, host, repository, issue);
 CREATE INDEX IF NOT EXISTS backlog_operations_target ON backlog_operations (service, host, repository, target_kind, target);

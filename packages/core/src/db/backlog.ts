@@ -54,11 +54,13 @@ export interface BacklogOperation extends BacklogRepositoryKey {
   error: string | null;
   /** A conflict found after the write: kept until chosen on, whatever an import reads. */
   overwritten: BacklogOverwritten | null;
+  /** The Task (proved by its token) that asked for it; null = no proof, a work machine's envelope, or written before the column existed. */
+  taskId: string | null;
   createdAt: number;
   updatedAt: number;
 }
 /** An operation `applyBacklogEdit` queues (`id`: given, else a new UUID); `replace` = the id of a `pending` one of the same record and field whose payload this replaces instead. */
-export type NewBacklogOperation = Pick<BacklogOperation, "issue" | "targetKind" | "target" | "kind" | "payload"> & { id?: string; field?: string; base?: unknown; replace?: string; /** a comment written earlier (moved when GitHub sync is turned on): sent without the window */ noDelay?: boolean };
+export type NewBacklogOperation = Pick<BacklogOperation, "issue" | "targetKind" | "target" | "kind" | "payload"> & { id?: string; field?: string; base?: unknown; replace?: string; taskId?: string | null; /** a comment written earlier (moved when GitHub sync is turned on): sent without the window */ noDelay?: boolean };
 /** A choice on a conflict refused; `status` = the HTTP status the API answers with. Nothing was changed. */
 /** A comment is sent to GitHub only this long after it is written, and can be taken back until then (it notifies people). */
 export const SEND_DELAY_MS = 60_000;
@@ -294,9 +296,9 @@ export class BacklogQueries extends WorkspaceQueries {
         }
         const id = op.id ?? crypto.randomUUID();
         this.sqlite
-          .query(`INSERT INTO backlog_operations (id, service, host, repository, issue, target_kind, target, kind, field, payload, base, status, retry_at, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
-          .run(id, ...key, op.issue, op.targetKind, op.target, op.kind, op.field ?? null, payload, op.kind === "set" ? JSON.stringify(op.base ?? null) : null, op.kind === "comment" && !op.noDelay ? now + SEND_DELAY_MS : null, now, now);
+          .query(`INSERT INTO backlog_operations (id, service, host, repository, issue, target_kind, target, kind, field, payload, base, status, retry_at, created_at, updated_at, task_id)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`)
+          .run(id, ...key, op.issue, op.targetKind, op.target, op.kind, op.field ?? null, payload, op.kind === "set" ? JSON.stringify(op.base ?? null) : null, op.kind === "comment" && !op.noDelay ? now + SEND_DELAY_MS : null, now, now, op.taskId ?? null);
         return id;
       });
       // a record the service has shows its operations on top of it, whatever `local` the caller wrote
@@ -378,6 +380,14 @@ export class BacklogQueries extends WorkspaceQueries {
       .query("SELECT * FROM backlog_operations WHERE status != 'done' AND (?1 IS NULL OR (service = ?1 AND host = ?2 AND repository = ?3)) ORDER BY seq")
       .all(repo?.service ?? null, repo?.host ?? null, repo?.repository ?? null)
       .map(rowToBacklogOperation);
+  }
+
+  /** The Task that asked for the newest operation on `target` (a draft's `local:` id before it is sent, the service's id after); null = none, or none with a proof. */
+  backlogOperationTask(repo: BacklogRepositoryKey, target: string): string | null {
+    const r = this.sqlite
+      .query("SELECT task_id FROM backlog_operations WHERE service = ? AND host = ? AND repository = ? AND (target = ?4 OR remote_id = ?4) ORDER BY seq DESC LIMIT 1")
+      .get(repo.service, repo.host, repo.repository, target) as { task_id: string | null } | null;
+    return r?.task_id ?? null;
   }
 
   getBacklogOperation(id: string): BacklogOperation | null {
@@ -643,6 +653,6 @@ function rowToBacklogOperation(r: any): BacklogOperation {
   return {
     seq: r.seq, id: r.id, service: r.service, host: r.host, repository: r.repository, issue: r.issue, targetKind: r.target_kind, target: r.target, kind: r.kind, field: r.field,
     payload: JSON.parse(r.payload), base: r.base === null ? null : JSON.parse(r.base), status: r.status, attempt: r.attempt, retryAt: r.retry_at, remoteId: r.remote_id,
-    error: r.error, overwritten: r.overwritten == null ? null : JSON.parse(r.overwritten), createdAt: r.created_at, updatedAt: r.updated_at,
+    error: r.error, overwritten: r.overwritten == null ? null : JSON.parse(r.overwritten), taskId: r.task_id ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }

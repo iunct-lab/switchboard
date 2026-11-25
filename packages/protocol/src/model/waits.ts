@@ -2,11 +2,11 @@ import { z } from "zod";
 
 /**
  * What a wait is for: `command` = an `ops-kit wait` the Task runs, `output` = the runner's next event (a turn or its
- * background jobs), `person` = the person's answer or approval, `resume` = a planned resume (a usage limit, GitHub's
+ * background jobs), `hook` = the runner runs a hook and its heartbeats keep arriving, `person` = the person's answer or approval, `resume` = a planned resume (a usage limit, GitHub's
  * limit, a full disk, a cut turn), `depends` = a PR / an Issue, `job` = a job the daemon runs for the Task, `date` = a
  * date, `queue` = a run slot (or a promotion letting new turns start again), `stop` = another condition of an open stop.
  */
-export const WaitKind = z.enum(["command", "output", "person", "resume", "depends", "job", "date", "queue", "stop"]);
+export const WaitKind = z.enum(["command", "output", "hook", "person", "resume", "depends", "job", "date", "queue", "stop"]);
 export type WaitKind = z.infer<typeof WaitKind>;
 
 /**

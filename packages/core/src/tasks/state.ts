@@ -35,6 +35,8 @@ export interface LiveSession {
   background?: number;
   /** When the runner last gave an event, or was last sent a turn (ms): what its silence is counted from (waits.ts). */
   lastEventAt: number;
+  /** The hook the runner runs now, from its heartbeats (`hook.progress`): its name, the first heartbeat (or the start the runner gave), the last heartbeat (ms). Any other event clears it. Memory only: a heartbeat is not a record of the transcript. */
+  hook?: { name: string; since: number; beatAt: number };
   /**
    * Replies sent under the admission hold while the Task sat on background jobs, oldest first. The queue holds only idle
    * rows and the process must keep running its jobs, so the text waits here (memory: it goes with the process) until the
@@ -550,6 +552,13 @@ export abstract class TaskManagerState {
   /** When each attached runner last gave an event (or was last sent a turn), by Task. */
   lastEvents(): Map<string, number> {
     return new Map([...this.live].map(([id, l]) => [id, l.lastEventAt]));
+  }
+
+  /** The hook each attached runner runs now (from its heartbeats), by Task. */
+  lastHooks(): Map<string, { name: string; since: number; beatAt: number }> {
+    const m = new Map<string, { name: string; since: number; beatAt: number }>();
+    for (const [id, l] of this.live) if (l.hook) m.set(id, l.hook);
+    return m;
   }
 
   protected mustGet(taskId: string): Task {

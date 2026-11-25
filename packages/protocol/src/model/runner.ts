@@ -89,11 +89,17 @@ export const RunnerInfo = z.object({
   cliDefaultModel: z.string().optional(),
   /** Absent = the runner has no login of its own (DAK). */
   login: RunnerLogin.optional(),
-  /** Which login `login: "ok"` is; absent = not known (an older CLI, another runner, or not logged in). `bedrock` = the user chose Amazon Bedrock in the settings. */
+  /** Which login `login: "ok"` is; absent = not known (an older CLI, another runner, or not logged in). `bedrock` = Amazon Bedrock, chosen in the settings or set in the CLI's own settings (`bedrockFrom`). */
   loginKind: LoginKind.optional(),
+  /** Where `loginKind: "bedrock"` comes from: `settings` = the user chose it here, `cli` = the CLI's own settings. */
+  bedrockFrom: z.enum(["settings", "cli"]).optional(),
   /** When the login runs out, epoch ms; absent = not known (an older CLI, another runner, not logged in, or Bedrock). */
   loginExpiresAt: z.number().optional(),
-  /** The runner can run on Amazon Bedrock (it has `bedrockModels`). */
+  /** Tasks started on Amazon Bedrock that are still working (running, waiting, or background); absent = none. They stay on Bedrock when the setting goes back. */
+  bedrockRunning: z.number().optional(),
+  /** The model list to edit (the saved one, else the adapter's); on Bedrock `models` is the same list by Bedrock ids. Absent = not on Bedrock, `models` is it. */
+  listModels: z.array(ModelOption).optional(),
+  /** The runner can run on Amazon Bedrock (its adapter has `bedrockModel`). */
   bedrockAvailable: z.boolean().default(false),
   /** What to type in a terminal tab to log in again. */
   loginHint: z.string().optional(),

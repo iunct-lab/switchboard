@@ -38,29 +38,6 @@ test("the rescue page's link: only under sb-rescue and only when the daemon name
   expect(rescueLink({ managed: true, rescuePage: "http://127.0.0.1:47841" })).toBe("http://127.0.0.1:47841");
 });
 
-test("the stand-alone container: no link to a page the machine's browser cannot open — the commands that reach sb-rescue inside it are shown instead", async () => {
-  const { rescueCommands, RESCUE_IN_CONTAINER_COMMANDS, promotionLine } = await import("./release.ts");
-  const container = { managed: true, rescueInContainer: true };
-  expect(rescueLink(container)).toBeNull();
-  expect(rescueCommands(container)).toEqual(RESCUE_IN_CONTAINER_COMMANDS);
-  // a failed promotion's line names no page either
-  expect(promotionLine({ ...container, hold: { tag: "v0.30.0", failed: true, reason: "x", busyTasks: 0 } })!.link).toBeNull();
-  // where the page opens (the cloud host, sb-rescue's own address on the machine) nothing changes: the link, no commands
-  for (const page of ["https://d1.example.net/rescue/", "http://127.0.0.1:47841"]) {
-    expect(rescueLink({ managed: true, rescuePage: page })).toBe(page);
-    expect(rescueCommands({ managed: true, rescuePage: page })).toBeNull();
-  }
-  expect(rescueCommands({ managed: false, rescueInContainer: true })).toBeNull();
-  expect(rescueCommands(null)).toBeNull();
-  // the commands are the ones the container's document gives, on the container's own loopback
-  const doc = await Bun.file(new URL("../../../docs/design/local-container.md", import.meta.url)).text();
-  for (const c of RESCUE_IN_CONTAINER_COMMANDS) {
-    expect(doc).toContain(c);
-    expect(c).toContain("exec switchboard curl -s");
-    expect(c).toContain("http://127.0.0.1:47841/api/");
-  }
-});
-
 test("promotion: the backlog line says which tag waits for how many Tasks, or which failed tag the app stays behind, with the rescue page", async () => {
   const { promotionLine } = await import("./release.ts");
   const managed = { managed: true, rescuePage: "https://d1.example.net/rescue/" };
@@ -78,7 +55,7 @@ const managed = { managed: true, head: "b".repeat(40), headSubject: "feat: x", c
 test("panel: outside sb-rescue there is one line and no button", async () => {
   const { releasePanel } = await import("./release.ts");
   expect(releasePanel(null)).toBeNull();
-  expect(releasePanel({ managed: false })).toEqual({ lines: [{ text: "リリースから動いていないので昇格はありません", warn: false }], canPromote: false, promoteSha: null, busyTasks: 0, release: null });
+  expect(releasePanel({ managed: false })).toEqual({ lines: [{ text: "リリースから動いていないので昇格はありません", warn: false }], canPromote: false, promoteSha: null, busyTasks: 0, release: null, warn: false });
   expect(releasePanel({ managed: false, error: "sb-rescue did not answer" })!.lines).toEqual([{ text: "sb-rescue did not answer", warn: true }]);
 });
 
@@ -96,6 +73,21 @@ test("panel: ahead says how far HEAD is, and only ahead >= 1 can promote", async
   expect(at(1, { behind: 0 })!.promoteSha).toBe("b".repeat(40));
   expect(at(0, { behind: 0 })!.lines[1]!.text).toContain("最新の版が動いています");
   expect(at(0)!.promoteSha).toBeNull();
+});
+
+test("panel: a warning line marks the view as warn, and none leaves it unmarked", async () => {
+  const { releasePanel } = await import("./release.ts");
+  const latest = { tag: "v0.9.0", sha: "c".repeat(40), ahead: 3, newer: true };
+  const rv = (state: string, extra = {}) => ({ tag: "v0.9.0", sha: "c".repeat(40), state, findings: [{ path: "a.ts", why: "x" }], reason: "r", taskId: "t1", at: Date.UTC(2030, 0, 1), ...extra });
+  const at = (extra: Record<string, unknown>) => releasePanel({ ...managed, ahead: 0, ...extra } as never)!.warn;
+  expect(at({ latestRelease: latest, review: rv("concern") })).toBe(true);
+  expect(at({ latestRelease: latest, review: rv("failed") })).toBe(true);
+  expect(at({ history: [{ ts: 0, action: "rejected", from: "a", to: "b".repeat(40), ok: false, reason: "boom" }] })).toBe(true);
+  expect(at({ lastError: "disk full" })).toBe(true);
+  expect(releasePanel({ managed: false, error: "sb-rescue did not answer" })!.warn).toBe(true);
+  expect(at({})).toBe(false);
+  expect(at({ latestRelease: latest, review: rv("ok") })).toBe(false);
+  expect(releasePanel({ managed: false })!.warn).toBe(false);
 });
 
 test("panel: HEAD behind what runs is not 'latest' and promotes nothing", async () => {
@@ -214,7 +206,7 @@ describe("release review", () => {
     expect(texts(p)).toContain("差分の確認: 確認中");
     expect(texts(p)).toContain("確認が終わるまで、この版には上がりません");
     expect(p.canPromote).toBe(false);
-    expect(p.release).toEqual({ tag: "v0.9.0", state: "running", confirm: null, canReview: false, taskLink: "/task/task_1" });
+    expect(p.release).toEqual({ tag: "v0.9.0", state: "running", confirm: null, canReview: false, pressNeedsCheck: false, taskLink: "/task/task_1" });
   });
 
   test("a check that could not be started says why: the hold's own reason is a line of the card, although no check has a state", async () => {
@@ -271,8 +263,29 @@ describe("release review", () => {
     expect((await panel({ review: null })).release).toMatchObject({ state: null, canReview: true });
   });
 
+  test("an unchecked release can be updated: the button checks first, and the press shows while it waits and when it was stopped", async () => {
+    const sha = "c".repeat(40);
+    const p = await panel({ review: null });
+    expect(p.canPromote).toBe(true);
+    expect(p.release).toMatchObject({ state: null, canReview: true, pressNeedsCheck: true, confirm: null });
+    // pressed: the check is not in yet, so the button waits and the line says what happens
+    const waiting = await panel({ review: null, pressed: { tag: "v0.9.0", sha, at: Date.UTC(2030, 0, 1, 0, 5) } });
+    expect(texts(waiting)).toContain("確認に懸念が無ければ v0.9.0 に上がります（1/1 09:05 に押した更新）");
+    expect(waiting.canPromote).toBe(false);
+    expect(waiting.release!.pressNeedsCheck).toBe(false);
+    expect(texts(await panel({ review: review({ state: "running" }), pressed: { tag: "v0.9.0", sha, at: Date.UTC(2030, 0, 1, 0, 5) } }))).toContain("確認に懸念が無ければ v0.9.0 に上がります（1/1 09:05 に押した更新）");
+    // stopped: a warning that says why, and the way on is the dialog's button
+    for (const [stopped, why] of [["concern", "懸念があった"], ["failed", "確かめられなかった"]] as const) {
+      const p = await panel({ review: review({ state: stopped }), pressed: { tag: "v0.9.0", sha, at: Date.UTC(2030, 0, 1, 0, 5), stopped } });
+      expect(p.lines.find((l) => l.text.includes("に押した更新は"))).toEqual({ text: `1/1 09:05 に押した更新は、${why}ので止めました`, warn: true });
+      expect(p.release!.confirm).not.toBeNull();
+    }
+    // a press made for another tag says nothing about this one
+    expect(texts(await panel({ review: null, pressed: { tag: "v0.8.9", sha, at: 0 } })).some((x) => x.includes("押した更新"))).toBe(false);
+  });
+
   test("no check yet, another tag's check, or a busy sb-rescue: the update waits", async () => {
-    expect((await panel({ review: null })).canPromote).toBe(false);
+    expect((await panel({ review: null, busy: "promote" })).canPromote).toBe(false);
     expect(texts(await panel({ review: null }))).toContain("差分の確認: まだ始まっていません");
     expect((await panel({ review: review({ tag: "v0.8.9", state: "ok" }) })).release!.state).toBeNull();
     expect((await panel({ review: review({ state: "ok" }), busy: "promote" })).canPromote).toBe(false);

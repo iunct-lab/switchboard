@@ -46,6 +46,26 @@ test("edit: every attribute is kept while GitHub is out of reach and shows at on
   expect(core!.db.listPendingBacklogOperations().filter((o) => o.field === "member").map((o) => o.payload)).toEqual([true]);
 });
 
+test("a body saved from an older read is refused", async () => {
+  const base = await boot(fakeGh().gh);
+  // two readers read the same version
+  const a = await detailOf(base, 304);
+  const b = await detailOf(base, 304);
+  expect(b.bodyRevision).toBe(a.bodyRevision);
+  expect((await patch(base, 304, { body: "A の本文", expectedBodyRevision: a.bodyRevision })).status).toBe(202);
+  const late = await patch(base, 304, { body: "B の本文", expectedBodyRevision: b.bodyRevision });
+  expect(late.status).toBe(409);
+  expect(((await late.json()) as { error: string }).error).toBe("本文が変わりました。読み直してください");
+  const now = await detailOf(base, 304);
+  expect(now.issue.body).toBe("A の本文");
+  expect(now.bodyRevision).not.toBe(a.bodyRevision);
+  // read again: the save from the new version goes through; a save that sends no version is as before
+  expect((await patch(base, 304, { body: "B の本文", expectedBodyRevision: now.bodyRevision })).status).toBe(202);
+  expect((await patch(base, 304, { body: "版なし" })).status).toBe(202);
+  // a version sent without a body checks nothing
+  expect((await patch(base, 304, { title: "題だけ", expectedBodyRevision: "stale" })).status).toBe(202);
+});
+
 test("edit: an Issue put in the Project here shows each later field edit before GitHub has its item", async () => {
   const base = await boot(fakeGh().gh);
   core!.db.sqlite.query("DELETE FROM backlog_records WHERE object_kind = 'project-item' AND json_extract(remote, '$.issue') = 302").run();
@@ -629,4 +649,97 @@ test("a screen answer is kept before its heads are read: a stage Task started be
   // the answer's grants were given once, to that Task, with no head: they answer for none, whatever is read later
   expect(grantRows(task)).toEqual([{ target: 12, by: "owner", head: "" }, { target: 13, by: "owner", head: "" }]);
   expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD12)).toBeNull();
+});
+
+test("an operation keeps the Task that asked for it: the proof's Task on a create, an edit and a comment; no proof is null; an edit of a create not sent yet keeps its Task", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  // during a limit: nothing is sent, so the create can still be changed
+  core!.db.setBacklogRetryAt(core!.db.getWorkspaceBacklogSource(metaId())!, Date.now() + 3_600_000);
+  const task = async (title: string) => ((await (await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title, prompt: title, runner: "claude" }) })).json()) as { id: string }).id;
+  const [a, b] = [await task("a"), await task("b")];
+  const proof = async (id: string) => ({ "x-task-id": id, "x-task-token": ((await (await fetch(`${base}/api/tasks/${id}/mcp`)).json()) as { token: string }).token });
+  const source = core!.db.getWorkspaceBacklogSource(metaId())!;
+  const taskOf = (pred: (o: ReturnType<NonNullable<typeof core>["db"]["listBacklogOperations"]>[number]) => boolean) => core!.db.listBacklogOperations(source).filter(pred).map((o) => o.taskId);
+  const made = await fetch(`${base}/api/backlog`, { method: "POST", headers: await proof(a), body: JSON.stringify({ workspaceId: metaId(), title: "子", body: "", labels: [], fields: { Status: "Backlog" } }) });
+  const { localId } = (await made.json()) as { localId: string };
+  expect(taskOf((o) => o.kind === "create")).toEqual([a]);
+  // another Task edits the create before it is sent: the create stays the first Task's
+  expect((await fetch(`${base}/api/backlog/${localId}`, { method: "PATCH", headers: await proof(b), body: JSON.stringify({ workspaceId: metaId(), title: "子の題" }) })).status).toBe(202);
+  expect(taskOf((o) => o.kind === "create")).toEqual([a]);
+  expect(core!.db.backlogOperationTask(source, `local:${localId}`)).toBe(a);
+  // a comment and an edit of a sent Issue: each carries its own Task; a call with no proof, or a wrong token, none
+  const comment = (headers: Record<string, string>, text: string) => fetch(`${base}/api/backlog/304/comment`, { method: "POST", headers, body: JSON.stringify({ workspaceId: metaId(), text }) });
+  expect((await comment(await proof(b), "b のコメント")).status).toBe(202);
+  expect((await comment({}, "証明なし")).status).toBe(202);
+  expect((await comment({ "x-task-id": a, "x-task-token": "wrong" }, "偽の証明")).status).toBe(202);
+  expect((await fetch(`${base}/api/backlog/305`, { method: "PATCH", headers: await proof(a), body: JSON.stringify({ workspaceId: metaId(), title: "a の編集" }) })).status).toBe(202);
+  expect(taskOf((o) => o.kind === "comment")).toEqual([b, null, null]);
+  expect(taskOf((o) => o.kind === "set" && o.field === "title")).toEqual([a]);
+});
+
+/** Two Tasks of the fake runner, and a way to speak as each (the proof the daemon checks). */
+async function twoTasks(base: string) {
+  const task = async (title: string) => ((await (await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title, prompt: title, runner: "claude" }) })).json()) as { id: string }).id;
+  const [a, b] = [await task("a"), await task("b")];
+  const proof = async (id: string) => ({ "x-task-id": id, "x-task-token": ((await (await fetch(`${base}/api/tasks/${id}/mcp`)).json()) as { token: string }).token });
+  const child = (headers: Record<string, string>, title: string, parent: number | null) => fetch(`${base}/api/backlog`, { method: "POST", headers, body: JSON.stringify({ workspaceId: metaId(), title, body: "", labels: [], parent, fields: { Status: "Backlog" } }) });
+  return { a, b, proof, child };
+}
+
+test("a child is not made on a PBI another Task works on", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  const { a, b, proof, child } = await twoTasks(base);
+  const source = core!.db.getWorkspaceBacklogSource(metaId())!;
+  // nothing is sent by itself: the send of the first child is played by hand below
+  core!.db.setBacklogRetryAt(source, Date.now() + 3_600_000);
+  const comment = async (id: string, text: string) => expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", headers: await proof(id), body: JSON.stringify({ workspaceId: metaId(), text }) })).status).toBe(202);
+  // nobody holds the PBI: a child is made, with no proof too
+  expect((await child({}, "誰もいない", 304)).status).toBe(202);
+  // A holds it, and makes a child that GitHub has already numbered, then one that is still waiting to be sent
+  await comment(a, "<!-- pbi-complete:claim 00000000-0000-4000-8000-00000000000a -->\n/pbi-complete 開始");
+  expect((await child(await proof(a), "送信済みの子", 304)).status).toBe(202);
+  const sent = core!.db.listBacklogOperations(source).find((o) => o.kind === "create" && o.taskId === a)!;
+  core!.db.setBacklogOperationResult(sent.id, { status: "done", remoteId: "I_999", record: { externalId: "I_999", remote: { number: 999, title: "送信済みの子", url: "", state: "OPEN", stateReason: null, body: "", labels: [], milestone: null, parent: 304, subIssues: [], createdAt: "2026-11-25T00:00:00Z", updatedAt: "2026-11-25T00:00:00Z", closedAt: null } } });
+  expect((await child(await proof(a), "送信待ちの子", 304)).status).toBe(202);
+  // B is refused, with A's id and A's two children; no proof is refused as well; A itself goes on
+  const refused = await child(await proof(b), "B の子", 304);
+  expect(refused.status).toBe(409);
+  const text = ((await refused.json()) as { error: string }).error;
+  expect(text).toContain(`Task ${a}（占有）が扱っています`);
+  expect(text).toContain("- #999 送信済みの子");
+  expect(text).toMatch(/- 送信待ち \S+ 送信待ちの子/);
+  expect(text).not.toContain("誰もいない");
+  expect(text).toContain("自分の分解をやめる");
+  expect((await child({}, "証明なし", 304)).status).toBe(409);
+  expect((await child(await proof(a), "A の 2 つ目", 304)).status).toBe(202);
+  // a child under no PBI is never refused
+  expect((await child(await proof(b), "親なし", null)).status).toBe(202);
+  // A lets go: B may make its child
+  await comment(a, "<!-- pbi-complete:release -->\n/pbi-complete 終了");
+  expect((await child(await proof(b), "B の子", 304)).status).toBe(202);
+});
+
+test("an Issue is not moved under a PBI another Task works on", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  const { a, b, proof } = await twoTasks(base);
+  expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", headers: await proof(a), body: JSON.stringify({ workspaceId: metaId(), text: "<!-- pbi-complete:claim 00000000-0000-4000-8000-00000000000a -->\n開始" }) })).status).toBe(202);
+  const move = async (id: string, parent: number) => fetch(`${base}/api/backlog/305`, { method: "PATCH", headers: await proof(id), body: JSON.stringify({ workspaceId: metaId(), parent }) });
+  const refused = await move(b, 304);
+  expect(refused.status).toBe(409);
+  expect(((await refused.json()) as { error: string }).error).toContain(`Task ${a}（占有）が扱っています`);
+  expect((await move(a, 304)).status).toBe(202);
+});
+
+test("a stage Task running on a PBI is the one that works on it, over a claim", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  const { a, proof, child } = await twoTasks(base);
+  expect((await fetch(`${base}/api/backlog/304/comment`, { method: "POST", headers: await proof(a), body: JSON.stringify({ workspaceId: metaId(), text: "<!-- pbi-complete:claim 00000000-0000-4000-8000-00000000000a -->\n開始" }) })).status).toBe(202);
+  const now = Date.now();
+  core!.db.insertTask({ ...core!.db.getTask(a)!, id: "tsk_stage304", title: "#304 分解", stage: { issue: 304, action: "to-tasks" }, status: "running", createdAt: now, updatedAt: now });
+  // the claim holder is refused while the stage Task runs on the PBI; the stage Task makes its children
+  const refused = await child(await proof(a), "A の子", 304);
+  expect(refused.status).toBe(409);
+  expect(((await refused.json()) as { error: string }).error).toContain("Task tsk_stage304（工程の Task）が扱っています");
+  expect((await child(await proof("tsk_stage304"), "工程の子", 304)).status).toBe(202);
 });

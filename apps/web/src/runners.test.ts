@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { RunnerInfo } from "@switchboard/protocol";
-import { abortNote, aguiNotices, customRunnerFromDraft, isAdkRunner, ledgerRunners, listedRunners, rememberRunnerLabels, runnerLabel, sendsOffHost } from "./runners.ts";
+import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
+import { abortNote, aguiNotices, customRunnerFromDraft, isAdkRunner, ledgerRunners, listedRunners, rememberRunnerLabels, runnerLabel, sendsOffHost, shadowCandidates } from "./runners.ts";
 
 const info = (id: string) => ({ id, available: true, permissionModes: [], models: [], efforts: [] }) as unknown as RunnerInfo;
 
@@ -72,4 +72,16 @@ test("abortNote: only an aborted custom runner says the server may not have stop
   expect(abortNote("custom:x", "ok")).toBeUndefined();
   expect(abortNote("custom:x", "error")).toBeUndefined();
   expect(abortNote("claude", "aborted")).toBeUndefined();
+});
+
+const ids = (...r: string[]) => r as RunnerId[];
+
+test("shadowCandidates is the one place the common 並走 default and each kind's 並走 take their choices from", () => {
+  const listed = ids("claude", "codex");
+  // without DAK, the common default still offers both detected runners
+  expect(shadowCandidates(listed, new Set(listed))).toEqual(["claude", "codex"]);
+  // a kind whose main runner is codex offers claude only
+  expect(shadowCandidates(listed, new Set(listed), "codex")).toEqual(["claude"]);
+  // not detected, and servers added in Settings, are not candidates
+  expect(shadowCandidates(ids("claude", "codex", "dak", "custom:x"), new Set(ids("claude", "dak", "custom:x")))).toEqual(["claude", "dak"]);
 });

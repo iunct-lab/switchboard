@@ -94,7 +94,7 @@ Spike が要るなら timebox と成果物（`docs/design/<name>.md`）を書い
 覆われない条件（受け入れ条件も守る条件も）があれば Task を足す。**条件をスコープ外に移すのは利用者の判断**（要件の変更）: PBI の決定ログに理由を書き、`## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」）で利用者に聞き（画面に関わる問いは同じ節の画面イメージを添える）、返事があるまで Ready にしない（headless でも同じ。勝手に条件を削って Ready にしない）。
 
 ```bash
-ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号>     # W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.tasks<PBI>.XXXXXX")。固定の /tmp/task.md にしない
+ops-kit backlog create --title "Task: <触る場所 — 何をするか>" --label type:task --body-file "$W/task.md" --parent <PBI番号>     # W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.tasks<PBI>.XXXXXX")。固定の /tmp/task.md にしない。exit 1 で相手の Task と子の一覧が出たら、読んで自分の分解をやめる（占有を放してもらうのは利用者に聞く）
 ops-kit backlog triage <num> <P0-P3> <PBI番号> Backlog     # 親 = PBI
 ```
 
@@ -122,7 +122,7 @@ Task 本文（`.github/ISSUE_TEMPLATE/task.yml` の見出し。「やること�
 
 ### 5. PBI を Ready にする
 
-本文は `ops-kit backlog view <PBI> --fresh --json | jq -r .issue.body > "$W/pbi.md"` で取り（`--fresh` で GitHub の新しい本文を読む）、書き足して `ops-kit backlog edit <PBI> --body-file "$W/pbi.md"` で戻す（`.body` は `null` になる）。
+本文は `ops-kit backlog view <PBI> --fresh --json > "$W/v.json"` を 1 回取り、`jq -r .issue.body "$W/v.json"` を `$W/pbi.md` に、`.bodyRevision` を `--rev` に渡し、書き足して `ops-kit backlog edit <PBI> --body-file "$W/pbi.md" --rev <版>` で戻す（`.body` は `null`。「本文が変わりました」で断られたら読み直して書き足し直す）。
 
 1. PBI の `## Tasks` に着手順を 1 行（`sub-issue 参照。順番: core → web`）
 2. 決定ログに「YYYY-MM-DD: Task 分解（#a, #b, #c）。またぐ条件: …（3.5。無ければ「なし（理由）」）。被覆: …。Story Points N → M（理由）」

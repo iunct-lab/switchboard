@@ -35,11 +35,13 @@ export const JobResult = z.object({
   review: z.object({
     findings: z.array(z.object({ severity: FindingSeverity, path: z.string(), line: z.number() })),
     firstLine: z.string(),
+    /** An arbiter's output (`as: "arbiter"`): the reviewer-side rulings (a `reviewer` ruling that names a rule), the viewpoints no round looked at, and the lines that could not be read. The merge verdict reads the arbiter's ruling here and nowhere else. */
+    rulings: z.object({ reviewerSide: z.array(z.string()), missing: z.array(z.string()), unreadable: z.array(z.string()) }).optional(),
   }).optional(),
 });
 export type JobResult = z.infer<typeof JobResult>;
-/** Why a review is not the plain main review (`JobRequest`'s `as`): another runner for `fallback` / `audit`; `recheck` is read by the runner the recheck setting names; `attack` is a second review, by the runner `attackReviewer` names or by the other one when that one is at its usage limit. */
-export const ReviewAs = z.enum(["fallback", "recheck", "audit", "attack"]);
+/** Why a review is not the plain main review (`JobRequest`'s `as`): another runner for `fallback` / `audit`; `recheck` is read by the runner the recheck setting names; `attack` is a second review, by the runner `attackReviewer` names or by the other one when that one is at its usage limit; `arbiter` is the single ruling on findings the implementer disputed, read by the runner the recheck setting names, like a recheck. */
+export const ReviewAs = z.enum(["fallback", "recheck", "audit", "attack", "arbiter"]);
 export type ReviewAs = z.infer<typeof ReviewAs>;
 
 /** A job the daemon runs as its own child, not the Task's. Times are epoch ms. `summary`: status, exit code, the log's last lines and its path. */
@@ -91,7 +93,7 @@ export const JobRequest = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("review"), taskId: z.string().min(1), pr: z.number().int().positive(), cwd: z.string().min(1), promptFile: z.string().min(1), outFile: z.string().min(1),
-    /** Omitted: the app picks the main reviewer from the review setting and the Task's runner (for `as: "recheck"`, the recheck reader from the recheck setting). Named: it must be that reviewer, unless `as` says why not (a recheck's must be the recheck reader). */
+    /** Omitted: the app picks the main reviewer from the review setting and the Task's runner (for `as: "recheck"` and `as: "arbiter"`, the recheck reader from the recheck setting). Named: it must be that reviewer, unless `as` says why not (a recheck's must be the recheck reader). */
     runner: z.enum(["codex", "claude"]).optional(),
     /**
      * Why this is not the plain main review: it stands in for one at its usage limit (`fallback`), it is the second

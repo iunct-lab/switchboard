@@ -111,6 +111,46 @@ export function pathsIn(body: string, top: { name: string; dir: boolean }[], { s
 }
 
 /**
+ * The paths for comparing with the places other PBIs yielded (their turns): `pathsIn`, and the paths of the 古い前提を持つ既存の箇所 list
+ * (the line and the indented or bulleted lines after it, as `withoutReferences` drops them) that the `## 手順` or `## 検証` section
+ * also names. A path only in the list stays a reference; one the steps or the checks name too is a place the Task works on or tests.
+ * The list and the sections are matched by the path's text (a `path:line` loses its line).
+ */
+export function turnPathsIn(body: string, top: { name: string; dir: boolean }[]): string[] {
+  const listed: string[] = [];
+  const sections: string[] = [];
+  let inSection = false;
+  let skipSection = false;
+  let inList = false;
+  let fence = "";
+  for (const line of body.split("\n")) {
+    const mark = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (mark) {
+      const [, run, rest] = mark as unknown as [string, string, string];
+      if (!fence) { if (!(run[0] === "`" && rest.includes("`"))) fence = run; }
+      else if (run[0] === fence[0] && run.length >= fence.length && rest.trim() === "") fence = "";
+    }
+    if (!fence && /^#{1,3}\s/.test(line)) {
+      inSection = /^#{2,3}\s+(?:手順|検証)/.test(line);
+      skipSection = /^#{2,3}\s+(?:検証|完了条件)/.test(line);
+      inList = false;
+    }
+    // the list's own lines are not the steps' text, wherever the list stands
+    const rest = line.replace(/^\s*(?:[-*+]|\d+[.)])?\s*/, "");
+    if (!skipSection && rest.startsWith("古い前提を持つ既存の箇所")) { inList = true; listed.push(line); continue; }
+    if (!skipSection && inList) {
+      if (/^(?:\s+\S|[-*]\s)/.test(line)) { listed.push(line); continue; }
+      inList = false;
+    }
+    if (inSection) sections.push(line);
+  }
+  const text = sections.join("\n");
+  // the whole path, not a part of a longer one (`a.ts` is not named by `a.tsx` or `a.ts.bak`)
+  const named = pathsIn(listed.join("\n"), top, { scope: true }).filter((p) => new RegExp(`(?<![\\w./-])${esc(p)}(?![\\w.-]*[\\w-])`).test(text));
+  return [...new Set([...pathsIn(body, top), ...named])];
+}
+
+/**
  * What a Task claims as its scope, for merge-gate: `pathsIn`, and a top directory named alone in backticks
  * (`ops-kit/`). pathsIn leaves that out so that parallel-guard's overlaps do not grow to a whole tree; a glob (`scripts/*.ts`)
  * is not a directory here either.

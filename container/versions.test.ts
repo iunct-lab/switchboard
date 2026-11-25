@@ -130,6 +130,20 @@ describe("ci stage tools", () => {
     expect(stageInstall("ci")).not.toContain("awscli-2");
   });
 
+  // a task in the container runs the screens audit and the e2e scripts, which need Chromium: it is installed once, in the base stage
+  test("the stand-alone stage has Chromium and CHROME_BIN from the base stage", () => {
+    const stage = (name: string) => new RegExp(`^FROM \\S+ AS ${name}\\n[\\s\\S]*?(?=^FROM |(?![\\s\\S]))`, "m").exec(dockerfile)?.[0] ?? "";
+    const base = stage("base");
+    expect(base).toContain('playwright@$PLAYWRIGHT_VERSION" install chromium');
+    expect(base).toContain("ENV CHROME_BIN=/usr/local/bin/chromium");
+    expect(base).toContain("/usr/local/bin/chromium");
+    // the stages that continue from base inherit it; neither installs it again
+    expect(stage("ci")).not.toContain("install chromium");
+    expect(stage("stand-alone")).not.toContain("install chromium");
+    expect(dockerfile).toMatch(/^FROM base AS stand-alone$/m);
+    expect(dockerfile).toMatch(/^FROM base AS ci$/m);
+  });
+
   // tests run `bun` from dirname(process.execPath); the npm package has only bun.exe there, so the Dockerfile links it
   test("the image links bun next to the bun.exe that process.execPath names", () => {
     expect(dockerfile).toMatch(/ln -s bun\.exe \/usr\/local\/lib\/nodejs\/lib\/node_modules\/bun\/bin\/bun\s/);

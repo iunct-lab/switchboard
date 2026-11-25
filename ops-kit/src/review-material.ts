@@ -1,9 +1,13 @@
+import { RULING_ROW, RULINGS_HEADING, section, standsForReviewer } from "./review-arbiter.ts";
+
 /**
  * Material a review is handed besides the diff, made by a command instead of by the runner's memory of a rule:
  *
  * - `handledFindings`: the findings of earlier rounds with the implementer's public replies and triage summaries, so a
- *   later round knows what was said about each. It is information only: no reply is marked as settling its finding,
- *   because whether a finding is settled is read from the code by the reviewer (`REVIEW_RULES` in `review-note.ts`);
+ *   later round knows what was said about each, and the arbiter's rulings, which close the findings they name. A reply
+ *   is quoted, never classified: the implementer's answer is the implementer's judgement, and an objection to it is a
+ *   `Repeat of:` the arbiter rules on (`REVIEW_RULES` in `review-note.ts`). This is review material, not the key the merge
+ *   decision reads: that is the app's job record of the arbiter;
  * - the old-assumption list (`oldPathHits` …): the places outside a change that use the words whose meaning the change
  *   touches. The implementer lists them in the PR description, and the same command checks that list for the reviewer.
  *
@@ -24,14 +28,16 @@ export interface InlineComment {
 export const TRIAGE_HEADING = "## レビュー対応";
 /** The first line of a recheck's summary comment: `[<runner>] recheck <kinds>`. */
 const RECHECK_SUMMARY = /^\[[\w-]+\] recheck\b/;
+/** The first line of the arbiter's comment copied to the PR: `[<runner>] arbiter`. */
+const ARBITER_COMMENT = /^\[[\w-]+\] arbiter\b/;
 
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /**
  * The findings of earlier rounds and what the implementer said about each, as Markdown: every thread that has a reply
- * (the finding, then the replies as they were written), and every triage summary. A reply is quoted, never classified:
- * a reply that says "fixed" and one that says "not fixed" look the same to a pattern, so none of them is given a mark
- * that could stand in for the reviewer's own check of the code. Empty when nothing was replied to yet. For a recheck
+ * (the finding, then the replies as they were written), every triage summary, and the rows of the `### Rulings` section
+ * of each arbiter comment (`## Rulings (closed)`). A reply is quoted, never classified: a reply that says "fixed" and one
+ * that says "not fixed" look the same to a pattern, so none of them is given a mark. Empty when nothing was replied to yet. For a recheck
  * (`kind`), empty until the PR has an earlier recheck's summary: the first recheck reads the PR with fresh eyes, the
  * later ones are told what was said.
  */
@@ -43,11 +49,22 @@ export function handledFindings(inline: InlineComment[], comments: string[], kin
     .filter((c) => !c.in_reply_to_id && replies.has(c.id))
     .flatMap((c) => [`- \`${c.path}:${c.line ?? c.original_line ?? "?"}\` ${oneLine(c.body)}`, ...replies.get(c.id)!.map((r) => `  - reply: ${oneLine(r)}`)]);
   const summaries = comments.filter((c) => c.trimStart().startsWith(TRIAGE_HEADING)).map((c) => c.trim());
-  if (!threads.length && !summaries.length) return "";
+  const rulings = comments
+    .filter((c) => ARBITER_COMMENT.test(c.trimStart()))
+    .flatMap((c) => section(c.split("\n").map((l) => l.trimEnd()), RULINGS_HEADING) ?? [])
+    .filter((l) => RULING_ROW.test(l));
+  // a later round's `[fixed]` row closes the earlier reviewer-side row for the same place
+  const fixedAt = new Set(rulings.map((l) => RULING_ROW.exec(l)!).filter((m) => m[1] === "fixed").map((m) => m[2]));
+  const stands = (l: string) => standsForReviewer(l) && !fixedAt.has(RULING_ROW.exec(l)![2]);
+  const closed = rulings.filter((l) => !stands(l));
+  const standing = rulings.filter(stands);
+  if (!threads.length && !summaries.length && !rulings.length) return "";
   return [
     "# Findings of earlier rounds and the implementer's replies",
-    "From the pull request's public replies only, quoted as written. This is what the implementer says, not what the code does: no reply here settles its finding. Check each earlier blocker and should-fix in the code as it is now; a triage summary may list the nits left as they are, with the grounds.",
+    "From the pull request's public replies only, quoted as written. A reply that says a finding is not needed, or that a non-blocking finding is left as it is, is the implementer's judgement; raise the finding again only once, as `Repeat of:`. A reply that says a blocker or should-fix is fixed is checked in the code as it is now. A triage summary may list the nits left as they are, with the grounds. A finding under `## Rulings (closed)` is closed: do not raise it again. A finding under `## Rulings for the reviewer (standing)` stands until it is fixed: check it in the code as it is now.",
     ...(threads.length ? ["", "## Threads", ...threads] : []),
+    ...(closed.length ? ["", "## Rulings (closed)", ...closed] : []),
+    ...(standing.length ? ["", "## Rulings for the reviewer (standing)", ...standing] : []),
     ...(summaries.length ? ["", "## Triage summaries", ...summaries.flatMap((s) => [s.replace(/^#+ /gm, (h) => `##${h}`), ""])] : []),
   ]
     .join("\n")

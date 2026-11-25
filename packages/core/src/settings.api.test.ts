@@ -118,9 +118,9 @@ describe("core daemon", () => {
     }
   });
 
-  test("settings models: no row = the bundled list; PATCH adds, removes and reorders without a restart; null brings the bundled list back; an empty list, a blank or duplicate id, dak and an undetected runner are 400; Bedrock keeps its own list", async () => {
+  test("settings models: no row = the bundled list; PATCH adds, removes and reorders without a restart; null brings the bundled list back; an empty list, a blank or duplicate id, dak and an undetected runner are 400; Bedrock lists the saved list as Bedrock ids", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-settings-models-"));
-    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"], bedrockModels: ["global.big"] }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0 });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { models: ["big", "small"], bedrockModel: (m) => ({ value: `global.${m.value}`, label: m.label }) }), fakeAdapter(SCRIPT, { id: "dak" })], { port: 0 });
     const b = `http://127.0.0.1:${c.server.port}`;
     const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const models = async () => ((await fetch(`${b}/api/health`).then(j)).runners as { id: string; models: { value: string; label: string }[] }[]).find((r) => r.id === "claude")!.models;
@@ -138,7 +138,7 @@ describe("core daemon", () => {
         expect(await fetch(`${b}/api/settings`).then(j)).toEqual(saved); // a refused PATCH saves nothing
       }
       expect((await patch({ bedrock: { claude: { region: "us-east-1" } } })).status).toBe(200);
-      expect(await models()).toEqual([opt("global.big")]); // the saved ids are not Bedrock's spelling
+      expect(await models()).toEqual([opt("global.big", "Big"), opt("global.small", "small")]); // the saved list, in its order, as Bedrock ids
       expect((await patch({ bedrock: { claude: null }, models: { claude: null } })).status).toBe(200);
       expect((await fetch(`${b}/api/settings`).then(j)).models).toEqual({});
       expect(await models()).toEqual([opt("big"), opt("small")]);
@@ -299,6 +299,24 @@ describe("core daemon", () => {
       // null clears each; a choice left empty is removed
       expect((await patch({ autoStart: { byKind: { complete: { budgetUsd: null } } } }).then(j)).autoStart.byKind.complete).toEqual({ model: "", effort: "", shadow: "off" });
       expect((await patch({ autoStart: { byKind: { complete: { shadow: null } } } }).then(j)).autoStart.byKind.complete).toBeUndefined();
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("shadow default: a detected runner is saved and read back; an undetected one is 400 and nothing changes", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-test-shadow-default-"));
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      expect((await patch({ shadowRunner: "codex" })).status).toBe(200);
+      expect((await fetch(`${b}/api/settings`).then(j)).shadowRunner).toBe("codex");
+      const refused = await patch({ shadowRunner: "dak" });
+      expect(refused.status).toBe(400);
+      expect(((await refused.json()) as { error: string }).error).toBe(`runner "dak" is not installed`);
+      expect((await fetch(`${b}/api/settings`).then(j)).shadowRunner).toBe("codex");
     } finally {
       await c.stop();
       rmSync(h, { recursive: true, force: true });

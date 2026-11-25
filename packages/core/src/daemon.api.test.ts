@@ -224,25 +224,6 @@ describe("core daemon", () => {
     }
   });
 
-  test("release: in the stand-alone container, where sb-rescue answers on the container's loopback only, the daemon names no rescue page and says so; promotion still goes through sb-rescue", async () => {
-    const seen: string[] = [];
-    const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(new URL(req.url).pathname), Response.json({ current: "c".repeat(40), previous: null, state: "running", busy: null, lastError: null, history: [] })) });
-    const h = mkdtempSync(join(tmpdir(), "switchboard-test-rescue-container-"));
-    // what container/entrypoint.sh and sb-rescue hand the daemon: sb-rescue's address inside the container, and the mark
-    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY, SWITCHBOARD_RESCUE_URL: `http://127.0.0.1:${rescue.port}`, SWITCHBOARD_RESCUE_IN_CONTAINER: "1" }), [fakeAdapter(SCRIPT, { lingers: true })], { port: 0, selfdevChecks: false });
-    try {
-      const rel = await fetch(`http://127.0.0.1:${c.server.port}/api/daemon/release`).then(j);
-      expect(rel).toMatchObject({ managed: true, rescueInContainer: true, current: "c".repeat(40) });
-      expect("rescuePage" in rel).toBe(false);
-      expect(JSON.stringify(rel)).not.toContain(`http://127.0.0.1:${rescue.port}`);
-      expect(seen).toContain("/api/status"); // the daemon itself still reaches it
-    } finally {
-      await c.stop();
-      await rescue.stop(true);
-      rmSync(h, { recursive: true, force: true });
-    }
-  });
-
   test("promote: release counts the commits between the running version and HEAD (ahead, behind) and the running tasks", async () => {
     const repo = mkdtempSync(join(tmpdir(), "switchboard-test-ahead-"));
     const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a]).stdout.toString().trim();

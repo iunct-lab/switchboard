@@ -25,7 +25,11 @@ function parseMarks(comments: { body: string; created_at: string }[]): Mark[] {
   return marks;
 }
 
-const history = fx.history as unknown as MergeHistory;
+/** The fixture was recorded when a review run as `recheck` lifted a kind: the same jobs as the arbiter's pass, which is how the gate lifts a kind now. */
+const arbitrated = (jobs: MergeHistory["jobs"]): MergeHistory["jobs"] => jobs.map((j) => j.kind === "review" && j.as === "recheck"
+  ? { ...j, as: "arbiter", kinds: [], result: { review: { findings: [], firstLine: "[claude] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [] } } } }
+  : j);
+const history = { ...(fx.history as unknown as MergeHistory), jobs: arbitrated((fx.history as unknown as MergeHistory).jobs) };
 
 /** The app, as the tests' fetch sees it: it answers the history the fixture holds and writes down what it was asked. */
 const app = (h: MergeHistory = history) => {
@@ -183,7 +187,7 @@ describe("readHistory + tally (fixture)", () => {
     // an older record (no `required`) is read by its reasons
     const stop = { gate: { ...verdict.gate, required: undefined, verdict: "stop", recheck: ["size"], reasons: ["[再チェック size] a"], merged: false } };
     const records = (extra: object[]): MergeHistory => ({
-      jobs: [job(1, { kind: "review", runner: "codex", as: "recheck", kinds: ["size"], result: { review: { findings: [], firstLine: "[codex] review" } } }), job(2, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }), job(3, { result: verdict }), ...extra] as MergeHistory["jobs"],
+      jobs: [job(1, { kind: "review", runner: "codex", as: "arbiter", result: { review: { findings: [], firstLine: "[codex] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [] } } } }), job(2, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }), job(3, { result: verdict }), ...extra] as MergeHistory["jobs"],
       grants: [], pulls: [{ number: 7, stored: true, state: "MERGED", mergedAt: "2026-10-02T01:00:00Z", closedAt: null, head: H, mergeCommit: "c".repeat(40) }], comments: [], since: Date.parse("2026-10-01T00:00:00Z"),
     });
     const [pr] = await prViewsOf(records([]));
@@ -216,7 +220,7 @@ describe("readHistory + tally (fixture)", () => {
     const noTask = records([]);
     noTask.jobs = noTask.jobs.map((j) => ({ ...j, taskRunner: null }));
     expect((await prViewsOf(noTask))[0]!.implementer).toBe("claude");
-    noTask.jobs = noTask.jobs.filter((j) => j.kind !== "review" || j.as === "recheck").map((j) => ({ ...j, runner: null }));
+    noTask.jobs = noTask.jobs.filter((j) => j.kind !== "review" || j.as === "arbiter").map((j) => ({ ...j, runner: null }));
     expect((await prViewsOf(noTask))[0]!.implementer).toBeNull();
   });
 
@@ -412,7 +416,7 @@ describe("readHistory + tally (fixture)", () => {
     const gate = { verdict: "merge", head: T, ask: [], recheck: [], required: ["size"], reasons: [], allowLarge: false, reviewSkipped: false, merged: true, stack: [entry(30, L, ["size"]), entry(31, T, [])] };
     const pull = (number: number, head: string) => ({ number, stored: true, state: "MERGED" as const, mergedAt: "2026-10-02T01:00:00Z", closedAt: null, head, mergeCommit: head });
     const h: MergeHistory = {
-      jobs: [base(1, 30, { kind: "review", runner: "codex", as: "recheck", kinds: ["size"], result: { review: { findings: [], firstLine: "[codex] review" } } }), base(2, 30, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }), base(3, 31, { head: T, result: { gate } })] as MergeHistory["jobs"],
+      jobs: [base(1, 30, { kind: "review", runner: "codex", as: "arbiter", result: { review: { findings: [], firstLine: "[codex] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [] } } } }), base(2, 30, { kind: "review", runner: "codex", result: { review: { findings: [], firstLine: "[codex] review" } } }), base(3, 31, { head: T, result: { gate } })] as MergeHistory["jobs"],
       grants: [], pulls: [pull(30, L), pull(31, T)], comments: [], since: Date.parse("2026-10-01T00:00:00Z"),
     };
     const by = new Map((await prViewsOf(h)).map((v) => [v.number, v]));

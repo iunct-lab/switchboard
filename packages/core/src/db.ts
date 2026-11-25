@@ -112,8 +112,8 @@ export class Db extends CliUpdateQueries {}
 export function abortOrphanedTasks(db: Db, now = Date.now(), maxStopResumes = MAX_STOP_RESUMES): string[] {
   const ids: string[] = [];
   db.sqlite.transaction(() => {
-    // a runner's silence ended with its process; the other waits stay as stored, and this daemon's wait watch looks at them again
-    for (const t of db.listTasksWithWaits()) if (t.waits!.some((w) => w.kind === "output")) db.setTaskWaits(t.id, t.waits!.filter((w) => w.kind !== "output"));
+    // a runner's silence (and the hook it ran) ended with its process; the other waits stay as stored, and this daemon's wait watch looks at them again
+    for (const t of db.listTasksWithWaits()) if (t.waits!.some((w) => w.kind === "output" || w.kind === "hook")) db.setTaskWaits(t.id, t.waits!.filter((w) => w.kind !== "output" && w.kind !== "hook"));
     for (const status of IN_FLIGHT) {
       for (const t of db.listTasksByStatus(status)) {
         if (t.executionMode === "cloud") {

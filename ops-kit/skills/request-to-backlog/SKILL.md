@@ -67,7 +67,7 @@ ops-kit backlog set <num> Status Backlog
 - **headless（エージェント管理アプリの Task など）で利用者に聞けないときも、解釈メモに前提を書いて進む**（要件の読みは質問ツールで聞かない。質問ツールは運用の確認だけ: `issue-workflow` の「運用の確認」）。判断が利用者に属するもの（お金 / 他 OS / 破壊的 / 要件の読み）は PBI の決定ログにも「利用者の確認待ち」と書き、`## 判断待ち`（`**進め方**: 止めて待つ`、ラベル `needs-decision`。`issue-workflow` の「判断待ちの出し方」。画面に関わる問いは同じ節の画面イメージを添える）を出す。ここは要望を PBI にする作業なので、出したうえで解釈メモの前提で PBI 化は続ける（止めるのは、その前提に依存する **実装**。回答が前提と違えば PBI を直す）。ただし、前提と矛盾する価値（下の 2.5）があれば除く — その要望は（ほかの価値も）PBI を作らずに止める
 - **自動か手動かが書かれていない要望は、自動の側に読む**（利用者の方針: 開発を自動化できるところは自動化する）。手動だけに狭める読み（「起票は利用者が押して始める」「定期の自動化はスコープ外」のような）は要件の読みなので、解釈メモに書くだけで決めず `## 判断待ち` を出す。PBI の「スコープ外」はその PBI の範囲で、リポジトリの方針ではない — 設計文書に「〜はしない（要望 #N の解釈）」と写さない
 - 要望 Issue には**親を付けない**（Project の Backlog ビューは `no:parent-issue`。要望を Backlog から隠したいなら、ビューの filter に `-label:type:request` を足す。ビューは API で変えられないので利用者の手作業）
-- 閉じるのは派生 PBI が全部 Done か「やらない」になったとき。閉じるときに結果を 3 行書く（`ops-kit backlog edit <req> --body-file … --state closed`）。経路が「公開側 Issue <URL>」なら公開側の Issue にも結果を書いて閉じる（`pbi-complete` の 6-5）
+- 閉じるのは派生 PBI が全部 Done か「やらない」になったとき。閉じるときに結果を 3 行書く（`ops-kit backlog edit <req> --body-file … --rev <版> --state closed`）。経路が「公開側 Issue <URL>」なら公開側の Issue にも結果を書いて閉じる（`pbi-complete` の 6-5）
 
 #### 整える範囲
 
@@ -103,7 +103,7 @@ ops-kit backlog set <num> Status Backlog
 GitHub の API では Issue に画像を添付できない。画像をどこに置き、どの URL を本文に埋めるかは CLAUDE.md にある。
 CLAUDE.md が何も書いていなければ、画像は上げずに `## 添付` に「添付: 保留」と書く。作業ツリーは触らない（置くなら API で）。
 
-要望 Issue 番号が先に要るなら、Issue を作ってから画像を上げて本文を `ops-kit backlog edit <num> --body-file "$W/req.md"` で更新する。個人情報（メール・トークン・他人の名前）が
+要望 Issue 番号が先に要るなら、Issue を作ってから画像を上げて本文を `ops-kit backlog edit <num> --body-file "$W/req.md" --rev <版>` で更新する。個人情報（メール・トークン・他人の名前）が
 写っていたら**上げない**で「添付: 個人情報のため保留」と書く。
 
 ### 2. 価値ごとに切る（PBI の粒度）
@@ -149,14 +149,14 @@ ops-kit backlog triage <num> <P0-P3>          # 親は渡さない
 ops-kit backlog set <num> "Story Points" <N>                          # 本文の N と同じ
 ```
 
-**自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。CLAUDE.md）。分解の後に sub-issue を 1 回見直し、二重の組があれば後の組を閉じる（`ops-kit backlog edit <Task> --state closed`）。
+**自分で分解する PBI は、作ったその場で分解する**: Task の無い PBI を Backlog に置くと、定期実行（バックログを進める）が分解の Task を始め、Task が二重にできる。自分で分解するなら同じ作業の中で `pbi-to-tasks` に進むか、先に PBI を占有する（並列ガードの `claim`。占有はアプリが見て、自動の工程は選ばない。CLAUDE.md）。`ops-kit backlog create --parent`（`edit --parent` も）が exit 1 で相手の Task と子の一覧を出したら、その一覧を読んで自分の分解をやめる。
 
 Priority の目安: 他の PBI の前提なら P0、利用者が「まずこれ」と言ったものは P1、それ以外 P2。PBI には必ず付ける（`ops-kit lint` が Priority の無い PBI を違反にする。バックログを進めるは実装中の片づけの次に Priority の高い順で取る）。要望には付けない（分割したあと PBI ごとに Priority が分かれうる）。
 Story Points は `issue-workflow` の「### Story Points」の基準表で付ける。
 
 ### 4. 要望 Issue に戻る
 
-`## 派生 PBI` に `- #N <題>（要望のどの部分か）— Priority` を並べ、`ops-kit backlog edit <req> --body-file "$W/req.md"` で更新。全部 Done で閉じる、と 1 行添える。
+`## 派生 PBI` に `- #N <題>（要望のどの部分か）— Priority` を並べ、`ops-kit backlog edit <req> --body-file "$W/req.md" --rev <版>` で更新。全部 Done で閉じる、と 1 行添える。
 
 ### 5. lint
 

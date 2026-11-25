@@ -37,6 +37,7 @@ export const RECORDINGS = [
   "packages/adapters/claude/fixtures/fork-turn-tool.jsonl",
   "packages/adapters/claude/fixtures/fork-turn.jsonl",
   "packages/adapters/claude/fixtures/guard-unavailable.jsonl",
+  "packages/adapters/claude/fixtures/hook-heartbeat.jsonl",
   "packages/adapters/claude/fixtures/list-commands-2.1.330.jsonl",
   "packages/adapters/claude/fixtures/question-tool.jsonl",
   "packages/adapters/claude/fixtures/resume-cost.jsonl",

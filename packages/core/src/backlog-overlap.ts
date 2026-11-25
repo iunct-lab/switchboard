@@ -4,8 +4,8 @@
  * (`withOverlap`), and the lines the screens show for it.
  */
 import type { BacklogIssueData, BacklogItem } from "@switchboard/protocol";
-import { holder, judge, othersOf, STALE_HOURS, topWith, turnsAhead, waitsOnlyForCheck, type Turn } from "../../../scripts/parallel-guard.ts";
-import { overlaps, pathsIn } from "../../../ops-kit/src/task-paths.ts";
+import { holder, judgeWithTurns, othersOf, STALE_HOURS, topWith, turnsAhead, waitsOnlyForCheck, type Turn } from "../../../scripts/parallel-guard.ts";
+import { overlaps, pathsIn, turnPathsIn } from "../../../ops-kit/src/task-paths.ts";
 import { readdirSync } from "node:fs";
 import { type Comment, PBI_COMPLETE_MARK } from "./backlog-comments.ts";
 
@@ -16,13 +16,13 @@ import { type Comment, PBI_COMPLETE_MARK } from "./backlog-comments.ts";
 const PATHS_MEMO_MAX = 4000;
 const pathsMemo = new Map<string, readonly string[]>();
 /** `pathsIn` against these names through the memo; the names part of the key is built once per reader. */
-function pathsReader(names: ReturnType<typeof topWith>): (body: string) => string[] {
-  const prefix = `${names.map((t) => `${t.dir ? "/" : ""}${t.name}`).join("\0")}\0\0`;
+function pathsReader(names: ReturnType<typeof topWith>, read: typeof pathsIn = pathsIn): (body: string) => string[] {
+  const prefix = `${read === pathsIn ? "" : "turn\0"}${names.map((t) => `${t.dir ? "/" : ""}${t.name}`).join("\0")}\0\0`;
   return (body) => {
     const key = prefix + body;
     const hit = pathsMemo.get(key);
     if (hit) return hit as string[];
-    const paths = pathsIn(body, names);
+    const paths = read(body, names);
     pathsMemo.set(key, paths);
     if (pathsMemo.size > PATHS_MEMO_MAX) pathsMemo.delete(pathsMemo.keys().next().value!);
     return paths;
@@ -153,14 +153,35 @@ export function turnWorks(items: BacklogItem[], issues: Map<number, BacklogIssue
  * it is no session at work, when no stage Task runs now. A claim written after the end (a hand outside the app) or one whose time cannot be read still counts.
  * Reads no value of the repository.
  */
-export function sessionOn(opts: { active?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean }): (pbi: number) => boolean {
+export function sessionOn(opts: { active?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean; claimTask?: (c: Comment) => ClaimTaskOf | null }): (pbi: number) => boolean {
+  const claim = claimOn(opts);
   return (pbi) => {
     if ((opts.active?.(pbi) ?? false) || !opts.commentsOf || (opts.unread?.(pbi) ?? false)) return true;
+    return claim(pbi) !== null;
+  };
+}
+
+/** What the Task that wrote a claim comment is (backlog-worker.ts `claimTaskOf`). */
+export type ClaimTaskOf = { id: string; stageIssue: number | null; holds: boolean };
+
+/**
+ * The claim on a PBI that counts, and the Task that wrote it (`taskId`; null = not known): the comments' `holder`, less one
+ * the Task that wrote it no longer keeps. A claim written by a stage Task of the PBI itself, or by a Task not known
+ * (`claimTask` gives null: a hand outside the app, a comment from before operations kept their Task), ends with that stage
+ * Task by `ended`. One written by another Task (a conversation's, /pbi-complete's) counts while that Task is at work or waits
+ * for the person (`holds`), whatever stage Tasks ran. null = no claim, or none that counts.
+ */
+export function claimOn(opts: { commentsOf?: (n: number) => Comment[]; ended?: (pbi: number, at: number) => boolean; claimTask?: (c: Comment) => ClaimTaskOf | null }): (pbi: number) => { taskId: string | null } | null {
+  return (pbi) => {
+    if (!opts.commentsOf) return null;
     const comments = opts.commentsOf(pbi);
     const h = holder(comments.map((c, k) => ({ id: k, body: c.body })));
-    if (h === null) return false;
-    const at = Date.parse(comments[h.id]?.createdAt ?? "");
-    return !(opts.ended && Number.isFinite(at) && opts.ended(pbi, at));
+    if (h === null) return null;
+    const written = comments[h.id];
+    const task = written ? opts.claimTask?.(written) ?? null : null;
+    if (task && task.stageIssue !== pbi) return task.holds ? { taskId: task.id } : null;
+    const at = Date.parse(written?.createdAt ?? "");
+    return opts.ended && Number.isFinite(at) && opts.ended(pbi, at) ? null : { taskId: task?.id ?? null };
   };
 }
 
@@ -194,8 +215,9 @@ export function ownerPbiOf(ref: string, pulls: StoredPull[], issues: Map<number,
  * later; a hit on one carries `turn`). An overlap only on `sharedFiles` does not count. A PR whose files are not all
  * stored cannot be judged (`unknown`). `root` = the checkout, whose top level the paths in a Task's body are read against.
  *
- * Judged per Task the session would start: one that can start (`startable`) and is not `reviewOnly`. One free Task lets
- * the PBI go, and the free ones are kept in `freeTasks` for the prompt; with none that can start, the Tasks left to do as
+ * Judged per Task the session would start: one that can start (`startable`), is not `reviewOnly` and names a path (the guard
+ * in the Task cannot judge one without, so it is no reason to start the PBI). One free Task lets
+ * the PBI go, and the free ones are kept in `freeTasks` for the prompt; with none, the Tasks left to do as
  * one. A PBI with nothing left to start (every open Task in review) is not held. Returns the places it kept (a PBI the queue does not resume, `notResumed`, has none): `turnWorks`'
  * places in the order they yielded, less those of a PBI whose Tasks all overlap the places kept before its own (it
  * waits for one of them; other work, a PR or a Task, does not drop it). Such a PBI holds no place, so two PBIs that yielded to each other do not wait
@@ -203,7 +225,7 @@ export function ownerPbiOf(ref: string, pulls: StoredPull[], issues: Map<number,
  * the PBIs it waits for, `yieldsTo`, so with each waiting for the other neither place decides). The place comes back with the same `since` once the PBI can start. The judgement of
  * every item and the list returned (the guard in the Task reads it) use the kept places only.
  */
-export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean; sharedFiles?: string[]; notResumed?: (i: BacklogItem) => boolean } = {}): Turn[] {
+export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIssueData>, startable: Map<number, number[]>, pulls: StoredPull[], statuses: Map<number, string | number | null>, root: string, opts: { active?: (pbi: number) => boolean; parked?: (pbi: number) => boolean; commentsOf?: (n: number) => Comment[]; unread?: (n: number) => boolean; ended?: (pbi: number, at: number) => boolean; claimTask?: (c: Comment) => ClaimTaskOf | null; sharedFiles?: string[]; notResumed?: (i: BacklogItem) => boolean } = {}): Turn[] {
   const active = opts.active ?? (() => false);
   const mine = items.filter((i) => i.type === "pbi" && (i.stage === "ready" || i.stage === "in-progress"));
   if (!mine.length) return [];
@@ -217,6 +239,9 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
   const names = topWith(rootTop, prs);
   const pathsFor = pathsReader(names);
   const taskPaths = (n: number) => pathsFor(issues.get(n)?.body ?? "");
+  // against the places ahead (`turnsAhead`) a Task is read with `turnPathsIn`
+  const turnPathsFor = pathsReader(names, turnPathsIn);
+  const taskTurnPaths = (n: number) => turnPathsFor(issues.get(n)?.body ?? "");
   // a Task of a PBI that waits for a date is not at work: nothing of it changes before the date
   const dated = new Set(items.filter((i) => !!i.waitsUntil && !i.waitsUntil.met).map((i) => i.number));
   const linked = pulls.map((p) => ({ state: p.state, linked: p.closes }));
@@ -239,18 +264,22 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
     const todo = subs.filter((n) => issues.get(n)?.state === "OPEN" && !reviewOnly(n, pulls, statuses));
     const all = todo.flatMap(taskPaths);
     if (!all.length) return null;
-    const free = (startable.get(i.number) ?? []).filter((n) => todo.includes(n));
+    // a Task with no path named cannot be judged by the guard in the Task, so it is no reason to start the PBI past a
+    // Task that names one; a PBI whose startable Tasks all name none (a count, an observation: they touch no file) goes as before
+    const startableNow = (startable.get(i.number) ?? []).filter((n) => todo.includes(n));
+    const named = startableNow.filter((n) => taskPaths(n).length > 0);
+    const free = named.length ? named : startableNow;
     const { others, unknown } = placesOnly ? { others: [], unknown: [] } : othersOf(new Set<number>([i.number, ...subs]), { prs, working }, names, pathsFor);
     const against = [...others, ...turnsAhead(ahead, i.number)];
-    const judged = (free.length ? free.map((task) => ({ task: task as number | null, paths: taskPaths(task) })) : [{ task: null, paths: all }])
-      .map((j) => ({ ...j, blocking: judge({ paths: j.paths }, against, now, opts.sharedFiles).blocking }));
+    const judged = (free.length ? free.map((task) => ({ task: task as number | null, paths: taskPaths(task), turnPaths: taskTurnPaths(task) })) : [{ task: null, paths: all, turnPaths: todo.flatMap(taskTurnPaths) }])
+      .map((j) => ({ ...j, blocking: judgeWithTurns({ paths: j.paths, turnPaths: j.turnPaths }, against, now, opts.sharedFiles).blocking }));
     return { judged, unknown };
   };
   // the places in the order they yielded; one whose PBI cannot start for the places kept before it (not for other work) is left out (it gets
   // the place back with the same `since` once it can), so a PBI waiting for a place that is not held is not held back by it
   const turns: Turn[] = [];
   const byPbi = new Map<number, Turn[]>();
-  for (const t of opts.commentsOf ? turnWorks(items, issues, pulls, statuses, opts.commentsOf, taskPaths, now.getTime(), opts.parked, opts.notResumed) : []) byPbi.set(t.pbi, [...(byPbi.get(t.pbi) ?? []), t]);
+  for (const t of opts.commentsOf ? turnWorks(items, issues, pulls, statuses, opts.commentsOf, taskTurnPaths, now.getTime(), opts.parked, opts.notResumed) : []) byPbi.set(t.pbi, [...(byPbi.get(t.pbi) ?? []), t]);
   for (const [pbi, own] of byPbi) {
     const item = mine.find((m) => m.number === pbi);
     const r = item ? judgeOf(item, turns, true) : null;
@@ -274,7 +303,7 @@ export function withOverlap(items: BacklogItem[], issues: Map<number, BacklogIss
       .filter((h) => !seen.has(`${h.ref} ${h.path}`) && !!seen.add(`${h.ref} ${h.path}`))
       .map((h) => ({ ref: h.ref, path: h.path, working: atWork(h), pbi: h.turn !== undefined ? null : ownerPbiOf(h.ref, pulls, issues), ...(h.turn !== undefined ? { turn: h.turn } : {}) }));
     i.overlap = hits.length || unknown.length ? { hits, unknown: unknown.length ? unknown.map((n) => `PR #${n} の変更ファイルが記録に無い`).join("・") : null } : null;
-    // a Task with no path named cannot be judged by the guard in the Task: it lets the PBI go, but is not named to start from
+    // a Task with no path named cannot be judged by the guard in the Task: it does not let the PBI go and is not named to start from
     if (!i.overlap) i.freeTasks = go.flatMap((j) => (j.task !== null && j.paths.length ? [j.task] : []));
   }
   return turns;

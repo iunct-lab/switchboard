@@ -29,9 +29,9 @@ import { currentRepo } from "./repo.ts";
 import { pbiFactsOf, prereqsOf } from "../packages/core/src/backlog-item.ts";
 import { prereqOf, prereqState, storedIssueTarget, waitsOf, type WaitTarget } from "../packages/core/src/backlog-waits.ts";
 import { pbiProgress } from "../packages/core/src/pbi-progress.ts";
-import { appSync, BacklogUnknown, readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { appSync, BacklogUnknown, readRecords, taskProof, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { linkedIssues } from "./task-paths.ts";
-import { overlaps, pathsIn } from "../ops-kit/src/task-paths.ts";
+import { overlaps, pathsIn, turnPathsIn } from "../ops-kit/src/task-paths.ts";
 import { sharedFilesOf } from "../ops-kit/src/config.ts";
 
 export const STALE_HOURS = 72;
@@ -161,6 +161,19 @@ export function judge(mine: { paths: string[]; claimId?: number }, others: Work[
   return { verdict: blocking.length > 0 ? "defer" : "go", blocking, stale, ...(shared.length ? { shared } : {}) };
 }
 
+/**
+ * `judge` with the places ahead (`turn`) read against `turnPaths` (`turnPathsIn`) and the other work against `paths`; the
+ * verdicts are joined. Without `turnPaths` every side is read against `paths`.
+ */
+export function judgeWithTurns(mine: { paths: string[]; turnPaths?: string[]; claimId?: number }, others: Work[], now: Date, sharedFiles: string[] = []): Verdict {
+  if (!mine.turnPaths) return judge(mine, others, now, sharedFiles);
+  const work = judge({ paths: mine.paths, claimId: mine.claimId }, others.filter((w) => w.turn === undefined), now, sharedFiles);
+  const turn = judge({ paths: mine.turnPaths, claimId: mine.claimId }, others.filter((w) => w.turn !== undefined), now, sharedFiles);
+  const shared = [...(work.shared ?? []), ...(turn.shared ?? [])];
+  const blocking = [...work.blocking, ...turn.blocking];
+  return { verdict: blocking.length > 0 ? "defer" : "go", blocking, stale: [...work.stale, ...turn.stale], ...(shared.length ? { shared } : {}) };
+}
+
 type Run = (args: string[]) => Promise<string>;
 
 async function gh(args: string[]): Promise<string> {
@@ -218,9 +231,9 @@ export const ghBoard = (repo: string, run: Run = gh, sharedFiles: string[] = [])
  * GitHub-synced repository brought up to date first, of a backlog kept in the app read as they are.
  */
 export function appBoard(env: Record<string, string | undefined>, f: typeof fetch = fetch, repo?: string): Board {
-  const api = async (method: string, path: string, body?: unknown) => {
+  const api = async (method: string, path: string, body?: unknown, extra: Record<string, string> = {}) => {
     const key = env.BACKLOG_TOKEN_FILE ? (await Bun.file(env.BACKLOG_TOKEN_FILE).text()).trim() : "";
-    const res = await f(`${env.BACKLOG_URL!.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) }, ...(body !== undefined && { body: JSON.stringify(body) }) });
+    const res = await f(`${env.BACKLOG_URL!.replace(/\/+$/, "")}${path}`, { method, headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }), ...extra }, ...(body !== undefined && { body: JSON.stringify(body) }) });
     const answer = await res.json().catch(() => null);
     if (!res.ok) throw new Error(`backlog ${method} ${path}: ${res.status} ${(answer as { error?: string } | null)?.error ?? res.statusText}`);
     return answer;
@@ -236,7 +249,7 @@ export function appBoard(env: Record<string, string | undefined>, f: typeof fetc
     const d = (await api("GET", `/${n}?workspaceId=${encodeURIComponent(await ws())}`)) as { comments: Array<{ seq: number | null; body: string; createdAt: string }> };
     return d.comments.map((c) => ({ id: c.seq ?? Date.parse(c.createdAt) - 1e13, body: c.body }));
   };
-  const write = async (n: number, text: string) => void (await api("POST", `/${n}/comment`, { workspaceId: await ws(), text }));
+  const write = async (n: number, text: string) => void (await api("POST", `/${n}/comment`, { workspaceId: await ws(), text }, await taskProof(env, f)));
   return {
     comments: read,
     post: async (n, body) => {
@@ -512,22 +525,24 @@ export function othersOf(own: Set<number>, m: Pick<Material, "prs" | "working">,
 const NO_FILES = (pr: number) => `PR #${pr} の変更ファイルが記録に無い（101 件以上）`;
 
 /** The Task's paths (its body's, and its own PRs' files), the other work (`othersOf`) with the places ahead of its PBI's (`turnsAhead`), and its prerequisites. */
-export async function readOthers(task: number, m: Material): Promise<{ paths: string[]; others: Work[]; prereqs: Prereq[]; shared: string[] }> {
+export async function readOthers(task: number, m: Material): Promise<{ paths: string[]; turnPaths: string[]; others: Work[]; prereqs: Prereq[]; shared: string[] }> {
   const { issue } = m;
   const own = new Set<number>([task, ...(issue.parent?.subIssues ?? [])]);
   if (issue.parent) own.add(issue.parent.number);
   const top = topWith(m.top, m.prs);
   const paths = pathsIn(issue.body, top);
+  const turnPaths = turnPathsIn(issue.body, top);
   for (const pr of m.prs) {
     if (!pr.linked.includes(task)) continue;
     if (pr.files === null) throw new Error(NO_FILES(pr.number));
     paths.push(...pr.files);
+    turnPaths.push(...pr.files);
   }
   const { others, unknown } = othersOf(own, m, top);
   if (unknown.length) throw new Error(NO_FILES(unknown[0]!));
   others.push(...turnsAhead(m.turns, issue.parent?.number ?? null).filter((w) => !own.has(w.task!)));
   const siblings = new Set<number>(issue.parent?.subIssues ?? []);
-  return { paths: [...new Set(paths)], others, prereqs: await readPrereqs([issue.body, issue.parent?.body ?? ""], siblings, m.target), shared: m.shared };
+  return { paths: [...new Set(paths)], turnPaths: [...new Set(turnPaths)], others, prereqs: await readPrereqs([issue.body, issue.parent?.body ?? ""], siblings, m.target), shared: m.shared };
 }
 
 /**
@@ -565,7 +580,7 @@ export async function overlap(board: Board, task: number, claimed: boolean, now 
     await back();
     throw e;
   }
-  const { paths, others, prereqs, shared } = found;
+  const { paths, turnPaths, others, prereqs, shared } = found;
   if (paths.length === 0) {
     await back();
     throw new Error(`Task #${task} の本文に触るファイルのパスが無い（pbi-to-tasks で名指しする）`);
@@ -577,7 +592,7 @@ export async function overlap(board: Board, task: number, claimed: boolean, now 
       }
     }
   }
-  const v = judge({ paths, claimId }, others, now, shared);
+  const v = judgeWithTurns({ paths, turnPaths, claimId }, others, now, shared);
   const verdict = prereqVerdict(prereqs) ?? v.verdict;
   if (verdict !== "go") await back();
   const conditions = waitConditions({ verdict, blocking: v.blocking, prereqs });

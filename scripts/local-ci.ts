@@ -78,6 +78,8 @@ export function failLines(output: string): string[] {
 
 /** The perf bench, main's measure (`perf-ratchet.ts base`) or the ratchet's check: their failure gets a verdict (a bench or base failure is one with no judgement). */
 export const isPerfStep = (s: Step) => /scripts\/perf-(bench|ratchet)\.ts/.test(s.run);
+/** The ratchet's base step alone: it measures the tag before, for the bundle and the bytes. */
+export const isPerfBase = (s: Step) => s.run.includes("perf-ratchet") && s.run.includes(" base ");
 /** The ratchet's check alone: the step whose output has the verdict and the bundle lines. */
 export const isPerfCheck = (s: Step) => s.run.includes("perf-ratchet") && s.run.includes(" check ");
 
@@ -735,8 +737,13 @@ async function settle(ran: Array<Step & { code: number; output: string; seconds:
     result.log = join(logDir, `${i + 1}-${failed.name.replace(/[^\w.-]/g, "_")}.log`);
     await Bun.write(result.log, failed.output);
     if (isPerfStep(failed)) {
-      // a bench that failed judged nothing; the check after it then reads no result, so the first perf failure is kept
-      perf ??= isPerfCheck(failed) ? perfVerdict(failed.output) : { ...perfVerdict(""), unknown: true };
+      // the check's own lines are the verdict even when the base step failed before it (the check judges the ceilings without the base's file); a bench that failed judged nothing, so it alone is unknown
+      if (isPerfCheck(failed)) perf = { ...perfVerdict(failed.output), reasons: perf?.reasons ?? [] };
+      else if (isPerfBase(failed)) {
+        const lines = failed.output.split("\n").map((l) => l.trim()).filter(Boolean);
+        const reason = lines.find((l) => l.startsWith("perf-base: ")) ?? lines.at(-1);
+        perf = { ...(perf ?? { ...perfVerdict(""), unknown: false }), reasons: [...(perf?.reasons ?? []), ...(reason ? [reason] : [])] };
+      } else perf = { ...(perf ?? perfVerdict("")), unknown: true };
       continue;
     }
     for (const l of result.fails) d.log(l);

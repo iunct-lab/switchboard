@@ -352,12 +352,12 @@ describe("判断待ちの進め方の行", () => {
   test("askProceed reads 推奨で進める / 止めて待つ outside fences, and null when there is no line", () => {
     // (where the question stands — a Task that names a file, in a checkout whose top is known — is what lets its kind be checked)
     const place = { issue: { number: 11, body: "1. `src/a.ts`: 直す", labels: ["type:task"] }, pbi: { number: 10, tasks: [11] }, top: [{ name: "src", dir: true }] };
-    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice）"), place)).toBe("recommended");
+    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice）\n`src/a.ts` の書き方"), place)).toBe("recommended");
     expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice）"))).toBe("wait");
     expect(askProceed(ask("**進め方**: 止めて待つ — お金が動く"))).toBe("wait");
     expect(askProceed(ask(""))).toBeNull();
     expect(askProceed(ask("```\n**進め方**: 推奨で進める（種類: implementation-choice）\n```"))).toBeNull();
-    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice） — 戻せる変更"), place)).toBe("recommended");
+    expect(askProceed(ask("**進め方**: 推奨で進める（種類: implementation-choice） — 戻せる変更\n`src/a.ts` の書き方"), place)).toBe("recommended");
     expect(askProceed(ask("  **進め方**: 止めて待つ — 公開\r"))).toBe("wait");
     expect(askProceed(ask("**進め方**: 推奨で進めるかは未定"))).toBeNull();
   });

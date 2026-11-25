@@ -115,11 +115,16 @@ The branches of the form "if CLAUDE.md names it … otherwise …" are kept: wha
 | `review+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `Codex の 5 時間枠が **0.9 以` | `other+codex` | split | names the main reviewer, which the review setting decides |
 | `review+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `Claude の枠（週間上限なども）が上限、` | `other+claude` | split | names the main reviewer, which the review setting decides |
 | `review` | `ops-kit/skills/cross-runner-review/SKILL.md` | `- 材料と指示は 1 と同じ fresh c` | `other` | split | names the main reviewer, which the review setting decides |
-| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `$N --runner claude --as` | `other+codex+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
-| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `$N --runner codex --as` | `other+claude+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `（実装したランナーの Claude）を名指しして` | `other+codex+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `（実装したランナーの Codex）を名指しして` | `other+claude+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `review+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `- 直接走らせて代替するなら、2 の代替のラ` | `other+out` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `review` | `ops-kit/skills/cross-runner-review/SKILL.md` | `で実際のランナーを who にし、要約の` | `other` | split | names the main reviewer, which the review setting decides |
-| `review` | `ops-kit/skills/cross-runner-review/SKILL.md` | `主レビュアーは実装したランナーと同じ枠を使う` | `same` | split | names the main reviewer, which the review setting decides |
+| `review+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `待たずに Codex の新しいセッションで代替する（その 1 回だけ` | `same+claude` | split | names the main reviewer, which the review setting decides |
+| `review+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `待たずに Claude の新しいセッションで代替する（その 1 回だけ` | `same+codex` | split | names the main reviewer, which the review setting decides |
+| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `設定と違うもう片方の Codex を名指しして` | `same+claude+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `review+reviewer+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `設定と違うもう片方の Claude を名指しして` | `same+codex+in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `review+task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `- 直接走らせて代替するなら、2 のもう片方のランナー` | `same+out` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
+| `review` | `ops-kit/skills/cross-runner-review/SKILL.md` | `上限でないときにこの印を付けない` | `same` | split | names the main reviewer, which the review setting decides |
 | `task` | `ops-kit/skills/cross-runner-review/SKILL.md` | `主レビュアーは自分のシェルで走らせず、アプリ` | `in` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `$N --runner codex --c` | `in+codex` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |
 | `task+reviewer` | `ops-kit/skills/cross-runner-review/SKILL.md` | `$N --runner claude --c` | `in+claude` | split | a Task asks the app (a job, a stop report); a session outside it runs the command itself |

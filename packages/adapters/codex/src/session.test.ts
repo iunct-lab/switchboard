@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QUESTION_DEFERRED_REPLY, type AgentEvent } from "@switchboard/protocol";
-import { bedrockModelName, telemetryArgs, CODEX_BEDROCK_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
+import { bedrockFromConfig, bedrockModelName, telemetryArgs, codexBedrockModel, CODEX_MODELS, codexSessionExists, createCodexAdapter, memoryOffNote } from "./index.ts";
 
 const FAKE = new URL("../fixtures/fake-app-server.ts", import.meta.url).pathname;
 
@@ -229,8 +229,7 @@ describe("bedrock", () => {
       // the environment is the same either way: no key or variable is added for Bedrock
       const names = (env: string) => env.split("\n").map((l) => l.split("=")[0]).filter((n) => n && n !== "OUT").sort();
       expect(names(bedrock.env)).toEqual(names(plain.env));
-      expect(CODEX_BEDROCK_MODELS.map((m) => m.value)).toEqual(["openai.gpt-6.1-sol", "openai.gpt-6-astra", "openai.gpt-6-luna"]);
-      expect(createCodexAdapter().bedrockModels).toBe(CODEX_BEDROCK_MODELS);
+      expect(createCodexAdapter().bedrockModel).toBe(codexBedrockModel);
       // the model the usage is reported under: the Bedrock id on Bedrock (also for the config.toml default), as is otherwise
       expect(bedrockModelName({ bedrock: { region: "ap-northeast-1" } }, "gpt-6-luna")).toBe("openai.gpt-6-luna");
       expect(bedrockModelName({ bedrock: { region: "ap-northeast-1" } }, "openai.gpt-6.1-sol")).toBe("openai.gpt-6.1-sol");
@@ -254,6 +253,32 @@ describe("bedrock", () => {
       expect(events.filter((e) => e.t === "usage").map((e) => (e.t === "usage" ? e.model : ""))).toContain("openai.gpt-6-luna");
     } finally {
       await s.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("bedrockModel", () => {
+    expect(codexBedrockModel({ value: "gpt-6-sol", label: "GPT-6 Sol" })).toBeNull();
+    expect(codexBedrockModel({ value: "gpt-6.2-sol", label: "GPT-6.2 Sol" })).toEqual({ value: "openai.gpt-6.2-sol", label: "GPT-6.2 Sol" });
+    expect(codexBedrockModel({ value: "openai.gpt-6-luna", label: "L" })?.value).toBe("openai.gpt-6-luna");
+    expect(CODEX_MODELS.map(codexBedrockModel).filter((m) => m !== null).map((m) => m.value)).toEqual(["openai.gpt-6.1-sol", "openai.gpt-6-astra", "openai.gpt-6-luna"]);
+  });
+
+  test("bedrock from config.toml", () => {
+    const home = mkdtempSync(join(tmpdir(), "sb-codex-bedrock-config-"));
+    const read = (toml?: string) => {
+      rmSync(join(home, "config.toml"), { force: true });
+      if (toml !== undefined) writeFileSync(join(home, "config.toml"), toml);
+      return bedrockFromConfig(home);
+    };
+    try {
+      expect(read('model = "gpt-6-luna"\nmodel_provider = "amazon-bedrock"\n')).toBe(true);
+      expect(read('profile = "aws"\n\n[profiles.aws]\nmodel_provider = "amazon-bedrock"\n')).toBe(true);
+      // the profile in use decides, not the top-level provider
+      expect(read('profile = "plain"\nmodel_provider = "amazon-bedrock"\n\n[profiles.plain]\nmodel = "gpt-6-luna"\n')).toBe(false);
+      expect(read('model_provider = "openai"\n')).toBe(false);
+      expect(read()).toBe(false);
+    } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });

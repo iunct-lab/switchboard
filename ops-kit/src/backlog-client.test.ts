@@ -237,6 +237,24 @@ test("triage without a Phase: an empty Phase position is skipped and parent / st
   expect(phased.err).toContain(triageUsage(true));
 });
 
+test("create and edit go as the Task's: the proof headers are read from the app for each call, and a call outside a Task carries none", async () => {
+  const sent = async (argv: string[], env: Record<string, string | undefined>) => {
+    const heads: Array<{ method: string; task: string | null; token: string | null }> = [];
+    const fake = app(routes((m) => ({ status: 202, body: m === "GET" ? {} : { localId: "u1", operations: ["o"] } })));
+    const fetch = async (url: string, init: RequestInit = {}) => {
+      if (!url.startsWith("http://app/api/backlog")) return Response.json({ url: "u", token: "mcp_x" });
+      const h = new Headers(init.headers);
+      if (init.method === "POST" || init.method === "PATCH") heads.push({ method: init.method, task: h.get("x-task-id"), token: h.get("x-task-token") });
+      return fake.fetch(url, init);
+    };
+    expect((await run(argv, { fetch, calls: fake.calls }, env)).code).toBe(0);
+    return heads;
+  };
+  expect(await sent(["create", "--title", "子"], { OPS_KIT_TASK_ID: "t_1" })).toEqual([{ method: "POST", task: "t_1", token: "mcp_x" }]);
+  expect(await sent(["edit", "3", "--title", "題"], { OPS_KIT_TASK_ID: "t_1" })).toEqual([{ method: "PATCH", task: "t_1", token: "mcp_x" }]);
+  expect(await sent(["create", "--title", "子"], {})).toEqual([{ method: "POST", task: null, token: null }]);
+});
+
 test("a comment goes as its Task's with the proof read from the app for this call (the app stops only the Task that proves the question is its own); outside a Task, or when the proof cannot be read, it goes as nobody's", async () => {
   const sent = async (env: Record<string, string | undefined>, proof: () => Response | Promise<Response>) => {
     const calls: Array<{ url: string; task: string | null; token: string | null; body: unknown }> = [];
@@ -262,7 +280,7 @@ test("a comment goes as its Task's with the proof read from the app for this cal
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
   const detail = { issue: { number: 3, body: "", labels: [], subIssues: [] }, fields: { "Story Points": 2, Code: "007" } };
   const ok = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
-  expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
+  expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--rev", "r1", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Code", "001"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", ""], ok)).code).toBe(0);
@@ -270,7 +288,7 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["comment", "3", "--body-file", "-"], ok)).code).toBe(0);
   expect((await run(["create", "--title", "New", "--label", "type:task", "--parent", "891", "--field", "Status=Backlog"], ok)).code).toBe(0);
   expect(ok.calls.filter((c) => c.method !== "GET").map((c) => [c.method, c.path, c.body])).toEqual([
-    ["PATCH", "/3", { workspaceId: "ws1", title: "T", body: "from stdin", labels: { add: ["a"], remove: ["b"] }, state: "CLOSED", milestone: null }],
+    ["PATCH", "/3", { workspaceId: "ws1", title: "T", body: "from stdin", expectedBodyRevision: "r1", labels: { add: ["a"], remove: ["b"] }, state: "CLOSED", milestone: null }],
     // a number only where the stored value is one; GitHub's field type decides when the app sends it
     ["PATCH", "/3", { workspaceId: "ws1", fields: { "Story Points": 5 } }],
     ["PATCH", "/3", { workspaceId: "ws1", fields: { Code: "001" } }],
@@ -292,6 +310,15 @@ test("edits go to the app's routes as its screen sends them; a refusal is exit 1
   expect((await run(["nope"])).code).toBe(1);
 });
 
+test("create --parent on a PBI another Task works on exits 1 with its children", async () => {
+  const text = "#891 は Task t_other（占有）が扱っています。子は作りません\nその Task が作った子:\n- #901 一つ目\n- 送信待ち abc 二つ目\n相手の一覧を読んで、自分の分解をやめる";
+  const held = app((m) => (m === "GET" ? { body: LIST } : { status: 409, body: { error: text } }));
+  const r = await run(["create", "--title", "子", "--label", "type:task", "--parent", "891", "--field", "Status=Backlog"], held);
+  expect(r.code).toBe(1);
+  expect(r.err).toBe(`backlog: 409 ${text}`);
+  expect(r.err.split("\n")).toHaveLength(5);
+});
+
 // a clone whose origin is acme/app: the repository the edit's section check takes the configuration for
 const clone = mkdtempSync(join(tmpdir(), "ops-kit.edit-clone."));
 Bun.spawnSync(["git", "init", "-q"], { cwd: clone });
@@ -304,9 +331,36 @@ async function editBody(body: string, opts: { stored?: string; labels?: string[]
   const fake = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: opts.stored ?? PBI_BODY, labels: opts.labels ?? ["type:pbi"] } } } : { status: 202, body: { localId: null, operations: ["o"] } }));
   const out: string[] = [];
   const err: string[] = [];
-  const code = await runBacklog(["edit", "3", "--body-file", "-", ...(opts.extra ?? [])], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, ...opts.env }, { out: (s) => out.push(s), err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: clone, pbiSections: () => opts.sections ?? ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外"] });
+  const code = await runBacklog(["edit", "3", "--body-file", "-", "--rev", "r1", ...(opts.extra ?? [])], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, ...opts.env }, { out: (s) => out.push(s), err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: clone, pbiSections: () => opts.sections ?? ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外"] });
   return { code, out: out.join("\n"), err: err.join("\n"), patches: fake.calls.filter((c) => c.method === "PATCH") };
 }
+
+test("edit --body-file sends the revision it read and exits 1 when the body moved", async () => {
+  // no --rev: refused with how to get one, nothing is sent
+  const fake = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: PBI_BODY, labels: [] }, bodyRevision: "abc123def456" } } : { status: 202, body: { localId: null, operations: ["o"] } }));
+  const bare = await run(["edit", "3", "--body-file", "-"], fake);
+  expect([bare.code, fake.calls.some((c) => c.method === "PATCH")]).toEqual([1, false]);
+  expect(bare.err).toContain("--body-file には読んだ版が要ります");
+  expect(bare.err).toContain(".bodyRevision");
+  // the body moved: the app answers 409, exit 1 with its sentence
+  const moved = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: PBI_BODY, labels: [] } } } : { status: 409, body: { error: "本文が変わりました。読み直してください" } }));
+  const refused = await run(["edit", "3", "--body-file", "-", "--rev", "old"], moved);
+  expect(refused.code).toBe(1);
+  expect(refused.err).toContain("本文が変わりました。読み直してください");
+  // saved: the revision is sent, and the new one is printed
+  const ok = await run(["edit", "3", "--body-file", "-", "--rev", "abc123def456"], fake);
+  expect(ok.code).toBe(0);
+  expect(fake.calls.filter((c) => c.method === "PATCH").map((c) => (c.body as { expectedBodyRevision: string }).expectedBodyRevision)).toEqual(["abc123def456"]);
+  expect(ok.out).toContain("保存しました（版 abc123def456）");
+  // saved, but the read of the new revision fails: still saved (exit 0), and it says how to read the revision
+  let patched = false;
+  const unread = app((m, p) => (m === "PATCH" ? ((patched = true), { status: 202, body: { localId: null, operations: ["o"] } }) : patched && p !== "/syncs" ? { status: 503, body: { error: "down" } } : { body: p === "/syncs" ? LIST : { issue: { number: 3, body: PBI_BODY, labels: [] }, bodyRevision: "abc123def456" } }));
+  const saved = await run(["edit", "3", "--body-file", "-", "--rev", "abc123def456"], unread);
+  expect(saved.code).toBe(0);
+  expect(saved.out).toContain("保存しました（版は読めませんでした");
+  // an edit without a body needs no revision
+  expect((await run(["edit", "3", "--add-label", "x"], fake)).code).toBe(0);
+});
 
 test("edit: a body of null, or a PBI body that loses a required section or the Story Points line, is refused with the reason and nothing is sent", async () => {
   for (const body of ["null\n", `null\n${PBI_BODY}`]) {
@@ -328,7 +382,7 @@ test("edit: a body of null, or a PBI body that loses a required section or the S
 
 test("edit: a log line added, or a section the stored body already lacked added, is sent; a Task is not held to the PBI's sections", async () => {
   const log = await editBody(`${PBI_BODY}\n## 決定ログ\n- 追記\n`);
-  expect([log.code, log.patches.map((c) => c.body)]).toEqual([0, [{ workspaceId: "ws1", body: `${PBI_BODY}\n## 決定ログ\n- 追記\n` }]]);
+  expect([log.code, log.patches.map((c) => c.body)]).toEqual([0, [{ workspaceId: "ws1", expectedBodyRevision: "r1", body: `${PBI_BODY}\n## 決定ログ\n- 追記\n` }]]);
   const old = "## ユーザーストーリー\nx\n## 到達点 / 受け入れ条件\n- [ ] 1\n\n**Story Points**: 3\n";
   expect((await editBody(PBI_BODY, { stored: old })).code).toBe(0);
   expect((await editBody("## やること\n別\n", { labels: ["type:task"] })).code).toBe(0);
@@ -359,7 +413,7 @@ test("empty: an edit or a create whose body is empty or only blanks is refused a
     return { code, err: err.join("\n"), writes: fake.calls.filter((c) => c.method !== "GET").length, reads: fake.calls.filter((c) => c.method === "GET").length };
   };
   for (const body of ["", "  \n\n"]) {
-    for (const argv of [["edit", "3", "--body-file", "-"], ["create", "--title", "T", "--body-file", "-"]]) {
+    for (const argv of [["edit", "3", "--body-file", "-", "--rev", "r1"], ["create", "--title", "T", "--body-file", "-"]]) {
       const r = await sent(argv, body);
       expect([argv[0], r.code, r.writes]).toEqual([argv[0], 1, 0]);
       expect(r.err).toContain(`backlog ${argv[0]}: 本文が空なので保存しません`);
@@ -671,7 +725,7 @@ test("scope: a Task body that names more paths is saved without a grant, and the
       return m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: o.number === undefined ? 3 : o.number, body: STORED, labels: o.labels ?? ["type:task"] } } } : { status: 202, body: { localId: null, operations: ["o"] } };
     });
     const err: string[] = [];
-    const code = await runBacklog(["edit", o.ref ?? "3", "--body-file", "-"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, OPS_KIT_TASK_ID: "t1" }, { out: () => {}, err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: o.cwd ?? dir });
+    const code = await runBacklog(["edit", o.ref ?? "3", "--body-file", "-", "--rev", "r1"], { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined, OPS_KIT_TASK_ID: "t1" }, { out: () => {}, err: (s) => err.push(s), stdin: async () => body }, { fetch: fake.fetch, cwd: o.cwd ?? dir });
     return { code, err: err.join("\n"), patched: fake.calls.some((c) => c.method === "PATCH"), asked: fake.calls.map((c) => c.path).filter((p) => p.includes("scope-stop")) };
   };
   try {
@@ -794,4 +848,11 @@ test("gate keys: a gate script that cannot be asked stops the Ready with the rea
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("view lists the children not sent yet", async () => {
+  const detail = { issue: { number: 3, title: "PBI 3", state: "OPEN", labels: [], milestone: null, parent: null, body: "本文", url: "" }, comments: [], fields: null, fetchedAt: 1, localId: null, pending: 0, waitingSubIssues: [{ localId: "L9", number: 0, title: "子 A", state: "OPEN" }, { localId: null, number: 12, title: "子 B", state: "OPEN" }], sync: { state: "synced", reason: null, lastSuccessfulSync: SYNC.syncedAt } };
+  const r = await run(["view", "3"], app((m, p) => ({ body: p === "/syncs" ? LIST : detail })));
+  expect(r.out).toContain("送信待ち L9 子 A");
+  expect(r.out).toContain("送信待ち #12 子 B");
 });

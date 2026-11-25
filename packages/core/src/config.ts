@@ -36,13 +36,8 @@ export interface CoreConfig {
   candidate: boolean;
   /** sb-rescue's address when it started this daemon from a release (SWITCHBOARD_RESCUE_URL): promotion goes through it. */
   rescueUrl?: string;
-  /** 人が開く救援画面の URL。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、Mac は rescueUrl。コンテナの中（rescueInContainer）では無い。 */
+  /** 人が開く救援画面の URL。sb-rescue の管理下のときだけ: クラウドホストは SWITCHBOARD_WEB_URL の /rescue/、それ以外（コンテナも）は rescueUrl。 */
   rescuePageUrl?: string;
-  /**
-   * sb-rescue answers on the container's own loopback only (SWITCHBOARD_RESCUE_IN_CONTAINER=1, set by container/entrypoint.sh):
-   * no address of it opens in a browser outside the container, so no page is named and the screen shows the commands that reach it.
-   */
-  rescueInContainer: boolean;
   /** Optional built web UI to serve when present. */
   webDist: string;
   /** How long a finished runner process is kept alive for follow-ups before it is released (then `--resume` is used). */
@@ -244,8 +239,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     codeRoot,
     candidate: env.SWITCHBOARD_CANDIDATE === "1",
     rescueUrl: env.SWITCHBOARD_RESCUE_URL || undefined,
-    rescueInContainer: env.SWITCHBOARD_RESCUE_IN_CONTAINER === "1",
-    rescuePageUrl: env.SWITCHBOARD_RESCUE_URL && env.SWITCHBOARD_RESCUE_IN_CONTAINER !== "1" ? (env.SWITCHBOARD_WEB_URL ? `${env.SWITCHBOARD_WEB_URL.replace(/\/+$/, "")}/rescue/` : env.SWITCHBOARD_RESCUE_URL) : undefined,
+    rescuePageUrl: env.SWITCHBOARD_RESCUE_URL ? (env.SWITCHBOARD_WEB_URL ? `${env.SWITCHBOARD_WEB_URL.replace(/\/+$/, "")}/rescue/` : env.SWITCHBOARD_RESCUE_URL) : undefined,
     idleStopCmd: env.SWITCHBOARD_IDLE_STOP_CMD || undefined,
     edgeHeaderValue: env.SWITCHBOARD_EDGE_HEADER_VALUE || undefined,
     githubWebhook: env.SWITCHBOARD_GITHUB_WEBHOOK === "1",

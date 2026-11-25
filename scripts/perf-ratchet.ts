@@ -614,13 +614,18 @@ if (import.meta.main && process.argv[2] === "spread") {
     for (const i of improved) console.log(`improved: ${i.key} = ${i.value} < ceiling ${i.ceiling} − 2 × ${band(i.key)}: lower it with \`bun scripts/perf-ratchet.ts update --env ${env}\` once the last ${LOWER_AFTER} tags are below it`);
     for (const i of raised) console.log(`raised: ${i.key} ceiling ${i.value} > main's ${i.ceiling} (raising a ceiling is merged by hand)`);
     for (const e of added) console.log(`added exception: ${e.key} #${e.issue}（例外を足すのは手でマージ）`);
-    const mainMeasure = (await Bun.file(baseFile!).json()) as { bundle: Bundle; journeys?: Record<string, JourneyBytes> };
-    const growth = bundleGrowth(result.bundle, mainMeasure.bundle);
-    console.log(growth.line);
-    for (const l of growth.grew) console.log(l);
-    const bytes = bytesGrowth(result.journeys, mainMeasure.journeys);
-    for (const l of [...bytes.lines, ...bytes.grew]) console.log(l);
-    if (over.length || improved.length || raised.length || added.length || growth.grew.length || bytes.grew.length) process.exit(1);
+    // the base step did not measure: the ceilings above are still judged, only the bundle and the bytes go uncompared
+    const grewLines: string[] = [];
+    if (existsSync(baseFile!)) {
+      const mainMeasure = (await Bun.file(baseFile!).json()) as { bundle: Bundle; journeys?: Record<string, JourneyBytes> };
+      const growth = bundleGrowth(result.bundle, mainMeasure.bundle);
+      console.log(growth.line);
+      for (const l of growth.grew) console.log(l);
+      const bytes = bytesGrowth(result.journeys, mainMeasure.journeys);
+      for (const l of [...bytes.lines, ...bytes.grew]) console.log(l);
+      grewLines.push(...growth.grew, ...bytes.grew);
+    } else console.log(`bundle: not compared (${baseFile} is missing: the base step did not measure)`);
+    if (over.length || improved.length || raised.length || added.length || grewLines.length) process.exit(1);
     console.log("perf ratchet: ok");
   }
 }

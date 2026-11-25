@@ -4,9 +4,9 @@
  * the kit's tools read, and how each stands against GitHub (`syncOf`).
  */
 import type { ProceedingQuestion } from "@switchboard/protocol";
-import type { Backlog, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogSyncInfo, BacklogSyncState } from "@switchboard/protocol";
+import type { Backlog, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogWaitingSubIssue, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogSyncInfo, BacklogSyncState } from "@switchboard/protocol";
 import type { BacklogOperation, Db } from "./db.ts";
-import { conflictRevision, withoutMarker } from "./backlog-merge.ts";
+import { bodyRevisionOf, conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../../../ops-kit/src/config.ts";
 import { workspaceConfigPath } from "./workspace-config.ts";
 import type { Turn } from "../../../scripts/parallel-guard.ts";
@@ -16,7 +16,8 @@ import { machineOfOperation } from "./backlog-upbox.ts";
 import { type BacklogWorkspace, localBacklogSource, syncsGithub, changesApart } from "./backlog-gh.ts";
 import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
 import { holder } from "../../../scripts/parallel-guard.ts";
-import { sessionOn, withOverlap } from "./backlog-overlap.ts";
+import { claimOn, sessionOn, withOverlap } from "./backlog-overlap.ts";
+import { claimTaskOf } from "./backlog-worker.ts";
 import { notResumed } from "./backlog-pick.ts";
 import { reduceStops } from "./stops.ts";
 import { ANSWER_HEADING, type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
@@ -143,12 +144,14 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   const issues = new Map<number, BacklogIssueData>();
   const targets = new Map<number, WaitTarget>();
   const comments = new Map<number, Comment[]>();
+  const commentIds = new Map<Comment, string>();
   const fields = new Map<number, RawBacklogIssue["projectItems"]["nodes"]>();
   const pulls: Array<NonNullable<Extract<BacklogRecord, { objectKind: "pull-request" }>["remote"]>> = [];
   const statuses = new Map<number, string | number | null>();
   const storedIssues = new Map(db.listBacklogRecords(source, "issue").map((r) => [r.externalId, r]));
   const readOf = new Map<number, { externalId: string; fetchedAt: number | null; fetchState: BacklogFetchState }>();
   const ids = issueIds(storedIssues.values());
+  const waitingChildren = waitingChildrenOf(records);
   for (const r of records) {
     // an Issue made here has no number until GitHub gives it one: read by its local id (readStoredIssue)
     if (r.objectKind === "issue" && r.remote?.number === 0) continue;
@@ -161,7 +164,10 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
       targets.set(r.remote.number, { kind: "pr", state: r.remote.state, isDraft: r.remote.isDraft, labels: r.remote.labels, closes: r.remote.closes, mergeCommit: r.remote.mergeCommit, stateReason: null, confirmOnly: false });
       pulls.push(r.remote);
     }
-    else if (r.objectKind === "comment" && r.remote) comments.set(r.remote.issue, [...(comments.get(r.remote.issue) ?? []), r.remote]);
+    else if (r.objectKind === "comment" && r.remote) {
+      comments.set(r.remote.issue, [...(comments.get(r.remote.issue) ?? []), r.remote]);
+      commentIds.set(r.remote, r.externalId);
+    }
     // the Project the workspace reads, by owner (GitHub ignores its case; the URL is written by hand) and number:
     // another owner's Project #n is another Project
     else if (r.objectKind === "project-item" && r.remote && r.remote.owner.toLowerCase() === source.project.owner.toLowerCase() && r.remote.project === source.project.number) {
@@ -187,11 +193,12 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   for (const i of issues.values()) {
     if (i.state !== "OPEN" || !i.labels.some((l) => l === "type:pbi" || l === "type:request")) continue;
     const closedSubs = readClosedTasks(i.subIssues, issues, unread);
+    const waiting = waitingChildren.get(i.number) ?? [];
     const raw: RawBacklogIssue = {
       number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, updatedAt: i.updatedAt, body: i.body,
       labels: { nodes: labelsOf(i).map((name) => ({ name })) },
       subIssuesSummary: {
-        total: i.subIssues.length, completed: closedSubs.length,
+        total: i.subIssues.length + waiting.length, completed: closedSubs.length + waiting.filter((w) => w.state === "CLOSED").length,
         doneAt: closedSubs.map((n) => issues.get(n)!.closedAt ?? issues.get(n)!.updatedAt).sort().at(-1) ?? null,
       },
       projectItems: { nodes: fields.get(i.number) ?? [] },
@@ -215,18 +222,23 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
     });
   // a claim left by a stage Task that ended is no session at work (`sessionOn`), unless the PBI's Task only waits for a planned resume
   const ended = (n: number, at: number) => !opts.parked?.(n) && db.endedStageRanAt(ws.id, n, at);
-  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now, sessionOn({ active: opts.active, commentsOf, unread, ended }));
+  // the Task that wrote a claim comment (a stored comment's id is the operation's target), so a claim another Task holds counts while that Task works or waits for the person
+  const taskOf = claimTaskOf(db, source);
+  const claimTask = (c: Comment) => { const id = commentIds.get(c); return id === undefined ? null : taskOf(id); };
+  const claimed = claimOn({ commentsOf, ended, claimTask });
+  for (const i of items) i.claim = claimed(i.number);
+  withWaits(withComments(asked, buildingOf(asked), commentsOf, tasksOf), targets, issues, now, sessionOn({ active: opts.active, commentsOf, unread, ended, claimTask }));
   withConfirmDecisions(items, targets);
   const startable = withPrereqs(items, issues, targets, opts.released ?? (() => null));
   for (const i of items) i.events = eventsOf({ item: i, issues, pulls, commentsOf, now, runningSince: opts.runningSince ?? null });
-  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, notResumed: (i) => {
+  const turns = withOverlap(items, issues, startable, pulls, statuses, ws.path, { active: opts.active, parked: opts.parked, commentsOf, unread, ended, claimTask, notResumed: (i) => {
     // a PBI whose stage Tasks are not on record (`lastTask` null) keeps its place: nothing says the queue left it
     if (opts.active?.(i.number)) return false;
     const s = withStageTask(db, i);
     return s.lastTask !== null && notResumed({ ...s, activeTaskId: null });
   }, sharedFiles: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE) });
   // the PBIs with a claim the app does not count as work: the guard in a Task counts the same
-  const worked = sessionOn({ active: opts.active, commentsOf, unread, ended });
+  const worked = sessionOn({ active: opts.active, commentsOf, unread, ended, claimTask });
   const unheld = [...issues.values()].filter((t) => t.state === "OPEN" && t.labels.includes("type:pbi")).map((t) => t.number).filter((n) => !worked(n) && holder(commentsOf(n).map((c, k) => ({ id: k, body: c.body }))) !== null);
   // a workspace whose Issues are a service's keeps its changes apart (changeSourceOf)
   const apart = changesApart(source);
@@ -398,6 +410,22 @@ export function givenOnScreen(ops: BacklogOperation[], commentId: string, body: 
 }
 
 /**
+ * The Issues kept here that name a parent GitHub's list of that parent's sub-issues does not hold yet: one made here with no
+ * number, or one numbered whose parent's list has not been read since. Each parent's Tasks as the app counts them are its
+ * list plus these (`tasks.total`), so a PBI whose Tasks were just made does not read as having none.
+ */
+export function waitingChildrenOf(records: BacklogRecord[]): Map<number, BacklogWaitingSubIssue[]> {
+  const issues = records.flatMap((r) => (r.objectKind === "issue" && r.remote ? [{ id: r.externalId, issue: r.remote as BacklogIssueData }] : []));
+  const listed = new Map(issues.filter((x) => x.issue.number > 0).map((x) => [x.issue.number, x.issue.subIssues]));
+  const out = new Map<number, BacklogWaitingSubIssue[]>();
+  for (const { id, issue } of issues) {
+    if (issue.parent === null || issue.change || (issue.number > 0 && listed.get(issue.parent)?.includes(issue.number))) continue;
+    out.set(issue.parent, [...(out.get(issue.parent) ?? []), { localId: id.startsWith("local:") ? id.slice("local:".length) : null, number: issue.number, title: issue.title, state: issue.state }]);
+  }
+  return out;
+}
+
+/**
  * One stored Issue of the workspace's repository, without asking GitHub; null = not stored. `ref`: its number, or
  * the local id of an Issue made here — before GitHub numbers it and after. It shows the edits not sent yet.
  */
@@ -427,10 +455,10 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
     return [{ operation: o.id, kind: o.kind, field: o.field, status: o.status, reason: o.error, updatedAt: o.updatedAt, conflict }];
   });
   return {
-    workspaceId: ws.id, issue, comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    workspaceId: ws.id, issue, bodyRevision: bodyRevisionOf(issue.body), comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     fields: item ? (item.remote as BacklogProjectItemData).fields : (create?.project?.fields ?? null), projectFields: source.projectFields ?? [], fetchedAt: rec.fetchedAt, fetchState: rec.fetchState,
     localId: typeof ref === "string" ? ref : rec.externalId.startsWith("local:") ? rec.externalId.slice("local:".length) : null, pending: pending.length,
-    held, limits: SYNC_LIMITS, changeRefs: null,
+    held, limits: SYNC_LIMITS, changeRefs: null, waitingSubIssues: waitingChildrenOf(records).get(issue.number) ?? [],
     sync: syncOf(db, all.filter((o) => family.has(o.issue)), { lastSuccessfulSync: freshAt(db.getBacklogRepository(source)?.lastSuccessfulSync ?? null, rec), retryAt: db.getBacklogRepository(source)?.retryAt ?? null, fetchState: rec.externalId.startsWith("local:") && !rec.remote ? "fetched" : rec.fetchState, importFailed: opts.importFailed, now: opts.now ?? Date.now() }),
   };
 }

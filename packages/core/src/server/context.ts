@@ -238,6 +238,8 @@ export interface ServerContext {
   promotionHold: PromotionHold | null;
   heldSince: { tag: string; at: number } | null;
   promotionAsked: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null;
+  /** The update the person pressed (`確かめて更新する`), in memory only: it carries the pressed tag through its check to the promotion, and says why it stopped (`stopped`: the check ended in a concern or could not be made). */
+  updatePressed: { tag: string; sha: string; at: number; stopped?: "concern" | "failed" } | null;
   readonly startReleaseReview: (tag: string, sha: string, current: string, source?: string | null) => Promise<string | null>;
   readonly reviewedShaFile: (tag: string) => string;
   readonly reviewedSha: (tag: string) => string | null;

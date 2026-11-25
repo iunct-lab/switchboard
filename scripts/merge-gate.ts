@@ -13,7 +13,7 @@ import { markedLinesTouched } from "./merge-gate-rules.ts";
 import { heldSettingsOf, type HeldSettings } from "./workspace-settings.ts";
 import { mergeRecords, type MergeRecordJob, type MergeRecords } from "../ops-kit/src/merge-records.ts";
 import { mergeRecordsEnv } from "./merge-records-env.ts";
-import { attackedOf, ciAtTips, ciOf, rechecksOf, reviewedOf } from "./merge-gate-records.ts";
+import { attackedOf, ciAtTips, ciOf, COMMAND_RECHECKS, rechecksOf, reviewedOf } from "./merge-gate-records.ts";
 import { viewpointsOf } from "./review-viewpoints.ts";
 
 export const LARGE_LINES = 300;
@@ -613,6 +613,14 @@ export function viewpointsMaterial(f: PrFacts): string {
   return viewpointsOf(judge(f, { allowLarge: false }).required ?? []);
 }
 
+/** What lifts a recheck kind, said in its reason: a command's kind is run with the local CI, a kind read by a model needs the arbiter's ruling (`rescue` both). */
+export function recheckWay(kind: RecheckKind): string {
+  const arbiter = "監督者の裁定が要る（`ops-kit job request review <PR> --as arbiter`）";
+  const command = `\`ops-kit job request recheck <PR> --kind ${kind}\` をローカル CI と同じ時に回す`;
+  if (!COMMAND_RECHECKS.includes(kind)) return ` → ${arbiter}`;
+  return kind === "rescue" ? ` → ${command}、${arbiter}` : ` → ${command}`;
+}
+
 /** --allow-large lifts the large reasons only with the app's record of the person's grant of the head (`PrFacts.granted`); no comment is read. */
 export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
   const large: { kind: RecheckKind | AskKind; text: string }[] = [];
@@ -679,7 +687,7 @@ export function judge(f: PrFacts, opts: { allowLarge: boolean }): Judgement {
     ? []
     : large
       .filter((l) => isAsk(l.kind) || !marked.has(l.kind))
-      .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}`);
+      .map((l) => `${isAsk(l.kind) ? "[聞く]" : `[再チェック ${l.kind}]`} ${l.text}${isAsk(l.kind) ? "" : recheckWay(l.kind)}`);
   if (mixed) reasons.push(mixed);
   if (opts.allowLarge && !lifted) {
     reasons.push(`利用者の許可の記録が無い: ${left.join(",")}（Task の会話で利用者が「${f.subject ?? "PR #<n>"} をマージしてよい」と認めると、その head に記録される。新しいコミットの後は聞き直す）`);
@@ -1100,7 +1108,7 @@ export async function readPr(n: number, run = gh, repo = currentRepo(), git = { 
   const own = jobs.filter((j) => j.pr === n);
   const local = await ciOf(jobs, top, covers, (passHead, passBase) => sharedMoved(git, sharedFilesOf(git.root), passHead, passBase, pr.baseRefOid), held);
   const checks = await checksWithLocalCi(runs.workflow_runs, local.pass, run, repo);
-  const rechecks = (await rechecksOf(own, pr.headRefOid, covers)) as RecheckKind[];
+  const rechecks = (await rechecksOf(own, pr.headRefOid, covers, RECHECK_KINDS)) as RecheckKind[];
   const reviewed = await reviewedOf(own, covers);
   const attacked = await attackedOf(own, covers);
   const task = await readTask(pr, pr.files.map((x: { path: string }) => x.path), run, repo);
@@ -1225,7 +1233,7 @@ export async function readChange(d: ChangeDetail, root: string, records?: Stored
   const raised = await limitsRaisedOf(files, async (side, path) => git("show", `${side === "head" ? head : await mergeBaseOf()}:${path}`));
   // a job's head stands for the change's head only when it is the same commit: no PR's commits to compare by
   const sameHead = (h: string) => h === head;
-  const rechecks = (await rechecksOf(jobs, head, sameHead)) as RecheckKind[];
+  const rechecks = (await rechecksOf(jobs, head, sameHead, RECHECK_KINDS)) as RecheckKind[];
   const reviewed = await reviewedOf(jobs, sameHead);
   const attacked = await attackedOf(jobs, sameHead);
   // a conflict with the base's tip: the merge cannot be made as is. Only exit 1 is a conflict; any other failure (an old
@@ -1340,7 +1348,7 @@ export async function readGitlabPr(iid: number, sh: Sh, target: ForgeTarget, hel
     : localPass ? [{ name: LOCAL_CI_ONLY, conclusion: "SUCCESS" }] : [];
   const localCi = !ran && localPass;
   const sameHead = (h: string) => h === head;
-  const rechecks = (await rechecksOf(jobs, head, sameHead)) as RecheckKind[];
+  const rechecks = (await rechecksOf(jobs, head, sameHead, RECHECK_KINDS)) as RecheckKind[];
   const reviewed = await reviewedOf(jobs, sameHead);
   const attacked = await attackedOf(jobs, sameHead);
   // GitLab says the CI must pass when it has no pipeline of the head: the local pass is that CI here, as UNSTABLE is on GitHub

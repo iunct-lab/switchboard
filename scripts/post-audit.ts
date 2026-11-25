@@ -3,7 +3,7 @@
  * the weekly post-merge audit reads again. Prints `{ repo, period, selected: [{ pr, route, auditor, implementerKnown, mergeSha }],
  * overflow, unsaved, uncountedAudits }`; exit 0 / 2 when it could not read. Keeps nothing (an audit job of the app that read the merge commit and kept `pass`, one that kept `finding` whose PBI (`pbiTitle`, open or closed) the app has stored, or a `[post-audit]` mark of an owner, member or collaborator on the PR, is the record of an audit; a `finding` job with no PBI is selected again: `record` stopped before filing it).
  *
- * A merged PR has one of three routes, decided from the app's records of it (scripts/merge-audit.ts `prViewsOf`): `recheck` (a recheck
+ * A merged PR has one of three routes, decided from the app's records of it (scripts/merge-audit.ts `prViewsOf`): `recheck` (a recheck or the arbiter
  * lifted the large PR, with no grant of the person's), `direct` (its merge verdict skipped the main review: nobody read it), `review`
  * (a main review was asked for). `direct` and `recheck` are all
  * candidates; `review` is a fixed number. Everything is ordered by hash of the period and the PR number (the same period

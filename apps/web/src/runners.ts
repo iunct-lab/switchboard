@@ -10,6 +10,14 @@ export function listedRunners(runners: RunnerInfo[] | undefined, keep?: RunnerId
   return out;
 }
 
+/**
+ * The runners a 並走 can run on: detected, not a server added in Settings, and not the Task's own (`primary`). The one place
+ * the choices of the common 並走 default and of each kind's 並走 are made, so the two cannot disagree.
+ */
+export function shadowCandidates(listed: RunnerId[], runnerOk: Set<RunnerId>, primary?: RunnerId): RunnerId[] {
+  return listed.filter((r) => runnerOk.has(r) && !r.startsWith("custom:") && r !== primary);
+}
+
 /** The ledger's runners: the listed ones, then any runner with a record that is not listed (a past DAK), first seen first. */
 export function ledgerRunners(listed: RunnerId[], recorded: RunnerId[]): RunnerId[] {
   const out = [...listed];

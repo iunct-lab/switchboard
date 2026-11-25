@@ -245,7 +245,7 @@ const answerWait = (sc: Pick<ServerContext, "db" | "tasks" | "settings" | "broad
     else sc.tasks.recordStopEvent(task.id, { ...s, actions, at: now });
   }
   const after = sc.db.getTask(task.id) ?? task;
-  refreshTaskWaits({ db: sc.db, bounds: () => boundsOf(sc.settings().quotaAndResume), broadcastTask: (t) => sc.broadcast({ type: "task.updated", task: t }) }, after, { files: readWaitFiles(waitsDirOf(sc.cfg.home)).waiting.get(task.id) ?? [], lastEventAt: sc.tasks.lastEvents().get(task.id) ?? null, queue: sc.tasks.queueWait(), refusal: sc.tasks.queueRefusal(task.id) }, now);
+  refreshTaskWaits({ db: sc.db, bounds: () => boundsOf(sc.settings().quotaAndResume), broadcastTask: (t) => sc.broadcast({ type: "task.updated", task: t }) }, after, { files: readWaitFiles(waitsDirOf(sc.cfg.home)).waiting.get(task.id) ?? [], lastEventAt: sc.tasks.lastEvents().get(task.id) ?? null, hook: sc.tasks.lastHooks().get(task.id) ?? null, queue: sc.tasks.queueWait(), refusal: sc.tasks.queueRefusal(task.id) }, now);
   return { status: 200, body: { ask: { ...ask, state: "answered", changedAt: now, answers: [] }, already: false, changes: [] } satisfies AskAnswerResult };
 };
 
@@ -395,6 +395,8 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   // an 実装 whose files other work touches is not started by an answer either, as backlog-next's pickNext leaves it;
   // one already running is the running answer below, not a refusal
   if (action === "complete" && !item.activeTaskId && isOverlapped(item)) return done({ state: "queued", reason: overlapLine([item]).join("・"), taskId: null, at });
+  // a Task holds the item with a claim: no stage starts from the answer, as backlog-next's pickNext leaves it (an answer's resume is automatic)
+  if (item.claim && !item.activeTaskId) return done({ state: "queued", reason: `占有中${item.claim.taskId ? `（Task ${item.claim.taskId}）` : ""}`, taskId: null, at });
   const r = await sc.startStage({ ws, meta: meta ?? ws, item, action, auto: true });
   // nothing happened since the last automatic start of this stage (an answer older than it): the card stays 再開待ち; the button still starts it
   if ("held" in r && !("error" in r)) return done({ state: "queued", reason: `前回の開始から出来事が増えていない（前回 ${r.held.previousTaskId}）`, taskId: null, at });

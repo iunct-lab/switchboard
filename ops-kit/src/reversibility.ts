@@ -80,8 +80,9 @@ const within = (path: string, scope: string[]) => scope.some((s) => path === s |
  * `implementation-choice` and `wording` only for a question on a Task's Issue whose every named path is inside what
  * that Task's body names (`scopeIn`, the merge gate's reading). Paths and numbers are read in the whole text, fences
  * and quotes too. What cannot be checked (the place is not known, the Task names no path, a kind with no rule here)
- * is refused: the work then stops and asks. This catches a wrong kind, not a wrong intention — a question that names
- * nothing passes it, and the stop words and the person's later answer are what is left.
+ * is refused: the work then stops and asks. A question that names nothing that would show its kind (no path in the
+ * Task's range, no Task of the PBI) is refused too. This catches a wrong kind, not a wrong intention — the stop words
+ * and the person's later answer are what is left.
  */
 export function kindRefusal(kind: string, body: string, place: AskPlace | null): string | null {
   if (!place) return "問いの置かれた Issue を読めず、種類を確かめられない";
@@ -92,13 +93,17 @@ export function kindRefusal(kind: string, body: string, place: AskPlace | null):
     if (named.length) return `種類 task-order の問いがファイルを名指している（${named[0]}）`;
     const family = new Set([place.pbi.number, ...place.pbi.tasks]);
     const other = [...body.matchAll(/#(\d+)/g)].map((m) => Number(m[1])).find((n) => !family.has(n));
-    return other === undefined ? null : `種類 task-order の問いが PBI #${place.pbi.number} とその Task でないもの（#${other}）を挙げている`;
+    if (other !== undefined) return `種類 task-order の問いが PBI #${place.pbi.number} とその Task でないもの（#${other}）を挙げている`;
+    const tasks = new Set(place.pbi.tasks);
+    const mentioned = [...body.matchAll(/#(\d+)/g)].some((m) => tasks.has(Number(m[1])));
+    return mentioned ? null : `種類 task-order の問いが PBI #${place.pbi.number} の Task を 1 つも名指していないので、順序の問いか確かめられない`;
   }
   if (kind === "implementation-choice" || kind === "wording") {
     const n = place.issue.number;
     if (!place.issue.labels.includes("type:task")) return `種類 ${kind} は Task の Issue に書いた問いだけ（#${n} は Task でないので、名指しの範囲を確かめられない）`;
     const scope = scopeIn(place.issue.body, place.top);
     if (!scope.length) return `Task #${n} の本文が触るファイルを名指していないので、範囲を確かめられない`;
+    if (!named.length) return `種類 ${kind} の問いがパスを 1 つも名指していないので、Task #${n} の範囲の中か確かめられない`;
     const out = named.find((x) => !within(x, scope));
     return out === undefined ? null : `問いが Task #${n} の名指しの外のパス（${out}）を挙げている`;
   }

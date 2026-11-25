@@ -1,6 +1,6 @@
 # CLI update
 
-The daemon keeps the host's `claude` and `codex` CLIs current: it takes a new version only from the distributor the installers use, checks what it fetched, places it beside the version in use, tries it, and moves the link only when no Task is running. Every decision is a row of `cli_updates`, read with `GET /api/runners/updates`, and the version before can be put back (`POST /api/runners/:id/rollback`).
+The daemon keeps the machine's `claude` and `codex` CLIs current: it takes a new version only from the distributor the installers use, checks what it fetched, places it beside the version in use, tries it, and moves the link only when no Task is running. Every decision is a row of `cli_updates`, read with `GET /api/runners/updates`, and the version before can be put back (`POST /api/runners/:id/rollback`).
 
 ## Where versions come from
 
@@ -28,7 +28,7 @@ The link (`~/.local/bin/claude`, `~/.codex/packages/standalone/current`) is move
 
 Two versions are kept: the one in use and the one a rollback goes to. The rollback target is the version installed here before the one in use, leaving out any version a person went back from. A rollback (`POST /api/runners/:id/rollback`) waits, like an install, until no Task runs. A version a person went back from is not brought in again by itself; a newer one is.
 
-A host without the installers' link, a candidate daemon and a work machine change nothing.
+A machine without the installers' link, a candidate daemon and a work machine change nothing.
 
 ## What this does not guard
 
@@ -36,9 +36,9 @@ A version the distributor itself publishes and signs with bad intent passes; `wa
 
 ## Known limits
 
-The one read-only turn starts the placed file directly, through an adapter with no runner settings: it does not go through anything that stands in front of `claude` on PATH, and it does not use the Bedrock switch of Settings. Two kinds of host therefore cannot pass it, and with `smoke` at `turn` a new version of that runner is refused there (it fails closed: the version in use stays, nothing new goes in):
+The one read-only turn starts the placed file directly, through an adapter with no runner settings: it does not go through anything that stands in front of `claude` on PATH, and it does not use the Bedrock switch of Settings. Two kinds of machine therefore cannot pass it, and with `smoke` at `turn` a new version of that runner is refused there (it fails closed: the version in use stays, nothing new goes in):
 
-- A host whose `claude` gets its sign-in from `scripts/host/claude-wrapper.sh` (installed ahead of the real `claude` on PATH, reading a `claude setup-token` token from Parameter Store): the placed file starts without that token.
-- A host where Claude or Codex runs only on Amazon Bedrock (switched in Settings, `docs/design/bedrock.md`): the turn does not get the Bedrock settings.
+- A machine whose `claude` gets its sign-in from `scripts/host/claude-wrapper.sh` (installed ahead of the real `claude` on PATH, reading a `claude setup-token` token from Parameter Store): the placed file starts without that token.
+- A machine where Claude or Codex runs only on Amazon Bedrock (switched in Settings, `docs/design/bedrock.md`): the turn does not get the Bedrock settings.
 
-On such a host, set `Settings.cliUpdate.smoke` to `version`: the distributor, checksum and signature checks still apply, and a version refused under the other setting is checked again. Nothing tries a turn in its place.
+On such a machine, set `Settings.cliUpdate.smoke` to `version`: the distributor, checksum and signature checks still apply, and a version refused under the other setting is checked again. Nothing tries a turn in its place.

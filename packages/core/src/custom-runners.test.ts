@@ -227,6 +227,32 @@ describe("/api/custom-runners", () => {
   });
 });
 
+describe("parallel run and custom:<name>", () => {
+  test("a custom runner is refused as the parallel run default and as a kind's parallel run; the saved values stay", async () => {
+    const b = await boot([fake("claude", []), fake("codex", []), fake("custom:sample", [])]);
+    expect((await send(b, "PATCH", "/api/settings", { shadowRunner: "codex" })).status).toBe(200);
+    expect((await send(b, "PATCH", "/api/settings", { autoStart: { byKind: { complete: { shadow: "codex" } } } })).status).toBe(200);
+    const refusedDefault = await send(b, "PATCH", "/api/settings", { shadowRunner: "custom:sample" });
+    expect(refusedDefault.status).toBe(400);
+    expect(((await refusedDefault.json()) as { error: string }).error).toBe(`runner "custom:sample" cannot be a parallel run default`);
+    const refusedKind = await send(b, "PATCH", "/api/settings", { autoStart: { byKind: { complete: { shadow: "custom:sample" } } } });
+    expect(refusedKind.status).toBe(400);
+    expect(((await refusedKind.json()) as { error: string }).error).toBe(`runner "custom:sample" cannot be a parallel run default`);
+    const saved = await send(b, "GET", "/api/settings").then(j);
+    expect(saved.shadowRunner).toBe("codex");
+    expect(saved.autoStart.byKind.complete.shadow).toBe("codex");
+  });
+
+  test("parallel run: a kind that already holds a custom parallel run keeps it through a PATCH of another field, and still cannot be given one", async () => {
+    const b = await boot([fake("claude", []), fake("codex", []), fake("custom:sample", [])]);
+    core!.db.setSetting("settings", { autoStart: { runner: "claude", byKind: { complete: { shadow: "custom:sample" } } } }); // saved before the refusal existed
+    expect((await send(b, "PATCH", "/api/settings", { autoStart: { byKind: { complete: { budgetUsd: 3 } } } })).status).toBe(200);
+    expect((await send(b, "GET", "/api/settings").then(j)).autoStart.byKind.complete).toMatchObject({ shadow: "custom:sample", budgetUsd: 3 });
+    expect((await send(b, "PATCH", "/api/settings", { autoStart: { byKind: { check: { shadow: "custom:sample" } } } })).status).toBe(400);
+    expect((await send(b, "PATCH", "/api/settings", { autoStart: { byKind: { complete: { shadow: "custom:sample" } } } })).status).toBe(400); // sent again = chosen now
+  });
+});
+
 describe("Tasks on dak and custom:<name>", () => {
   test("the past dak Task, schedule and ledger rows read as before", async () => {
     const b = await boot([fake("claude", []), fake("dak", [])]);

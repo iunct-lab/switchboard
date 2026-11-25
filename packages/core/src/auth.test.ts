@@ -470,10 +470,6 @@ describe("sb_session cookie", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_WEB_URL: "https://d1.example.net/" }).rescuePageUrl).toBe("https://d1.example.net/rescue/");
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue }).rescuePageUrl).toBe(rescue);
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_WEB_URL: "https://d1.example.net" }).rescuePageUrl).toBeUndefined();
-    // inside the stand-alone container sb-rescue's address opens in no browser outside it: no page is named, and the daemon knows why
-    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_RESCUE_IN_CONTAINER: "1" })).toMatchObject({ rescueUrl: rescue, rescueInContainer: true });
-    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue, SWITCHBOARD_RESCUE_IN_CONTAINER: "1" }).rescuePageUrl).toBeUndefined();
-    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_RESCUE_URL: rescue }).rescueInContainer).toBe(false);
   });
 
   test("a removed passkey's cookie is refused within SESSION_RECHECK_MS: the daemon asks the Starter and caches the answer", async () => {

@@ -1,7 +1,7 @@
 import type { RunnerId } from "@switchboard/protocol";
 import { LOCAL_ISSUE_RULES, localChangeRules, type OtherRepo, otherRepoRules } from "./backlog-prompt.ts";
 import { skillPathsFor } from "./skillsync.ts";
-import { renderEntry, REVIEWER_WORDS, type ProcessDef, type ReviewSetting } from "./process-defs.ts";
+import { entryConditions, renderEntry, REVIEWER_WORDS, type ProcessDef, type ReviewSetting } from "./process-defs.ts";
 
 /** Where a request came from besides the button (evals, a throwaway app with the folder its copy is in). */
 export type FeedbackSource = { kind: "eval"; taskId: string } | { kind: "artifact"; artifactId: string; taskId: string; copy: string };
@@ -119,7 +119,7 @@ export function buildBaselinePrompt(concept: string, opts: { other: OtherRepo; l
   // the concept is the person's: it is rendered into the entry after the entry's own text was read for the runner
   // (a definition without the entry is left as it is: `renderEntry` refuses it, and nothing starts on an empty text)
   const entry = def.entries.baseline;
-  const body = renderEntry(entry === undefined ? def : { ...def, entries: { ...def.entries, baseline: forRunner(entry) } }, "baseline", { concept: fenced(concept), reviewer: REVIEWER_WORDS[opts.review ?? "other"] });
+  const body = renderEntry(entry === undefined ? def : { ...def, entries: { ...def.entries, baseline: forRunner(entry) } }, "baseline", { concept: fenced(concept), reviewer: REVIEWER_WORDS[opts.review ?? "other"] }, entryConditions({ runner: opts.runner ?? "claude", review: opts.review ?? "other", local: opts.local }));
   // the baseline merges its PRs (the entry's own text says when), so it gets the merging half of the rules
   return `${body}\n\n${forRunner(otherRepoRules(opts.other, { local: opts.local, localForge: opts.local && opts.localForge, merges: true }))}${NO_ISSUES}`;
 }

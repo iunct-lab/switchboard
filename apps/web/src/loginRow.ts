@@ -9,6 +9,8 @@ export interface LoginRow {
   label: string;
   text: string;
   action: "login" | "logout" | null;
+  /** On Amazon Bedrock: true = chosen in the settings here, "cli" = set in the CLI's own settings. */
+  bedrock?: true | "cli";
 }
 
 const LABELS: Record<LoginRow["id"], string> = { switchboard: "Switchboard", claude: "Claude Code", codex: "Codex", gh: "GitHub" };
@@ -16,12 +18,13 @@ const LABELS: Record<LoginRow["id"], string> = { switchboard: "Switchboard", cla
 /**
  * The row of a runner's own login (claude, codex): the kind while logged in, with logout; "ログアウト中" while it ran out
  * or was logged out, with login; a note and no button while the tool is missing or the state is not known. A runner switched
- * to Amazon Bedrock says so, with neither (its own login is not in use). Runners without such a row (dak) give null.
+ * to Amazon Bedrock (by the setting here, or by the CLI's own setting, which says where) says so, with neither (its own login is not in use). Runners without such a row (dak) give null.
  * A kind that is not known (an older CLI) is left out, not guessed.
  */
-export function loginRowView(r: Pick<RunnerInfo, "id" | "login" | "loginKind" | "available">): (LoginRow & { bedrock?: true }) | null {
+export function loginRowView(r: Pick<RunnerInfo, "id" | "login" | "loginKind" | "available" | "bedrockFrom">): LoginRow | null {
   if (r.id !== "claude" && r.id !== "codex") return null;
   const row = { id: r.id, label: LABELS[r.id] };
+  if (r.bedrockFrom === "cli") return { ...row, text: t(common.loginBedrockCli), action: null, bedrock: "cli" };
   if (r.loginKind === "bedrock") return { ...row, text: t(common.loginBedrock), action: null, bedrock: true };
   if (!r.available) return { ...row, text: t(common.loginNoTool), action: null };
   if (r.login === "ok") {

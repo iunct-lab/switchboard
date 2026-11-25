@@ -826,6 +826,8 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
     }
     // a wait past its limit, or a runner silent past its: nothing ends it by itself any more, so it is the person's to look at
     for (const w of overWaits(t, now)) {
+      // a hook wait past its limit is 応答なし at the wait watch's next look: it is asked as that, not as a wait over its limit
+      if (w.kind === "hook") continue;
       const silent = w.kind === "output";
       // a wait that comes from a stop of a Task whose turn is over is answered here; any other is the Task's own to end
       const answered = answerableWait(t, w);

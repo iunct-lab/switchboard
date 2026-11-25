@@ -32,6 +32,11 @@ export class JobQueries extends ScheduleQueries {
     return (this.sqlite.query(`SELECT * FROM jobs WHERE repo = ? AND pr IN (${marks}) ORDER BY id`).all(repo, ...prs) as JobRow[]).map(rowToJob);
   }
 
+  /** The review jobs asked for a PR number, in any repository, newest first (a caller keeps the repository's own). */
+  reviewJobsForPr(pr: number): Job[] {
+    return (this.sqlite.query("SELECT * FROM jobs WHERE kind = 'review' AND pr = ? ORDER BY id DESC").all(pr) as JobRow[]).map(rowToJob);
+  }
+
   /** The tag CI jobs of a repository (`repo` as recorded) asked for a tag's commit (`head`), oldest first. */
   tagCiJobsOf(repo: string, sha: string): Job[] {
     return (this.sqlite.query("SELECT * FROM jobs WHERE kind = 'tag-ci' AND repo = ? AND head = ? ORDER BY id").all(repo, sha) as JobRow[]).map(rowToJob);

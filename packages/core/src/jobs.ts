@@ -4,14 +4,17 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readd
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { childEnv } from "@switchboard/adapter-claude";
+import { checkRulings } from "../../../ops-kit/src/review-arbiter.ts";
 import { primaryReviewer } from "../../../ops-kit/src/conditions.ts";
 import { RECHECK_KINDS } from "../../../scripts/merge-gate.ts";
 import { heavyStateDir } from "../../../ops-kit/src/heavy.ts";
 import { REVIEWER_ISOLATION, reviewPrompt } from "../../../ops-kit/src/review-note.ts";
+import { storedEnds } from "./backlog-stored.ts";
 import type { Db } from "./db.ts";
 import { TASK_MARK } from "./detached.ts";
 import { readBootId } from "./ops-stops.ts";
 import { ledgerRowFor } from "./pricing.ts";
+import { isLimitText } from "./ratelimit.ts";
 import { gitlabTargetOf, workspaceConfigEnv } from "./workspace-config.ts";
 
 /**
@@ -361,6 +364,16 @@ export const auditResult = (text: string): JobResult["review"] | null => {
 };
 
 /**
+ * An arbiter's output (`as: arbiter`) has no Findings section: its record keeps the rulings and viewpoints as `checkRulings` reads them
+ * (`ops-kit/src/review-arbiter.ts`, the one reader of the line shapes), so an output that cannot be read is on record as unreadable, not as no record.
+ */
+export const arbiterResult = (text: string): NonNullable<JobResult["review"]> => {
+  const r = checkRulings(text);
+  const cap = (l: string[]) => l.slice(0, MAX_FINDINGS).map((x) => x.slice(0, MAX_FIRST_LINE));
+  return { findings: [], firstLine: (text.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, MAX_FIRST_LINE), rulings: { reviewerSide: cap(r.reviewerSide), missing: cap(r.missing), unreadable: cap(r.unreadable) } };
+};
+
+/**
  * The copy of a review's output, run as a short child whose working folder is the folder of the place the request named.
  * Entering the folder pins it: a link put in place of a folder on the way afterwards changes nothing for the child. The child
  * reads where that folder really is (`process.cwd()` is the kernel's path of the pinned folder) and refuses one outside the
@@ -418,7 +431,7 @@ export function deliverReview(job: Job, jobDir: string): void {
 function recordReview(deps: JobDeps, job: Job, jobDir: string): void {
   try {
     const text = readFileSync(join(jobDir, "out.md"), "utf8");
-    const result = reviewResult(text) ?? (job.as === "audit" ? auditResult(text) : null);
+    const result = job.as === "arbiter" ? arbiterResult(text) : reviewResult(text) ?? (job.as === "audit" ? auditResult(text) : null);
     if (result) deps.db.setJobResult(job.id, { result: { review: result } });
   } catch {
     // no output file, or not readable: the job has no result
@@ -578,13 +591,43 @@ export function recheckReviewer(primary: "codex" | "claude", setting: "other" | 
 /** A Task in one of these may still work in its folder: every status but the ended ones. */
 const LIVE_TASK = TaskStatus.options.filter((s) => s !== "done" && s !== "error" && s !== "aborted");
 
+/** The utilization of the main reviewer's usage-limit window at which a stand-in review is taken (the same value as the skill's guidance for a fallback). */
+const LIMIT_UTILIZATION = 0.9;
+
+/**
+ * Why a review asked of a runner that is not the main reviewer is refused, or null when the record backs the reason it names
+ * (`as`): a fallback needs the main reviewer's usage-limit window at its limit now, or a main review job of this PR that ended at
+ * the limit; a recheck needs a main review job of this PR (one asked with no reason, or its stand-in) that has ended; an audit needs the PR stored as merged. An attack names its
+ * own runner and is not checked here.
+ */
+export function reviewPurposeRefusal(deps: JobDeps, cwd: string, req: JobRequest, primary: "codex" | "claude"): string | null {
+  if (req.kind !== "review" || !req.as || req.as === "attack") return null;
+  const now = (deps.now ?? Date.now)();
+  const workspaces = deps.db.listWorkspaces();
+  const ws = workspaces.find((w) => sameRepository(w.path, cwd));
+  const key = repoKeyOf(cwd, ws);
+  // the job's own record of the repository first, so a review checkout that is gone does not hide it
+  const mine = () => deps.db.reviewJobsForPr(req.pr).filter((j) => (key !== "" && j.repo === key) || sameRepository(j.cwd, cwd, workspaces.map((w) => w.path)));
+  if (req.as === "fallback") {
+    if (deps.db.quotaAll().some((q) => q.runner === primary && q.utilization >= LIMIT_UTILIZATION && q.resetsAt * 1000 > now)) return null;
+    if (mine().some((j) => j.runner === primary && j.status !== "pass" && isLimitText(primary, j.summary ?? undefined))) return null;
+    return `fallback（主レビュアー ${primary} が使用上限）は、${primary} の使用上限の枠が ${LIMIT_UTILIZATION} 以上で戻っていない記録か、この PR の ${primary} のレビューが使用上限で終わった記録があるときだけ受けます。どちらの記録もありません。主レビューは --runner ${primary} で頼んでください`;
+  }
+  if (req.as === "recheck" || req.as === "arbiter") {
+    if (mine().some((j) => (j.as === null || j.as === "fallback") && j.endedAt !== null)) return null;
+    return `${req.as} は、この PR の review の仕事が終わった後に頼みます。終わった review の記録がありません。先に主レビュー（--runner ${primary}）を頼んでください`;
+  }
+  if (ws && storedEnds(deps.db, ws)(req.pr)?.state === "MERGED") return null;
+  return `audit は、PR がマージ済みの記録があるときだけ受けます。PR #${req.pr} のマージの記録がまだありません（保存の同期の前かもしれません）。同期の後に頼み直してください`;
+}
+
 /**
  * Starts a job for a Task: checks the request, records the job and starts it as the daemon's detached child.
  * Throws JobError (404: no such Task; 400: a folder or file outside the Task's repository, or a reviewer the setting does not name).
  *
  * A review's runner is the app's to decide: the main reviewer follows from the review setting as it is now and the Task's
  * runner (`primaryReviewer`). A request that names another runner is refused unless it says why (`as`: a usage-limit
- * fallback, an audit). A recheck (`as: "recheck"`) is read by the runner the recheck setting names (`recheckReviewer`): the app
+ * fallback, an audit). A recheck (`as: "recheck"`) and an arbiter (`as: "arbiter"`, which takes no kinds) are read by the runner the recheck setting names (`recheckReviewer`): the app
  * picks it when the request names none, and refuses another one. The attacking-side review (`as: "attack"`) names its runner: `attackReviewer`'s, or the other one standing in when that one is at its usage limit (the caller's reason; the limit is not checked). It is refused for a Task whose runner reviews nothing, where `attackReviewer` names none.
  */
 export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } = {}): Job {
@@ -605,9 +648,9 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
     const setting = deps.reviewRunner?.() ?? "other";
     const primary = primaryReviewer(taskRunner, setting);
     if (!req.runner && !primary) throw new JobError(`この Task のランナー（${taskRunner}）からは主レビュアーを決められません。--runner codex|claude で名指ししてください`, 400);
-    if (req.as && req.as !== "recheck" && !req.runner) throw new JobError("as（主レビューでない回の理由）は runner の名指しが要ります", 400);
+    if (req.as && req.as !== "recheck" && req.as !== "arbiter" && !req.runner) throw new JobError("as（主レビューでない回の理由）は runner の名指しが要ります", 400);
     if (req.runner && primary && req.runner !== primary && !req.as) {
-      throw new JobError(`設定（レビューのランナー: ${setting}）では、この Task（${taskRunner}）の主レビュアーは ${primary} です。主レビューは --runner ${primary} で頼んでください。主レビュアーでないランナーに頼むのは、理由を --as で名指ししたときだけです（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー）`, 400);
+      throw new JobError(`設定（レビューのランナー: ${setting}）では、この Task（${taskRunner}）の主レビュアーは ${primary} です。主レビューは --runner ${primary} で頼んでください。主レビュアーでないランナーに頼むのは、理由を --as で名指ししたときだけです（fallback = 主レビュアーが使用上限、recheck = 再チェック、audit = マージ後の監査、attack = 攻める側のレビュー、arbiter = 監督者の裁定）`, 400);
     }
     if (req.as === "attack") {
       const attacker = attackReviewer(taskRunner, setting);
@@ -615,16 +658,21 @@ export function requestJob(deps: JobDeps, req: JobRequest, opts: { app?: true } 
       if (!attacker) throw new JobError(`この Task のランナー（${taskRunner}）では、攻める側のレビューを頼むランナーを決められません`, 400);
     }
     let rechecker: "codex" | "claude" | null = null;
-    if (req.as === "recheck" && primary) {
+    if ((req.as === "recheck" || req.as === "arbiter") && primary) {
       const recheck = deps.recheckRunner?.() ?? setting;
       rechecker = recheckReviewer(primary, recheck);
-      if (req.runner && req.runner !== rechecker) throw new JobError(`設定（再チェック・監査のランナー: ${recheck}）では、この Task（${taskRunner}）の再チェックは ${rechecker} です。--runner を省けばアプリが選びます`, 400);
+      if (req.runner && req.runner !== rechecker) throw new JobError(`設定（再チェック・監査のランナー: ${recheck}）では、この Task（${taskRunner}）の${req.as === "arbiter" ? "監督者" : "再チェック"}は ${rechecker} です。--runner を省けばアプリが選びます`, 400);
     }
     if (req.as === "recheck") {
       const bad = (req.kinds ?? []).filter((k) => !(RECHECK_KINDS as string[]).includes(k));
       // no kinds is recorded as none (it counts for no kind's pass); a word that is not a kind is a mistake
       if (bad.length) throw new JobError(`kinds に再チェックの種類でない語があります: 知らない種類 ${bad.join(", ")}（${RECHECK_KINDS.join(" / ")}）`, 400);
     } else if (req.kinds?.length) throw new JobError("kinds は as: recheck のときだけ渡します", 400);
+    // the runner that will read it (a recheck without one is the recheck setting's): any other than the main reviewer must have its reason backed by the record
+    if (req.as && primary && (req.runner ?? rechecker) !== primary) {
+      const refusal = reviewPurposeRefusal(deps, cwd, req, primary);
+      if (refusal) throw new JobError(refusal, 400);
+    }
     // the reviewer may write in its checkout: not in the Task's own working folder, a registered workspace's checkout or the
     // working tree of any Task not ended (someone's work in progress), nor in a folder under them. Another Task counts by the
     // working tree that holds its folder (a Task in a package folder protects the whole tree); a folder in no working tree (the

@@ -70,7 +70,7 @@ W=$(mktemp -d /tmp/switchboard.flow.XXXXXX); bun scripts/flow-report.ts --days 3
 
 ### GraphQL consumption and when it stops
 
-GitHub's GraphQL allows 5,000 points per hour, shared by all of the host's Tasks. The thresholds below are the constants `MIN_REMAINING` (the least budget that lets a run start) and `MAX_COST` (the most points one run may spend), and the comments read per PR are `COMMENTS_MAX`, all in `packages/core/src/flow.ts`; the values are read there.
+GitHub's GraphQL allows 5,000 points per hour, shared by all of the machine's Tasks. The thresholds below are the constants `MIN_REMAINING` (the least budget that lets a run start) and `MAX_COST` (the most points one run may spend), and the comments read per PR are `COMMENTS_MAX`, all in `packages/core/src/flow.ts`; the values are read there.
 
 - At the start of a run it reads the remaining points, and **if fewer than `MIN_REMAINING` remain, it reads nothing, prints the reason and stops** (exit 1)
 - Only merged PRs are read from GitHub (`fetchMergedPrs`). Of the PBIs closed in the period, it reads the PRs merged after the creation date of the oldest PBI, one search page at a time (`PR_QUERY`), up to `COMMENTS_MAX` comments. When no PBI was closed in the period, it does not read GitHub. **If one run is likely to exceed `MAX_COST` points, it stops before calling**
@@ -107,7 +107,7 @@ For a recheck kind the after-merge PRs are only those merged in the period, whil
 
 - **`PR`**: PRs with a round of the rule in the period. **`往復の中央値` / `往復の最大`**: the rounds per such PR
 - **`同じ場所への再指摘`**: findings of the 2nd round or later on a `path` that an earlier round of the same PR and rule already named
-- **`合格までの分の中央値`**: minutes from the start of the PR's first round of the rule to the pass. For a recheck, the pass follows merge-gate's rule for the kind (`rechecksOf`): a kind a command decides (`migration`, `security:lockfile`) passes with a passing recheck job, `rescue` needs a passing recheck review as well (the time is the later of the two), any other kind passes with a recheck review that has no blocker and no should-fix; a PR with none yet is left out. For `review`, it is the end of the last round
+- **`合格までの分の中央値`**: minutes from the start of the PR's first round of the rule to the pass. For a recheck, the pass follows merge-gate's rule for the kind (`rechecksOf`): a kind a command decides (`migration`, `security:lockfile`) passes with a passing recheck job, `rescue` needs a passing arbiter job as well (the time is the later of the two), any other kind passes with a passing arbiter job (an `as: arbiter` review job with no ruling for the reviewer, no missing viewpoint and no unreadable line); a PR with none yet is left out. For `review`, it is the end of the last round
 
 A rule with no rounds in the period shows `0` for the round counts and `-` for the medians. The triage columns (`修正` and the others) count the triage tables posted in the period on their own, so a round summarized before the period and triaged inside it adds to them while its rule shows `PR 0`. The time until the pass also ends inside the period: for a recheck, a pass after its end is not used and such a PR has no time in that period; for `review`, the last round before its end closes the time.
 

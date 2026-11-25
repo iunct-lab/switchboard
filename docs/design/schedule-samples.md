@@ -168,6 +168,12 @@ Turns the last week's changes in what this workspace's repository depends on int
   newest tag on the main branch (`git describe --tags --abbrev=0 origin/main`).
 - Run `ops-kit public-sync --source <tag>` once. Never add `--adopted`. Report the tag, the exit code and the output
   as they are.
+- When the sync ended with exit 0 and the repository has `scripts/release-smoke.ts`, run
+  `bun scripts/release-smoke.ts <publicSync.target> --record <the tag synced>` once and put its last line
+  (`[release-smoke] pass|fail <public tag> <sha>`) into the report as it is. It installs the public Release the sync made
+  the way the README says, on a PATH without git, and writes that line into the Release of the development tag; on a fail
+  it files a request (or comments on the open one). A fail (exit 1) is reported with a `switchboard-stop` fence like a
+  failed sync, with its `✗` line as the reason. A repository without that script skips this.
 - When no tag could be chosen or the sync ended with another exit code than 0, report the stop with a
   `switchboard-stop` fence, with the first line of the output as the reason. Files nothing.
 

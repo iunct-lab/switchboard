@@ -6,7 +6,7 @@
 import { machineOfOperation } from "./backlog-upbox.ts";
 import type { BacklogCommentData, BacklogCreateInput, BacklogEditInput, BacklogIssueData, BacklogProjectItemData, BacklogRecord, BacklogSource } from "@switchboard/protocol";
 import { applyBacklogField, artifactsOfIssues, BacklogResolveError, type BacklogArtifactPayload, type BacklogLocalEntry, type Db, type NewBacklogOperation } from "./db.ts";
-import { withoutMarker } from "./backlog-merge.ts";
+import { bodyRevisionOf, withoutMarker } from "./backlog-merge.ts";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts";
 import { syncsGithub } from "./backlog-gh.ts";
@@ -73,7 +73,7 @@ export interface BacklogCreatePayload {
 }
 
 /** A new Issue, kept until it is created on GitHub; read and edited by the returned local id until then and after. */
-export function createStoredIssue(db: Db, source: BacklogSource, input: Omit<BacklogCreateInput, "workspaceId">, now = Date.now()): { localId: string } {
+export function createStoredIssue(db: Db, source: BacklogSource, input: Omit<BacklogCreateInput, "workspaceId">, now = Date.now(), by: string | null = null): { localId: string } {
   refuseSecrets(input.title, input.body, input.milestone ?? undefined, ...input.labels, ...texts(input.fields));
   const localId = crypto.randomUUID();
   const at = new Date(now).toISOString();
@@ -81,12 +81,15 @@ export function createStoredIssue(db: Db, source: BacklogSource, input: Omit<Bac
   const draft: BacklogIssueData = { number: 0, title: input.title, url: "", state: "OPEN", stateReason: null, body: input.body, labels: input.labels, milestone: input.milestone, parent: input.parent, subIssues: [], createdAt: at, updatedAt: at, closedAt: null, ...(change ? { change: { ...change, mergeCommit: null, mergedAt: null, reviewedHead: null, reportedAt: null } } : {}) };
   const payload: BacklogCreatePayload = { title: input.title, body: input.body, state: "OPEN", labels: input.labels, milestone: input.milestone, parent: input.parent, project: someFields(input.fields) ? { ...source.project, fields: input.fields! } : null, ...(change ? { change } : {}) };
   const id = `local:${localId}`;
-  db.applyBacklogEdit(source, { records: [{ objectKind: "issue", externalId: id, local: draft }], operations: [{ id: localId, issue: id, targetKind: "issue", target: id, kind: "create", payload }] }, now);
+  db.applyBacklogEdit(source, { records: [{ objectKind: "issue", externalId: id, local: draft }], operations: [{ id: localId, issue: id, targetKind: "issue", target: id, kind: "create", payload, taskId: by }] }, now);
   return { localId };
 }
 
-/** A name an Issue artifact can carry: no `#` (it parts the path from the name on the command line), brackets, quotes or control characters; at most 100 characters. */
-export const artifactName = (s: string) => s.replace(/[#()\[\]{}<>"'`\\\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+/** A name an Issue artifact can carry (gh's rule): letters, numbers, spaces, periods, hyphens and underscores only, starting and ending with a letter or a number; at most 100 characters. */
+export const artifactName = (s: string) => {
+  const plain = (x: string) => x.replace(/[^\p{L}\p{N} ._-]/gu, " ").replace(/\s+/g, " ").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+  return plain(plain(s).slice(0, 100));
+};
 
 /**
  * The reports to attach to PBI `number`'s Issue when it is closed: one `artifact` operation per artifact of the
@@ -104,7 +107,8 @@ export function artifactOperations(db: Db, source: BacklogSource, issue: string,
   return artifactsOfIssues(db.sqlite, [number, ...subIssues], asked.map((w) => w.id)).map((a) => {
     const base = artifactName(a.title) || artifactName(a.entry ?? "") || a.id;
     let name = base;
-    for (let i = 2; used.has(name.toLowerCase()); i++) name = `${base} ${i}`;
+    // the number fits inside the 100 characters, so the send's own artifactName keeps it (and the names stay distinct)
+    for (let i = 2; used.has(name.toLowerCase()); i++) name = `${artifactName(base.slice(0, 100 - ` ${i}`.length))} ${i}`;
     used.add(name.toLowerCase());
     const payload: BacklogArtifactPayload = a.kind === "url" ? { artifactId: a.id, name, kind: "link", url: a.source } : { artifactId: a.id, name, kind: /\.html?$/i.test(a.entry ?? "") ? "html" : "markdown" };
     return { issue, targetKind: "issue", target: issue, kind: "artifact", payload };
@@ -116,12 +120,14 @@ export function artifactOperations(db: Db, source: BacklogSource, issue: string,
  * (its `base`). An Issue not created yet has its create changed instead. Refused: an Issue not stored, one not read in
  * full (404 / 403 on its last read), a Project change of an Issue whose create is under way. Returns the operations.
  */
-export function editStoredIssue(db: Db, source: BacklogSource, ref: number | string, input: Omit<BacklogEditInput, "workspaceId">, now = Date.now()): { localId: string | null; operations: string[] } {
+export function editStoredIssue(db: Db, source: BacklogSource, ref: number | string, input: Omit<BacklogEditInput, "workspaceId">, now = Date.now(), by: string | null = null): { localId: string | null; operations: string[] } {
   refuseSecrets(input.title, input.body, input.milestone ?? undefined, ...(input.labels?.add ?? []), ...texts(input.fields));
   const rec = issueRecord(db, source, ref);
   const cur = rec ? (shown(rec) as BacklogIssueData | null) : null;
   if (!rec || !cur) throw new BacklogEditError(rec?.remote ? `#${ref} は GitHub から読めていません（${rec.fetchState}）。再読込してから編集してください` : `#${ref} は保存されていません`, rec?.remote ? 409 : 404);
   const localId = rec.externalId.startsWith("local:") ? rec.externalId.slice("local:".length) : null;
+  // a body saved from a version that is not the one shown now is not put over it (checked here, in the same call that stores)
+  if (input.body !== undefined && input.expectedBodyRevision !== undefined && input.expectedBodyRevision !== bodyRevisionOf(cur.body)) throw new BacklogEditError("本文が変わりました。読み直してください", 409);
   // a name both added and removed is removed, whether the Issue was made yet or not
   const added = (input.labels?.add ?? []).filter((l) => !input.labels?.remove.includes(l));
   const labels = (l: string[]) => [...new Set([...l, ...added])].filter((x) => !input.labels?.remove.includes(x));
@@ -198,7 +204,7 @@ export function editStoredIssue(db: Db, source: BacklogSource, ref: number | str
   }
   // an Issue the service does not have yet shows its edits here; one it has, on what it answered (rebaseBacklogRecord)
   if (!rec.remote) records.push({ objectKind: "issue", externalId: issue, local: ops.filter((o) => o.targetKind === "issue").reduce<unknown>((d, o) => applyBacklogField("issue", d, o.field!, o.payload), cur) });
-  return { localId, operations: ops.length ? db.applyBacklogEdit(source, { records, operations: ops }, now) : [] };
+  return { localId, operations: ops.length ? db.applyBacklogEdit(source, { records, operations: ops.map((o) => ({ ...o, taskId: by })) }, now) : [] };
 }
 
 /**
@@ -403,12 +409,12 @@ export function askStoredDecision(db: Db, source: BacklogSource, n: number, text
 }
 
 /** A plain comment (text as written, no heading) on Issue n, kept here and sent later; no label changes. */
-export function commentStoredIssue(db: Db, source: BacklogSource, n: number, text: string, now = Date.now()): { operation: string } {
+export function commentStoredIssue(db: Db, source: BacklogSource, n: number, text: string, now = Date.now(), by: string | null = null): { operation: string } {
   refuseSecrets(text);
   const rec = issueRecord(db, source, n);
   if (!rec || !shown(rec)) throw new BacklogEditError(rec ? `#${n} は GitHub から読めていません（${rec.fetchState}）。再読込してからコメントしてください` : `#${n} は保存されていません`, rec ? 409 : 404);
   const c = comment(rec, n, text, now);
-  const [operation] = db.applyBacklogEdit(source, { records: [c.record], operations: [c.op] }, now);
+  const [operation] = db.applyBacklogEdit(source, { records: [c.record], operations: [{ ...c.op, taskId: by }] }, now);
   return { operation: operation! };
 }
 
