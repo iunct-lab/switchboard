@@ -176,8 +176,9 @@ export const BacklogIssueDetail = z.object({
    * `id`: the stored record's id (GitHub's comment id, or `sb:<seq>` on a backlog kept here).
    * `seq`: the sequence number of the operation that wrote a comment here, the same before and after it is sent; null for
    * one only imported from GitHub. The order the parallel guard decides who came first by.
+   * `screen`: true on a `## 回答` the person gave on the app's screen, as given (givenOnScreen); absent on any other.
    */
-  comments: z.array(BacklogCommentData.extend({ id: z.string(), seq: z.number().nullable().default(null) })),
+  comments: z.array(BacklogCommentData.extend({ id: z.string(), seq: z.number().nullable().default(null), screen: z.literal(true).optional() })),
   fields: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).nullable(),
   /** The fields of the Project a value can be written to: what the edit form offers; `fields` is checked against them. */
   projectFields: z.array(BacklogProjectField).default([]),

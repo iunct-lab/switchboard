@@ -902,7 +902,7 @@ describe("aws/template.yaml uplink bucket", () => {
       `backlog-export/${VAR}/*`, `backlog-refused/${VAR}/*`, `backlog/${VAR}/*`, `backlog/${VAR}/*`, `lease-proof/${VAR}/*`, `uplink/${VAR}/*`,
     ]);
     const listPrefixes = /'s3:prefix': \[([^\]]*)\]/.exec(policy())![1]!;
-    expect(listPrefixes).toBe(`'lease/*', !Sub 'backlog-refused/${VAR}/*', !Sub 'backlog-export/${VAR}/*'`);
+    expect(listPrefixes).toBe(`'lease/*', 'lease-proof/*', !Sub 'backlog-refused/${VAR}/*', !Sub 'backlog-export/${VAR}/*'`);
     // nothing names a machine by a value
     expect(policy()).not.toMatch(/Machine:|InstanceMachineName|instance\//);
     expect(policy()).not.toMatch(/\$\{Uplink\.Arn\}\/(uplink|backlog|backlog-refused|backlog-export|lease-proof)\/(?!\$\{!aws:PrincipalTag\/switchboard-machine\}\/|\*')/);
@@ -1014,7 +1014,7 @@ describe("aws/template.yaml uplink bucket", () => {
     const get = withKey("uplink/*", "s3:GetObject")[0]!;
     for (const k of ["uplink/*", "backlog/*", "lease/*", "lease-proof/*"]) expect(get).toContain(`\${Uplink.Arn}/${k}'`);
     // backlog-export/ is listed (never read) to find an export to write a tombstone over
-    expect(sts.find((st) => st.includes("s3:ListBucket"))).toContain("'s3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'backlog-export/*']");
+    expect(sts.find((st) => st.includes("s3:ListBucket"))).toContain("'s3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'lease-proof/*', 'backlog-export/*']");
     expect(withKey("lease/*", "s3:PutObject").map((st) => st.includes(COND_NEW) || st.includes(COND_MATCH)).sort()).toEqual([true, true]);
     expect(withKey("lease-proof/${InstanceMachineName}/*", "s3:PutObject")[0]).not.toContain("Condition");
     expect(withKey("backlog-refused/*", "s3:PutObject")[0]).toContain(COND_NEW);

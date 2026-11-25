@@ -147,9 +147,12 @@ describe("a work machine reads its own prefix and takes the export in", () => {
     await put({ ...app, records: [{ ...app.records[0], remote: {} }] });
     await expect(readBacklogExport(s3, "pc1", "acme/app")).rejects.toThrow("形が違います（records.0.remote");
     // a tombstone addressed to another machine, or of a newer shape, does not drop pc1's copy
-    await put({ kind: "backlog-export", v: 1, machine: "pc2", removed: true, at: t });
+    await put({ kind: "backlog-export", v: 1, machine: "pc2", repository: "acme/app", removed: true, at: t });
     await expect(readBacklogExport(s3, "pc1", "acme/app")).rejects.toMatchObject({ kind: "fetch", removed: false });
-    await put({ kind: "backlog-export", v: 2, machine: "pc1", removed: true, at: t });
+    // one of another repository under this key withdraws nothing here
+    await put({ kind: "backlog-export", v: 1, machine: "pc1", repository: "acme/tools", removed: true, at: t });
+    await expect(readBacklogExport(s3, "pc1", "acme/app")).rejects.toThrow("pc1 の acme/tools 宛て");
+    await put({ kind: "backlog-export", v: 2, machine: "pc1", repository: "acme/app", removed: true, at: t });
     await expect(readBacklogExport(s3, "pc1", "acme/app")).rejects.toMatchObject({ kind: "newer", removed: false });
   });
 
@@ -186,7 +189,7 @@ describe("an export that must no longer be read", () => {
       const shrunk = { uplink: { machines: { pc2: ["acme/app"] } } };
       expect(await writeBacklogExports(ec2, shrunk, s3, t)).toEqual(["backlog-export/pc2/acme/app.json.zst"]);
       const key = "backlog-export/pc2/acme/tools.json.zst";
-      expect(text(s3.objects.get(key)!.body)).toMatchObject({ removed: true, machine: "pc2", at: t });
+      expect(text(s3.objects.get(key)!.body)).toMatchObject({ removed: true, machine: "pc2", repository: "acme/tools", at: t });
       expect(text(s3.objects.get("backlog-export/pc1/acme/app.json.zst")!.body)).toMatchObject({ removed: true, machine: "pc1" });
       // the same message as a key that was never there
       await expect(readBacklogExport(s3, "pc2", "acme/tools")).rejects.toThrow("EC2 に acme/tools の写しがありません");

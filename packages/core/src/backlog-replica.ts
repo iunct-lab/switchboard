@@ -18,6 +18,9 @@ import type { S3Store } from "./s3.ts";
 
 const REPLICA_KEY = "backlog.replica";
 
+/** A record made on this machine (its id begins `sb:`, backlog-local.ts): not a copy, so a copy being replaced or dropped leaves it. */
+const madeHere = (r: { externalId: string }) => r.externalId.startsWith("sb:");
+
 /** Per repository (`service/host/repository`), when its copy was last taken here. */
 export function replicaTakenAt(db: Db, source: Pick<BacklogSource, "service" | "host" | "repository">): number | null {
   return db.getSetting<Record<string, number>>(REPLICA_KEY, {})[`${source.service}/${source.host}/${source.repository}`] ?? null;
@@ -80,7 +83,7 @@ export function importBacklogExport(db: Db, exported: BacklogExport, at: { works
     }
     // what the instance no longer has is not kept (nothing made here: those have no value of the service's)
     const there = new Set(rows.map((r) => `${r.objectKind} ${r.externalId}`));
-    for (const r of db.listBacklogRecords(mine)) if (r.remote && !r.local && !there.has(`${r.objectKind} ${r.externalId}`)) db.deleteBacklogRecord({ ...mine, objectKind: r.objectKind, externalId: r.externalId });
+    for (const r of db.listBacklogRecords(mine)) if (r.remote && !r.local && !madeHere(r) && !there.has(`${r.objectKind} ${r.externalId}`)) db.deleteBacklogRecord({ ...mine, objectKind: r.objectKind, externalId: r.externalId });
     // a new Issue or comment the instance sent: the record made here becomes the service's, under its id
     for (const op of db.listPendingBacklogOperations(mine)) {
       const r = op.kind === "set" ? null : cameOf(op);
@@ -107,7 +110,7 @@ export function dropBacklogCopy(db: Db, workspaceId: string, repository: string)
   // the workspace reads another repository now: the withdrawn one's records are not what it holds, and the ones it holds stay
   if (!source || source.repository.toLowerCase() !== repository.toLowerCase()) return;
   db.sqlite.transaction(() => {
-    for (const r of db.listBacklogRecords(source)) if (!r.local) db.deleteBacklogRecord({ ...source, objectKind: r.objectKind, externalId: r.externalId });
+    for (const r of db.listBacklogRecords(source)) if (!r.local && !madeHere(r)) db.deleteBacklogRecord({ ...source, objectKind: r.objectKind, externalId: r.externalId });
     const taken = db.getSetting<Record<string, number>>(REPLICA_KEY, {});
     delete taken[`${source.service}/${source.host}/${source.repository}`];
     db.setSetting(REPLICA_KEY, taken);
@@ -140,12 +143,19 @@ export class Workbench {
     },
   ) {}
 
+  /** How many repositories' exports are held in memory. */
+  heldCount(): number {
+    return this.held.size;
+  }
+
   private now(): number {
     return (this.opts.clock ?? Date.now)();
   }
 
   private fetch(repository: string, force: boolean): Promise<BacklogExport> {
     const name = repository.toLowerCase();
+    // a copy older than the interval is read again whenever it is wanted, so it is not kept: what is held is at most one interval's worth
+    for (const [k, h] of this.held) if (this.now() - h.at >= this.opts.intervalMs) this.held.delete(k);
     const running = this.fetching.get(name);
     if (running) return running;
     const had = this.held.get(name);

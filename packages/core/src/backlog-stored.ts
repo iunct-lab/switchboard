@@ -12,13 +12,14 @@ import { workspaceConfigPath } from "./workspace-config.ts";
 import type { Turn } from "../../../scripts/parallel-guard.ts";
 import { readdirSync } from "node:fs";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
+import { machineOfOperation } from "./backlog-upbox.ts";
 import { type BacklogWorkspace, localBacklogSource, syncsGithub, changesApart } from "./backlog-gh.ts";
 import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backlog-item.ts";
 import { holder } from "../../../scripts/parallel-guard.ts";
 import { sessionOn, withOverlap } from "./backlog-overlap.ts";
 import { notResumed } from "./backlog-pick.ts";
 import { reduceStops } from "./stops.ts";
-import { type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
+import { ANSWER_HEADING, type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
 import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
 import { eventsOf } from "./stage-start-gate.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
@@ -386,6 +387,17 @@ export function storedIssueReader(db: Db): StoredIssueReader {
 }
 
 /**
+ * The operation that gave comment `commentId` on the app's screen, as it was given: its operation carries the screen mark, is
+ * not one taken in from a work machine (the screen meant is this instance's), and its body is still the comment's (one edited
+ * on GitHub after it was sent is not the person's words any more). null = not given on the screen. `ops` = db.listBacklogOperations.
+ */
+export function givenOnScreen(ops: BacklogOperation[], commentId: string, body: string): BacklogOperation | null {
+  const sent = ops.find((o) => o.kind === "comment" && o.target === commentId && machineOfOperation(o.id) === null && (o.payload as { screen?: unknown } | null)?.screen === true);
+  const given = (sent?.payload as { body?: unknown } | undefined)?.body;
+  return sent && typeof given === "string" && given.trim() === body.trim() ? sent : null;
+}
+
+/**
  * One stored Issue of the workspace's repository, without asking GitHub; null = not stored. `ref`: its number, or
  * the local id of an Issue made here — before GitHub numbers it and after. It shows the edits not sent yet.
  */
@@ -400,8 +412,9 @@ export function readStoredIssue(db: Db, ws: Pick<BacklogWorkspace, "id">, ref: n
   const records = shownRecords(db, source);
   // a comment made here is named by its `local:` id before it is sent and by the service's after: both find its operation.
   // Oldest last: one sent again when GitHub is turned on (backlog-enable.ts) keeps the seq it was written with
-  const written = new Map(db.listBacklogOperations(source).reverse().flatMap((o) => (o.kind === "comment" ? [[o.target, o.seq] as const, ...(o.remoteId ? [[o.remoteId, o.seq] as const] : [])] : [])));
-  const comments = issue.number ? records.flatMap((r) => (r.objectKind === "comment" && r.remote?.issue === issue.number ? [{ ...r.remote, id: r.externalId, seq: written.get(r.externalId) ?? null }] : [])) : [];
+  const ops = db.listBacklogOperations(source);
+  const written = new Map([...ops].reverse().flatMap((o) => (o.kind === "comment" ? [[o.target, o.seq] as const, ...(o.remoteId ? [[o.remoteId, o.seq] as const] : [])] : [])));
+  const comments = issue.number ? records.flatMap((r) => (r.objectKind === "comment" && r.remote?.issue === issue.number ? [{ ...r.remote, id: r.externalId, seq: written.get(r.externalId) ?? null, ...(r.remote.body.trimStart().startsWith(ANSWER_HEADING) && givenOnScreen(ops, r.externalId, r.remote.body) ? { screen: true as const } : {}) }] : [])) : [];
   const item = issue.number ? projectItemOf(records, source, issue.number) : undefined;
   const all = db.listPendingBacklogOperations(source);
   const pending = all.filter((o) => o.issue === rec.externalId);

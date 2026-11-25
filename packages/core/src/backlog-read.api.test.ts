@@ -14,8 +14,8 @@ import { ghBoard, overlap, storedMaterial } from "../../../scripts/parallel-guar
 import { mockupTaskOf, stageOf } from "./backlog-item.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { storedIssueHeads, readStoredIssue } from "./backlog-stored.ts";
-import { editStoredIssue } from "./backlog-edit.ts";
-import { FAKE_ORIGIN, backlogNextSchedule, boot, closeTried, detailOf, fakeGh, fixtureStage, holdingClaude, metaId, pages, patch, raw, refreshed, runSchedule, start, startedTasks, useBacklogDaemon } from "./api-test-harness.ts";
+import { answerStoredDecision, editStoredIssue } from "./backlog-edit.ts";
+import { FAKE_ORIGIN, backlogNextSchedule, boot, closeTried, detailOf, fakeGh, fixtureStage, holdingClaude, metaId, overlapReadyGh, pages, patch, raw, refreshed, runSchedule, start, startedTasks, useBacklogDaemon } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -460,6 +460,41 @@ test("ops-kit backlog: reads answer what is stored with GitHub out of reach and 
   await core!.stop();
   core = undefined;
   expect((await cli("list")).code).toBe(2);
+});
+
+test("ops-kit backlog: a gate PBI is not made Ready without the key table, nor on a Task's answer to its question, nor after the table changed; the screen's answer to the question lets it", async () => {
+  // PBI 304 has one Task, 3041, that names a file the merge gate covers; the kit asks the real script which paths those are
+  const base = await boot(overlapReadyGh({ 304: "scripts/merge-gate.ts", 309: "src/b.ts", 310: "src/c.ts" }));
+  const cli = async (argv: string[], stdin = "") => {
+    const out: string[] = [];
+    const code = await runBacklog(argv, { BACKLOG_URL: `${base}/api/backlog`, GH_REPO: "acme/app" }, { out: (s) => out.push(s), err: (s) => out.push(s), stdin: async () => stdin });
+    return { code, out: out.join("\n") };
+  };
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const readied = async () => (await cli(["set", "304", "Status", "Ready"])).code;
+  const table = (key: string) => `## ゲートの鍵\n**鍵の変更**: あり\n| 鍵 | 誰が書けるか | どこで読むか | 利用者の操作（1 件あたり） |\n|---|---|---|---|\n| ${key} | a | b | c |\n`;
+  const body = async () => ((await detailOf(base, 304)).issue.body).replace(/\n## ゲートの鍵[\s\S]*$/, "");
+  const written = async (key: string) => (await cli(["edit", "304", "--body-file", "-"], `${await body()}\n${table(key)}`)).code;
+  const screenAnswer = async () => {
+    const at = (await detailOf(base, 304)).comments.filter((c) => c.body.startsWith("## 判断待ち")).at(-1)!.createdAt;
+    answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta.id)!, 304, "はい", Date.now() + 5000, { question: { at }, screen: true, heads: {} });
+  };
+  // (1) no table
+  expect(await readied()).toBe(1);
+  expect((await cli(["set", "304", "Status", "Ready"])).out).toContain("ゲートの鍵");
+  expect(await written("k1")).toBe(0);
+  // (2) the table says あり: no question yet, then a question a Task answers with `backlog comment`, then the screen's answer
+  expect(await readied()).toBe(1);
+  expect((await cli(["comment", "304", "--body-file", "-"], `## 判断待ち\n${table("k1")}`)).code).toBe(0);
+  expect(await readied()).toBe(1);
+  expect((await cli(["comment", "304", "--body-file", "-"], "## 回答\nTask が書いた")).code).toBe(0);
+  expect(await readied()).toBe(1);
+  expect((await cli(["comment", "304", "--body-file", "-"], `## 判断待ち\n${table("k1")}`)).code).toBe(0);
+  await screenAnswer();
+  expect(await readied()).toBe(0);
+  // (3) the table is changed after the answer
+  expect(await written("k2")).toBe(0);
+  expect(await readied()).toBe(1);
 });
 
 test("GET /api/backlog/records: lint and the parallel guard read the stored records with GitHub out of reach, --fresh too", async () => {

@@ -23,7 +23,7 @@ export const EXPORT_VERSION = 1;
 export const EXPORT_MAX_BYTES = 64 * 1024 * 1024;
 
 /** What replaces an export that must no longer be read (the instance cannot delete): read as no export at all. */
-const Tombstone = z.object({ kind: z.literal("backlog-export"), v: z.number().int(), machine: z.string(), removed: z.literal(true), at: z.number() });
+const Tombstone = z.object({ kind: z.literal("backlog-export"), v: z.number().int(), machine: z.string(), repository: z.string(), removed: z.literal(true), at: z.number() });
 /**
  * The tombstones written, by key, with the etag the put answered: a key is skipped only while the listed object still has
  * that etag, so a database restored from before a later real export (or any other write over the tombstone) gets the
@@ -76,8 +76,9 @@ export function buildBacklogExport(db: Db, machine: string, repository: string):
   const key = [source.service, source.host, source.repository] as const;
   const sync = db.getBacklogRepository(source);
   if (sync?.lastSuccessfulSync == null) return null;
-  // what the service has, not what the instance still has to send (`local`)
-  const rows = db.sqlite.query("SELECT object_kind, external_id, remote, fetch_state FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND remote IS NOT NULL ORDER BY object_kind, external_id").all(...key) as Array<{ object_kind: BacklogExport["records"][number]["objectKind"]; external_id: string; remote: string; fetch_state: BacklogExport["records"][number]["fetchState"] }>;
+  // what the service has, not what the instance still has to send (`local`), nor what it made with its own sync off (an
+  // `sb:` id is of the database that made it: a work machine reads that prefix as made there and keeps it, backlog-replica.ts)
+  const rows = db.sqlite.query("SELECT object_kind, external_id, remote, fetch_state FROM backlog_records WHERE service = ? AND host = ? AND repository = ? AND remote IS NOT NULL AND substr(external_id, 1, 3) != 'sb:' ORDER BY object_kind, external_id").all(...key) as Array<{ object_kind: BacklogExport["records"][number]["objectKind"]; external_id: string; remote: string; fetch_state: BacklogExport["records"][number]["fetchState"] }>;
   const mine = importedId(machine, "");
   const ops = db.sqlite.query("SELECT id, status, remote_id, error, updated_at FROM backlog_operations WHERE substr(id, 1, ?) = ? AND service = ? AND host = ? AND lower(repository) = lower(?) ORDER BY id").all(mine.length, mine, source.service, source.host, source.repository) as Array<{ id: string; status: string; remote_id: string | null; error: string | null; updated_at: number }>;
   return {
@@ -120,7 +121,7 @@ export async function writeBacklogExports(db: Db, cfg: { uplink: Pick<UplinkConf
     for (const o of await store.list(PREFIX)) {
       const m = /^backlog-export\/([^/]+)\/([^/]+\/[^/]+)\.json\.zst$/.exec(o.key);
       if (!m || live.has(o.key) || withdrawn.get(o.key) === o.etag || !isMachineName(m[1])) continue;
-      const tombstone: z.infer<typeof Tombstone> = { kind: "backlog-export", v: EXPORT_VERSION, machine: m[1], removed: true, at: now };
+      const tombstone: z.infer<typeof Tombstone> = { kind: "backlog-export", v: EXPORT_VERSION, machine: m[1], repository: m[2]!, removed: true, at: now };
       try {
         const put = await store.put(o.key, Bun.zstdCompressSync(new TextEncoder().encode(JSON.stringify(tombstone))));
         if (put === "conflict") continue;
@@ -148,9 +149,9 @@ export async function writeBacklogExports(db: Db, cfg: { uplink: Pick<UplinkConf
 
 /**
  * The work machine's side: the export of `repository` (`owner/name`) written for `machine`, read from the machine's own
- * prefix only. The key is listed first (the role may list its own prefix), so a key that is not there is told from a
- * read that is refused: S3 answers a GET of a missing key with "access denied" to a role whose list permission has a
- * prefix condition. Throws ExportError when there is none (`missing`: the instance does not register this machine for
+ * prefix only. The key is listed first (the role may list its own prefix): the size is read before the object, so one over the
+ * limit is not fetched, and a key that is not there is told from a read that is refused. (With the list's prefix
+ * condition S3 answers a GET of a missing key with NoSuchKey.) Throws ExportError when there is none (`missing`: the instance does not register this machine for
  * the repository, reads no such repository, has not imported it yet, or wrote a tombstone), when it cannot be read or
  * is not this machine's export of this repository (`fetch`) or when it is of a newer shape (`newer`).
  */
@@ -178,6 +179,8 @@ export async function readBacklogExport(store: S3Store, machine: string, reposit
   const tombstone = Tombstone.safeParse(raw);
   if (tombstone.success) {
     if (tombstone.data.machine !== machine) throw notMine(tombstone.data.machine);
+    // another repository's tombstone under this key withdraws nothing here
+    if (tombstone.data.repository.toLowerCase() !== repository.toLowerCase()) throw notMine(`${tombstone.data.machine} の ${tombstone.data.repository}`);
     throw new ExportError("missing", notThere(repository), true);
   }
   const parsed = Exported.safeParse(raw);

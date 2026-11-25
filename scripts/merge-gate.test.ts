@@ -1,6 +1,6 @@
 // test-reads: scripts/merge-gate.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ASK_KINDS, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, viewpointsMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
+import { ASK_KINDS, gatePaths, checksFromRuns, configScopeOf, designRulesTouched, judge, scopeMaterial, viewpointsMaterial, sharedMoved, loadReversibility, main, mergePr, commentOnlyChange, fileSecurityKinds, plainDiffHeader, PROTECTED, RECHECK_KINDS, REVERSIBILITY_PATH, SECURITY_KINDS, readGitlabPr, readPr as readPrWith, readChange, appJobs, appRecords, writeGateResult, type JobsOf, type RecordsOf, type PrFacts, type RecheckKind } from "./merge-gate";
 import { markedLinesTouched } from "./merge-gate-rules";
 import { VIEWPOINTS } from "./review-viewpoints";
 import { Db } from "../packages/core/src/db";
@@ -3003,5 +3003,29 @@ describe("reversibility table", () => {
     e.effects.push("weather");
     e.rows[0].effect = "weather";
     expect(() => loadReversibility(write("own-effect.json", e))).toThrow(/effects must be/);
+  });
+});
+
+describe("gate-paths", () => {
+  const given = ["scripts/merge-gate.ts", "scripts/local-ci.ts", "ops-kit/bin/gh", "rescue/x.ts", "ops-kit/bin/", "packages/core/src/promotion.ts", "apps/web/src/a.ts", "docs/x.md", "scripts/", "rescue/sub/", "docs/"];
+
+  test("returns the gate's paths and the directories that hold one, not the others", () => {
+    expect(gatePaths(given)).toEqual(["scripts/merge-gate.ts", "scripts/local-ci.ts", "ops-kit/bin/gh", "rescue/x.ts", "ops-kit/bin/", "packages/core/src/promotion.ts", "scripts/", "rescue/sub/"]);
+  });
+
+  test("main prints one path per line and exits 0, and refuses a PR number or another flag with the usage", async () => {
+    const out: string[] = [];
+    const errs: string[] = [];
+    const run = async () => {
+      throw new Error("gh must not be called");
+    };
+    const code = await main(["--gate-paths", "scripts/merge-gate.ts", "apps/web/src/a.ts"], run as never, (l) => out.push(l), (e) => errs.push(e));
+    expect(code).toBe(0);
+    expect(out).toEqual(["scripts/merge-gate.ts"]);
+    for (const bad of [["--gate-paths", "12", "scripts/local-ci.ts"], ["12", "--gate-paths", "scripts/local-ci.ts"], ["--gate-paths", "scripts/local-ci.ts", "--merge"], ["--gate-paths"]]) {
+      const e: string[] = [];
+      expect(await main(bad, run as never, () => {}, (x) => e.push(x))).toBe(2);
+      expect(e[0]).toContain("--gate-paths");
+    }
   });
 });
