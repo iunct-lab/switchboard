@@ -15,7 +15,7 @@ export interface SupervisorOptions {
   home: string;
   /** The checkout agents edit; handed to the daemon as its meta workspace. */
   repo: string;
-  /** Releases come from a repository, not the checkout `repo`: the daemon's repo root is then the release it runs from. */
+  /** Releases come from a repository, not a checkout: `repo` is then `releases/current`, the link to the release that runs. */
   source?: string | null;
   port: number;
   rescueUrl?: string;
@@ -67,7 +67,10 @@ export class Supervisor {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     // sb-rescue's own secret for 作り直す: the daemon and the runners it starts have no use for it
     delete env.SWITCHBOARD_STARTER_TOKEN;
-    Object.assign(env, { SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOME: this.o.home, SWITCHBOARD_PORT: String(this.o.port), SWITCHBOARD_REPO_ROOT: this.o.source ? dir : this.o.repo });
+    // The meta workspace is `repo` as given, never the release directory itself: with releases from a repository it is
+    // `releases/current`, a path that stays when a promotion switches the link and removes old releases. A Task's hooks
+    // (the kit's deny-shared-tmp, which blocks every Bash when it is missing) and kit are named under it.
+    Object.assign(env, { SWITCHBOARD_SUPERVISED: "1", SWITCHBOARD_HOME: this.o.home, SWITCHBOARD_PORT: String(this.o.port), SWITCHBOARD_REPO_ROOT: this.o.repo });
     if (this.o.rescueUrl) env.SWITCHBOARD_RESCUE_URL = this.o.rescueUrl;
     const fd = openSync(this.logPath, "a");
     this.note(`starting ${this.running} on port ${this.o.port}`);

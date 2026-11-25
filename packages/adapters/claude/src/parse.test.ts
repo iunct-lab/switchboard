@@ -2,7 +2,7 @@
 import { recordingText, skipRecordings, assertRecordings } from "../../../../scripts/recordings.ts";
 import { describe, expect, test } from "bun:test";
 import { AgentEvent, QUESTION_DEFERRED_REPLY } from "@switchboard/protocol";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountName, buildArgs, childEnv, otelEnv, CLAUDE_EFFORTS, CLAUDE_LOGIN_HINT, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, cliDefaultModelFromSettings, createClaudeAdapter, loginStatus, subagentEnv } from "./index.ts";
@@ -22,6 +22,9 @@ function replay() {
   const events = fixture.split("\n").flatMap((l) => p.feed(l));
   return events;
 }
+
+/** A Claude home with no synced skills, so a test of the settings does not read this machine's. */
+const emptyHome = () => mkdtempSync(join(tmpdir(), "switchboard.nohome."));
 
 describe("claude stream-json → AgentEvent (recorded replay)", () => {
   test.skipIf(skipRecordings("packages/adapters/claude/fixtures/write-with-permission.jsonl"))("every emitted event validates against the protocol schema", () => {
@@ -274,19 +277,48 @@ describe("--resume (recorded against Claude Code 2.1.261)", () => {
   });
 
   test("buildArgs: guards become one PreToolUse Bash hook in --settings, none without guards", () => {
-    const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: ["'/k/ops-kit/bin/deny-shared-tmp'", "/k/other"] }, ["--x"]);
+    const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: ["'/k/ops-kit/bin/deny-shared-tmp'", "/k/other"] }, ["--x"], emptyHome());
     const at = args.indexOf("--settings");
     expect(JSON.parse(args[at + 1]!)).toEqual({
       hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "'/k/ops-kit/bin/deny-shared-tmp'", onFailure: "block" }, { type: "command", command: "/k/other", onFailure: "block" }] }] },
     });
     expect(args.at(-1)).toBe("--x");
-    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" })).not.toContain("--settings");
-    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: [] })).not.toContain("--settings");
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p" }, [], emptyHome())).not.toContain("--settings");
+    expect(buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", guards: [] }, [], emptyHome())).not.toContain("--settings");
+  });
+
+  test("buildArgs: synced skills from the manifests go to skillOverrides as off, alone or beside the hooks; no manifest adds nothing", () => {
+    const home = mkdtempSync(join(tmpdir(), "switchboard.skills."));
+    try {
+      const settings = (o: { guards?: string[] } = {}) => {
+        const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", ...o }, [], home);
+        const at = args.indexOf("--settings");
+        return at < 0 ? undefined : JSON.parse(args[at + 1]!);
+      };
+      expect(settings()).toBeUndefined();
+      mkdirSync(join(home, "skills", "synced", "a"), { recursive: true });
+      mkdirSync(join(home, "skills", "synced", "b"), { recursive: true });
+      mkdirSync(join(home, "skills", "synced", "broken"), { recursive: true });
+      writeFileSync(join(home, "skills", "synced", "a", "manifest.json"), JSON.stringify({ skills: [{ name: "docx" }, { name: "pdf" }] }));
+      writeFileSync(join(home, "skills", "synced", "b", "manifest.json"), JSON.stringify({ skills: [{ name: "xlsx" }, { skillId: "no-name" }] }));
+      writeFileSync(join(home, "skills", "synced", "broken", "manifest.json"), "{not json");
+      const off = { "anthropic-skills:docx": "off", "anthropic-skills:pdf": "off", "anthropic-skills:xlsx": "off" };
+      expect(settings()).toEqual({ skillOverrides: off });
+      expect(settings({ guards: ["/k/guard"] })).toEqual({
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "/k/guard", onFailure: "block" }] }] },
+        skillOverrides: off,
+      });
+      // the names are read at every start: a manifest that lost a skill stops switching it off
+      writeFileSync(join(home, "skills", "synced", "a", "manifest.json"), JSON.stringify({ skills: [{ name: "docx" }] }));
+      expect(Object.keys(settings()!.skillOverrides).sort()).toEqual(["anthropic-skills:docx", "anthropic-skills:xlsx"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("task settings allow skill operations: allow goes to permissions.allow in the same --settings as the hooks", () => {
     const settings = (o: { guards?: string[]; allow?: string[] }) => {
-      const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", ...o });
+      const args = buildArgs({ cwd: "/w", scope: ["/w"], prompt: "p", ...o }, [], emptyHome());
       expect(args.filter((a) => a === "--settings").length).toBeLessThanOrEqual(1);
       const at = args.indexOf("--settings");
       return at < 0 ? undefined : JSON.parse(args[at + 1]!);

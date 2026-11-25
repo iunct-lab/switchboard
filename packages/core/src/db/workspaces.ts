@@ -1,6 +1,7 @@
 /** Workspaces. */
 
 import type { BacklogSource, Workspace, WorkspaceAllocation, WorkspaceSweep } from "@switchboard/protocol";
+import { basename, dirname } from "node:path";
 import { newId } from "./util.ts";
 import { DbCore } from "./core.ts";
 
@@ -27,6 +28,56 @@ export class WorkspaceQueries extends DbCore {
     const row: Workspace = { id: ws.id ?? newId("ws"), name: ws.name, path: ws.path, kind: ws.kind, createdAt: Date.now(), backlog: "github", sweep: { implement: 1, plan: 1 }, allocation: { share: null, mode: "continuing" }, issueArtifacts: false, ...(ws.upstream ? { upstream: ws.upstream } : {}) };
     this.sqlite.query("INSERT INTO workspaces (id, name, path, kind, created_at, upstream) VALUES (?, ?, ?, ?, ?, ?)").run(row.id, row.name, row.path, row.kind, row.createdAt, ws.upstream ?? null);
     return row;
+  }
+
+  /**
+   * The one meta workspace, at `path`. One matters: the first meta row is the one read (`listWorkspaces`' order), and
+   * one left at a removed release would hand every Task that release's hook path, which blocks all its Bash calls.
+   * An install from a Release used to register each release directory as the meta workspace; it is now the link
+   * `releases/current`. When `path` is that link, the meta rows at its sibling release directories (named by a full
+   * commit id, as sb-rescue names them; gone or still kept:
+   * the restart of a promotion comes before the old releases are removed) are that one workspace: the one read so far
+   * moves to `path` with its id and settings, and their Tasks get `path` instead (cwd and scope, workspace) so they can
+   * start, resume and fork again. The row already at `path` is kept when there is one; any other meta row (another
+   * checkout) becomes a repo and keeps its Tasks.
+   */
+  seedMetaWorkspace(path: string, name: string): Workspace {
+    const metas = this.sqlite.query("SELECT id, path FROM workspaces WHERE kind = 'meta' ORDER BY name").all() as { id: string; path: string }[];
+    const at = this.sqlite.query("SELECT id FROM workspaces WHERE path = ?").get(path) as { id: string } | null;
+    const releases = basename(path) === "current" ? metas.filter((m) => dirname(m.path) === dirname(path) && RELEASE_ID.test(basename(m.path))) : [];
+    const inUse = metas.find((m) => m.path !== path);
+    let id = "";
+    this.sqlite.transaction(() => {
+      if (at) {
+        this.sqlite.query("UPDATE workspaces SET name = ?, kind = 'meta' WHERE id = ?").run(name, at.id);
+        id = at.id;
+      } else if (inUse && releases.some((m) => m.id === inUse.id)) {
+        this.sqlite.query("UPDATE workspaces SET name = ?, path = ? WHERE id = ?").run(name, path, inUse.id);
+        id = inUse.id;
+      } else id = this.upsertWorkspace({ name, path, kind: "meta" }).id;
+      this.sqlite.query("UPDATE workspaces SET kind = 'repo' WHERE kind = 'meta' AND id != ?").run(id);
+      for (const r of releases) {
+        this.movePathsOfTasks(r.path, path);
+        this.sqlite.query("UPDATE tasks SET workspace_id = ? WHERE workspace_id = ?").run(id, r.id);
+      }
+    })();
+    return this.getWorkspace(id)!;
+  }
+
+  /** Tasks' cwd and scope entries at `from` or under it are moved to `to` (at a path boundary). */
+  private movePathsOfTasks(from: string, to: string): void {
+    const map = (v: string) => (v === from || v.startsWith(`${from}/`) ? to + v.slice(from.length) : v);
+    const rows = this.sqlite.query("SELECT id, cwd, scope FROM tasks WHERE instr(cwd, ?1) = 1 OR instr(scope, ?1) > 0").all(from) as { id: string; cwd: string; scope: string }[];
+    for (const r of rows) {
+      let scope = r.scope;
+      try {
+        const list = JSON.parse(r.scope) as unknown;
+        if (Array.isArray(list)) scope = JSON.stringify(list.map((d) => (typeof d === "string" ? map(d) : d)));
+      } catch {
+        // a scope that is not a JSON list is left as it is
+      }
+      this.sqlite.query("UPDATE tasks SET cwd = ?, scope = ? WHERE id = ?").run(map(r.cwd), scope, r.id);
+    }
   }
 
   /** The hash of the runner config the person confirmed for a foreign repository. */
@@ -170,3 +221,6 @@ function rowToWorkspace(r: any): Workspace {
   const backlog = source && (source.service === "switchboard" || source.disabled) ? "switchboard" : "github";
   return { id: r.id, name: r.name, path: r.path, kind: r.kind, createdAt: r.created_at, backlog, sweep: { implement: r.sweep_implement, plan: r.sweep_plan }, allocation: { share: r.alloc_share, mode: r.alloc_mode }, issueArtifacts: r.issue_artifacts === 1, ...(r.project_var ? { projectVar: r.project_var } : {}), ...(r.upstream ? { upstream: r.upstream } : {}), ...(r.rules ? { rules: r.rules } : {}), ...(r.config ? { config: r.config } : {}) };
 }
+
+/** The name sb-rescue gives a release directory: the full commit id. */
+const RELEASE_ID = /^[0-9a-f]{40}$/;

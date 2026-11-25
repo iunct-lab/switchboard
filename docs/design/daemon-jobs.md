@@ -154,10 +154,71 @@ get its classes used; that is a blocker. These rules are here and not in each
 kind's instructions so that the main review, the follow-up and a recheck cannot drift apart; `handled.md` and `old-paths.md` are made by
 `ops-kit review-handled` and `ops-kit old-paths check` when the review's material is prepared (the kit's README, "Review material").
 
-Status of the measurement (2026-11-17): the variables, flags and feature names above exist in the installed CLIs
-(Claude Code 2.1.325, Codex CLI 0.169.0), and the argv is covered by tests. What each of them removes from a real
-reviewer's input (the `tools` / `mcp_servers` / `skills` lists of Claude Code's `init` event, the instructions Codex
-records for a session) has not been measured yet; when it is, the per-runner table of what a reviewer reads goes here.
+What each of them removes from a reviewer's input was measured with one run of each runner without the isolation and one
+with it, in one review checkout (a fresh clone of a merged PR with its `_review/`; the memory figure below comes from a
+folder that had a memory, which a new checkout has not), with the argv of `jobCommand` and an instruction that asks the runner only to report what
+it has, followed by the runner's note. The numbers come from the runner's own record, not from what the model says about
+itself (it miscounts its tools and slash commands). They depend on what the user has installed and on the CLI version, so
+read them as an example of where the input comes from; the list after the tables says how to read them on your own machine.
+
+Claude Code (input tokens are the first turn's input, cached or not, from the `result` line):
+
+| Input | Without isolation | With isolation |
+|---|---|---|
+| Instructions: `prompt.md` and the runner's note (`ops-kit review-note claude`) | the same | the same |
+| Material under `_review/` | read when the instructions ask for it | the same |
+| `CLAUDE.md` files of the clone | in context: the model quotes a rule of the clone's `CLAUDE.md` when asked | none: asked for the rule, it answers `NONE` |
+| The user's `CLAUDE.md` and memory | in context (the memory index was about 1.3k tokens) | none |
+| Tools / MCP servers / skills / slash commands / plugins (`init` event) | 23 / 1 / 37 / 67 / 3 | 22 / 0 / 0 / 0 / 3 |
+| Input tokens of the first turn | 43.6k | 24.9k |
+
+The plugins left are Claude Code's own built-in ones (their source ends in `@builtin`), not the user's. The `tools` list of
+the unisolated start also grows when an MCP server finishes connecting after `init`, so the count of tools there is not fixed.
+
+Codex (from the session record Codex writes under `~/.codex/sessions/` when `--ephemeral` is left off):
+
+| Input | Without isolation | With isolation |
+|---|---|---|
+| Instructions: `prompt.md` and the runner's note (`ops-kit review-note codex`) | the same | the same |
+| Material under `_review/` | read when the instructions ask for it | the same |
+| `AGENTS.md` of the clone | a user message beginning `# AGENTS.md instructions` | no such message; the first user message is only the environment context |
+| The user's instructions | none were present when measured (no user-level `AGENTS.md`) | none |
+| Tools, apps, plugin skills | the 12 built-in tools, plus the apps' tools (`mcp__codex_apps__*`, 13); 32 skills listed, most from plugins (17.0 KB of skills text) | the 12 built-in tools; no apps' tools; Codex's own 4 skills (3.9 KB) |
+| Base instructions | 28 KB | 28 KB (not changed by any flag) |
+| Input tokens of the turn | 20.4k | 17.1k |
+
+What each candidate removed, with the other candidates left off (Claude Code), or alone (Codex):
+
+| Candidate | Effect |
+|---|---|
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` | Removes every `CLAUDE.md` (the clone's and the user's): about 16.7k input tokens, and the model no longer quotes the rule. The largest single effect |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | Removes the project's memory index: about 1.3k tokens, measured in a folder that has a memory. A new review checkout has none, so there it removes nothing until a memory is written for that path |
+| `--strict-mcp-config` | The user's MCP servers go to 0 |
+| `--disable-slash-commands` | Skills and slash commands go to 0 (skills are slash commands to Claude Code) |
+| `-c project_doc_max_bytes=0` | The `AGENTS.md` message is not sent |
+| `-c mcp_servers={}` | Not shown by this measurement: the Codex config it ran with named no MCP server, and the apps' tools come from the apps feature, not from `mcp_servers`. It is kept for a config that names servers; that case has not been measured |
+| `--disable apps` | The apps' tools go to 0; the skills list does not change |
+| `--disable plugins` | The plugins' skills are no longer listed (32 to 4); the apps' tools stay |
+
+Both CLIs accept the isolated start (Codex with the sandbox flags of `jobCommand`) and run to the end, signed in with the
+same OAuth login as without it (`--bare` is not used). Claude Code's `--debug-file` does not print the paths of the
+`CLAUDE.md` files it reads, so it is not the evidence for them; the model's answer to a question only the file can answer,
+and the input tokens, are.
+
+Measured with Claude Code 2.1.331 and Codex CLI 0.172.0.
+
+To check a reviewer's input on your own machine:
+
+- Claude Code: add `--output-format stream-json --verbose` and read the first line, the `system` event with `subtype` `init`:
+  its `tools`, `mcp_servers`, `skills`, `slash_commands` and `plugins` are the lists the reviewer got. Ask the reviewer a
+  question only a loaded file can answer (for example, to quote a rule of the checkout's `CLAUDE.md`, or the first line of
+  your memory index): `NONE` is the isolated answer.
+- Codex: run without `--ephemeral` and with `--json`. The `thread.started` event gives the run's `thread_id`; the session
+  record under `~/.codex/sessions/` (or `$CODEX_HOME/sessions/`) whose file name ends in that id is the run's own. Its first
+  lines carry `base_instructions`, the tool namespaces, the developer message with the skills list, and a user message
+  beginning `# AGENTS.md instructions` when `AGENTS.md` was loaded; a user-level instructions file shows up there the same
+  way. Delete that one file when done (not the newest file: another Codex session may have written one since). The
+  `turn.completed` event carries the turn's input tokens.
 
 ## How the Task is resumed
 

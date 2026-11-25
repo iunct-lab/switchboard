@@ -1,7 +1,7 @@
 // test-reads: ops-kit/bin/ops-kit ops-kit/src/cli.ts ops-kit/src/heavy.ts packages/core/src/daemon-reads.ts
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
@@ -379,7 +379,8 @@ test("from a source repository (no git): promote by tag builds from the tarball,
     expect(await promote(sctx, "v0.3.0", FAST)).toMatchObject({ action: "promote", ok: true, from: t2.sha, to: t3.sha });
     expect([currentOf(home), previousOf(home)]).toEqual([t3.sha, t2.sha]);
     const h = await until(() => health(port), "s3 up");
-    expect([h.version, h.repoRoot]).toEqual(["s3", realpathSync(join(home, "releases", "current"))]);
+    // the meta workspace is the link, not the release under it: a promotion that removes old releases leaves it in place
+    expect([h.version, h.repoRoot]).toEqual(["s3", join(home, "releases", "current")]);
     expect(JSON.parse(readFileSync(join(home, "releases", t3.sha, ".release.json"), "utf8"))).toEqual({ tag: "v0.3.0", sha: t3.sha });
 
     const rescue = startRescue(sctx, { port: 0 });
