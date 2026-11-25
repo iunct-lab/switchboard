@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { commentOnGithub, createOnGithub, editOnGithub, listFromGithub, viewFromGithub, type Project } from "./backlog-github.ts";
+import { readyGateCheck } from "./gate-keys.ts";
 import { projectOf, type OpsConfig } from "./config.ts";
 import { repoOf, type GhClient } from "./gh.ts";
 import { fieldChoice, setField, UsageError } from "./set.ts";
@@ -203,6 +204,11 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
     };
     const edit = async (ref: string, body: Record<string, unknown>) => {
       const ws = await workspace();
+      if (!asChange && env.BACKLOG_URL && /^[0-9]+$/.test(issueRef(ref)) && (body.fields as Record<string, unknown> | undefined)?.Status === "Ready") {
+        const read = async (n: number) => (await api("GET", `/${n}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
+        const why = await readyGateCheck(read, Number(issueRef(ref)), opts.cwd, repoTop(opts.cwd));
+        if (why) throw new Refused(`Ready にしません: ${why}`);
+      }
       await api("PATCH", `/${encodeURIComponent(issueRef(ref))}${asChange ? "?change=1" : ""}`, { workspaceId: ws.workspaceId, ...body });
       // pending or not shows in `view` (送信待ち): a backlog kept in the app is applied at once
       io.out(`#${issueRef(ref)} を保存しました`);
@@ -702,7 +708,7 @@ export interface Detail {
   issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null; pr?: number | null; reportedAt?: string | null } };
   /** A local change's branch tips now; absent / null otherwise. */
   changeRefs?: { head: string | null; base: string | null } | null;
-  comments: Array<{ id: string; body: string; createdAt: string }>;
+  comments: Array<{ id: string; body: string; createdAt: string; screen?: true }>;
   fields: Record<string, string | number | null> | null;
   fetchedAt: number | null;
   localId: string | null;

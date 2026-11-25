@@ -12,7 +12,7 @@ import { fieldValue, UsageError, type Field } from "../../../ops-kit/src/set.ts"
 import { syncsGithub } from "./backlog-gh.ts";
 import { criteria, confirmationsOf } from "./backlog-item.ts";
 import { DECISION_HEADING, ANSWER_HEADING, HOLD_HEADING, proceedingAnswer, type Comment } from "./backlog-comments.ts";
-import { shown, projectItemOf, issueRecord, shownRecords } from "./backlog-stored.ts";
+import { shown, projectItemOf, issueRecord, shownRecords, givenOnScreen } from "./backlog-stored.ts";
 import { grantHeadsOf, type GrantHeads } from "./merge-grants.ts";
 
 /* ---------- edits kept here and sent to GitHub later ---------- */
@@ -372,17 +372,16 @@ export function screenAnswer(db: Db, source: BacklogSource, n: number): { issue:
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .at(-1);
   if (!last) return null;
-  // and only as it was given: a comment edited on GitHub after it was sent is not the screen's words any more
-  // never an operation taken in from a work machine, whatever it carries: the screen meant is this instance's
-  const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && o.target === last.id && machineOfOperation(o.id) === null && (o.payload as { screen?: unknown } | null)?.screen === true);
-  const given = (sent?.payload as { body?: unknown } | undefined)?.body;
-  if (typeof given !== "string" || given.trim() !== last.body.trim()) return null;
+  // and only as it was given, never an operation taken in from a work machine (givenOnScreen)
+  const sent = givenOnScreen(db.listBacklogOperations(source), last.id, last.body);
+  if (!sent) return null;
+  const given = (sent.payload as { body: string }).body;
   // the heads its grants are for, as kept when it was taken; none kept = an answer taken before answers kept them
-  const heads = grantHeadsOf((sent!.payload as { heads?: unknown }).heads);
+  const heads = grantHeadsOf((sent.payload as { heads?: unknown }).heads);
   // the person's own input as the app took it apart (a chosen option's sentence, the memo), when the answer's text starts with lines of the app's
-  const kept = (sent!.payload as { parts?: unknown }).parts;
+  const kept = (sent.payload as { parts?: unknown }).parts;
   const parts = Array.isArray(kept) && kept.every((p) => typeof p === "string") ? (kept as string[]) : undefined;
-  return { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent!.id, ...(heads ? { heads } : {}), ...(parts ? { parts } : {}) };
+  return { issue: last.issue, text: given.trimStart().slice(ANSWER_HEADING.length).trim(), id: sent.id, ...(heads ? { heads } : {}), ...(parts ? { parts } : {}) };
 }
 
 /** `## 保留` + text on Issue n, kept here and sent later: the needs-decision label stays (an answer would take it off). */

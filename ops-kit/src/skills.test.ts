@@ -1227,3 +1227,14 @@ test("skills: the user's mark and the split of instruction-file Tasks are writte
   expect(split).toContain("`instructions`");
   expect(read("task-to-pr")).toContain("「ついでの整合」をしない");
 });
+
+test("skills: gate keys — pbi-to-tasks bars a display record or a gated side's value as a key and asks for the 鍵 section, request-to-backlog puts removing the mechanism among the options", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  const pbi = read("pbi-to-tasks");
+  const row = pbi.indexOf("ゲートされる側が書ける値（環境変数・枝の名前・本文の印）をゲートの鍵にする");
+  expect(row).toBeGreaterThanOrEqual(0);
+  expect(row).toBeLessThan(pbi.indexOf("| 新しいテーブル・エンドポイント・画面 |"));
+  for (const word of ["`## ゲートの鍵`", "`**鍵の変更**: あり|なし`", "`**進め方**: 止めて待つ`", "決定ログに 1 行"]) expect(pbi).toContain(word);
+  expect(pbi.indexOf("### 4.5 ゲートの鍵")).toBeLessThan(pbi.indexOf("### 5. PBI を Ready にする"));
+  expect(read("request-to-backlog")).toContain("「仕組みを無くす（無くすと何が起きるか）」を必ず入れる");
+});

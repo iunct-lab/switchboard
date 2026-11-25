@@ -71,7 +71,7 @@ let buf='';for await (const chunk of Bun.stdin.stream()) {buf+=new TextDecoder()
   process.env.CLAUDE_CONFIG_DIR = configDir;
   const port = Array.from({ length: 100 }, (_, i) => 47911 + i).find(p => Bun.spawnSync(["lsof", `-iTCP:${p}`, "-sTCP:LISTEN"], { stdout: "ignore", stderr: "ignore" }).exitCode === 1);
   assert(port, "free daemon port");
-  core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: home, SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_CODEX_HOME: join(home, "codex"), SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [createClaudeAdapter({ bin: cli, claudeHome: join(home, "claude-config") }), other], { port, selfdevChecks: false, gh: async () => ({ code: 1, stdout: "", stderr: "fixture" }), judge: async () => { throw new Error("fixture judge disabled"); }, rubricJudge: async () => { throw new Error("fixture rubric judge disabled"); } });
+  core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: home, SWITCHBOARD_CLAUDE_PROJECTS: join(home, "none"), SWITCHBOARD_CODEX_HOME: join(home, "codex"), SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), [createClaudeAdapter({ bin: cli, claudeHome: join(home, "claude-config") }), other], { port, selfdevChecks: false, gh: async () => ({ code: 1, stdout: "", stderr: "fixture" }), judge: async () => { throw new Error("fixture judge disabled"); }, rubricJudge: async () => { throw new Error("fixture rubric judge disabled"); }, titleSuggester: async () => { throw new Error("fixture title suggester disabled"); } });
   const base = `http://127.0.0.1:${core.server.port}`;
   const post = async (path: string, body: object) => { const r = await fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); assert(r.ok, "fixture API"); return r.json(); };
   const workspaces = await Promise.all([a, b, unknown].map(path => post("/api/workspaces", { path })));
@@ -125,7 +125,7 @@ let buf='';for await (const chunk of Bun.stdin.stream()) {buf+=new TextDecoder()
     const count = core.db.listTasks().length; await click(".compose button.pri");
     await until(() => core!.db.listTasks().length > count && latest()?.status === "error", "Cloud error");
     await until(() => evaluate(`document.querySelector('.main')?.textContent.includes(${JSON.stringify(help)})`), "error view");
-    assert(latest().cloudSession === null && latest().outcome === "unknown", "error is unconfirmed");
+    assert(latest().cloudSession === null && latest().outcome === "failed", "error shows failed");
     assert(!await evaluate(`document.body.textContent.includes('fixture-secret')`), "raw error redacted"); cases++;
   }
   // Folder trust: the guidance shows before Start for a known-untrusted folder, no CLI is started, nothing is written.

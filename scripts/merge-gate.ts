@@ -53,7 +53,12 @@ export const SECURITY_WORDS = ["auth", "approval", "permission", "permissions", 
  */
 export const SECURITY_KINDS = ["security:docs", "security:tests", "security:words", "security:lockfile", "security:github", "security:gates", "security:gate-support", "security:host"] as const;
 export type SecurityKind = (typeof SECURITY_KINDS)[number];
-const glob = (ps: string[]) => ps.map((p) => new Bun.Glob(p));
+const globSources = new WeakMap<Bun.Glob, string>();
+const glob = (ps: string[]) => ps.map((p) => {
+  const g = new Bun.Glob(p);
+  globSources.set(g, p);
+  return g;
+});
 /** Secrets files: in the words group (they hold the secrets the words name). */
 const SECURITY_WORD_FILES = glob(["**/.env*", "**/.gitleaks.toml"]);
 export const SECURITY_GROUPS: Record<Exclude<SecurityKind, "security:docs" | "security:tests" | "security:words">, Bun.Glob[]> = {
@@ -239,6 +244,15 @@ export interface Judgement {
 }
 
 const matches = (globs: Bun.Glob[], path: string) => globs.some((g) => g.match(path));
+
+/**
+ * The paths among `paths` that the gate's own lists cover: a path of the `security:gates` group or of ATTACK_PATHS, the same
+ * values `judge` reads. A path ending in `/` (a directory a Task names) is kept when a glob matches a file under it.
+ */
+export function gatePaths(paths: string[]): string[] {
+  const lists = [...SECURITY_GROUPS["security:gates"], ...ATTACK_PATHS];
+  return paths.filter((p) => (p.endsWith("/") ? lists.some((g) => globSources.get(g)?.startsWith(p) || g.match(`${p}x`)) : matches(lists, p)));
+}
 
 /**
  * The security groups of a path; empty = not security. A document that is not an instruction is security:docs alone. A
@@ -1418,7 +1432,7 @@ export async function mergePr(n: number, repo: string, mode: MergeMode, facts: P
   await run(["stack", "merge", String(n), "--rebase", "-y"], marked);
 }
 
-const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)\n       bun scripts/merge-gate.ts <PR> --viewpoints | --change <n> --viewpoints   (the review material of the viewpoints the PR asks for; no judgement)";
+const USAGE = "usage: bun scripts/merge-gate.ts <PR> [--allow-large] [--merge | --merge-stack | --merge-sync] [--repo <owner/name>]\n       bun scripts/merge-gate.ts --change <n> [--allow-large]\n       bun scripts/merge-gate.ts <PR> --scope | --change <n> --scope   (the review material of the Task scope; no judgement)\n       bun scripts/merge-gate.ts <PR> --viewpoints | --change <n> --viewpoints   (the review material of the viewpoints the PR asks for; no judgement)\n       bun scripts/merge-gate.ts --gate-paths <path>...   (the given paths the gate covers, one per line; no judgement)";
 
 /**
  * What a run as the app's job leaves for its record: `$J/result.json` (the judged head and the verdict's parts), which the daemon reads when
@@ -1539,6 +1553,20 @@ export async function requestGate(args: string[], env: Record<string, string | u
 
 /** The command: 0 = merge (and merged, with --merge / --merge-stack) / 1 = stop, or the merge failed / 2 = not judged. Only a merge verdict merges. */
 export async function main(args: string[], run: Run = gh, log = console.log, err = console.error, stackRepo: () => string | undefined = originRepo, glab: Sh = runGlab, cwd = process.cwd(), backlog: { env: Record<string, string | undefined>; fetch?: (url: string, init?: RequestInit) => Promise<Response> } = { env: process.env }): Promise<number> {
+  // not a judgement: no PR, no `gh`, no app; the paths the gate covers among the ones given (the kit asks this instead of keeping a copy of the lists)
+  if (args[0] === "--gate-paths") {
+    const given = args.slice(1);
+    if (given.length === 0 || given.some((a) => a.startsWith("--") || /^\d+$/.test(a))) {
+      err(USAGE);
+      return 2;
+    }
+    for (const p of gatePaths(given)) log(p);
+    return 0;
+  }
+  if (args.includes("--gate-paths")) {
+    err(USAGE);
+    return 2;
+  }
   // in a Task the verdict (and the merge) is the app's: its own copy of this script runs as a job, and its record is what the Task's verdict is
   if (backlog.env.SWITCHBOARD_TASK_ID) return requestGate(args, backlog.env, cwd, log, err, { fetch: backlog.fetch });
   // `--cwd <dir>`: the checkout to judge in, given by the app's job, which starts in the daemon's own folder. A Task's shell never reaches this (it asks the app).

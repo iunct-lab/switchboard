@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Backlog, BacklogIssueDetail, BacklogItem } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
 import { taskAllowRules } from "./tasks/sessions.ts";
-import { answerStoredDecision, askStoredDecision, screenAnswer, holdStoredDecision } from "./backlog-edit.ts";
+import { answerStoredDecision, askStoredDecision, screenAnswer, holdStoredDecision, commentStoredIssue } from "./backlog-edit.ts";
 import { buildStartPrompt } from "./backlog-prompt.ts";
 import { confirmationsOf, confirmAfterOf, confirmDecisionsOf, toItem } from "./backlog-item.ts";
 import { pickNext } from "./backlog-pick.ts";
@@ -279,6 +279,33 @@ test("stage prompt carries grant: the newest ## 回答 given on the screen goes 
   // nothing saved as a policy, no allow rule added
   expect(((await (await fetch(`${base}/api/policies`)).json()) as { policies: unknown[] }).policies).toEqual([]);
   expect(taskAllowRules("/meta", "/repo")).toEqual(rulesBefore);
+});
+
+test("screen mark on view: only a ## 回答 given on the screen, as given, shows screen: true in the Issue's comments", async () => {
+  const fake = taskDecisionGh({ i305: [subTask(321, "OPEN", ["type:task", "needs-decision"], [["## 判断待ち\n**問い**: 登録するか", "2026-09-28T03:00:00Z"], ["## 回答\n\nGitHub で書いた回答", "2026-09-28T04:00:00Z"]])], i307: [] });
+  const base = await boot(fake.gh);
+  await refreshed(base);
+  const db = core!.db;
+  const source = db.getWorkspaceBacklogSource(metaId())!;
+  const view = async () => ((await (await fetch(`${base}/api/backlog/321?workspaceId=${metaId()}`)).json()) as BacklogIssueDetail).comments;
+  const marked = async () => (await view()).filter((c) => c.screen).map((c) => c.body);
+  // only imported from GitHub
+  expect((await view()).some((c) => c.body.includes("GitHub で書いた回答"))).toBe(true);
+  expect(await marked()).toEqual([]);
+  // answered on the screen
+  expect((await fetch(`${base}/api/backlog/305/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: metaId(), text: "画面で答えた", issue: 321 }) })).status).toBe(202);
+  expect(await marked()).toEqual(["## 回答\n\n画面で答えた"]);
+  // a Task's answer and one written with `backlog comment`: no mark
+  const at = Date.now() + 1000;
+  askStoredDecision(db, source, 321, "**問い**: もう一度", at);
+  answerStoredDecision(db, source, 321, "Task が答えた", at + 500, { question: { at: new Date(at).toISOString() }, by: "task:t_x" });
+  commentStoredIssue(db, source, 321, "## 回答\n\nコメントで書いた", at + 1000);
+  expect(await marked()).toEqual(["## 回答\n\n画面で答えた"]);
+  // the screen's one rewritten on GitHub after it was sent: no longer marked
+  const sent = db.listBacklogOperations(source).find((o) => o.kind === "comment" && (o.payload as { screen?: boolean }).screen)!;
+  const rec = db.getBacklogRecord({ ...source, objectKind: "comment", externalId: sent.target })!;
+  db.sqlite.run("UPDATE backlog_records SET remote = ?, local = NULL, fetch_state = 'fetched' WHERE external_id = ?", [JSON.stringify({ ...(rec.local ?? rec.remote) as object, body: "## 回答\n\n書き換えた" }), sent.target]);
+  expect(await marked()).toEqual([]);
 });
 
 /** `gh` whose `pr view … --json headRefOid` answers from `heads` (by PR number; none = the read fails), every such read kept in `reads`. */

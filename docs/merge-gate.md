@@ -45,6 +45,8 @@ In a repository where Actions does not start (a job with 0 steps, or a run that 
 
 A Task's body names the paths it plans to change, but the files a change needs often differ from the plan, so a file outside the names does not stop the merge. When a file of the PR is covered by no path of the Task (a named directory covers what is under it), the judgement lists it in `notes` as `Task #<n> の名指しの外: <paths>`, with the sibling Tasks that name it. `bun scripts/merge-gate.ts <PR> --scope` (`--change <n> --scope` for a local change) prints the same list as Markdown for the main review, which checks each file for a change the Task's purpose needs against one mixed in from another Task; it judges, merges and records nothing, and prints nothing when no file is outside.
 
+`bun scripts/merge-gate.ts --gate-paths <path>...` prints, one per line, those of the given paths that the gate itself covers (the `security:gates` group and the attack-review paths, the same lists `judge` reads); a path ending in `/` is kept when the lists cover a file under it. It judges nothing and needs no PR number or `gh`; a PR number or another flag with it exits 2. The kit calls it instead of keeping a copy of the lists.
+
 Three kinds of file come along with a named file and are not listed as outside (`companion` in `scripts/merge-gate.ts`):
 
 - **The test of a named file**: `<name>.test.ts` next to a named `<name>.ts` (`.tsx` too). A test of a file the Task does not name is listed as outside

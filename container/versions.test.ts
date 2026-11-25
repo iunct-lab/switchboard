@@ -125,6 +125,11 @@ describe("ci stage tools", () => {
     }
   });
 
+  test("the aws CLI is in the base stage, so the stand-alone image has it", () => {
+    expect(stageInstall("base")).toContain("awscli-2");
+    expect(stageInstall("ci")).not.toContain("awscli-2");
+  });
+
   // tests run `bun` from dirname(process.execPath); the npm package has only bun.exe there, so the Dockerfile links it
   test("the image links bun next to the bun.exe that process.execPath names", () => {
     expect(dockerfile).toMatch(/ln -s bun\.exe \/usr\/local\/lib\/nodejs\/lib\/node_modules\/bun\/bin\/bun\s/);

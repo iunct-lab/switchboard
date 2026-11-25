@@ -251,11 +251,11 @@ Resources:
               # its own backlog copy, which the instance writes (the work machine reads this and never the data bucket)
               - !Sub '${Uplink.Arn}/backlog-export/${!aws:PrincipalTag/switchboard-machine}/*'
             Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] } }
-          # the list on its own prefixes; with this prefix condition S3 still answers a GET of a missing key with "access denied", so the work machine lists a key before it reads it
+          # the list on its own prefixes (and on the proofs of a lease, which it reads); with this prefix condition a GET of a missing key answers NoSuchKey, and the work machine lists a key before it reads it to read the size first and to tell a key that is not there from a read that is refused
           - Effect: Allow
             Action: s3:ListBucket
             Resource: !GetAtt Uplink.Arn
-            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }, StringLike: { 's3:prefix': ['lease/*', !Sub 'backlog-refused/${!aws:PrincipalTag/switchboard-machine}/*', !Sub 'backlog-export/${!aws:PrincipalTag/switchboard-machine}/*'] } }
+            Condition: { 'Null': { 'aws:PrincipalTag/switchboard-machine': 'false' }, StringNotLike: { 'aws:PrincipalTag/switchboard-machine': ['', '*/*', '*.*', '*:*', '*@*', '*+*', '*=*', '* *', '_*', '-*'] }, StringLike: { 's3:prefix': ['lease/*', 'lease-proof/*', !Sub 'backlog-refused/${!aws:PrincipalTag/switchboard-machine}/*', !Sub 'backlog-export/${!aws:PrincipalTag/switchboard-machine}/*'] } }
           # leases: taken with If-None-Match, renewed and given back with If-Match; proofs of who wrote one are read, and its own written
           - Effect: Allow
             Action: s3:GetObject
@@ -526,7 +526,7 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt Uplink.Arn
-                Condition: { StringLike: { 's3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'backlog-export/*'] } }
+                Condition: { StringLike: { 's3:prefix': ['uplink/*', 'backlog/*', 'lease/*', 'lease-proof/*', 'backlog-export/*'] } }
               # a lease is taken with If-None-Match and renewed or given back with If-Match
               - Effect: Allow
                 Action: s3:PutObject

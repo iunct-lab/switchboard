@@ -11,6 +11,7 @@ Each item has one line of what holds and one line of where it is enforced or sta
 - **No default that bypasses approval.** The permission mode is the owner's choice per task; a mode that skips approvals is marked as dangerous and is never the default. The runner's own approval stays untouched.
   Source: README `## Design rules` ("System ENABLES, Agent DECIDES, User APPROVES"), `docs/design/permission-modes.md`.
 - **A change to a permission boundary, the gates, CI, dependencies or the host scripts is seen by the owner before it merges.** No recheck by another runner lifts it.
+  The design of a gate's keys (what the gate trusts) is seen by the owner before the PBI becomes Ready, and a key is only a diff the decision reads itself or a record the app keeps (2026-11-22 owner's answer).
   Source: `scripts/merge-gate.ts` `SECURITY_KINDS` (`security:docs`, `security:tests`, `security:words`, `security:lockfile`, `security:github`, `security:gates`, `security:gate-support`, `security:host`) — the `[聞く]` reasons of `docs/merge-gate.md`.
 - **Only the owner raises a cost ceiling or a usage threshold.** A task budget, a perf budget, the quota gate: an agent may propose, never set higher.
   Source: `.claude/skills/perf-loop/SKILL.md` (raising a ceiling is the owner's call), `docs/design/perf.md`, task `budgetUsd`.

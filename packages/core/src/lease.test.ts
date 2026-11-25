@@ -125,7 +125,7 @@ describe("PbiLeases", () => {
     await prove(s3, "pc1", 12, TOK);
     const before = s3.calls;
     await ec2!.refresh();
-    expect(s3.calls - before).toBe(1 + 3 + 1); // the list, the three keys that are a lease's, and the proof of the one that is held
+    expect(s3.calls - before).toBe(1 + 3 + 2); // the list, the three keys that are a lease's, and the list and read of the proof of the one that is held
     expect([7, 9, 10, 11, 12].map((n) => ec2!.heldElsewhere(REPO, n)?.holder ?? null)).toEqual([null, null, null, null, "pc1"]);
   });
 
@@ -304,6 +304,41 @@ describe("the proof of a lease", () => {
     expect(await pc.acquire(REPO, 9)).toEqual({ ok: false, holder: "instance", until: clock.now + TTL });
     await pc.refresh();
     expect(pc.heldElsewhere(REPO, 9)).toEqual({ holder: "instance", until: clock.now + TTL });
+  });
+
+  /** A bucket that answers a GET of a key that is not there with a refusal, as a role without a list on the key's prefix gets; `listRefused` refuses the list as well. */
+  const refusing = (s3: ReturnType<typeof memoryS3>, listRefused = false): S3Store => ({
+    ...s3,
+    get: async (key, o) => {
+      if (key.startsWith("lease-proof/") && !(await s3.list(key)).some((x) => x.key === key)) throw new Error("aws get-object failed (254): AccessDenied");
+      return s3.get(key, o);
+    },
+    list: async (prefix, after) => {
+      if (listRefused) throw new Error("aws list-objects-v2 failed (254): AccessDenied");
+      return s3.list(prefix, after);
+    },
+  });
+
+  test("a missing proof is read as none by listing its key, though a GET of the key is refused; a refused list is not read as none", async () => {
+    const base = memoryS3();
+    const now = () => 1_000_000;
+    const ec2 = new PbiLeases(base, { machine: "instance", ttlMs: TTL, now });
+    const pc = new PbiLeases(refusing(base), { machine: "pc1", ttlMs: TTL, now });
+    // (a) a PBI with no lease and no proof under it is taken, and its lease and proof are written
+    expect(await pc.acquire(REPO, 7)).toEqual({ ok: true });
+    expect((await stored(base, 7)).machine).toBe("pc1");
+    expect((await proofOf(base, "pc1", 7)).state).toBe("held");
+    // a lease naming a machine whose proof is not there (put by hand) is no holder's: taken, though a GET of the proof is refused
+    await base.put(leaseKey(REPO, 8), json({ pbi: 8, machine: "instance", token: TOK, state: "held", expiresAt: now() + TTL }));
+    expect(await pc.acquire(REPO, 8)).toEqual({ ok: true });
+    // (c) a lease with its machine's proof is held, and is not taken
+    await ec2.acquire(REPO, 9);
+    expect(await pc.acquire(REPO, 9)).toEqual({ ok: false, holder: "instance", until: now() + TTL });
+    // (b) a list that is refused throws: the PBI is not taken and no lease is written
+    await base.put(leaseKey(REPO, 10), json({ pbi: 10, machine: "instance", token: TOK, state: "held", expiresAt: now() + TTL }));
+    const blind = new PbiLeases(refusing(base, true), { machine: "pc2", ttlMs: TTL, now });
+    await expect(blind.acquire(REPO, 10)).rejects.toThrow("AccessDenied");
+    expect((await stored(base, 10)).machine).toBe("instance");
   });
 
   /** A store that counts the proof reads and writes. */

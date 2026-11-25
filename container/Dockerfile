@@ -6,7 +6,8 @@
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS base
 
 # diffutils: sb-rescue makes the diff of a new release with `diff -ruN` for its check; without it no release is ever checked
-RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq diffutils && dnf clean all
+# awscli-2: a work machine asks the uplink bucket through the aws CLI (docs/design/work-machine.md); the host takes the distribution's too
+RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq diffutils awscli-2 && dnf clean all
 
 # pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256). The unsuffixed sha256 are the arm64 ones the
 # host pins; <NAME>_SHA256_X86_64 is the same version's x86-64 file from the same upstream release
@@ -87,14 +88,14 @@ ENV HOME=/home/switchboard
 
 # the stage that CI runs in, off the host (sb-offload: `docker build --target ci`): what the stand-alone image has, plus a
 # git with PCRE (git grep -P), Playwright's Chromium at the host's pin (aws/host/devtools.sh), Noto Sans and Noto Sans
-# CJK JP for the screenshots, and the aws CLI (the build fetches the work tree from S3). It stops before the repository
+# CJK JP for the screenshots (the build fetches the work tree from S3 with the base stage's aws CLI). It stops before the repository
 # is copied in: the work tree is mounted or copied by the CI steps. No USER, so root can mount tmpfs, and the
 # unprivileged user of the base stage (switchboard, uid 1000) is the one that runs the steps.
 FROM base AS ci
 ARG PLAYWRIGHT_VERSION=1.65.1
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN dnf install -y -q git-core zstd rsync procps-ng file diffutils fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
-    cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib awscli-2 \
+    cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib \
   && dnf clean all \
   && npx -y "playwright@$PLAYWRIGHT_VERSION" install chromium \
   && chmod -R a+rX /opt/playwright \

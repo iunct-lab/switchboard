@@ -1,6 +1,6 @@
 // test-reads: ops-kit/fixtures/
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appSync, BACKLOG_USAGE, BacklogUnknown, readRecords, runBacklog, syncedRepositories, triageUsage } from "./backlog-client.ts";
@@ -225,7 +225,7 @@ test("a daemon older than the kit (404 on /syncs) still serves set and view thro
 });
 
 test("triage without a Phase: an empty Phase position is skipped and parent / status are read; with a Phase it is a usage error (exit 1)", async () => {
-  const ok = app((m, p) => (m === "GET" ? { body: LIST } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
+  const ok = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : { issue: { number: 3, body: "", subIssues: [] } } } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
   expect((await run(["triage", "3", "P2", "", "891", "Ready"], ok, {}, false)).code).toBe(0);
   expect((await run(["triage", "3", "P2", "", "Ready"], ok, {}, false)).code).toBe(0);
   expect(ok.calls.filter((c) => c.method !== "GET").map((c) => c.body)).toEqual([
@@ -260,7 +260,7 @@ test("a comment goes as its Task's with the proof read from the app for this cal
 });
 
 test("edits go to the app's routes as its screen sends them; a refusal is exit 1", async () => {
-  const detail = { issue: { number: 3, body: "", labels: [] }, fields: { "Story Points": 2, Code: "007" } };
+  const detail = { issue: { number: 3, body: "", labels: [], subIssues: [] }, fields: { "Story Points": 2, Code: "007" } };
   const ok = app((m, p) => (m === "GET" ? { body: p === "/syncs" ? LIST : detail } : { status: 202, body: { localId: "L1", operations: ["o"] } }));
   expect((await run(["edit", "#3", "--title", "T", "--body-file", "-", "--add-label", "a", "--remove-label", "b", "--state", "closed", "--no-milestone"], ok)).code).toBe(0);
   expect((await run(["set", "3", "Story Points", "5"], ok)).code).toBe(0);
@@ -703,5 +703,95 @@ test("scope: a Task body that names more paths is saved without a grant, and the
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+// a checkout whose ops.config.json names a merge gate script: it answers `--gate-paths` with the given paths under `gate/`, and leaves a line in `started` when run
+const KEYS = (change: string, key = "k1") => `## ゲートの鍵\n**鍵の変更**: ${change}\n| 鍵 | 誰が書けるか | どこで読むか | 利用者の操作（1 件あたり） |\n|---|---|---|---|\n| ${key} | a | b | c |\n`;
+function gateCheckout(withGate: boolean) {
+  const dir = mkdtempSync(join(tmpdir(), "ops-kit.gate-keys."));
+  mkdirSync(join(dir, "gate"));
+  mkdirSync(join(dir, "docs"));
+  writeFileSync(join(dir, "gate", "a.ts"), "");
+  writeFileSync(join(dir, "docs", "a.md"), "");
+  writeFileSync(join(dir, "fake-gate.ts"), `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(join(dir, "started"))}, "run\\n");\nif (process.argv[2] !== "--gate-paths") process.exit(2);\nfor (const p of process.argv.slice(3)) if (p.startsWith("gate/")) console.log(p);\n`);
+  writeFileSync(join(dir, "ops.config.json"), JSON.stringify(withGate ? { mergeGate: "fake-gate.ts" } : {}));
+  const git = (...a: string[]) => Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: dir });
+  git("init", "-q");
+  git("remote", "add", "origin", "https://github.com/acme/app.git");
+  git("add", ".");
+  git("commit", "-q", "-m", "x");
+  return dir;
+}
+/** `backlog <argv>` for PBI 3 (its body and comments as given) whose one Task 4 names `taskPath`; what was sent and what the gate script was asked. */
+async function readyGate(dir: string, argv: string[], pbi: { body: string; comments?: Array<{ id: string; body: string; createdAt: string; screen?: true }> }, taskPath = "gate/a.ts") {
+  const fake = app((m, p) => {
+    if (m !== "GET") return { status: 202, body: { localId: null, operations: ["o"] } };
+    if (p === "/syncs") return { body: LIST };
+    if (p.startsWith("/3?")) return { body: { issue: { number: 3, body: pbi.body, labels: ["type:pbi"], subIssues: [4] }, comments: pbi.comments ?? [], fields: { Status: "Backlog" } } };
+    return { body: { issue: { number: 4, body: `## やること\n1. \`${taskPath}\`: 直す\n`, labels: ["type:task"], subIssues: [] }, comments: [], fields: null } };
+  });
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runBacklog(argv, { BACKLOG_URL: "http://app/api/backlog", GH_REPO: undefined }, { out: (s) => out.push(s), err: (s) => err.push(s) }, { fetch: fake.fetch, cwd: dir, phase: true });
+  return { code, err: err.join("\n"), sent: fake.calls.filter((c) => c.method === "PATCH").length };
+}
+const ASK = (change: string, key?: string) => ({ id: "c1", body: `## 判断待ち\n${KEYS(change, key)}`, createdAt: "2026-01-01" });
+const ANSWER = (screen: boolean) => ({ id: "c2", body: "## 回答\nはい", createdAt: "2026-01-02", ...(screen ? { screen: true as const } : {}) });
+const READY = [["set", "3", "Status", "Ready"], ["triage", "3", "P1", "Phase 0", "", "Ready"]];
+
+test("gate keys: a PBI whose Tasks name a gate path is not made Ready without the table, and with あり not without the question and the screen's answer to it; なし or a Task that names no gate path goes", async () => {
+  const dir = gateCheckout(true);
+  try {
+    const stops = [
+      [{ body: "## ユーザーストーリー\nx\n" }, "ゲートの鍵"],
+      [{ body: "## ゲートの鍵\n**鍵の変更**: あり\n" }, "ゲートの鍵"],
+      [{ body: KEYS("あり") }, "問いを出して"],
+      [{ body: KEYS("あり"), comments: [ASK("あり")] }, "画面からの"],
+      // a Task's `backlog comment` is not the screen's answer
+      [{ body: KEYS("あり"), comments: [ASK("あり"), ANSWER(false)] }, "画面からの"],
+      // an answer before the question does not count
+      [{ body: KEYS("あり"), comments: [ANSWER(true), ASK("あり")] }, "画面からの"],
+      // the table was changed after the answer
+      [{ body: KEYS("あり", "k2"), comments: [ASK("あり"), ANSWER(true)] }, "問いの写しと違"],
+    ] as const;
+    for (const argv of READY) {
+      for (const [pbi, why] of stops) {
+        const r = await readyGate(dir, argv, { ...pbi, comments: "comments" in pbi ? [...pbi.comments] : undefined });
+        expect([r.code, r.sent]).toEqual([1, 0]);
+        expect(r.err).toContain(why);
+      }
+      for (const pbi of [{ body: KEYS("あり"), comments: [ASK("あり"), ANSWER(true)] }, { body: KEYS("なし") }]) {
+        expect(await readyGate(dir, argv, pbi)).toMatchObject({ code: 0, sent: 1 });
+      }
+      // no gate path in the Task: nothing is asked of the PBI
+      expect(await readyGate(dir, argv, { body: "## ユーザーストーリー\nx\n" }, "docs/a.md")).toMatchObject({ code: 0, sent: 1 });
+    }
+    // another field is not Ready
+    expect(await readyGate(dir, ["set", "3", "Priority", "P1"], { body: "x" })).toMatchObject({ code: 0, sent: 1 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gate keys without mergeGate: no mergeGate in ops.config.json means the script is not started and a gate-path PBI without the table is made Ready as before", async () => {
+  const dir = gateCheckout(false);
+  try {
+    for (const argv of READY) expect(await readyGate(dir, argv, { body: "## ユーザーストーリー\nx\n" })).toMatchObject({ code: 0, sent: 1 });
+    expect(existsSync(join(dir, "started"))).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gate keys: a gate script that cannot be asked stops the Ready with the reason", async () => {
+  const dir = gateCheckout(true);
+  try {
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify({ mergeGate: "missing.ts" }));
+    const r = await readyGate(dir, READY[0]!, { body: KEYS("なし") });
+    expect([r.code, r.sent]).toEqual([1, 0]);
+    expect(r.err).toContain("確かめられません");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

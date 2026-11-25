@@ -11,7 +11,7 @@
  * runner being a fake. Then the Home form at 390px. Screenshots and result.json stay in the directory it prints; a JSON
  * of pass / fail per case on stdout; exit 1 when one fails.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../packages/core/src/config.ts";
@@ -24,11 +24,13 @@ const out = mkdtempSync(join(tmpdir(), "switchboard.backlog-local-e2e."));
 const shots = join(out, "shots");
 mkdirSync(shots);
 const home = join(out, "home");
-// the workspace: a Git checkout with no origin, and this repository's ops.config.json (its field choices)
+// the workspace: a Git checkout with no origin, and this repository's ops.config.json (its field choices). Without its
+// mergeGate: the checkout has no merge-gate script, so the kit's Ready check of a gate PBI could not ask it and would refuse
 const repo = join(out, "repo");
 mkdirSync(repo);
 Bun.spawnSync(["git", "init", "-q", repo]);
-copyFileSync(join(import.meta.dir, "../ops.config.json"), join(repo, "ops.config.json"));
+const { mergeGate: _gate, ...config } = JSON.parse(readFileSync(join(import.meta.dir, "../ops.config.json"), "utf8"));
+writeFileSync(join(repo, "ops.config.json"), JSON.stringify(config, null, 2));
 
 const ghCalls: Array<{ cwd: string; args: string[] }> = [];
 const gh: GhRunner = async (args, cwd) => {

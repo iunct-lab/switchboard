@@ -4,11 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
+import { applyLocalOperations } from "./backlog-local.ts";
 import { BacklogEditError, commentStoredIssue as commentWindowed, createStoredIssue, editStoredIssue } from "./backlog-edit.ts";
 import { readStoredBacklog, readStoredIssue, workspaceSyncOf } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { fakeGithub } from "./backlog-fake-github.ts";
-import { ExportError, readBacklogExport, writeBacklogExports } from "./backlog-export.ts";
+import { ExportError, exportKey, readBacklogExport, writeBacklogExports } from "./backlog-export.ts";
 import { importBacklogExport, replicaTakenAt, Workbench } from "./backlog-replica.ts";
 import { sendGithubOperations } from "./backlog-send.ts";
 import { BacklogSync } from "./backlog-sync.ts";
@@ -249,6 +250,63 @@ describe("what a work machine writes", () => {
     expect(listRefused(ec2).map((r) => r.reason)).toEqual(["pc1 is not registered for acme/other"]);
     expect(lines.length).toBe(1);
     expect(ec2.listPendingBacklogOperations(S).map((o) => o.payload)).toEqual(["PC の題"]);
+  });
+});
+
+describe("a work machine's copy that is withdrawn or replaced", () => {
+  /** An Issue made here with the sync off: applied at once, so it holds the service's value (`remote`) under an `sb:` id. */
+  const madeHere = () => {
+    createStoredIssue(pc, S, { title: "同期を切って作った", body: "", labels: [], milestone: null, parent: null, fields: null }, t);
+    applyLocalOperations(pc, S, t);
+    return pc.listBacklogRecords(S, "issue").filter((r) => r.externalId.startsWith("sb:"));
+  };
+  const bench = () => new Workbench(pc, { intervalMs: 0, machine: "pc1", store: exportsS3, repositoryOf: () => "acme/app", clock });
+
+  test("tombstone: a tombstone of this repository drops the copy and leaves what was made here; another repository's tombstone is refused and the copy stays; a replaced copy leaves it too", async () => {
+    // one the instance made with its own sync off: an `sb:` id is of the database that made it, so it is not copied
+    ec2.putBacklogSnapshot(S, { records: [{ objectKind: "issue", externalId: "sb:made-on-ec2", remote: issue(40, { title: "EC2 で作った" }), fetchState: "fetched" }], cursor: null, syncedAt: 777 });
+    await copy();
+    expect(pc.listBacklogRecords(S).map((r) => r.externalId)).not.toContain("sb:made-on-ec2");
+    const made = madeHere();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.remote).not.toBeNull();
+    expect(made[0]!.local).toBeNull();
+    const ids = () => pc.listBacklogRecords(S).map((r) => r.externalId).sort();
+    const copied = ids().filter((id) => !id.startsWith("sb:"));
+    expect(copied).toEqual(["I_12", "I_3", "PVTI_I_12"]);
+    // (c) the instance no longer has I_3: the copy is replaced, and what was made here is not "gone from EC2"
+    ec2.deleteBacklogRecord({ ...S, objectKind: "issue", externalId: "I_3" });
+    await copy();
+    expect(ids()).toEqual(["I_12", made[0]!.externalId, "PVTI_I_12"].sort());
+    // (b) a tombstone of acme/tools under the acme/app key is not this repository's withdrawal
+    const key = exportKey("pc1", "acme/app");
+    const live = exportsS3.objects.get(key)!.body;
+    await exportsS3.put(key, Bun.zstdCompressSync(new TextEncoder().encode(JSON.stringify({ kind: "backlog-export", v: 1, machine: "pc1", repository: "acme/tools", removed: true, at: t }))));
+    const before = ids();
+    await expect(bench().pull({ id: wsPc, path: "/pc/app" })).rejects.toMatchObject({ kind: "fetch", removed: false });
+    expect(ids()).toEqual(before);
+    await exportsS3.put(key, live);
+    // (a) the pair leaves the registry: a tombstone of this repository drops the copy, not what was made here
+    await writeBacklogExports(ec2, { uplink: { machines: {} } }, exportsS3, t);
+    await expect(bench().pull({ id: wsPc, path: "/pc/app" })).rejects.toMatchObject({ kind: "missing", removed: true });
+    expect(ids()).toEqual([made[0]!.externalId]);
+  });
+
+  test("held: an export held past the reading interval is let go when the next one is read, not before", async () => {
+    await writeBacklogExports(ec2, { uplink: { machines: MACHINES } }, exportsS3);
+    let repository = "acme/app";
+    const b = new Workbench(pc, { intervalMs: 1000, machine: "pc1", store: exportsS3, repositoryOf: () => repository, clock });
+    const ws = { id: wsPc, path: "/pc/app" };
+    await b.pull(ws);
+    expect(b.heldCount()).toBe(1);
+    // another repository's read within the interval keeps it
+    repository = "acme/tools";
+    t += 999;
+    await expect(b.pull(ws)).rejects.toMatchObject({ kind: "missing" });
+    expect(b.heldCount()).toBe(1);
+    t += 1;
+    await expect(b.pull(ws)).rejects.toMatchObject({ kind: "missing" });
+    expect(b.heldCount()).toBe(0);
   });
 });
 

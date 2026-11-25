@@ -495,7 +495,7 @@ describe("set / triage with BACKLOG_URL", () => {
         const path = url.pathname.replace(/^\/api\/backlog/, "");
         calls.push({ method: req.method, path, body: req.method === "PATCH" ? await req.json() : null });
         if (path === "/syncs") return Response.json({ syncs: [sync], items: [] });
-        if (req.method === "GET") return Response.json({ issue: { number: 12 }, comments: [], fields: { Status: "Backlog", "Story Points": 3 }, fetchedAt: 1, localId: null, pending: 0 });
+        if (req.method === "GET") return Response.json({ issue: { number: 12, body: "", subIssues: [] }, comments: [], fields: { Status: "Backlog", "Story Points": 3 }, fetchedAt: 1, localId: null, pending: 0 });
         return Response.json({});
       },
     });

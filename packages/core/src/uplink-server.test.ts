@@ -144,27 +144,28 @@ describe("lease and backlog-next", () => {
   });
 });
 
-describe("the renewal round with a request that never answers", () => {
-  /** The `aws` CLI over an S3 kept in memory; a get of `stuckKey` is a `sleep` that ends only when the limit the caller passed kills it. */
-  const emulated = (mem: ReturnType<typeof memoryS3>, stuck: { key: string | null }): AwsRun => async (args, opts) => {
-    const at = (flag: string) => args[args.indexOf(flag) + 1]!;
-    const fail = (stderr: string) => ({ code: 254, stdout: "", stderr });
-    if (args[1] === "get-object") {
-      if (args.includes(`--key`) && at("--key") === stuck.key) return runCommand("sleep", ["30"], opts?.timeoutMs);
-      const got = await mem.get(at("--key"));
-      if (!got) return fail("NoSuchKey");
-      writeFileSync(args[args.length - 1]!, got.body);
-      return { code: 0, stdout: JSON.stringify({ ETag: got.etag }), stderr: "" };
-    }
-    if (args[1] === "put-object") {
-      const cond = args.includes("--if-none-match") ? { ifNoneMatch: true as const } : args.includes("--if-match") ? { ifMatch: at("--if-match") } : undefined;
-      const r = await mem.put(at("--key"), new Uint8Array(readFileSync(at("--body"))), cond);
-      return r === "conflict" ? fail("PreconditionFailed") : { code: 0, stdout: JSON.stringify({ ETag: r.etag }), stderr: "" };
-    }
-    const listed = await mem.list(at("--prefix"));
-    return { code: 0, stdout: JSON.stringify(listed.map((o) => ({ key: o.key, etag: o.etag, size: o.size }))), stderr: "" };
-  };
+/** The `aws` CLI over an S3 kept in memory; a get of `stuck.key`, or a list under `stuck.list`, is a `sleep` that ends only when the limit the caller passed kills it. */
+const emulated = (mem: ReturnType<typeof memoryS3>, stuck: { key: string | null; list?: string }): AwsRun => async (args, opts) => {
+  const at = (flag: string) => args[args.indexOf(flag) + 1]!;
+  const fail = (stderr: string) => ({ code: 254, stdout: "", stderr });
+  if (args[1] === "get-object") {
+    if (args.includes(`--key`) && at("--key") === stuck.key) return runCommand("sleep", ["30"], opts?.timeoutMs);
+    const got = await mem.get(at("--key"));
+    if (!got) return fail("NoSuchKey");
+    writeFileSync(args[args.length - 1]!, got.body);
+    return { code: 0, stdout: JSON.stringify({ ETag: got.etag }), stderr: "" };
+  }
+  if (args[1] === "put-object") {
+    const cond = args.includes("--if-none-match") ? { ifNoneMatch: true as const } : args.includes("--if-match") ? { ifMatch: at("--if-match") } : undefined;
+    const r = await mem.put(at("--key"), new Uint8Array(readFileSync(at("--body"))), cond);
+    return r === "conflict" ? fail("PreconditionFailed") : { code: 0, stdout: JSON.stringify({ ETag: r.etag }), stderr: "" };
+  }
+  if (stuck.list !== undefined && at("--prefix") === stuck.list) return runCommand("sleep", ["30"], opts?.timeoutMs);
+  const listed = await mem.list(at("--prefix"));
+  return { code: 0, stdout: JSON.stringify(listed.map((o) => ({ key: o.key, etag: o.etag, size: o.size }))), stderr: "" };
+};
 
+describe("the renewal round with a request that never answers", () => {
   const REPO = "acme/app";
   /** A daemon holding PBIs 7 (recovered: nobody is at it here, so a round gives it back) and 8, whose reads of 7 never come back. */
   async function holding78(timeoutMs: number | undefined) {
@@ -535,17 +536,41 @@ describe("uplink", () => {
 });
 
 describe("the stores setupBacklog builds", () => {
-  test("only the lease store's requests carry the time limit, the bucket-name lookup included; the uplink's own carry none", async () => {
+  test("the lease store and the uplink's own each carry their own time limit, the bucket-name lookup included", async () => {
     const seen: Array<{ cmd: string; timeoutMs?: number }> = [];
     const run: AwsRun = async (args, opts) => {
       seen.push({ cmd: args[0] === "ssm" ? "ssm" : `${args[0]} ${args[1]}`, timeoutMs: opts?.timeoutMs });
       return args[0] === "ssm" ? { code: 0, stdout: "named\n", stderr: "" } : { code: 254, stdout: "", stderr: "NoSuchKey" };
     };
-    const { s3, leases } = uplinkStores({ bucket: "", leaseCallTimeoutMs: 20_000 }, run);
+    const { s3, leases } = uplinkStores({ bucket: "", leaseCallTimeoutMs: 20_000, uplinkCallTimeoutMs: 600_000 }, run);
     await leases.get("k");
     expect(seen).toEqual([{ cmd: "ssm", timeoutMs: 20_000 }, { cmd: "s3api get-object", timeoutMs: 20_000 }]);
     seen.length = 0;
     await s3.get("k");
-    expect(seen).toEqual([{ cmd: "ssm", timeoutMs: undefined }, { cmd: "s3api get-object", timeoutMs: undefined }]);
+    expect(seen).toEqual([{ cmd: "ssm", timeoutMs: 600_000 }, { cmd: "s3api get-object", timeoutMs: 600_000 }]);
   });
+});
+
+describe("the uplink round with a request that never answers", () => {
+  test("a listing of a machine's uplink/ that never returns ends the round at the limit, the withdrawal still runs in it, and the next round runs", async () => {
+    const mem = memoryS3();
+    const key = "backlog-export/pc2/acme/app.json.zst"; // a machine no longer registered: its export is to be withdrawn
+    await mem.put(key, new Uint8Array(8));
+    const stuck = { key: null, list: "uplink/pc1/" };
+    let listed = 0;
+    const run: AwsRun = async (args, opts) => {
+      if (args[1] === "list-objects-v2" && args[args.indexOf("--prefix") + 1] === "uplink/pc1/") listed++;
+      return emulated(mem, stuck)(args, opts);
+    };
+    const { s3 } = uplinkStores({ bucket: "b", leaseCallTimeoutMs: 20_000, uplinkCallTimeoutMs: 300 }, run);
+    await boot({ ...RECEIVE, SWITCHBOARD_UPLINK_INTERVAL_S: "0.6" }, s3 as never);
+    const withdrawn = async () => (await mem.get(key))!.body.length !== 8;
+    // the first round waited for the stuck listing until the limit, then withdrew the export that no machine is registered for
+    for (let k = 0; k < 200 && !(await withdrawn()); k++) await Bun.sleep(20);
+    expect(await withdrawn()).toBe(true);
+    expect(listed).toBe(1);
+    // the busy flag came back (a round that is still busy returns at once): the next round on the interval asked again
+    for (let k = 0; k < 200 && listed < 2; k++) await Bun.sleep(20);
+    expect(listed).toBeGreaterThanOrEqual(2);
+  }, 15_000);
 });

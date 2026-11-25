@@ -826,7 +826,10 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 280,500 (+360 bytes; the copy measured 280,135 before and 280,496 after): a stack's PRs allowed past the gate go in
     // one at a time from the bottom without --delete-branch and gh stack merge does not pass on that grant (pbi-complete 5), and the
     // upper PR's retargeting is checked after each (stacked-pr-delivery 6); the first draft (+656) was cut to this.
-    expect(bytes).toBeLessThanOrEqual(280_500);
+    // Raised to 281,900 (+1,400 bytes over 280,500; the copy measured 280,496 before and 281,850 after): a gate PBI writes the
+    // gate's keys and, when it changes them, waits for an answer on the screen before it is Ready (pbi-to-tasks 3 and 4.5), and a
+    // request that complains about a mechanism always offers removing it (request-to-backlog).
+    expect(bytes).toBeLessThanOrEqual(281_900);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

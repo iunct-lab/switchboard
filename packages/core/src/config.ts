@@ -138,6 +138,8 @@ export interface UplinkConfig {
   leaseRenewMs: number;
   /** How long one request of the lease store may take before it is given up (SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20); a request that never answers must not hold the renewal round. */
   leaseCallTimeoutMs: number;
+  /** How long one request of the uplink's own sends, receives and reads may take before it is given up (SWITCHBOARD_UPLINK_CALL_TIMEOUT_S, 600: 64 MiB at about 1 Mbps); a request that never answers must not hold the round, which runs one at a time. */
+  uplinkCallTimeoutMs: number;
   /** A work machine's backlog copy: how often the instance's export of a repository is read again (SWITCHBOARD_BACKLOG_COPY_INTERVAL_S, 60 minutes). */
   backlogCopyIntervalMs: number;
   /** The most a work machine reads of one backlog export, compressed (SWITCHBOARD_BACKLOG_EXPORT_MAX_BYTES, 64 MiB). */
@@ -195,6 +197,7 @@ export function loadUplink(env: NodeJS.ProcessEnv = process.env, warn: (line: st
     leaseTtlMs: positiveOr(env.SWITCHBOARD_LEASE_TTL_S, 900) * 1000,
     leaseRenewMs: positiveOr(env.SWITCHBOARD_LEASE_RENEW_S, 60) * 1000,
     leaseCallTimeoutMs: positiveOr(env.SWITCHBOARD_LEASE_CALL_TIMEOUT_S, 20) * 1000,
+    uplinkCallTimeoutMs: positiveOr(env.SWITCHBOARD_UPLINK_CALL_TIMEOUT_S, 600) * 1000,
     backlogCopyIntervalMs: positiveOr(env.SWITCHBOARD_BACKLOG_COPY_INTERVAL_S, 3600) * 1000,
     backlogExportMaxBytes: positiveOr(env.SWITCHBOARD_BACKLOG_EXPORT_MAX_BYTES, 64 * 1024 * 1024),
   };

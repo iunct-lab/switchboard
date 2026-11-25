@@ -66,7 +66,7 @@ export type AwsRun = (args: string[], opts?: { timeoutMs?: number }) => Promise<
 /**
  * Runs a command and reads what it printed. With `timeoutMs` a command that has not ended by then is killed and the
  * call throws: a request that never answers must not hold whatever waits for it (the lease renewal round). Without
- * it there is no limit, as a big send or receive of the uplink needs.
+ * it there is no limit.
  */
 export const runCommand = async (bin: string, args: string[], timeoutMs?: number): Promise<{ code: number; stdout: string; stderr: string }> => {
   const p = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -99,7 +99,7 @@ const EMPTY_RANGE = /InvalidRange|\(416\)/;
  * The bucket through the `aws` CLI the host already has (no SDK is added): `s3api get-object` / `put-object` /
  * `list-objects-v2`, with the machine's own credentials and region. `bucket` is asked for at the first call, so a
  * daemon that never uses the store never looks its name up. `limit.timeoutMs` ends a call that has not answered by then
- * (the store of the leases has one; the uplink's own has none).
+ * (both stores of the uplink bucket have one, each its own: `uplinkStores`).
  */
 export function awsS3(bucket: string | (() => Promise<string>), run: AwsRun = runAws, limit?: { timeoutMs?: number }): S3Store {
   let name: Promise<string> | undefined;
@@ -170,13 +170,14 @@ export async function bucketFromParameter(run: AwsRun = runAws): Promise<string>
 }
 
 /**
- * The two views of the uplink bucket: the uplink's own (big sends and receives, no time limit) and the lease store's
- * (every request, the bucket-name lookup too, ends at `leaseCallTimeoutMs`: a stuck one would hold the renewal round).
+ * The two views of the uplink bucket, each with its own time limit on every request (the bucket-name lookup too): the
+ * uplink's own (big sends and receives) ends at `uplinkCallTimeoutMs`, the lease store's at `leaseCallTimeoutMs`. A
+ * stuck request would hold the round that waits for it (the uplink round, the renewal round).
  */
-export function uplinkStores(uplink: { bucket: string; leaseCallTimeoutMs: number }, run: AwsRun = runAws): { s3: S3Store; leases: S3Store } {
-  const limit = { timeoutMs: uplink.leaseCallTimeoutMs };
-  return {
-    s3: awsS3(uplink.bucket || (() => bucketFromParameter(run)), run),
-    leases: awsS3(uplink.bucket || (() => bucketFromParameter((a) => run(a, limit))), run, limit),
+export function uplinkStores(uplink: { bucket: string; leaseCallTimeoutMs: number; uplinkCallTimeoutMs: number }, run: AwsRun = runAws): { s3: S3Store; leases: S3Store } {
+  const store = (timeoutMs: number) => {
+    const limit = { timeoutMs };
+    return awsS3(uplink.bucket || (() => bucketFromParameter((a) => run(a, limit))), run, limit);
   };
+  return { s3: store(uplink.uplinkCallTimeoutMs), leases: store(uplink.leaseCallTimeoutMs) };
 }

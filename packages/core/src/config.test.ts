@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "./config.ts";
+import { loadConfig, loadUplink, UPLINK_PREVIEW } from "./config.ts";
 
 const made: string[] = [];
 const dir = (parent: string, prefix: string) => {
@@ -75,5 +75,16 @@ describe("dockerdIdleMs", () => {
   test("dockerd idle wait is overridden by SWITCHBOARD_DOCKERD_IDLE_MIN; a non-number or 0 or less keeps the default", () => {
     expect(loadConfig({ SWITCHBOARD_HOME: tmpdir(), SWITCHBOARD_DOCKERD_IDLE_MIN: "3" }).dockerdIdleMs).toBe(3 * 60_000);
     for (const bad of ["x", "0", "-5", ""]) expect(loadConfig({ SWITCHBOARD_HOME: tmpdir(), SWITCHBOARD_DOCKERD_IDLE_MIN: bad }).dockerdIdleMs).toBe(10 * 60_000);
+  });
+});
+
+describe("the uplink's time limits", () => {
+  test("the uplink's own requests end at 600 s unless SWITCHBOARD_UPLINK_CALL_TIMEOUT_S says otherwise, and the lease store's limit is a value of its own", () => {
+    const receive = { ...UPLINK_PREVIEW, SWITCHBOARD_UPLINK: "receive" };
+    expect(loadUplink(receive)).toMatchObject({ uplinkCallTimeoutMs: 600_000, leaseCallTimeoutMs: 20_000 });
+    expect(loadUplink({ ...receive, SWITCHBOARD_UPLINK_CALL_TIMEOUT_S: "1800" })).toMatchObject({ uplinkCallTimeoutMs: 1_800_000, leaseCallTimeoutMs: 20_000 });
+    expect(loadUplink({ ...receive, SWITCHBOARD_LEASE_CALL_TIMEOUT_S: "5" })).toMatchObject({ uplinkCallTimeoutMs: 600_000, leaseCallTimeoutMs: 5_000 });
+    // a value that is not a positive number is the default, as for the other limits
+    expect(loadUplink({ ...receive, SWITCHBOARD_UPLINK_CALL_TIMEOUT_S: "0" }).uplinkCallTimeoutMs).toBe(600_000);
   });
 });

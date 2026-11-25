@@ -89,9 +89,11 @@ export class PbiLeases {
     return got ? { etag: got.etag, lease: got.more ? null : decode(got.body, pbi) } : null;
   }
 
-  /** The proof of a machine's holding as stored: its token and state, or null when there is none (or it is no proof). A read that fails throws. */
+  /** The proof of a machine's holding as stored: its token and state, or null when there is none (or it is no proof). The key is listed first: only a key the list does not show is none, so a list or a read that is refused or fails throws (a refusal is never read as "no proof"). */
   private async readProof(machine: string, repository: string, pbi: number): Promise<{ token?: unknown; state?: unknown } | null> {
-    const got = await this.store.get(proofKey(machine, repository, pbi), { maxBytes: LEASE_MAX_BYTES });
+    const key = proofKey(machine, repository, pbi);
+    if (!(await this.store.list(key)).some((o) => o.key === key)) return null;
+    const got = await this.store.get(key, { maxBytes: LEASE_MAX_BYTES });
     if (!got || got.more) return null;
     try {
       const p = JSON.parse(new TextDecoder().decode(got.body));
