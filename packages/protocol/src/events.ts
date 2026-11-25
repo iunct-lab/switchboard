@@ -210,6 +210,12 @@ export const AgentEvent = z.discriminatedUnion("t", [
   /** The artifact an agent's `switchboard-artifact` fence registered. Recorded by the daemon, never emitted by an adapter. */
   z.object({ t: z.literal("artifact.saved"), id: z.string(), title: z.string() }),
   /**
+   * A heartbeat Claude Code sends every 30 s while a hook runs long: `hook` is the hook event's name (Stop, …), `startedAt` the
+   * hook's start in epoch ms when the line says so (the 2.1.332 line only carries the elapsed seconds, so null). Liveness only,
+   * not a conversation record.
+   */
+  z.object({ t: z.literal("hook.progress"), hook: z.string(), startedAt: z.number().nullable() }),
+  /**
    * How many background jobs the runner still has (Claude `system/background_tasks_changed`: run_in_background shells,
    * Monitors). A job's notification starts a turn on the runner's own, so the process is not released while any is left.
    */

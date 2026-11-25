@@ -49,14 +49,14 @@ export function testsOf(body: string): { ran: number | null; total: number } | u
 }
 
 /** What perf-ratchet's check said: its `ceilings:` environment and its over / improved / raised / grew lines as printed (grew = the bundle 1% or more above main's tip). `unknown` = none of the four (the bench failed, or the check stopped before judging). */
-export interface PerfVerdict { env: string | null; over: string[]; improved: string[]; raised: string[]; grew: string[]; unknown: boolean }
+export interface PerfVerdict { env: string | null; over: string[]; improved: string[]; raised: string[]; grew: string[]; /** Why the bundle and the bytes were not compared (the failed base step's line): empty when they were. */ reasons: string[]; unknown: boolean }
 
 export function perfVerdict(output: string): PerfVerdict {
   const lines = output.split("\n");
   const of = (kind: string) => lines.filter((l) => l.startsWith(`${kind}: `));
   const [over, improved, raised, grew] = [of("over"), of("improved"), of("raised"), of("grew")];
   const env = lines.map((l) => /^ceilings: (\S+)$/.exec(l)?.[1]).find(Boolean) ?? null;
-  return { env, over, improved, raised, grew, unknown: over.length + improved.length + raised.length + grew.length === 0 };
+  return { env, over, improved, raised, grew, reasons: [], unknown: over.length + improved.length + raised.length + grew.length === 0 };
 }
 
 /** The lines of a build that could not be started, for the log: what happened, then what sb-offload printed. */

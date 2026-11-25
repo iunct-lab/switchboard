@@ -1,4 +1,4 @@
-import type { LoginKind, RunnerId, RunnerInfo, RunnerAdapter } from "@switchboard/protocol";
+import { isWorkingStatus, type LoginKind, type RunnerId, type RunnerInfo, type RunnerAdapter } from "@switchboard/protocol";
 import { LOGIN_FORCED_RECHECK_MS, LOGIN_RECHECK_MS } from "../login.ts";
 import { versionAtLeast } from "../tasks/state.ts";
 import type { ServerContext, ServerContextInit } from "./context.ts";
@@ -17,7 +17,7 @@ export const refreshLogins = (sc: Pick<ServerContext, "loginCheckedAt" | "loginC
       .map(async (d) => {
         const r = await d.adapter.detect().catch(() => null);
         if (!r?.available || r.login === undefined) return;
-        d.info = { ...d.info, login: r.login, loginKind: r.loginKind, loginExpiresAt: r.loginExpiresAt, loginHint: r.loginHint, note: r.note };
+        d.info = { ...d.info, login: r.login, loginKind: r.loginKind, bedrockFrom: r.bedrockFrom, loginExpiresAt: r.loginExpiresAt, loginHint: r.loginHint, note: r.note };
         if (r.login === "ok") sc.loginExpired.delete(d.adapter.id);
       }),
   ).then(() => {
@@ -54,23 +54,29 @@ export const logoutTarget = (sc: Pick<ServerContext, "detected">, id: string) =>
 // Runner list for /api/health: detection is from boot (the login and the note from the last recheck), the effective default mode and auto-resume follow the saved
 // settings, and the models / the CLI's default model are read each time — the default is the user's own CLI
 // setting and changes there.
-// Amazon Bedrock only when the user chose it for the runner and the adapter has Bedrock models. Nothing
+// Amazon Bedrock only when the user chose it for the runner and the adapter has `bedrockModel`. Nothing
 // switches to it by itself: a runner whose login lapsed stays `expired`.
-export const bedrockOf = (sc: Pick<ServerContext, "adapterMap" | "settings">, runner: RunnerId) => (sc.adapterMap.get(runner)?.bedrockModels ? sc.settings().bedrock[runner] : undefined);
+export const bedrockOf = (sc: Pick<ServerContext, "adapterMap" | "settings">, runner: RunnerId) => (sc.adapterMap.get(runner)?.bedrockModel ? sc.settings().bedrock[runner] : undefined);
 
 // Where the bill of a runner's usage goes now, for the ledger row: Bedrock for a Task started there, else the login the
 // runner's last status check reported (a Claude account or an Anthropic Console one). undefined = not known.
 export const loginKindOf = (sc: Pick<ServerContext, "bedrockTasks" | "detected">, runner: RunnerId, taskId?: string): LoginKind | undefined => (taskId !== undefined && sc.bedrockTasks.has(taskId) ? "bedrock" : sc.detected.find((d) => d.adapter.id === runner)?.info.loginKind);
 
-export const runnerInfo = (sc: Pick<ServerContext, "detected" | "bedrockOf" | "loginExpired" | "settings" | "savedAutoResume" | "savedModels" | "savedDefaultMode">): RunnerInfo[] =>
+export const runnerInfo = (sc: Pick<ServerContext, "detected" | "bedrockOf" | "bedrockTasks" | "db" | "loginExpired" | "settings" | "savedAutoResume" | "savedModels" | "savedDefaultMode">): RunnerInfo[] =>
   sc.detected.map(({ adapter, info }) => {
     const bedrock = sc.bedrockOf(adapter.id);
     // on Bedrock the runner's own login is not used: it reads as ok, with the kind that says where the bill goes
     const login = bedrock ? "ok" : info.login !== undefined && sc.loginExpired.has(adapter.id) ? "expired" : info.login;
+    // where Bedrock comes from is decided here and nowhere else: the setting chosen on the screen, or the CLI's own settings the detection read
+    const bedrockFrom: RunnerInfo["bedrockFrom"] = bedrock ? "settings" : login === "ok" && info.bedrockFrom === "cli" && info.loginKind === "bedrock" ? "cli" : undefined;
     const loginKind = bedrock ? "bedrock" : login === "ok" ? info.loginKind : undefined;
+    // Tasks started on Bedrock that still work, also after the setting went back: a switch back does not change what they run on
+    const bedrockRunning = [...sc.bedrockTasks].filter((id) => { const t = sc.db.getTask(id); return t?.runner === adapter.id && isWorkingStatus(t.status); }).length;
     const loginExpiresAt = !bedrock && login === "ok" ? info.loginExpiresAt : undefined; // an expiry beside "expired" or Bedrock would mislead
     const forks = adapter.forks === true && versionAtLeast(info.version, adapter.forkMinVersion);
-    const base = { ...info, forks, login, loginKind, loginExpiresAt, bedrockAvailable: adapter.bedrockModels !== undefined, defaultModel: sc.settings().defaultModel[adapter.id], defaultEffort: sc.settings().defaultEffort[adapter.id], subagentModel: sc.settings().subagentModel[adapter.id], subagents: adapter.id === "claude" ? true : undefined, autoResume: sc.savedAutoResume(adapter.id), models: (bedrock ? adapter.bedrockModels : (sc.savedModels(adapter.id) ?? adapter.models)) ?? [], cliDefaultModel: adapter.cliDefaultModel?.() };
+    // the one list to edit, and on Bedrock the same list by Bedrock ids (a model with none there is left out)
+    const listed = sc.savedModels(adapter.id) ?? adapter.models ?? [];
+    const base = { ...info, forks, login, loginKind, bedrockFrom, ...(bedrockRunning ? { bedrockRunning } : {}), loginExpiresAt, bedrockAvailable: adapter.bedrockModel !== undefined, defaultModel: sc.settings().defaultModel[adapter.id], defaultEffort: sc.settings().defaultEffort[adapter.id], subagentModel: sc.settings().subagentModel[adapter.id], subagents: adapter.id === "claude" ? true : undefined, autoResume: sc.savedAutoResume(adapter.id), models: bedrock && adapter.bedrockModel ? listed.map(adapter.bedrockModel).filter((m) => m !== null) : listed, ...(bedrock ? { listModels: listed } : {}), cliDefaultModel: adapter.cliDefaultModel?.() };
     if (!info.permissionModes.length) return base;
     const saved = sc.savedDefaultMode(adapter.id);
     const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);
@@ -82,7 +88,7 @@ export async function setupLogins(sc: Pick<ServerContextInit, "adapterMap" | "de
   sc.detected = [];
   for (const a of sc.adapters) {
     const d = await a.detect();
-    sc.detected.push({ adapter: a, info: { id: a.id, forks: false, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModels !== undefined } });
+    sc.detected.push({ adapter: a, info: { id: a.id, forks: false, ...(a.label ? { label: a.label } : {}), ...d, permissionModes: a.permissionModes ?? [], models: a.models ?? [], efforts: a.efforts ?? [], bedrockAvailable: a.bedrockModel !== undefined } });
     if (d.available) sc.adapterMap.set(a.id, a);
   }
   // Login: the runner's own status command runs again when /api/health is read and its last answer is over a

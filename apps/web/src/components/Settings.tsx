@@ -20,9 +20,10 @@ import { EMPTY_PRICE_FORM, parsePriceForm, priceFormOf, type PriceForm } from ".
 import { addModel, hideModel, moveModel, removeModel, unhideModel } from "../modelList.ts";
 import { countriesUrl } from "../login.ts";
 import { forgetPresets, presetRow } from "../presets.ts";
-import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, type CustomRunnerDraft } from "../runners.ts";
+import { aguiNotices, customRunnerFromDraft, PORT_LABEL, isAdkRunner, listedRunners, sendsOffHost, shadowCandidates, type CustomRunnerDraft } from "../runners.ts";
 import { githubSyncText, issueArtifactsShown } from "../backlogSync.ts";
 import { Knowledge } from "./Knowledge.tsx";
+import { ShadowDefaultCard } from "./ShadowDefaultCard.tsx";
 import { WorkspaceCard } from "./WorkspaceCard.tsx";
 import { jstTime } from "../time.ts";
 import { SETTINGS_GROUPS, settingsGroup } from "../settingsGroups.ts";
@@ -82,8 +83,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
     el?.scrollIntoView();
   }, [loaded, props.focus]);
   if (!s) return <main className="main settings"><section className="card"><div className="muted">{t(settings.loading)}</div></section></main>;
-  const dakOk = props.runnerOk.has("dak");
-  const listed = listedRunners(props.health?.runners, s.shadowRunner === "dak" ? "dak" : undefined);
+  const listed = listedRunners(props.health?.runners, s.shadowRunner ?? undefined);
   const runnerOptions = (current: RunnerId, label: string) =>
     listedRunners(props.health?.runners, current).filter((r) => props.runnerOk.has(r) || r === current).map((r) => (
       <option key={r} value={r}>
@@ -121,11 +121,11 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
                 <span className="muted">— {r.permissionModes.length > 0 ? t(settings.runnerApprovalNow, { mode: mode?.label ?? r.defaultPermissionMode ?? "—" }) : t(settings.runnerApprovalUnset)}</span>
               </summary>
               {runnerRows(r).map((row) =>
-                // the row is never dropped (modelsRowView): a list the runner cannot edit says so, and the CLI candidates stay (Bedrock hides them here)
+                // the row is never dropped (modelsRowView): a list the runner cannot edit says so; on Bedrock the list edited is the original-id one (listModels)
                 row.key === "models" && modelsRowView(r).folded ? (
                   <details key={row.key} className="runner-models">
                     <summary>{t(row.label)}</summary>
-                    {modelsRowView(r).list ? <ModelChoices runner={r.id} list={r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} /> : <div className="muted">{t(settings.notChangeable)}</div>}
+                    {modelsRowView(r).list ? <><ModelChoices runner={r.id} list={r.listModels ?? r.models} saved={!!s.models[r.id]} disabled={saving} save={trySave} />{r.loginKind === "bedrock" && <div className="muted">{t(settings.bedrockModelsHint)}</div>}</> : <div className="muted">{t(settings.notChangeable)}</div>}
                     {modelsRowView(r).candidates && <CliModelCandidates runners={[r]} hidden={(runner) => s.hiddenModels[runner] ?? s.defaults.hiddenModels[runner] ?? []} disabled={saving} save={trySave} onError={props.onError} />}
                   </details>
                 ) : (
@@ -204,7 +204,7 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
                 <div key={heading} className="auto-start-kinds">
                   <div className="hint">{heading}</div>
                   {kinds.map(([kind, label]) => (
-                    <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} shadowRunners={listed.filter((r) => props.runnerOk.has(r))} defaultBudget={qr.defaultBudgetUsd} disabled={saving} save={save} />
+                    <KindRow key={kind} kind={kind} label={t(label)} auto={s.autoStart} info={info} runnerOptions={runnerOptions} listed={listed} runnerOk={props.runnerOk} defaultBudget={qr.defaultBudgetUsd} disabled={saving} save={save} />
                   ))}
                 </div>
               ))}
@@ -241,17 +241,9 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
       </SettingsCard>
       <CustomRunnersSection onError={props.onError} />
 
-      {(listed.includes("dak") || s.shadowRunner === "dak") && (
-      <SettingsCard title={t(settings.dakDefault)}>
-        <label className={`hint toggle ${!dakOk && s.shadowRunner !== "dak" ? "off" : ""}`} title={dakOk ? t(settings.dakTitle) : t(settings.dakUnreachable)}>
-          <input type="checkbox" checked={s.shadowRunner === "dak"} disabled={saving || (!dakOk && s.shadowRunner !== "dak")} onChange={(e) => void save({ shadowRunner: e.target.checked ? "dak" : null })} />
-          {t(settings.dakToggle)}
-          {!dakOk && s.shadowRunner === "dak" && <span className="hint">{t(settings.dakMissing)}</span>}
-        </label>
-        <DefaultNote on={d.shadowRunner === "dak"} />
-        {reset.dakDefault}
+      <SettingsCard title={t(settings.shadowDefault)}>
+        <ShadowDefaultCard value={s.shadowRunner} listed={listed} runnerOk={props.runnerOk} disabled={saving} onChange={(runner) => void save({ shadowRunner: runner })} note={<DefaultNote on={d.shadowRunner !== null} />} reset={reset.shadowDefault} />
       </SettingsCard>
-      )}
       <CliUpdateSettings value={s.cliUpdate} def={d.cliUpdate} disabled={saving} Field={NumberField} onSave={(v) => save({ cliUpdate: v })} onError={props.onError} />
 
       <SettingsGroupHeading id="settings-auto" />
@@ -1037,8 +1029,8 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
     }
   };
   const drop = (runner: RunnerId, value: string) => setFound((f) => f?.map((r) => (r.runner === runner && "candidates" in r ? { ...r, candidates: r.candidates.filter((m) => m.value !== value) } : r)) ?? null);
-  // the list 足す appends to: the runner's own login list, as モデルの選択肢 above shows it (not Bedrock's)
-  const listOf = (runner: RunnerId) => props.runners.find((r) => r.id === runner && r.models.length > 0 && r.loginKind !== "bedrock")?.models;
+  // the list 足す appends to: the runner's own login list, as モデルの選択肢 above edits it (listModels on Bedrock)
+  const listOf = (runner: RunnerId) => props.runners.filter((r) => r.id === runner && r.models.length > 0).map((r) => r.listModels ?? r.models)[0];
   const add = async (runner: RunnerId, m: ModelOption) => {
     const list = listOf(runner);
     if (!list) return;
@@ -1074,7 +1066,7 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
                   <span className="mono">{m.value}</span>
                   {t(settings.parenClose)}
                 </span>
-                <button className="ghost" disabled={props.disabled || !listOf(r.runner)} aria-label={t(settings.addCandidate, { runner: r.runner, model: m.value })} title={listOf(r.runner) ? t(settings.addCandidateTitle) : t(settings.bedrockNoAdd)} onClick={() => void add(r.runner, m)}>
+                <button className="ghost" disabled={props.disabled || !listOf(r.runner)} aria-label={t(settings.addCandidate, { runner: r.runner, model: m.value })} title={t(settings.addCandidateTitle)} onClick={() => void add(r.runner, m)}>
                   {t(settings.add)}
                 </button>
                 <button className="ghost" disabled={props.disabled} aria-label={t(settings.hideCandidate, { runner: r.runner, model: m.value })} title={t(settings.hideTitle)} onClick={() => void hide(r.runner, m.value)}>
@@ -1181,7 +1173,8 @@ function KindRow(props: {
   auto: SettingsData["autoStart"];
   info: (id: RunnerId) => RunnerInfo | undefined;
   runnerOptions: (current: RunnerId, label: string) => React.ReactNode;
-  shadowRunners: RunnerId[];
+  listed: RunnerId[];
+  runnerOk: Set<RunnerId>;
   /** what an empty kind budget falls back to on a button Task (バックログを進める: the schedule's first) */
   defaultBudget: number | null;
   disabled: boolean;
@@ -1208,7 +1201,7 @@ function KindRow(props: {
   const modes = (runnerInfo?.permissionModes ?? []).filter((m) => !m.danger || m.value === runnerInfo?.defaultPermissionMode);
   // a saved value the runner no longer lists (or one not detected now) stays shown, so the box says what is saved
   const savedMode = own?.permissionMode && !modes.some((m) => m.value === own.permissionMode) ? own.permissionMode : null;
-  const shadows = props.shadowRunners.filter((r) => r !== cRunner || r === own?.shadow);
+  const shadows = shadowCandidates(props.listed, props.runnerOk, cRunner);
   const savedShadow = own?.shadow && own.shadow !== "off" && !shadows.includes(own.shadow as RunnerId) ? own.shadow : null;
   const pick = (choice: { runner?: RunnerId; model?: string; effort?: string; permissionMode?: string | null; budgetUsd?: number | null; shadow?: string | null } | null) => props.save({ autoStart: { byKind: { [props.kind]: choice } } });
   return (

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { AgentEvent, Ask, AskAnswerResult, AskQuestion, AskChanged, AskList, Backlog, RunnerAdapter, RunnerSession, Task } from "@switchboard/protocol";
 import { mergeGranted } from "../../../ops-kit/src/backlog-client.ts";
 import { importing } from "../fixtures/github-import.ts";
-import { answerStoredDecision, screenAnswer } from "./backlog-edit.ts";
+import { answerStoredDecision, commentStoredIssue, screenAnswer } from "./backlog-edit.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { loadConfig } from "./config.ts";
 import { readPolicies, writePolicies } from "./policies.ts";
@@ -364,6 +364,19 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const body = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
     expect(body.ask!.resume).toMatchObject({ state: "running" });
     expect(stageTasks(306).map((t) => t.title.split(":")[0])).toEqual(["#306 実装"]);
+  });
+
+  test("an answer on the screen does not start a stage on a PBI another Task holds", async () => {
+    const base = await boot(fakeGh().gh, holding);
+    // a conversation Task (no stage) claims PBI 306 with the guard's comment, and is still at work
+    const holder = insertStage("会話", "running", null);
+    commentStoredIssue(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, 306, "<!-- pbi-complete:claim t1 -->", Date.now(), holder.id);
+    const ask = await decisionOf306(base);
+    const body = (await (await answer(base, ask.id, { kind: "choice", choice: B })).json()) as AskAnswerResult;
+    // the answer is written, no stage starts, and the card says whose claim holds it
+    expect(queued()[1]).toMatchObject([306, "comment", null, { body: `## 回答\n\n${B}` }]);
+    expect(stageTasks(306)).toEqual([]);
+    expect(body.ask!.resume).toMatchObject({ state: "queued", taskId: null, reason: `占有中（Task ${holder.id}）` });
   });
 
   test("重なり overlap: an answer while the PBI's 実装 already runs answers that Task, not the overlap refusal", async () => {
@@ -913,8 +926,9 @@ describe("POST /api/asks/answer — questions the work went on from with their r
   const ASKED_AT = "2026-09-25T00:00:00Z";
   // (no word of the table's stop list in it: a question with one would wait, not go on)
   const B = "B: ファイル — 影響: 読み口はそのまま";
-  const GO = ["## 判断待ち", "", "**問い**: 保存先をどちらにするか", "**選択肢**:", "- A: DB — 影響: 読み口を書き換える", `- ${B}`, "**推奨**: A — 今の読み口のまま", "**進め方**: 推奨で進める（種類: task-order） — 戻せる変更"].join("\n"); // on a PBI's own Issue: the kind a PBI can carry (its place is checked)
-  const going = () => fakeGh({ comments: { i304: [{ body: GO, createdAt: ASKED_AT }], i305: [{ body: GO, createdAt: ASKED_AT }] } });
+  const GO = ["## 判断待ち", "", "**問い**: 保存先をどちらにするか", "**選択肢**:", "- A: DB — 影響: 読み口を書き換える", `- ${B}`, "**推奨**: A — 今の読み口のまま", "**進め方**: 推奨で進める（種類: task-order） — 戻せる変更", "#30400 を先にするか、#30401 を先にするか"].join("\n"); // on a PBI's own Issue: the kind a PBI can carry (its place is checked); 30400 and 30401 are the Tasks the fixtures make up for 304 (its subIssuesSummary)
+  const GO_305 = GO.replace(/#3040/g, "#3050");
+  const going = () => fakeGh({ comments: { i304: [{ body: GO, createdAt: ASKED_AT }], i305: [{ body: GO_305, createdAt: ASKED_AT }] } });
   const proceeding = async (base: string) => (await asks(base)).filter((a) => a.proceeding);
   const comments = () => queued().filter((o) => o[1] === "comment");
   const NAMED = ` — 問い ${new Date(ASKED_AT).toISOString()}`;
@@ -1100,7 +1114,7 @@ describe("POST /api/asks/answer — questions the work went on from with their r
   test("an answer to an Issue's question given on the screen keeps the head of the PR its grant names, read when it was answered — a stopped question's and an overturned one's alike", async () => {
     const GRANT = "PR #12 を判定の外でマージしてよい";
     const HEAD = "1".repeat(40);
-    const fake = fakeGh({ pr: { state: "OPEN", head: HEAD, comments: [], commits: [] }, comments: { i304: [{ body: STOPPED("保存先をどちらにするか"), createdAt: T1 }, { body: STOPPED("読み口をどちらにするか"), createdAt: T2 }], i305: [{ body: GO, createdAt: ASKED_AT }] } });
+    const fake = fakeGh({ pr: { state: "OPEN", head: HEAD, comments: [], commits: [] }, comments: { i304: [{ body: STOPPED("保存先をどちらにするか"), createdAt: T1 }, { body: STOPPED("読み口をどちらにするか"), createdAt: T2 }], i305: [{ body: GO_305, createdAt: ASKED_AT }] } });
     const base = await boot(fake.gh);
     const headReads = () => fake.calls.filter((c) => c[0] === "pr" && c.at(-1) === "headRefOid").length;
     const kept = (n: number) => comments().filter((o) => o[0] === n).map((o) => (o[3] as { screen?: boolean; heads?: unknown }));

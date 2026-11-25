@@ -7,7 +7,7 @@
 # (sb-e2e_sb-home ...) apart from the ones of a real start (the project switchboard), so down -v here cannot touch them.
 set -eu
 cd "$(dirname "$0")/.."
-W=$(mktemp -d /tmp/switchboard.4191.XXXXXX)
+W=$(mktemp -d "${TMPDIR:-/tmp}/switchboard.e2e.XXXXXX")
 cat > "$W/override.yaml" <<'YAML'
 services:
   switchboard:
@@ -30,11 +30,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# port 47831 is the published one: a real start on the machine would have it already
-if (exec 3<>/dev/tcp/127.0.0.1/47831) 2>/dev/null; then
-  echo "FAIL: 127.0.0.1:47831 is already in use (a real stand-alone start?)" >&2
-  exit 1
-fi
+# the container shares the machine's network: a real start on the machine would hold 47831 and 47841 already
+for port in 47831 47841; do
+  if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+    echo "FAIL: 127.0.0.1:$port is already in use (a real stand-alone start?)" >&2
+    exit 1
+  fi
+done
 
 wait_for() { # <seconds> <description> <command...>
   local n=$1 what=$2
@@ -52,7 +54,7 @@ marked() { dc exec -T switchboard sh -c 'grep -l e2e-mark "$HOME"/.claude/projec
 
 dc down -v --remove-orphans >/dev/null 2>&1 || true
 dc up -d --build || fail "compose up"
-wait_for 90 "daemon health through the relay" healthy
+wait_for 90 "daemon health" healthy
 
 ID=$(curl -fsS -X POST -H 'content-type: application/json' \
   -d "{\"cwd\":\"$CWD\",\"title\":\"e2e\",\"prompt\":\"p\",\"runner\":\"claude\"}" "$BASE/api/tasks" | jq -r .id) ||

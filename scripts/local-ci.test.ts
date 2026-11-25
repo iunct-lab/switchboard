@@ -880,7 +880,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const { run, perfResult, cleanup } = await perfRun(CHECK, `ceilings: local\n${over}\n{\n${JSON_DUMP}\n}`);
     cleanup();
     expect(run.ok).toBe(false);
-    expect(run.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], grew: [], unknown: false });
+    expect(run.perf).toEqual({ env: "local", over: [over], improved: [], raised: [], grew: [], reasons: [], unknown: false });
     expect(perfResult).toBe('{"runs":5}');
     expect(run.results.find((x) => x.run === CHECK)!.fails).toEqual([over]);
   });
@@ -938,7 +938,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
     const { run, cleanup } = await perfRun(BENCH, "Error: Chrome not found");
     cleanup();
     expect(run.results.filter((x) => x.code !== 0).map((x) => x.run)).toEqual([BENCH, CHECK]);
-    expect(run.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], unknown: true });
+    expect(run.perf).toEqual({ env: null, over: [], improved: [], raised: [], grew: [], reasons: [], unknown: true });
   });
 
   test("perf and bun test both failing: the comment names both steps with their raised: and (fail) lines", async () => {
@@ -995,7 +995,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
   });
 
   test("perfVerdict: kinds as printed", () => {
-    expect(perfVerdict("ceilings: github\nover: a = 2 > ceiling 1\nperf ratchet: ok")).toEqual({ env: "github", over: ["over: a = 2 > ceiling 1"], improved: [], raised: [], grew: [], unknown: false });
+    expect(perfVerdict("ceilings: github\nover: a = 2 > ceiling 1\nperf ratchet: ok")).toEqual({ env: "github", over: ["over: a = 2 > ceiling 1"], improved: [], raised: [], grew: [], reasons: [], unknown: false });
     const grew = "grew: bundle.js +1.10% (1000 → 1011 B) ≥ 1%: merging is the user's call (docs/design/perf.md)";
     const p = perfVerdict(`ceilings: local\nbundle: js 1011 B (main 1000 B, +11 B, +1.10%) / css 50 B (main 50 B, +0 B, +0.00%)\n${grew}`);
     expect(p).toMatchObject({ grew: [grew], over: [], unknown: false });

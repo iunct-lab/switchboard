@@ -1,6 +1,6 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { pathsIn, scopeIn } from "./task-paths";
+import { pathsIn, scopeIn, turnPathsIn } from "./task-paths";
 
 const top = [
   { name: "packages", dir: true }, { name: "apps", dir: true }, { name: "aws", dir: true }, { name: "docs", dir: true },
@@ -120,5 +120,41 @@ describe("task-paths pathsIn: a place that only names a file as a reference", ()
     ].join("\n");
     expect(pathsIn(body, top)).toEqual(["packages/core/src/flow.ts", "docs/design/backlog.md"]);
     expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["packages/core/src/backlog-waits.ts", "apps/web/src/changes.ts", "apps/web/src/components/Backlog.tsx", "packages/core/src/flow.ts"]));
+  });
+});
+
+describe("task-paths turnPathsIn", () => {
+  const body = (verify: string, step = "1. `docs/design/backlog.md`: 書く") => [
+    "古い前提を持つ既存の箇所:",
+    "- `packages/core/src/a.ts:34`（読む）、`apps/web/b.ts:5`",
+    "  - `aws/c.ts`",
+    "",
+    "## 手順",
+    step,
+    verify,
+  ].join("\n");
+
+  test("adds a path of the old-assumption list that the steps or the checks name too, and not one only in the list", () => {
+    const verify = "## 検証\n- `bun test packages/core/src/a.test.ts` と `packages/core/src/a.ts` の呼び手";
+    expect(turnPathsIn(body(verify), top)).toEqual(["docs/design/backlog.md", "packages/core/src/a.ts"]);
+    expect(turnPathsIn(body("## 検証\n- 動く", "1. `docs/design/backlog.md`: `aws/c.ts` も直す"), top)).toEqual(["docs/design/backlog.md", "aws/c.ts"]);
+    expect(turnPathsIn(body("## 検証\n- 動く"), top)).toEqual(["docs/design/backlog.md"]);
+  });
+
+  test("does not change pathsIn, and a section other than the steps and the checks does not match", () => {
+    const verify = "## 検証\n- `packages/core/src/a.ts`";
+    expect(pathsIn(body(verify), top)).toEqual(["docs/design/backlog.md"]);
+    const other = [body("## 検証\n- 動く"), "## 背景", "（`packages/core/src/a.ts` を参照）"].join("\n");
+    expect(turnPathsIn(other, top)).toEqual(["docs/design/backlog.md"]);
+  });
+
+  test("a path counts only as a whole, not as a part of a longer path", () => {
+    expect(turnPathsIn(body("## 検証\n- `packages/core/src/a.tsx` と `packages/core/src/a.ts.bak`"), top)).toEqual(["docs/design/backlog.md"]);
+    expect(turnPathsIn(body("## 検証\n- `packages/core/src/a.ts`。"), top)).toEqual(["docs/design/backlog.md", "packages/core/src/a.ts"]);
+  });
+
+  test("the list's own lines do not count as the steps' text when the list stands under 手順", () => {
+    const inSteps = ["## 手順", "1. `docs/design/backlog.md`: 書く", "古い前提を持つ既存の箇所:", "- `packages/core/src/a.ts:34`", "## 検証", "- 動く"].join("\n");
+    expect(turnPathsIn(inSteps, top)).toEqual(["docs/design/backlog.md"]);
   });
 });

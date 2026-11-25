@@ -21,11 +21,11 @@ describe("runnerRows", () => {
     expect(rows).toHaveLength(7);
     expect(rows.every((r) => !r.editable)).toBe(true);
   });
-  test("the model list is not editable for a bedrock login", () => {
-    expect(runnerRows({ ...claude, loginKind: "bedrock" }).find((r) => r.key === "models")?.editable).toBe(false);
+  test("the model list is editable for a bedrock login too", () => {
+    expect(runnerRows({ ...claude, loginKind: "bedrock" }).find((r) => r.key === "models")?.editable).toBe(true);
     expect(runnerRows(claude).find((r) => r.key === "models")?.editable).toBe(true);
   });
-  test("a bedrock login cannot edit its list but keeps the CLI candidates; a runner without a list has none", () => {
+  test("a bedrock login edits its list and keeps the CLI candidates; a runner without a list has none", () => {
     expect(showsCliCandidates({ ...claude, loginKind: "bedrock" })).toBe(true);
     expect(showsCliCandidates(codex)).toBe(true);
     expect(showsCliCandidates(adk)).toBe(false);
@@ -33,7 +33,7 @@ describe("runnerRows", () => {
   });
   test("the モデルの選択肢 row is shown for every runner: list, candidates only, or the plain 変えられない row", () => {
     expect(modelsRowView(claude)).toEqual({ folded: true, list: true, candidates: true });
-    expect(modelsRowView({ ...claude, loginKind: "bedrock" })).toEqual({ folded: true, list: false, candidates: true });
+    expect(modelsRowView({ ...claude, loginKind: "bedrock" })).toEqual({ folded: true, list: true, candidates: true });
     expect(modelsRowView(adk)).toEqual({ folded: false, list: false, candidates: false });
     expect(modelsRowView(info({ id: "dak" }))).toEqual({ folded: false, list: false, candidates: false });
   });

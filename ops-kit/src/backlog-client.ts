@@ -35,8 +35,9 @@ export const BACKLOG_USAGE = `  backlog list [--search <語>] [--label <l>]... [
       --head / --base: PR の代わりのローカルの「変更」として作る（両方そろえる。GitHub の workspace では Issue と別に 1 から番号が付き、GitHub には送らない）
       --pr <n>: その「変更」が代わりをする GitHub の PR（GitHub の workspace だけ。GitHub が使えない間の切り替え）
       --change（view / edit / comment）: <issue> を Issue ではなくローカルの「変更」の番号として読む・書く
-  backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
+  backlog edit <issue> [--title <t>] [--body-file <f|->] [--rev <版>] [--add-label <l>]... [--remove-label <l>]... [--state open|closed]
                [--reason completed|not-planned] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]
+      --rev: --body-file の本文を読んだときの版（backlog view <n> --json | jq -r .bodyRevision）。アプリ経由では --body-file に必須。読んだ後に本文が変わっていれば保存せず 1（読み直して書き直す）
       --body-file: 本文が先頭 null だけ、または type:pbi の必須の節・**Story Points**: の行を失う本文は保存せず 1（押し切る口は無い。節を消す --allow-empty でも同じ）
       --reason: 閉じた理由（--state closed と一緒だけ。重複・やらないと決めた Issue は not-planned。閉じている Issue の理由の付け替えも同じ形）
   backlog comment <issue> --body-file <f|->
@@ -202,16 +203,21 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
       const kinds = [...new Set(texts.flatMap((t) => (t ? findSecrets(t, hostAws(env as NodeJS.ProcessEnv)).map((h) => h.kind) : [])))];
       if (kinds.length) throw new Refused(`認証に使える値（${kinds.join(", ")}）が含まれるので送りません。値を消してから実行してください`);
     };
-    const edit = async (ref: string, body: Record<string, unknown>) => {
+    const edit = async (ref: string, body: Record<string, unknown>, showRevision = false) => {
       const ws = await workspace();
       if (!asChange && env.BACKLOG_URL && /^[0-9]+$/.test(issueRef(ref)) && (body.fields as Record<string, unknown> | undefined)?.Status === "Ready") {
         const read = async (n: number) => (await api("GET", `/${n}?workspaceId=${encodeURIComponent(ws.workspaceId)}`)) as Detail;
         const why = await readyGateCheck(read, Number(issueRef(ref)), opts.cwd, repoTop(opts.cwd));
         if (why) throw new Refused(`Ready にしません: ${why}`);
       }
-      await api("PATCH", `/${encodeURIComponent(issueRef(ref))}${asChange ? "?change=1" : ""}`, { workspaceId: ws.workspaceId, ...body });
+      await api("PATCH", `/${encodeURIComponent(issueRef(ref))}${asChange ? "?change=1" : ""}`, { workspaceId: ws.workspaceId, ...body }, await taskProof(env, opts.fetch ?? fetch));
       // pending or not shows in `view` (送信待ち): a backlog kept in the app is applied at once
-      io.out(`#${issueRef(ref)} を保存しました`);
+      if (!showRevision) io.out(`#${issueRef(ref)} を保存しました`);
+      else {
+        // the save is done: a failed read of the new revision does not make it a failure
+        const saved = (await api("GET", `/${encodeURIComponent(issueRef(ref))}?workspaceId=${encodeURIComponent(ws.workspaceId)}${asChange ? "&change=1" : ""}`).catch(() => null)) as Detail | null;
+        io.out(saved ? `#${issueRef(ref)} を保存しました（版 ${saved.bodyRevision}）` : `#${issueRef(ref)} を保存しました（版は読めませんでした。次に保存する前に view --json の .bodyRevision で読み直す）`);
+      }
       return 0;
     };
     switch (sub) {
@@ -283,7 +289,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           return 0;
         }
         const ws = await workspace();
-        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base, ...(pr !== undefined ? { pr: number(pr) } : {}) } } : {}) })) as { localId: string; number?: number | null };
+        const r = (await api("POST", "", { workspaceId: ws.workspaceId, title, body: body ?? "", labels, milestone: milestone ?? null, parent: parent ? number(parent) : null, fields: Object.keys(fields).length ? fields : null, ...(head && base ? { change: { head, base, ...(pr !== undefined ? { pr: number(pr) } : {}) } } : {}) }, await taskProof(env, opts.fetch ?? fetch))) as { localId: string; number?: number | null };
         // a backlog kept in the app numbers it at once; GitHub's once it is sent
         io.out(typeof r.number === "number" ? `#${r.number} を作りました（localId ${r.localId}）` : `作りました（送信待ち）: localId ${r.localId}。番号が付く前も backlog view ${r.localId} で読める`);
         return 0;
@@ -292,6 +298,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const [ref] = args.splice(0, 1);
         const title = take("--title");
         const body = await text(take("--body-file"));
+        const rev = take("--rev");
         const allowEmpty = has("--allow-empty");
         const add = takeAll("--add-label");
         const remove = takeAll("--remove-label");
@@ -303,8 +310,10 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const milestone = has("--no-milestone") ? null : take("--milestone");
         const parent = has("--no-parent") ? null : take("--parent");
         if (!ref || args.length || (state !== undefined && !/^(open|closed)$/i.test(state)) || (reasonArg !== undefined && (!reason || state?.toLowerCase() !== "closed")))
-          throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--reason completed|not-planned（--state closed と一緒だけ）] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]");
+          throw new Refused("backlog edit <issue> [--title <t>] [--body-file <f|->] [--rev <版>] [--add-label <l>]... [--remove-label <l>]... [--state open|closed] [--reason completed|not-planned（--state closed と一緒だけ）] [--milestone <m> | --no-milestone] [--parent <n> | --no-parent] [--allow-empty]");
         if (body !== undefined && !body.trim() && !allowEmpty) throw new Refused(EMPTY_BODY("edit"));
+        // the app's save is checked against the version the body was read at; without it a save would put over a newer one unseen
+        if (!direct && body !== undefined && rev === undefined) throw new Refused("backlog edit: --body-file には読んだ版が要ります（ops-kit backlog view <n> --json | jq -r .bodyRevision を --rev に渡す）");
         noSecrets(title, body, milestone ?? undefined, ...add);
         // a body that loses what the Issue had is not saved: read the Issue as it is now, before anything is sent
         if (body !== undefined) {
@@ -327,6 +336,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
         const input: Record<string, unknown> = {
           ...(title !== undefined && { title }),
           ...(body !== undefined && { body }),
+          ...(body !== undefined && rev !== undefined && !direct && { expectedBodyRevision: rev }),
           ...((add.length || remove.length) && { labels: { add, remove } }),
           ...(state !== undefined && { state: state.toUpperCase() }),
           ...(reason && { stateReason: reason }),
@@ -339,7 +349,7 @@ export async function runBacklog(argv: string[], env: Record<string, string | un
           io.out(`#${number(ref)} を保存しました`);
           return 0;
         }
-        return await edit(ref, input);
+        return await edit(ref, input, body !== undefined);
       }
       case "comment": {
         const [ref] = args.splice(0, 1);
@@ -705,6 +715,8 @@ function freshness(ws: Sync): string {
 export interface Detail {
   /** The workspace the app answered from; absent in GitHub's own (without BACKLOG_URL). */
   workspaceId?: string;
+  /** The body's version as the app shows it; absent in GitHub's own (without BACKLOG_URL). */
+  bodyRevision?: string;
   issue: { number: number; title: string; state: string; stateReason?: string | null; labels: string[]; milestone: string | null; parent: number | null; subIssues: number[]; body: string; url: string; change?: { head: string; base: string; mergeCommit: string | null; mergedAt: string | null; reviewedHead: string | null; pr?: number | null; reportedAt?: string | null } };
   /** A local change's branch tips now; absent / null otherwise. */
   changeRefs?: { head: string | null; base: string | null } | null;
@@ -713,6 +725,7 @@ export interface Detail {
   fetchedAt: number | null;
   localId: string | null;
   pending: number;
+  waitingSubIssues?: Array<{ localId: string | null; number: number; title: string; state: string }>;
   /** The edits held, not sent; none in GitHub's own (without BACKLOG_URL). */
   held?: Array<{ operation: string; kind: "create" | "set" | "comment"; field: string | null; status: "conflict" | "failed" | "unknown"; reason: string | null }>;
   sync: { state: string; reason: string | null; lastSuccessfulSync: number | null };
@@ -732,6 +745,7 @@ export function formatDetail(d: Detail): string {
     `labels: ${i.labels.join(", ") || "-"}  milestone: ${i.milestone ?? "-"}  parent: ${i.parent ? `#${i.parent}` : "-"}`,
     `fields: ${d.fields ? Object.entries(d.fields).map(([k, v]) => `${k}=${v ?? "-"}`).join(", ") : "-"}`,
     `最終取得 ${at}  同期 ${d.sync.state}${d.sync.reason ? `（${d.sync.reason}）` : ""}  送信待ち ${d.pending}`,
+    ...(d.waitingSubIssues ?? []).map((w) => `送信待ち ${w.number ? `#${w.number}` : w.localId} ${w.title}`),
     ...(d.held ?? []).map((h) => `保留: ${h.kind === "set" ? h.field : HELD_KIND[h.kind]} ${HELD[h.status]}${h.reason ? `（${h.reason}）` : ""}`),
     "",
     i.body,

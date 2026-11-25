@@ -37,7 +37,7 @@ The kind of a pending send operation is decided by `forgeKind` (`backlog-send.ts
 `runForgeOperation(op, services)` calls the `op.kind` of the implementation for `op.target.service`. Before calling (`checkForgeOperation`):
 
 - A service that is not supported, or a service without that operation, raises `ForgeUnsupported` (`サービス gitlab には対応していません（対応: github）`). It is never done another way instead. For an import this becomes the workspace's import failure (errors on the screen), for a pending send operation the operation is marked `failed` (with the reason, nothing is sent), and for local CI a failure of the report
-- If the text to be sent (`op.texts`; for a pending send operation, `textsOf(payload)`) contains a value usable for authentication, it raises `ForgeRefused` (`findSecrets`; the kit also looks for the host's AWS names). Besides when an edit is saved (422), it checks again just before sending out (so operations that entered without passing the save check, such as ones restored from an old DB, are not sent either)
+- If the text to be sent (`op.texts`; for a pending send operation, `textsOf(payload)`) contains a value usable for authentication, it raises `ForgeRefused` (`findSecrets`; the kit also looks for this machine's AWS names). Besides when an edit is saved (422), it checks again just before sending out (so operations that entered without passing the save check, such as ones restored from an old DB, are not sent either)
 
 The service branching lives in this one place (the per-call `services` table), and we do not add `service === "github"` branches on the core or runner side.
 

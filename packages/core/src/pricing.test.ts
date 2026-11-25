@@ -3,8 +3,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLAUDE_BEDROCK_MODELS, createClaudeHistoryParser } from "@switchboard/adapter-claude";
-import { CODEX_BEDROCK_MODELS } from "@switchboard/adapter-codex";
+import { CLAUDE_MODELS, claudeBedrockModel, createClaudeHistoryParser } from "@switchboard/adapter-claude";
+import { CODEX_MODELS, codexBedrockModel } from "@switchboard/adapter-codex";
 import type { AgentEvent } from "@switchboard/protocol";
 import { billedUsd, billingFromRow, billingOf, isBedrockModel, isCharged, ledgerRowFor, loadPricing, priceUsage, resolveModel, usageSince } from "./pricing.ts";
 
@@ -108,7 +108,7 @@ describe("pricing", () => {
 
   test("every Bedrock id of the claude adapter is priced", () => {
     const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
-    for (const m of CLAUDE_BEDROCK_MODELS) expect(priceUsage(table, m.value, "claude", u)).toMatchObject({ priced: true });
+    for (const m of CLAUDE_MODELS.map(claudeBedrockModel)) expect(priceUsage(table, m.value, "claude", u)).toMatchObject({ priced: true });
     expect(priceUsage(table, "global.anthropic.claude-haiku-5-5", "claude", u).model).toBe("claude-haiku-5-5");
     expect(priceUsage(table, "global.anthropic.claude-haiku-4-5-20251001-v1:0", "claude", u).model).toBe("claude-haiku-4-5");
     // a row or an alias the user wrote for the Bedrock id wins over the Anthropic row
@@ -121,7 +121,7 @@ describe("pricing", () => {
 
   test("every Bedrock id of the codex adapter is priced and billed at the API price", () => {
     const u = { inputTokens: 1000, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0 };
-    for (const m of CODEX_BEDROCK_MODELS) {
+    for (const m of CODEX_MODELS.map(codexBedrockModel).filter((x) => x !== null)) {
       const p = priceUsage(table, m.value, "codex", u);
       expect(p).toMatchObject({ priced: true, model: m.value.replace(/^openai\./, "") });
       expect(p.costUsd).toBeGreaterThan(0);

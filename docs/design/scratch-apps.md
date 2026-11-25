@@ -119,7 +119,7 @@ refusal, a failed call, or `やめる` (status 0, `利用者が断った`) rejec
 | `/api/tasks/:id?limit=0` | one Task without its events |
 | `/api/backlog` | the backlog's items and fields |
 | `/api/schedules` | the schedules |
-| `/api/ops/resources` | the host's memory, disk and load |
+| `/api/ops/resources` | the machine's memory, disk and load |
 | `/api/artifacts?q=&limit=` | artifacts across Tasks |
 
 Read the lists once and again only on a button or every minute or so: `/api/tasks` is large, and the limit above is

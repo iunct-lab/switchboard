@@ -16,6 +16,8 @@ export const BacklogEditInput = z
     workspaceId: z.string(),
     title: issueText.title.optional(),
     body: issueText.body.optional(),
+    /** With `body`: the body's `bodyRevision` as read; another one now refuses the save (409). Absent = no check. */
+    expectedBodyRevision: z.string().optional(),
     labels: z.object({ add: z.array(z.string().min(1)).default([]), remove: z.array(z.string().min(1)).default([]) }).strict().optional(),
     state: z.enum(["OPEN", "CLOSED"]).optional(),
     /** Why it is closed: only with `state: "CLOSED"` — closing it, or changing the reason of one closed. */

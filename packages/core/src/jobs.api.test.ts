@@ -43,6 +43,9 @@ describe("/api/jobs recheck", () => {
     const core = await startServer(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [], { port: 0, selfdevChecks: false, dryRunRestart: true, jobCommand: () => ({ argv: ["true"], tail: "" }) });
     try {
       core.db.insertTask(claudeTask("t-claude"));
+      // a recheck follows a review of the PR that has ended
+      const first = core.db.insertJob({ kind: "review", taskId: "t-claude", pr: 5, runner: "codex", cwd: repo, startedAt: Date.now(), repo: "", head: null, as: null, kinds: [] });
+      core.db.finishJob(first.id, { status: "pass", exitCode: 0, summary: "", endedAt: Date.now() });
       const base = `http://127.0.0.1:${core.server.port}`;
       const patch = async (body: unknown) => expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).status).toBe(200);
       const recheck = async () => {

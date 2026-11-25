@@ -17,7 +17,7 @@ gh api "repos/{owner}/{repo}/pulls/$N/reviews"  --paginate | jq -r '.[] | select
 gh pr view $N --comments --json comments -q '.comments[] | "---- \(.author.login)\n\(.body)"'   # 要約コメント（[<名前>] review）も全文
 ```
 
-攻める側のレビュー（`[<runner>] attack`。`cross-runner-review` の 2b）の指摘も、1〜4 で主レビューと同じに処理する。
+攻める側のレビュー（`[<runner>] attack`。`cross-runner-review` の 2b）の指摘も、1〜4 で主レビューと同じに処理する。監督者の転記（`[<runner>] arbiter`。`cross-runner-review` の 6）は指摘ではなく裁定で、2 の「収束しないとき」のとおりに使う。
 
 複数のレビュアーの同じ指摘は 1 件にまとめ、返信に「[<レビュアー A>] と [<レビュアー B>] の同じ指摘」と書く。
 
@@ -28,34 +28,27 @@ gh pr view $N --comments --json comments -q '.comments[] | "---- \(.author.login
 | 振り分け | いつ | やること |
 |---|---|---|
 | **修正** | blocker。should-fix で Task の範囲内。non-blocking（nit・question）は採るかを実装者が決める（直す nit は同じ修正コミットに入る 1 行程度だけ） | 前の回に直した論点にまた付いた blocker / should-fix（行末の `Repeat of:` か自分の読み）は、直す前に 3 の「同じ論点が続いたら」。ほかはこの枝で直す。回帰テストを先に書き、修正前に fail することを見る。指摘の行に `Test: _review/tests/<file>` があれば先にそれを、レビューの clone（`cross-runner-review` の 1 の `$R`）から worktree のテストの置き場へ写して（相対 import は直す）走らせ、修正前に落ちるのを見る（`_review/` の下に写さない。写した先が残す回帰テストになる）。書く前に `task-to-pr` の「足す前に」を通す（既存のテストに条件を足す・軽い階層を先に。回帰テストは要る） |
-| **Issue 化** | 正しいが Task の範囲外（別の受け入れ条件、別の場所、リファクタ、将来の改善）。同じ PBI なら Task、別の価値なら PBI（`request-to-backlog` の粒度で。元要望は「なし（PR #N のレビュー）」） | Issue を作り（`ops-kit backlog create`。Task なら `--parent <PBI>`）、返信に番号。PBI の決定ログにも 1 行（`ops-kit backlog edit <PBI> --body-file …`）。既にある次の Task に回すなら、その Task の本文（手順か「守る条件」の行）に足してから（`ops-kit backlog edit <Task> --body-file …`。`task-to-pr` の 3 の「見つけた穴」）、返信に Task の番号と「本文に足した」を書く（PR 本文にだけ書いた穴は、受け取る Task に届かない） |
+| **Issue 化** | 正しいが Task の範囲外（別の受け入れ条件、別の場所、リファクタ、将来の改善）。同じ PBI なら Task、別の価値なら PBI（`request-to-backlog` の粒度で。元要望は「なし（PR #N のレビュー）」） | Issue を作り（`ops-kit backlog create`。Task なら `--parent <PBI>`）、返信に番号。PBI の決定ログにも 1 行（`ops-kit backlog edit <PBI> --body-file … --rev <版>`）。既にある次の Task に回すなら、その Task の本文（手順か「守る条件」の行）に足してから（`ops-kit backlog edit <Task> --rev <版> --body-file …`。`task-to-pr` の 3 の「見つけた穴」）、返信に Task の番号と「本文に足した」を書く（PR 本文にだけ書いた穴は、受け取る Task に届かない） |
 | **対処不要** | 観点がずれている: 設計原則（設計ルール。場所は CLAUDE.md）や PBI の決定ログ・スコープ外に反する提案、互換層・一度しか使わない抽象・念のための切り替えの設定の追加（環境・運用で変わる値の上書きの口は除く。`pbi-to-tasks` の設計チェック）、レビュアーの誤読、実行環境の上で検証できない懸念。採らないと決めた non-blocking | 返信に**根拠**（ファイル・Issue・doc の名指し）。「意図的です」だけは不可。non-blocking の見送りは要約の「見送った nit・question」の表に 1 行（指摘と理由）で足りる |
 
 採る question は事実で答える（「分からない」なら調べてから）。**レビュアーが正しくて自分の修正が間違いのこともある**。自分の変更を守らず、より小さく安全な直し方があればそちらに切り替える。
 
 優先度: blocker → should-fix → question → nit。blocker が「対処不要」になるのは誤読のときだけで、必ず根拠を書く。
 
-### 収束しないとき（main との比較）
+### 収束しないとき（監督者）
 
 きっかけ（どちらかが当たれば回す。数は決めた値で設定にしない。変えるならこの文を直す）:
 
 - 4 の修正後の見直しを 2 回回しても blocker / should-fix が残る PR
 - 差分が 500 行（`task-to-pr` の Task の粒度の上限）を超える PR は、1 回目のレビューの後
 
-`cross-runner-review` の 5 を回す（主レビュアーが残る指摘を 1 件ずつ main と読み比べて分類する。比較の転記は主レビューに数えない）。`ops-kit review-compare check` が exit 1 なら後退がある。分類で振り分ける:
+`cross-runner-review` の 6 の監督者を頼む（実装者が答えた指摘にレビュアーが `Repeat of:` を重ねたものを、書かれたルールで裁く。PR を読み直す回ではない）。`ops-kit review-arbiter check` の exit 1 なら、レビュアー側の裁定か `missing` の観点がある。裁定ごとに振り分ける:
 
-- `REGRESSION`: 「修正」（3 のまま。直して返信し、見直しは `cross-runner-review` の 4。`$M/compared.md` が材料に入るので、後退が閉じたか・ほかの分類の行を挙げ直さないかは見直しが読む）
-- ほかの分類（`NEW-FEATURE-GAP` / `IMPROVED-BUT-INCOMPLETE` / `SAME` / `OWNER-DECIDED`）: 後退でないので、触る場所の領域ごとに要望 Issue にして「Issue 化」で返信する
+- `[reviewer]`: 「修正」（3 のまま。直して返信し、見直しは `cross-runner-review` の 6 の `--follow-up`）
+- `[implementer]`: 閉じる。各指摘のスレッドに `対処不要: 監督者の裁定（実装者の側）: <裁定のルール>` で返信して resolve する（4）。この返信は 4 の「対処不要」の返信と同じ扱いで、5 の「全指摘に答えがある」に数える。以後の回は同じ論点を挙げない
+- `missing` の観点: `cross-runner-review` の 6 のとおり
 
-```bash
-W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.triage<PR番号>.XXXXXX"); echo "$W"   # 新しいシェルなら。表示されたパスを控える
-ops-kit review-compare leftovers "$M/compared.md" --source "PR #$N の [<runner>] compare" --out "$W/leftovers"   # 後退以外が無ければ何も書かない
-# 領域ごとに $W/leftovers/<n>.md（本文）と titles.tsv（<n> と題）ができる。本文ごとに:
-ops-kit backlog create --title "<titles.tsv の題>" --label type:request --body-file "$W/leftovers/<n>.md"   # 出る番号が要望
-ops-kit backlog set <要望の番号> Status Backlog
-```
-
-各指摘のスレッドに `Issue 化: #<要望>（main と比べて後退でない: <分類>）` で返信して resolve する（4）。この返信は 4 の「Issue 化」の返信と同じ扱いで、5 の「全指摘が…返信済み」に数える。
+利用者には聞かない（`## 判断待ち` も Task の会話の確認も出さない）。
 
 ## 3. 直す
 
@@ -68,8 +61,8 @@ ops-kit backlog set <要望の番号> Status Backlog
 
 1. 似た既存の仕組みを探し、同じ形にできるならそうする（`pbi-to-tasks` の 2 の「あるなら同じ形で作る」を修正にも使う）
 2. 方針を 1 文で PBI の決定ログに書く（日付つき。PBI の無い PR は PR 本文の「逸脱」）
-3. 方針が要件の読みか、安全と使い勝手の優先なら、`issue-workflow` の「判断待ちの出し方」で `## 判断待ち` を出して止める
-4. Task の手順を方針に合わせて直す（`ops-kit backlog edit <Task>`）。それから修正を 1 コミットで積む
+3. 実装者の答えとレビュアーの指摘が割れたままなら、監督者に裁定を頼む（`cross-runner-review` の 6）。利用者には聞かない（`## 判断待ち` も Task の会話の確認も出さない）。拠れるルールが無ければ実装者の側。裁定が出たら 2 の 1 文をそれに合わせて直す。裁定の後に別の論点で割れた指摘は、実装者の答えが立つ（監督者は PR ごとに 1 回）
+4. Task の手順を方針（裁定が `[reviewer]` ならその裁定）に合わせて直す（`ops-kit backlog edit <Task>`）。それから修正を 1 コミットで積む
 
 ### 修正する
 
@@ -86,7 +79,7 @@ gh stack rebase && gh stack push   # 下の枝を直したら上に cascade（st
 
 修正が Task の手順・受け入れ条件から外れたら（別の直し方にした、範囲を広げた・削った）、見直しの前に PR 本文の「逸脱」の項（`task-to-pr` の「レビュアーへ」）と Task のコメント（`ops-kit backlog comment <Task>`）を更新し、PBI の決定ログ（`ops-kit backlog edit <PBI>`）に日付つきで 1 行書く。
 
-修正を push するたびに（ローカルの変更ではコミットするたびに）、見直しの前に PR 本文を今の実装に合わせる（概要・レビュアーへ・テスト観点のうち修正で変わったもの。squash でマージするリポジトリではこれがマージのメッセージになる）: `gh pr view $N --json body -q .body > "$W/pr.md"` → 直す → `gh pr edit $N --body-file "$W/pr.md"`（`W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.triage<PR番号>.XXXXXX")`。4 の要約にも使う）。ローカルの変更では `ops-kit backlog view <変更> --json | jq -r .issue.body > "$W/pr.md"` → `ops-kit backlog edit <変更> --body-file "$W/pr.md"`（`gh pr view` は呼ばない）。それから `cross-runner-review` の 4（修正後の見直し）を回す。
+修正を push するたびに（ローカルの変更ではコミットするたびに）、見直しの前に PR 本文を今の実装に合わせる（概要・レビュアーへ・テスト観点のうち修正で変わったもの。squash でマージするリポジトリではこれがマージのメッセージになる）: `gh pr view $N --json body -q .body > "$W/pr.md"` → 直す → `gh pr edit $N --body-file "$W/pr.md"`（`W=$(mktemp -d "${TMPDIR:-/tmp}/<リポジトリ名>.triage<PR番号>.XXXXXX")`。4 の要約にも使う）。ローカルの変更では `ops-kit backlog view <変更> --json` の `.issue.body` を `$W/pr.md` に、`.bodyRevision` を控える → `ops-kit backlog edit <変更> --body-file "$W/pr.md" --rev <版>`（`gh pr view` は呼ばない）。それから `cross-runner-review` の 4（修正後の見直し）を回す。
 
 **1 回のレビューの修正は 1 コミットにまとめてから見直しを頼む**。nit ごとにコミットすると、コミットごとに新しい見直しが次の端のケースを見つけ、収束しない。直す範囲は 2 の表のとおり（nit は 1 行程度だけ）。直し方は、端のケースを広げる推測より、限界を書いた保守的な規則を選ぶ。文書に「〜だけ」「全部」のような網羅の主張を書かない。
 
@@ -99,8 +92,7 @@ blocker / should-fix と、採った nit・question は **1 コメント 1 返�
 ```
 修正: <何をどう直したか> — <commit sha 短縮>。確かめた方法: <回帰テスト名（追加先: 既存 / 単体 / 新規）か、Scenario を再現したコマンドと結果>。読み手: <変わらない / n か所と結果>
 Issue 化: #<n>（<なぜこの PR の外か>）
-Issue 化: #<要望>（main と比べて後退でない: <分類>）   ← 「収束しないとき（main との比較）」の返信。上の Issue 化と同じ扱い
-対処不要: <根拠>。<ファイル / Issue / doc>
+対処不要: <根拠>。<ファイル / Issue / doc>   ← 監督者が実装者の側に裁定したときの根拠は、その裁定のルール
 回答: <事実>
 ```
 
@@ -137,9 +129,9 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 
 全部 yes ならそのままマージする（聞き直さない。`pbi-complete` の「この依頼が含む範囲」）。1 つでも no なら理由を要約に書いて止める（PR は open のまま。聞くものは `issue-workflow` の「判断待ちの出し方」で分ける: マージしてよいかは運用の確認として Task の会話で聞いてターンを終え、Issue に書かない。実装の判断は Issue の `## 判断待ち`）:
 
-- [ ] マージ判定（CLAUDE.md のコマンド。ローカルの変更では `<マージ判定> --change <変更>`、マージは Task への指示が名指しする `local-merge.ts <変更>`（判定をもう一度通してから rebase で入れ、Task も閉じる）。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。large の理由の扱いは `pbi-complete` の 5: `[聞く]` は小さな差分でも、利用者が Task の会話で `PR #<n> をマージしてよい` と認めるまで（認めたら `--allow-large`）マージしない。`[再チェック <kind>]` は聞かずに再チェックを仕事として頼み、その記録で外す。頼み方も同じ節）
-- [ ] 全指摘が 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み（見送る nit・question は要約の表で）（main との比較で要望にした指摘の `Issue 化: #<要望>（main と比べて後退でない: …）` の返信も数える）
-- [ ] blocker が残っていない（修正済みか、誤読の根拠つき）
+- [ ] マージ判定（CLAUDE.md のコマンド。ローカルの変更では `<マージ判定> --change <変更>`、マージは Task への指示が名指しする `local-merge.ts <変更>`（判定をもう一度通してから rebase で入れ、Task も閉じる）。無ければこのチェックリストを自分で確かめる）が exit 0（stop の `reasons` は要約の「マージ判断」に貼る。large の理由の扱いは `pbi-complete` の 5: `[聞く]` は小さな差分でも、利用者が Task の会話で `PR #<n> をマージしてよい` と認めるまで（認めたら `--allow-large`）マージしない。`[再チェック <kind>]` は聞かずに、LLM が読む種類は監督者（`cross-runner-review` の 6）、コマンドの種類は再チェックの仕事を頼み、その記録で外す。頼み方も同じ節）
+- [ ] 全部の指摘に答えがある: 修正 / Issue 化 / 対処不要 / 回答 のどれかで、返信済み（見送る nit・question は要約の表で）。blocker は修正済みか、誤読の根拠つき
+- [ ] 要る種類に監督者の裁定がある: マージ判定の `[再チェック <kind>]` に LLM が読む種類があれば、今の head を覆う監督者の仕事の記録があり、レビュアー側の裁定と `missing` の観点が無い（`cross-runner-review` の 6。判定が読むのは仕事の記録だけで、`[<runner>] arbiter` のコメントは数えない）。割れた指摘が無くても、その種類の裁定の記録は要る
 - [ ] 主レビュアーの独立レビューがある（`cross-runner-review` の「誰がレビューするか」。利用上限のときは同じスキルの 0。自己レビューだけでは満たさない。レビューできなければ未レビューとして止める）
 <!-- when extra=on -->
   （追加のレビュアーは未着でもよく、届いたら転記して比較する）
@@ -152,7 +144,7 @@ gh pr comment $N --body-file "$W/summary.md"   # W=$(mktemp -d "${TMPDIR:-/tmp}/
 - [ ] `git diff --stat origin/main...HEAD` に迷いファイル（作業ファイル、fixture の絶対パス）が無い
 - [ ] `gh pr view $N --json baseRefName,mergeable,mergeStateStatus` が CLEAN
 
-**ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh` の行は呼ばない。CI 緑は `<ローカル CI> --change <変更>` の合格（`<マージ判定> --change <変更>` が数える）、PR 本文は変更の本文（`ops-kit backlog edit <変更> --body-file <ファイル>` で直す）、迷いファイルは `git diff --stat main...<枝>`、base と CLEAN は `<マージ判定> --change <変更>` が見る。
+**ローカルの変更では**（4 の同名の段落と同じ workspace）: 上の `gh` の行は呼ばない。CI 緑は `<ローカル CI> --change <変更>` の合格（`<マージ判定> --change <変更>` が数える）、PR 本文は変更の本文（`ops-kit backlog edit <変更> --body-file <ファイル> --rev <版>` で直す）、迷いファイルは `git diff --stat main...<枝>`、base と CLEAN は `<マージ判定> --change <変更>` が見る。
 
 **GitHub が使えないときは**（CLAUDE.md が名指しする `<GitHub 不在の切り替え>` があり、マージ判定か `gh pr merge` が GitHub の一時的な障害・上限で失敗するとき。exit の読み方は `task-to-pr` の同名の段落）: `<GitHub 不在の切り替え> --task <Task> --pbi <PBI> --head <枝> --pr <PR> -- pr view <PR>` で切り替えを残す（exit 3 の `L<n>` が変更の番号）。PR の代わりをする変更（`--pr`）は、レビュースレッドを読めないのでローカルではマージされない（`<マージ判定> --change <n>` が止める）: レビューとローカル CI の記録だけ変更に進め、マージは GitHub が戻ってから PR で行う。PR をまだ作っていなかった枝の変更は「ローカルの変更では」の行でマージまで進める（判定の規則は PR と同じ）。スタックの途中なら下の PR から 1 本ずつ切り替える
 

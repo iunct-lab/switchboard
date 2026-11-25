@@ -25,7 +25,7 @@ description: PR を「実装したのと同じランナーの新しいセッシ�
 
 <!-- when task=out -->
 主レビュアーは、アプリのレビューの設定（別のランナー / 同じランナー）と実装したランナーで決まる。アプリの Task が読む写しには、その Task に合う側だけが入る。
-再チェック（2 の「再チェック」）を読むランナーは、アプリの再チェックの設定（主レビュアーでないランナー / 主レビューと同じランナー。未設定ならレビューの設定の値）で決まる。
+監督者（6）を読むランナーは、アプリの再チェックの設定（主レビュアーでないランナー / 主レビューと同じランナー。未設定ならレビューの設定の値）で決まる。
 アプリの Task の外では設定が届かないので、設定の既定の値として `review=other`・`recheck=other` の側を読む（ランナーの決まりではなく、設定が無いときの読み方）。`reviewer` は主レビュアー（`review=other` では実装していない方のランナー）、`runner` は実装したランナー。
 <!-- end when -->
 <!-- when review=other reviewer=codex -->
@@ -35,15 +35,15 @@ description: PR を「実装したのと同じランナーの新しいセッシ�
 主レビュアーは **Claude Code**（実装したのは Codex。実装したのとは別のランナー）。
 <!-- end when -->
 <!-- when review=same reviewer=claude -->
-主レビュアーは **Claude Code の新しいセッション**（実装したのと同じランナー。設定による選択で、別のランナーを求めない）。
+主レビュアーは **Claude Code の新しいセッション**（実装したのと同じランナー。設定による選択で、別のランナーを求めない。例外は 0 の利用上限の代替で、その 1 回だけもう片方のランナーが読む）。
 <!-- end when -->
 <!-- when review=same reviewer=codex -->
-主レビュアーは **Codex の新しいセッション**（実装したのと同じランナー。設定による選択で、別のランナーを求めない）。
+主レビュアーは **Codex の新しいセッション**（実装したのと同じランナー。設定による選択で、別のランナーを求めない。例外は 0 の利用上限の代替で、その 1 回だけもう片方のランナーが読む）。
 <!-- end when -->
 <!-- when review=same -->
 
 - 材料・実行・転記・4 の見直しは下の手順のまま。**実装時の会話・判断の要約・memory は渡さない**。同じランナーでも別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する
-- 要約の 1 行目は `[<runner>] review（同じランナーの別セッション。設定による選択）`（`post_review` の 4 つ目の引数 `（同じランナーの別セッション。設定による選択）`）。利用上限の代替の印（`（同じランナーの別セッション。<上限のランナー> が利用上限のため代替）`）は付けない（上限で替えたのではない）
+- 要約の 1 行目は `[<runner>] review（同じランナーの別セッション。設定による選択）`（`post_review` の 4 つ目の引数 `（同じランナーの別セッション。設定による選択）`）。0 で利用上限のためもう片方のランナーに代替したときは、1 行目を `[<runner>] review（別のランナー。<上限のランナー> が利用上限のため代替）` にする（その印は 0 の手順のとおり）
 <!-- end when -->
 <!-- when extra=on -->
 
@@ -65,20 +65,14 @@ Codex の 5 時間枠が **0.9 以上**、またはレビュー実行の出力�
 Claude の枠（週間上限なども）が上限、またはレビュー実行の出力に利用上限が出たら、新しい Codex のセッション（2 の頼み方）で代替する（サブエージェントのレビューはアプリに記録が残らず、判定に数えられない）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
 <!-- end when -->
 <!-- when review=other -->
-main との比較（5）は代替しない。主レビュアーが上限なら停止の報告 `usage-limit` で戻る時刻まで待ってから回す。
-<!-- end when -->
-<!-- when review=same -->
-main との比較（5）も設定どおり実装したランナーの別セッションが回し、上限なら同じく `usage-limit` で止まって待つ。
-<!-- end when -->
-<!-- when review=other -->
 
 - 材料と指示は 1 と同じ fresh clone と `_review/` だけ（**実装時の会話・判断の要約・memory は渡さない**）。別セッションによる独立レビューとして扱い、実装した自分による自己レビューとは区別して報告する。同じランナーのため見落としが重なりうることも記録する。
 <!-- end when -->
 <!-- when review=other reviewer=codex task=in -->
-- 仕事で代替するなら、主レビュアーでない方（実装したランナー）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
+- 仕事で代替するなら、主レビュアーでない方（実装したランナーの Claude）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
 <!-- end when -->
 <!-- when review=other reviewer=claude task=in -->
-- 仕事で代替するなら、主レビュアーでない方（実装したランナー）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner codex --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/codex.md"`
+- 仕事で代替するなら、主レビュアーでない方（実装したランナーの Codex）を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner codex --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/codex.md"`
 <!-- end when -->
 <!-- when review=other task=out -->
 - 直接走らせて代替するなら、2 の代替のランナーの側のコマンド。
@@ -88,11 +82,28 @@ main との比較（5）も設定どおり実装したランナーの別セッ�
 - 4 の修正後の見直しも同じ代替を使い、`WHO` は今回のレビュアー、`PREV` は前回のレビューが実際に書かれたファイルにする（ランナーを替えても `PREV` を今回の名前に替えない）。
 - 代替も利用上限なら、未レビューのままマージせず、運用の確認として Task の会話で止める。追加認証が要るレビューを自動で選ばない。
 <!-- end when -->
+<!-- when review=same reviewer=claude -->
+設定が Claude の新しいセッションで、Claude の枠（週間上限を含む）が上限、またはレビュー実行の出力に利用上限が出たら、待たずに Codex の新しいセッションで代替する（その 1 回だけ。設定は変えない。サブエージェントのレビューは実装したランナーと同じ枠で、アプリに記録も残らず、判定に数えられない）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
+<!-- end when -->
+<!-- when review=same reviewer=codex -->
+設定が Codex の新しいセッションで、Codex の 5 時間枠が 0.9 以上、またはレビュー実行の出力に利用上限が出たら、待たずに Claude の新しいセッションで代替する（その 1 回だけ。設定は変えない。サブエージェントのレビューは実装したランナーと同じ枠で、アプリに記録も残らず、判定に数えられない）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、実行が上限で止まったらその出力を優先する。
+<!-- end when -->
+<!-- when review=same reviewer=claude task=in -->
+- 仕事で代替するなら、設定と違うもう片方の Codex を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner codex --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/codex.md"`
+<!-- end when -->
+<!-- when review=same reviewer=codex task=in -->
+- 仕事で代替するなら、設定と違うもう片方の Claude を名指しして `--as fallback` を付ける（付けないと、設定と違うランナーとしてアプリが断る）: `ops-kit job request review $N --runner claude --as fallback --cwd "$R" --prompt "$M/prompt.md" --out "$M/claude.md"`
+<!-- end when -->
+<!-- when review=same task=out -->
+- 直接走らせて代替するなら、2 のもう片方のランナーのコマンドで走らせる。
+<!-- end when -->
 <!-- when review=same -->
-主レビュアーは実装したランナーと同じ枠を使うので、上限の代替は無い（別のランナーへ替えない。設定が同じランナーを選んでいる）。記録された枠は古いことがあるので（`resets_at` が過ぎた行は 0）、レビューの実行が上限で止まったらその出力を優先する。上限なら、未レビューのままマージせず、利用上限で止まったと報告して止まる。追加認証が要るレビューを自動で選ばない。
+- 転記は 3 の `post_review` で、実際に走ったランナーを who にして、1 行目を `[<runner>] review（別のランナー。<上限のランナー> が利用上限のため代替）` にする（4 つ目の引数）。上限でないときにこの印を付けない。
+- 4 の修正後の見直しも同じ代替を使う（仕事なら上の代替と同じ `--runner <もう片方> --as fallback` で、`--prompt "$M/prompt-fix.md" --out "$M/fix-review.md"`）。`WHO` は今回のレビュアー、`NOTE` は上の代替の印、`PREV` は前回のレビューが実際に書かれたファイルにする（ランナーを替えても `PREV` を今回の名前に替えない）。
+- 代替も利用上限なら、未レビューのままマージせず、運用の確認として Task の会話で止める。追加認証が要るレビューを自動で選ばない。
 <!-- end when -->
 
-再チェック（2）のランナーが上限なら代替せず、`usage-limit` で戻る時刻まで待つ（ランナーは設定が決め、違うランナーはアプリが断る）。
+監督者（6）のランナーが上限なら代替せず、`usage-limit` で戻る時刻まで待つ（ランナーは再チェックの設定が決め、違うランナーはアプリが断る）。
 
 ## 1. 材料を用意する（会話の文脈は渡さない）
 
@@ -119,7 +130,7 @@ AVAIL=$(df -Pk "$REVIEW_ROOT" | awk 'NR==2{print $4}')
 ```
 
 ```bash
-N=<PR番号>; KIND=review   # 再チェック（マージ判定の Recheck）で 1〜3 を流すときは KIND=recheck（主レビューの clone は 4 の見直しまで残すので消さない）
+N=<PR番号>; KIND=review   # 監督者（6）も、この clone と `_review/` を使う（主レビューの clone は 4 の見直しと 6 の後まで残すので消さない）
 R="${REVIEW_ROOT:?}/${NAME:?}.${KIND:?}${N:?}"; echo "$R"   # 再開して新しいシェルで R を作り直すときは、上のブロックの REVIEW_ROOT・NAME とこの行の代入まで（次の行は流さない）
 rm -rf "$R"   # 初回だけ: 同じ PR のやり直しは前のものを消して 1 つのまま。clone が作るので mkdir しない
 HEAD_REF=$(gh pr view $N --json headRefName -q .headRefName); BASE_REF=$(gh pr view $N --json baseRefName -q .baseRefName)
@@ -143,7 +154,7 @@ ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"; [ -s "$M/handled.md"
 ```
 
 <!-- when mergeGate=on -->
-マージ判定が名指しの外のファイルを数えるリポジトリでは、その一覧も材料にする（`<マージ判定>` は CLAUDE.md のコマンド。空なら作らない。ローカルの変更では `--change <変更> --scope`）。主レビュー（`KIND=review`）では、その PR に求める観点（`--viewpoints`。ローカルの変更でも `--change <変更>` を付ける）と、観点があればその指示が読む元要望（`request.md`。再チェックと同じ作り方）も材料にする（再チェックは種類ごとの指示で見るので、観点の材料を作らない）:
+マージ判定が名指しの外のファイルを数えるリポジトリでは、その一覧も材料にする（`<マージ判定>` は CLAUDE.md のコマンド。空なら作らない。ローカルの変更では `--change <変更> --scope`）。主レビュー（`KIND=review`）では、その PR に求める観点（`--viewpoints`。ローカルの変更でも `--change <変更>` を付ける）と、観点があればその指示が読む元要望（`request.md`）も材料にする。観点が見られたかは監督者（6）がこの `viewpoints.md` で確かめる:
 
 ```bash
 <マージ判定> $N --scope > "$M/scope.md"; grep -q . "$M/scope.md" || rm -f "$M/scope.md"
@@ -155,7 +166,7 @@ fi
 ```
 <!-- end when -->
 
-**ローカルの変更では**（`task-to-pr` の「ローカルの変更では」の workspace）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT`・`KIND`・`R=` の行は上のまま。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸だけ。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。main との比較（5）の材料の `handled.md` は同じく `ops-kit backlog view <変更> --fresh`、`DEFAULT=` と `git fetch` の行は飛ばし、`main.txt` は `git -C "$R" rev-parse "$BASE_REF" > "$M/main.txt"`（`origin/` を付けない）、転記は `ops-kit backlog comment <変更> --body-file <ファイル>` で、1 行目を `[<runner>] compare` にして全文を 1 件。`handled.md` は見直しの前に `ops-kit backlog view <変更> --fresh > "$M/handled.md"`（変更へのコメントに振り分けの表がある。`ops-kit review-handled` は呼ばない）、`old-paths.md` は上の行の `origin/$BASE_REF` を `$BASE_REF` にして作る。
+**ローカルの変更では**（`task-to-pr` の「ローカルの変更では」の workspace）: clone の代わりに `git worktree add --detach "$R" <枝>`（`NAME=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")`（どの worktree から流しても main の作業ツリーのディレクトリの名前）、`REVIEW_ROOT`・`KIND`・`R=` の行は上のまま。`rm -rf "$R"` の代わりに `git worktree remove --force "$R" 2>/dev/null; git worktree prune; [ "$(git -C "$R" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$R" 2>/dev/null && pwd -P)" ] || rm -rf "$R"` で前のものを外してから（`rm -rf` は git に登録されていない残骸だけ。名前が同じほかのリポジトリの生きた worktree は消さず、`git worktree add` が止まる）。終わったら `git worktree remove`）、`REPO=$(gh repo view …)`・古い clone の片付けのループ・`gh repo clone`・`gh pr view` の行は飛ばす（`gh` を呼ばない。GitHub の同じ番号の別の Issue に触らない）。`HEAD_REF` / `BASE_REF` は `ops-kit backlog view <変更>` の出力の `変更: <head> → <base>` の行から入れる（`<枝>` は `<head>`）。PR の情報は `ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）、差分は `git diff "$BASE_REF...$HEAD_REF" > "$M/diff.patch"`。転記（3）は `gh pr comment` / インラインの代わりに、1 行目を `[<runner>] review` にしたレビューの全文を `ops-kit backlog comment <変更> --body-file <ファイル>` で 1 件。修正後の見直し（4）の差分は `git diff <前回の head>..<枝>`。監督者（6）の転記は、`gh pr comment` の代わりに `ops-kit backlog comment <変更> --body-file <ファイル>` で、1 行目を `[<runner>] arbiter` にして全文を 1 件。`handled.md` は見直しの前に `ops-kit backlog view <変更> --fresh > "$M/handled.md"`（変更へのコメントに振り分けの表がある。`ops-kit review-handled` は呼ばない）、`old-paths.md` は上の行の `origin/$BASE_REF` を `$BASE_REF` にして作る。
 
 レビュー指示（`$M/prompt.md`）。**4 項目（security / license / personal data / public readers）は「none」でも必ず書かせる**。
 
@@ -227,7 +238,7 @@ Output exactly this Markdown, nothing else:
 PROMPT
 ````
 
-指示（`prompt.md`・再チェックの追加の文）には書かず、起動のときに指示の後ろへ足される文（`ops-kit review-note <runner>`）が持つもの: 何かを走らせてよいか（実際にレビューするランナーの側だけ。0 の代替でも合う側が入る）、指摘の重さの定義、`handled.md`・`old-paths.md` の使い方、同じ論点の繰り返しに付ける `Repeat of:`。主レビュー・4 の見直し・再チェックのどれにも同じ文が足される。
+指示（`prompt.md`）には書かず、起動のときに指示の後ろへ足される文（`ops-kit review-note <runner>`）が持つもの: 何かを走らせてよいか（実際にレビューするランナーの側だけ。0 の代替でも合う側が入る）、指摘の重さの定義、`handled.md`・`old-paths.md` の使い方、同じ論点の繰り返しに付ける `Repeat of:`。主レビュー・4 の見直し・再チェックのどれにも同じ文が足される。
 
 ## 2. 走らせる
 
@@ -248,30 +259,13 @@ ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt.md"
 <!-- when task=in -->
 
 request が出す `job#<id>` と JSON を止まりの報告に書き（reason `depends`・conditions に `job#<id>`）、ターンを終える。レビューが終わるとアプリが結果の要約を添えて再開するので、`--out` のファイルを読んで 3 の転記に進む。
-主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。
+主レビュアーは、頼んだ時点のレビューの設定と Task のランナーからアプリが決める。違うランナーを名指しすると断られ、断りの文が正しいランナーを言う（その文のランナーで頼み直し、出力のファイル名と転記の名前もそのランナーにする）。主レビュアーでないランナーに頼むのは、理由を `--as` で言うときだけ（マージ後の監査は `--as audit`。0 の代替があるときはそこに書いた形）。アプリは理由を記録と照らし、合わなければ断る（仕事は記録しない）: fallback は主レビュアーの枠が 0.9 以上か、同じ PR の主レビュアーの仕事が使用上限で終わったとき、`--as arbiter` は同じ PR の主レビュー（代替を含む）の仕事が先に終わったとき、`--as audit` は PR がマージ済みと保存の記録にあるとき（同期が遅れていれば、同期の後に頼み直す）だけ。
 
-マージ判定が数えるのは、レビューの仕事の記録（head と、出力の `### Findings` の節の指摘）。PR への投稿（`post_review`）は人が読むため。主レビュー・攻める側・再チェックを仕事で頼まず自分のシェルで回した結果は判定に数えられない。アプリが持つ変更（ローカルの変更）のレビューと `local-ci` は `--change` を付けて頼む。
+マージ判定が数えるのは、レビューの仕事の記録（head と、出力の `### Findings` の節の指摘）。PR への投稿（`post_review`）は人が読むため。主レビュー・攻める側・監督者を仕事で頼まず自分のシェルで回した結果は判定に数えられない。アプリが持つ変更（ローカルの変更）のレビューと `local-ci` は `--change` を付けて頼む。
 <!-- end when -->
 
-**再チェック**（判定の `[再チェック <kind>]` のうちレビューで見る種類。材料と指示は CLAUDE.md の `<再チェック>`）: 1 を `KIND=recheck` の clone で流して材料を作る。会話の文脈と主レビューの結果は渡さない。
-<!-- when recheck=same -->
-再チェックは主レビューと同じランナーの新しいセッションが読む（再チェックの設定の値）。
-<!-- end when -->
-<!-- when recheck=other -->
-再チェックは主レビュアーでないランナーの新しいセッションが読む（再チェックの設定の値）。
-<!-- end when -->
-<!-- when task=in -->
-ランナーは名指ししない（アプリが設定から選び、違うランナーは断る）。`--kinds` が無いと種類なしで記録され、どの再チェックも満たさない:
+**再チェック**（判定の `[再チェック <kind>]`）: LLM が読む種類は PR を読み直す回を頼まず、監督者（6）が裁定する。コマンドで決まる種類（`migration`・`security:lockfile`、rescue のコマンド側）は `ops-kit job request recheck <PR> --kind <種類>`（`pbi-complete` の 5）。`--as recheck` のレビューは判定の何も外さない。
 
-```bash
-ops-kit job request review $N --as recheck --kinds <kind,…> --cwd "$R" --prompt "$M/prompt.md" --out "$M/recheck.md"
-```
-
-転記は 3 の `post_review` の 1 行目を `[<runner>] recheck <kind,…>` に替え（2b と同じ替え方）、5 つ目の引数にこの仕事の id。`<runner>` は仕事の記録（`ops-kit job list --json` のその id の `runner`）。
-<!-- end when -->
-<!-- when task=out -->
-アプリの Task の外では上の側のランナーで 2 の直接の実行を流し（出力は `$M/recheck.md`）、転記の 1 行目は `[<runner>] recheck <kind,…>`。
-<!-- end when -->
 <!-- when task=out -->
 アプリの Task の外では直接走らせる。読むだけでなくテストも書いて走らせられるよう、アプリのレビューの仕事と同じ引数で（レビュアーは clone の中だけに書け、ネットワークは無く、テストは `_review/tests/` に書いて重い処理の枠の中で走らせられる）。会話は保存しない、出力はファイルへ。1 のとおり clone の決まりと利用者の MCP・スキルを読ませない引数を付け、指示の後ろに `ops-kit review-note <runner>` の文を足す（アプリに仕事として頼むレビューには、アプリが同じ引数と文を付ける）。先にどちらのランナーでも:
 
@@ -383,10 +377,10 @@ JOB=<id> post_review $N codex "$M/codex.md"   # 0 の代替で頼んだときは
 JOB=<id> post_review $N claude "$M/claude.md"   # 0 の代替で頼んだときは、実際のランナーとそのファイル、4 つ目の引数に代替の印
 <!-- end when -->
 <!-- when review=same reviewer=codex -->
-JOB=<id> post_review $N codex "$M/codex.md" '（同じランナーの別セッション。設定による選択）'
+JOB=<id> post_review $N codex "$M/codex.md" '（同じランナーの別セッション。設定による選択）'   # 0 で上限のためもう片方に代替したときは、実際に走ったランナーとそのファイル、4 つ目の引数は 0 の代替の印
 <!-- end when -->
 <!-- when review=same reviewer=claude -->
-JOB=<id> post_review $N claude "$M/claude.md" '（同じランナーの別セッション。設定による選択）'
+JOB=<id> post_review $N claude "$M/claude.md" '（同じランナーの別セッション。設定による選択）'   # 0 で上限のためもう片方に代替したときは、実際に走ったランナーとそのファイル、4 つ目の引数は 0 の代替の印
 <!-- end when -->
 <!-- when extra=on -->
 post_review $N <extra> "$M/<extra>.md"   # 仕事ではないので JOB を付けない
@@ -399,7 +393,7 @@ post_review $N <extra> "$M/<extra>.md"   # 仕事ではないので JOB を付�
 ## 4. 修正後の見直し
 
 レビューのあとに修正コミットを積んだら、**マージ前に主レビュアーに見直させる**。マージ判定（CLAUDE.md のコマンド）は「今の head（かそのコミットが同じ差分で入った head）で合格した主レビュアーの仕事の記録」が無い PR を止める。
-材料は**この PR の修正コミットだけ**の差分、前回のレビュー、作り直した `handled.md` と `old-paths.md`（5 の `$M/compared.md` があれば残す。レビューの文（`REVIEW_RULES`）が読む）。出力形式は 1 と同じ:
+材料は**この PR の修正コミットだけ**の差分、前回のレビュー、作り直した `handled.md` と `old-paths.md`。出力形式は 1 と同じ:
 
 ```bash
 # R・M・HEAD_REF・BASE_REF は 1 で作ったもの。OLD = 3 で控えた、前回レビューした head（fetch の前に控えておく）
@@ -445,7 +439,7 @@ CODEX=$(command -v codex)
 NOTE=   # 0 の代替で頼んだ見直しは、0 の転記と同じ 1 行目の印の続きを入れる
 <!-- end when -->
 <!-- when review=same -->
-NOTE='（同じランナーの別セッション。設定による選択）'
+NOTE='（同じランナーの別セッション。設定による選択）'   # 0 で上限のため代替した見直しは、0 の代替の印（別のランナー。…）にする
 <!-- end when -->
 [ "$RC" = 0 ] && grep -q '^### Findings' "$M/fix-review.md" && post_review $N $WHO "$M/fix-review.md" "$NOTE" "${JOB:-}" \
   || echo "見直しが exit $RC か、出力に ### Findings が無い（打ち切り・枠切れ・sandbox）。ログを読んで一度だけやり直す。空のまま転記しない"
@@ -453,57 +447,64 @@ NOTE='（同じランナーの別セッション。設定による選択）'
 
 exit 124 の扱いは 2 と同じ。**`### Findings` の無い出力は転記しない**（`post_review` は中身が空でも要約を書き、人には見直し済みに見える）。
 rebase だけ（`gh stack rebase`、下のマージ後の GitHub の自動 rebase）なら見直しは要らない（判定は同じ差分で入った head も数える）。見直しで新しい指摘が出たら `review-triage-and-merge` の 2 から。
-見直しが済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（2 の `$T` も。`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
+見直しと、要るなら 6 の監督者が済んで採否が終わったら `rm -rf <1 で作った $R のパス>`（2 の `$T` も。`review*` のような glob で消さない。切れたセッションの残りは次のレビューの 1 が消す）。
 
-## 5. main との比較（指摘が収束しないとき）
+## 6. 監督者（割れた論点を裁く。`[再チェック <kind>]` を外す）
 
-使いどころは `review-triage-and-merge` の「収束しないとき（main との比較）」。残る blocker / should-fix を主レビュアーが 1 件ずつ既定の枝と読み比べて分類する回で、PR 全体は読み直さない（主レビューの代わりにならない）。スタックは一番上の PR で 1 回。
+使いどころは、`review-triage-and-merge` の 2 の「収束しないとき」と 3 の「同じ論点が続いたら」（実装者の答えにレビュアーが `Repeat of:` を重ねた）と、マージ判定の `[再チェック <kind>]` のうち LLM が読む種類（`pbi-complete` の 5）。PR を読み直す回ではない。
 
-上限のときは 0 のとおり。
+監督者は新しいサブエージェントで、これまでの回の材料だけを読み、割れた指摘ごとに、書かれたルール（README の Design rules、PBI の受け入れ条件・スコープ外・決定ログ、指摘の場所の `docs/design/*.md`）で実装者とレビュアーのどちらの側かを決める（拠れるルールが無ければ実装者の側）。観点があれば、それが見られたかも答える。**PR ごとに 1 回**で、直しを積んだら下の `--follow-up` の 1 回だけ。利用者の確認は挟まない（`## 判断待ち` も Task の会話の確認も出さない）。
 
-1 と同じ clone（`KIND=review`）に材料を足す:
-
-```bash
-DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)   # 既定の枝
-git -C "$R" fetch -q origin "$DEFAULT"
-ops-kit review-compare prompt > "$M/prompt-compare.md"
-cp "$M/<runner>.md" "$M/latest-review.md"   # 直近の回の出力（4 の見直しがあれば fix-review.md）
-ops-kit review-handled $N --kind review > "$M/handled.md"; [ -s "$M/handled.md" ] || rm -f "$M/handled.md"   # 作り直す
-git -C "$R" rev-parse "origin/$DEFAULT" > "$M/main.txt"
-rm -f "$M/compared.md"   # 切れたときに前回の出力を使わない
-```
-
-<!-- when task=in reviewer=codex -->
-主レビュアーに頼む（2 と同じ。`job#<id>` で止まる）:
-
-```bash
-ops-kit job request review $N --runner codex --cwd "$R" --prompt "$M/prompt-compare.md" --out "$M/compared.md"
-```
+材料は 1 の clone（`KIND=review`。無ければ 1 を流し直す）の `_review/` の `handled.md`・各回のレビューの出力・`tests/`・`pbi.md`・`design-rules.md`・関係する `docs/design`。
+<!-- when mergeGate=on -->
+観点の材料は 1 で作った `viewpoints.md`。
 <!-- end when -->
-<!-- when task=in reviewer=claude -->
-主レビュアーに頼む（2 と同じ。`job#<id>` で止まる）:
+最新の head の材料に作り直し、指示を道具で作る（指示の文をここに写さない）:
 
 ```bash
-ops-kit job request review $N --runner claude --cwd "$R" --prompt "$M/prompt-compare.md" --out "$M/compared.md"
+git -C "$R" fetch -q origin "$HEAD_REF" && git -C "$R" checkout -q "origin/$HEAD_REF"   # 判定は今の head を覆う仕事を数える
+ops-kit review-handled $N --kind review > "$M/handled.md"; [ -s "$M/handled.md" ] || rm -f "$M/handled.md"   # [<runner>] arbiter の Rulings も入る
+<!-- when mergeGate=on -->
+<マージ判定> $N --viewpoints > "$M/viewpoints.md"; grep -q . "$M/viewpoints.md" || rm -f "$M/viewpoints.md"   # ローカルの変更では --change <変更> を付ける
+<!-- end when -->
+ops-kit review-arbiter prompt > "$M/arbiter-prompt.md" && [ -s "$M/arbiter-prompt.md" ]   # 失敗か空なら頼まず止まって報告する
+rm -f "$M/arbiter.md"   # 切れたときに前回の出力を使わない
+```
+
+<!-- when task=in -->
+アプリに仕事として頼む（2 と同じ。`job#<id>` で止まる）。`--runner` も `--kinds` も付けない（ランナーは再チェックの設定からアプリが選び、違うランナーは断られる）:
+
+```bash
+ops-kit job request review $N --as arbiter --cwd "$R" --prompt "$M/arbiter-prompt.md" --out "$M/arbiter.md"
 ```
 <!-- end when -->
 <!-- when task=out -->
-アプリの Task の外では 2 と同じ直接の実行で、`$M/prompt.md` を `$M/prompt-compare.md` に、出力を `$M/compared.md` に替える。
+アプリの Task の外では 2 と同じ直接の実行で、`$M/prompt.md` を `$M/arbiter-prompt.md` に、出力を `$M/arbiter.md` に替える（仕事の記録が無いので判定には数えられない）。
+<!-- end when -->
+<!-- when recheck=same -->
+監督者は主レビューと同じランナーの新しいセッションが読む（再チェックの設定の値）。
+<!-- end when -->
+<!-- when recheck=other -->
+監督者は主レビュアーでないランナーの新しいセッションが読む（再チェックの設定の値）。
 <!-- end when -->
 
-出力を道具で読む。`check` の exit は 0 = 後退なし / 1 = 後退あり（後退の行を出す）/ 2 = 分類の節が無い・読めない行がある:
+出力は道具で読む。exit は 0 = reviewer 側の裁定も `missing` の観点も無い / 1 = ある / 2 = 読めない（一度だけやり直す。2 のままなら転記せず止まって報告する）:
 
 ```bash
-ops-kit review-compare check "$M/compared.md"; echo $?   # 2 なら一度だけやり直す（2 の「固まったとき」と同じ）。2 のままなら転記せず止まって報告する
+ops-kit review-arbiter check "$M/arbiter.md"; echo $?
 ```
 
-転記は PR への 1 件のコメントで、**1 行目を `[<runner>] compare`**、続けて出力の全文。インラインにしない（`post_review` を使わない）。`[<runner>] review` で始めない（主レビューの要約と取り違える。比較は全体を読んでいない）:
+転記は PR への 1 件のコメントで、**1 行目を `[<runner>] arbiter`**（`<runner>` は仕事の記録の runner）、続けて出力の全文。インラインにしない。ローカルの変更では `ops-kit backlog comment <変更> --body-file -`:
 
 ```bash
-{ printf '[<runner>] compare\n\n'; cat "$M/compared.md"; } | gh pr comment $N --body-file -
+{ printf '[<runner>] arbiter\n\n'; cat "$M/arbiter.md"; } | gh pr comment $N --body-file -
 ```
 
-`$M/compared.md` は 4 の見直しの材料として残す。後退の直しと要望への回し方は `review-triage-and-merge` の同じ節。
+**この転記は表示のみ**。マージ判定が読む裁定は仕事の記録（`as: arbiter`）だけで、`[<runner>] arbiter` のコメントを書いても判定は通らない。次の回の `handled.md` には入る（実装者側と修正済みは `## Rulings (closed)`、レビュアー側は `## Rulings for the reviewer (standing)`）。
+
+裁定の使い方（振り分けは `review-triage-and-merge` の 2）: `[implementer]` は閉じる（返信は「対処不要」の型で、根拠は裁定のルール）。`[reviewer]` は「修正」で、残る間は LLM が読む種類の `[再チェック <kind>]` が外れない。`missing` の観点は、名指しした主レビュアーの見直し（4）の後に監督者を頼み直す（未検証）。
+
+レビュアー側の裁定を直して push したら、`--follow-up` で 1 回だけ頼み直す。監督者は `_review/fix.range-diff`（4 と同じ作り方）と裁定した指摘だけを読み、直ったものを `[fixed]` にする。指示と出力だけを替え（`arbiter-prompt-fix.md`・`arbiter-fix.md`、`ops-kit review-arbiter prompt --follow-up`）、転記も同じ形。2 回目でも `[reviewer]` が残る指摘は直っていない: 3 の「同じ論点が続いたら」の 1・2 で直し方を替えて直し、もう一度 `--follow-up`。
 
 ## 報告（利用者への返事の型）
 
@@ -524,8 +525,9 @@ Verdict: <runner>「…」、<extra>「…」
 - 実装した自分（同じ会話）だけでレビューを済ませる
 - レビュアーに会話の要約や「ここは意図的」といった弁明を渡す（採否のときに自分が返信する）
 - 4 項目（security / license / personal data / public readers）の無いレビューを「レビュー済み」と数える
-- `handled.md`・`old-paths.md` を作らずに見直し・再チェックを頼む
+- `handled.md`・`old-paths.md` を作らずに見直しを、`handled.md` を作らずに監督者を頼む
 - 枠切れの主レビュアーを飛ばしてマージに進む（0 のとおり。レビューできなければ未レビューとして止める）
+- 監督者の裁定に利用者の確認を挟む（`## 判断待ち` も Task の会話の確認も出さない）。`[<runner>] arbiter` のコメントで判定が通ると考える（判定は仕事の記録だけを読む）
 <!-- when extra=on -->
 - 追加のレビュアーを待ってマージを止める（待たなくてよい。止めるのは主レビュアーだけ）
 <!-- end when -->

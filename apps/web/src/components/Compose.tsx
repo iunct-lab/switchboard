@@ -7,7 +7,8 @@ import { AttachButton, AttachmentBar, useAttachments, useDropZone } from "./Atta
 import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { staleDraft } from "../presets.ts";
-import { isAdkRunner, listedRunners, runnerLabel } from "../runners.ts";
+import { listedRunners, runnerLabel } from "../runners.ts";
+import { composeShadow } from "../composeShadow.ts";
 import { homeEmptyLabel, initialChoice } from "../runnerSettings.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { SlashPicker } from "./SlashPicker.tsx";
@@ -231,22 +232,21 @@ export function Compose(props: {
         })
         .catch(() => undefined);
   }, [props.health]);
-  const dakOk = props.runnerOk.has("dak");
-  const shadowOn = !isAdkRunner(runner) && dakOk && (shadow ?? shadowDefault === "dak");
+  const dakListed = listedRunners(props.health?.runners).includes("dak");
+  const shadowRow = composeShadow({ runner, shadowDefault, touched: shadow, runnerOk: props.runnerOk, dakListed });
+  const shadowRowDefault = composeShadow({ runner, shadowDefault, touched: null, runnerOk: props.runnerOk, dakListed });
   // What 詳細 says while closed: what differs from an untouched form (the initial model and effort, the saved shadow). Cloud sends
   // none of model / effort / budget / shadow, so they are not shown as changed there. An untouched model is the rule's
   // (the effect below fills the select a render later): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
   const defaultModel = initial.model;
-  const defaultShadow = !isAdkRunner(runner) && dakOk && shadowDefault === "dak";
+  const defaultShadow = shadowRowDefault.checked ? shadowRowDefault.runner : null;
   const summary = detailsSummary(
-    cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort: effort === initial.effort ? "" : effort, budget, shadow: shadowOn },
+    cloud ? { title, executionMode: "cloud", model: defaultModel, effort: "", budget: "", shadow: defaultShadow } : { title, executionMode: "local", model: modelTouched ? model : defaultModel, effort: effort === initial.effort ? "" : effort, budget, shadow: shadowRow.checked ? shadowRow.runner : null },
     { model: defaultModel, shadow: defaultShadow, briefTitle: brief?.title },
   );
-  // What the request says about the shadow. Untouched → omitted, so the daemon applies its saved default itself (also
-  // one this page has not loaded yet, or a non-DAK one set through the API); a click → explicit. A DAK primary with
-  // DAK as the default says null: the daemon would only note that the shadow equals the primary. An ADK server added in
-  // Settings offers no shadow toggle, so it says null too: the saved DAK default does not ride along unseen.
-  const shadowRunnerField: RunnerId | null | undefined = runner.startsWith("custom:") ? null : runner === "dak" ? (shadowDefault === "dak" ? null : undefined) : shadow === null ? undefined : shadow && dakOk ? "dak" : null;
+  // What the request says about the shadow: the row's own result. Checked → the named runner; unchecked → null; omitted (the
+  // daemon's saved default then decides) before the default is loaded and for a DAK primary, which has no row.
+  const shadowRunnerField: RunnerId | null | undefined = shadowRow.field;
 
   // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
   const offRunners = unavailableNotices(props.health?.runners);
@@ -529,24 +529,24 @@ export function Compose(props: {
           {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} emptyLabel={homeEmptyLabel("model", runnerInfo)} />}
           {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setEffortTouched(true); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} emptyLabel={homeEmptyLabel("effort", runnerInfo)} />}
           {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder={t(home.budgetPlaceholder)} inputMode="decimal" title={t(home.budgetTitle)} />}
-          {!cloud && !isAdkRunner(runner) && listedRunners(props.health?.runners).includes("dak") && (
+          {!cloud && shadowRow.show && (
             <label
-              className={`hint toggle shadow ${!dakOk || shadowDefault === undefined ? "off" : ""}`}
-              title={!dakOk ? t(home.dakUnreachable) : shadowDefault === undefined ? t(home.loadingDefault) : t(home.dakShadowTitle)}
+              className={`hint toggle shadow ${shadowRow.disabled ? "off" : ""}`}
+              title={shadowRow.note === "loading" ? t(home.loadingDefault) : t(home.shadowTitle, { runner: runnerLabel(shadowRow.runner ?? "") })}
             >
               <input
                 type="checkbox"
-                disabled={!dakOk || shadowDefault === undefined}
-                checked={shadowOn}
+                disabled={shadowRow.disabled}
+                checked={shadowRow.checked}
                 onChange={(e) => {
                   setShadow(e.target.checked);
-                  setRunnerTouched(true); // the pair was chosen for this runner: the router must not swap the primary to DAK
+                  setRunnerTouched(true); // the pair was chosen for this runner: the router must not swap the primary
                 }}
               />
-              {t(home.dakShadow)}
-              {shadowOn && shadowDefault === "dak" && <span className="hint">{t(home.defaultTag)}</span>}
-              {!dakOk && shadowDefault === "dak" && <span className="hint">{t(home.shadowDefaultOff)}</span>}
-              {shadowDefault && shadowDefault !== "dak" && shadow === null && <span className="hint">{t(home.shadowDefault, { runner: shadowDefault })}</span>}
+              {shadowRow.runner ? t(home.shadow, { runner: runnerLabel(shadowRow.runner) }) : t(home.shadowLabel)}
+              {shadowRow.checked && shadowRow.saved && <span className="hint">{t(home.defaultTag)}</span>}
+              {shadowRow.note === "same" && <span className="hint">{t(home.shadowSame)}</span>}
+              {shadowRow.note === "missing" && <span className="hint">{shadowRow.runner === "dak" ? t(home.dakUnreachable) : t(home.shadowMissing, { runner: runnerLabel(shadowRow.runner ?? "") })}</span>}
             </label>
           )}
           <button className="ghost" onClick={props.onOpenSettings} title={t(home.defaultsInSettingsTitle)}>{t(home.defaultsInSettings)}</button>

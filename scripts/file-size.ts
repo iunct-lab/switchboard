@@ -27,7 +27,7 @@ export const TEST_LIMIT = 2000;
 export const STILL_OVER: Record<string, number> = {
   // the screen's components: splitting them needs a look at the screens, which the split of the core's code left out
   "apps/web/src/components/Backlog.tsx": 1510,
-  "apps/web/src/components/Settings.tsx": 1479,
+  "apps/web/src/components/Settings.tsx": 1472,
 };
 
 export const isTest = (path: string): boolean => /\.test\.tsx?$/.test(path);

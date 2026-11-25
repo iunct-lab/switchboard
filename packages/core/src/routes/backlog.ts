@@ -15,6 +15,7 @@ import { ACTION_FOR_STAGE } from "../backlog-item.ts";
 import { checkFieldTypes, answerStoredConfirmation, answerStoredDecision, setAnswerHeads, BacklogEditError, createStoredIssue, editStoredIssue, resolveStoredConflict, retryStoredOperation, cancelStoredOperation, withdrawStoredOperation, commentStoredIssue } from "../backlog-edit.ts";
 import { changeSourceOf, changesApart, syncsGithub, runGh } from "../backlog-gh.ts";
 import { readStoredIssue, readStoredRecords, storedIssueReader, canStartStoredBacklog } from "../backlog-stored.ts";
+import { heldParentRefusal } from "../backlog-worker.ts";
 import { overlapLine, isOverlapped } from "../backlog-overlap.ts";
 import type { Routes, ServerContext } from "../server/context.ts";
 
@@ -48,7 +49,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
     "/api/backlog": {
       GET: async (req) => sc.json(await sc.readBacklog(new URL(req.url).searchParams.get("refresh") === "1")),
       /** A new Issue in the workspace's repository: stored here (202, its `localId` and `number`) and created on GitHub later. */
-      POST: async (req) => {
+      POST: async (req, srv) => {
         const parsed = BacklogCreateInput.safeParse(await req.json().catch(() => null));
         if (!parsed.success) return sc.bad(parsed.error.message);
         const { workspaceId, ...input } = parsed.data;
@@ -70,7 +71,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
               const outage = await githubOutage({ gh: sc.opts.gh ?? runGh, waitUntil: sc.backlog.waitUntil({ id: workspaceId }) }, sc.db.getWorkspace(workspaceId)!.path);
               if (!outage.unusable) return sc.bad(outageRefusal(outage), 409);
               checkLocalChange(sc.db, kept, sc.db.getWorkspace(workspaceId)!.path, input.change);
-              const made = createStoredIssue(sc.db, kept, input);
+              const made = createStoredIssue(sc.db, kept, input, Date.now(), sc.callingTask(req, srv));
               applyLocalOperations(sc.db, kept);
               return sc.json({ ...made, number: readStoredIssue(sc.db, { id: workspaceId }, made.localId, { source: kept })?.issue.number || null }, 202);
             }
@@ -85,7 +86,10 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
             // a choice is fixed to the config's spelling or refused before it is stored
             input.fields = checkFieldChoices(sc.db.getWorkspace(workspaceId)!.path, input.fields, savedConfigFile(workspaceId)) ?? null;
           }
-          const made = createStoredIssue(sc.db, source, input);
+          const caller = sc.callingTask(req, srv);
+          const held = heldParentRefusal(sc.db, source, input.parent, caller);
+          if (held) return sc.bad(held, 409);
+          const made = createStoredIssue(sc.db, source, input, Date.now(), caller);
           sc.backlog.send(sc.db.getWorkspace(workspaceId)!);
           // a backlog kept here only numbers it at once; GitHub's numbers it once it is sent (null until then)
           const number = readStoredIssue(sc.db, { id: workspaceId }, made.localId)?.issue.number || null;
@@ -236,7 +240,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
        * With `cancel` alone, a comment still inside its 60 s send window taken back: 202, 409 when it is past it or not one.
        * With `withdraw` alone, an `unknown` / `failed` operation of it taken back, nothing sent: 202, 409 likewise.
        */
-      PATCH: async (req) => {
+      PATCH: async (req, srv) => {
         const parsed = BacklogEditInput.safeParse(await req.json().catch(() => null));
         if (!parsed.success) return sc.bad(parsed.error.message);
         const { workspaceId, ...input } = parsed.data;
@@ -253,7 +257,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
             const ref = sc.issueRef(req.params.number ?? "");
             if (resolve || retry || cancel || withdraw || edit.parent !== undefined || edit.fields || edit.project !== undefined || edit.milestone !== undefined) return sc.bad("変更に送れるのは題・本文・状態・ラベル・マージの記録だけです", 422);
             if (!readStoredIssue(sc.db, { id: workspaceId }, ref, { source: kept })?.issue.change) return sc.bad(`変更 #${req.params.number} は保存されていません`, 404);
-            const edited = editStoredIssue(sc.db, kept, ref, edit);
+            const edited = editStoredIssue(sc.db, kept, ref, edit, Date.now(), sc.callingTask(req, srv));
             applyLocalOperations(sc.db, kept);
             return sc.json(edited, 202);
           }
@@ -271,7 +275,11 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
             if (defs) checkFieldTypes(defs, fixed);
           }
           const ref = sc.issueRef(req.params.number ?? "");
-          const edited = resolve ? resolveStoredConflict(sc.db, source, ref, resolve) : retry ? retryStoredOperation(sc.db, source, ref, retry.operation) : cancel ? cancelStoredOperation(sc.db, source, ref, cancel.operation) : withdraw ? withdrawStoredOperation(sc.db, source, ref, withdraw) : editStoredIssue(sc.db, source, ref, edit);
+          if (typeof edit.parent === "number") {
+            const held = heldParentRefusal(sc.db, source, edit.parent, sc.callingTask(req, srv));
+            if (held) return sc.bad(held, 409);
+          }
+          const edited = resolve ? resolveStoredConflict(sc.db, source, ref, resolve) : retry ? retryStoredOperation(sc.db, source, ref, retry.operation) : cancel ? cancelStoredOperation(sc.db, source, ref, cancel.operation) : withdraw ? withdrawStoredOperation(sc.db, source, ref, withdraw) : editStoredIssue(sc.db, source, ref, edit, Date.now(), sc.callingTask(req, srv));
           sc.backlog.send(sc.db.getWorkspace(workspaceId)!);
           return sc.json(edited, 202);
         } catch (e) {
@@ -349,11 +357,11 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
           if (new URL(req.url).searchParams.get("change") === "1" && changesApart(source)) {
             const kept = changeSourceOf(sc.db, ws.id)!;
             if (!readStoredIssue(sc.db, ws, Number(req.params.number), { source: kept })?.issue.change) return sc.bad(`変更 #${req.params.number} は保存されていません`, 404);
-            const made = commentStoredIssue(sc.db, kept, Number(req.params.number), parsed.data.text);
+            const made = commentStoredIssue(sc.db, kept, Number(req.params.number), parsed.data.text, Date.now(), sc.callingTask(req, srv));
             applyLocalOperations(sc.db, kept);
             return sc.json(made, 202);
           }
-          const made = commentStoredIssue(sc.db, source, Number(req.params.number), parsed.data.text);
+          const made = commentStoredIssue(sc.db, source, Number(req.params.number), parsed.data.text, Date.now(), sc.callingTask(req, srv));
           sc.backlog.send(ws);
           // a question that says 推奨で進める from which the work may not go on waits for the person, and the stage Task
           // that posted it stops here (`waits` = why; the kit's command prints it). Which Task posted it is what the

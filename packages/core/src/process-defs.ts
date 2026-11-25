@@ -7,8 +7,9 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { RunnerId } from "@switchboard/protocol";
 import { findRepoRoot } from "./config.ts";
-import { type Conditions, renderConditions } from "../../../ops-kit/src/conditions.ts";
+import { type Conditions, primaryReviewer, renderConditions } from "../../../ops-kit/src/conditions.ts";
 
 /** Where the candidates live, relative to the meta repository's root (beside `ops-kit/skills`). */
 export const PROCESS_SOURCE = "ops-kit/processes";
@@ -130,3 +131,20 @@ export function renderEntry(def: ProcessDef, entry: string, vars: Record<string,
 /** How a request names the main reviewer under each review setting (the stage prompts and the fix prompt share the words). */
 export const REVIEWER_WORDS = { other: "別のランナー", same: "同じランナーの新しいセッション" } as const;
 export type ReviewSetting = keyof typeof REVIEWER_WORDS;
+
+/**
+ * The conditions a caller that starts a Task knows, for `renderEntry`: the Task's runner (only claude and codex are
+ * conditions), the review setting and the main reviewer that follows from them, that the reader is the app's Task, and
+ * where the backlog is. `mergeGate` and `extra` come from the repository's own settings, which the caller does not
+ * hold, so they are not given: an entry that uses them is refused by `renderConditions`.
+ */
+export function entryConditions(o: { runner: RunnerId; review: ReviewSetting; local: boolean }): Conditions {
+  const reviewer = primaryReviewer(o.runner, o.review);
+  return {
+    ...(o.runner === "claude" || o.runner === "codex" ? { runner: o.runner } : {}),
+    review: o.review,
+    ...(reviewer ? { reviewer } : {}),
+    task: "in",
+    backlog: o.local ? "app" : "github",
+  };
+}

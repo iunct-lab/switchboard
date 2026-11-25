@@ -228,6 +228,18 @@ export const failedIn = (items: BacklogItem[], slot: Slot) =>
 export const plannedResumeIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => inSlot(i, slot) && i.activeTaskId !== null && i.activeTaskId === i.lastTask?.id && i.lastTask.resumeAt !== null && failedIn([i], slot).length === 0);
 
+/**
+ * The items of a slot backlog-next leaves because a Task holds them with a claim (`claim`: not released, its Task at work or
+ * waiting for the person). One a stage Task runs on is its own work, not a claim to wait for, so it is not here.
+ */
+export const claimedIn = (items: BacklogItem[], slot: Slot) => items.filter((i) => inSlot(i, slot) && i.claim !== null && !i.activeTaskId);
+
+/** The log line for `claimedIn`; null when none. */
+export function claimedLine(items: BacklogItem[], slot: Slot): string | null {
+  const held = claimedIn(items, slot);
+  return held.length ? `占有中: ${held.map((i) => `#${i.number}${i.claim!.taskId ? `（Task ${i.claim!.taskId}）` : ""}`).join(" ")}` : null;
+}
+
 /** The log line for `plannedResumeIn`, the time written by `fmt` (server passes `fmtTime` of ratelimit.ts, which the backlog's files do not import: ratelimit.ts imports backlog-gh.ts); null when none. */
 export function plannedResumeLine(items: BacklogItem[], slot: Slot, now: number, fmt: (at: number, now: number) => string): string | null {
   const held = plannedResumeIn(items, slot);
@@ -386,7 +398,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
   // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
-  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && !notResumed(i) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
+  const open = items.filter((i) => !i.onHold && !flowHeld.has(i) && !i.activeTaskId && !i.claim && (i.lastTask?.action !== "direct" || !i.lastTask.started || i.labels.includes(DIRECT_RETURNED_LABEL)) && !isWaiting(i) && !notResumed(i) && (SLOT_STAGES[slot].includes(i.stage) || (slot === "implement" && resumed(i) !== null)));
   const queued = order && slot === "implement" ? (i: BacklogItem) => order.indexOf(i.number) : null;
   // The ones to finish first (`resumed`), then the PBIs of a known failure close to its end (`due`), then Priority, then not yet worked on, then the stage, then the oldest;
   // the queue's order instead when there is one

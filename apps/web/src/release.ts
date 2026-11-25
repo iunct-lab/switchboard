@@ -35,14 +35,14 @@ export interface ReleaseStatus {
   history?: ReleaseHistoryEntry[];
   /** The rescue page a person opens: the host's `/rescue/` on the cloud, sb-rescue's own address on a Mac. */
   rescuePage?: string;
-  /** sb-rescue answers inside the container only: there is no page to link, and `rescueCommands` are what reaches it. */
-  rescueInContainer?: boolean;
   /** Why the newest tag is not promoted yet: it is a tag that failed (`failed`), Tasks a restart would cut (`tasks` not false; `busyTasks` of them now), or something else that `reason` says (`tasks: false`: its diff's check, the tag CI, sb-rescue busy). */
   hold?: { tag: string; failed: boolean; reason: string; busyTasks: number; tasks?: boolean } | null;
   /** The wait before a promotion with a restart, as in the health (`PromotionDrain`). */
   drain?: PromotionDrain;
   /** The last promotion the daemon asked for, or why it could not (`error`). Memory only: gone after a restart, when `history` has the result. */
   asked?: { tag: string; sha: string; at: number; by: "check" | "backlog-next" | "idle"; error?: string } | null;
+  /** The update a person pressed (確かめて更新する) for `tag`: it goes up once the check of that tag clears it. `stopped`: the check found a concern or could not be made, and the press ended. Memory only. */
+  pressed?: { tag: string; sha: string; at: number; stopped?: "concern" | "failed" } | null;
   /**
    * The newest release of a public copy's clone. `newer`: it is newer than what runs. `ahead`: the commits counted
    * from what runs (from HEAD outside sb-rescue), null when they cannot be counted (a version installed from a Release has
@@ -96,17 +96,6 @@ export function rescueLink(r: ReleaseStatus | null): string | null {
   return r?.managed && r.rescuePage ? r.rescuePage : null;
 }
 
-/** What reaches sb-rescue of the stand-alone container from a terminal on the machine: its status, and the roll back (docs/design/local-container.md, "What can reach the screen and the API"). */
-export const RESCUE_IN_CONTAINER_COMMANDS = [
-  "docker compose -f container/compose.yaml exec switchboard curl -s http://127.0.0.1:47841/api/status",
-  "docker compose -f container/compose.yaml exec switchboard curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:47841/api/rollback",
-] as const;
-
-/** The commands shown in place of the rescue page's link: under sb-rescue, where the daemon says the page does not open outside the container. */
-export function rescueCommands(r: ReleaseStatus | null): readonly string[] | null {
-  return r?.managed && r.rescueInContainer && !r.rescuePage ? RESCUE_IN_CONTAINER_COMMANDS : null;
-}
-
 export const shortSha = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : t(settings.shaNone));
 
 /** "昇格を却下: abc1234 — the candidate exited (1) …". The reason is shown as recorded: it is what the person needs to act on. */
@@ -148,6 +137,8 @@ export interface ReleaseTarget {
   confirm: string | null;
   /** The check can be started from the screen: not checked yet (the automatic check is off, or has not come), a concern, or a check that failed. */
   canReview: boolean;
+  /** Not checked yet: the update button starts the check first (and goes up when it clears), with no dialog since nothing goes up yet. */
+  pressNeedsCheck: boolean;
   /** The check's Task, to read the whole reply. */
   taskLink: string | null;
 }
@@ -158,6 +149,8 @@ export interface ReleasePanelView {
   promoteSha: string | null;
   busyTasks: number;
   release: ReleaseTarget | null;
+  /** True when any line is a warning (a concern, a failed check or operation, an error): the settings card opens for it. */
+  warn: boolean;
 }
 
 /** The newest release when the daemon says it is newer than what runs; otherwise no line, no button. */
@@ -182,7 +175,14 @@ function releaseLines(r: ReleaseStatus, latest: NonNullable<ReleaseStatus["lates
     confirm = t(settings.confirmFailed, { tag: latest.tag, reason });
   }
   const state = review?.state ?? null;
-  return { lines, target: { tag: latest.tag, state, confirm, canReview: state === null || state === "concern" || state === "failed", taskLink: review ? `/task/${encodeURIComponent(review.taskId)}` : null } };
+  // the press belongs to this tag: its wait while the check is not in yet, and where it stopped
+  const press = r.pressed && r.pressed.tag === latest.tag ? r.pressed : null;
+  if (press) {
+    const pressTime = jstClock(press.at);
+    if (press.stopped) lines.push({ text: t(settings.pressedStopped, { time: pressTime, why: t(press.stopped === "concern" ? settings.pressedWhyConcern : settings.pressedWhyFailed) }), warn: true });
+    else if (state !== "ok") lines.push({ text: t(settings.pressedWaits, { tag: latest.tag, time: pressTime }), warn: false });
+  }
+  return { lines, target: { tag: latest.tag, state, confirm, canReview: state === null || state === "concern" || state === "failed", pressNeedsCheck: state === null && !(press && !press.stopped), taskLink: review ? `/task/${encodeURIComponent(review.taskId)}` : null } };
 }
 
 /** The "動いている版" section, shared by the settings screen and a meta-workspace Task: what runs, what HEAD is, and whether promoting is possible. */
@@ -193,7 +193,7 @@ export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
     const latest = newerRelease(r);
     // outside sb-rescue nothing is checked or applied from here: the new release and where to run it so it can be
     if (latest) lines.push({ text: t(settings.latestReleaseUnmanaged, { tag: latest.tag }), warn: false });
-    return { lines, canPromote: false, promoteSha: null, busyTasks: 0, release: null };
+    return { lines, canPromote: false, promoteSha: null, busyTasks: 0, release: null, warn: lines.some((l) => l.warn) };
   }
   const parts = runningParts(r);
   const lines: ReleasePanelView["lines"] = parts
@@ -225,8 +225,8 @@ export function releasePanel(r: ReleaseStatus | null): ReleasePanelView | null {
   if (hold && (!(shown && shown.target.state !== "ok") || notStarted)) lines.push({ text: hold.text, warn: !!r.hold?.failed || notStarted });
   if (r.lastError) lines.push({ text: t(settings.failed, { error: r.lastError }), warn: true });
   // a public copy's clone does not move HEAD: what is applied is the tag, once the check has not stopped it
-  const canPromote = shown ? !r.busy && shown.target.state !== "running" && shown.target.state !== null : !r.busy && (r.ahead ?? 0) > 0;
-  return { lines, canPromote, promoteSha: !shown && canPromote && r.head ? r.head : null, busyTasks: r.busyTasks ?? 0, release: shown?.target ?? null };
+  const canPromote = shown ? !r.busy && shown.target.state !== "running" && (shown.target.state !== null || shown.target.pressNeedsCheck) : !r.busy && (r.ahead ?? 0) > 0;
+  return { lines, canPromote, promoteSha: !shown && canPromote && r.head ? r.head : null, busyTasks: r.busyTasks ?? 0, release: shown?.target ?? null, warn: lines.some((l) => l.warn) };
 }
 
 /**

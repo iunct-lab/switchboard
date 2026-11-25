@@ -17,7 +17,7 @@ export interface SettingsGroup {
 
 export const SETTINGS_GROUPS: SettingsGroup[] = [
   { id: "settings-login", title: settings.groupLogin, sections: ["ログイン"] },
-  { id: "settings-runner", title: settings.groupRunner, sections: ["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走（DAK）の既定", "CLI の更新"] },
+  { id: "settings-runner", title: settings.groupRunner, sections: ["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走の既定", "CLI の更新"] },
   { id: "settings-auto", title: settings.groupAuto, sections: ["Switchboard 自体の開発", "バックログを進める", "使用量と自動再開", "回答の方針", "新しい予定の既定", "定型の指示"] },
   { id: "settings-judge", title: settings.groupJudge, sections: ["判定と自動選択", "LLM 提案", "タスク名の自動付与"] },
   { id: "settings-model", title: settings.groupModel, sections: ["モデルの価格", "予算"] },

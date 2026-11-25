@@ -84,6 +84,21 @@ describe("waitsOf: every wait in one form, each with its limit", () => {
     expect(of({ task: task({ status: "running", executionMode: "cloud" }), lastEventAt: T0 })).toEqual([]);
   });
 
+  test("a hook's heartbeats: a hook wait in the place of the output wait while they come; past the silence limit it is the output wait again", () => {
+    const hook = { name: "Stop", since: T0 - MIN, beatAt: T0 };
+    const running = task({ status: "running", outcome: "unknown" });
+    expect(of({ task: running, lastEventAt: T0, hook })).toEqual([{ kind: "hook", key: "hook", label: "Stop", since: T0 - MIN, until: T0 + 10 * MIN, progressAt: T0, stallSec: null }]);
+    // the beats stopped for the silence limit: the same wait as with no hook
+    expect(brief(of({ task: running, lastEventAt: T0, hook, now: T0 + 10 * MIN }))).toEqual([["output", "output", "ランナーの出力", 0, 10 * MIN]]);
+    // a send to the live runner moves the last event, not the last beat: the stale hook does not hide the silence
+    expect(brief(of({ task: running, lastEventAt: T0 + 10 * MIN, hook, now: T0 + 10 * MIN }))).toEqual([["output", "output", "ランナーの出力", 10 * MIN, 20 * MIN]]);
+    // no heartbeat: as before; a finished turn has no hook wait either
+    expect(of({ task: running, lastEventAt: T0, hook: null })).toEqual(of({ task: running, lastEventAt: T0 }));
+    expect(of({ task: task({ status: "done" }), lastEventAt: T0, hook })).toEqual([]);
+    // a hook wait is stored while it lasts; the output wait only once it is over
+    expect(shownWaits(of({ task: running, lastEventAt: T0, hook }), T0 + MIN).map((w) => w.kind)).toEqual(["hook"]);
+  });
+
   test("the person: an open approval, or a turn that ended needing them", () => {
     expect(brief(of({ task: task({ status: "waiting" }) }))).toEqual([["person", "approval", "ツールの承認", 0, 3 * DAY]]);
     expect(brief(of({ task: task({ outcome: "needs_action" }) }))).toEqual([["person", "person", "利用者の対応", 0, 3 * DAY]]);
@@ -459,7 +474,7 @@ describe("checkWaits: which stopped Tasks are looked at", () => {
     db.close();
     rmSync(home, { recursive: true, force: true });
   });
-  const none = { lastEvents: () => new Map<string, number>(), queueWait: () => null, queueRefusal: () => null, recordStop: () => ({ ok: false as const, why: "" }), record: () => undefined, abort: async () => { throw new Error("not called"); } };
+  const none = { lastEvents: () => new Map<string, number>(), lastHooks: () => new Map<string, { name: string; since: number; beatAt: number }>(), queueWait: () => null, queueRefusal: () => null, recordStop: () => ({ ok: false as const, why: "" }), record: () => undefined, abort: async () => { throw new Error("not called"); } };
   const look = (now: number) => checkWaits({ db, tasks: none, dir: waitsDirOf(home), bounds: () => BOUNDS, broadcastTask: () => undefined }, now);
   const stopped = (id: string, updatedAt: number, stage: number | null = null) => {
     db.insertTask({ id, workspaceId: stage === null ? null : "ws", title: id, runner: "claude", cwd: home, scope: [home], status: "done", runnerSessionId: "s", executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "waits", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: stage === null ? null : { issue: stage, action: "complete" }, statusAt: updatedAt, createdAt: updatedAt, updatedAt });

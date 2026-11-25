@@ -5,7 +5,7 @@ import { jstClock } from "./time.ts";
 
 /**
  * What a Task's waits (`Task.waits`, the daemon's list) say in its tag: the list and the Task's header show one wait —
- * the runner's silence first, then one over its limit, then the one whose limit comes first — and the tooltip all of them.
+ * the runner's silence first, then a running hook, then one over its limit, then the one whose limit comes first — and the tooltip all of them.
  */
 
 const MIN = 60_000;
@@ -29,6 +29,7 @@ export function stalledFor(w: WaitRecord, now: number): number | null {
 /** One wait as a line: `待ち: <label> 3 分 / 上限 30 分`; `compact` (the list) leaves the label to the tooltip. */
 export function waitLabel(w: WaitRecord, now: number, compact: boolean): string {
   if (w.kind === "output") return t(m.silent, { min: count(now - w.since, MIN) });
+  if (w.kind === "hook") return t(m.hookRunning, { min: count(now - w.since, MIN) });
   const unit = unitOf(w.until - w.since);
   const vars = { label: w.label, waited: count(now - w.since, unit.ms), limit: count(w.until - w.since, unit.ms), unit: unit.name };
   const over = waitOver(w, now);
@@ -38,14 +39,14 @@ export function waitLabel(w: WaitRecord, now: number, compact: boolean): string 
 }
 
 /**
- * The wait the tag shows: the runner's silence, else one over its limit, else the one whose limit comes first. The
+ * The wait the tag shows: the runner's silence, else a running hook, else one over its limit, else the one whose limit comes first. The
  * person's own waits (an approval, a question) are shown where they are answered, not here.
  */
 export function shownWait(task: Pick<Task, "waits">, now: number): WaitRecord | null {
   // a planned resume within its time has its own tag (when it resumes); past it, it is a wait over its limit like any other
   const waits = (task.waits ?? []).filter((w) => w.kind !== "person" && (w.kind !== "resume" || waitOver(w, now)));
   const byLimit = (a: WaitRecord, b: WaitRecord) => a.until - b.until;
-  return waits.find((w) => w.kind === "output") ?? overWaits({ waits }, now).sort(byLimit)[0] ?? [...waits].sort(byLimit)[0] ?? null;
+  return waits.find((w) => w.kind === "output") ?? waits.find((w) => w.kind === "hook") ?? overWaits({ waits }, now).sort(byLimit)[0] ?? [...waits].sort(byLimit)[0] ?? null;
 }
 
 export interface WaitTagView {
@@ -60,6 +61,12 @@ export interface WaitTagView {
 export function waitTag(task: Pick<Task, "waits">, now: number, compact: boolean): WaitTagView | null {
   const w = shownWait(task, now);
   if (!w) return null;
-  const lines = (task.waits ?? []).filter((x) => x.kind !== "person").map((x) => (x.kind === "output" ? t(m.silentTitle, { when: jstClock(x.since, now) }) : waitLabel(x, now, false)));
-  return { text: waitLabel(w, now, compact), title: lines.join("\n"), tone: w.kind === "output" ? "silent" : waitOver(w, now) ? "over" : "wait" };
+  const line = (x: WaitRecord) =>
+    x.kind === "output"
+      ? t(m.silentTitle, { when: jstClock(x.since, now) })
+      : x.kind === "hook"
+        ? t(m.hookRunningTitle, { name: x.label, since: jstClock(x.since, now), beat: jstClock(x.progressAt ?? x.since, now) })
+        : waitLabel(x, now, false);
+  const lines = (task.waits ?? []).filter((x) => x.kind !== "person").map(line);
+  return { text: waitLabel(w, now, compact), title: lines.join("\n"), tone: w.kind === "output" ? "silent" : w.kind !== "hook" && waitOver(w, now) ? "over" : "wait" };
 }

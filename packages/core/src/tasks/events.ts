@@ -198,7 +198,16 @@ export abstract class TaskEvents extends TaskManagerState {
    * busy_timeout, 2026-10-31). A lock holds this event and the ones after it, in order, until the database answers.
    */
   protected fromRunner(taskId: string, live: LiveSession, ev: AgentEvent) {
-    live.lastEventAt = Date.now();
+    const now = Date.now();
+    live.lastEventAt = now;
+    if (ev.t === "hook.progress") {
+      // a heartbeat only says the runner is alive: it is kept in memory, not in the transcript (one every 30 s would grow it)
+      // hooks run in parallel and beat in turn: while beats keep coming, the first one's start stays
+      live.hook = { name: ev.hook, since: live.hook?.since ?? ev.startedAt ?? now, beatAt: now };
+      this.endSilence(taskId, true);
+      return;
+    }
+    live.hook = undefined;
     live.held.push(ev);
     if (live.held.length === 1) this.takeHeld(taskId, live);
   }
@@ -235,10 +244,11 @@ export abstract class TaskEvents extends TaskManagerState {
   }
 
   /** The runner spoke again: the silence the wait watch had stored on the Task (応答なし) is over at once, not at the watch's next look. */
-  private endSilence(taskId: string) {
+  private endSilence(taskId: string, keepHook = false) {
     const waits = this.db.getTask(taskId)?.waits;
-    if (!waits?.some((w) => w.kind === "output")) return;
-    this.db.setTaskWaits(taskId, waits.filter((w) => w.kind !== "output"));
+    const ends = (w: { kind: string }) => w.kind === "output" || (w.kind === "hook" && !keepHook);
+    if (!waits?.some(ends)) return;
+    this.db.setTaskWaits(taskId, waits.filter((w) => !ends(w)));
     const t = this.db.getTask(taskId);
     if (t) this.broadcast({ type: "task.updated", task: t });
   }

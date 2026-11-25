@@ -261,6 +261,21 @@ test("backlog-next held: a Ready PBI whose last 実装 was started by itself and
   expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
 });
 
+test("a held PBI is named in the log and not started", async () => {
+  const claude = holdingClaude();
+  const base = await boot(fakeGh().gh, claude.adapter);
+  closeTried();
+  // a conversation Task claims Issue 304 by a comment of the parallel guard, as /pbi-complete does
+  const holder = ((await (await fetch(`${base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId: metaId(), title: "会話", prompt: "会話", runner: "claude" }) })).json()) as { id: string }).id;
+  const token = ((await (await fetch(`${base}/api/tasks/${holder}/mcp`)).json()) as { token: string }).token;
+  const said = await fetch(`${base}/api/backlog/304/comment`, { method: "POST", headers: { "x-task-id": holder, "x-task-token": token }, body: JSON.stringify({ workspaceId: metaId(), text: "<!-- pbi-complete:claim t1 -->\n着手" }) });
+  expect(said.status).toBe(202);
+  const id = await backlogNextSchedule(base);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  expect(startedTasks().filter((t) => t.title.startsWith("#304 "))).toHaveLength(0);
+  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 占有中: #304（Task ${holder}）`));
+});
+
 test("backlog-next: a firing starts the picked item's stage Task, and the scheduled complete uses the button prompt", async () => {
   const claude = holdingClaude();
   const base = await boot(fakeGh().gh, claude.adapter);
@@ -444,7 +459,7 @@ async function bootLogin(runner: "claude" | "codex", login: { claude?: LoginStat
   const state: { claude: LoginState; codex: LoginState } = { claude: { login: "ok", ...login.claude }, codex: { login: "ok", ...login.codex } };
   const claude = holdingClaude();
   const codex = holdingClaude();
-  const withBedrock = bedrock ? { bedrockModels: [{ value: "global.anthropic.claude-haiku-5-5", label: "haiku" }] } : {};
+  const withBedrock = bedrock ? { bedrockModel: (m: { value: string; label: string }) => ({ value: `global.anthropic.${m.value}`, label: m.label }) } : {};
   const base = await boot(fakeGh().gh, [{ ...claude.adapter, ...withBedrock, detect: async () => ({ available: true, ...state.claude }) }, { ...codex.adapter, id: "codex", detect: async () => ({ available: true, ...state.codex }) }]);
   closeTried();
   const r = await fetch(`${base}/api/schedules`, { method: "POST", body: JSON.stringify({ title: "バックログを進める", cron: "0 */3 * * *", workspaceId: metaId(), runner, prompt: "", action: "backlog-next" }) });

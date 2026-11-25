@@ -194,3 +194,37 @@ test("main.ts registers the saved ADK servers as custom:<name> and DAK from SWIT
     await adk.stop(true);
   }
 }, 40_000);
+
+// The daily archive must not move the schema: only the daemon's start does, and it takes the snapshot before it first.
+test("events-archive leaves a database that needs a migration as it is and prepares nothing", async () => {
+  const home = mkdtempSync(join(tmpdir(), "switchboard-test-archive-"));
+  try {
+    const dbPath = join(home, "switchboard.db");
+    new Db(dbPath).close();
+    const raw = new Database(dbPath);
+    raw.exec("ALTER TABLE tasks DROP COLUMN background");
+    raw.close();
+    expect(needsMigration(dbPath)).toBe(true); // the precondition: this DB needs a migration (else the test proves nothing)
+    const dir = join(home, "archive");
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn(["bun", join(import.meta.dir, "main.ts"), "events-archive", ...args], {
+        env: { ...process.env, SWITCHBOARD_HOME: home, SWITCHBOARD_SUPERVISED: "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+      return { out, code };
+    };
+    const prepared = await run("prepare", dir, "--encrypt", "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq");
+    expect(prepared.code).toBe(0);
+    expect(prepared.out).toContain("still needs a migration");
+    expect(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"))).toEqual([]);
+    expect(needsMigration(dbPath)).toBe(true);
+    expect(existsSync(join(home, "snapshots"))).toBe(false);
+    const committed = await run("commit", dir);
+    expect(committed.code).toBe(0);
+    expect(needsMigration(dbPath)).toBe(true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 40_000);

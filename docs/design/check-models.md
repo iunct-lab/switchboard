@@ -6,7 +6,7 @@ The model choices in the UI (the list saved on the settings screen's `モデル�
 
 The check reads only what is on the machine — no vendor API, no API key, no network (filing a request, below, is the one step that goes out):
 
-- **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (reading it whole can exhaust memory on a small host).
+- **claude**: the model table embedded in the executable (`Bun.which("claude")`, resolved to the real file). Its entries look like `{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",…}`; the file (about 240 MB) is scanned chunk by chunk, never read into one string (reading it whole can exhaust memory on a small machine).
 - **codex**: `codex debug models --bundled`, the table shipped in the binary. Without `--bundled` codex refreshes the list over the network with the ChatGPT login, so the flag is always given. Only `visibility: "list"` entries count (`"hide"` ones are internal).
 - The two table readers live in `packages/core/src/model-catalog.ts`: this script and the settings screen's `CLI の表を読む` (GET `/api/settings/model-candidates`, read only when pressed — never at boot or on a timer) call the same functions.
 - **the model choices** as the daemon offers them: the list saved on the settings screen, from `switchboard.db`'s settings row (read-only; the same `Settings` schema the daemon parses), else the bundled list of that runner; and from the same row the `載せない` list (`hiddenModels`), else `SHIPPED_HIDDEN_MODELS`.
@@ -41,7 +41,7 @@ Registering it is a call to the running daemon, so it is done with the user's OK
 
 ### Why not `bun test` / CI
 
-The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the host, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (decided 2026-10-01): late by at most one firing, and nothing else stops.
+The CLIs are not installed in GitHub Actions, so CI cannot run the check; on the machine, a failing test would stop every unrelated PR's local CI and merge whenever a CLI auto-updates. So the check runs on a schedule (decided 2026-10-01): late by at most one firing, and nothing else stops.
 
 ## When a request arrives
 

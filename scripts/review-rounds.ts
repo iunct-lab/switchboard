@@ -14,7 +14,7 @@ import { writeFileSync } from "node:fs";
 import { mergeHistory, type MergeHistory, type MergeHistoryJob } from "../ops-kit/src/merge-records.ts";
 import { auditRows, formatSince, mergeCommitsOf, prViewsOf, revertsSince, spawnRun, tally, type PrRecord, type Revert, type Run } from "./merge-audit";
 import { RECHECK_KINDS } from "./merge-gate";
-import { COMMAND_RECHECKS, commandPassOf, reviewPassOf } from "./merge-gate-records.ts";
+import { arbiterPassOf, COMMAND_RECHECKS, commandPassOf } from "./merge-gate-records.ts";
 import { mergeRecordsEnv } from "./merge-records-env.ts";
 import { currentRepo } from "./repo.ts";
 
@@ -70,15 +70,16 @@ const reviewOf = (j: MergeHistoryJob): JobReview | undefined => {
 /**
  * The rounds of every PR in the jobs. A review job that passed and left its findings is one round: of the rule `review` when it
  * is the main review (`as` none, or `fallback` at a usage limit: the jobs merge-gate counts), of each recheck kind it names when
- * it ran as `recheck` (a job of several kinds is one round of each kind, counting all its findings); an audit or an attacking
- * review is not a round. A finding whose place could not be read (no path) is not counted.
+ * it ran as `recheck` (a job of several kinds is one round of each kind, counting all its findings; the gate no longer reads these, they stay
+ * for the rounds already recorded), and of the rule `arbiter` when it ran as `arbiter` (it has no findings: a round to count the supervisor's turns by);
+ * an audit or an attacking review is not a round. A finding whose place could not be read (no path) is not counted.
  */
 export function roundsOf(jobs: MergeHistoryJob[]): Round[] {
   const rounds: Round[] = [];
   for (const j of jobs) {
     const r = reviewOf(j);
     if (j.kind !== "review" || j.status !== "pass" || !r || j.endedAt === null) continue;
-    const rules = j.as === null || j.as === "fallback" ? ["review"] : j.as === "recheck" ? kindsOf(j) : [];
+    const rules = j.as === null || j.as === "fallback" ? ["review"] : j.as === "recheck" ? kindsOf(j) : j.as === "arbiter" ? ["arbiter"] : [];
     const findings = r.findings.filter((f) => f.path !== "").map((f) => ({ severity: f.severity, path: f.path }));
     for (const rule of rules) rounds.push({ pr: j.pr, runner: j.runner ?? "", rule, at: githubTime(j.endedAt), from: githubTime(j.startedAt), findings });
   }
@@ -111,21 +112,22 @@ export function parseTriage(comments: PrComment[]): TriageRow[] {
   return rows;
 }
 
-/** A recheck kind's pass on a PR, at the time the rule of merge-gate's `rechecksOf` is first met. */
+/** A pass on a PR, at the time the rule of merge-gate's `rechecksOf` is first met: of a command's kind, or `arbiter` for the kinds a model reads. */
 export interface Pass { pr: number; kind: string; at: string }
 /**
- * The rule is `rechecksOf`'s (merge-gate-records.ts): a kind a command decides (`COMMAND_RECHECKS`) passes with a passing recheck job,
- * `rescue` needs a passing recheck review as well, any other kind passes with the review alone. The time is the end of the job that
- * completes it (the later of the two for `rescue`). The head is not compared: the first pass of the PR is what is wanted.
+ * The rule is `rechecksOf`'s (merge-gate-records.ts): a kind a command decides (`COMMAND_RECHECKS`) passes with a passing recheck job;
+ * the kinds a model reads pass together with the arbiter's pass (`arbiterPassOf`), the pass of the rule `arbiter`; `rescue` needs both.
+ * The time is the end of the job that completes it (the later of the two for `rescue`). The head is not compared: the first pass of the PR is what is wanted.
  */
 export function passesOf(jobs: MergeHistoryJob[]): Pass[] {
   const out: Pass[] = [];
   for (const [pr, mine] of groupBy(jobs.filter((j) => j.endedAt !== null), (j) => String(j.pr))) {
     const first = (pred: (j: MergeHistoryJob) => boolean) => Math.min(...mine.filter(pred).map((j) => j.endedAt!));
-    for (const kind of new Set(mine.flatMap(kindsOf))) {
+    const arbiter = first(arbiterPassOf);
+    if (Number.isFinite(arbiter)) out.push({ pr: Number(pr), kind: "arbiter", at: githubTime(arbiter) });
+    for (const kind of new Set(mine.flatMap(kindsOf).filter((k) => COMMAND_RECHECKS.includes(k)))) {
       const cmd = first((j) => commandPassOf(j, kind));
-      const review = first((j) => reviewPassOf(j, kind));
-      const at = COMMAND_RECHECKS.includes(kind) ? Math.max(cmd, kind === "rescue" ? review : cmd) : review;
+      const at = Math.max(cmd, kind === "rescue" ? arbiter : cmd);
       if (Number.isFinite(at)) out.push({ pr: Number(pr), kind, at: githubTime(at) });
     }
   }

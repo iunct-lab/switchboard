@@ -1,21 +1,34 @@
 /**
- * bun scripts/release-smoke.ts <owner/name> [--api <Releases API base URL>] — install the newest Release of a
+ * bun scripts/release-smoke.ts <owner/name> [--api <Releases API base URL>] [--record <development tag>] — install the newest Release of a
  * repository the way README's "Use it" says, on this machine but as a machine without git would, and see it run:
  * the Release's source tarball is unpacked into a temporary HOME, `bun rescue/install.ts --source <owner/name>` builds
  * it there with a PATH that has no git, sb-rescue is started from it on two free ports, and `/api/health` must answer
  * ok and the rescue page 200. Everything is stopped and removed afterwards. Exit 0 = pass, 1 = fail, 2 = usage.
  * The last line is `[release-smoke] pass|fail <tag> <sha>` (`resultLine`), a mark in the form of the tag CI's.
+ * The build and the daemon run inside a heavy slot of this machine.
+ *
+ * `--record <development tag>` (`recordSmoke`) also writes that line into the body of the Release of the development
+ * tag, in this clone's origin (the same place as the tag CI's `[tag-ci]` mark; a line of the same public tag is
+ * replaced, not doubled), and on a fail files a request (scripts/file-request.ts, the tag CI's way: a comment on the
+ * open request with the same title, if there is one).
  *
  * Why: the development host runs from its own clone and never takes this path, so a Release that cannot be installed
  * without git would go unnoticed there. This is the check to run against the real Release after a public sync made it.
- * It is an entry point of its own: the public sync does not call it (see docs/design/local-container.md, "Check it").
+ * The scheduled public sync calls it after a sync that ended 0, in a repository that has this script (the shared
+ * `ops-kit public-sync` knows nothing of it; see docs/design/schedule-samples.md, "Public repository sync").
  *
- * `smokeRelease` takes everything it touches as `deps`, so its test runs it against a fake Releases API with no
- * process started; the defaults below are the real ones.
+ * `smokeRelease` and `recordSmoke` take everything they touch as `deps`, so their tests run against a fake Releases
+ * API and fake writes with no process started; the defaults below are the real ones.
  */
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { withHeavySlot } from "../ops-kit/src/heavy.ts";
+import { findSecrets, hostAws } from "../ops-kit/src/secrets.ts";
+import { type Filed, commentRequest, fileRequest, requestText } from "./file-request.ts";
+import { must, spawnSh, withReleaseLock } from "./release-tag.ts";
+import { currentRepo } from "./repo.ts";
+import { hidePaths } from "./tag-ci.ts";
 
 export interface SmokeDeps {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
@@ -145,6 +158,130 @@ export async function smokeRelease(o: { repo: string; api?: string; waitMs?: num
   }
 }
 
+/** The line of a result in a Release's body, whatever its tag and commit: the pattern `recordLine` replaces. */
+const MARK = /^\[release-smoke\] (?:pass|fail) (\S+) (\S+)[ \t]*$/gm;
+export const RECORD_HEADING = "## 公開の Release の確かめ";
+
+/**
+ * The Release body with `line` in it: the line of the same public tag (or the same `-` of a Release that was not found)
+ * is replaced in place, any other stays, and a body with none gets the line under its own heading at the end.
+ */
+export function recordLine(body: string, line: string): string {
+  const tag = /^\[release-smoke\] (?:pass|fail) (\S+)/.exec(line)![1]!;
+  let found = false;
+  const out = body.replace(MARK, (all, t: string) => {
+    if (t !== tag) return all;
+    if (found) return "\u0000";
+    found = true;
+    return line;
+  });
+  if (found) return out.replace(/\u0000\n?/g, "");
+  return `${body.trimEnd()}\n\n${RECORD_HEADING}\n${line}\n`.trimStart();
+}
+
+/** The title of the request for a public Release that did not come up: the same for the same public tag. */
+export const requestTitleOf = (publicTag: string | null): string => `公開の Release が入らない: ${publicTag ?? "-"}`;
+
+/** The request for a failed result. The reason is without host paths, and left out when it holds a value usable for auth. */
+export function failureRequest(r: SmokeResult, devTag: string, repo: string, date = new Date().toISOString().slice(0, 10)): { title: string; body: string } {
+  const reason = hidePaths(r.reason ?? "");
+  const detail = findSecrets(reason, hostAws()).length === 0 ? reason : "（理由に認証に使える値が含まれるので書かない。実行したホストの出力を見る）";
+  const body = [
+    "## 要望",
+    `公開の同期が出した Release ${r.tag ?? "（見つからない）"} が、README の「Use it」と同じに git の無い環境で入れて起動できなかった。直してほしい（この要望は直した PBI が閉じる）。`,
+    "",
+    "````text",
+    `公開の Release: ${r.tag ?? "-"}（${r.sha?.slice(0, 7) ?? "-"}）`,
+    `同期した開発元のタグ: ${devTag}（${repo}）`,
+    ...r.steps.map((s) => `見えたこと: ${s}`),
+    `落ちた理由: ${detail}`,
+    "````",
+    "",
+    `結果の行は開発元のタグの Release の本文にある（\`gh release view ${devTag} -R ${repo} --json body -q .body\`）。`,
+    "",
+    "## 出典",
+    "- 誰の言葉: 定期の検査",
+    `- いつ: ${date}`,
+    "- 経路: 公開の同期の後の確かめ（scripts/release-smoke.ts）",
+    "",
+    "## 添付",
+    "なし",
+    "",
+    "## 派生 PBI",
+    "",
+    "## 解釈メモ",
+    "- 同じ公開のタグの失敗は同じ題になる。次の同期の後も同じタグで落ちればこの要望にコメントが付く（閉じない）",
+  ].join("\n");
+  return { title: requestTitleOf(r.tag), body };
+}
+
+export interface RecordDeps {
+  /** The development repository (origin). */
+  repo: string;
+  /** The body of the Release of `tag` in `repo`, or null when it cannot be read. */
+  readBody: (tag: string) => string | null;
+  writeBody: (tag: string, body: string) => void;
+  /** Read and write under one lock (the clone's release lock). */
+  locked: <T>(fn: () => T) => T;
+  file: (req: { title: string; body: string }) => Promise<Filed>;
+  comment: (ref: string, body: string) => Promise<void>;
+  /** An open request's body and comments. */
+  text: (ref: string) => Promise<string>;
+  log: (line: string) => void;
+  date?: string;
+}
+
+/**
+ * Write the result's line into the development tag's Release, and for a fail file a request or comment on the open one
+ * with the same title (once per public tag). A Release that cannot be read is an error: the line is not written to a
+ * body that was not read.
+ */
+export async function recordSmoke(r: SmokeResult, devTag: string, d: RecordDeps): Promise<void> {
+  // a Release that cannot be read or written does not keep a fail from its request: the request is the durable record
+  let unrecorded: unknown = null;
+  try {
+    d.locked(() => {
+      const body = d.readBody(devTag);
+      if (body === null) throw new Error(`the Release of ${devTag} in ${d.repo} cannot be read`);
+      const next = recordLine(body, resultLine(r));
+      if (next !== body) d.writeBody(devTag, next);
+    });
+    d.log(`${devTag} の Release に ${resultLine(r)} を書いた`);
+  } catch (e) {
+    unrecorded = e;
+  }
+  if (!r.ok) await fileFailure(r, devTag, d);
+  if (unrecorded !== null) throw unrecorded;
+}
+
+async function fileFailure(r: SmokeResult, devTag: string, d: RecordDeps): Promise<void> {
+  const req = failureRequest(r, devTag, d.repo, d.date);
+  const filed = await d.file(req);
+  if (!("open" in filed)) {
+    d.log(`要望を立てた: ${filed.filed === null ? "番号不明" : `#${filed.filed}`}`);
+    return;
+  }
+  const named = `${r.tag ?? "-"}（${r.sha?.slice(0, 7) ?? "-"}）`;
+  if ((await d.text(filed.open)).includes(named)) return;
+  await d.comment(filed.open, `${named}でも同じ失敗（開発元のタグ ${devTag}）`);
+  d.log(`要望: 既存 ${filed.open} にコメントした（起票しない）`);
+}
+
+/** The real writes: gh on this clone's origin, under the release lock of this clone. */
+export const realRecordDeps = (repo = currentRepo()): RecordDeps => ({
+  repo,
+  readBody: (tag) => {
+    const r = spawnSh(["gh", "release", "view", tag, "-R", repo, "--json", "body", "-q", ".body"]);
+    return r.ok ? r.out : null;
+  },
+  writeBody: (tag, body) => void must(spawnSh, ["gh", "release", "edit", tag, "-R", repo, "--notes-file", "-"], body),
+  locked: (fn) => withReleaseLock(must(spawnSh, ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]), fn),
+  file: (req) => fileRequest(req),
+  comment: (ref, body) => commentRequest(ref, body),
+  text: (ref) => requestText(ref),
+  log: (l) => console.log(l),
+});
+
 /** The real machine: processes, the temp directory, the network. */
 export const realDeps = (): SmokeDeps => ({
   fetch: (url, init) => fetch(url, init),
@@ -184,23 +321,41 @@ export const realDeps = (): SmokeDeps => ({
   bun: process.execPath,
 });
 
-export function parseArgs(args: string[]): { repo: string; api?: string } | null {
-  const at = args.indexOf("--api");
-  const api = at >= 0 ? args[at + 1] : undefined;
-  const rest = at >= 0 ? [...args.slice(0, at), ...args.slice(at + 2)] : args;
-  if (rest.length !== 1 || !SOURCE.test(rest[0]!) || (at >= 0 && (!api || !/^https?:\/\//.test(api)))) return null;
-  return { repo: rest[0]!, ...(api ? { api } : {}) };
+export function parseArgs(args: string[]): { repo: string; api?: string; record?: string } | null {
+  const rest = [...args];
+  const take = (flag: string): string | undefined | null => {
+    const at = rest.indexOf(flag);
+    if (at < 0) return undefined;
+    const v = rest[at + 1];
+    rest.splice(at, v === undefined ? 1 : 2);
+    return v ?? null;
+  };
+  const api = take("--api");
+  const record = take("--record");
+  if (rest.length !== 1 || !SOURCE.test(rest[0]!)) return null;
+  if (api === null || (api !== undefined && !/^https?:\/\//.test(api))) return null;
+  if (record === null || (record !== undefined && !TAG.test(record))) return null;
+  return { repo: rest[0]!, ...(api ? { api } : {}), ...(record ? { record } : {}) };
 }
 
 if (import.meta.main) {
   const a = parseArgs(process.argv.slice(2));
   if (!a) {
-    console.error("usage: bun scripts/release-smoke.ts <owner/name> [--api <Releases API base URL>]");
+    console.error("usage: bun scripts/release-smoke.ts <owner/name> [--api <Releases API base URL>] [--record <development tag>]");
     process.exit(2);
   }
-  const r = await smokeRelease({ ...a, waitMs: 300_000 }, realDeps());
+  const r = await withHeavySlot("release-smoke", () => smokeRelease({ repo: a.repo, ...(a.api ? { api: a.api } : {}), waitMs: 300_000 }, realDeps()));
   for (const s of r.steps) console.log(`✓ ${s}`);
   if (r.reason) console.log(`✗ ${r.reason}`);
+  let recorded = true;
+  if (a.record) {
+    try {
+      await recordSmoke(r, a.record, realRecordDeps());
+    } catch (e) {
+      recorded = false;
+      console.log(`✗ 結果を記録できなかった: ${(e as Error).message}`);
+    }
+  }
   console.log(resultLine(r));
-  process.exit(r.ok ? 0 : 1);
+  process.exit(r.ok && recorded ? 0 : 1);
 }

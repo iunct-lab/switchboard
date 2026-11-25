@@ -1,6 +1,9 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { changedFiles, pickTests, runTests, type RunDeps } from "./test-changed";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { changedFiles, hostSpawn, pickTests, runTests, type RunDeps } from "./test-changed";
 import { reusedLine, type OffloadRecord } from "./offload-record";
 
 const tree: Record<string, string> = {
@@ -198,5 +201,16 @@ describe("runTests", () => {
     const full = rig({ offload: false });
     await runTests({ full: "x" }, full.deps);
     expect(full.st.host).toEqual([["bun", "test"]]);
+  });
+
+  test("on the host the tests get local-ci's environment: no token or key from the caller, the caller's TMPDIR", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard.test-changed."));
+    const spawn = hostSpawn(dir, { PATH: process.env.PATH, TMPDIR: dir, GH_TOKEN: "x", GITHUB_TOKEN: "x", AWS_SECRET_ACCESS_KEY: "x", SWITCHBOARD_SUPERVISED: "1" });
+    try {
+      const code = await spawn(["sh", "-c", `test -z "$GH_TOKEN$GITHUB_TOKEN$AWS_SECRET_ACCESS_KEY$SWITCHBOARD_SUPERVISED" && test "$TMPDIR" = "${dir}" && test "$CI" = true`]);
+      expect(code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

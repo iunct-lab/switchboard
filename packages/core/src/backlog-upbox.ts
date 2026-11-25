@@ -1,4 +1,5 @@
 import { BacklogRepositoryKey, type BacklogIssueData, type BacklogSource } from "@switchboard/protocol";
+import { heldParentRefusal } from "./backlog-worker.ts";
 import { z } from "zod";
 import { findSecrets, hostAws } from "../../../ops-kit/src/secrets.ts";
 import { ANSWER_HEADING, HOLD_HEADING, PROCEED_CONFIRMED, PROCEED_OVERTURNED } from "./backlog-comments.ts";
@@ -412,7 +413,11 @@ export async function importBacklogOperations(db: Db, store: S3Store, machines: 
             }
           }
         }
-        const here: BacklogOperation = { ...op, ...repo, targetKind: op.targetKind, id: importedId(machine, op.id), payload, seq: 0, status: "pending", attempt: 0, retryAt: null, remoteId: null, error: null, overwritten: null };
+        // a child under a PBI another Task works on is not taken in (an envelope proves no Task here)
+        const under = op.kind === "create" ? (op.payload as CreateValues).parent : op.kind === "set" && op.targetKind === "issue" && op.field === "parent" && typeof op.payload === "number" ? op.payload : null;
+        const held = heldParentRefusal(db, at.source, under, null);
+        if (held) throw new Error(held);
+        const here: BacklogOperation = { ...op, ...repo, targetKind: op.targetKind, id: importedId(machine, op.id), payload, seq: 0, status: "pending", attempt: 0, retryAt: null, remoteId: null, error: null, overwritten: null, taskId: null };
         const r = db.takeBacklogOperation(here, record, checked.first, now);
         if (r === "sent") refuse(`the Issue of create ${op.id} is already made; its later edit goes by its number`);
         if (r === "taken") touched.add(at.ws);

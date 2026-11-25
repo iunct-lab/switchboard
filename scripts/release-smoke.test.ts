@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFakeReleases } from "../container/fake-releases.ts";
-import { gitlessPath, parseArgs, resultLine, smokeRelease, type SmokeDeps } from "./release-smoke.ts";
+import { gitlessPath, parseArgs, recordSmoke, requestTitleOf, resultLine, smokeRelease, type RecordDeps, type SmokeDeps } from "./release-smoke.ts";
 
 const root = mkdtempSync(join(tmpdir(), "sb-release-smoke-"));
 const sha = "a".repeat(40);
@@ -140,5 +140,97 @@ test("gitlessPath links every command but git and its helpers, the first PATH di
 test("the command line: one owner/name, and --api only with an http(s) URL", () => {
   expect(parseArgs(["o/n"])).toEqual({ repo: "o/n" });
   expect(parseArgs(["--api", "http://localhost:1", "o/n"])).toEqual({ repo: "o/n", api: "http://localhost:1" });
-  for (const bad of [[], ["o/n", "x/y"], ["--api", "o/n"], ["o/n", "--api"], ["o/n", "--api", "ftp://x"], ["nope"]]) expect({ bad, parsed: parseArgs(bad) }).toEqual({ bad, parsed: null });
+  expect(parseArgs(["o/n", "--record", "v1.2.3"])).toEqual({ repo: "o/n", record: "v1.2.3" });
+  for (const bad of [[], ["o/n", "x/y"], ["--api", "o/n"], ["o/n", "--api"], ["o/n", "--api", "ftp://x"], ["nope"], ["o/n", "--record"], ["o/n", "--record", "main"]]) expect({ bad, parsed: parseArgs(bad) }).toEqual({ bad, parsed: null });
+});
+
+/** Fake writes: the development Release bodies by tag, the open requests, and what was filed or commented. */
+function recordDeps(bodies: Record<string, string>, open: Array<{ ref: string; title: string; text: string }> = []) {
+  const written: Array<{ tag: string; body: string }> = [];
+  const filed: Array<{ title: string; body: string }> = [];
+  const commented: Array<{ ref: string; body: string }> = [];
+  const logs: string[] = [];
+  let locks = 0;
+  const d: RecordDeps = {
+    repo: "dev/repo",
+    readBody: (tag) => bodies[tag] ?? null,
+    writeBody: (tag, body) => {
+      written.push({ tag, body });
+      bodies[tag] = body;
+    },
+    locked: (fn) => {
+      locks++;
+      return fn();
+    },
+    file: async (req) => {
+      const same = open.find((o) => o.title === req.title);
+      if (same) return { open: same.ref };
+      filed.push(req);
+      return { filed: 77 };
+    },
+    comment: async (ref, body) => void commented.push({ ref, body }),
+    text: async (ref) => open.find((o) => o.ref === ref)!.text,
+    log: (l) => logs.push(l),
+    date: "2026-11-26",
+  };
+  return { d, written, filed, commented, logs, locks: () => locks };
+}
+
+const passed = { ok: true, tag: "v0.4.0", sha, steps: [], reason: null };
+const failed = { ok: false, tag: "v0.4.0", sha, steps: ["latest Release: v0.4.0 (aaaaaaa)"], reason: "rescue/install.ts --source o/n exited 1: boom at /home/someone/x" };
+
+test("record, pass: the development Release gets the line under its own heading, the old body stays, no request", async () => {
+  const bodies = { "v9.9.9": "notes\n\n## CI\n[tag-ci] pass " + "b".repeat(40) };
+  const r = recordDeps(bodies);
+  await recordSmoke(passed, "v9.9.9", r.d);
+  expect(r.written).toHaveLength(1);
+  expect(bodies["v9.9.9"]).toBe(`notes\n\n## CI\n[tag-ci] pass ${"b".repeat(40)}\n\n## 公開の Release の確かめ\n[release-smoke] pass v0.4.0 ${sha}\n`);
+  expect([r.filed, r.commented, r.locks()]).toEqual([[], [], 1]);
+});
+
+test("record, fail: a fail line and one request whose body has the reason without host paths", async () => {
+  const bodies = { "v9.9.9": "notes" };
+  const r = recordDeps(bodies);
+  await recordSmoke(failed, "v9.9.9", r.d);
+  expect(bodies["v9.9.9"]).toContain(`[release-smoke] fail v0.4.0 ${sha}`);
+  expect(r.filed).toHaveLength(1);
+  expect(r.filed[0]!.title).toBe("公開の Release が入らない: v0.4.0");
+  expect(r.filed[0]!.body).toContain("boom at ~/x");
+  expect(r.filed[0]!.body).not.toContain("/home/someone");
+  expect(r.commented).toEqual([]);
+});
+
+test("record, fail with an open request of the same title: a comment only, once per public tag", async () => {
+  const open = [{ ref: "#5", title: requestTitleOf("v0.4.0"), text: "body of the request" }];
+  const r = recordDeps({ "v9.9.9": "notes" }, open);
+  await recordSmoke(failed, "v9.9.9", r.d);
+  expect([r.filed, r.commented.map((c) => c.ref)]).toEqual([[], ["#5"]]);
+  expect(r.commented[0]!.body).toContain(`v0.4.0（${sha.slice(0, 7)}）`);
+  // the comment already there names the tag: a second run says nothing more
+  open[0]!.text += `\n${r.commented[0]!.body}`;
+  const again = recordDeps({ "v9.9.9": "notes" }, open);
+  await recordSmoke(failed, "v9.9.9", again.d);
+  expect(again.commented).toEqual([]);
+});
+
+test("record: a line of the same public tag is replaced, never doubled; another tag's stays; an unreadable Release writes nothing but a fail still files its request", async () => {
+  const other = `[release-smoke] pass v0.3.0 ${"c".repeat(40)}`;
+  const bodies = { "v9.9.9": `notes\n\n## 公開の Release の確かめ\n${other}\n[release-smoke] fail v0.4.0 ${sha}\n` };
+  const r = recordDeps(bodies);
+  await recordSmoke(passed, "v9.9.9", r.d);
+  expect(bodies["v9.9.9"]).toBe(`notes\n\n## 公開の Release の確かめ\n${other}\n[release-smoke] pass v0.4.0 ${sha}\n`);
+  const lines = bodies["v9.9.9"].split("\n").filter((l) => l.startsWith("[release-smoke]"));
+  expect(lines).toHaveLength(2);
+  // the same result again changes nothing
+  await recordSmoke(passed, "v9.9.9", r.d);
+  expect(r.written).toHaveLength(1);
+
+  const none = recordDeps({});
+  await expect(recordSmoke(failed, "v1.0.0", none.d)).rejects.toThrow("cannot be read");
+  expect(none.written).toEqual([]);
+  expect(none.filed).toHaveLength(1);
+  // a pass with an unreadable Release files nothing
+  const unread = recordDeps({});
+  await expect(recordSmoke(passed, "v1.0.0", unread.d)).rejects.toThrow("cannot be read");
+  expect([unread.written, unread.filed]).toEqual([[], []]);
 });

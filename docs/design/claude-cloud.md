@@ -395,7 +395,7 @@ lifecycle fixtures, safety/E2E tests and branch/real-continuation validation.
 On the stopped Cloud Task, select **`ローカルで続ける`**. A validated Cloud reference
 and PTY support are required. This is an explicit action for an existing
 session, not a third execution mode on Home. The official CLI runs on the
-Switchboard host in the Task's saved cwd, not the browser device. Opening a
+machine Switchboard runs on, in the Task's saved cwd, not the browser device. Opening a
 Terminal tab, reconnecting or reloading never starts Teleport. The button
 calls `POST /api/tasks/:id/teleport` (409 with the reason when refused); no
 terminal socket is needed (2026-10-16).

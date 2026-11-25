@@ -145,7 +145,7 @@ describe("SETTINGS_GROUPS", () => {
     const runner = groupBody("settings-runner");
     for (const part of ["runnerOptions(", "<ModelSelect", "<EffortSelect"]) expect(runner).toContain(part);
     // the runner group holds every section it names, and the cards that moved are not in the groups they left
-    expect(settingsGroup("settings-runner").sections).toEqual(["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走（DAK）の既定", "CLI の更新"]);
+    expect(settingsGroup("settings-runner").sections).toEqual(["ランナーごとの既定", "どの仕事をどのランナーで", "ADK のエージェント（カスタムランナー）", "並走の既定", "CLI の更新"]);
     expect(settingsGroup("settings-model").sections).toEqual(["モデルの価格", "予算"]);
   });
 
@@ -156,7 +156,7 @@ describe("SETTINGS_GROUPS", () => {
     // a row the runner cannot change says so instead of being dropped; the models row is folded only when it has something to show
     expect(block).toContain('{!row.editable ? (\n                        <span className="muted">{t(settings.notChangeable)}</span>');
     expect(block).toContain('row.key === "models" && modelsRowView(r).folded ?');
-    expect(block).toContain("{modelsRowView(r).list ? <ModelChoices ");
+    expect(block).toContain("{modelsRowView(r).list ? <><ModelChoices ");
     expect(block).toContain("{modelsRowView(r).candidates && <CliModelCandidates runners={[r]} ");
     for (const saved of [
       "save({ defaultModel: { [r.id]: m || null } })",

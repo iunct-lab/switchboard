@@ -247,6 +247,8 @@ export const task = msgs({
   waitDays: { ja: "日", en: "d" },
   silent: { ja: "応答なし {min} 分", en: "No response for {min} min" },
   silentTitle: { ja: "応答なし: 最後のイベントは {when}（ターン中か裏の処理があるのに、ランナーから何も届いていません。止めてはいません）", en: "No response: the last event was at {when} (a turn or background work is under way, but nothing has come from the runner. Nothing was stopped)" },
+  hookRunning: { ja: "hook 実行中 {min} 分", en: "Hook running for {min} min" },
+  hookRunningTitle: { ja: "hook 実行中: {name}（{since} から。最後の心拍 {beat}）", en: "Hook running: {name} (since {since}; last heartbeat {beat})" },
   resumeGithubTitle: { ja: "GitHub の API 上限（1 時間の枠）で待機。{when} に枠が戻る見込み（自動再開はランナーごとの設定。Task の Brief から今すぐ再開・取り消しができます）", en: "Waiting on GitHub's API limit (the hourly quota). The quota should be back at {when} (auto-resume is set per runner. Resume now or cancel from the Task's Brief)" },
   resumeGithubCompact: { ja: "GitHub 待ち", en: "Waiting for GitHub" },
   resumeGithub: { ja: "GitHub の上限待ち（{when} に再開）", en: "Waiting for GitHub's limit (resumes at {when})" },

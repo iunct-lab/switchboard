@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { awaitingReply, endedUnmarked, failedSince, isClosable } from "./backlog-pick.ts";
+import { awaitingReply, claimedLine, endedUnmarked, failedSince, isClosable, pickNext } from "./backlog-pick.ts";
 import { item } from "./api-test-harness.ts";
 
 // The "nothing since the last Task" judgments read the written time of the Issue's comments, never the Issue's updatedAt.
@@ -39,4 +39,20 @@ describe("endedUnmarked", () => {
   const base: Partial<BacklogItem> = { stage: "in-progress", tasks: { total: 2, done: 1, doneAt: null }, lastTask: task({ action: "complete" }) };
   test("own comments arriving later do not release it", () => expect(endedUnmarked(at(base, T0 - 10_000))).toBe(true));
   test("a comment written after the Task releases it", () => expect(endedUnmarked(at(base, BEFORE_END))).toBe(false));
+});
+
+describe("a PBI a session holds", () => {
+  // an in-progress PBI is picked when it was answered since its last stage Task ended (a Ready or needs-tasks one is picked as it is)
+  const held = (over: Partial<BacklogItem>) => item({ number: 7, ...(over.stage === "in-progress" ? { answeredAt: iso(T0 + 100_000), lastTask: task({ updatedAt: T0 }) } : {}), ...over });
+  test("a PBI a session holds is picked for no stage until it is released", () => {
+    for (const [stage, slot] of [["needs-tasks", "plan"], ["ready", "implement"], ["in-progress", "implement"]] as const) {
+      const claim = { taskId: "t_holder" };
+      expect(pickNext([held({ stage, claim })], slot)).toBeNull();
+      expect(pickNext([held({ stage, claim: null })], slot)).toMatchObject({ item: { number: 7 } });
+      // a stage Task of its own running on it is its own work, not a claim to wait for: the item is left for that reason
+      expect(pickNext([held({ stage, claim, activeTaskId: "t_stage" })], slot)).toBeNull();
+    }
+    expect(claimedLine([held({ claim: { taskId: "t_holder" } }), held({ number: 8, claim: { taskId: null } }), held({ number: 9 })], "implement")).toBe("占有中: #7（Task t_holder） #8");
+    expect(claimedLine([held({ stage: "request", claim: { taskId: "t_holder" } })], "implement")).toBeNull();
+  });
 });

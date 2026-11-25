@@ -5,6 +5,16 @@ import { subagentModelAlias } from "../backlog-prompt.ts";
 import type { Routes, ServerContext } from "../server/context.ts";
 import { SETTINGS_KEY } from "../server/helpers.ts";
 
+/** A runner the parallel-run default and a kind's parallel run may name: detected, and not a custom server. */
+function shadowChoosable(sc: Pick<ServerContext, "adapterMap">, runner: string): boolean {
+  return sc.adapterMap.has(runner as RunnerId) && !runner.startsWith("custom:");
+}
+
+/** The 400 text for a runner shadowChoosable refuses: "not installed" only when it was not detected. */
+function shadowRefusal(sc: Pick<ServerContext, "adapterMap">, runner: string): string {
+  return sc.adapterMap.has(runner as RunnerId) ? `runner "${runner}" cannot be a parallel run default` : `runner "${runner}" is not installed`;
+}
+
 /** The routes under /api/settings. */
 export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "savedModels" | "settings" | "json" | "runnerInfo" | "settingsDefaults" | "strong" | "bad" | "tasks" | "db" | "logOp" | "armPromotionCheck" | "armCliUpdateCheck">): Routes {
   return {
@@ -107,13 +117,13 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
           if (!sc.adapterMap.has(runner as RunnerId)) return sc.bad(`runner "${runner}" is not installed`);
           next.autoResume[runner] = true;
         }
-        // Amazon Bedrock: only a runner with Bedrock models can be switched; null goes back to its own login
+        // Amazon Bedrock: only a runner whose adapter has `bedrockModel` can be switched; null goes back to its own login
         for (const [runner, v] of Object.entries(data.bedrock ?? {})) {
           if (v === null) {
             delete next.bedrock[runner];
             continue;
           }
-          if (!sc.adapterMap.get(runner as RunnerId)?.bedrockModels) return sc.bad(`runner "${runner}" cannot run on Amazon Bedrock`);
+          if (!sc.adapterMap.get(runner as RunnerId)?.bedrockModel) return sc.bad(`runner "${runner}" cannot run on Amazon Bedrock`);
           next.bedrock[runner] = { region: v.region };
         }
         // The model choices: the whole list per runner, null = back to the bundled list. A runner that has no
@@ -162,7 +172,7 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
         if (data.outbound) next.outbound = { ...next.outbound, ...data.outbound };
         // Shadow run: the default shadow runner must be detected; null switches the default off.
         if (data.shadowRunner !== undefined) {
-          if (!sc.adapterMap.has(data.shadowRunner)) return sc.bad(`runner "${data.shadowRunner}" is not installed`);
+          if (!shadowChoosable(sc, data.shadowRunner)) return sc.bad(shadowRefusal(sc, data.shadowRunner));
           next.shadowRunner = data.shadowRunner;
         }
         // The automatic judgement: a partial patch; a runner that is not detected cannot be chosen
@@ -264,7 +274,8 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
             // a shadow is another runner than the one the kind starts on, and one that is detected
             if (choice.shadow && choice.shadow !== "off") {
               if (choice.shadow === choiceRunner) return sc.bad("shadowRunner must differ from runner");
-              if (!sc.adapterMap.has(choice.shadow)) return sc.bad(`runner "${choice.shadow}" is not installed`);
+              // one chosen in this PATCH must be choosable; one saved earlier stays through a change of another field as long as it is detected
+              if (shadowPatch !== undefined ? !shadowChoosable(sc, choice.shadow) : !sc.adapterMap.has(choice.shadow)) return sc.bad(shadowRefusal(sc, choice.shadow));
             }
             if (!choice.runner && !choice.permissionMode && !choice.budgetUsd && !choice.shadow && !choice.model && !choice.effort) delete next.autoStart.byKind[kind];
             else next.autoStart.byKind[kind] = choice;

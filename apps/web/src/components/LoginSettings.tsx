@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { RunnerInfo, Settings, TaskSummary } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
 import { type GithubStatus, type Health } from "../api/daemon.ts";
@@ -23,10 +23,10 @@ export function LoginSettings(props: { health: Health | null; tasks: TaskSummary
   };
   useEffect(readGh, []);
   const runners = (props.health?.runners ?? []).filter((r) => loginRowView(r) !== null);
-  const rows: Array<{ view: LoginRow }> = [
+  const rows: Array<{ view: LoginRow; runner?: RunnerInfo }> = [
     // until the health is read the configuration is not known: no row rather than a wrong "no login needed"
     ...(props.health ? [{ view: switchboardRowView(props.health.login) }] : []),
-    ...runners.map((r) => ({ view: loginRowView(r)! })),
+    ...runners.map((r) => ({ view: loginRowView(r)!, runner: r })),
     ...(gh ? [{ view: githubRowView(gh) }] : []),
   ];
   const failed = (e: unknown) => props.onError(t(m.logoutFailed, { error: String((e as Error).message ?? e) }));
@@ -49,8 +49,9 @@ export function LoginSettings(props: { health: Health | null; tasks: TaskSummary
   };
   return (
     <>
-      {rows.map(({ view }) => (
-        <div key={view.id} className="login-row">
+      {rows.map(({ view, runner }) => (
+        <Fragment key={view.id}>
+        <div className="login-row">
           <b className="login-who">{view.label}</b>
           <span className="hint login-state">{view.text}</span>
           {view.action === "logout" ? (
@@ -61,8 +62,13 @@ export function LoginSettings(props: { health: Health | null; tasks: TaskSummary
             <RunnerLogin runner={view.id} onDone={() => void (view.id === "gh" ? readGh() : props.onChanged())} onError={props.onError} />
           ) : null}
         </div>
+        {view.bedrock === "cli" ? <div className="hint">{t(m.loginBedrockCliWhere, { where: t(view.id === "claude" ? m.loginBedrockCliWhereClaude : m.loginBedrockCliWhereCodex) })}</div> : null}
+        {runner && !runner.bedrockFrom && (runner.bedrockRunning ?? 0) >= 1 ? (
+          <div className="hint">{t(m.bedrockStillRunning, { n: runner.bedrockRunning!, login: t(runner.id === "claude" ? m.bedrockNextClaude : m.bedrockNextPlan) })}</div>
+        ) : null}
+        </Fragment>
       ))}
-      {runners.filter((r) => r.bedrockAvailable).map((r) => (
+      {runners.filter((r) => r.bedrockAvailable && r.bedrockFrom !== "cli").map((r) => (
         <BedrockSwitch key={r.id} runner={r} label={loginRowView(r)!.label} busy={busy} region={props.bedrock?.[r.id]?.region} onBedrock={(next) => props.onBedrock(r.id, next)} />
       ))}
     </>

@@ -74,7 +74,7 @@ servers:
 - `workspaces` is matched against Workspace names. Every Workspace with that name gets the server, and after a rename it is no longer passed from the next start. A Task with no Workspace does not get a server that has `workspaces`
 - An entry of the wrong shape (a `name:` with no body, a `workspaces` that is not a list) is skipped unread and its name is written to the daemon's log at startup (the other entries and the Task's start are not stopped)
 - `mcp.yaml` is read once at startup. After editing it, restart the daemon; it takes effect from the next `claude -p` that starts (the Brief is computed from the current setting, so the Brief of a Task started before the restart also shows the new list)
-- `--mcp-config` is passed as a JSON argument, so the `env` / `headers` values are visible in `ps` on the same host. Put secrets in environment variables or files that the MCP server itself reads
+- `--mcp-config` is passed as a JSON argument, so the `env` / `headers` values are visible in `ps` on the same machine. Put secrets in environment variables or files that the MCP server itself reads
 - Not passed to Codex / DAK / Cloud Tasks (Codex's MCP is a separate mechanism; Cloud does not go through `buildArgs`). Workspace MCP (`/mcp/<taskId>` above) is not passed automatically
 - The Brief on the Task screen shows the names passed to that Task (`なし` when there are none) under `渡す MCP` in its `Workspace MCP` section. The contents are `mcpServers` in `GET /api/tasks/:id`
 

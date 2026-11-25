@@ -63,3 +63,9 @@ test("the logout confirmation counts the running Tasks of the same runner; gh co
   expect(logoutConfirmText("gh", tasks)).toContain("3 件");
   expect(logoutConfirmText("codex", [])).not.toContain("動いている Task");
 });
+
+test("bedrock from the CLI: the row says where it is set, with neither logout, login nor a way back", () => {
+  const view = loginRowView({ id: "claude", available: true, login: "ok", loginKind: "bedrock", bedrockFrom: "cli" });
+  expect(view).toEqual({ id: "claude", label: "Claude Code", text: "使用中: Amazon Bedrock（CLI の設定）", action: null, bedrock: "cli" });
+  expect(loginRowView({ id: "codex", available: true, login: "ok", loginKind: "bedrock", bedrockFrom: "settings" })?.bedrock).toBe(true);
+});

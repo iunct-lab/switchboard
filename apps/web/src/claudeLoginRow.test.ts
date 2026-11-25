@@ -83,3 +83,22 @@ test("the Bedrock switch names the runner as its row does", () => {
   const h = html(runner({ login: "ok", loginKind: "claude.ai", bedrockAvailable: true }));
   expect([...h.matchAll(/<b class="login-who">([^<]+)<\/b>/g)].map((x) => x[1])).toEqual(["Switchboard", "Claude Code", "Claude Code"]);
 });
+
+test("bedrock from the CLI: the place is named and neither the switch nor the way back is offered", () => {
+  const h = render([runner({ login: "ok", loginKind: "bedrock", bedrockFrom: "cli", bedrockAvailable: true })]);
+  expect(h).toContain("使用中: Amazon Bedrock（CLI の設定）");
+  expect(h).toContain("CLAUDE_CODE_USE_BEDROCK");
+  expect(h).not.toContain("Amazon Bedrock を使う");
+  expect(h).not.toContain("Claude アカウントに戻す");
+  expect(render([runner({ id: "codex", login: "ok", loginKind: "bedrock", bedrockFrom: "cli" })])).toContain("model_provider");
+});
+
+test("still on bedrock: a note with the count only when Tasks remain and the runner is no longer on Bedrock", () => {
+  const note = (r: Partial<RunnerInfo>) => render([runner({ login: "ok", loginKind: "claude.ai", ...r })]);
+  expect(note({ bedrockRunning: 2 })).toContain("Amazon Bedrock で始めた Task が 2 件、まだ Bedrock で動いています");
+  expect(note({ bedrockRunning: 0 })).not.toContain("まだ Bedrock で動いています");
+  expect(note({})).not.toContain("まだ Bedrock で動いています");
+  expect(render([runner({ login: "ok", loginKind: "bedrock", bedrockFrom: "settings", bedrockRunning: 2, bedrockAvailable: true })])).not.toContain("まだ Bedrock で動いています");
+  // the CLI's own Bedrock: the next Task runs on Bedrock too, so the note would be wrong
+  expect(render([runner({ login: "ok", loginKind: "bedrock", bedrockFrom: "cli", bedrockRunning: 2 })])).not.toContain("まだ Bedrock で動いています");
+});

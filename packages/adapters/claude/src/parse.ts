@@ -74,6 +74,11 @@ export function mapClaudeMessage(m: Any, s: ClaudeParserState): AgentEvent[] {
       }
       break;
     }
+    case "tool_progress": {
+      // Only the heartbeat of a long hook (`heartbeat: true`, tool_name = the hook event) counts; other progress lines are dropped as before.
+      if (m.heartbeat === true && typeof m.tool_name === "string") out.push({ t: "hook.progress", hook: m.tool_name, startedAt: null });
+      break;
+    }
     case "stream_event": {
       const e = m.event;
       if (!e) break;

@@ -3,7 +3,7 @@
 // local-ci と同じ scripts/test-select.ts の選択で選んだテストだけを回す。選択の規則はそちらが持ち、ここには足さない。
 // 一式に広げるのは、選択が判定できないとき（test-select.ts の classify）だけ。packages/protocol/ も、ほかと同じく読み込みの木で辿る。
 // 子プロセスで読むだけの依存は追わない（漏れはタグの CI が拾う）。
-// 変更が無い、または選ばれたテストが無ければ何も回さない。SWITCHBOARD_SUPERVISED は抜いて回す。
+// 変更が無い、または選ばれたテストが無ければ何も回さない。ホストで回すテストには local-ci と同じ環境（stepEnv: PATH・HOME・CI・TMPDIR と明示した録画の場所だけ）を渡す。
 // 使い方: bun scripts/test-changed.ts [--local] [--force]
 // sb-offload があるホストでは、選んだテスト全部（録画を読むものも）を外の 1 本のビルドで回す（local-ci と同じ runBuild /
 // ciScript / parseBuild。docs/design/local-ci-offload.md）。ホストの重い処理の枠は取らない。外が失敗・時間切れ・中断しても
@@ -12,9 +12,10 @@
 // 外のビルドは、入力の鍵（選んだテスト・作業ツリーの全ファイル・録画）がまったく同じビルドが 24 時間以内にあれば新しく始めず、
 // そのビルドの結果を受け取る（走っていれば終わるのを待つ）。--force はその 1 回を回し直す。幅は SWITCHBOARD_OFFLOAD_REUSE_HOURS（0 で使い回さない）。
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withHeavySlot } from "../ops-kit/src/heavy.ts";
-import { type Deps, parseBuild, testRun } from "./local-ci.ts";
+import { type Deps, parseBuild, stepEnv, testRun } from "./local-ci.ts";
 import { runBuild, type Offload } from "./local-ci-offload.ts";
 import { reusedLine, reuseHours } from "./offload-record.ts";
 import { offloadFor } from "./tag-ci.ts";
@@ -22,6 +23,12 @@ import { currentRepo } from "./repo.ts";
 import { repoFiles, selectFrom } from "./test-select.ts";
 
 const ROOT = join(import.meta.dir, "..");
+
+/** ホストで回すテストの子プロセス。環境は local-ci の step と同じ（呼び出し元のトークン・鍵は渡さず、TMPDIR は呼び出し元のもの）。 */
+export function hostSpawn(root: string, from: Record<string, string | undefined> = process.env): RunDeps["spawnHost"] {
+  const env = stepEnv(from.TMPDIR || tmpdir(), from);
+  return async (cmd) => await Bun.spawn(cmd, { cwd: root, env, stdout: "inherit", stderr: "inherit" }).exited;
+}
 
 export type Picked = { full: string } | { tests: string[] };
 
@@ -102,12 +109,11 @@ if (import.meta.main) {
     process.exit(0);
   }
   console.log("full" in picked ? `test-changed: 一式（${picked.full}）` : `test-changed: ${picked.tests.length} ファイル\n${picked.tests.join("\n")}`);
-  const { SWITCHBOARD_SUPERVISED: _, ...env } = process.env;
   const offload = offloadFor(process.argv.slice(2).includes("--local"));
   process.exit(
     await runTests(picked, {
       ...(process.argv.slice(2).includes("--force") ? {} : { reuseHours: reuseHours(process.env) }),
-      spawnHost: async (cmd) => await Bun.spawn(cmd, { cwd: ROOT, env, stdout: "inherit", stderr: "inherit" }).exited,
+      spawnHost: hostSpawn(ROOT),
       ...(offload ? { offload } : {}),
       slot: (name, fn) => withHeavySlot(name, fn),
       ...(() => { try { return { repo: currentRepo(ROOT) }; } catch { return {}; } })(),

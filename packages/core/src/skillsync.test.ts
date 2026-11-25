@@ -627,15 +627,21 @@ describe("the kit's skills as a Task reads them", () => {
   const asksFor = (text: string, r: string) => text.split("\n").filter((l) => l.includes(`--runner ${r}`) && !l.includes("--as fallback"));
 
   describe("cross-runner-review and pbi-complete by condition", () => {
-    test("same: only the steps for a new session of the same runner, description included", () => {
+    test("same: the steps for a new session of the same runner, and the other runner only as the usage-limit fallback, description included", () => {
       const text = render("cross-runner-review", PAIRS[0]);
-      for (const gone of ["--runner codex", "codex exec", "exec --sandbox", "Claude Code が実装したら Codex", "Codex", "codex", "OPS_KIT_REVIEW_RUNNER", "<!-- when"]) expect({ gone, has: text.includes(gone) }).toEqual({ gone, has: false });
+      for (const gone of ["codex exec", "exec --sandbox", "Claude Code が実装したら Codex", "OPS_KIT_REVIEW_RUNNER", "上限の代替は無い", "<!-- when"]) expect({ gone, has: text.includes(gone) }).toEqual({ gone, has: false });
       expect(text.split("\n").find((l) => l.startsWith("description: "))).toContain("実装したのと同じランナーの新しいセッション");
       expect(asksFor(text, "claude").length).toBeGreaterThan(0);
+      expect(asksFor(text, "codex")).toEqual([]);
+      expect(text).toContain("--runner codex --as fallback");
       expect(text).toContain("（同じランナーの別セッション。設定による選択）");
+      expect(text).toContain("（別のランナー。<上限のランナー> が利用上限のため代替）");
       const codex = render("cross-runner-review", PAIRS[1]);
       expect(asksFor(codex, "codex").length).toBeGreaterThan(0);
-      expect(codex).not.toContain("--runner claude");
+      expect(asksFor(codex, "claude")).toEqual([]);
+      expect(codex).toContain("--runner claude --as fallback");
+      expect(codex).not.toContain("--runner codex --as fallback");
+      for (const copy of [text, codex]) expect(copy).toContain("代替も利用上限なら、未レビューのままマージせず");
     });
 
     test("other: only the steps for the other runner; the Task's own runner is named only as the usage-limit fallback", () => {
@@ -829,7 +835,16 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 281,900 (+1,400 bytes over 280,500; the copy measured 280,496 before and 281,850 after): a gate PBI writes the
     // gate's keys and, when it changes them, waits for an answer on the screen before it is Ready (pbi-to-tasks 3 and 4.5), and a
     // request that complains about a mechanism always offers removing it (request-to-backlog).
-    expect(bytes).toBeLessThanOrEqual(281_900);
+    // Raised to 282,700 (+800 bytes over 281,900; the copy measured 281,850 before and 282,668 after): every body save in the skills
+    // passes the version it read (--rev), and a refused child creation says to read the other side's list and stop (pbi-to-tasks 4,
+    // request-to-backlog); the duplicate review after a decomposition went out.
+    // Raised to 283,200 (+500 bytes over 282,700; the copy measured 282,668 before and 283,148 after): the app checks the reason a
+    // review for a runner other than the main reviewer names (fallback, recheck, audit) against its records, and the skill says
+    // which record each needs (cross-runner-review, the `--as` paragraph); the first draft (+524) was cut to this.
+    // Raised to 285_600 (+2,400 bytes over 283,200; the copy measured 285,411 after, with the review follow-ups that refresh the clone before the arbiter and say a later split stays with the implementer): the supervisor replaces the comparison with main and the
+    // model-read rechecks (cross-runner-review 6 with how to ask, read and post it and its follow-up, pbi-complete 5 and
+    // review-triage-and-merge 2, 3 and 5 pointing to it); the comparison's section and its sorting of leftovers are gone, and the first draft (+3,990) was cut to this.
+    expect(bytes).toBeLessThanOrEqual(285_600);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

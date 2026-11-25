@@ -559,10 +559,11 @@ describe("pickNext overlap", () => {
       const ws = imported([...two(task(10, 1, "src/a.ts", "\n\n**前提**: #70"), task(11, 1, "src/b.ts", "\n\n**前提**: #70")), issue(70, ["type:pbi"]), busy]);
       expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
     }
-    // a Task naming no path is not judged, so it counts as free
+    // a Task naming no path cannot be judged by the guard in the Task, so it does not count as free
     {
       const ws = imported([...two(task(10, 1, "src/a.ts"), issue(11, ["type:task"], { body: "パスの名指し無し", parent: 1 })), busy]);
-      expect(byNumber(ws)[1]!.overlap).toBeNull();
+      expect(byNumber(ws)[1]!.overlap).toEqual({ hits: [{ ref: "PR #50", path: "src/a.ts", working: true, pbi: null }], unknown: null });
+      expect(pick(ws)).toBeNull();
     }
     // a PR not judged stays on the whole PBI, a free Task or not
     {
@@ -598,7 +599,7 @@ describe("pickNext overlap", () => {
     const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
     const ws = imported([
       issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "Ready" }), task(20, 2, "src/a.ts"),
-      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts", "src/q.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30, 901, 902] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts", "src/q.ts"),
       issue(4, ["type:pbi"], { subIssues: [40] }), item(4, { Status: "Ready" }), task(40, 4, "src/q.ts"),
       pr(90, ["src/a.ts"], { state: "MERGED" }), pr(91, ["src/q.ts"], { state: "MERGED" }),
       comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
@@ -618,7 +619,7 @@ describe("pickNext overlap", () => {
     const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
     const ws = imported([
       issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress" }), task(20, 2, "src/a.ts"),
-      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30, 901, 902] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
       pr(90, ["src/a.ts"], { state: "MERGED" }),
       comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
     ]);
@@ -649,7 +650,7 @@ describe("pickNext overlap", () => {
     const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
     const ws = imported([
       issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress" }), task(20, 2, "src/a.ts"),
-      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
+      issue(3, ["type:pbi"], { subIssues: [30, 901, 902] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
       pr(90, ["src/a.ts"]),
       comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
       comment(2, "c2s", "## 状況\n進んでいない\n<!-- tasks-done: 0 -->", ago(2)),
@@ -888,6 +889,26 @@ describe("sync of each item and of the workspace", () => {
     expect(workspaceSyncOf(db, ws, { now: NOW }).creates[0]).toMatchObject({ state: "pending" });
   });
 
+  test("a child kept here and not sent yet counts as the PBI's Task", () => {
+    const ws = imported([issue(10, ["type:pbi"]), item(10, { Status: "Backlog" })]);
+    expect(byNumber(ws)[10]!.tasks).toMatchObject({ total: 0 });
+    const child = (n: number, over: Partial<BacklogIssueData>) => ({ ...issue(n, ["type:task"], { parent: 10, ...over }).remote!, title: `child ${n}` });
+    // not numbered yet
+    db.applyBacklogEdit(SOURCE, { records: [{ objectKind: "issue", externalId: "local:L9", local: { ...child(0, {}), url: "" } }], operations: [{ issue: "local:L9", targetKind: "issue", target: "local:L9", kind: "create", payload: { title: "child 0", parent: 10 } }] }, 1);
+    expect(byNumber(ws)[10]!.tasks).toMatchObject({ total: 1, done: 0 });
+    expect(readStoredIssue(db, ws, 10)!.waitingSubIssues).toEqual([{ localId: "L9", number: 0, title: "child 0", state: "OPEN" }]);
+    // numbered, not in the parent's list yet: still one
+    db.putBacklogSnapshot(SOURCE, { records: [issue(10, ["type:pbi"]), item(10, { Status: "Backlog" }), issue(11, ["type:task"], { parent: 10 })], cursor: null, syncedAt: 6000 });
+    expect(readStoredIssue(db, ws, 10)!.waitingSubIssues.map((w) => w.number).sort((a, b) => a - b)).toEqual([0, 11]);
+    // closed before GitHub lists it: counted as done
+    db.putBacklogSnapshot(SOURCE, { records: [issue(10, ["type:pbi"]), item(10, { Status: "Backlog" }), issue(11, ["type:task"], { parent: 10, state: "CLOSED" })], cursor: null, syncedAt: 6500 });
+    expect(byNumber(ws)[10]!.tasks).toMatchObject({ total: 2, done: 1 });
+    // GitHub put it in the parent's list: counted once, no longer waiting
+    db.putBacklogSnapshot(SOURCE, { records: [issue(10, ["type:pbi"], { subIssues: [11] }), item(10, { Status: "Backlog" }), issue(11, ["type:task"], { parent: 10 })], cursor: null, syncedAt: 7000 });
+    expect(byNumber(ws)[10]!.tasks).toMatchObject({ total: 2 });
+    expect(readStoredIssue(db, ws, 10)!.waitingSubIssues.map((w) => w.number)).toEqual([0]);
+  });
+
   test("the workspace is the worst of its Issues; a create that GitHub already numbered is not a numberless one", () => {
     const ws = imported([issue(1, ["type:request"]), issue(2, ["type:request"])]);
     db.putBacklogSnapshot(SOURCE, { records: [issue(1, ["type:request"]), { ...issue(2, ["type:request"]), fetchState: "forbidden", remote: null }], cursor: null, syncedAt: 6000 });
@@ -1049,7 +1070,7 @@ describe("close with a reason", () => {
 
 describe("questions the work goes on from with their recommendation", () => {
   // a PBI's own question about its Tasks (the kind a PBI's Issue can carry; the kind is checked against where the question stands)
-  const GO = "## 判断待ち\n\n**問い**: どちらか\n**選択肢**:\n- A: 置き換える\n- B: 足す\n**推奨**: A — 戻せる\n**進め方**: 推奨で進める（種類: task-order） — 戻せる変更";
+  const GO = "## 判断待ち\n\n**問い**: どちらか\n**選択肢**:\n- A: 置き換える\n- B: 足す\n**推奨**: A — 戻せる\n**進め方**: 推奨で進める（種類: task-order） — 戻せる変更\n#901 を先にするか、#902 を先にするか";
   const WAIT = "## 判断待ち\n\n**問い**: 公開するか\n**進め方**: 止めて待つ — 公開";
   const NOW = Date.parse("2026-10-06T00:00:00Z");
   // the workspace's checkout: its top level is what a question's paths are read against (none: nothing goes on)
@@ -1064,18 +1085,22 @@ describe("questions the work goes on from with their recommendation", () => {
       issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress", Priority: "P0" }),
       issue(20, ["type:task"], { parent: 2, body: "1. `src/a.ts`: 直す" }), comment(20, "c2", impl("```\nsed -i s/x/y/ src/b.ts\n```"), "2026-10-05T00:00:00Z"),
       issue(3, ["type:pbi"]), item(3, { Status: "Ready", Priority: "P0" }), comment(3, "c3", impl(""), "2026-10-05T00:00:00Z"),
+      // a question on a Task that names no path shows nothing of its kind: it waits like a needs-decision one
+      issue(4, ["type:pbi"], { subIssues: [40] }), item(4, { Status: "In progress", Priority: "P0" }),
+      issue(40, ["type:task"], { parent: 4, body: "1. `src/a.ts`: 直す" }), comment(40, "c4", impl("名前をどうするか"), "2026-10-05T00:00:00Z"),
     ]);
     const b = read(ws);
-    expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toEqual({ 1: "in-progress", 2: "needs-decision", 3: "needs-decision" });
+    expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toEqual({ 1: "in-progress", 2: "needs-decision", 3: "needs-decision", 4: "needs-decision" });
+    expect(b.items.find((i) => i.number === 4)!.decision).toMatchObject({ issue: 40 });
     expect(b.items.find((i) => i.number === 2)!.decision).toMatchObject({ issue: 20 });
     expect(b.proceeding!.map((q) => [q.issue.number, q.stopped])).toEqual([[10, null]]);
     // the same records read without a checkout: the paths cannot be checked, so every one of them waits
-    expect(Object.fromEntries(readStoredBacklog(db, ws, { now: NOW }).items.map((i) => [i.number, i.stage]))).toEqual({ 1: "needs-decision", 2: "needs-decision", 3: "needs-decision" });
+    expect(Object.fromEntries(readStoredBacklog(db, ws, { now: NOW }).items.map((i) => [i.number, i.stage]))).toEqual({ 1: "needs-decision", 2: "needs-decision", 3: "needs-decision", 4: "needs-decision" });
   });
 
   test("pickNext: an item with only a proceeding question (no label) is a candidate and is not asked as a waiting decision; one with a question that waits (labelled) is not picked", () => {
     const ws = imported([
-      issue(1, ["type:pbi"]), item(1, { Status: "Ready", Priority: "P1" }), comment(1, "c1", GO, "2026-10-05T00:00:00Z"),
+      issue(1, ["type:pbi"], { subIssues: [901, 902] }), item(1, { Status: "Ready", Priority: "P1" }), comment(1, "c1", GO, "2026-10-05T00:00:00Z"),
       issue(2, ["type:pbi", "needs-decision"]), item(2, { Status: "Ready", Priority: "P0" }), comment(2, "c2", WAIT, "2026-10-05T00:00:00Z"),
     ]);
     const b = read(ws);
@@ -1098,7 +1123,7 @@ describe("questions the work goes on from with their recommendation", () => {
       // answered: it no longer holds
       issue(5, ["type:pbi"]), item(5, { Status: "Ready", Priority: "P3" }), comment(5, "c5", noKind, "2026-10-05T00:00:00Z"), comment(5, "c6", "## 回答\n\nA", "2026-10-05T01:00:00Z"),
       // the table lets this one go on
-      issue(6, ["type:pbi"]), item(6, { Status: "Ready", Priority: "P2" }), comment(6, "c7", GO, "2026-10-05T00:00:00Z"),
+      issue(6, ["type:pbi"], { subIssues: [901, 902] }), item(6, { Status: "Ready", Priority: "P2" }), comment(6, "c7", GO, "2026-10-05T00:00:00Z"),
     ]);
     const b = read(ws);
     expect(Object.fromEntries(b.items.map((i) => [i.number, i.stage]))).toMatchObject({ 1: "needs-decision", 2: "needs-decision", 3: "needs-decision", 5: "ready", 6: "ready" });
@@ -1110,9 +1135,9 @@ describe("questions the work goes on from with their recommendation", () => {
 
   test("a Task's question belongs to its parent PBI, closed Tasks too; a PBI closed within the day is listed as closed, one closed earlier is not; the newest question of a labelled Issue is the waiting one", () => {
     const ws = imported([
-      issue(3, ["type:pbi"], { subIssues: [30] }), item(3, { Status: "In progress" }), issue(30, ["type:task"], { parent: 3, state: "CLOSED" }), comment(30, "c1", GO, "2026-10-04T00:00:00Z"),
-      issue(4, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-05T12:00:00Z" }), comment(4, "c2", GO, "2026-10-04T00:00:00Z"),
-      issue(5, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-01T00:00:00Z" }), comment(5, "c3", GO, "2026-09-30T00:00:00Z"),
+      issue(3, ["type:pbi"], { subIssues: [30, 901, 902] }), item(3, { Status: "In progress" }), issue(30, ["type:task"], { parent: 3, state: "CLOSED" }), comment(30, "c1", GO, "2026-10-04T00:00:00Z"),
+      issue(4, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-05T12:00:00Z", subIssues: [901, 902] }), comment(4, "c2", GO, "2026-10-04T00:00:00Z"),
+      issue(5, ["type:pbi"], { state: "CLOSED", closedAt: "2026-10-01T00:00:00Z", subIssues: [901, 902] }), comment(5, "c3", GO, "2026-09-30T00:00:00Z"),
       // labelled by mistake with a proceeding line: the label says it waits, so it is the item's waiting decision only
       issue(6, ["type:pbi", "needs-decision"]), comment(6, "c4", GO, "2026-10-03T00:00:00Z"), comment(6, "c5", GO.replace("どちらか", "次の問い"), "2026-10-04T00:00:00Z"),
     ]);
@@ -1149,7 +1174,7 @@ describe("questions the work goes on from with their recommendation", () => {
     expect(proceedingAnswer(hand, { at: q1 })).toBeNull();
     expect(proceedingAnswer(hand, { at: q2 })?.body).toBe("## 回答\nB で");
 
-    const ws = imported([issue(7, ["type:pbi"]), item(7, { Status: "Ready" }), comment(7, "c1", GO, q1), comment(7, "c2", confirm, "2026-10-05T12:00:00Z")]);
+    const ws = imported([issue(7, ["type:pbi"], { subIssues: [901, 902] }), item(7, { Status: "Ready" }), comment(7, "c1", GO, q1), comment(7, "c2", confirm, "2026-10-05T12:00:00Z")]);
     const b = read(ws);
     expect(b.items[0]).toMatchObject({ number: 7, answeredAt: null });
     expect(b.proceeding).toMatchObject([{ issue: { number: 7 }, answer: { at: "2026-10-05T12:00:00Z" } }]);
@@ -1170,4 +1195,39 @@ describe("questions the work goes on from with their recommendation", () => {
     const end = storedEnds(db, ws);
     expect([1, 2, 11, 12, 13, 99].map(end)).toEqual([null, { kind: "issue", state: "CLOSED", at: Date.parse("2026-10-03T00:00:00Z") }, null, { kind: "pr", state: "MERGED", at: Date.parse("2026-10-04T00:00:00Z") }, { kind: "pr", state: "CLOSED", at: Date.parse("2026-10-05T00:00:00Z") }, null]);
   });
+});
+
+test("a claim counts while the Task that wrote it works or waits for the person", () => {
+  const ws = imported([30, 31, 32, 33, 34, 35, 36].flatMap((n) => [issue(n, ["type:pbi"]), item(n, { Status: "Ready" })]).concat(comment(36, "c36", "<!-- pbi-complete:claim t1 -->", "2026-10-03T00:00:00Z")));
+  const now = Date.now();
+  const make = (id: string, over: Record<string, unknown>) => db.insertTask({ id, workspaceId: ws.id, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "running", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now - 5000, updatedAt: now, ...over } as Parameters<Db["insertTask"]>[0]);
+  // conversation Tasks (no stage): at work, finished, asking the person; a stage Task of PBI 35 that wrote its claim and ended
+  make("t_work", {});
+  make("t_done", { status: "done", outcome: "finished" });
+  make("t_asks", { status: "done", outcome: "needs_action" });
+  make("t_stage", { status: "error", stage: { issue: 35, action: "complete" }, statusAt: now + 60_000 });
+  const claim = (n: number, by: string, at = now) => commentStoredIssue(db, SOURCE, n, "<!-- pbi-complete:claim t1 -->", at, by);
+  claim(30, "t_work");
+  claim(31, "t_done");
+  claim(32, "t_asks");
+  claim(33, "t_work");
+  commentStoredIssue(db, SOURCE, 33, "<!-- pbi-complete:release -->", now + 1000, "t_work");
+  claim(34, "t_gone");
+  claim(35, "t_stage");
+  const read = () => readStoredBacklog(db, ws);
+  const claimOf = (n: number) => read().items.find((i) => i.number === n)!.claim;
+  expect(claimOf(30)).toEqual({ taskId: "t_work" });
+  expect(claimOf(32)).toEqual({ taskId: "t_asks" });
+  // finished with nothing asked, released, a Task whose row is gone, a claim its own stage Task left when it ended: no claim, and the list says the guard counts none of them as work
+  for (const n of [31, 33, 34, 35]) expect(claimOf(n)).toBeNull();
+  expect(read().unheld).toEqual([31, 34, 35]);
+  // a claim whose Task is not known (written outside the app) counts as before: it is a claim, with no Task
+  expect(claimOf(36)).toEqual({ taskId: null });
+  // the stage Task's own claim ends with it; a stage Task running on the PBI makes it work, as it always did
+  expect(readStoredBacklog(db, ws, { active: (n) => n === 35 }).unheld).toEqual([31, 34]);
+  // the Ready PBIs held by a Task are picked for no stage; the rest are
+  const items = read().items;
+  expect(items.filter((i) => i.claim).map((i) => i.number).sort()).toEqual([30, 32, 36]);
+  expect(pickNext(items, "implement")).toMatchObject({ item: { number: 31 } });
+  expect(pickNext(items.filter((i) => ![31, 33, 34, 35].includes(i.number)), "implement")).toBeNull();
 });

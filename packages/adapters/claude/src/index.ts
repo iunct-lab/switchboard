@@ -40,13 +40,13 @@ export const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 /**
- * The same models by their Amazon Bedrock ids: the global inference profile of each (`global.` + the id the
- * CLI's own Bedrock table has as `anthropic.<id>`). Offered only while the runner is switched to Bedrock; which of
- * them the account can call is up to IAM.
+ * A model by its Amazon Bedrock id: the global inference profile (`global.` + the id the CLI's own Bedrock table has
+ * as `anthropic.<id>`); an id that already is one is kept. Offered only while the runner is on Bedrock; which models
+ * the account can call is up to IAM.
  */
 // Haiku 4.5 is the one id Bedrock spells with a version (the CLI's own table has `anthropic.claude-haiku-4-5-20251001-v1:0`).
 const BEDROCK_SPELLING: Record<string, string> = { "claude-haiku-4-5": "claude-haiku-4-5-20251001-v1:0" };
-export const CLAUDE_BEDROCK_MODELS: ModelOption[] = CLAUDE_MODELS.map((m) => ({ value: `global.anthropic.${BEDROCK_SPELLING[m.value] ?? m.value}`, label: m.label }));
+export const claudeBedrockModel = (m: ModelOption): ModelOption => ({ value: /^(global\.|anthropic\.)/.test(m.value) ? m.value : `global.anthropic.${BEDROCK_SPELLING[m.value] ?? m.value}`, label: m.label });
 
 /** Thinking efforts offered in the UI: the values `claude --effort` takes. */
 export const CLAUDE_EFFORTS: ModelOption[] = ["low", "medium", "high", "xhigh", "max"].map((value) => ({ value, label: value }));
@@ -231,7 +231,7 @@ export const CLAUDE_LOGIN_HINT = "claude auth login";
  * (`accountName`) that the usage-limit reports are kept under. They are not returned, stored or logged, and the
  * credential files are never looked at. No answer within `timeoutMs`, or a CLI without the subcommand → unknown.
  */
-export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; expiresAt?: number; account?: string }> {
+export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ login: RunnerLogin; kind?: LoginKind; bedrockFrom?: "cli"; expiresAt?: number; account?: string }> {
   try {
     const proc = Bun.spawn([exe, "auth", "status"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: childEnv() });
     // Both pipes are collected as they arrive and awaited only briefly after the exit: a child the command left behind
@@ -253,7 +253,7 @@ export async function loginStatus(exe: string, timeoutMs = 10_000): Promise<{ lo
     await Promise.race([drained, Bun.sleep(500)]);
     if (code === 0) {
       const { kind, expiresAt, account } = loginFieldsOf(stdout);
-      return { login: "ok", kind, ...(expiresAt !== undefined ? { expiresAt } : {}), ...(account ? { account } : {}) };
+      return { login: "ok", kind, ...(kind === "bedrock" ? { bedrockFrom: "cli" as const } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}), ...(account ? { account } : {}) };
     }
     return { login: /unknown (command|option)|unrecognized/i.test(stderr) ? "unknown" : "expired" };
   } catch {
@@ -275,14 +275,15 @@ export function accountName(id: string): string {
 
 /** `authMethod` and `loginExpiresAt` are read as they are; the organization and email only pass through `accountName`. */
 function loginFieldsOf(stdout: string): { kind?: LoginKind; expiresAt?: number; account?: string } {
-  let parsed: { authMethod?: unknown; loginExpiresAt?: unknown; orgId?: unknown; email?: unknown } | null;
+  let parsed: { authMethod?: unknown; apiProvider?: unknown; loginExpiresAt?: unknown; orgId?: unknown; email?: unknown } | null;
   try {
     parsed = JSON.parse(stdout);
   } catch {
     return {};
   }
   const method = parsed?.authMethod;
-  const kind = method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
+  // the CLI's own settings (CLAUDE_CODE_USE_BEDROCK) say `third_party` / `bedrock`: that wins over the method
+  const kind = parsed?.apiProvider === "bedrock" ? "bedrock" : method === "claude.ai" ? "claude.ai" : method === "api_key" ? "console" : undefined;
   // the limits belong to the organization the login is in; the email tells two people of one organization apart
   const id = [parsed?.orgId, parsed?.email].filter((v): v is string => typeof v === "string" && v !== "").join(":");
   return { kind, expiresAt: expiresAtOf(parsed?.loginExpiresAt), ...(id ? { account: accountName(id) } : {}) };
@@ -333,7 +334,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
     permissionModes: CLAUDE_PERMISSION_MODES,
     defaultPermissionMode: CLAUDE_DEFAULT_PERMISSION_MODE,
     models: CLAUDE_MODELS,
-    bedrockModels: CLAUDE_BEDROCK_MODELS,
+    bedrockModel: claudeBedrockModel,
     efforts: CLAUDE_EFFORTS,
     loginArgs: ["auth", "login"],
     loginApiArgs: ["auth", "login", "--console"],
@@ -351,11 +352,11 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
         await proc.exited;
         const version = text.match(/\d+\.\d+\.\d+/)?.[0] ?? text;
         if (proc.exitCode !== 0) return { available: false, version, path: which };
-        const { login, kind, expiresAt, account } = await loginStatus(which);
+        const { login, kind, bedrockFrom, expiresAt, account } = await loginStatus(which);
         // what the sessions put on their usage-limit reports; a status that could not be read keeps the last one
         if (login !== "unknown") loggedInAccount = account ?? "";
         lastLoginRead = { exe: which, at: Date.now(), reading: false };
-        return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), ...(expiresAt !== undefined ? { loginExpiresAt: expiresAt } : {}), loginHint: CLAUDE_LOGIN_HINT };
+        return { available: true, version, path: which, login, ...(kind ? { loginKind: kind } : {}), ...(bedrockFrom ? { bedrockFrom } : {}), ...(expiresAt !== undefined ? { loginExpiresAt: expiresAt } : {}), loginHint: CLAUDE_LOGIN_HINT };
       } catch (e) {
         return { available: false, note: String(e) };
       }

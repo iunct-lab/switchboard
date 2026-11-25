@@ -1,5 +1,5 @@
 // The daemon of container/e2e-release.sh: what a release built for that check starts in place of
-// packages/core/src/main.ts (the script puts a one-line main.ts that imports this file into each release's tree).
+// packages/core/src/main.ts (the script puts a two-line main.ts that imports `boot` from this file and calls it into each release's tree).
 // It is the real core under the real sb-rescue: the newest release is read, its diff checked and the promotion decided
 // by the same code as in a real start; only the runner is a fake, and the check for a new release comes every 2 seconds
 // instead of the setting's minutes. Port, home, repository and sb-rescue's address come from sb-rescue's environment.
@@ -53,11 +53,17 @@ export function fakeRunner(home: string): RunnerAdapter {
   };
 }
 
-if (import.meta.main) {
+/** Starts the daemon with the fake runner. A release's packages/core/src/main.ts is replaced with a call to it. */
+export async function boot(): Promise<void> {
   const cfg = loadConfig({ ...process.env, SWITCHBOARD_HISTORY_POLL_MS: "0" });
   seedNewHome(cfg.dbPath);
-  const core = await startServer(cfg, [fakeRunner(cfg.home)], { port: cfg.port, promotionCheckMs: 2000, judge: never, rubricJudge: never, titleSuggester: never });
+  // a clone's own tag goes in on the tag CI's word, which is the whole CI in a heavy slot: not part of this E2E, so no result (the default setting brings such a tag in)
+  const core = await startServer(cfg, [fakeRunner(cfg.home)], { port: cfg.port, promotionCheckMs: 2000, tagCi: async () => "none", judge: never, rubricJudge: never, titleSuggester: never });
   // the promotion is asked about only with a meta workspace: the repository the daemon runs from (the release, or the clone)
   if (!core.db.listWorkspaces().some((w) => w.kind === "meta")) core.db.upsertWorkspace({ name: basename(cfg.repoRoot), path: cfg.repoRoot, kind: "meta" });
+  // as the real main.ts: sb-rescue switches a release that differs only in what the daemon reads again (here, nothing it runs) by SIGHUP, which would otherwise end the process
+  if (process.env.SWITCHBOARD_SUPERVISED === "1") process.on("SIGHUP", () => void core.reloadRelease());
   console.log(`e2e daemon up on ${cfg.port}${cfg.candidate ? " (candidate)" : ""}`);
 }
+
+if (import.meta.main) await boot();

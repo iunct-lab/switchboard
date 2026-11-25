@@ -402,7 +402,11 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
     }
     const perfFailed = failed.some((f) => isPerfStep(f));
     const p = run.perf;
-    const warnings = !perfFailed ? [] : p && !p.unknown ? [...p.raised, ...p.grew, ...p.improved, ...p.over] : ["perf の判定ができなかった（bench が落ちたか、check が判定の前に止まった）"];
+    // the check's lines when it judged (even with the base step failed before it), the fixed line when the bench failed or the check stopped before judging; the base's reason after them
+    const warnings = !perfFailed ? [] : [
+      ...(p && !p.unknown ? [...p.raised, ...p.grew, ...p.improved, ...p.over] : ["perf の判定ができなかった（bench が落ちたか、check が判定の前に止まった）"]),
+      ...(p?.reasons ?? []).map((r) => `perf の bundle・bytes を比べられなかった: ${hidePaths(r.replace(/^perf-base: /, ""))}`),
+    ];
     // the Release keeps 20 lines: each failed step gets its share
     const fails = counted.flatMap((f) => (f.fails ?? []).slice(0, Math.floor(20 / counted.length)));
     const test = run.outputs["bun test"];

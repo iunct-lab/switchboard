@@ -108,7 +108,9 @@ test("skills: a request is checked against the repository's premises before it b
   const tasks = read("pbi-to-tasks");
   // the body is read from .issue.body (.body is null: writing it back emptied PBIs), fresh, before Ready writes Tasks and the log
   const ready = tasks.slice(tasks.indexOf("### 5. PBI を Ready にする"), tasks.indexOf("\n## 報告"));
-  expect(ready).toContain("`ops-kit backlog view <PBI> --fresh --json | jq -r .issue.body");
+  expect(ready).toContain("`ops-kit backlog view <PBI> --fresh --json > \"$W/v.json\"`");
+  expect(ready).toContain("`jq -r .issue.body \"$W/v.json\"`");
+  expect(ready).toContain("--rev <版>");
   expect(tasks).toMatch(/前提.*矛盾していたら.*Task にしない。PBI に `## 判断待ち`.*Ready にしない。.*`request-to-backlog` の「2\.5 前提と照らす」/);
   const own = read("issue-workflow");
   const list = own.slice(own.indexOf("使う側のリポジトリが持つもの"), own.indexOf("\n## 階層"));
@@ -249,28 +251,67 @@ test("cross-runner-review: the main reviewer is split by the review setting, eac
   const sideOf = (phrase: string) => [...new Set(lines.filter((l) => !l.mark && l.text.includes(phrase)).map((l) => l.when?.review ?? "any"))];
   expect(sideOf(`\`[<runner>] review${chosen}\``)).toEqual(["same"]);
   expect(sideOf(`\`[<runner>] review${substitute}\``)).toEqual(["other"]);
-  expect(sideOf("--as fallback")).toEqual(["other"]);
+  expect(sideOf("--as fallback")).toEqual(["other", "same"]);
+  // a usage limit on the same-runner side hands the review to the other runner, with its own mark and the same stop when that one is at its limit too
+  const swapped = "（別のランナー。<上限のランナー> が利用上限のため代替）";
+  expect(sideOf(`\`[<runner>] review${swapped}\``)).toEqual(["same"]);
+  expect(sideOf("代替も利用上限なら、未レビューのままマージせず")).toEqual(["other", "same"]);
+  expect(sideOf("上限の代替は無い")).toEqual([]);
   // the 4th argument of post_review is how either mark reaches the summary's first line
   expect(text).toContain("note=${4:-}");
   expect(text).toContain("printf '[%s] review%s\\n\\n' \"$who\" \"$note\"");
 });
 
-test("cross-runner-review: the recheck runner is split by the recheck setting, and a recheck is asked without --runner", () => {
+test("cross-runner-review: the arbiter's runner is split by the recheck setting, and the arbiter is asked without --runner", () => {
   const text = readFileSync(join(skills, "cross-runner-review", "SKILL.md"), "utf8");
-  const same = "再チェックは主レビューと同じランナーの新しいセッションが読む";
-  const other = "再チェックは主レビュアーでないランナーの新しいセッションが読む";
+  const same = "監督者は主レビューと同じランナーの新しいセッションが読む";
+  const other = "監督者は主レビュアーでないランナーの新しいセッションが読む";
   for (const review of ["same", "other"] as const) {
     for (const recheck of ["same", "other"] as const) {
       const conds = { runner: "claude", review, recheck, reviewer: review === "same" ? "claude" : "codex", task: "in", backlog: "github", mergeGate: "on", extra: "off" } as const;
       const copy = renderConditions(text, conds, "cross-runner-review");
       expect({ review, recheck, same: copy.includes(same), other: copy.includes(other) }).toEqual({ review, recheck, same: recheck === "same", other: recheck === "other" });
       // the app picks the recheck's runner from the setting and refuses another: no request names one
-      const asks = copy.split("\n").filter((l) => l.includes("ops-kit job request review") && l.includes("--as recheck"));
-      expect({ review, recheck, asks: asks.length > 0, named: asks.filter((l) => l.includes("--runner")) }).toEqual({ review, recheck, asks: true, named: [] });
+      const asks = copy.split("\n").filter((l) => l.includes("ops-kit job request review") && l.includes("--as arbiter"));
+      expect({ review, recheck, asks: asks.length > 0, named: asks.filter((l) => l.includes("--runner") || l.includes("--kinds")) }).toEqual({ review, recheck, asks: true, named: [] });
       // a recheck runner at its limit is waited for, not swapped for the one that is not (the app refuses a runner the setting does not name)
       expect({ review, recheck, swap: copy.includes("上限でない側") }).toEqual({ review, recheck, swap: false });
     }
   }
+});
+
+test("arbiter: the skills hand a split finding and the model-read rechecks to the supervisor, and the gate reads only the job's record", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  for (const [review, recheck, task] of [["same", "same", "in"], ["other", "other", "in"], ["other", "same", "out"]] as const) {
+    const copy = renderConditions(read("cross-runner-review"), { runner: "claude", review, recheck, reviewer: review === "same" ? "claude" : "codex", task, backlog: "github", mergeGate: "on", extra: "off" }, "cross-runner-review");
+    // section 6 exists, the comparison round (5) and its command are gone, and the instruction and the check are the kit's commands
+    expect(copy).toContain("## 6. 監督者");
+    expect(copy).not.toContain("## 5. main との比較");
+    for (const word of ["ops-kit review-arbiter prompt >", "ops-kit review-arbiter prompt --follow-up", "ops-kit review-arbiter check", "`[<runner>] arbiter`"]) expect({ word, has: copy.includes(word) }).toEqual({ word, has: true });
+    for (const word of ["review-compare", "[<runner>] compare"]) expect({ word, has: copy.includes(word) }).toEqual({ word, has: false });
+    // a review run as recheck lifts nothing now: no request line asks for one
+    expect(copy.split("\n").filter((l) => l.includes("ops-kit job request review") && l.includes("--as recheck"))).toEqual([]);
+    // the PR comment is for display; the gate's key is the job's record
+    expect(copy).toContain("`[<runner>] arbiter` のコメントを書いても判定は通らない");
+    if (task === "in") expect(copy).toContain('ops-kit job request review $N --as arbiter --cwd "$R"');
+  }
+  const triage = read("review-triage-and-merge");
+  const again = triage.slice(triage.indexOf("### 同じ論点が続いたら（直す前に）"), triage.indexOf("### 修正する"));
+  const converge = triage.slice(triage.indexOf("### 収束しないとき"), triage.indexOf("## 3. 直す"));
+  // a point raised again goes to the supervisor and not to the user: no 判断待ち, no question in the conversation
+  expect(again).toContain("監督者に裁定を頼む（`cross-runner-review` の 6）");
+  expect(again).not.toContain("判断待ち` を出して止める");
+  expect(converge).toContain("`cross-runner-review` の 6 の監督者を頼む");
+  expect(converge).not.toContain("review-compare");
+  // the merge checklist asks for an answer to every finding and the supervisor's ruling where a kind needs one
+  const checklist = triage.slice(triage.indexOf("## 5. マージ可否"), triage.indexOf("## 6. マージと記録"));
+  expect(checklist).toContain("全部の指摘に答えがある");
+  expect(checklist).toContain("要る種類に監督者の裁定がある");
+  expect(checklist).not.toContain("main と比べて");
+  const complete = read("pbi-complete");
+  expect(complete).toContain("`ops-kit job request review <PR> --as arbiter --cwd … --prompt … --out …`");
+  expect(complete).not.toContain("--as recheck --kinds");
+  expect(complete).toContain("`ops-kit job request recheck <PR> --kind <種類>");
 });
 
 test("cross-runner-review: post_review prints the model the job ran with under the summary's first line", () => {
@@ -899,7 +940,7 @@ test("cross-runner-review: the follow-up review re-reads the PR body, which the 
   expect(step4).toContain("gh pr view $N --json number,title,body,url");
   // ローカルの変更（PR の無い workspace）でも、見直しの前に本文を直して取り直す
   expect(triageStep3()).toContain("ops-kit backlog edit <変更> --body-file");
-  expect(triageStep3()).toContain("ops-kit backlog view <変更> --json | jq -r .issue.body");
+  expect(triageStep3()).toContain("ops-kit backlog view <変更> --json` の `.issue.body`");
   const local = review.slice(review.indexOf("**ローカルの変更では**"), review.indexOf("レビュー指示（"));
   expect(local).toContain('`ops-kit backlog view <変更> > "$M/pr.md"`（4 の見直しの前にも同じ行で取り直す）');
 });
@@ -1176,7 +1217,7 @@ test("skills: what keeps a review from going round — the conditions decided wh
   // the lists are made by the kit's commands, and how a reviewer uses them is not written in the skill a second time
   for (const cmd of ['ops-kit review-handled $N --kind "$KIND" > "$M/handled.md"', 'ops-kit review-handled $N --kind review > "$M/handled.md"', 'ops-kit old-paths check "origin/$BASE_REF" "$M/pr.md"']) expect(review).toContain(cmd);
   expect(review).toContain("### Read outside the diff");
-  for (const rule of ["- blocker:", "a reply never settles a finding by itself", "Repeat of:"]) {
+  for (const rule of ["- blocker:", "the arbiter rules on it by the written rules", "Repeat of:"]) {
     expect(REVIEW_RULES).toContain(rule);
     expect({ rule, inSkill: review.includes(rule) }).toEqual({ rule, inSkill: rule === "Repeat of:" });
   }
@@ -1187,8 +1228,9 @@ test("skills: what keeps a review from going round — the conditions decided wh
   // a point raised again after its fix: back to the policy before the next fix, reachable from the unattended flow
   const triage = read("review-triage-and-merge");
   const again = triage.slice(triage.indexOf("### 同じ論点が続いたら（直す前に）"), triage.indexOf("### 修正する"));
-  for (const word of ["同じ形にできるならそうする", "PBI の決定ログに書く", "`## 判断待ち` を出して止める", "Task の手順を方針に合わせて直す", "回数では止めない", "`Repeat of:`"]) expect(again).toContain(word);
+  for (const word of ["同じ形にできるならそうする", "PBI の決定ログに書く", "Task の手順を方針（裁定が `[reviewer]` ならその裁定）に合わせて直す", "回数では止めない", "`Repeat of:`"]) expect(again).toContain(word);
   expect(read("pbi-complete").split("「同じ論点が続いたら」").length - 1).toBe(2);
+  expect(again).not.toContain("`## 判断待ち` を出して止める");
   // nits left as they are: one table in the summary the handled list picks up by its heading
   expect(triage).toContain("| 見送った nit・question（[レビュアー] `path:line` と 1 文の引用） | 根拠 |");
   expect(triage).toContain(`1 行目は必ず \`${TRIAGE_HEADING}\``);
@@ -1237,4 +1279,13 @@ test("skills: gate keys — pbi-to-tasks bars a display record or a gated side's
   for (const word of ["`## ゲートの鍵`", "`**鍵の変更**: あり|なし`", "`**進め方**: 止めて待つ`", "決定ログに 1 行"]) expect(pbi).toContain(word);
   expect(pbi.indexOf("### 4.5 ゲートの鍵")).toBeLessThan(pbi.indexOf("### 5. PBI を Ready にする"));
   expect(read("request-to-backlog")).toContain("「仕組みを無くす（無くすと何が起きるか）」を必ず入れる");
+});
+
+test("skills: every body save in the skills and processes passes the version it read (--rev)", () => {
+  const files = [...readdirSync(skills).map((n) => join(skills, n, "SKILL.md")), join(skills, "../processes/p1-direct.md")];
+  const bare: string[] = [];
+  for (const f of files)
+    for (const m of readFileSync(f, "utf8").matchAll(/backlog edit [^|\n`]*--body-file[^|\n`]*/g)) if (!m[0].includes("--rev")) bare.push(`${relative(skills, f)}: ${m[0].slice(0, 60)}`);
+  expect(bare).toEqual([]);
+  expect(files.filter((f) => readFileSync(f, "utf8").includes("二重の組")).map((f) => relative(skills, f))).toEqual([]);
 });

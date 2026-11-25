@@ -8,7 +8,7 @@ import { Settings, type Job, type JobRequest, type RunnerId, type Task } from "@
 import { loadConfig } from "./config.ts";
 import { Db } from "./db.ts";
 import { mergeRecordsOf } from "./merge-records.ts";
-import { DAEMON_MERGE_GATE, deliverReview, spawnCollectPending, jobCommand, JobError, reviewResult, auditResult, JOBS_KEEP_MS, type JobDeps, type ResolvedJobRequest, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
+import { DAEMON_MERGE_GATE, deliverReview, spawnCollectPending, jobCommand, JobError, reviewResult, auditResult, arbiterResult, JOBS_KEEP_MS, type JobDeps, type ResolvedJobRequest, jobUsage, pruneJobDirs, localCiPendingDir, recoverJobs, requestJob, sameRepository } from "./jobs.ts";
 import { fakeAdapter } from "./api-test-harness.ts";
 import { startServer } from "./server.ts";
 import { runnerChoice } from "./server/routing.ts";
@@ -48,6 +48,22 @@ afterAll(() => {
   db.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+/** A database whose registered workspace (a clone of the repository above) has stored PR `pr` in `state`; `put` replaces what is stored. */
+function dbWithStoredPr(file: string, pr: number) {
+  const db2 = new Db(join(root, file));
+  db2.insertTask(mkTask("t1", join(root, "task")));
+  const clone = join(root, `${file}-clone`);
+  mkdirSync(clone);
+  sh(clone, "git", "init", "-q");
+  sh(clone, "git", "remote", "add", "origin", ORIGIN);
+  const source = { service: "github", host: "github.com", repository: "acme/app", project: { owner: "acme", number: 1 } } as const;
+  const ws = db2.upsertWorkspace({ name: "app", path: clone, kind: "repo" });
+  db2.setWorkspaceBacklogSource(ws.id, source);
+  let at = 1000;
+  const put = (state: "OPEN" | "MERGED") => db2.putBacklogSnapshot(source, { records: [{ objectKind: "pull-request", externalId: `PR_${pr}`, fetchState: "fetched", remote: { number: pr, state, isDraft: false, labels: [], closes: [], mergeCommit: null, updatedAt: "2026-10-02T00:00:00Z", files: [], closedAt: null, mergedAt: state === "MERGED" ? "2026-10-02T00:00:00Z" : null, head: null } }], cursor: null, syncedAt: (at += 1000) });
+  return { db: db2, put };
+}
 
 /** Deps whose command is `script` and whose finish resolves `ended`. */
 function fake(script: string) {
@@ -477,14 +493,17 @@ describe("jobs", () => {
 
   test("an audit job (as audit) keeps the first line of its output, which has no Findings section; another review's such output records none", async () => {
     writeFileSync(join(repo, "prompt.md"), "audit");
+    const audits = dbWithStoredPr("audit-first-line.sqlite", 12);
+    audits.put("MERGED");
     const run = async (extra: { as?: "audit"; runner: "claude" | "codex" }, name: string) => {
       const { deps, ended } = fake(`printf '\\npass\\n' > "$JOB_OUT"`);
-      const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: name, ...extra });
+      const job = requestJob({ ...deps, db: audits.db }, { kind: "review", taskId: "t1", pr: 12, cwd: repo, promptFile: "prompt.md", outFile: name, ...extra });
       await ended;
-      return db.getJob(job.id)!;
+      return audits.db.getJob(job.id)!;
     };
     expect((await run({ as: "audit", runner: "claude" }, "out-audit.md")).result).toEqual({ review: { findings: [], firstLine: "pass" } });
     expect((await run({ runner: "codex" }, "out-plain.md")).result).toBeNull();
+    audits.db.close();
     expect(auditResult("\n  finding  \n- a.ts:1 x")).toEqual({ findings: [], firstLine: "finding" });
     expect(auditResult("\n \n")).toBeNull();
   });
@@ -911,10 +930,10 @@ describe("jobs", () => {
   });
 
   describe("review runner from the setting", () => {
-    const ask = (setting: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "fallback" | "recheck" | "audit" | "attack" } = {}, taskId = "t1") => {
+    const ask = (setting: "same" | "other", extra: { runner?: "codex" | "claude"; as?: "fallback" | "recheck" | "audit" | "attack"; pr?: number } = {}, taskId = "t1", database: Db = db) => {
       writeFileSync(join(repo, "prompt.md"), "review");
       const { deps, ended } = fake("true");
-      const job = requestJob({ ...deps, reviewRunner: () => setting }, { kind: "review", taskId, pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md", ...extra });
+      const job = requestJob({ ...deps, db: database, reviewRunner: () => setting }, { kind: "review", taskId, pr: 12, cwd: repo, promptFile: "prompt.md", outFile: "out.md", ...extra });
       return { job, ended };
     };
 
@@ -925,9 +944,98 @@ describe("jobs", () => {
       const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
       expect(() => ask("same", { runner: "codex" })).toThrow("主レビュアーは claude です");
       expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before); // refused before a job is recorded
-      const fallback = ask("same", { runner: "codex", as: "fallback" });
-      expect(fallback.job.runner).toBe("codex");
-      await fallback.ended;
+      // a fallback needs the main reviewer's window at its limit on record
+      db.upsertQuota("claude", "five_hour", 0.95, Math.floor(Date.now() / 1000) + 3600, Date.now(), "same-test");
+      try {
+        const fallback = ask("same", { runner: "codex", as: "fallback" });
+        expect(fallback.job.runner).toBe("codex");
+        await fallback.ended;
+      } finally {
+        db.upsertQuota("claude", "five_hour", 0, 0, Date.now(), "same-test");
+      }
+    });
+
+    const endedJob = (pr: number, over: { runner?: "codex" | "claude"; cwd?: string; repo?: string; status?: "pass" | "fail"; summary?: string; as?: "attack" | "audit" | "recheck" | "fallback" }, database: Db = db) => {
+      const j = database.insertJob({ kind: "review", taskId: "t1", pr, runner: over.runner ?? "claude", cwd: over.cwd ?? repo, startedAt: Date.now(), repo: over.repo ?? "acme/app", head: null, as: over.as ?? null, kinds: [] });
+      database.finishJob(j.id, { status: over.status ?? "pass", exitCode: 0, summary: over.summary ?? "", endedAt: Date.now() });
+    };
+    const refusedWith = (fn: () => unknown): string => {
+      try {
+        fn();
+      } catch (e) {
+        expect(e).toBeInstanceOf(JobError);
+        expect((e as JobError).status).toBe(400);
+        return (e as JobError).message;
+      }
+      throw new Error("not refused");
+    };
+
+    test("fallback: refused without a usage-limit record of the main reviewer; taken with a window at 0.9 or a main review job of the same PR that ended at its limit", async () => {
+      const soon = () => Math.floor(Date.now() / 1000) + 3600;
+      const before = db.listJobs(Number.MAX_SAFE_INTEGER).length;
+      try {
+        db.upsertQuota("claude", "five_hour", 0.5, soon(), Date.now(), "fb-test");
+        expect(refusedWith(() => ask("same", { runner: "codex", as: "fallback", pr: 31 }))).toContain("claude");
+        // a window of the other runner at its limit says nothing of the main reviewer
+        db.upsertQuota("codex", "five_hour", 0.99, soon(), Date.now(), "fb-test");
+        refusedWith(() => ask("same", { runner: "codex", as: "fallback", pr: 31 }));
+        expect(db.listJobs(Number.MAX_SAFE_INTEGER).length).toBe(before); // refused before a job is recorded
+        db.upsertQuota("claude", "five_hour", 0.95, soon(), Date.now(), "fb-test");
+        const taken = ask("same", { runner: "codex", as: "fallback", pr: 31 });
+        expect(taken.job).toMatchObject({ runner: "codex", as: "fallback" });
+        await taken.ended;
+        // a window that has come back is no record of a limit now
+        db.upsertQuota("claude", "five_hour", 0.95, Math.floor(Date.now() / 1000) - 60, Date.now(), "fb-test");
+        refusedWith(() => ask("same", { runner: "codex", as: "fallback", pr: 31 }));
+        // a main review of another repository's PR with the same number is no record of this one's
+        endedJob(31, { status: "fail", summary: "You've hit your session limit · resets 4:10am (Asia/Tokyo)", repo: "acme/elsewhere", cwd: join(root, "gone-elsewhere") });
+        refusedWith(() => ask("same", { runner: "codex", as: "fallback", pr: 31 }));
+        // an ended job of this PR that did not end at the limit is not one either; the one that did is
+        endedJob(31, { status: "fail", summary: "exit 1" });
+        refusedWith(() => ask("same", { runner: "codex", as: "fallback", pr: 31 }));
+        endedJob(31, { status: "fail", summary: "You've hit your session limit · resets 4:10am (Asia/Tokyo)" });
+        const byJob = ask("same", { runner: "codex", as: "fallback", pr: 31 });
+        expect(byJob.job.runner).toBe("codex");
+        await byJob.ended;
+      } finally {
+        for (const r of ["claude", "codex"] as const) db.upsertQuota(r, "five_hour", 0, 0, Date.now(), "fb-test");
+      }
+    });
+
+    test("recheck: refused until a main review job of the same PR has ended", async () => {
+      const first = refusedWith(() => ask("other", { as: "recheck", pr: 32 }));
+      expect(first).toContain("codex");
+      expect(first).toContain("主レビュー");
+      endedJob(32, { repo: "acme/elsewhere", cwd: join(root, "gone-elsewhere") });
+      refusedWith(() => ask("other", { as: "recheck", pr: 32 }));
+      // an attacking-side review that ended is not the main review
+      endedJob(32, { as: "attack" });
+      refusedWith(() => ask("other", { as: "recheck", pr: 32 }));
+      // a running review has not ended
+      const running = db.insertJob({ kind: "review", taskId: "t1", pr: 32, runner: "codex", cwd: repo, startedAt: Date.now(), repo: "acme/app", head: null, as: null, kinds: [] });
+      refusedWith(() => ask("other", { as: "recheck", pr: 32 }));
+      db.finishJob(running.id, { status: "pass", exitCode: 0, summary: "", endedAt: Date.now() });
+      const taken = ask("other", { as: "recheck", pr: 32 });
+      expect(taken.job).toMatchObject({ runner: "claude", as: "recheck" });
+      await taken.ended;
+    });
+
+    test("audit: refused while the PR is open; taken once it is stored as merged", async () => {
+      const { db: db2, put } = dbWithStoredPr("audit.sqlite", 40);
+      try {
+        put("OPEN");
+        const open = refusedWith(() => ask("other", { runner: "claude", as: "audit", pr: 40 }, "t1", db2));
+        expect(open).toContain("マージの記録がまだ");
+        expect(open).toContain("同期の後に頼み直");
+        // a number the store does not hold has no merge record either
+        refusedWith(() => ask("other", { runner: "claude", as: "audit", pr: 41 }, "t1", db2));
+        put("MERGED");
+        const taken = ask("other", { runner: "claude", as: "audit", pr: 40 }, "t1", db2);
+        expect(taken.job).toMatchObject({ runner: "claude", as: "audit", pr: 40 });
+        await taken.ended;
+      } finally {
+        db2.close();
+      }
     });
 
     test("other: the runner that did not implement reviews, and the refusal names it", async () => {
@@ -944,10 +1052,8 @@ describe("jobs", () => {
       expect((refusal as JobError).status).toBe(400);
       expect((refusal as JobError).message).toContain("--runner codex");
       expect(() => ask("other", { as: "fallback" })).toThrow("runner の名指し");
-      // a recheck or an audit is read by a runner that is not the main reviewer, and says so
-      const audit = ask("other", { runner: "claude", as: "audit" });
-      expect(audit.job.runner).toBe("claude");
-      await audit.ended;
+      // an audit is read by a runner that is not the main reviewer, and says so (its record is checked in the audit test below)
+      expect(refusedWith(() => ask("other", { runner: "claude", as: "audit" }))).toContain("audit");
     });
 
     test("attack takes either runner under either setting, so one runner's usage limit does not stop it, and still needs one named", async () => {
@@ -1076,7 +1182,7 @@ describe("jobs", () => {
     const run = async (runner: "claude" | "codex", choice: { model?: string; effort?: string }) => {
       const { deps, ended } = fake(system);
       deps.reviewChoice = () => choice;
-      const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out-model.md" });
+      const job = requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "attack", cwd: repo, promptFile: "prompt.md", outFile: "out-model.md" });
       expect(job).toMatchObject({ model: choice.model || null, effort: choice.effort || null });
       return (await ended).model;
     };
@@ -1102,7 +1208,7 @@ describe("jobs", () => {
     writeFileSync(join(repo, "prompt.md"), "review");
     for (const [runner, file, body] of [["claude", "claude.jsonl", jsonl(claudeResult)], ["codex", "codex.jsonl", jsonl(codexTurn(10, 4, 2))]] as const) {
       const { deps, ended } = fake(`printf '%s' '${body.replace(/'/g, "")}' > "$J/${file}"`);
-      requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+      requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner, as: "attack", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
       await ended;
     }
     const peek = new Database(join(root, "db.sqlite"), { readonly: true });
@@ -1112,7 +1218,7 @@ describe("jobs", () => {
     expect(rows[0]!.cost_usd).toBe(0.5);
     // a review that left nothing readable books nothing and still ends
     const { deps, ended } = fake("true");
-    requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", as: "fallback", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
+    requestJob(deps, { kind: "review", taskId: "t1", pr: 12, runner: "claude", as: "attack", cwd: repo, promptFile: "prompt.md", outFile: "out.md" });
     expect((await ended).status).toBe("pass");
     expect(ledger()).toHaveLength(2);
     peek.close();
@@ -1367,6 +1473,65 @@ describe("/api/jobs", () => {
     } finally {
       await core.stop();
     }
+  });
+
+  test("an arbiter job runs on the recheck runner of the setting and records its rulings and viewpoints", async () => {
+    const home = join(root, "home-arbiter");
+    const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: "0", SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" });
+    const out = [
+      "### Rulings",
+      "- [reviewer] `a.ts:3` — rule: README Design rules",
+      "- [reviewer] `b.ts:4` — rule: none",
+      "- [implementer] `c.ts:5` — rule: none",
+      "",
+      "### Viewpoints",
+      "- error paths — covered",
+      "- old callers — missing",
+    ].join("\n");
+    const argvs: string[][] = [];
+    // the real settings route and job request; only the runner's process is a fake (it writes the arbiter's output)
+    const core = await startServer(cfg, [fakeAdapter([], { id: "claude", models: [], efforts: [] })], { port: 0, selfdevChecks: false, dryRunRestart: true, jobCommand: (r) => ((argvs.push(jobCommand(r as ResolvedJobRequest).argv), { argv: ["sh", "-c", `printf '%s\\n' "$ARBITER_OUT" > "$JOB_OUT"`], tail: "" })) });
+    process.env.ARBITER_OUT = out;
+    try {
+      core.db.insertTask(mkTask("t9", join(root, "task")));
+      writeFileSync(join(repo, "prompt.md"), "arbiter");
+      const base = `http://127.0.0.1:${core.server.port}`;
+      const patch = async (body: unknown) => {
+        const r = await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify(body) });
+        expect([r.status, r.status === 200 ? "" : await r.text()]).toEqual([200, ""]);
+      };
+      const ask = (extra: Record<string, unknown> = {}) => fetch(`${base}/api/jobs`, { method: "POST", body: JSON.stringify({ kind: "review", taskId: "t9", pr: 77, cwd: repo, promptFile: "prompt.md", outFile: "out-arbiter.md", as: "arbiter", ...extra }) });
+      // setting other: the runner that is not the main reviewer (claude for a claude Task's codex review), and only once a main review of the PR has ended
+      await patch({ reviewRunner: "other", recheckRunner: "other" });
+      const early = await ask();
+      expect([early.status, ((await early.json()) as { error: string }).error]).toEqual([400, expect.stringContaining("主レビュー")]);
+      const main = core.db.insertJob({ kind: "review", taskId: "t9", pr: 77, runner: "codex", cwd: repo, startedAt: Date.now(), repo: "acme/app", head: null, as: null, kinds: [] });
+      core.db.finishJob(main.id, { status: "pass", exitCode: 0, summary: "", endedAt: Date.now() });
+      const done = async (r: Response) => {
+        expect(r.status).toBe(202);
+        const id = ((await r.json()) as Job).id;
+        for (let i = 0; i < 100 && core.db.getJob(id)!.status === "running"; i++) await Bun.sleep(50);
+        return core.db.getJob(id)!;
+      };
+      const other = await done(await ask());
+      expect(other).toMatchObject({ runner: "claude", as: "arbiter", kinds: [], status: "pass" });
+      expect(other.result?.review).toMatchObject({ rulings: { reviewerSide: ["- [reviewer] `a.ts:3` — rule: README Design rules"], missing: ["- old callers — missing"], unreadable: [] } });
+      const wrong = await ask({ runner: "codex" });
+      expect([wrong.status, ((await wrong.json()) as { error: string }).error]).toEqual([400, expect.stringContaining("監督者は claude")]);
+      // setting same: the main reviewer's own runner, in a new session
+      await patch({ recheckRunner: "same" });
+      const same = await done(await ask());
+      expect(same).toMatchObject({ runner: "codex", as: "arbiter" });
+      expect(argvs.length).toBe(2);
+      for (const argv of argvs) expect(argv.filter((a) => a === "resume" || a.startsWith("--resume") || a === "--continue")).toEqual([]);
+      // kinds belong to a recheck only
+      expect((await ask({ kinds: ["size"] })).status).toBe(400);
+    } finally {
+      delete process.env.ARBITER_OUT;
+      await core.stop();
+    }
+    // an output that cannot be read is on record as unreadable, so it is not taken for a ruling that found nothing
+    expect(arbiterResult("looks fine").rulings).toEqual({ reviewerSide: [], missing: [], unreadable: ["no `### Rulings` section", "no `### Viewpoints` section"] });
   });
 
   test("POST with a relative fixtures folder answers 400", async () => {

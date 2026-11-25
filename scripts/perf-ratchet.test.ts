@@ -182,6 +182,25 @@ describe("perf-ratchet bytes against main's", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  test("check without the base file", async () => {
+    const budgets = (await Bun.file(BUDGET_PATH).json()) as Budgets;
+    const dir = mkdtempSync(join(tmpdir(), "sb-perf-ratchet-test-"));
+    try {
+      // one count far below its ceiling is improved:, which the ceilings judge without main's measure
+      const journeys = { ...budgets.local.journeys, launch: { ...budgets.local.journeys.launch, requests: 0 } };
+      const r = join(dir, "result.json");
+      writeFileSync(r, JSON.stringify({ runs: 5, journeys, bundle: { js: 100000, css: 10000 }, loaded: budgets.local.loaded }));
+      const missing = join(dir, "perf-base.json");
+      const p = Bun.spawn([process.execPath, "scripts/perf-ratchet.ts", "check", r, "--base", missing, "--env", "local"], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe", env: childEnv({ PERF_BASE_REF: "HEAD" }) });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      expect(out).toContain("improved: journeys.launch.requests = 0 <");
+      expect(out).toContain(`bundle: not compared (${missing} is missing: the base step did not measure)\n`);
+      expect(out + err).not.toContain("ENOENT");
+      expect(code).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   test("bytes has no ceiling: judge leaves a result's bytes and responses out", () => {
     const r = { journeys: { "open-task": { requests: 9, bytes: 99999, responses: evals(1) } } } as unknown as Budget;
     expect(judge(r, { journeys: { "open-task": { requests: 9 } } })).toEqual({ over: [], improved: [] });

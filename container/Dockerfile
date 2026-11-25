@@ -11,15 +11,15 @@ RUN dnf install -y -q git sqlite unzip tar xz gzip shadow-utils findutils jq dif
 
 # pinned as in aws/host/devtools.sh and node.sh (same versions, same URLs, same sha256). The unsuffixed sha256 are the arm64 ones the
 # host pins; <NAME>_SHA256_X86_64 is the same version's x86-64 file from the same upstream release
-ARG DOCKER_VERSION=29.10.0
-ARG DOCKER_SHA256=6e5159e8b5615e0c0c2954a2a1a2a12bc65f5d9b603595dba24a10cb367408cd
-ARG DOCKER_SHA256_X86_64=7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def
+ARG DOCKER_VERSION=29.10.1
+ARG DOCKER_SHA256=a38c8a9ef6d17bce07499bfd3a3688542274769dc3b4f75c06ea2705fe65053e
+ARG DOCKER_SHA256_X86_64=061642059fa7f2ed9b2f04a327a951cff4249585cf04b2661c2a6539197c9962
 ARG COMPOSE_VERSION=5.7.1
 ARG COMPOSE_SHA256=f2f49f903240895fa764c0dca3a14548b754ad9426f6b609ccaf55ec5a3aa2a5
 ARG COMPOSE_SHA256_X86_64=af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf
-ARG UV_VERSION=0.13.8
-ARG UV_SHA256=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
-ARG UV_SHA256_X86_64=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+ARG UV_VERSION=0.13.10
+ARG UV_SHA256=14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2
+ARG UV_SHA256_X86_64=bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
 ARG GITLEAKS_SHA256_X86_64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
@@ -79,6 +79,19 @@ RUN npm install -g --no-fund --no-audit "bun@$BUN_VERSION" "@anthropic-ai/claude
   && ln -s bun.exe /usr/local/lib/nodejs/lib/node_modules/bun/bin/bun \
   && npm cache clean --force
 
+# Playwright's Chromium at the host's pin (aws/host/devtools.sh) and Noto Sans and Noto Sans CJK JP for the screenshots, in the base
+# stage so that the stand-alone image and the ci stage both have them: a task in the container runs the screens audit and the e2e scripts
+ARG PLAYWRIGHT_VERSION=1.65.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN dnf install -y -q fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
+    cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib \
+  && dnf clean all \
+  && npx -y "playwright@$PLAYWRIGHT_VERSION" install chromium \
+  && chmod -R a+rX /opt/playwright \
+  && ln -s "$(ls -d /opt/playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)" /usr/local/bin/chromium \
+  && npm cache clean --force
+ENV CHROME_BIN=/usr/local/bin/chromium
+
 # the user, its HOME, and the four paths that container/compose.yaml mounts volumes on (a new named volume takes the
 # owner of the directory it covers, so the daemon can write to them); what gh-stack's install above made is the user's
 RUN useradd -u 1000 -m -d /home/switchboard switchboard \
@@ -86,22 +99,13 @@ RUN useradd -u 1000 -m -d /home/switchboard switchboard \
   && chown -R switchboard:switchboard /home/switchboard
 ENV HOME=/home/switchboard
 
-# the stage that CI runs in, off the host (sb-offload: `docker build --target ci`): what the stand-alone image has, plus a
-# git with PCRE (git grep -P), Playwright's Chromium at the host's pin (aws/host/devtools.sh), Noto Sans and Noto Sans
-# CJK JP for the screenshots (the build fetches the work tree from S3 with the base stage's aws CLI). It stops before the repository
+# the stage that CI runs in, off the host (sb-offload: `docker build --target ci`): what the stand-alone image has (Chromium and the
+# Noto fonts come from the base stage), plus a git with PCRE (git grep -P), zstd, rsync and the like (the build fetches the work tree
+# from S3 with the base stage's aws CLI). It stops before the repository
 # is copied in: the work tree is mounted or copied by the CI steps. No USER, so root can mount tmpfs, and the
 # unprivileged user of the base stage (switchboard, uid 1000) is the one that runs the steps.
 FROM base AS ci
-ARG PLAYWRIGHT_VERSION=1.65.1
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN dnf install -y -q git-core zstd rsync procps-ng file diffutils fontconfig google-noto-sans-fonts google-noto-sans-cjk-ttc-fonts nss atk at-spi2-atk \
-    cups-libs libdrm libxkbcommon libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib \
-  && dnf clean all \
-  && npx -y "playwright@$PLAYWRIGHT_VERSION" install chromium \
-  && chmod -R a+rX /opt/playwright \
-  && ln -s "$(ls -d /opt/playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)" /usr/local/bin/chromium \
-  && rm -rf /home/switchboard/.npm
-ENV CHROME_BIN=/usr/local/bin/chromium
+RUN dnf install -y -q git-core zstd rsync procps-ng file diffutils && dnf clean all
 # --no-index: the build is not in a repository, where git grep stops with 128 before it looks at -P
 RUN git grep --no-index -P x </dev/null; [ $? -ne 128 ]
 
@@ -118,5 +122,5 @@ RUN bun install --frozen-lockfile
 USER switchboard
 WORKDIR /home/switchboard
 
-# sb-rescue and its daemon behind relays to 127.0.0.1 (container/entrypoint.sh); started by container/up.sh
+# sb-rescue and its daemon on the machine's 127.0.0.1 only, no relay (host network; container/entrypoint.sh); started by container/up.sh
 ENTRYPOINT ["bash", "/opt/switchboard/container/entrypoint.sh"]

@@ -10,7 +10,7 @@ import { join, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "./config.ts";
 import { startServer as startDaemon } from "./server.ts";
-import type { AgentEvent, RunnerId, StartOptions, RunnerDetection, RunnerAdapter, RunnerSession, BacklogAction, Task, Backlog, BacklogItem, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogIssueData } from "@switchboard/protocol";
+import type { AgentEvent, ModelOption, RunnerId, StartOptions, RunnerDetection, RunnerAdapter, RunnerSession, BacklogAction, Task, Backlog, BacklogItem, BacklogIssueDetail, BacklogQueue, BacklogSource, BacklogIssueData } from "@switchboard/protocol";
 import type { CoreServer, StartServerOptions } from "./server.ts";
 import { stopArmedQueues } from "./tasks/state.ts";
 import type { GhRunner } from "./backlog-gh.ts";
@@ -41,13 +41,13 @@ export const NO_GH = async () => ({ code: 1, stdout: "", stderr: "no gh in this 
 export const NO_HISTORY = { SWITCHBOARD_CLAUDE_PROJECTS: join(tmpdir(), "switchboard-test-no-claude-projects"), SWITCHBOARD_HISTORY_POLL_MS: "0" };
 
 /** A scripted fake runner: replays the recorded Claude fixture events, pauses on permission.ask until answered. */
-export function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; gate?: Promise<unknown>; closeMs?: number; models?: string[]; bedrockModels?: string[]; efforts?: string[]; cliDefaultModel?: () => string | undefined; detect?: () => Partial<RunnerDetection>; forks?: { min: string }; hasSession?: (id: string) => boolean } = {}): RunnerAdapter {
+export function fakeAdapter(script: AgentEvent[], opts: { id?: RunnerId; lingers?: boolean; starts?: StartOptions[]; sends?: string[]; modes?: string[]; dangerModes?: string[]; defaultMode?: string; liveSwitch?: boolean; refuseMode?: string; modeChanges?: string[]; slowMs?: number; gate?: Promise<unknown>; closeMs?: number; models?: string[]; bedrockModel?: (m: ModelOption) => ModelOption | null; efforts?: string[]; cliDefaultModel?: () => string | undefined; detect?: () => Partial<RunnerDetection>; forks?: { min: string }; hasSession?: (id: string) => boolean } = {}): RunnerAdapter {
   return {
     id: opts.id ?? "claude",
     ...(opts.forks ? { forks: true, forkMinVersion: opts.forks.min } : {}),
     hasSession: opts.hasSession,
     models: opts.models?.map((value) => ({ value, label: value })),
-    bedrockModels: opts.bedrockModels?.map((value) => ({ value, label: value })),
+    bedrockModel: opts.bedrockModel,
     efforts: opts.efforts?.map((value) => ({ value, label: value })),
     cliDefaultModel: opts.cliDefaultModel,
     permissionModes: opts.modes?.map((value) => ({ value, label: value, description: value, danger: opts.dangerModes?.includes(value) || undefined })),
@@ -402,7 +402,7 @@ export function importedAs(n: number, over: Record<string, unknown>, fetchState:
 }
 
 const bareItem = (over: Partial<BacklogItem>): Omit<BacklogItem, "progress"> => ({
-  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, onHold: false, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], events: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
+  number: 1, title: "t", url: "u", type: "pbi", stage: "ready", priority: null, storyPoints: null, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", commentedAt: null, tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, answeredAt: null, heldAt: null, confirmations: [], postMerge: [], closable: false, onHold: false, claim: null, flow: false, bodyChars: 0, requestChars: null, kind: null, requestFrom: null, origin: null, labels: [], waits: [], waitsAt: null, waitsUntil: null, overlap: null, prereqs: [], events: [], stopSummary: [], mockupTask: null, mockups: [], sync: { state: "synced", reason: null, lastSuccessfulSync: null, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A" }, workspaceId: "ws_meta", workspaceName: "switchboard", ...over,
 });
 
 /** A hand-built item with the answers `pbiProgress` gives for its stage and Tasks (what the daemon's read puts on it). */

@@ -28,7 +28,7 @@ import type { BacklogIssueData, BacklogSource } from "@switchboard/protocol";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BacklogArtifactPayload, BacklogOperation, BacklogOperationStatus, BacklogOverwritten, Db } from "./db.ts";
-import type { BacklogCreatePayload } from "./backlog-edit.ts";
+import { artifactName, type BacklogCreatePayload } from "./backlog-edit.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { backlogFieldValue, sameBacklogValue } from "./backlog-merge.ts";
 import { parseIncluded, responseOf, retryAtFromResponse, type GithubResponse } from "../../../ops-kit/src/gh.ts";
@@ -210,6 +210,14 @@ export const issueArtifactGh = {
   names: (stdout: string): string[] => (JSON.parse(stdout.trim() || "[]") as Array<{ name?: unknown }>).flatMap((a) => (typeof a?.name === "string" ? [a.name] : [])),
   create: (repo: string, issue: number, a: { name: string; file: string } | { name: string; url: string }): string[] =>
     "url" in a ? ["issue", "artifact", "create", String(issue), "-R", repo, a.url, "--name", a.name] : ["issue", "artifact", "create", String(issue), "-R", repo, `${a.file}#${a.name}`],
+  /** Why gh refused a create: it answers on stdout, one `failed\t<name>\t<file>\t<reason>` line per artifact, and leaves stderr empty. Null = no such line. */
+  refusal: (stdout: string): string | null => {
+    for (const line of stdout.split("\n")) {
+      const [kind, , , ...reason] = line.split("\t");
+      if (kind === "failed") return reason.join("\t").trim() || "gh issue artifact create: failed";
+    }
+    return null;
+  },
   /** Whether a gh call is the one that writes (not made once the sync is off). */
   writes: (args: string[]): boolean => args[0] === "issue" && args[1] === "artifact" && args[2] !== "list",
 };
@@ -578,7 +586,7 @@ class Sender {
   /** gh's own subcommand (not `gh api`): its output, or a CallError carrying what gh said, read as any failed call is. */
   private async cli(args: string[]): Promise<string> {
     const r = await this.gh(args, this.cwd);
-    if (r.code !== 0) throw new CallError(`gh ${args.slice(0, 3).join(" ")}: ${(r.stderr.trim() || `exit ${r.code}`).slice(0, 200)}`, responseOf(r.stdout, r.stderr));
+    if (r.code !== 0) throw new CallError(`gh ${args.slice(0, 3).join(" ")}: ${(r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`).slice(0, 200)}`, responseOf(r.stdout, r.stderr));
     return r.stdout;
   }
 
@@ -594,9 +602,18 @@ class Sender {
     if (!n) return { status: "failed", error: "Issue の番号が分かりません" };
     // anything but a plain `true` is not private: never sent
     if ((await call(this.gh, this.cwd, [this.repo("")]))?.private !== true) return { status: "failed", error: ARTIFACT_PUBLIC };
-    if (issueArtifactGh.names(await this.cli(issueArtifactGh.list(this.source.repository, n))).includes(p.name)) return { status: "done" };
+    // a name queued before the rule was gh's is made to fit here too (the stored payload is not rewritten)
+    const name = artifactName(p.name) || artifactName(p.artifactId);
+    if (issueArtifactGh.names(await this.cli(issueArtifactGh.list(this.source.repository, n))).includes(name)) return { status: "done" };
     posting.on = true;
-    await this.cli(issueArtifactGh.create(this.source.repository, n, copy.file ? { name: p.name, file: copy.file } : { name: p.name, url: p.url ?? "" }));
+    const args = issueArtifactGh.create(this.source.repository, n, copy.file ? { name, file: copy.file } : { name, url: p.url ?? "" });
+    const made = await this.gh(args, this.cwd);
+    if (made.code !== 0) {
+      // gh took the input and refused it (its reason is on stdout): nothing was made, not sent again by itself
+      const why = issueArtifactGh.refusal(made.stdout);
+      if (why && !made.stderr.trim()) return { status: "failed", error: why.slice(0, 300) };
+      throw new CallError(`gh ${args.slice(0, 3).join(" ")}: ${(made.stderr.trim() || made.stdout.trim() || `exit ${made.code}`).slice(0, 200)}`, responseOf(made.stdout, made.stderr));
+    }
     this.onWrite();
     posting.on = false;
     return { status: "done" };

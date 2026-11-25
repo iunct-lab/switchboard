@@ -130,6 +130,8 @@ export interface WaitFacts {
   files: WaitFile[];
   /** When its attached runner last gave an event; null = no runner attached. */
   lastEventAt: number | null;
+  /** The hook the runner runs now, from its heartbeats (`TaskManager.lastHooks`); null = none. */
+  hook?: { name: string; since: number; beatAt: number } | null;
   /** A later stage Task of the same Issue took the work over: this Task's stops are waited on by nobody any more. */
   superseded: boolean;
   /** Why the queue waits (`TaskManager.queueWait`). */
@@ -160,8 +162,13 @@ export function waitsOf(f: WaitFacts): WaitRecord[] {
   for (const w of f.files) out.push({ kind: "command", key: `command:${w.pid}`, label: w.label, since: w.startedAt, until: w.timeoutAt, progressAt: w.stallSec === null ? null : w.progressAt, stallSec: w.stallSec });
   // a turn, or the runner's background jobs: the runner is expected to say something
   const atWork = isWorking(t, "output");
-  if (atWork && t.executionMode !== "cloud" && f.lastEventAt !== null && !f.files.some((w) => !waitOver({ until: w.timeoutAt }, now)))
-    out.push({ kind: "output", key: "output", label: t.status === "background" ? "裏の処理の知らせ" : "ランナーの出力", since: f.lastEventAt, until: f.lastEventAt + b.silentMs });
+  if (atWork && t.executionMode !== "cloud" && f.lastEventAt !== null && !f.files.some((w) => !waitOver({ until: w.timeoutAt }, now))) {
+    // heartbeats of a hook still arriving: the runner is working, not silent. Once they stop for `silentMs` it is the silence again.
+    // Judged by the last heartbeat, not the last event: a send to the live runner moves `lastEventAt` without a heartbeat.
+    if (f.hook && now - f.hook.beatAt < b.silentMs)
+      out.push({ kind: "hook", key: "hook", label: f.hook.name, since: f.hook.since, until: f.hook.beatAt + b.silentMs, progressAt: f.hook.beatAt, stallSec: null });
+    else out.push({ kind: "output", key: "output", label: t.status === "background" ? "裏の処理の知らせ" : "ランナーの出力", since: f.lastEventAt, until: f.lastEventAt + b.silentMs });
+  }
   if (t.status === "waiting") out.push({ kind: "person", key: "approval", label: "ツールの承認", since: t.statusAt, until: t.statusAt + b.othersMs });
   else if (personWait(t) === "needs") out.push({ kind: "person", key: "person", label: "利用者の対応", since: t.statusAt, until: t.statusAt + b.othersMs });
   if (t.resumeAt !== null) {
@@ -220,7 +227,7 @@ export const WAIT_CHECK_MS = 30_000;
 
 export interface WaitWatchDeps {
   db: Db;
-  tasks: Pick<TaskManager, "lastEvents" | "queueWait" | "queueRefusal" | "recordStop" | "record" | "abort">;
+  tasks: Pick<TaskManager, "lastEvents" | "lastHooks" | "queueWait" | "queueRefusal" | "recordStop" | "record" | "abort">;
   dir: string;
   bounds: () => WaitBounds;
   broadcastTask: (task: Task) => void;
@@ -237,7 +244,7 @@ export interface WaitWatchDeps {
  * One Task's waits worked out again and stored when they changed (the screens are told): what the watch does for each
  * Task it looks at, and what an answer to a wait's question does at once, so the question does not stay until the next look.
  */
-export function refreshTaskWaits(deps: Pick<WaitWatchDeps, "db" | "broadcastTask" | "bounds">, task: Task, extra: Pick<WaitFacts, "files" | "lastEventAt" | "queue" | "refusal">, now: number): void {
+export function refreshTaskWaits(deps: Pick<WaitWatchDeps, "db" | "broadcastTask" | "bounds">, task: Task, extra: Pick<WaitFacts, "files" | "lastEventAt" | "hook" | "queue" | "refusal">, now: number): void {
   const { db } = deps;
   const issue = issueOf(task);
   const superseded = issue !== null && db.lastStageTask(task.workspaceId!, issue)?.id !== task.id;
@@ -281,6 +288,7 @@ export async function checkWaits(deps: WaitWatchDeps, now: number): Promise<void
     }
   }
   const lastEvents = tasks.lastEvents();
+  const hooks = tasks.lastHooks();
   const queue = tasks.queueWait();
   const candidates = new Map<string, Task>();
   // a Task stopped on its stops is looked at while the daemon still resumes it (STOP_WAITS_MS after its last change);
@@ -291,5 +299,5 @@ export async function checkWaits(deps: WaitWatchDeps, now: number): Promise<void
     if (t && !otherMachineOf(t)) candidates.set(id, t);
   }
   const bounds = deps.bounds();
-  for (const task of candidates.values()) refreshTaskWaits({ ...deps, bounds: () => bounds }, task, { files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, queue, refusal: tasks.queueRefusal(task.id) }, now);
+  for (const task of candidates.values()) refreshTaskWaits({ ...deps, bounds: () => bounds }, task, { files: waiting.get(task.id) ?? [], lastEventAt: lastEvents.get(task.id) ?? null, hook: hooks.get(task.id) ?? null, queue, refusal: tasks.queueRefusal(task.id) }, now);
 }

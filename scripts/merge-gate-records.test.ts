@@ -45,38 +45,44 @@ describe("the attacking review", () => {
 });
 
 describe("rechecks", () => {
+  const KINDS = ["security:docs", "security:tests", "security:lockfile", "security:gate-support", "size", "responsibility", "migration", "rescue", "design-rules"];
+  const READING = KINDS.filter((k) => !["migration", "rescue", "security:lockfile"].includes(k));
+  const rulings = (over: { reviewerSide?: string[]; missing?: string[]; unreadable?: string[] } = {}) => ({ review: { findings: [], firstLine: "[claude] arbiter", rulings: { reviewerSide: [], missing: [], unreadable: [], ...over } } });
+  const arbiter = (over: Partial<MergeRecordJob> = {}) => job({ as: "arbiter", result: rulings(), ...over });
   const asRecheck = (kinds: string[], over: Partial<MergeRecordJob> = {}) => job({ as: "recheck", kinds, ...over });
   const command = (kind: string, over: Partial<MergeRecordJob> = {}) => job({ kind: "recheck", runner: null, kinds: [kind], result: null, ...over });
-  const of = async (jobs: MergeRecordJob[], inOld = false) => (await rechecksOf(jobs, HEAD, covers(inOld))).sort();
+  const of = async (jobs: MergeRecordJob[], inOld = false) => (await rechecksOf(jobs, HEAD, covers(inOld), KINDS)).sort();
 
-  test("a kind a review reads: a review run as recheck for it, with no blocker and no should-fix", async () => {
-    expect(await of([asRecheck(["size", "responsibility"])])).toEqual(["responsibility", "size"]);
-    expect(await of([asRecheck(["size"], { result: finding("nit") }), asRecheck(["design-rules"], { result: finding("question") })])).toEqual(["design-rules", "size"]);
-    // a finding of weight, a path-less finding included (a weighted line whose place could not be read)
-    expect(await of([asRecheck(["size"], { result: finding("blocker") })])).toEqual([]);
-    expect(await of([asRecheck(["size"], { result: finding("should-fix") })])).toEqual([]);
+  test("an arbiter job lifts the reading kinds only with no reviewer-side ruling and no missing viewpoint", async () => {
+    expect(await of([arbiter()])).toEqual([...READING].sort());
+    // a reviewer-side ruling, a missing viewpoint, a line it could not read, or no rulings recorded at all
+    for (const r of [rulings({ reviewerSide: ["a.ts:1 the check is missing"] }), rulings({ missing: ["size"] }), rulings({ unreadable: ["???"] }), { review: { findings: [], firstLine: "x" } }, { review: { findings: [], firstLine: "x", rulings: { reviewerSide: [] } } }, { review: { findings: [], firstLine: "x", rulings: null } }, null]) {
+      expect([JSON.stringify(r), await of([arbiter({ result: r })])]).toEqual([JSON.stringify(r), []]);
+    }
+    // another head, or a job that did not pass
+    expect(await of([arbiter({ head: OLD })])).toEqual([]);
+    expect(await of([arbiter({ head: OLD })], true)).toEqual([...READING].sort());
+    expect(await of([arbiter({ status: "fail" }), arbiter({ status: "aborted" }), arbiter({ status: "running" })])).toEqual([]);
   });
 
-  test("a review that named no kind satisfies none; neither does a main review, a failed one, or one of another head", async () => {
-    expect(await of([asRecheck([])])).toEqual([]);
-    expect(await of([job({ kinds: [] }), asRecheck(["size"], { status: "fail" }), asRecheck(["size"], { result: null }), asRecheck(["size"], { head: OLD })])).toEqual([]);
-    expect(await of([asRecheck(["size"], { head: OLD })], true)).toEqual(["size"]);
+  test("a review run as recheck, a main review or an attack review lifts no kind", async () => {
+    expect(await of([asRecheck(["size", "responsibility", "rescue", "migration"]), job(), job({ as: "attack" }), job({ as: "fallback" })])).toEqual([]);
   });
 
   test("a kind a command decides: a recheck job that passed at exactly the head, whatever `covers` says of an older one", async () => {
     expect(await of([command("migration"), command("security:lockfile")])).toEqual(["migration", "security:lockfile"]);
     expect(await of([command("migration", { head: OLD })], true)).toEqual([]);
     expect(await of([command("migration", { status: "fail" }), command("security:lockfile", { status: "aborted" })])).toEqual([]);
-    // a review run as recheck for a command kind is not that kind's pass
-    expect(await of([asRecheck(["migration", "security:lockfile"])])).toEqual([]);
+    // an arbiter is not the pass of a command kind, and a review run as recheck for it is neither
+    expect(await of([arbiter(), asRecheck(["migration", "security:lockfile"])])).toEqual([...READING].sort());
   });
 
-  test("rescue needs both its command and a review of it", async () => {
+  test("rescue needs both its command and the arbiter's pass", async () => {
     expect(await of([command("rescue")])).toEqual([]);
-    expect(await of([asRecheck(["rescue"])])).toEqual([]);
-    expect(await of([command("rescue"), asRecheck(["rescue"])])).toEqual(["rescue"]);
-    expect(await of([command("rescue"), asRecheck(["rescue"], { result: finding("should-fix") })])).toEqual([]);
-    expect(await of([command("rescue", { head: OLD }), asRecheck(["rescue"], { head: OLD })], true)).toEqual([]);
+    expect(await of([arbiter()])).not.toContain("rescue");
+    expect(await of([command("rescue"), arbiter()])).toEqual([...READING, "rescue"].sort());
+    expect(await of([command("rescue"), arbiter({ result: rulings({ missing: ["size"] }) })])).toEqual([]);
+    expect(await of([command("rescue", { head: OLD }), arbiter({ head: OLD })], true)).toEqual([...READING].sort());
   });
 });
 
@@ -141,7 +147,7 @@ describe("a record's commit ids", () => {
       expect(ciAtTips([ci("pass", { pr: 7, base: bad })], 7, HEAD, bad)).toEqual({ pass: false });
       expect(await reviewedOf([job({ head: bad })], spy)).toBe(false);
       expect(await attackedOf([job({ as: "attack", head: bad })], spy)).toBe(false);
-      expect(await rechecksOf([job({ as: "recheck", kinds: ["size"], head: bad })], HEAD, spy)).toEqual([]);
+      expect(await rechecksOf([job({ as: "arbiter", head: bad, result: { review: { findings: [], firstLine: "x", rulings: { reviewerSide: [], missing: [], unreadable: [] } } } })], HEAD, spy, ["size"])).toEqual([]);
     }
     expect(asked).toEqual([]);
   });
