@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
@@ -20,6 +20,27 @@ describe("reposDir", () => {
     const c = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: "/srv/code/switchboard" });
     expect(c.reposDir).toBe("/srv/code");
     expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: "/srv/code/switchboard", SWITCHBOARD_REPOS_DIR: "/home/switchboard/repos/" }).reposDir).toBe("/home/switchboard/repos");
+  });
+});
+
+describe("repoRoot", () => {
+  test("a release directory next to releases/current is read as the link; another directory is kept as given", () => {
+    const home = dir(tmpdir(), "sb-config-");
+    const releases = join(home, "releases");
+    const sha = "a".repeat(40);
+    mkdirSync(join(releases, sha), { recursive: true });
+    mkdirSync(join(releases, "b".repeat(40)));
+    symlinkSync("b".repeat(40), join(releases, "current"));
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(releases, sha) }).repoRoot).toBe(join(releases, "current"));
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(releases, "current") }).repoRoot).toBe(join(releases, "current"));
+    // the candidate sb-rescue starts on a release is that release, not the running one `current` still names
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(releases, sha), SWITCHBOARD_CANDIDATE: "1" }).repoRoot).toBe(join(releases, sha));
+    // a release id under a folder that is not `releases`, even with a `current` beside it; a name that is not a release id: as given
+    mkdirSync(join(home, "code", sha), { recursive: true });
+    symlinkSync(sha, join(home, "code", "current"));
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(home, "code", sha) }).repoRoot).toBe(join(home, "code", sha));
+    mkdirSync(join(releases, "current-not"), { recursive: true });
+    expect(loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_REPO_ROOT: join(releases, "current-not") }).repoRoot).toBe(join(releases, "current-not"));
   });
 });
 

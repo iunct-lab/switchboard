@@ -131,7 +131,31 @@ export function otelEnv(opts: Pick<StartOptions, "otel">): Record<string, string
   };
 }
 
-export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
+/**
+ * `skillOverrides` that switch off the skills claude.ai synced to this machine (`<claudeHome>/skills/synced/<id>/manifest.json`,
+ * listed as `anthropic-skills:<name>`): a Task does not use them and each one costs its description in every Task's skill
+ * listing. The names are read at every start, since a sync adds and removes them. Nothing without a readable manifest.
+ */
+export function syncedSkillOverrides(claudeHome = join(homedir(), ".claude")): Record<string, "off"> | undefined {
+  const root = join(claudeHome, "skills", "synced");
+  const out: Record<string, "off"> = {};
+  try {
+    for (const id of readdirSync(root)) {
+      try {
+        const skills = (JSON.parse(readFileSync(join(root, id, "manifest.json"), "utf8")) as { skills?: unknown }).skills;
+        if (!Array.isArray(skills)) continue;
+        for (const s of skills) if (typeof s?.name === "string" && s.name) out[`anthropic-skills:${s.name}`] = "off";
+      } catch {
+        // no manifest in this folder, or one that cannot be read: it adds nothing
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function buildArgs(opts: StartOptions, extra: string[] = [], claudeHome?: string): string[] {
   const args = [
     "-p",
     "--input-format", "stream-json",
@@ -158,7 +182,10 @@ export function buildArgs(opts: StartOptions, extra: string[] = []): string[] {
     ? { PreToolUse: [{ matcher: "Bash", hooks: opts.guards.map((command) => ({ type: "command", command, onFailure: "block" })) }] }
     : undefined;
   const permissions = opts.allow?.length ? { allow: opts.allow } : undefined;
-  if (hooks || permissions) args.push("--settings", JSON.stringify({ ...(hooks ? { hooks } : {}), ...(permissions ? { permissions } : {}) }));
+  const skillOverrides = syncedSkillOverrides(claudeHome);
+  if (hooks || permissions || skillOverrides) {
+    args.push("--settings", JSON.stringify({ ...(hooks ? { hooks } : {}), ...(permissions ? { permissions } : {}), ...(skillOverrides ? { skillOverrides } : {}) }));
+  }
   // only the MCP servers Switchboard hands over: the user-wide ones would start per task, used or not
   args.push("--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: opts.mcpServers ?? {} }));
   args.push(...extra);
@@ -335,7 +362,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): RunnerA
     },
     start(opts, emit) {
       if (opts.executionMode === "cloud") return new CloudSession(bin, opts, emit, cloudChildEnv(childEnv(process.env, opts.env)));
-      return new ClaudeSession(bin, opts, emit, options.extraArgs ?? [], options.accountRereadMs ?? ACCOUNT_REREAD_MS);
+      return new ClaudeSession(bin, opts, emit, options.extraArgs ?? [], options.accountRereadMs ?? ACCOUNT_REREAD_MS, options.claudeHome);
     },
   };
 }
@@ -358,8 +385,8 @@ class ClaudeSession implements RunnerSession {
   /** set_permission_mode requests waiting for their control_response (request_id → settle). */
   private modeRequests = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
 
-  constructor(bin: string, private opts: StartOptions, private emit: (ev: AgentEvent) => void, extraArgs: string[], private accountRereadMs: number) {
-    const args = buildArgs(opts, extraArgs);
+  constructor(bin: string, private opts: StartOptions, private emit: (ev: AgentEvent) => void, extraArgs: string[], private accountRereadMs: number, claudeHome?: string) {
+    const args = buildArgs(opts, extraArgs, claudeHome);
     // the login may have changed since it was last read: ask now, so the answer is there before the first report
     if (!opts.bedrock) rereadAccount(accountRereadMs);
     this.proc = Bun.spawn([bin, ...args], {

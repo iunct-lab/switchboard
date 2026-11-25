@@ -72,9 +72,9 @@ export function readShippedDefaults(home: string, root: string): { routing?: Ret
   return out;
 }
 
-/** The repository this daemon runs from is always registered as the "meta" workspace (self-dev). */
+/** The repository this daemon runs from is always registered as the "meta" workspace (self-dev), and it is the only one. */
 export function seedWorkspaces(db: Db, cfg: CoreConfig) {
-  db.upsertWorkspace({ name: basename(cfg.repoRoot), path: cfg.repoRoot, kind: "meta" });
+  db.seedMetaWorkspace(cfg.repoRoot, basename(cfg.repoRoot));
 }
 
 /** How often the buffered API requests are written to api_requests. */

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { isMachineName } from "./machine.ts";
 
 export interface CoreConfig {
@@ -209,11 +209,24 @@ export const homeOf = (env: NodeJS.ProcessEnv): string => (env.SWITCHBOARD_HOME 
 /** The file of the daemon's key: `SWITCHBOARD_TOKEN_FILE`, else `token` in its home. */
 export const tokenPathOf = (env: NodeJS.ProcessEnv): string => env.SWITCHBOARD_TOKEN_FILE ?? join(homeOf(env), "token");
 
+/**
+ * A repo root that is one of sb-rescue's release directories (named by a full commit id, under `releases/`, next to
+ * `current`) is read as `releases/current`, the link: an sb-rescue installed from a Release before it handed the link
+ * itself still names the release directory, and sb-rescue is not part of a promotion. The meta workspace's path must
+ * stay when a promotion switches the link and removes old releases: a Task's hooks and kit are named under it.
+ * Not for a candidate (`SWITCHBOARD_CANDIDATE=1`): it is the release being checked, and `current` still names the running one.
+ */
+export function releaseLinkOf(dir: string): string {
+  const parent = dirname(dir);
+  const link = join(parent, "current");
+  return /^[0-9a-f]{40}$/.test(basename(dir)) && basename(parent) === "releases" && existsSync(link) ? link : dir;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
   const home = homeOf(env);
   if (!existsSync(home)) mkdirSync(home, { recursive: true });
   const codeRoot = findRepoRoot(import.meta.dir);
-  const repoRoot = env.SWITCHBOARD_REPO_ROOT ? resolve(env.SWITCHBOARD_REPO_ROOT) : codeRoot;
+  const repoRoot = env.SWITCHBOARD_REPO_ROOT ? (env.SWITCHBOARD_CANDIDATE === "1" ? resolve(env.SWITCHBOARD_REPO_ROOT) : releaseLinkOf(resolve(env.SWITCHBOARD_REPO_ROOT))) : codeRoot;
   const dbPath = env.SWITCHBOARD_DB ?? join(home, "switchboard.db");
   const homeIsTemp = isTempDir(home) || isTempDir(dbPath);
   return {
