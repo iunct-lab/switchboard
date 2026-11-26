@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { changedFiles, hostSpawn, pickTests, runTests, type RunDeps } from "./test-changed";
+import { stepsOf } from "./local-ci-offload";
 import { reusedLine, type OffloadRecord } from "./offload-record";
 
 const tree: Record<string, string> = {
@@ -70,7 +71,7 @@ describe("runTests", () => {
             offload: {
               fixtures: { dir: "/fixtures-dir", required: true },
               start: async (script, _cwd, run) => {
-                st.scripts.push(script);
+                st.scripts.push(`${script}\n${stepsOf(script)}`);
                 st.runs.push(run);
                 return { build: "build-1" };
               },

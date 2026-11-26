@@ -7,7 +7,7 @@ export const FeedbackInput = z.object({
   screen: z.string().max(200).optional(),
   /** request = register it as a request (request-to-backlog); fix = start a Task that fixes it now. */
   mode: z.enum(["request", "fix"]).default("request"),
-  /** Where a request is filed: the workspace whose repository and Project get it. Omitted = the meta workspace. すぐ直す always fixes Switchboard. */
+  /** Where a request is filed, or where a すぐ直す Task runs: the workspace whose repository it is. Omitted = the meta workspace. */
   workspaceId: z.string().optional(),
   /** Evals: the request was drafted from a task's evaluations; the task goes into the request's 出典. An artifact: from a throwaway app. */
   source: z.discriminatedUnion("kind", [

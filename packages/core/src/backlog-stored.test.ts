@@ -2,13 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BacklogEditInput, type BacklogIssueData, type BacklogSource } from "@switchboard/protocol";
+import { BacklogEditInput, type BacklogIssueData, type BacklogItem, type BacklogSource } from "@switchboard/protocol";
+import { autoHeldOf } from "./server/start.ts";
 import { PROCEED_CONFIRMED, PROCEED_OVERTURNED, proceedAnswerLine, proceedingAnswer } from "./backlog-comments.ts";
 import { storedEnds } from "./backlog-stored.ts";
 import { answerStoredDecision, BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue } from "./backlog-edit.ts";
 import { askWithdrawnPrereqs, mergePrereqs, prereqOf } from "./backlog-waits.ts";
-import { isUnblocked, overlapIn, pickNext, heldIn } from "./backlog-pick.ts";
-import { readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
+import { isUnblocked, overlapIn, pickNext, heldIn, autoActionsOf } from "./backlog-pick.ts";
+import { withStageTask, readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
 import { asksFromBacklog } from "./asks.ts";
 import { overlapLine } from "./backlog-overlap.ts";
 import { readOthers, storedMaterial } from "../../../scripts/parallel-guard.ts";
@@ -341,7 +342,7 @@ test("waiting: a waits= pull request closed unmerged holds the PBI as withdrawn;
 });
 
 /** A stage Task of the PBI that left its slot (an error) between `from` and `to`. */
-const endedStage = (ws: { id: string }, pbiNo: number, from: string, to: string) => db.insertTask({ id: `t_${pbiNo}_${from}`, workspaceId: ws.id, title: "t", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "error", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: pbiNo, action: "complete" }, statusAt: Date.parse(to), createdAt: Date.parse(from), updatedAt: Date.parse(to) });
+const endedStage = (ws: { id: string }, pbiNo: number, from: string, to: string, auto = false) => db.insertTask({ id: `t_${pbiNo}_${from}`, workspaceId: ws.id, title: "t", runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "error", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: pbiNo, action: "complete", ...(auto ? { auto: true as const } : {}) }, statusAt: Date.parse(to), createdAt: Date.parse(from), updatedAt: Date.parse(to) });
 
 describe("overlap wait on a Task", () => {
   // PBI 21 waits on Task 14 (open), whose PBI is 30
@@ -615,7 +616,7 @@ describe("pickNext overlap", () => {
   });
 
   test("a place of a PBI the queue does not resume does not block the guard", async () => {
-    // P (2) is In progress and yielded to a merged PR; B (3) names P's path. P's place holds B back, until P's last stage Task failed with no update to the Issue since
+    // P (2) is In progress and yielded to a merged PR; B (3) names P's path. P's place holds B back, until the gate holds P (its last automatic Task failed with no event since)
     const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
     const ws = imported([
       issue(2, ["type:pbi"], { subIssues: [20] }), item(2, { Status: "In progress" }), task(20, 2, "src/a.ts"),
@@ -630,16 +631,17 @@ describe("pickNext overlap", () => {
     // no stage Task on record: it keeps its place, in the app and in the guard
     expect(readStoredBacklog(db, ws).turns!.map((t) => t.pbi)).toEqual([2]);
     expect(await guardRefs()).toEqual([2]);
-    // its last stage Task failed after the release and nothing was written since: the queue does not resume it, so it holds no place
-    endedStage(ws, 2, ago(2), ago(1));
+    // its last automatic stage Task failed after the release and no event came since: the gate holds its next start, so the queue does not resume it and it holds no place
+    const from = ago(2);
+    endedStage(ws, 2, from, ago(1), true);
     const read = readStoredBacklog(db, ws);
     expect(read.turns).toEqual([]);
     expect(read.items.find((i) => i.number === 3)!.overlap).toBeNull();
     expect(await guardRefs()).toEqual([]);
     // a stage Task that runs on it holds the place whatever its last Task
     expect(readStoredBacklog(db, ws, { active: (n) => n === 2 }).turns!.map((t) => t.pbi)).toEqual([2]);
-    // an update to the Issue after the Task ended lets the queue resume it: the same place, the same since
-    db.putBacklogSnapshot(SOURCE, { records: [comment(2, "c2b", "回答", ago(0.5))], cursor: null, syncedAt: 6000 });
+    // an event after the Task ended (the person marks it reviewed) lets the queue resume it: the same place, the same since
+    db.updateTask(`t_2_${from}`, { reviewedAt: Date.now() });
     expect(readStoredBacklog(db, ws).turns).toEqual([{ pbi: 2, since: readStoredBacklog(db, ws, { active: (n) => n === 2 }).turns![0]!.since, task: 20, paths: ["src/a.ts"] }]);
     expect(await guardRefs()).toEqual([2]);
   });
@@ -1230,4 +1232,67 @@ test("a claim counts while the Task that wrote it works or waits for the person"
   expect(items.filter((i) => i.claim).map((i) => i.number).sort()).toEqual([30, 32, 36]);
   expect(pickNext(items, "implement")).toMatchObject({ item: { number: 31 } });
   expect(pickNext(items.filter((i) => ![31, 33, 34, 35].includes(i.number)), "implement")).toBeNull();
+});
+
+describe("autoHeld is the gate's answer", () => {
+  // A real Db with an automatic stage Task, a button's stage Task and none; an item with and without a later event. The item
+  // carries `autoHeld` and `startStage` asks `autoHeldOf` the same: the two never differ for the same item and stage.
+  const task = (ws: { id: string }, id: string, no: number, action: "complete" | "close" | "direct" | "to-pbi", auto: boolean, at: number, over: Record<string, unknown> = {}) =>
+    db.insertTask({ id, workspaceId: ws.id, title: id, runner: "claude", cwd: "/work/app", scope: ["/work/app"], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: no, action, ...(auto ? { auto: true as const } : {}) }, statusAt: at + 10, createdAt: at, updatedAt: at + 10, ...over } as Parameters<Db["insertTask"]>[0]);
+
+  test("an item carries what the gate answers, for every stage, Task and event", () => {
+    const ws = imported([issue(5, ["type:pbi"])]);
+    const base = readStoredBacklog(db, ws).items.find((i) => i.number === 5)!;
+    const cases: Array<[string, BacklogItem["stage"], boolean, "complete" | "close" | null, boolean, "none" | "event" | "reviewed"]> = [];
+    for (const stage of ["ready", "in-progress"] as const)
+      for (const closable of [false, true])
+        for (const prev of ["complete", "close", null] as const)
+          for (const auto of [true, false])
+            for (const ev of ["none", "event", "reviewed"] as const) cases.push([`${stage}`, stage, closable, prev, auto, ev]);
+    let n = 0;
+    let held = 0;
+    for (const [, stage, closable, prev, auto, ev] of cases) {
+      const no = 100 + n++;
+      if (prev) task(ws, `t_${no}`, no, prev, auto, 1000, ev === "reviewed" ? { reviewedAt: 2000 } : {});
+      const i: BacklogItem = { ...base, number: no, stage, closable, events: ev === "event" ? [{ key: "pr:1", at: 3000 }] : [] };
+      const got = withStageTask(db, i);
+      const action = autoActionsOf(got)[0]!;
+      expect(action).toBe(stage === "in-progress" && closable ? "close" : "complete");
+      // the events the gate sees when a start is made: the item's, and the person's check of the last Task
+      expect(got.events).toEqual(ev === "reviewed" && prev ? [{ key: `reviewed:t_${no}`, at: 2000 }] : i.events);
+      const asked = autoHeldOf({ db }, ws as never, got, action);
+      expect([stage, closable, prev, auto, ev, got.autoHeld]).toEqual([stage, closable, prev, auto, ev, asked && { ...asked, action }]);
+      if (asked) held++;
+    }
+    // the cases do hold some and let some go, so an always-null answer would not pass
+    expect(held).toBeGreaterThan(0);
+    expect(held).toBeLessThan(cases.length);
+    // a stage with no automatic start of its own carries none
+    expect(withStageTask(db, { ...base, stage: "needs-decision" }).autoHeld).toBeNull();
+  });
+
+  test("autoHeld is about the stage pickNext starts next", () => {
+    const ws = imported([issue(5, ["type:pbi"]), issue(6, ["type:request"])]);
+    const base = readStoredBacklog(db, ws).items.find((i) => i.number === 5)!;
+    // a closable PBI answered after its automatic 閉じる starts 実装, not 閉じる: the item answers for 実装
+    task(ws, "t_close", 5, "close", true, 1000);
+    const answered = withStageTask(db, { ...base, stage: "in-progress", closable: true, answeredAt: new Date(5000).toISOString(), events: [] });
+    const picked = pickNext([answered], "implement")!;
+    expect(picked.action).toBe("complete");
+    expect(answered.autoHeld).toEqual(((h) => h && { ...h, action: picked.action })(autoHeldOf({ db }, ws as never, answered, picked.action)));
+    expect(answered.events).toEqual([]);
+    // a request starts direct or to-pbi by the process definitions, which the item does not have: it is held only when
+    // both ways are held, so it is never left out of a start the chosen way lets go (the start asks the gate for that way)
+    const req = readStoredBacklog(db, ws).items.find((i) => i.number === 6)!;
+    const direct = [{ id: "p1-direct", auto: {} }] as never;
+    task(ws, "t_direct", 6, "direct", true, 1000);
+    const one = withStageTask(db, { ...req, events: [] });
+    expect(one.autoHeld).toBeNull();
+    expect(pickNext([one], "plan", undefined, undefined, direct)!.action).toBe("direct");
+    expect(autoHeldOf({ db }, ws as never, one, "direct")).toEqual({ previousTaskId: "t_direct" });
+    expect(pickNext([one], "plan")!.action).toBe("to-pbi");
+    expect(autoHeldOf({ db }, ws as never, one, "to-pbi")).toBeNull();
+    task(ws, "t_topbi", 6, "to-pbi", true, 1100);
+    expect(withStageTask(db, { ...req, events: [] }).autoHeld).toMatchObject({ previousTaskId: expect.any(String) });
+  });
 });

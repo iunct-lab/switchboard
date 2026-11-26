@@ -288,7 +288,7 @@ test("no detected runner returns 409", async () => {
   expect(core.db.listTasks()).toHaveLength(0);
 });
 
-test("a request for another workspace is filed in that repository and its Project; すぐ直す still fixes Switchboard", async () => {
+test("a request for another workspace is filed in that repository and its Project", async () => {
   const base = await boot();
   const dir = mkdtempSync(join(home, "lib-"));
   const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "lib" }) })).json()) as { id: string };
@@ -311,9 +311,79 @@ test("a request for another workspace is filed in that repository and its Projec
   expect(await (await post(base, { text: "meta へ", workspaceId: meta.id })).json() as Task).toMatchObject({ workspaceId: meta.id });
   for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
   expect(starts[0]!.prompt).toStartWith("あなたは Switchboard の meta workspace で動いている。");
-  // すぐ直す ignores the workspace: it fixes Switchboard
-  expect(await (await post(base, { text: "直す", mode: "fix", workspaceId: lib.id })).json() as Task).toMatchObject({ workspaceId: meta.id });
   expect((await post(base, { text: "x", workspaceId: "ws_missing" })).status).toBe(404);
+});
+
+const addLib = async (base: string) => {
+  const dir = mkdtempSync(join(home, "lib-"));
+  const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "lib" }) })).json()) as { id: string };
+  return { dir, lib: core.db.getWorkspace(lib.id)! };
+};
+
+test("fix: on another workspace the Task starts there, with that repository's brief", async () => {
+  const base = await boot();
+  const { dir, lib } = await addLib(base);
+  const r = await post(base, { text: "lib を直して", mode: "fix", workspaceId: lib.id });
+  expect(r.status).toBe(201);
+  expect(await r.json() as Task).toMatchObject({ workspaceId: lib.id, cwd: dir });
+  for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
+  const s = starts[0]!;
+  expect(s.cwd).toBe(dir);
+  expect(s.prompt.startsWith(workspaceBrief(lib, ["claude", "codex"]).split("\n")[0]!)).toBe(true);
+  expect(s.prompt).not.toContain("packages/protocol（AgentEvent zod スキーマ）");
+  expect(s.prompt).toContain("このリポジトリの CLAUDE.md / AGENTS.md");
+});
+
+test("fix: developSelf off refuses the meta workspace (also with no workspaceId) and starts on another", async () => {
+  const base = await boot();
+  const { dir, lib } = await addLib(base);
+  const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  expect((await developSelf(base, false)).status).toBe(200);
+  for (const body of [{ text: "x", mode: "fix" }, { text: "x", mode: "fix", workspaceId: meta.id }]) {
+    const r = await post(base, body);
+    expect(r.status).toBe(409);
+    expect(await r.text()).toContain("Switchboard 自体を開発しない設定です");
+  }
+  expect(core.db.listTasks()).toHaveLength(0);
+  expect((await post(base, { text: "x", mode: "fix", workspaceId: "ws_missing" })).status).toBe(404);
+  const r = await post(base, { text: "lib を直して", mode: "fix", workspaceId: lib.id });
+  expect(r.status).toBe(201);
+  expect(await r.json() as Task).toMatchObject({ workspaceId: lib.id, cwd: dir });
+});
+
+// A registered repository with no remote (its changes kept in the app), with either kind of backlog: the fix reads the
+// merge gate the way a stage Task there does — from the Switchboard checkout, never as this repository's own scripts.
+for (const backlog of ["switchboard", "github"] as const) {
+  test(`fix on another repository without a remote (backlog ${backlog}) names no bare Switchboard script`, async () => {
+    const base = await boot();
+    const dir = mkdtempSync(join(home, "lib-"));
+    expect(Bun.spawnSync(["git", "init", "-q"], { cwd: dir }).exitCode).toBe(0);
+    const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, name: "lib", backlog }) })).json()) as { id: string };
+    expect((await post(base, { text: "直して", mode: "fix", workspaceId: lib.id })).status).toBe(201);
+    for (let i = 0; !starts.length && i < 100; i++) await Bun.sleep(10);
+    const prompt = starts[0]!.prompt;
+    expect({
+      bare: prompt.match(/bun scripts\/[a-z-]+\.ts[^`]*/g) ?? [],
+      // the Switchboard checkout's absolute path in front of its merge-gate or local-ci, as in otherRepoRules
+      fromSwitchboard: /\/scripts\/(merge-gate|local-ci)\.ts/.test(prompt),
+    }).toEqual({ bare: [], fromSwitchboard: true });
+  });
+}
+
+test("fixScope: for another repository no Switchboard-only path stands bare", () => {
+  const other = { meta: "/work/switchboard", projectVar: undefined, setup: { config: false, kit: [], copies: [] } };
+  const out = fixScope("other", { other });
+  expect(out).not.toContain("CLAUDE.md の「作業の場所」");
+  expect(out).not.toContain("CLAUDE.md の「マージ判定とローカル CI」");
+  // the scope's own lines name no Switchboard-only path; the rules after them (otherRepoRules) say where `scripts/…` lives
+  const [own = "", rules = ""] = out.split("\n\nスキル（");
+  expect(own).not.toContain("scripts/");
+  expect(own).not.toContain("docs/merge-gate.md");
+  expect(rules).toContain("Switchboard のリポジトリ /work/switchboard からの相対パス");
+  expect(out).toContain("--repo <このリポジトリの owner/name>");
+  expect(out).toContain("このリポジトリの CLAUDE.md / AGENTS.md");
+  expect(out).toContain("sb/fix-<topic>");
+  expect(fixScope("other", {})).toBe(fixScope("other"));
 });
 
 test("new-repo: the prompt is the three fixed sentences, the skill path, the name and the purpose in fences, and the 出典", () => {

@@ -4,7 +4,7 @@
  * the kit's tools read, and how each stands against GitHub (`syncOf`).
  */
 import type { ProceedingQuestion } from "@switchboard/protocol";
-import type { Backlog, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogWaitingSubIssue, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogSyncInfo, BacklogSyncState } from "@switchboard/protocol";
+import type { Backlog, BacklogAction, BacklogFetchState, BacklogHeldEdit, BacklogIssueData, BacklogIssueDetail, BacklogItem, BacklogWaitingSubIssue, BacklogProjectItemData, BacklogPullRequestData, BacklogRecord, BacklogSource, BacklogSyncInfo, BacklogSyncState } from "@switchboard/protocol";
 import type { BacklogOperation, Db } from "./db.ts";
 import { bodyRevisionOf, conflictRevision, withoutMarker } from "./backlog-merge.ts";
 import { CONFIG_FILE, sharedFilesOf } from "../../../ops-kit/src/config.ts";
@@ -18,11 +18,11 @@ import { type RawBacklogIssue, FLOW_LABEL, toItem, derivedPbisOf } from "./backl
 import { holder } from "../../../scripts/parallel-guard.ts";
 import { claimOn, sessionOn, withOverlap } from "./backlog-overlap.ts";
 import { claimTaskOf } from "./backlog-worker.ts";
-import { notResumed } from "./backlog-pick.ts";
+import { notResumed, autoActionsOf } from "./backlog-pick.ts";
 import { reduceStops } from "./stops.ts";
 import { ANSWER_HEADING, type Comment, type SubTask, latestDecision, latestAnswer, proceedingOf, proceedCheckOf, checkoutTop, refusedProceeding, heldSince, taskDecision, latestReport } from "./backlog-comments.ts";
 import { type PbiWait, waitsOf, type WaitTarget, storedIssueTarget, readClosedTasks, withWaits, withConfirmDecisions, withPrereqs } from "./backlog-waits.ts";
-import { eventsOf } from "./stage-start-gate.ts";
+import { autoStartHeld, eventsOf } from "./stage-start-gate.ts";
 import type { BacklogCreatePayload } from "./backlog-edit.ts";
 
 /**
@@ -247,9 +247,23 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
 }
 
 /**
+ * The one place that applies the rule of stage-start-gate.ts to an item: null = an automatic start of `action` may go,
+ * otherwise the previous automatic Task it is held for. `item.events` must be the item's whole events (with the person's
+ * check of the last stage Task, which `withStageTask` adds).
+ */
+export function readAutoHeld(db: Db, workspaceId: string, item: Pick<BacklogItem, "number" | "events">, action: BacklogAction): { previousTaskId: string } | null {
+  const prev = db.lastAutoStageTask(workspaceId, item.number, action);
+  const running = prev ? db.activeStageTask(workspaceId, item.number)?.id === prev.id : false;
+  return autoStartHeld(item.events, prev && { id: prev.id, createdAt: prev.createdAt, endedAt: running ? null : prev.statusAt });
+}
+
+/**
  * An item with its last stage Task (`lastTask`), the record of how its stage Tasks stopped (`stopSummary`), and its waits
  * dropped when an 実装 started after they were written: the part of server/backlog-read.ts `withActive` that reads only the
- * stage Tasks' rows, which `readStoredBacklog` needs before it judges the places (`notResumed`).
+ * stage Tasks' rows, which `readStoredBacklog` needs before it judges the places (`notResumed`). The person's check of the
+ * last stage Task is an event too (it is on the Task's row, which the stored read does not have), so `autoHeld` is read here,
+ * last, for the stage `autoActionsOf` names from the rest; a request is held only when both of its ways are (the start asks the
+ * gate again for the way it takes).
  */
 export function withStageTask(db: Db, i: BacklogItem): BacklogItem {
   const t = db.lastStageTask(i.workspaceId, i.number);
@@ -257,12 +271,16 @@ export function withStageTask(db: Db, i: BacklogItem): BacklogItem {
   // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared
   const impl = i.waitsAt ? db.lastStageTask(i.workspaceId, i.number, "complete") : null;
   const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
-  return {
+  const reviewed = t?.reviewedAt != null ? [{ key: `reviewed:${t.id}`, at: t.reviewedAt }] : [];
+  const s: BacklogItem = {
     ...i,
+    events: [...i.events, ...reviewed],
     lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt, started: t.runnerSessionId !== null } : null,
     stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number)), { newestTaskId: t?.id ?? null }),
     ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
   };
+  const held = autoActionsOf(s).map((action) => ((h) => h && { ...h, action })(readAutoHeld(db, i.workspaceId, s, action)));
+  return { ...s, autoHeld: held.length && held.every((h) => h !== null) ? held[0]! : null };
 }
 
 /**

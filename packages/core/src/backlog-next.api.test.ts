@@ -10,10 +10,11 @@ import { startServer, type CoreServer } from "./server.ts";
 import { importing } from "../fixtures/github-import.ts";
 import { fmtTime } from "./ratelimit.ts";
 import { buildStartPrompt } from "./backlog-prompt.ts";
-import { pickNext, onHoldIn } from "./backlog-pick.ts";
+import { pickNext, onHoldIn, GATE_LINE } from "./backlog-pick.ts";
+import { leftLines } from "./server/backlog-next.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import type { RawBacklogIssue } from "./backlog-item.ts";
-import { DECOMPOSED_READY, FAKE_ORIGIN, backlogNextSchedule, boot, budgetGh, closeTried, commentingGh, decisions, decomposedGh, fakeGh, fixtureStage, holdingClaude, item, metaId, metaName, moreReadyGh, pages, refreshed, runSchedule, scheduleLog, scheduleLogAll, shutdown, start, startedTasks, subTask, sweepAll, taskDecisionGh, threeWorkspaces, useBacklogDaemon } from "./api-test-harness.ts";
+import { DECOMPOSED_READY, overlapReadyGh, FAKE_ORIGIN, backlogNextSchedule, boot, budgetGh, closeTried, resumeTried, commentingGh, decisions, decomposedGh, fakeGh, fixtureStage, holdingClaude, item, metaId, metaName, moreReadyGh, pages, refreshed, runSchedule, scheduleLog, scheduleLogAll, shutdown, start, startedTasks, subTask, sweepAll, taskDecisionGh, threeWorkspaces, useBacklogDaemon } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -121,25 +122,26 @@ test("start: the buttons record their own reason, not the criteria's", async () 
   expect(await fetch(`${base}/api/tasks/${p.id}/provenance`).then((r) => r.json())).toMatchObject({ processReason: "backlog stage to-pbi" });
 });
 
-test("backlog-next stalled: the closable Issue 307 is closed and Issue 305, unmoved since its last resume, is left and logged", async () => {
+test("backlog-next stalled: the closable Issue 307 is closed and Issue 305, unmoved since its last resume, is left", async () => {
   const claude = holdingClaude();
   const fake = taskDecisionGh({ i305: [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "OPEN", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])], i307: [] });
   const base = await boot(fake.gh, claude.adapter);
+  resumeTried();
   const id = await backlogNextSchedule(base);
   // implement 2: one firing would take both if both could go
   expect((await sweepAll(base, { implement: 2, plan: 0 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
-  expect(core!.db.listTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#307 閉じる"]);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#304 実装", "#307 閉じる"]);
   const log = await scheduleLogAll(base);
-  expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前回の再開から進んでいない: #305`));
   expect(log).toContainEqual(expect.stringContaining("#307 を close で開始"));
 });
 
-test("backlog-next stalled: Issue 305 with a Task closed since its last resume is resumed with 実装 before Ready", async () => {
+test("backlog-next stalled: Issue 305, which the gate does not hold, is resumed with 実装 before Ready", async () => {
   const claude = holdingClaude();
   const fake = taskDecisionGh({ i305: [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "CLOSED", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])], i307: [] });
   const base = await boot(fake.gh, claude.adapter);
   closeTried();
+  core!.db.sqlite.run("DELETE FROM tasks WHERE id LIKE 'tsk_close307_resume305_%'"); // no automatic start of it before: nothing holds it
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#305 実装"]);
@@ -148,32 +150,6 @@ test("backlog-next stalled: Issue 305 with a Task closed since its last resume i
   const prompt = claude.starts.find((x) => x.prompt.includes("#305"))!.prompt;
   expect(prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 2 } }));
   expect(prompt).toContain("`<!-- tasks-done: 2 -->` を 1 行そのまま入れて");
-});
-
-test("backlog-next stalled: Issue 305 whose last resume ended before writing a mark is left and logged until a Task closes", async () => {
-  const claude = holdingClaude();
-  const open = [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "CLOSED", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])];
-  const base = await boot(taskDecisionGh({ i305: open, i307: [] }).gh, claude.adapter);
-  closeTried();
-  const now = Date.now();
-  core!.db.insertTask({ ...core!.db.getTask(`tsk_close307_${metaId()}`)!, id: `tsk_close307_resume305`, title: "#305 実装: PBI: 実装中の PBI", stage: { issue: 305, action: "complete" }, status: "done", createdAt: now, updatedAt: now });
-  const id = await backlogNextSchedule(base);
-  expect((await runSchedule(base, id)).status).toBe(201);
-  expect(startedTasks().map((t) => t.title.split(":")[0])).not.toContain("#305 実装");
-  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前回の再開から進んでいない: #305`));
-});
-
-test("backlog-next stalled: Issue 305 with a Task closed after its unmarked resume began is resumed", async () => {
-  const claude = holdingClaude();
-  const now = Date.now();
-  const later = new Date(now + 3_600_000).toISOString();
-  const subs = [subTask(310, "CLOSED", ["type:task"], []), subTask(311, "CLOSED", ["type:task"], [], later), subTask(312, "OPEN", ["type:task"], [])];
-  const base = await boot(taskDecisionGh({ i305: subs, i307: [] }).gh, claude.adapter);
-  closeTried();
-  core!.db.insertTask({ ...core!.db.getTask(`tsk_close307_${metaId()}`)!, id: "tsk_close307_resume305", title: "#305 実装: PBI: 実装中の PBI", stage: { issue: 305, action: "complete" }, status: "done", createdAt: now, updatedAt: now });
-  const id = await backlogNextSchedule(base);
-  expect((await runSchedule(base, id)).status).toBe(201);
-  expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#305 を complete で開始"));
 });
 
 describe("on-hold", () => {
@@ -216,8 +192,9 @@ describe("on-hold", () => {
   });
 });
 
-test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Task failed on the usage limit or stopped asking, and the log names each with the resume time", async () => {
+test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Task failed on the usage limit or stopped asking, and the log names each, the failed one with its resume time", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  resumeTried();
   const now = Date.now();
   const resumeAt = now + 3_600_000;
   const row = { workspaceId: metaId(), runner: "claude" as const, cwd: home!, scope: [home!], runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto" as const, effort: null, origin: "switchboard" as const, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: now, createdAt: now, updatedAt: now };
@@ -230,7 +207,7 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   // a stopped Task with its resume planned takes no slot (slot does not count a resume): the firing names it as failed
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 返事待ち: #304`));
-  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の Task が失敗したまま更新が無い: #307（使用上限、${fmtTime(resumeAt, now)} に戻る）`));
+  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 再開の予約: #307（${fmtTime(resumeAt, now)} に再開）`));
   expect(log).not.toContainEqual(expect.stringContaining("前回から更新が無い: #304"));
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められる項目が無い`));
   // reviewed (the person read the question): the 実装 is started again next firing, with no update to the Issue
@@ -242,7 +219,7 @@ test("backlog-next failed / awaiting reply: a firing leaves a PBI whose last Tas
   expect(startedTasks().filter((t) => t.title.startsWith("#304 実装: "))).toHaveLength(2);
 });
 
-test("backlog-next held: a Ready PBI whose last 実装 was started by itself and nothing happened since is not started and the log names the gate's line; the 閉じる that did not close keeps the unchanged line; the button still starts it", async () => {
+test("backlog-next held: a Ready PBI whose last 実装 was started by itself and nothing happened since is not started and the log names the gate's line once; the button still starts it", async () => {
   const base = await boot(fakeGh().gh, holdingClaude().adapter);
   closeTried();
   // Issue 304 (updated 2026-09-20) had an 実装 that finished after that
@@ -252,9 +229,10 @@ test("backlog-next held: a Ready PBI whose last 実装 was started by itself and
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#304 実装"]); // only the old Issue 304 実装
   const log = await scheduleLogAll(base);
-  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: #304（前回 tsk_last304）`));
-  expect(log).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回から更新が無い: #307`)); // Issue 307: closeTried's 閉じる; 304 is not on this line
-  expect(log).not.toContainEqual(expect.stringContaining("前回から更新が無い: #304"));
+  // one line for every item the gate holds (closeTried's 305 and 307 too)
+  expect(log).toContainEqual(expect.stringMatching(new RegExp(`飛ばした \\(manual\\): ${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: .*#304（前回 tsk_last304）`)));
+  expect(log.filter((l) => l.includes("#304"))).toHaveLength(1); // said once: not again for the item the slot picked
+  expect(log).not.toContainEqual(expect.stringContaining("前回から更新が無い"));
   // the row's button is not held by it
   const r = await start(base, 304, { action: "complete" });
   expect(r.status).toBe(201);
@@ -1015,4 +993,154 @@ test("backlog-next held without a new event is logged and the button still start
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining(`飛ばした (manual): ${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: #307（前回 ${first.id}）`));
   expect((await start(base, 307, { action: "close" })).status).toBe(201);
   expect(startedTasks().filter((t) => t.stage?.issue === 307)).toHaveLength(2);
+});
+
+test.each([
+  ["a failed Task with no update since", 304, "complete", "error", 1],
+  ["a resume whose mark did not move", 305, "complete", "done", 1],
+  ["a resume that ended before writing its mark", 305, "complete", "done", 2],
+  ["a 閉じる that did not close", 307, "close", "done", 1],
+] as const)("a held item has one reason in the log: %s", async (_, n, action, status, closed) => {
+  const subs = [subTask(310, "CLOSED", ["type:task"], []), subTask(311, closed === 2 ? "CLOSED" : "OPEN", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])];
+  const base = await boot(taskDecisionGh({ i305: subs, i307: [] }).gh, holdingClaude().adapter);
+  const now = Date.now();
+  const title = `#${n} ${action === "close" ? "閉じる" : "実装"}: PBI`;
+  // its last stage Task was started by itself (`auto`) and ended; nothing the gate counts happened since
+  core!.db.insertTask({ id: `tsk_prev${n}`, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: status === "error" ? "failed" : "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: n, action, auto: true }, statusAt: now, createdAt: now, updatedAt: now });
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 3, plan: 0 })).status).toBe(200);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === n).map((t) => t.id)).toEqual([`tsk_prev${n}`]); // only the inserted one
+  const log = (await scheduleLogAll(base)).filter((l) => new RegExp(`#${n}(?!\\d)`).test(l));
+  expect(log).toEqual([expect.stringContaining(`${metaName()}: 実装の枠: 前回の開始から出来事が増えていない: #${n}（前回 tsk_prev${n}）`)]);
+  expect((await scheduleLogAll(base)).join("\n")).not.toMatch(/前回の Task が失敗したまま更新が無い|前回の再開から進んでいない/);
+});
+
+describe("the gate line is the start's answer", () => {
+  const insert = (id: string, n: number, action: "complete" | "close", createdAt: number) =>
+    core!.db.insertTask({ id, workspaceId: metaId(), title: `#${n} ${action === "close" ? "閉じる" : "実装"}: PBI`, runner: "claude", cwd: home!, scope: [home!], status: "done", runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: n, action, auto: true }, statusAt: createdAt + 500, createdAt, updatedAt: createdAt + 500 });
+  const fire = async (base: string) => {
+    const id = await backlogNextSchedule(base);
+    expect((await sweepAll(base, { implement: 3, plan: 0 })).status).toBe(200);
+    await runSchedule(base, id);
+    return scheduleLogAll(base);
+  };
+  const naming = (log: string[], n: number) => log.filter((l) => new RegExp(`#${n}(?!\\d)`).test(l));
+  const answered = (now: number) => ({ i307: [{ body: "## 回答\n受け入れ条件 1 を確認した", createdAt: new Date(now - 500).toISOString() }] });
+
+  test("an answered closable PBI the gate holds for 実装 is named on the gate line", async () => {
+    const now = Date.now();
+    const base = await boot(taskDecisionGh({ i305: [], i307: [] }, answered(now)).gh, holdingClaude().adapter);
+    insert("tsk_auto307", 307, "complete", now - 2000);
+    const log = await fire(base);
+    expect(startedTasks().filter((t) => t.stage?.issue === 307).map((t) => t.id)).toEqual(["tsk_auto307"]);
+    expect(naming(log, 307)).toEqual([expect.stringContaining("前回の開始から出来事が増えていない: #307（前回 tsk_auto307）")]);
+  });
+
+  test("an item the firing starts is not called held", async () => {
+    const now = Date.now();
+    const base = await boot(taskDecisionGh({ i305: [], i307: [subTask(320, "CLOSED", ["type:task"], [])] }, answered(now)).gh, holdingClaude().adapter);
+    insert("tsk_old_complete", 307, "complete", 1000); // events came after it: 実装 may start
+    insert("tsk_new_close", 307, "close", now - 2000); // nothing since: 閉じる would be held
+    const log = await fire(base);
+    expect(startedTasks().some((t) => t.stage?.issue === 307 && !t.id.startsWith("tsk_"))).toBe(true);
+    expect(naming(log, 307).filter((l) => l.includes("前回の開始から出来事が増えていない"))).toEqual([]);
+  });
+
+  test("an item another line names is not named on the gate line too", () => {
+    const autoHeld = { previousTaskId: "tsk_prev", action: "complete" as const };
+    const checksOnly = item({ number: 5, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, confirmations: [{ n: 1, text: "見る" }] as never, autoHeld });
+    const claimed = item({ number: 6, stage: "ready", claim: { taskId: null } as never, autoHeld });
+    for (const i of [checksOnly, claimed]) expect(leftLines(null, [i], "implement").filter((l) => new RegExp(`#${i.number}(?!\\d)`).test(l))).toHaveLength(1);
+  });
+});
+
+// the gate line for a held item the first read did not name, and the lines said again after a start leave it to that line
+function insertHeld(id: string, n: number, action: "complete" | "to-pbi" | "direct", ago = 2000, status: "done" | "idle" = "done", workspaceId = metaId()) {
+  const at = Date.now() - ago; // nothing the gate counts happened since
+  core!.db.insertTask({ id, workspaceId, title: `#${n} ${action}: x`, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: n, action, auto: true }, statusAt: at + 500, createdAt: at, updatedAt: at + 500 });
+}
+const namingOf = (log: string[], n: number) => log.filter((l) => new RegExp(`#${n}(?!\\d)`).test(l));
+
+/** fakeGh plus a large request numbered 320 (its criteria choose PBI にする). */
+function largeRequestGh(): GhRunner {
+  const fake = fakeGh();
+  return async (args, cwd) => {
+    const r = await fake.gh(args, cwd);
+    if (!r.stdout.includes('"subIssuesSummary"')) return r;
+    const page = JSON.parse(r.stdout);
+    const nodes = page.data?.repository?.issues?.nodes;
+    const small = nodes?.find((n: { number: number }) => n.number === 302);
+    if (!small) return r;
+    nodes.push({ ...structuredClone(small), number: 320, body: `${small.body}\n${"長い要望。".repeat(300)}`, createdAt: "2026-09-20T03:00:00Z" });
+    return { ...r, stdout: JSON.stringify(page) };
+  };
+}
+
+test("a request the gate holds for PBI にする is named on the gate line", async () => {
+  const base = await boot(largeRequestGh(), holdingClaude().adapter);
+  insertHeld("tsk_prev320", 320, "to-pbi");
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === 320).map((t) => t.id)).toEqual(["tsk_prev320"]); // held
+  expect(namingOf(await scheduleLogAll(base), 320)).toEqual([expect.stringContaining("前回の開始から出来事が増えていない: #320（前回 tsk_prev320）")]);
+});
+
+describe("a gate-held item another line comes to name after a start is said once", () => {
+  test("overlap with the PBI this firing starts", async () => {
+    const base = await boot(overlapReadyGh({ 304: "src/a.ts", 309: "src/a.ts", 310: "src/a.ts" }), holdingClaude().adapter);
+    closeTried();
+    insertHeld("tsk_prev310", 310, "complete");
+    const id = await backlogNextSchedule(base);
+    expect((await sweepAll(base, { implement: 3, plan: 0 })).status).toBe(200);
+    await runSchedule(base, id);
+    expect(startedTasks().some((t) => t.stage?.issue === 304)).toBe(true);
+    expect(namingOf(await scheduleLogAll(base), 310)).toEqual([expect.stringContaining("#310")]);
+  });
+
+  test("the flow limit reached by the PBI this firing starts", async () => {
+    const inner = moreReadyGh(309, 310);
+    const gh: GhRunner = async (args, cwd) => {
+      const r = await inner(args, cwd);
+      if (!r.stdout.includes('"subIssuesSummary"')) return r;
+      const page = JSON.parse(r.stdout);
+      for (const node of page.data?.repository?.issues?.nodes ?? []) if (node.number === 304 || node.number === 309) node.labels.nodes.push({ name: "flow-improvement" });
+      return { ...r, stdout: JSON.stringify(page) };
+    };
+    const base = await boot(gh, holdingClaude().adapter);
+    closeTried();
+    insertHeld("tsk_prev309", 309, "complete");
+    const id = await backlogNextSchedule(base);
+    expect((await sweepAll(base, { implement: 3, plan: 0 })).status).toBe(200);
+    await runSchedule(base, id);
+    expect(startedTasks().some((t) => t.stage?.issue === 304)).toBe(true);
+    expect(namingOf(await scheduleLogAll(base), 309)).toEqual([expect.stringContaining("#309")]);
+  });
+});
+
+test("a request held for both ways, picked for the second one, is on one gate line", async () => {
+  const base = await boot(fakeGh().gh, holdingClaude().adapter);
+  insertHeld("tsk_topbi302", 302, "to-pbi", 20_000);
+  insertHeld("tsk_direct302", 302, "direct", 2000, "idle"); // queued at the limit, its start cancelled
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === 302).map((t) => t.id).sort()).toEqual(["tsk_direct302", "tsk_topbi302"]);
+  expect(namingOf(await scheduleLogAll(base), 302)).toEqual([expect.stringContaining(`${GATE_LINE}: #302（前回 `)]);
+});
+
+test("two workspaces of the same name each name their own held request", async () => {
+  const { base, ids, dirs } = await threeWorkspaces(holdingClaude().adapter);
+  core!.db.upsertWorkspace({ path: dirs.lib!, name: "app", kind: "repo" }); // a name is not unique, only the path is
+  insertHeld("tsk_a302", 302, "to-pbi", 2000, "done", ids.app!);
+  insertHeld("tsk_b302", 302, "to-pbi", 2000, "done", ids.lib!);
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  await runSchedule(base, id);
+  expect(startedTasks().filter((t) => t.stage?.issue === 302 && (t.workspaceId === ids.app || t.workspaceId === ids.lib)).map((t) => t.id).sort()).toEqual(["tsk_a302", "tsk_b302"]);
+  const naming = (await scheduleLogAll(base)).filter((l) => /#302（前回 tsk_[ab]302）/.test(l));
+  // each line begins with its own time, so the order of the two is not compared
+  expect(naming).toHaveLength(2);
+  expect(naming).toEqual(expect.arrayContaining([expect.stringContaining("#302（前回 tsk_a302）"), expect.stringContaining("#302（前回 tsk_b302）")]));
 });

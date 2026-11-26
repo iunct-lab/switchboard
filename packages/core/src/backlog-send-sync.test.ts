@@ -6,7 +6,6 @@ import { editStoredIssue } from "./backlog-edit.ts";
 import { readStoredBacklog, readStoredIssue } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { conflictRevision } from "./backlog-merge.ts";
-import { failedSince } from "./backlog-pick.ts";
 import { S, answerStoredDecision, clock, commentStoredIssue, fakeGithub, importsToo, makeSync, useSendDb } from "./api-test-harness.ts";
 
 let dir: string;
@@ -359,30 +358,3 @@ test("BacklogSync: a release written after its claim still waits after the claim
   expect(item.waits.map((w) => w.number)).toEqual([40]);
 });
 
-test("BacklogSync: a stage Task's own comment sent after it ended leaves a failed item held (`failedSince`); one written after the Task releases it", async () => {
-  const g = fakeGithub();
-  g.issues.get(12)!.labels = ["type:pbi"];
-  const ws = db.upsertWorkspace({ name: "app", path: dir, kind: "repo" });
-  db.setWorkspaceBacklogSource(ws.id, S);
-  const sync = makeSync(db, readsWithComments(g), clock);
-  t = Date.parse("2026-09-30T12:00:00Z"); // before the Issue's updatedAt the fake GitHub reports (2026-10-01)
-  await sync.sync(ws);
-  const start = t;
-  // the Task writes its comment while it runs (written start + 10 s) and ends a minute after it started
-  commentStoredIssue(db, S, 12, "<!-- pbi-complete:claim 1 -->", start + 70_000);
-  db.insertTask({ id: "t_12", workspaceId: ws.id, title: "t", runner: "claude", cwd: dir, scope: [dir], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 12, action: "complete" }, statusAt: start + 60_000, createdAt: start, updatedAt: start + 60_000 });
-  // the comment reaches GitHub after the Task ended, and is read back
-  t = start + 180_000;
-  await sync.send(ws);
-  await sync.sync(ws);
-  const lastTask = () => {
-    const r = db.lastStageTask(ws.id, 12)!;
-    return { id: r.id, status: "error" as const, statusAt: r.statusAt, createdAt: r.createdAt, updatedAt: r.updatedAt, action: r.stage?.action ?? null, outcome: r.outcome, reviewedAt: r.reviewedAt, resumeAt: r.resumeAt, started: false };
-  };
-  // the Task is read as one that failed: `failedSince` holds it until a comment is written after it ended
-  const read = () => ({ ...readStoredBacklog(db, ws).items.find((i) => i.number === 12)!, lastTask: lastTask() });
-  expect(failedSince(read())).toBe(true);
-  // a comment written after the Task ended (written start + 120 s) counts, sent or not
-  commentStoredIssue(db, S, 12, "Task の後に書いたコメント", start + 180_000);
-  expect(failedSince(read())).toBe(false);
-});

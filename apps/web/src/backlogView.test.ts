@@ -130,7 +130,7 @@ describe("layout", () => {
 describe("itemMarks", () => {
   // the shape inProgress.test.ts builds a row with: nothing to mark
   const row = (over: Partial<BacklogItem> = {}): BacklogItem =>
-    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, confirmations: [], overlap: null, prereqs: [], stopSummary: [], ...over });
+    item(1, { url: "https://github.com/o/r/issues/1", tasks: null, decision: null, activeTaskId: null, projectStatus: null, lastTask: null, autoHeld: null, replyWaiting: false, report: null, waits: [], waitsAt: null, waitsUntil: null, confirmations: [], overlap: null, prereqs: [], stopSummary: [], ...over });
   const wait = (state: BacklogItem["waits"][number]["state"]) => ({ kind: "pr", number: 9, state, reason: "overlap", open: state !== "met", pbi: null }) as unknown as BacklogItem["waits"][number];
   const prereq = (state: BacklogItem["prereqs"][number]["state"]) => ({ number: 7, kind: "issue", need: "done", state, via: [], confirming: false }) as BacklogItem["prereqs"][number];
   const stop = (next: "decide" | "wait", state: "waiting" | "resolved" = "waiting", count = 1) =>

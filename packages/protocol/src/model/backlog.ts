@@ -183,6 +183,13 @@ export const BacklogItem = z.object({
    */
   closable: z.boolean(),
   /**
+   * Whether an automatic start of the stage this item would start next is held (packages/core/src/stage-start-gate.ts): the
+   * previous automatic Task and the stage it was held for. null = may start, or the gate does not look at the item. A
+   * request can start two ways (direct or to-pbi, by the process definitions): it is held only when both are, and its start
+   * asks the gate again for the way it takes.
+   */
+  autoHeld: z.object({ previousTaskId: z.string(), action: BacklogAction }).nullable(),
+  /**
    * The other answers of `packages/core/src/pbi-progress.ts` (docs/design/pbi-progress.md): `closableByApi` = the API
    * takes 閉じる (Tasks all closed, confirmations left or not); `closesOnAnswer` = the one confirmation line whose answer
    * closes the PBI, null = none does; `checking` = built, every Task closed and only `postMerge` lines unchecked.

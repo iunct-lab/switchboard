@@ -8,7 +8,7 @@ import { listProcesses } from "../process-defs.ts";
 import { readQueue } from "../backlog-queue.ts";
 import { allocationOf, sweepOrder, weekWindowStart } from "../allocation.ts";
 import { askWithdrawnPrereqs } from "../backlog-waits.ts";
-import { awaitingReply, failedIn, failedSince, plannedResumeLine, checksOnlyLine, claimedLine, checkingLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, spinningIn, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
+import { gateHeldIn, notGateHeld, onGateLine, GATE_LINE, plannedResumeIn, claimedIn, checksOnlyIn, checkingIn, flowShareHeldIn, maintenanceHeldIn, plannedResumeLine, checksOnlyLine, claimedLine, checkingLine, pickNext, dueSoonOf, replyWaitingIn, overlapIn, QUOTA_FULL, unchangedIn, heldIn, onHoldIn, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, allocationHeldLines, type AllocationHold, flowStopped, type FlowLimit } from "../backlog-pick.ts";
 import { storedFlowIssues, canStartStoredBacklog } from "../backlog-stored.ts";
 import { overlapLine, overlapHolderLines, overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { runGh } from "../backlog-gh.ts";
@@ -43,11 +43,9 @@ export const leftLines = (_sc: unknown, items: BacklogItem[], slot: Slot, flow?:
   const onHold = onHoldIn(items, slot);
   if (onHold.length) out.push(`保留: ${onHold.map((i) => `#${i.number}`).join(" ")}`);
   const unheld = items.filter((i) => !i.onHold);
-  // a Task that ended asking the person, or failed, with no update to the Issue since; named under that, not as unchanged
+  // a Task that ended asking the person with no answer or update since; named under that, not as unchanged
   const replyWaiting = replyWaitingIn(unheld, slot);
   if (replyWaiting.length) out.push(`返事待ち: ${replyWaiting.map((i) => `#${i.number}`).join(" ")}`);
-  const failed = failedIn(unheld, slot);
-  if (failed.length) out.push(`前回の Task が失敗したまま更新が無い: ${failed.map((i) => `#${i.number}${i.lastTask!.resumeAt ? `（使用上限、${fmtTime(i.lastTask!.resumeAt, Date.now())} に戻る）` : ""}`).join(" ")}`);
   const planned = plannedResumeLine(unheld, slot, Date.now(), fmtTime);
   if (planned) out.push(planned);
   const claimed = claimedLine(unheld, slot);
@@ -56,8 +54,13 @@ export const leftLines = (_sc: unknown, items: BacklogItem[], slot: Slot, flow?:
   if (checksOnly) out.push(checksOnly);
   const checking = checkingLine(unheld, slot);
   if (checking) out.push(checking);
-  const unchanged = unchangedIn(unheld, slot).filter((i) => !failedSince(i) && !awaitingReply(i));
+  const unchanged = unchangedIn(unheld, slot).filter((i) => !replyWaiting.includes(i));
   if (unchanged.length) out.push(`前回から更新が無い: ${unchanged.map((i) => `#${i.number}`).join(" ")}`);
+  // the gate's one reason for an item it holds, whatever way the last Task ended; an item another line above or the allocation's
+  // names is said there only. The overlap and the flow limit, said again after a start, leave a held item to this line instead
+  const named = new Set([...replyWaiting, ...unchanged, ...plannedResumeIn(unheld, slot), ...claimedIn(unheld, slot), ...checksOnlyIn(unheld, slot), ...checkingIn(unheld, slot), ...flowShareHeldIn(unheld, slot, hold), ...maintenanceHeldIn(unheld, slot, hold)]);
+  const gateHeld = gateHeldIn(unheld, slot).filter((i) => !named.has(i));
+  if (gateHeld.length) out.push(`${GATE_LINE}: ${gateHeld.map((i) => `#${i.number}（前回 ${i.autoHeld!.previousTaskId}）`).join(" ")}`);
   // what holds them: an overlap still open, a prerequisite not done yet, one a person has to look at
   const held = heldIn(unheld, slot);
   for (const [label, of] of HELD_LINES) {
@@ -68,12 +71,9 @@ export const leftLines = (_sc: unknown, items: BacklogItem[], slot: Slot, flow?:
     if (rows.length) out.push(`${label}: ${rows.join(" ")}`);
   }
   // PBIs whose Tasks' files other work touches: left before a session starts only to find that out
-  const overlapped = overlapIn(unheld, slot, undefined, flow, hold);
+  const overlapped = overlapIn(unheld.filter(notGateHeld(slot)), slot, undefined, flow, hold);
   out.push(...overlapHolderLines(overlapped), ...overlapLine(overlapped));
   out.push(...allocationHeldLines(unheld, slot, hold));
-  // stalled PBIs whose newest ## 状況 counts as many closed Tasks as now
-  const spinning = spinningIn(unheld, slot);
-  if (spinning.length) out.push(`前回の再開から進んでいない: ${spinning.map((i) => `#${i.number}`).join(" ")}`);
   return out;
 };
 
@@ -279,10 +279,13 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         skipped.push(`${ws.name}: #${next.item.number} を始めない: 候補の定義を読めません: ${defsError}`);
         continue;
       }
-      // held for the previous automatic start (stage-start-gate.ts): said before GitHub is read again, so a held item costs no read
-      const heldBefore = sc.autoHeldOf(ws, next.item, next.action);
-      if (heldBefore) {
-        skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の開始から出来事が増えていない: #${next.item.number}（前回 ${heldBefore.previousTaskId}）`);
+      // held for the previous automatic start (stage-start-gate.ts): said before GitHub is read again, so a held item costs no read.
+      // One the slot's gate line (`leftLines`) already names is not said again; one it does not (a request held for the way it
+      // takes, while `autoHeld` holds a request only when both ways are) is said here in the same words
+      const heldBy = sc.autoHeldOf(ws, next.item, next.action);
+      if (heldBy) {
+        const said = `#${next.item.number}（前回 ${heldBy.previousTaskId}）`;
+        if (!skipped.some((l) => onGateLine(l, next.item, heldBy.previousTaskId))) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${GATE_LINE}: ${said}`);
         continue;
       }
       // read again right before the start: the sweep may have taken long since this workspace was read, and an
@@ -323,7 +326,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
       });
       if ("held" in t && !("error" in t)) {
-        skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: 前回の開始から出来事が増えていない: #${next.item.number}（前回 ${t.held.previousTaskId}）`);
+        skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${GATE_LINE}: #${next.item.number}（前回 ${t.held.previousTaskId}）`);
         continue;
       }
       // its stage Task started after GitHub was read (a button, an answer's resume): the slot's next item instead
@@ -353,7 +356,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       swapOverlapLines(skipped, firstOverlap, overlapLinesUnder(head, sc.leftLines(r.items, slot, flow(), hold)));
     }
     // the flow PBIs left, said after the starts: one started in this firing may be what holds the next
-    const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)), slot, flow()), flow());
+    const flowLine = reported && flowHeldLine(flowHeldIn(r.items.filter((i) => !flowStarted.has(i.number)).filter(notGateHeld(slot)), slot, flow()), flow());
     if (flowLine) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${flowLine}`);
   }
   };

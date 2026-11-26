@@ -258,7 +258,10 @@ export function formatSelection(s: Selection): string {
 
 /** 今のツリーのファイル（追跡と未追跡。消したものは除く）。 */
 export function repoFiles(root: string): string[] {
-  const listed = Bun.spawnSync(["git", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root }).stdout.toString();
+  const p = Bun.spawnSync(["git", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root });
+  // 読めなかった理由を stderr に残す（選ぶ結果は変えない。一覧が空なら何も選ばれず、黙っていると理由が辿れない）。
+  if (p.exitCode !== 0) console.error(`git ls-files が exit ${p.exitCode} で失敗した: ${p.stderr.toString().trim()}`);
+  const listed = p.stdout.toString();
   return listed.split("\n").filter((f) => f && existsSync(join(root, f)) && statSync(join(root, f)).isFile());
 }
 

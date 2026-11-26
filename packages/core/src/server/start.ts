@@ -11,7 +11,7 @@ import { savedConfigFile } from "../workspace-config.ts";
 import { syncsGithub } from "../backlog-gh.ts";
 import { buildDirectPrompt, buildStartPrompt, subagentModelAlias, startTitle } from "../backlog-prompt.ts";
 import { screenAnswer } from "../backlog-edit.ts";
-import { autoStartHeld } from "../stage-start-gate.ts";
+import { readAutoHeld } from "../backlog-stored.ts";
 import { otherRepo } from "./helpers.ts";
 import type { ServerContext } from "./context.ts";
 
@@ -139,12 +139,8 @@ export const completeTaskModelFor = (sc: Pick<ServerContext, "settings" | "decid
 /** A stage Task runs on the workspace whose repository the Issue is in, so another repository's #n is not the meta's #n. */
 export const activeStageTask = (sc: Pick<ServerContext, "db">, workspaceId: string, n: number) => sc.db.activeStageTask(workspaceId, n);
 
-/** The one place that applies the rule of stage-start-gate.ts to an item: null = an automatic start may go, otherwise the previous automatic Task it is held for. */
-export const autoHeldOf = (sc: Pick<ServerContext, "db">, ws: Workspace, item: BacklogItem, action: BacklogAction): { previousTaskId: string } | null => {
-  const prev = sc.db.lastAutoStageTask(ws.id, item.number, action);
-  const running = prev ? sc.db.activeStageTask(ws.id, item.number)?.id === prev.id : false;
-  return autoStartHeld(item.events, prev && { id: prev.id, createdAt: prev.createdAt, endedAt: running ? null : prev.statusAt });
-};
+/** The gate's answer when a start is made, read by `readAutoHeld` (backlog-stored.ts, the one place that applies the rule of stage-start-gate.ts): null = an automatic start may go, otherwise the previous automatic Task it is held for. */
+export const autoHeldOf = (sc: Pick<ServerContext, "db">, ws: Workspace, item: BacklogItem, action: BacklogAction): { previousTaskId: string } | null => readAutoHeld(sc.db, ws.id, item, action);
 
 /**
  * Starts one stage Task of an Issue: the button, backlog-next and the resume after an answer all come here, so

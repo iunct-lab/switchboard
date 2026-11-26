@@ -8,7 +8,7 @@ import { NO_HOST } from "../ops-kit/src/secrets";
 import type { Filed, OpenRequest } from "./file-request";
 import { stepWithIdle } from "./local-ci";
 import { ciSteps } from "./ci";
-import { OffloadStartError, type Offload } from "./local-ci-offload";
+import { OffloadStartError, stepsOf, type Offload } from "./local-ci-offload";
 import { baseTreeTar, classifyMiss, tagPendingDirOf, writeTagPending, failedIn, failedTestFiles, failureRequest, followUp, hidePaths, latestPass, latestPassTag, MAX_TAG_RUNS, offloadFor, parseArgs, PERF_STREAK, PERF_WARNING_HEADING, perfKeys, perfStreak, perfStreakFollow, warningsOf, REQUEST_TITLE, resolveRepo, resultSection, tagCi, tagCiExit, tagResult, TAG_CI_RESULT, judgesNewest, writeJobResult, type FollowDeps, type TagCiDeps, type TagCiEntry } from "./tag-ci";
 
 const ciYml = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
@@ -1091,7 +1091,7 @@ describe("tag-ci: the build off the host", () => {
     const started: Array<{ script: string; cwd: string; baseTree?: string; imageRoot?: string; size: string }> = [];
     const offload: Offload = {
       start: async (script, cwd, o) => {
-        started.push({ script, cwd, size: o.size, ...(o.baseTree ? { baseTree: o.baseTree } : {}), ...(o.imageRoot ? { imageRoot: o.imageRoot } : {}) });
+        started.push({ script: `${script}\n${stepsOf(script)}`, cwd, size: o.size, ...(o.baseTree ? { baseTree: o.baseTree } : {}), ...(o.imageRoot ? { imageRoot: o.imageRoot } : {}) });
         return { build: `b${started.length}` };
       },
       collect: async (build) => {

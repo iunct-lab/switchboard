@@ -76,8 +76,6 @@ export const withActive = (sc: Pick<ServerContext, "db" | "activeStageTask" | "m
     const stage = withStageTask(sc.db, i);
     const item: BacklogItem = {
       ...stage,
-      // the person's check of the last stage Task is an event too; it is on the Task's row, which the stored read does not have
-      events: stage.lastTask?.reviewedAt != null ? [...i.events, { key: `reviewed:${stage.lastTask.id}`, at: stage.lastTask.reviewedAt }] : i.events,
       activeTaskId: sc.activeStageTask(i.workspaceId, i.number)?.id ?? null,
       mockups: i.mockupTask ? sc.mockupsOf(i.mockupTask) : [],
     };

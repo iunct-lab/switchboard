@@ -1,6 +1,6 @@
 /**
  * The selection: which item the scheduler starts next in a slot (`pickNext`), and why each of the others is not
- * started — answered or not, stopped, waiting for a reply, held by the flow limit or the allocation, spinning — with the
+ * started — answered or not, stopped, waiting for a reply, held by the flow limit or the allocation, held by the gate — with the
  * lines the screens show for them. Whether a start by itself repeats a previous one is not decided here: stage-start-gate.ts.
  */
 import type { BacklogAction, BacklogItem, BacklogStage, WorkspaceMode } from "@switchboard/protocol";
@@ -11,7 +11,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_FAILURES_FILE, parseKnownFailures, type KnownFailure } from "../../../ops-kit/src/known-failures.ts";
 import { DIRECT_RETURNED_LABEL, chooseProcess, ACTION_FOR_STAGE, type Slot } from "./backlog-item.ts";
-import { tasksDoneMark } from "./backlog-prompt.ts";
 import { isOverlapped } from "./backlog-overlap.ts";
 
 /** An entry of the known-failures registry this close to its last day (or past it) puts its Issue's PBIs before Priority. */
@@ -88,14 +87,6 @@ const triedThisStage = (i: BacklogItem) => STAGE_ORDER.includes(i.stage) && !!i.
 const commentedSince = (i: BacklogItem, since: number) => !!i.commentedAt && Date.parse(i.commentedAt) > since;
 
 /**
- * Its last stage Task failed (error / aborted) and no comment was written on the Issue since. A runner that could not run at
- * all (the usage limit, an organization's setting) ends the Task in seconds and leaves no mark on the Issue — not the
- * ## 状況 mark of a resume either — so without this an in-progress PBI was resumed every firing (26 times in 30 hours). Any stage. A Task closed since releases it too (`tasks.doneAt`), which asking the person (`awaitingReply`) does not.
- */
-export const failedSince = (i: BacklogItem) =>
-  !!i.lastTask && (i.lastTask.status === "error" || i.lastTask.status === "aborted") && !touchedSince(i) && !(i.tasks?.doneAt && Date.parse(i.tasks.doneAt) > i.lastTask.updatedAt);
-
-/**
  * Something happened on the Issue since its last stage Task ended: a comment was written on it, or a ## 回答 came
  * on one of its Tasks (`answeredAt`, which a child's answer sets without a comment on the parent).
  */
@@ -137,7 +128,7 @@ export const flowLimitOf = (limit: number, counted: number[], stopped: number): 
 /**
  * The flow PBIs in progress that count against the limit: one with a stage Task running, or one backlog-next would
  * go on with (`candidates` without `flow`: a resume, a close, a lifted reply). One it leaves (a reply or decision waited
- * for, a wait on a dependency, no update since, no progress since the last resume, on hold) is stopped and is not counted.
+ * for, a wait on a dependency, the same stop again, held by the gate (`autoHeld`), on hold) is stopped and is not counted.
  * One whose implementation does not start because it touches what other work touches, or the overlap cannot be judged
  * (`isOverlapped`; `pickNext` skips it), is stopped too, unless a stage Task is running on it; a close does not look at
  * the overlap, so it still counts. Once its overlap clears it counts again, so the running ones may then be over the limit
@@ -214,19 +205,11 @@ export const replyWaitingIn = (items: BacklogItem[], slot: Slot) =>
   items.filter((i) => inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && awaitingReply(i));
 
 /**
- * The items of a slot backlog-next leaves because their last stage Task failed with no update to the Issue since; one asking the person is listed as that instead.
- * That failed Task holding the Issue only by its planned resume (dedupe counts it) is still named here, with the time.
- */
-export const failedIn = (items: BacklogItem[], slot: Slot) =>
-  items.filter((i) => inSlot(i, slot) && (!i.activeTaskId || i.activeTaskId === i.lastTask?.id) && !isWaiting(i) && !isUnblocked(i) && !awaitingReply(i) && failedSince(i));
-
-/**
  * The items of a slot a resume reservation holds (the runner's usage limit, the GitHub budget, the disk, or a start queued
- * at the limit): a stage Task is the Issue's running one (dedupe counts it) and has a time to resume at. One `failedIn`
- * names (with the same time) is left out, so no PBI is on two lines.
+ * at the limit): a stage Task is the Issue's running one (dedupe counts it) and has a time to resume at.
  */
 export const plannedResumeIn = (items: BacklogItem[], slot: Slot) =>
-  items.filter((i) => inSlot(i, slot) && i.activeTaskId !== null && i.activeTaskId === i.lastTask?.id && i.lastTask.resumeAt !== null && failedIn([i], slot).length === 0);
+  items.filter((i) => inSlot(i, slot) && i.activeTaskId !== null && i.activeTaskId === i.lastTask?.id && i.lastTask.resumeAt !== null);
 
 /**
  * The items of a slot backlog-next leaves because a Task holds them with a claim (`claim`: not released, its Task at work or
@@ -249,13 +232,13 @@ export function plannedResumeLine(items: BacklogItem[], slot: Slot, now: number,
 
 /**
  * The in-progress PBIs of the implement slot whose Tasks are all closed and whose only unchecked criteria are the person's
- * checks: backlog-next leaves them to the person. One another line names (waiting, a reply awaited, failed, stopped) or
+ * checks: backlog-next leaves them to the person. One another line names (waiting, a reply awaited, stopped) or
  * one an answer or a met wait starts again is left out, so no PBI is on two lines nor named as left when it is started.
  */
 export const checksOnlyIn = (items: BacklogItem[], slot: Slot) =>
   slot !== "implement"
     ? []
-    : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.closableByApi && i.confirmations.length > 0 && !i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !failedSince(i) && !stopHeld(i));
+    : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.closableByApi && i.confirmations.length > 0 && !i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !stopHeld(i));
 
 /** The log line for `checksOnlyIn`; null when none. */
 export function checksOnlyLine(items: BacklogItem[], slot: Slot): string | null {
@@ -266,10 +249,10 @@ export function checksOnlyLine(items: BacklogItem[], slot: Slot): string | null 
 /**
  * The in-progress PBIs of the implement slot that are `checking` (`pbiProgress`: built, Tasks all closed, only after-merge
  * lines unchecked) with no stage Task running: backlog-next starts no 閉じる for them. One an answer or a met wait starts
- * again, or one another line already names (a wait, a reply, a failure, a stop), is left out, as for `checksOnlyIn`.
+ * again, or one another line already names (a wait, a reply, a stop), is left out, as for `checksOnlyIn`.
  */
 export const checkingIn = (items: BacklogItem[], slot: Slot) =>
-  slot !== "implement" ? [] : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !failedSince(i) && !stopHeld(i));
+  slot !== "implement" ? [] : items.filter((i) => i.stage === "in-progress" && !i.activeTaskId && i.progress.checking && !isWaiting(i) && !isAnswered(i) && !isUnblocked(i) && !awaitingReply(i) && !stopHeld(i));
 
 /** The log line for `checkingIn`; null when none. */
 export function checkingLine(items: BacklogItem[], slot: Slot): string | null {
@@ -277,15 +260,40 @@ export function checkingLine(items: BacklogItem[], slot: Slot): string | null {
   return held.length ? `確認中: ${held.map((i) => `#${i.number}`).join(" ")}` : null;
 }
 
-/** The items of a slot backlog-next leaves because it stopped the same way again (`stopHeld`), and a 閉じる that did not close. */
-export const unchangedIn = (items: BacklogItem[], slot: Slot) =>
-  items.filter((i) => (inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && stopHeld(i)) || (slot === "implement" && i.stage === "in-progress" && i.closable && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && !isClosable(i)));
+/** The items of a slot backlog-next leaves because it stopped the same way again (`stopHeld`). */
+export const unchangedIn = (items: BacklogItem[], slot: Slot) => items.filter((i) => inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && !isUnblocked(i) && stopHeld(i));
+
+/**
+ * The items of a slot the gate holds for the previous automatic start (`autoHeld`: nothing happened since it that the gate counts): the one reason the log gives
+ * for a held item. A Task running on it or a wait still open names it elsewhere, so it is not here.
+ */
+export const gateHeldIn = (items: BacklogItem[], slot: Slot) => items.filter((i) => inSlot(i, slot) && !i.activeTaskId && !isWaiting(i) && i.autoHeld !== null);
+/** Not one `gateHeldIn` takes: the overlap and the flow-limit lines leave a held item to the gate's line. */
+export const notGateHeld = (slot: Slot) => (i: BacklogItem) => !gateHeldIn([i], slot).length;
+/** The words of the gate's line: the log names a held item by them only (`#N（前回 <Task id>）` after). */
+export const GATE_LINE = "前回の開始から出来事が増えていない";
+/**
+ * Whether a log line already names held item `i` on the gate's line: by the previous Task the start was held for, or the one
+ * the item's `autoHeld` names (the line `leftLines` wrote; a request held both ways may name the other way's). Task ids
+ * are unique, so a same-numbered item of another workspace, even one of the same name, is not taken for it.
+ */
+export const onGateLine = (line: string, i: Pick<BacklogItem, "number" | "autoHeld">, previousTaskId: string) =>
+  line.includes(GATE_LINE) && [previousTaskId, i.autoHeld?.previousTaskId].some((id) => !!id && line.includes(`#${i.number}（前回 ${id}）`));
 
 /**
  * A Ready / in-progress PBI with a wait or a prerequisite not met: still open, not read, withdrawn,
  * in a cycle or not judged. backlog-next leaves it; its row's button does not.
  */
 const isWaiting = (i: BacklogItem) => i.waits.some((w) => w.state !== "met") || (!!i.waitsUntil && !i.waitsUntil.met) || i.prereqs.some((p) => p.state !== "met");
+
+/**
+ * The stages an automatic start of the item can start, as `candidates` chooses: one in progress goes on with 実装 when
+ * answered or unblocked, else is closed (閉じる) when its Tasks and checks are done (`closable`, as `candidates` picks 閉じる
+ * for it), else 実装 again; a request starts direct or to-pbi by the
+ * process definitions (`chooseProcess`), which the item does not carry, so both are named; [] = no stage starts by itself.
+ */
+export const autoActionsOf = (i: BacklogItem): BacklogAction[] =>
+  i.stage === "in-progress" ? [isAnswered(i) || isUnblocked(i) || !i.closable ? "complete" : "close"] : i.stage === "request" ? ["to-pbi", "direct"] : ACTION_FOR_STAGE[i.stage] ? [ACTION_FOR_STAGE[i.stage]!] : [];
 
 /**
  * A Ready / in-progress PBI whose waits closed or became deferred.
@@ -308,52 +316,16 @@ export const heldIn = (items: BacklogItem[], slot: Slot) =>
       return { item, pending: held.filter((x) => x.state === "pending"), stuck: held.filter((x) => x.state !== "pending") };
     });
 
-/**
- * An in-progress PBI whose Tasks are all closed and whose confirmations are all answered: backlog-next starts 閉じる.
- * Left when its last stage Task was a 閉じる that finished with no update to the Issue since, so a 閉じる that
- * failed is not started again every firing.
- */
-export const isClosable = (i: BacklogItem) =>
-  i.closable && !(i.lastTask?.action === "close" && isFinished(i.lastTask) && !releasedByReview(i.lastTask) && !commentedSince(i, i.lastTask.updatedAt));
-
 /** An in-progress PBI with Tasks left and nothing it waits on: backlog-next resumes it (`complete`). */
 const isStalled = (i: BacklogItem) => i.stage === "in-progress" && !!i.tasks && i.tasks.done < i.tasks.total;
 
 /**
- * A resume that ended before writing its ## 状況 mark: the last stage Task is a finished 実装, and neither the
- * Issue (a comment written, `commentedAt`), a Task closed since (`tasks.doneAt`) nor a ## 回答 is newer than that Task's start. A resume writes
- * its marked ## 状況 first, and a 実装 started from Ready in a repository with the parallel guard writes its claim comment
- * first, so either one that got that far wrote a comment after the Task started. Without the guard the 実装 writes only
- * its decision log (the body), which does not count (only comments do), so it is not resumed from this rule.
- */
-export const endedUnmarked = (i: BacklogItem) => {
-  const t = i.lastTask;
-  if (!t || t.action !== "complete" || !isFinished(t)) return false;
-  const newer = (at: string | null | undefined) => !!at && Date.parse(at) > t.createdAt;
-  return !newer(i.commentedAt) && !newer(i.tasks?.doneAt) && !newer(i.answeredAt);
-};
-
-/**
- * A stalled PBI not moved since its last resume: its newest ## 状況 carries the tasks-done mark of as many closed
- * Tasks as now, and no ## 回答 came after that report; or the resume ended before writing a mark (`endedUnmarked`).
- * A resume that ended asking the person and was marked reviewed releases it too.
- */
-const isSpinning = (i: BacklogItem) =>
-  isStalled(i) &&
-  ((tasksDoneMark(i.report) === i.tasks!.done && !(i.answeredAt && Date.parse(i.answeredAt) > Date.parse(i.report!.at))) || endedUnmarked(i)) &&
-  !(i.lastTask && releasedByReview(i.lastTask));
-
-/**
- * A PBI the queue does not resume: it did not move since its last resume (stalled and spinning), it waits for a reply, its
- * last Task failed with no update to the Issue since, or it stopped the same way again (`stopHeld`). A PBI that is unblocked
- * is resumed, so it is not one. `candidates` leaves these out, and so does the place a PBI yielded with on an overlap
+ * A PBI the queue does not resume: the gate holds its next automatic start (`autoHeld`: nothing happened since the previous one
+ * that the gate counts, whichever way that Task ended), it waits for a reply, or it stopped the same way again (`stopHeld`). A PBI
+ * that is unblocked is resumed, so it is not one. `candidates` leaves these out, and so does the place a PBI yielded with on an overlap
  * (backlog-overlap.ts `turnWorks`): a place that nothing resumes would hold the others until a person looks.
  */
-export const notResumed = (i: BacklogItem) => !isUnblocked(i) && (failedSince(i) || awaitingReply(i) || stopHeld(i) || (isStalled(i) && !isClosable(i) && !isAnswered(i) && isSpinning(i)));
-
-/** The stalled PBIs backlog-next leaves because they did not move since their last resume. */
-export const spinningIn = (items: BacklogItem[], slot: Slot) =>
-  items.filter((i) => slot === "implement" && !i.activeTaskId && !isWaiting(i) && !isAnswered(i) && isSpinning(i));
+export const notResumed = (i: BacklogItem) => !isUnblocked(i) && (awaitingReply(i) || stopHeld(i) || i.autoHeld !== null);
 
 /**
  * The one item backlog-next moves on in a slot: the PBIs to finish first (回答済みの実装中 →
@@ -365,11 +337,9 @@ export const spinningIn = (items: BacklogItem[], slot: Slot) =>
  * in-progress PBI still first); whether it starts again is the gate's (stage-start-gate.ts).
  * An item waiting for a PR / Issue still open is left, Ready or in progress.
  * A Ready PBI whose waits all closed takes the same place as such an in-progress one, its stopped Task reviewed or not.
- * Any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`) unless it
- * did not move since its last resume (`spinningIn`).
- * A resume that ended before writing its mark is left too, until the Issue, a Task or an answer moves.
- * An item whose last stage Task failed, or ended asking the person, with no update to the Issue since is left in
- * any stage (`failedIn`, `replyWaitingIn`).
+ * Any other in-progress PBI is closed (`close`) when it can be, else resumed (`complete`, `resume: true`).
+ * An item the gate holds (`autoHeld`: nothing happened since the previous automatic start, whichever way that Task ended), or
+ * whose last stage Task ended asking the person, is left in any stage (`gateHeldIn`, `replyWaitingIn`).
  * An item labelled `on-hold` is left in every slot and stage (`onHoldIn`), and in no other reason's list.
  */
 export function pickNext(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set(), hold?: AllocationHold): Picked | null {
@@ -389,12 +359,12 @@ export type Picked = { item: BacklogItem; action: BacklogAction; resume?: true; 
  */
 function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: FlowLimit, defs: ProcessDef[] = [], dueSoon: ReadonlySet<number> = new Set(), hold?: AllocationHold): Picked[] {
   const resumed = (i: BacklogItem) =>
-    isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : isClosable(i) ? -2 : isStalled(i) && !isSpinning(i) ? -1 : null;
+    isAnswered(i) ? -4 : isUnblocked(i) ? -3 : i.stage !== "in-progress" ? null : i.closable ? -2 : isStalled(i) ? -1 : null;
   const first = (i: BacklogItem) => resumed(i) ?? 0;
   const tried = (i: BacklogItem) => (triedThisStage(i) ? 1 : 0);
   // a PBI of (or itself) an Issue a known failure's registry entry names, close to its end, goes before Priority
   const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
-  // A Task that failed or stopped asking, with no update to the Issue since, holds the item in any stage (an unblocked one still goes on)
+  // A Task that stopped asking, the same stop again or the gate's hold (`notResumed`) leaves the item in any stage (an unblocked one still goes on)
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
   // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);
@@ -417,7 +387,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
     const r = resumed(item);
     // a request starts in the candidate its own criteria choose; the reason goes into the Task's provenance
     const chosen = r === null && item.stage === "request" ? chooseProcess(item, defs) : null;
-    const action: BacklogAction = r === -2 ? "close" : r !== null ? "complete" : chosen ? (chosen.process === "p1-direct" ? "direct" : "to-pbi") : ACTION_FOR_STAGE[item.stage]!;
+    const action: BacklogAction = r !== null ? autoActionsOf(item)[0]! : chosen ? (chosen.process === "p1-direct" ? "direct" : "to-pbi") : ACTION_FOR_STAGE[item.stage]!;
     return r === -1 ? { item, action, resume: true } : chosen ? { item, action, reason: chosen.reason } : { item, action };
   });
 }

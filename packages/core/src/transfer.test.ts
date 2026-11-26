@@ -1,7 +1,7 @@
 // test-reads: packages/core/src/main.ts
 import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, createWriteStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, StartOptions, Task } from "@switchboard/protocol";
@@ -14,7 +14,7 @@ import { startServer as startDaemon } from "./server.ts";
  * sessions the tests count. Here it never answers, unless a test passes its own.
  */
 const startServer: typeof startDaemon = (cfg, adapters, opts = {}) => startDaemon(cfg, adapters, { judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined), ...opts });
-import { exportHistory, importHistory, type Manifest } from "./transfer.ts";
+import { exportHistory, importHistory, type Manifest, writeTarZst } from "./transfer.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "sb-transfer-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -220,6 +220,134 @@ describe("export streams", () => {
     const out = join(tmp, "dl.tar.zst");
     await expect(exportHistory(cfg, out)).rejects.toThrow("is a link to nothing");
     expect(existsSync(out)).toBe(false);
+  });
+  // While exportHistory cleans up, other work of the same process opens a file as soon as the package's descriptor
+  // number is free. exportHistory must not close that file: exactly one owner closes the descriptor.
+  const stolenDescriptors = async (kind: "success" | "failure", rounds: number) => {
+    const { cfg } = fakeHistory(join(tmp, `owner-${kind}`));
+    if (kind === "failure") symlinkSync(join(cfg.knowledgeDir, "missing.md"), join(cfg.knowledgeDir, "dangling.md"));
+    const probe = join(tmp, `owner-${kind}-probe`);
+    writeFileSync(probe, "x");
+    const link = (fd: number | string) => {
+      try {
+        return readlinkSync(`/proc/self/fd/${fd}`);
+      } catch {
+        return null;
+      }
+    };
+    let stolen = 0;
+    let took = 0; // rounds in which the watcher found the package's descriptor and took its number once it was free
+    const real = realpathSync(tmp); // /proc/self/fd shows resolved paths
+    for (let i = 0; i < rounds; i++) {
+      const out = join(tmp, `owner-${kind}-${i}.tar.zst`);
+      const outLink = join(real, `owner-${kind}-${i}.tar.zst`);
+      let other: number | undefined;
+      let running = true;
+      let watching = false;
+      const beforePack = () => {
+        if (watching) return;
+        watching = true;
+        const n = readdirSync("/proc/self/fd").find((f) => link(f) === outLink);
+        if (n === undefined) return;
+        const watch = () => {
+          if (!running || other !== undefined) return;
+          try {
+            fstatSync(Number(n));
+            setImmediate(watch);
+          } catch {
+            other = openSync(probe, "r"); // the number is free: take it
+          }
+        };
+        setImmediate(watch);
+      };
+      await exportHistory(cfg, out, { beforePack }).catch((e) => {
+        if (kind === "success") throw e;
+      });
+      running = false;
+      if (other !== undefined) {
+        took++;
+        if (link(other) === realpathSync(probe)) closeSync(other);
+        else stolen++;
+      }
+    }
+    return { stolen, took };
+  };
+  test("a failed export does not close a descriptor someone else opened", async () => {
+    const { stolen, took } = await stolenDescriptors("failure", 60);
+    expect(took).toBeGreaterThan(0); // the watcher saw the package's descriptor, so a 0 below is not vacuous
+    expect(stolen).toBe(0);
+  }, 30_000);
+  test("a successful export does not close a descriptor someone else opened", async () => {
+    const { stolen, took } = await stolenDescriptors("success", 60);
+    expect(took).toBeGreaterThan(0); // the watcher saw the package's descriptor, so a 0 below is not vacuous
+    expect(stolen).toBe(0);
+  }, 30_000);
+  test("a failed writeTarZst leaves no late close behind for the descriptor number it freed", async () => {
+    const dir = mkdtempSync(join(tmp, "wtz-"));
+    const probe = join(dir, "probe");
+    writeFileSync(probe, "x");
+    let stolen = 0;
+    for (let i = 0; i < 60; i++) {
+      const path = join(dir, `big-${i}.bin`);
+      writeFileSync(path, "0123456789");
+      // the name is read for the header, after the size was taken: the file is cut there, and the write fails
+      const entry = {
+        path,
+        get name() {
+          truncateSync(path, 0);
+          return "big.bin";
+        },
+      };
+      await expect(writeTarZst(join(dir, `out-${i}.tar.zst`), [entry])).rejects.toThrow("shrank");
+      // the package's descriptor number is free again: this open gets it, and a close still on its way would take it
+      const other = openSync(probe, "r");
+      await Bun.sleep(2);
+      try {
+        fstatSync(other);
+        closeSync(other);
+      } catch {
+        stolen++;
+      }
+    }
+    expect(stolen).toBe(0);
+  }, 30_000);
+});
+
+describe("a close error of the package", () => {
+  // A filesystem that reports a delayed write error at close (EIO, ENOSPC, EDQUOT): injected where the stream's close
+  // answers, the real close still runs.
+  const proto = Object.getPrototypeOf(createWriteStream(join(tmp, "close-sample"))) as { _destroy: (e: Error | null, cb: (e?: Error | null) => void) => void };
+  const original = proto._destroy;
+  const failClose = async <T>(run: () => Promise<T>): Promise<{ result: T | Error; injected: number }> => {
+    let injected = 0;
+    proto._destroy = function (this: unknown, err, cb) {
+      original.call(this, err, (e) => {
+        injected++;
+        cb(e ?? Object.assign(new Error("EIO: i/o error, close"), { code: "EIO" }));
+      });
+    };
+    try {
+      return { result: await run().catch((e: Error) => e), injected };
+    } finally {
+      proto._destroy = original;
+    }
+  };
+  test("writeTarZst rejects when closing the package fails after a good write", async () => {
+    const { result, injected } = await failClose(() => writeTarZst(join(tmp, "ce-w.tar.zst"), [{ name: "a.txt", bytes: Buffer.from("a") }]));
+    expect(injected).toBeGreaterThan(0);
+    expect((result as Error).message).toContain("EIO");
+  });
+  test("exportHistory rejects when closing the package fails after a good write", async () => {
+    const { cfg } = fakeHistory(join(tmp, "ce-e"));
+    const { result, injected } = await failClose(() => exportHistory(cfg, join(tmp, "ce-e.tar.zst")));
+    expect(injected).toBeGreaterThan(0);
+    expect((result as Error).message).toContain("EIO");
+  });
+  test("a failed pipeline reports its own error, not the close error", async () => {
+    const { cfg } = fakeHistory(join(tmp, "ce-f"));
+    symlinkSync(join(cfg.knowledgeDir, "missing.md"), join(cfg.knowledgeDir, "dangling.md"));
+    const { result } = await failClose(() => exportHistory(cfg, join(tmp, "ce-f.tar.zst")));
+    expect((result as Error).message).toContain("is a link to nothing");
   });
 });
 

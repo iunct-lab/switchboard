@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Ask } from "@switchboard/protocol";
-import { stallAskOf, stallRows } from "./queueStall.ts";
+import { STALL_RECHECK_GRACE_MS, readStall, stallAskOf, stallRecheckIn, stallRows } from "./queueStall.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], questions: [], grants: [], grant: null, recommendation: null, next: null,
@@ -45,4 +45,32 @@ test("stall rows say the holders and the person's waits", () => {
     { text: "Task #5841 — 4 件（作業中）", href: null },
   ]);
   expect(stallRows(ask({ id: "notice:x", kind: "notice" }))).toEqual({ person: [], holders: [] });
+});
+
+test("Home reads the queue again when the stall reaches the limit", () => {
+  const MIN = 60_000;
+  const q = { enabled: true, stall: { since: 0 } };
+  expect(stallRecheckIn(q, 60 * MIN, 10 * MIN)).toBe(50 * MIN + 1000);
+  expect(stallRecheckIn(q, 60 * MIN, 70 * MIN)).toBeNull();
+  // past the limit, within the grace: once more at its end (a read that crossed the limit, a browser clock ahead)
+  expect(stallRecheckIn(q, 60 * MIN, 60 * MIN + 100)).toBe(STALL_RECHECK_GRACE_MS - 100);
+  expect(stallRecheckIn(q, 60 * MIN, 60 * MIN + STALL_RECHECK_GRACE_MS)).toBeNull();
+  expect(stallRecheckIn({ enabled: false, stall: { since: 0 } }, 60 * MIN, 10 * MIN)).toBeNull();
+  expect(stallRecheckIn({ enabled: true, stall: null }, 60 * MIN, 10 * MIN)).toBeNull();
+});
+
+test("Home's read clears the card and sets a clock only while the notice is not there", async () => {
+  const MIN = 60_000;
+  const api = (o: { asks?: Ask[]; settings?: "fail" }) => ({
+    backlogQueue: async () => ({ enabled: true, stall: { since: 0 } }),
+    asks: async () => ({ asks: o.asks ?? [] }),
+    settings: async () => {
+      if (o.settings === "fail") throw new Error("network");
+      return { quotaAndResume: { queueStallMs: 60 * MIN } };
+    },
+  });
+  expect(await readStall(api({ asks: [stalled] }), 10 * MIN)).toEqual({ ask: stalled, wait: null });
+  expect(await readStall(api({}), 10 * MIN)).toEqual({ ask: null, wait: 50 * MIN + 1000 });
+  // the limit cannot be read: no clock, and the card that was shown is still cleared
+  expect(await readStall(api({ settings: "fail" }), 10 * MIN)).toEqual({ ask: null, wait: null });
 });

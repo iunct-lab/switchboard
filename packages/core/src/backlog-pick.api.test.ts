@@ -8,7 +8,7 @@ import { listProcesses, loadProcess, parseProcessDef } from "./process-defs.ts";
 import { type CoreServer } from "./server.ts";
 import { fmtTime } from "./ratelimit.ts";
 import { buildStartPrompt, tasksDoneMark, TASKS_DONE_MARK } from "./backlog-prompt.ts";
-import { pickNext, dueSoonIssues, dueSoonOf, spinningIn, unchangedIn, heldIn, awaitingReply, isAnswered, failedIn, failedSince, plannedResumeLine, checksOnlyLine, checkingLine, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog-pick.ts";
+import { pickNext, dueSoonIssues, dueSoonOf, unchangedIn, gateHeldIn, heldIn, awaitingReply, isAnswered, plannedResumeLine, checksOnlyLine, checkingLine, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog-pick.ts";
 import { toItem, requestTextChars, chooseProcess, type RawBacklogIssue } from "./backlog-item.ts";
 import { STOPPED, backlogNextSchedule, boot, fixtureStage, holdingClaude, item, metaId, raw, runSchedule, scheduleLogAll, subTask, taskDecisionGh, useBacklogDaemon, wait } from "./api-test-harness.ts";
 
@@ -247,41 +247,25 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   // a running stage Task or a question holds it
   expect(pickNext([{ ...closable, activeTaskId: "tsk_run" }, { ...stalled, activeTaskId: "tsk_run" }], "implement")).toBeNull();
   expect(pickNext([{ ...stalled, stage: "needs-decision", decision: { body: "## 判断待ち", at: "2026-09-29T00:00:00Z", issue: 2 } }], "implement")).toBeNull();
-  // a 閉じる that finished with no update since is not started again; an update brings it back
-  const triedClose = { ...closable, lastTask: { id: "tsk_close", status: "error" as const, statusAt: Date.parse("2026-09-29T00:00:00Z"), createdAt: Date.parse("2026-09-29T00:00:00Z"), updatedAt: Date.parse("2026-09-29T00:00:00Z"), action: "close" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } };
-  expect(pickNext([triedClose], "implement")).toBeNull();
-  expect(pickNext([{ ...triedClose, commentedAt: "2026-09-29T01:00:00Z" }], "implement")).toMatchObject({ action: "close" });
-  expect(unchangedIn([triedClose, closable], "implement").map((i) => i.number)).toEqual([1]);
-  expect(unchangedIn([{ ...triedClose, commentedAt: "2026-09-29T01:00:00Z" }], "implement")).toEqual([]);
-  expect(unchangedIn([triedClose], "plan")).toEqual([]);
-  // started for another reason or listed under 待ち: not named as unchanged
-  expect(unchangedIn([{ ...triedClose, answeredAt: "2026-09-29T01:00:00Z" }, { ...triedClose, number: 9, waits: [wait(778, "pr", true)] }], "implement")).toEqual([]);
-  // the mark of the last resume: the same count → left (and listed); a Task closed since → resumed; an answer after it → resumed
-  const spun = { ...stalled, report: report(1) };
-  expect(pickNext([spun], "implement")).toBeNull();
-  expect(spinningIn([spun, stalled, closable], "implement").map((i) => i.number)).toEqual([2]);
-  expect(spinningIn([spun], "plan")).toEqual([]);
-  expect(pickNext([{ ...spun, tasks: { total: 3, done: 2, doneAt: null } }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...spun, answeredAt: "2026-09-29T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...spun, answeredAt: "2026-09-28T23:00:00Z" }], "implement")).toBeNull();
-  // a ## 状況 without the mark (a 状況確認's) does not hold it
-  expect(pickNext([{ ...stalled, report: report(null) }], "implement")).toMatchObject({ action: "complete", resume: true });
-  // a resume that ended (done: a failed one is held by 前回の Task が失敗したまま更新が無い) before writing its mark is left until the Issue, a Task or an answer moves past its start
-  const died = { ...stalled, lastTask: { id: "tsk_resume", status: "done" as const, statusAt: Date.parse("2026-09-30T00:00:00Z"), createdAt: Date.parse("2026-09-30T00:00:00Z"), updatedAt: Date.parse("2026-09-30T00:10:00Z"), action: "complete" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true } };
-  expect(pickNext([died], "implement")).toBeNull();
-  expect(spinningIn([died], "implement").map((i) => i.number)).toEqual([2]);
-  expect(pickNext([{ ...died, commentedAt: "2026-09-30T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true }); // a comment (also: a Ready 実装 that logged its start, then stopped)
-  expect(pickNext([{ ...died, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toMatchObject({ action: "complete", resume: true }); // a Task closed since
-  expect(pickNext([{ ...died, answeredAt: "2026-09-30T01:00:00Z" }], "implement")?.item.number).toBe(2); // an answer
-  expect(pickNext([{ ...died, tasks: { total: 3, done: 1, doneAt: "2026-09-29T00:00:00Z" } }], "implement")).toBeNull(); // a Task closed before the resume
-  expect(pickNext([{ ...died, lastTask: { ...died.lastTask, action: "check" as const } }], "implement")).toMatchObject({ action: "complete", resume: true }); // the last Task was a 状況確認
-  // a resume that failed (error) before writing its mark is held by 前回の Task が失敗したまま更新が無い: held until the Issue, an answer or a closed Task is newer than its end
-  const failed = { ...died, lastTask: { ...died.lastTask, status: "error" as const } };
-  expect(pickNext([failed], "implement")).toBeNull();
-  expect(pickNext([{ ...failed, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...failed, tasks: { total: 3, done: 2, doneAt: "2026-09-30T00:05:00Z" } }], "implement")).toBeNull(); // closed before it ended
+  // what the gate holds (`autoHeld`) is not picked; whatever the last Task's end or the Issue's marks say does not hold it by itself
+  const lastDone = { id: "tsk_close", status: "error" as const, statusAt: Date.parse("2026-09-29T00:00:00Z"), createdAt: Date.parse("2026-09-29T00:00:00Z"), updatedAt: Date.parse("2026-09-29T00:00:00Z"), action: "close" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
+  const triedClose = { ...closable, lastTask: lastDone };
+  const gateHeld = { ...triedClose, autoHeld: { previousTaskId: "tsk_close", action: "close" as const } };
+  expect(pickNext([gateHeld], "implement")).toBeNull();
+  expect(pickNext([triedClose], "implement")).toMatchObject({ action: "close" });
+  // the log names a 閉じる that did not close by the gate's answer, not by the repeated-stop line
+  expect(unchangedIn([triedClose], "implement")).toEqual([]);
+  expect(gateHeldIn([gateHeld, closable], "implement").map((i) => i.number)).toEqual([1]);
+  expect(gateHeldIn([gateHeld], "plan")).toEqual([]);
+  // a running Task, a wait still open: named elsewhere, not as held by the gate
+  expect(gateHeldIn([{ ...gateHeld, activeTaskId: "tsk_run" }, { ...gateHeld, number: 9, waits: [wait(778, "pr", true)] }], "implement")).toEqual([]);
+  // a stalled PBI is resumed whatever its ## 状況 mark or the end of its last Task says, unless the gate holds it
+  const spun = { ...stalled, report: report(1), lastTask: { ...lastDone, action: "complete" as const, status: "done" as const } };
+  expect(pickNext([spun], "implement")).toMatchObject({ action: "complete", resume: true });
+  expect(pickNext([{ ...spun, autoHeld: { previousTaskId: "tsk_close", action: "complete" as const } }], "implement")).toBeNull();
+  expect(pickNext([{ ...spun, autoHeld: { previousTaskId: "tsk_close", action: "complete" as const }, answeredAt: "2026-09-29T01:00:00Z", commentedAt: "2026-09-29T01:00:00Z" }], "implement")).toBeNull(); // the gate's answer is the whole judgment
   // a Task closing does not answer a question the resume asked the person
-  const asking = { ...died, lastTask: { ...died.lastTask, outcome: "needs_action" as const } };
+  const asking = { ...stalled, lastTask: { ...lastDone, action: "complete" as const, status: "done" as const, outcome: "needs_action" as const } };
   expect(pickNext([{ ...asking, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toBeNull();
   expect(tasksDoneMark(report(4))).toBe(4);
   expect(tasksDoneMark(report(null))).toBeNull();
@@ -312,15 +296,16 @@ test("pickNext tried: an item whose last stage Task is of the same stage is pick
   expect(pickNext([triedReady, freshReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" }); // P0 before P3
   expect(pickNext([triedReady, { ...freshReady, priority: "P0" }], "implement")).toMatchObject({ item: { number: 2 } });
   expect(pickNext([triedReady], "implement")).toMatchObject({ item: { number: 1 }, action: "complete" });
-  // a Task that failed is held by `failedSince` (kept: the flow count and the overlap places read it too), not by the gate
-  expect(pickNext([{ ...triedReady, lastTask: last("complete", undefined, "error") }], "implement")).toBeNull();
+  // a Task that failed is held the same way as any other: by the gate's answer (`autoHeld`), not by how it ended
+  expect(pickNext([{ ...triedReady, lastTask: last("complete", undefined, "error") }], "implement")).toMatchObject({ item: { number: 1 } });
+  expect(pickNext([{ ...triedReady, lastTask: last("complete", undefined, "error"), autoHeld: { previousTaskId: "tsk_last", action: "complete" } }], "implement")).toBeNull();
   // the same for 分解待ち and 要望 in the plan slot
   const triedTasks = item({ number: 3, stage: "needs-tasks", priority: "P0", lastTask: last("to-tasks") });
   const triedRequest = item({ number: 4, stage: "request", type: "request", priority: "P0", lastTask: last("to-pbi") });
   const freshRequest = item({ number: 5, stage: "request", type: "request", priority: "P0" });
   expect(pickNext([triedTasks, triedRequest, freshRequest], "plan")).toMatchObject({ item: { number: 5 }, action: "to-pbi" });
   expect(pickNext([triedTasks, triedRequest], "plan")).toMatchObject({ item: { number: 3 }, action: "to-tasks" });
-  // nothing is listed as unchanged for them: that line is for a repeated stop and a 閉じる that did not close
+  // nothing is listed as unchanged for them: that line is for a repeated stop only
   expect(unchangedIn([triedReady, freshReady, triedTasks, triedRequest, freshRequest], "plan")).toEqual([]);
   expect(unchangedIn([triedReady], "implement")).toEqual([]);
   // 2: a last Task of another stage (split into Tasks, now Ready) is not worked on at this stage yet: it goes with the untried
@@ -359,51 +344,42 @@ test("pickNext priority: the plan slot takes a 分解待ち PBI by Priority, bef
   expect(pickNext([freshRequest, { ...triedP1, lastTask: null, priority: null }], "plan")).toMatchObject({ item: { number: 1 } });
 });
 
-test("pickNext failed: an item whose last stage Task failed with no update to the Issue since is left in any stage; an update, a reply's resume or a closed wait brings it back", () => {
+test("pickNext failed: an item whose last stage Task failed is held by the gate's answer alone, in any stage, and goes on when nothing holds it", () => {
   const at = "2026-09-28T00:00:00Z";
   const failed = (status: TaskStatus = "error", resumeAt: number | null = null) => ({ id: "tsk_last", status, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "failed" as const, reviewedAt: null, resumeAt, started: true });
-  // an in-progress PBI with Tasks left: resumed unless its last Task failed and the Issue was not updated since — the usage-limit case (resumeAt set) and an aborted one alike
+  const held = (action: BacklogAction) => ({ autoHeld: { previousTaskId: "tsk_last", action } });
+  // an in-progress PBI with Tasks left: resumed unless the gate holds it — the usage-limit case (resumeAt set) and an aborted one alike
   const stalled = item({ number: 1, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: at });
   expect(pickNext([stalled], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...stalled, lastTask: failed("error", Date.parse("2026-09-30T11:01:00Z")) }], "implement")).toBeNull();
-  expect(pickNext([{ ...stalled, lastTask: failed("aborted") }], "implement")).toBeNull();
-  // the Issue updated after it (a comment, a ## 回答) → resumed; an Issue updated at the very time is not newer
-  expect(pickNext([{ ...stalled, lastTask: failed(), commentedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(pickNext([{ ...stalled, lastTask: failed(), answeredAt: "2026-09-28T01:00:00Z", commentedAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete" });
+  for (const lastTask of [failed("error", Date.parse("2026-09-30T11:01:00Z")), failed("aborted"), failed()]) {
+    expect(pickNext([{ ...stalled, lastTask }], "implement")).toMatchObject({ action: "complete", resume: true });
+    expect(pickNext([{ ...stalled, lastTask, ...held("complete") }], "implement")).toBeNull();
+  }
   // a closable one is held the same way; its waits closing still goes on
-  const closable = item({ number: 2, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, commentedAt: at, lastTask: failed() });
+  const closable = item({ number: 2, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, commentedAt: at, lastTask: failed(), ...held("close") });
   expect(pickNext([closable], "implement")).toBeNull();
   expect(pickNext([{ ...closable, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toMatchObject({ item: { number: 2 } });
   // a Ready item too, and the plan slot's stages
-  expect(pickNext([item({ number: 3, stage: "ready", commentedAt: at, lastTask: failed() })], "implement")).toBeNull();
-  expect(pickNext([item({ number: 4, stage: "needs-tasks", commentedAt: at, lastTask: { ...failed(), action: "to-tasks" } })], "plan")).toBeNull();
-  // listed for the log by slot; a running one or one waiting for a PR is not
-  const items = [{ ...stalled, lastTask: failed() }, closable, item({ number: 3, stage: "ready", commentedAt: at, lastTask: failed() }), item({ number: 4, stage: "needs-tasks", commentedAt: at, lastTask: { ...failed(), action: "to-tasks" as const } })];
-  expect(failedIn(items, "implement").map((i) => i.number)).toEqual([1, 2, 3]);
-  expect(failedIn(items, "plan").map((i) => i.number)).toEqual([4]);
-  expect(failedIn([{ ...stalled, lastTask: failed(), activeTaskId: "tsk_run" }, { ...closable, waits: [wait(778, "pr", true)] }], "implement")).toEqual([]);
-  expect(failedSince(stalled)).toBe(false);
-  expect(failedSince({ ...stalled, lastTask: failed("done") })).toBe(false);
-  // a ## 回答 on a child Task sets answeredAt without touching the parent's updatedAt: that counts as an update too
+  expect(pickNext([item({ number: 3, stage: "ready", commentedAt: at, lastTask: failed(), ...held("complete") })], "implement")).toBeNull();
+  expect(pickNext([item({ number: 4, stage: "needs-tasks", commentedAt: at, lastTask: { ...failed(), action: "to-tasks" }, ...held("to-tasks") })], "plan")).toBeNull();
+  // with no hold on it, an answered one goes on with 実装 (whether the start goes is the gate's, asked when it starts)
   expect(pickNext([{ ...stalled, lastTask: failed(), answeredAt: "2026-09-28T01:00:00Z" }], "implement")).toMatchObject({ action: "complete" });
-  expect(failedIn([{ ...stalled, lastTask: failed(), answeredAt: "2026-09-28T01:00:00Z" }], "implement")).toEqual([]);
 });
 
 test("a planned resume is named in the queue log", () => {
   const at = "2026-09-28T00:00:00Z";
   const resumeAt = Date.parse("2026-11-17T03:41:00Z");
   const last = (resume: number | null, outcome: "failed" | "unknown") => ({ id: "tsk_last", status: "error" as TaskStatus, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome, reviewedAt: null, resumeAt: resume, started: true });
-  // held by the reservation: the Issue was updated after the Task, so failedIn does not name it
+  // held by the reservation, the Issue updated after the Task
   const planned = item({ number: 2999, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: "2026-09-28T01:00:00Z", lastTask: last(resumeAt, "failed"), activeTaskId: "tsk_last" });
-  // held the same way but failed with no update since: failedIn names it (with its time), so not here
+  // held the same way but failed with no update since: named by its reservation too, with the time
   const failed = item({ number: 3000, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: at, lastTask: last(resumeAt, "failed"), activeTaskId: "tsk_last" });
   // a running Task with no resume time is not a reservation
   const running = item({ number: 3001, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null }, commentedAt: at, lastTask: last(null, "unknown"), activeTaskId: "tsk_last" });
   const now = Date.parse("2026-11-17T01:00:00Z");
-  expect(failedIn([failed], "implement").map((i) => i.number)).toEqual([3000]);
-  expect(plannedResumeLine([planned, failed, running], "implement", now, fmtTime)).toBe("再開の予約: #2999（12:41 に再開）");
+  expect(plannedResumeLine([planned, failed, running], "implement", now, fmtTime)).toBe("再開の予約: #2999（12:41 に再開） #3000（12:41 に再開）");
   expect(plannedResumeLine([planned, failed, running], "plan", now, fmtTime)).toBeNull();
-  expect(plannedResumeLine([failed], "implement", now, fmtTime)).toBeNull();
+  expect(plannedResumeLine([running], "implement", now, fmtTime)).toBeNull();
 });
 
 test("a PBI left with only the person's checks is named", () => {
@@ -488,24 +464,17 @@ test("pickNext awaiting reply: an item whose last stage Task ended asking the pe
   // listed for the log by slot, apart from the failed ones
   expect(replyWaitingIn([stalled, ready, request], "implement").map((i) => i.number)).toEqual([1, 2]);
   expect(replyWaitingIn([stalled, ready, request], "plan").map((i) => i.number)).toEqual([3]);
-  expect(failedIn([{ ...stalled, lastTask: asked({ status: "error" }) }], "implement")).toEqual([]);
   expect(replyWaitingIn([{ ...stalled, lastTask: asked({ status: "error" }) }], "implement").map((i) => i.number)).toEqual([1]);
   expect(replyWaitingIn([{ ...stalled, activeTaskId: "tsk_run" }, { ...ready, waits: [wait(778, "pr", true)] }], "implement")).toEqual([]);
   // a ## 回答 on a child Task (answeredAt newer, the parent's updatedAt not): answered, so resumed first — not listed as awaiting
   const childAnswered = { ...stalled, answeredAt: "2026-09-28T01:00:00Z" };
   expect(pickNext([childAnswered], "implement")).toMatchObject({ action: "complete" });
   expect(replyWaitingIn([childAnswered], "implement")).toEqual([]);
-  // reviewed releases a Ready item and a closable one too, which 前回の再開から進んでいない would otherwise hold until the Issue changes
+  // reviewed releases a Ready item and a closable one too
   const reviewed = asked({ reviewedAt: Date.parse("2026-09-28T02:00:00Z") });
   expect(pickNext([{ ...ready, lastTask: reviewed }], "implement")).toMatchObject({ item: { number: 2 }, action: "complete" });
   expect(unchangedIn([{ ...ready, lastTask: reviewed }], "implement")).toEqual([]);
   expect(pickNext([item({ number: 4, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, commentedAt: at, lastTask: { ...reviewed, action: "close" } })], "implement")).toMatchObject({ action: "close" });
-  // a stalled PBI held by 前回の再開から進んでいない (its last resume's tasks-done mark matches): reviewed releases it as well; a done resume reviewed does not
-  const spun = { ...stalled, report: { body: `## 状況\n### 残り\n- #12\n${TASKS_DONE_MARK(1)}`, at: "2026-09-27T23:00:00Z" } };
-  expect(pickNext([spun], "implement")).toBeNull();
-  expect(pickNext([{ ...spun, lastTask: reviewed }], "implement")).toMatchObject({ action: "complete", resume: true });
-  expect(spinningIn([{ ...spun, lastTask: reviewed }], "implement")).toEqual([]);
-  expect(pickNext([{ ...spun, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toBeNull();
   // one that ended done (nothing asked) and was marked reviewed is picked like any tried one; the gate decides whether it starts again
   expect(pickNext([{ ...ready, lastTask: asked({ outcome: "finished", reviewedAt: Date.parse("2026-09-28T02:00:00Z") }) }], "implement")).toMatchObject({ item: { number: 2 } });
 });

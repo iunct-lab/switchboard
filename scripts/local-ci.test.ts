@@ -8,7 +8,7 @@ import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
 import type { MergeRecordJob } from "../ops-kit/src/merge-records";
 import { checkoutSteps, fileSizeBaseOf, parseBuild, setupFailure, quote, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, narrowTestStep, notify, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepWithIdle, TargetError, withoutPerf, collectPending, type Deps, type LocalCiResult, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash, newestCiRecord, writeJobResult } from "./local-ci";
-import { buildFiles, ciScript, hostOffload, runBuild, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Offload } from "./local-ci-offload";
+import { buildFiles, ciScript, stepsOf, hostOffload, runBuild, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Offload } from "./local-ci-offload";
 import { listedIn } from "./file-size";
 import { ciAtTips } from "./merge-gate-records";
 import { markerSeconds, perfVerdict, stepSeconds, testsOf } from "./local-ci-notes";
@@ -28,6 +28,9 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const BASE = "3333333333333333333333333333333333333333";
 /** A job the app recorded for the PR (`GET /api/merge-records`): the head and base a run tested and its outcome. */
 const rec = (outcome: "pass" | "fail", head: string, id = 1, o: Partial<MergeRecordJob> = {}): MergeRecordJob => ({ id, kind: "local-ci", taskId: "t1", pr: 42, runner: null, status: outcome, exitCode: outcome === "pass" ? 0 : 1, startedAt: 0, endedAt: 1, repo: "example/development", head, base: BASE, as: null, kinds: [], result: { ci: { outcome } }, ...o });
+/** `ciScript`'s steps' script, decoded. */
+const builtSteps = (...a: Parameters<typeof ciScript>) => stepsOf(ciScript(...a));
+
 // local-ci's worktrees and failure logs: never the real ~/.cache (a failure removes that PR's earlier logs)
 const CACHE = mkdtempSync(join(tmpdir(), "sb-local-ci-test-"));
 afterAll(() => rmSync(CACHE, { recursive: true, force: true }));
@@ -1218,7 +1221,9 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         ...(fixtures ? { fixtures } : {}),
         // a build is its start and its collect: the answer is made at the start and read at the collect
         collect: (build) => answers.get(build) ?? Promise.reject(new Error(`no build ${build}`)),
-        start: async (script, cwd, run) => {
+        start: async (sent, cwd, run) => {
+          // what the build runs: the root script and, decoded, the steps' script it writes
+          const script = `${sent}\n${stepsOf(sent)}`;
           await Bun.sleep(5);
           const steps = [...script.matchAll(/^bash -e -c '([\s\S]*?)'; c=\$\?/gm)].map((m) => m[1]!.replaceAll(`'\\''`, "'"));
           // the names file as it is while the build runs (it is removed after)
@@ -1697,7 +1702,8 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
 
     test("a keepGoing step's failure does not stop the build's later steps, as runCi's does not", () => {
       const s = [{ name: "a", run: "a", keepGoing: true }, { name: "b", run: "b" }];
-      const script = ciScript(s, {});
+      const sent = ciScript(s, {});
+      const script = stepsOf(sent);
       expect(script).toContain(`bash -e -c 'a'; c=$?; echo; echo "sb-step: 0 exit $c $(date +%s.%N)"\n`);
       expect(script).toContain(`bash -e -c 'b'; c=$?; echo; echo "sb-step: 1 exit $c $(date +%s.%N)"; [ "$c" -eq 0 ] || exit "$c"`);
       expect(parseBuild("sb-step: 0 begin 1\nsb-step: 0 exit 3 2\nsb-step: 1 begin 2\nsb-step: 1 exit 0 4\n", s, 0).map((r) => [r.name, r.code])).toEqual([["a", 3], ["b", 0]]);
@@ -1725,7 +1731,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
           offload: {
             // the part sb-offload's build runs as the image's user; the root part around it (tmpfs, PID namespace, su) is the build's, not this host's
             start: async (script, cwd) => {
-              const user = /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF\n/.exec(script)![1]!.replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
+              const user = stepsOf(script).replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
               const p = Bun.spawnSync(["bash", "-c", user], { cwd, env: { PATH: process.env.PATH ?? "", HOME: join(dir, "home") }, stdout: "pipe", stderr: "pipe" });
               outputs.set("build-1", { code: p.exitCode, output: `${p.stdout.toString()}${p.stderr.toString()}` });
               return { build: "build-1" };
@@ -1790,7 +1796,7 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
           offload: {
             start: async (s, cwd) => {
               scripts.push(s);
-              const user = /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF\n/.exec(s)![1]!.replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
+              const user = stepsOf(s).replaceAll("/sb/work", cwd).replaceAll("/sb/tmp", join(dir, "tmp")).replaceAll("/tmp/install.log", join(dir, "install.log"));
               const p = Bun.spawnSync(["bash", "-c", user], { cwd, env: { PATH: process.env.PATH ?? "", HOME: join(dir, "home") }, stdout: "pipe", stderr: "pipe" });
               outputs.set("build-1", { code: p.exitCode, output: `${p.stdout.toString()}${p.stderr.toString()}` });
               return { build: "build-1" };
@@ -1800,11 +1806,11 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         };
         const r = await runCheckout(work, {}, "file-size-base", d, dir, undefined, undefined, false);
         expect(asked).toEqual(["origin/main:scripts/file-size.ts"]);
-        expect(scripts[0]).toContain(`export FILE_SIZE_BASE_LIST='${JSON.stringify(base)}'\n`);
+        expect(stepsOf(scripts[0]!)).toContain(`export FILE_SIZE_BASE_LIST='${JSON.stringify(base)}'\n`);
         expect(r.results.map((x) => [x.name, x.code])).toEqual([["file sizes", 1]]);
         expect(r.outputs["file sizes"]).toContain(`${raised}: its ceiling ${ceiling + 1} > the base's ${ceiling}: a ceiling only goes down\nthe ceilings are compared with FILE_SIZE_BASE_LIST\n`);
         // a build given no list (test-changed's, or a base that cannot be read) has no FILE_SIZE_BASE_LIST
-        expect(ciScript([{ name: "file sizes", run: "bun scripts/file-size.ts" }], {})).not.toContain("FILE_SIZE_BASE_LIST");
+        expect(builtSteps([{ name: "file sizes", run: "bun scripts/file-size.ts" }], {})).not.toContain("FILE_SIZE_BASE_LIST");
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2279,18 +2285,18 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
 
       test("perf: ciScript exports PERF_ENV=offload and emits the files after the last perf step only with perf", () => {
         const steps = [{ name: "a", run: "bun scripts/perf-bench.ts" }, { name: "b", run: "bun scripts/perf-ratchet.ts check" }, { name: "c", run: "bun test" }];
-        const on = ciScript(steps, { perf: true });
+        const on = builtSteps(steps, { perf: true });
         expect(on).toContain("export PERF_ENV=offload\n");
-        expect(on).toContain("PERF_BASE_TREE=${PERF_BASE_TREE:-}");
+        expect(ciScript(steps, { perf: true })).toContain("PERF_BASE_TREE=${PERF_BASE_TREE:-}");
         expect(on.split("\n").filter((l) => l.startsWith("for f in perf-result.json perf-base.json"))).toHaveLength(1);
         // after step 1's exit mark and before step 2's begin mark
         expect(on.indexOf("sb-step: 1 exit")).toBeLessThan(on.indexOf("sb-file:"));
         expect(on.indexOf("sb-file:")).toBeLessThan(on.indexOf("sb-step: 2 begin"));
-        const off = ciScript(steps, {});
+        const off = builtSteps(steps, {});
         expect(off).not.toContain("PERF_ENV");
         expect(off).not.toContain("sb-file");
         // no perf step: no file line
-        expect(ciScript([{ name: "c", run: "bun test" }], { perf: true })).not.toContain("sb-file");
+        expect(builtSteps([{ name: "c", run: "bun test" }], { perf: true })).not.toContain("sb-file");
       });
 
       test("record: runBuild writes a ci line per caller, an image line first when start returns one, and no key without a log", async () => {
@@ -2371,10 +2377,9 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         // a fake `bun` that leaves a mark when called (a function, not a file: a tmpfs of the build may not run files)
         const fakeBun = `bun() { echo "$*" >> ${quote(mark)}; }\n`;
         // the script that runs inside the build (between the heredoc's lines), its fixed paths moved into the temporary directory
-        const inner = (script: string) => /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF/.exec(script)![1]!;
         const run = (tree: string) => {
           mkdirSync(join(root, "tmp"), { recursive: true });
-          const body = fakeBun + inner(ciScript([{ name: "echo", run: "echo ok" }], {})).replace(/\/sb\/work|\/sb\/tmp|\/tmp\/install\.log/g, (m) => ({ "/sb/work": tree, "/sb/tmp": join(root, "tmp"), "/tmp/install.log": join(root, "install.log") })[m]!);
+          const body = fakeBun + stepsOf(ciScript([{ name: "echo", run: "echo ok" }], {})).replace(/\/sb\/work|\/sb\/tmp|\/tmp\/install\.log/g, (m) => ({ "/sb/work": tree, "/sb/tmp": join(root, "tmp"), "/tmp/install.log": join(root, "install.log") })[m]!);
           const p = Bun.spawnSync(["bash", "-c", body], { env: { PATH: process.env.PATH ?? "", HOME: root }, stdout: "pipe", stderr: "pipe" });
           return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
         };
@@ -2415,18 +2420,22 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
 
     test("ciScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
       const script = ciScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
-      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "if [ -f package.json ]; then bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      // the steps' text is base64 in the root script (no repository text in its source); the parts below are the root script's and the decoded steps'
+      const parts = ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"'];
+      const inSteps = ["git remote add origin 'https://github.com/o/r.git'", "if [ -f package.json ]; then bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"'];
+      for (const part of parts) expect(script).toContain(part);
+      for (const part of inSteps) expect(stepsOf(script)).toContain(part);
       // the steps run in a new PID namespace whose init reaps orphans (the build's PID 1 does not)
       expect(script).toContain("unshare --pid --fork --mount-proc bash -c 'su - switchboard -c ");
       expect(script).toContain('sb-setup: PID 名前空間を作れない');
       // the image has them: nothing is installed or created in the build
       for (const gone of ["bun.sh/install", "@openai/codex@", "reinstall", "dnf ", "useradd", "su - sb "]) expect(script).not.toContain(gone);
       // a repository that is not owner/name (a local change's workspace) gets no origin
-      expect(ciScript([], { repo: "ws_1" })).not.toContain("remote add");
+      expect(builtSteps([], { repo: "ws_1" })).not.toContain("remote add");
       // SWITCHBOARD_FIXTURES only for a run that needs the recordings
-      expect(ciScript([], {})).not.toContain("SWITCHBOARD_FIXTURES");
-      expect(ciScript([], { fixtures: { required: false } })).not.toContain("SWITCHBOARD_FIXTURES");
-      expect(ciScript([], { fixtures: { required: true } })).toContain("export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures\n");
+      expect(builtSteps([], {})).not.toContain("SWITCHBOARD_FIXTURES");
+      expect(builtSteps([], { fixtures: { required: false } })).not.toContain("SWITCHBOARD_FIXTURES");
+      expect(builtSteps([], { fixtures: { required: true } })).toContain("export SWITCHBOARD_FIXTURES=$HOME/.switchboard/fixtures\n");
     });
   });
 });

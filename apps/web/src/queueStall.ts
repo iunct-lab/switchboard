@@ -35,3 +35,45 @@ export function stallRows(a: Ask): { person: StallPersonRow[]; holders: StallHol
     })),
   };
 }
+
+/**
+ * After the limit, one more read this long past it: the browser's clock may run ahead of the daemon's. A clock ahead by
+ * more than this is not covered: the open Home then shows the card on its next signal (a Task's row, a stop record) or
+ * when it is opened again, not at the limit.
+ */
+export const STALL_RECHECK_GRACE_MS = 60_000;
+
+/**
+ * How long until the queue's stall reaches the limit and its notice is due (ms), or null when none is: the queue is
+ * off or not stalled, or the stall is past the limit by more than the grace (the notice is read with the queue then).
+ * Before the limit the wait ends 1 s past it; within the grace after it, once more at its end, for a browser clock that
+ * runs ahead of the daemon's. `now` is taken before the read, so a read that crosses the limit still sets a clock.
+ */
+export function stallRecheckIn(q: { enabled: boolean; stall: { since: number } | null }, limitMs: number, now: number): number | null {
+  if (!q.enabled || !q.stall) return null;
+  const due = q.stall.since + limitMs;
+  if (due > now) return due - now + 1000;
+  if (due + STALL_RECHECK_GRACE_MS > now) return due + STALL_RECHECK_GRACE_MS - now;
+  return null;
+}
+
+/**
+ * Home's read of the stall: the notice when the queue is stalled and it is listed, and otherwise how long until the
+ * queue is read again (`stallRecheckIn`). The limit (Settings) is read only then; a failed limit read only leaves no
+ * clock, the card is still cleared. `at` is the time before the read.
+ */
+export async function readStall(
+  api: {
+    backlogQueue(): Promise<{ enabled: boolean; stall: { since: number } | null }>;
+    asks(): Promise<{ asks: Ask[] }>;
+    settings(): Promise<{ quotaAndResume: { queueStallMs: number } }>;
+  },
+  at: number,
+): Promise<{ ask: Ask | null; wait: number | null }> {
+  const q = await api.backlogQueue();
+  if (!q.enabled || !q.stall) return { ask: null, wait: null };
+  const ask = stallAskOf((await api.asks()).asks);
+  if (ask) return { ask, wait: null };
+  const limit = await api.settings().then((s) => s.quotaAndResume.queueStallMs, () => null);
+  return { ask: null, wait: limit === null ? null : stallRecheckIn(q, limit, at) };
+}
