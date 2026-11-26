@@ -79,7 +79,12 @@ export const WAIT_KEEP_CHOICE = "待ち続ける";
 export const WAIT_STOPPED_ACTION = "利用者が止めた";
 export const WAIT_KEPT_ACTION = "利用者が待ち続けると答えた";
 /** What the question says each answer does (`Ask.next`). */
-export const WAIT_ANSWER_NEXT = `${WAIT_STOP_CHOICE}: この待ちを片づけ、相手が片づいても再開しない / ${WAIT_KEEP_CHOICE}: 上限をいまから数え直す`;
+const WAIT_STOP_NEXT = `${WAIT_STOP_CHOICE}: この待ちを片づけ、相手が片づいても再開しない`;
+export const WAIT_ANSWER_NEXT = `${WAIT_STOP_NEXT} / ${WAIT_KEEP_CHOICE}: 上限をいまから数え直す`;
+/** `WAIT_ANSWER_NEXT` when the stop that makes the wait makes others too (`others`: their labels): stopping resolves the whole stop, so they go with it. */
+export const waitAnswerNext = (others: string[]): string => (others.length ? `${WAIT_ANSWER_NEXT}（同じ停止の ${others.join("、")} も一緒に片づく）` : WAIT_ANSWER_NEXT);
+/** What the question says when only a stop that is retrying makes the wait: it goes on by itself, so the one answer is to stop it. */
+export const WAIT_RETRYING_NEXT = `${WAIT_STOP_NEXT}（再試行中なので、待ち続けるならこのまま何もしない）`;
 /** The action an answer leaves on each stop of the wait `key`, cut as a stop's action is stored. */
 export const waitAnswerAction = (action: typeof WAIT_STOPPED_ACTION | typeof WAIT_KEPT_ACTION, key: string): string => `${action}: ${key}`.slice(0, 200);
 
@@ -92,7 +97,7 @@ type StopWait = Pick<WaitRecord, "kind" | "key" | "label"> & { until: (since: nu
  * (`after:<value>`), another runner's limit (`runner#<id>`), anything else (`<stop id>:<condition key>`); a `depends`
  * stop with no unmet condition is one by itself (`<stop id>`).
  */
-function stopWaits(s: StopRecord): StopWait[] {
+function stopWaits(s: Pick<StopRecord, "id" | "reason" | "op" | "target" | "conditions">): StopWait[] {
   const unmet = s.conditions.filter((c) => !c.met);
   const out = unmet.map((c): StopWait => {
     const m = WAIT_KEY.exec(c.key);
@@ -113,6 +118,37 @@ function stopWaits(s: StopRecord): StopWait[] {
 
 /** The Task's own open stops that make the wait `key` (the newest record of each): what an answer to that wait's question moves. */
 export const stopsOfWait = (stops: StopRecord[], taskId: string, key: string): StopRecord[] => openStops(stops).filter((s) => s.work.taskId === taskId && stopWaits(s).some((w) => w.key === key));
+
+type WaitMaker = Pick<StopRecord, "id" | "reason" | "op" | "target" | "conditions" | "state">;
+const isOpen = (s: Pick<StopRecord, "state">) => s.state === "waiting" || s.state === "retrying";
+
+/** The open stops (of one Task's, the newest of each) that make the wait `key`: what the question for that wait past its limit is about. */
+export const stopsMakingWait = <S extends WaitMaker>(stops: S[], key: string): S[] => stops.filter((s) => isOpen(s) && stopWaits(s).some((w) => w.key === key));
+
+/** The labels of the other waits those stops make: stopping the wait `key` resolves them all. */
+export const siblingWaitLabels = (stops: WaitMaker[], key: string): string[] => [...new Set(stopsMakingWait(stops, key).flatMap((s) => stopWaits(s).filter((w) => w.key !== key).map((w) => w.label)))];
+
+/**
+ * Whether the person already stopped the wait `key` of the Task: the newest record of one of its stops is resolved, made
+ * that wait before it was resolved, and carries the person's stop action, and no open stop of the Task makes that
+ * wait now. Another wait of the same stop was stopped first, which resolved the whole stop, so this answer finds
+ * nothing left to stop and nothing to resume. A newer open stop on the same key is still to be answered.
+ */
+export const stoppedWait = (stops: StopRecord[], taskId: string, key: string): boolean => {
+  if (stopsOfWait(stops, taskId, key).length) return false;
+  const latest = new Map<string, StopRecord>();
+  for (const r of stops) latest.set(r.id, r);
+  return [...latest.values()].some((s) => s.state === "resolved" && s.work.taskId === taskId && stopWaits(s).some((w) => w.key === key) && s.actions.some((a) => a.what.startsWith(WAIT_STOPPED_ACTION)));
+};
+
+/** The Task and the wait's key a wait question's id names (`waitover:<task>:<key>@<until>`): the key may hold `:`, never ends in `@<until>`. */
+export const waitOfAskId = (id: string): { taskId: string; key: string } | null => {
+  if (!id.startsWith("waitover:")) return null;
+  const rest = id.slice("waitover:".length);
+  const colon = rest.indexOf(":");
+  const at = rest.lastIndexOf("@");
+  return colon > 0 && at > colon + 1 ? { taskId: rest.slice(0, colon), key: rest.slice(colon + 1, at) } : null;
+};
 
 /**
  * Whether the question for this wait past its limit takes the two answers: a wait that comes from a stop (a PR / an

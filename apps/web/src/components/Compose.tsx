@@ -8,6 +8,7 @@ import { ModelSelect } from "./ModelSelect.tsx";
 import { EffortSelect } from "./EffortSelect.tsx";
 import { staleDraft } from "../presets.ts";
 import { listedRunners, runnerLabel } from "../runners.ts";
+import { shownWorkspaces } from "../workspaceList.ts";
 import { composeShadow } from "../composeShadow.ts";
 import { homeEmptyLabel, initialChoice } from "../runnerSettings.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
@@ -392,7 +393,7 @@ export function Compose(props: {
             }}
           >
             <option value="" disabled={cloud}>{cloud ? t(home.chooseWorkspace) : t(home.autoWorkspace)}</option>
-            {props.workspaces.map((w) => (
+            {shownWorkspaces(props.workspaces, props.health?.releaseOnly ?? false).map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
                 {w.kind === "meta" ? t(home.selfSuffix) : ""} — {w.path}

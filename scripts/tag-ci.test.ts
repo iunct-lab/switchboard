@@ -1221,6 +1221,19 @@ describe("tag-ci: the build off the host", () => {
     // a build left by a run that is gone starts nothing, so it names no image either: only its result is read
   });
 
+  test("a build whose setup failed is not the tag's fail: no mark, the walk stops, exit 2", async () => {
+    const o = fakeOffload();
+    o.offload.collect = async () => ({ code: 1, output: "sb-setup: bun install が失敗\nsb-offload: exit 1" });
+    const h = offloaded([{ tag: "v2.0.0", body: "" }, { tag: "v1.0.0", body: "" }], o);
+    const r = await tagCi(h.d, "o/r", "/repo", CACHE, NO_HOST);
+    expect(r).toEqual([]);
+    expect(tagCiExit(r)).toBe(2);
+    expect(h.f.edits).toEqual([]);
+    expect(h.f.worktrees).toEqual(["v2.0.0"]);
+    // the build's record is removed: the next run starts a build, it does not read this log again
+    expect(existsSync(tagPendingDirOf(CACHE)) ? readdirSync(tagPendingDirOf(CACHE)) : []).toEqual([]);
+  });
+
   test("a build that sb-offload could not start is not the tag's fail: no mark, no request's material, the walk stops and nothing is judged (exit 2)", async () => {
     const o = fakeOffload();
     o.offload.start = async () => {

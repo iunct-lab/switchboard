@@ -908,6 +908,51 @@ describe("aws/host devtools", () => {
     for (const l of tars) expect(l).toContain("tar --no-same-owner -x");
   });
 
+  test("bun is pinned in devtools.sh and installed by bootstrap through the checksummed fetch, before bun install", () => {
+    expect(read("devtools.sh")).toMatch(/\nBUN_VERSION=\d+(\.\d+)+\n/);
+    expect(read("devtools.sh")).toMatch(/\nBUN_SHA256=[0-9a-f]{64}\n/);
+    const boot = read("bootstrap.sh");
+    expect(boot).not.toContain("bun.sh/install");
+    expect(boot).toMatch(/fetch "https:\/\/github\.com\/oven-sh\/bun\/releases\/download\/bun-v\$BUN_VERSION\/bun-linux-aarch64\.zip" "\$BUN_SHA256" /);
+    const at = boot.indexOf('"$BUN_SHA256"');
+    expect(at).toBeGreaterThan(0);
+    expect(at).toBeLessThan(boot.indexOf("bun install --frozen-lockfile"));
+  });
+
+  // the bun block of bootstrap.sh, run with the real fetch and sha256sum; only the distributor's curl is a fake
+  const bunBlock = () => {
+    const boot = read("bootstrap.sh");
+    const from = boot.indexOf("fetch() {");
+    const start = boot.indexOf('BUN_VERSION="$(sed');
+    const end = boot.indexOf('rm -rf "$DL"', start);
+    return boot.slice(from, boot.indexOf("\n", from)) + "\n" + boot.slice(start, end);
+  };
+  const runBun = (zip: Buffer) => {
+    const d = mkdtempSync(join(tmpdir(), "switchboard-test-bun-"));
+    try {
+      mkdirSync(join(d, "bin")); mkdirSync(join(d, "here")); mkdirSync(join(d, "dl")); mkdirSync(join(d, "home"));
+      writeFileSync(join(d, "here", "devtools.sh"), read("devtools.sh"));
+      writeFileSync(join(d, "payload"), zip);
+      // a fake curl: writes the payload to the -o file
+      writeFileSync(join(d, "bin", "curl"), `#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\ncp "${join(d, "payload")}" "$out"\n`);
+      chmodSync(join(d, "bin", "curl"), 0o755);
+      const script = `set -euo pipefail; HERE=${d}/here; DL=${d}/dl; SB_HOST_HOME=${d}/home; SB_HOST_USER=$(id -un)
+as_user() { "$@"; }
+${bunBlock()}`;
+      const r = Bun.spawnSync(["bash", "-c", script], { env: { ...process.env, PATH: `${d}/bin:${process.env.PATH}` }, stderr: "pipe" });
+      return { code: r.exitCode, err: r.stderr.toString(), installed: existsSync(join(d, "home", ".bun", "bin", "bun")) };
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  };
+
+  test("a bun whose sha256 differs is not installed and stops the bootstrap", () => {
+    const r = runBun(Buffer.from("not the pinned bun"));
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("did NOT match"); // stopped by the checksum, not by something else
+    expect(r.installed).toBe(false);
+  });
+
   test("an interrupted install is redone, not taken for done", () => {
     const dev = read("devtools.sh");
     // docker unpacks into <dir>.new and is renamed into place last, so the directory exists only when complete

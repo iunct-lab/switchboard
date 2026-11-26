@@ -119,6 +119,9 @@ same `POST /api/asks/answer` as every other question:
   With no open stop the wait is gone, and so is the automatic resume: `resumeDepends` reads open stops only, so the
   Task does not start again when the pull request, Issue or job ends later. Marking the Task reviewed would not do
   this — the resume does not look at that mark.
+  When that was the Task's last open stop, its `outcome` goes from `waits` to `finished`. A stop that makes several
+  waits ends for all of them at once, so the question of each other wait of that stop is answered too: `止める` on it
+  returns 200 with `already: true` and no question, not 409, and a wait's answer never carries a `resume` of the Task.
 - `待ち続ける` leaves the stops open and adds `利用者が待ち続けると答えた: <key>` to their actions — written to the
   record only, not as the stop reported again, so nothing that follows a report (a resume planned for another
   runner's limit) runs. `waitsOf` takes

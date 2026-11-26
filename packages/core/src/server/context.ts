@@ -313,6 +313,7 @@ export interface ServerContext {
   readonly stopWorktreeSweep: (() => void) | null;
   readonly stopSettleSweep: (() => void) | null;
   readonly isMeta: (t: { workspaceId: string | null; }) => boolean;
+  readonly selfDevOn: (t: { workspaceId: string | null; }) => boolean;
   restarting: boolean;
   readonly judgeStop: AbortController;
   lastJudgingAt: number;

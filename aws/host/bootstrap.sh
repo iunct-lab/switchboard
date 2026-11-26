@@ -85,8 +85,17 @@ DL="$(mktemp -d)"
   fetch "https://github.com/FiloSottile/age/releases/download/v$AGE_VERSION/age-v$AGE_VERSION-linux-arm64.tar.gz" "$AGE_SHA256" "$DL/age.tar.gz"
   tar --no-same-owner -xzf "$DL/age.tar.gz" -C /usr/local/bin --strip-components=1 age/age age/age-keygen
 }
+# bun at the version and sha256 devtools.sh pins (read from its lines, so the version is written once); ~/.bun/bin/bun is where the unit's ExecStart points
+BUN_VERSION="$(sed -n 's/^BUN_VERSION=//p' "$HERE/devtools.sh")"; BUN_SHA256="$(sed -n 's/^BUN_SHA256=//p' "$HERE/devtools.sh")"
+: "${BUN_VERSION:?}" "${BUN_SHA256:?}"
+[ -x "$SB_HOST_HOME/.bun/bin/bun" ] || {
+  fetch "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-aarch64.zip" "$BUN_SHA256" "$DL/bun.zip"
+  unzip -q -o "$DL/bun.zip" -d "$DL/bun"
+  as_user mkdir -p "$SB_HOST_HOME/.bun/bin"
+  install -m 755 -o "$SB_HOST_USER" "$DL/bun/bun-linux-aarch64/bun" "$SB_HOST_HOME/.bun/bin/bun"
+  as_user ln -sf bun "$SB_HOST_HOME/.bun/bin/bunx"
+}
 rm -rf "$DL"
-as_user bash -c 'command -v bun >/dev/null || curl -fsSL https://bun.sh/install | bash'
 as_user bash -c 'command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash'
 as_user bash -c 'command -v codex >/dev/null || curl -fsSL https://chatgpt.com/codex/install.sh | sh'
 as_user bash "$HERE/cli-autoupdate.sh"

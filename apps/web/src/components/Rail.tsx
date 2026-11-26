@@ -3,6 +3,7 @@ import { isWorkingStatus, type TaskStopMark, type TaskSummary, type TerminalStat
 import { MachineTag, OriginTag, BackgroundTag, ResumeTag, ShadowTag, WaitTag } from "./ui.tsx";
 import { attentionGroups, outcomeDotClass, outcomeLabel, terminalMark } from "../attention.ts";
 import { taskTimes } from "../inProgress.ts";
+import { shownWorkspaces } from "../workspaceList.ts";
 import { dotClass, filterTasks, PAGE, STATUS_FILTERS, taskDot, waitTitle, type StatusFilter } from "../taskList.ts";
 import { t } from "../i18n.ts";
 import { home } from "../i18n/home.ts";
@@ -20,7 +21,7 @@ function TerminalMark(props: { status: TerminalStatus | undefined }) {
   return mark && <span className={mark.className}>{mark.text}</span>;
 }
 
-export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; /** opens that Workspace's shell with no Task; absent = this daemon cannot open a shell */ onOpenTerminal?: (workspaceId: string) => void; terminalWorkspaceId?: string; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
+export function Rail(props: { workspaces: Workspace[]; releaseOnly?: boolean; tasks: TaskSummary[]; currentTaskId?: string; approvals: number; approvalsOpen: boolean; onApprovals: () => void; listOpen: boolean; onToggleList: () => void; onOpenTask: (id: string) => void; onHome: () => void; onFeedback: () => void; onShowArchived: () => void; /** opens that Workspace's shell with no Task; absent = this daemon cannot open a shell */ onOpenTerminal?: (workspaceId: string) => void; terminalWorkspaceId?: string; terminals: Record<string, TerminalStatus>; stopMarks: Record<string, TaskStopMark> | null }) {
   // the Tasks group: searched and filtered in what the page holds, drawn PAGE rows at a time
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -85,7 +86,7 @@ export function Rail(props: { workspaces: Workspace[]; tasks: TaskSummary[]; cur
         </>
       )}
       <div className="grp">Workspace</div>
-      {props.workspaces.map((w) => (
+      {shownWorkspaces(props.workspaces, props.releaseOnly ?? false).map((w) => (
         <div key={w.id} role="button" tabIndex={0} aria-pressed={wsFilter === w.id} className={`it ${props.terminalWorkspaceId === w.id || wsFilter === w.id ? "on" : ""}`} title={w.path} onClick={() => setWsFilter(wsFilter === w.id ? null : w.id)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setWsFilter(wsFilter === w.id ? null : w.id); } }}>
           <span className="t">
             {w.name}

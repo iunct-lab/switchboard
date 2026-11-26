@@ -24,6 +24,8 @@ export type StopNext = z.infer<typeof StopNext>;
  * `unchanged` = it stopped again with nothing changed since the previous stop.
  */
 export const StopSummary = z.object({
+  /** The newest stop's id (`key` names the series). */
+  id: z.string(),
   key: z.string(),
   work: StopRecord.shape.work,
   op: z.string(),

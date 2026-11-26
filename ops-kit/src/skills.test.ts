@@ -1289,3 +1289,43 @@ test("skills: every body save in the skills and processes passes the version it 
   expect(bare).toEqual([]);
   expect(files.filter((f) => readFileSync(f, "utf8").includes("二重の組")).map((f) => relative(skills, f))).toEqual([]);
 });
+
+test("issue-workflow: re-running the chained edit block keeps the original body", () => {
+  const text = readFileSync(join(skills, "issue-workflow", "SKILL.md"), "utf8");
+  const block = / *```bash\n( *set -euo pipefail\n[\s\S]*?) *```/.exec(text)?.[1];
+  expect(block).toBeDefined();
+  const script = (block as string).replaceAll("<番号か localId>", "7").replaceAll("<直す>", "sed s/A/B/");
+  for (const second of ["newer", "fails"]) {
+    const dir = mkdtempSync(join(tmpdir(), "skills-rerun."));
+    try {
+      const W = join(dir, "w");
+      mkdirSync(W);
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      // a fake ops-kit: the first fresh view gives "## A" at r1; later fresh views give "## B" at r2 or fail; edit records its arguments
+      writeFileSync(
+        join(bin, "ops-kit"),
+        `#!/bin/bash
+if [ "$2" = edit ] || [ "$1 $2" = "backlog edit" ]; then echo "$*" >> "${dir}/edits"; exit 0; fi
+if [[ " $* " == *" --fresh "* ]]; then
+  n=$(cat "${dir}/fresh" 2>/dev/null || echo 0); echo $((n+1)) > "${dir}/fresh"
+  if [ "$n" -ge 1 ]; then ${second === "fails" ? "exit 1" : `echo '{"issue":{"number":7,"body":"## B"},"bodyRevision":"r2"}'; exit 0`}; fi
+  echo '{"issue":{"number":7,"body":"## A"},"bodyRevision":"r1"}'; exit 0
+fi
+echo '{"issue":{"number":7,"body":"## A"},"bodyRevision":"r1"}'
+`,
+        { mode: 0o755 },
+      );
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, W };
+      const run = () => spawnSync("bash", ["-c", script], { env, encoding: "utf8" });
+      expect(run().status).toBe(0);
+      expect(readFileSync(join(W, "orig.md"), "utf8").trim()).toBe("## A");
+      run();
+      expect(readFileSync(join(W, "orig.md"), "utf8").trim()).toBe("## A");
+      const edits = readFileSync(join(dir, "edits"), "utf8").trim().split("\n");
+      expect({ second, edits: edits.map((e) => e.includes("--rev r1")) }).toEqual({ second, edits: [true, true] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

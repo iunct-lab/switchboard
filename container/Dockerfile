@@ -26,7 +26,7 @@ ARG GITLEAKS_SHA256_X86_64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7c
 ARG NODE_VERSION=24.22.3
 ARG NODE_SHA256=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c
 ARG NODE_SHA256_X86_64=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
-# pinned here only (the host installs gh from the distribution's repository, and the others at the latest)
+# pinned here only (the host installs gh from the distribution's repository, and claude and codex at the latest)
 ARG GH_VERSION=2.103.3
 ARG GH_SHA256=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 ARG GH_SHA256_X86_64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
@@ -72,7 +72,7 @@ RUN set -eu; \
   printf 'owner: github\nname: gh-stack\nhost: github.com\ntag: %s\nispinned: true\npath: %s/gh-stack\n' "$GH_STACK_VERSION" "$D" > "$D/manifest.yml"; \
   rm -rf "$DL"
 
-# bun, claude and codex, from npm at a pinned version (the host takes the latest of each). The npm package of bun only has bun.exe next to
+# bun, claude and codex, from npm at a pinned version (bun is the host's version; the host takes the latest of claude and codex). The npm package of bun only has bun.exe next to
 # the binary process.execPath names; tests put dirname(process.execPath) on a narrow PATH and run `bun` from it (as on the host, ~/.bun/bin), so `bun` is a link there
 RUN npm install -g --no-fund --no-audit "bun@$BUN_VERSION" "@anthropic-ai/claude-code@$CLAUDE_VERSION" "@openai/codex@$CODEX_VERSION" \
   && for b in bun claude codex; do ln -sf "/usr/local/lib/nodejs/bin/$b" "/usr/local/bin/$b"; done \

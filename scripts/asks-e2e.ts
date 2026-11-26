@@ -241,9 +241,11 @@ try {
   let seq = 0;
   const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
   const errors: unknown[] = [];
+  const held: string[] = []; // the list reads held back while a scene looks at the screen before the list is read again
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
     if (m.id) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result); }
+    if (m.method === "Fetch.requestPaused") held.push(m.params.requestId);
     if (m.method === "Log.entryAdded" && m.params.entry.source === "security") errors.push(m);
     if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) errors.push(m);
   };
@@ -1029,6 +1031,26 @@ stageOf(ci, 304);
   await until(async () => (await openWaits()).length === 0, "the third wait is answered with 待ち続ける", openWaits);
   await until(async () => (await waitHeads()).length === 0, "no heading of waits is left", waitHeads);
   assert(core.db.listStopRecords([over3.id]).at(-1)?.state !== "resolved", "待ち続ける keeps the stop open");
+  // a wait answered from its own card says so at once, while the list is not read again: the buttons are gone, one line is there, nothing sideways
+  for (const width of [390, 1280]) {
+    if (width === 1280) { await call("Emulation.setTouchEmulationEnabled", { enabled: false }); await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }); }
+    const own = await overWait(`答えが返った待ちの Task ${width}`);
+    await open();
+    await until(async () => evaluateNow(`!!${card(own.ask)}`), `the card of the wait of ${width}`, waitHeads);
+    await call("Fetch.enable", { patterns: [{ urlPattern: "*/api/asks", requestStage: "Request" }] });
+    await evaluate(`[...${card(own.ask)}.querySelectorAll('.ask-button button')].find(b => b.textContent.trim() === '待ち続ける').click()`);
+    await until(async () => held.length > 0, `the list read again is held at ${width}`);
+    const shown = await until(async () => { const c = await evaluate(`(() => { const c = ${card(own.ask)}; return { buttons: [...c.querySelectorAll('.ask-button button')].length, line: c.querySelector('.ask-wait-answered')?.textContent ?? null, head: [...c.closest('.ask-waits').querySelectorAll('.ask-wait-actions button')].map(b => b.textContent.trim()) }; })()`) as Json; return c.line ? c : null; }, `the answer's line on the card at ${width}`);
+    assert(shown.buttons === 0 && shown.line === "待ち続けると答えました", `the answered wait's card at ${width}: ${JSON.stringify(shown)}`);
+    // the only wait under its heading is answered: the heading offers nothing more to send
+    assert(shown.head.length === 0, `the heading over the answered wait at ${width}: ${JSON.stringify(shown.head)}`);
+    await sideways(width, "the answered wait");
+    await evaluate(`${card(own.ask)}.scrollIntoView({ block: "center" })`);
+    await shot(`asks-wait-answered-${width}.png`);
+    for (const id of held.splice(0)) await call("Fetch.continueRequest", { requestId: id });
+    await call("Fetch.disable");
+    await until(async () => evaluateNow(`!${card(own.ask)}`), `the answered wait is gone when the list is read again at ${width}`);
+  }
   report.waits = { tasks: [over1.id, over2.id, over3.id], stopped: [over1.ask, over2.ask], kept: over3.ask, widths: [1280, 390] };
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);

@@ -494,7 +494,7 @@ describe("overlap turn", () => {
 
   // the reasons the queue does not resume P: each is what a stored PBI carries once its last stage Task is read
   const lastTask = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}): NonNullable<BacklogItem["lastTask"]> => ({ id: "tsk_p", status: "done", statusAt: T0 + 60_000, createdAt: T0, updatedAt: T0 + 60_000, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null, started: true, ...over });
-  const waitingStop: BacklogItem["stopSummary"][number] = { key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
+  const waitingStop: BacklogItem["stopSummary"][number] = { id: "s1", key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
   const inProgress = { stage: "in-progress" as const, tasks: { total: 2, done: 1, doneAt: null } };
   const reasons: [string, Partial<BacklogItem>][] = [
     ["not moved since its last resume", { ...inProgress, lastTask: lastTask() }],

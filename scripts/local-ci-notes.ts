@@ -60,7 +60,7 @@ export function perfVerdict(output: string): PerfVerdict {
 }
 
 /** The lines of a build that could not be started, for the log: what happened, then what sb-offload printed. */
-export const notStartedLines = (n: { code: number; output: string }): string => `外のビルドを始められなかった（exit ${n.code}）${n.output.trim() ? `\n${n.output.trim()}` : ""}`;
+export const notStartedLines = (n: { code: number; output: string; setup?: true }): string => `${n.setup ? "外のビルドの準備に失敗した" : "外のビルドを始められなかった"}（exit ${n.code}）${n.output.trim() ? `\n${n.output.trim()}` : ""}`;
 
 /** The seconds over the `local` ceilings of the budget in `dir`, as `over:` lines (failLines' form); none without that budget. */
 export async function durationOver(dir: string, seconds: StepSeconds): Promise<string[]> {

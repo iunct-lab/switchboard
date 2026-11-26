@@ -44,7 +44,9 @@ export class WorkspaceQueries extends DbCore {
   seedMetaWorkspace(path: string, name: string): Workspace {
     const metas = this.sqlite.query("SELECT id, path FROM workspaces WHERE kind = 'meta' ORDER BY name").all() as { id: string; path: string }[];
     const at = this.sqlite.query("SELECT id FROM workspaces WHERE path = ?").get(path) as { id: string } | null;
-    const releases = basename(path) === "current" ? metas.filter((m) => dirname(m.path) === dirname(path) && RELEASE_ID.test(basename(m.path))) : [];
+    // every row at a release directory next to releases/current, whatever its kind: a version before this one turned the
+    // ones it did not move into repos, which still showed in the list, pointed at a directory a promotion removes
+    const releases = basename(path) === "current" ? (this.sqlite.query("SELECT id, path FROM workspaces WHERE path != ?").all(path) as { id: string; path: string }[]).filter((m) => dirname(m.path) === dirname(path) && RELEASE_ID.test(basename(m.path))) : [];
     const inUse = metas.find((m) => m.path !== path);
     let id = "";
     this.sqlite.transaction(() => {
@@ -56,12 +58,37 @@ export class WorkspaceQueries extends DbCore {
         id = inUse.id;
       } else id = this.upsertWorkspace({ name, path, kind: "meta" }).id;
       this.sqlite.query("UPDATE workspaces SET kind = 'repo' WHERE kind = 'meta' AND id != ?").run(id);
+      const gone = new Set<string>();
       for (const r of releases) {
         this.movePathsOfTasks(r.path, path);
-        this.sqlite.query("UPDATE tasks SET workspace_id = ? WHERE workspace_id = ?").run(id, r.id);
+        if (r.id === id) continue;
+        this.foldWorkspace(r.id, id);
+        gone.add(r.id);
       }
+      if (gone.size) this.moveQueueEntries(gone, id);
     })();
     return this.getWorkspace(id)!;
+  }
+
+  /** The records that name workspace `from` (Tasks, schedules, the routing log, request evaluations, settings changes) name `to`, and `from` is removed. */
+  private foldWorkspace(from: string, to: string): void {
+    // a change still waiting for the person was asked against the removed row's settings: its record stays, closed (as on removal)
+    this.sqlite.query("UPDATE workspace_config_changes SET state = 'superseded', decided_at = ? WHERE workspace_id = ? AND state = 'pending'").run(Date.now(), from);
+    for (const t of ["tasks", "schedules", "routing_log", "workspace_config_changes"]) this.sqlite.query(`UPDATE ${t} SET workspace_id = ? WHERE workspace_id = ?`).run(to, from);
+    // the key is (workspace_id, issue): where both have the issue, the surviving row's entry stays
+    this.sqlite.query("UPDATE OR IGNORE request_evals SET workspace_id = ? WHERE workspace_id = ?").run(to, from);
+    this.sqlite.query("DELETE FROM request_evals WHERE workspace_id = ?").run(from);
+    this.sqlite.query("DELETE FROM workspaces WHERE id = ?").run(from);
+  }
+
+  /** The backlog queue's entries (and its ended ones) that name a workspace in `from` name `to`; a PBI that then appears twice stays once, in the first place. */
+  private moveQueueEntries(from: Set<string>, to: string): void {
+    const queue = this.getSetting<{ items?: { workspaceId: string; number: number }[]; ended?: { workspaceId: string }[] } | null>("backlogQueue", null);
+    if (!queue) return;
+    const move = <T extends { workspaceId: string }>(e: T): T => (from.has(e.workspaceId) ? { ...e, workspaceId: to } : e);
+    const seen = new Set<string>();
+    const items = queue.items?.map(move).filter((e) => !seen.has(`${e.workspaceId}#${e.number}`) && seen.add(`${e.workspaceId}#${e.number}`));
+    this.setSetting("backlogQueue", { ...queue, ...(items ? { items } : {}), ...(queue.ended ? { ended: queue.ended.map(move) } : {}) });
   }
 
   /** Tasks' cwd and scope entries at `from` or under it are moved to `to` (at a path boundary). */

@@ -66,6 +66,8 @@ export const panels = msgs({
   waitStopAll: { ja: "{n} 件を止める", en: "Stop {n}" },
   waitKeep: { ja: "待ち続ける", en: "Keep waiting" },
   waitStop: { ja: "止める", en: "Stop" },
+  waitAnsweredStop: { ja: "止めました", en: "Stopped" },
+  waitAnsweredKeep: { ja: "待ち続けると答えました", en: "Answered to keep waiting" },
   waitAnswerFailed: { ja: "{label}に答えられませんでした: {error}", en: "Could not answer {label}: {error}" },
   seeTaskTalk: { ja: "Task の会話を見る", en: "See the Task's conversation" },
   answerInTask: { ja: "Task の会話で答える", en: "Answer in the Task's conversation" },

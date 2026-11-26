@@ -20,7 +20,7 @@ import { approvalBatches, approvalWindowNote, BatchAnswers } from "../approval-b
 import { ASK_HISTORY_MS, ON_HOLD_RESUME, askIdBase, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, policyPbi, proceedingAsks, rankAsks, grantOfChoice, prFacts, questionsChosen, questionsReply, resumeOfTask, withGone, type GoneFacts, type PolicyEnv, type PrFacts } from "../asks.ts";
 import { gateRecordsOf, STACK_GATE_LOOKBACK_MS } from "../gate-records.ts";
 import { closedHits, noticeAsks, type NoticeRecord } from "../asks-notices.ts";
-import { boundsOf, readWaitFiles, refreshTaskWaits, stopsOfWait, WAIT_KEPT_ACTION, WAIT_STOP_CHOICE, WAIT_STOPPED_ACTION, waitAnswerAction, waitsDirOf } from "../waits.ts";
+import { boundsOf, readWaitFiles, refreshTaskWaits, stoppedWait, stopsOfWait, WAIT_KEPT_ACTION, WAIT_STOP_CHOICE, WAIT_STOPPED_ACTION, waitAnswerAction, waitOfAskId, waitsDirOf } from "../waits.ts";
 import { checkPolicy, matchPolicies, readPolicies, recordUse, subjectChanges, writePolicies } from "../policies.ts";
 import { listRefusedDeltas } from "../uplink-s3.ts";
 import { listRefused } from "../backlog-upbox.ts";
@@ -213,9 +213,11 @@ export const approvalPendingOf = (sc: Pick<ServerContext, "tasks" | "db">) => {
 export const nowOf = (sc: Pick<ServerContext, "db" | "failed">, r: AskAnswerResult): AskAnswerResult => {
   const a = r.ask;
   // a stop of a Task, with an Issue or without, goes on as that Task, whether answered in words or by its grant
-  const t = a && a.task && a.state === "answered" && (!a.issue || a.kind === "stop") ? sc.db.getTask(a.task.id) : null;
+  const t = a && a.task && a.state === "answered" && a.kind !== "wait" && (!a.issue || a.kind === "stop") ? sc.db.getTask(a.task.id) : null;
   return t && a ? { ...r, ask: { ...a, resume: resumeOfTask({ task: t, repliedAt: a.changedAt, failure: sc.failed(a.id) }) } } : r;
 };
+
+const stoppedAlready = (): { status: number; body: object } => ({ status: 200, body: { ask: null, already: true, changes: [] } satisfies AskAnswerResult });
 
 // What an answer answered, by the question's id, is `ask_answers` for a day: a resend whose reply was lost gets it again, nothing written twice.
 
@@ -234,6 +236,7 @@ const answerWait = (sc: Pick<ServerContext, "db" | "tasks" | "settings" | "broad
   // a stop being retried stays the daemon's to move: written again as it is, it would be taken for one more retry.
   // Only a stop under the Task's own id is written again (`recordStop` names it `<task>/<id>`): another would become a new stop
   const stops = task && key !== undefined ? stopsOfWait(sc.db.listStopRecords([task.id]), task.id, key).filter((s) => s.id.startsWith(`${task.id}/`) && (stopping || s.state !== "retrying")) : [];
+  if (task && key !== undefined && !stops.length && stopping && stoppedWait(sc.db.listStopRecords([task.id]), task.id, key)) return stoppedAlready();
   if (!task || otherMachineOf(task) || key === undefined || !stops.length) return changed("問いがもうありません", null);
   const now = Date.now();
   for (const s of stops) {
@@ -277,6 +280,9 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
   const ask = asks.find((a) => a.id === id);
   if (!ask || (ask.state !== "open" && ask.state !== "held")) {
     const current = asks.find((a) => a.id !== id && askIdBase(a.id) === askIdBase(id) && (a.state === "open" || a.state === "held")) ?? null;
+    // 止める on a wait whose stop another wait's 止める already resolved: what was asked has happened
+    const waited = ask || current ? null : waitOfAskId(id);
+    if (waited && answer.kind === "choice" && answer.choice === WAIT_STOP_CHOICE && stoppedWait(sc.db.listStopRecords([waited.taskId]), waited.taskId, waited.key)) return stoppedAlready();
     const why = ask ? "回答済みです" : current ? "問いが新しくなりました" : "問いがもうありません（対象の Issue が閉じたか、別の所で答えられました）";
     return changed(why, [why], current);
   }

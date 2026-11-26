@@ -9,7 +9,7 @@ import type { GateRecord } from "./gate-records.ts";
 import { matchPolicies, POLICY_DEFAULT_DAYS, subjectChanges } from "./policies.ts";
 import { issueOf, NEEDS_PERSON, resumableDepends, spanText, WAIT_KEY } from "./stops.ts";
 import { IN_FLIGHT, TURN_ENDED } from "./task-status.ts";
-import { answerableWait, WAIT_ANSWER_NEXT, WAIT_KEEP_CHOICE, WAIT_STOP_CHOICE } from "./waits.ts";
+import { answerableWait, siblingWaitLabels, stopsMakingWait, WAIT_KEEP_CHOICE, WAIT_RETRYING_NEXT, WAIT_STOP_CHOICE, waitAnswerNext } from "./waits.ts";
 
 /**
  * The questions waiting on the user, built from the records each time they are read — the
@@ -411,6 +411,9 @@ export const askIdBase = (id: string): string => (id.lastIndexOf("@") < 0 ? id :
 /** A stop's question: its series, and the time the newest stop took its present op + reason + grant — reported again with another grant, it is another question, and no earlier answer is its answer. */
 export const stopAskId = (s: Pick<StopSummary, "key" | "contentAt">): string => `stop:${s.key.replaceAll("\u0000", "|")}@${s.contentAt}`;
 
+/** A `depends` stop the app does not resume asks the person: its question is the stop's, so a wait past its limit makes none of its own. */
+export const asksPersonOnStop = (s: Pick<StopSummary, "reason" | "state" | "conditions">): boolean => s.reason === "depends" && s.state === "waiting" && !resumableDepends(s);
+
 function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "state" | "at" | "changedAt" | "reason" | "question" | "next" | "source" | "route" | "conditions" | "task" | "lastReply">, next: string | null, outcome: Task["outcome"] | null, lastReply?: (taskId: string) => string | null): Ask {
   // a first stop has no earlier one to show the answer as a change (`next` stays decide): its `answered` says the person's reply came after it
   const answered = s.lastAnswer !== null && (s.next === "resume" || (s.next === "decide" && s.answered));
@@ -418,7 +421,7 @@ function stopAsk(s: StopSummary, shared: Omit<Ask, "id" | "kind" | "needs" | "st
   // records) is needs_action — or failed: a turn cut or stopped with the stop still asking goes on by nothing but the
   // person — and over once it is finished (a later turn ended with nothing to do); a stop that waits by
   // itself stays auto, whatever the Task's outcome. A `depends` stop the app does not resume asks the person too.
-  const asks = s.next === "decide" || (s.reason === "depends" && s.state === "waiting" && !resumableDepends(s));
+  const asks = s.next === "decide" || asksPersonOnStop(s);
   const [needs, state]: [Ask["needs"], Ask["state"]] =
     s.next === "none" ? [NEEDS_PERSON.has(s.reason) || s.lastAnswer ? "person" : "auto", "resolved"] : answered ? ["person", "answered"] : asks && (outcome === "needs_action" || outcome === "failed") ? ["person", "open"] : asks && outcome === "finished" ? ["auto", "resolved"] : ["auto", "open"];
   return {
@@ -831,6 +834,10 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
       const silent = w.kind === "output";
       // a wait that comes from a stop of a Task whose turn is over is answered here; any other is the Task's own to end
       const answered = answerableWait(t, w);
+      // the stops that make the wait: one the person is asked about as a stop is not asked again as a wait, and one retrying goes on by itself
+      const makers = answered ? stopsMakingWait(input.stops(t), w.key) : [];
+      if (makers.length && makers.every(asksPersonOnStop)) continue;
+      const retrying = makers.length > 0 && makers.every((s) => s.state === "retrying");
       const spans =`${spanText(now - w.since)}（上限 ${spanText(w.until - w.since)}）`;
       asks.push({
         ...shared(t, t.id, t.title),
@@ -843,8 +850,8 @@ export function asksFromTasks(input: TaskAskInput): Ask[] {
         changedAt: w.until,
         reason: silent ? `応答なし: ${w.label}が ${spans} 無い` : `待ちが上限を過ぎた: ${w.label} を ${spans} 待っている`,
         question: null,
-        choices: answered ? [WAIT_STOP_CHOICE, WAIT_KEEP_CHOICE] : [],
-        next: silent ? "Task を開いて様子を見る（固まっていれば中断して、返信で再開する）" : answered ? WAIT_ANSWER_NEXT : "Task を開いて、待ち続けるか・相手を進めるか・止めるかを決める",
+        choices: answered ? (retrying ? [WAIT_STOP_CHOICE] : [WAIT_STOP_CHOICE, WAIT_KEEP_CHOICE]) : [],
+        next: silent ? "Task を開いて様子を見る（固まっていれば中断して、返信で再開する）" : answered ? (retrying ? WAIT_RETRYING_NEXT : waitAnswerNext(siblingWaitLabels(makers, w.key))) : "Task を開いて、待ち続けるか・相手を進めるか・止めるかを決める",
         source: { label: "待ちの記録", url: null, taskId: t.id },
         route: "task",
         wait: { kind: w.kind, key: w.key },

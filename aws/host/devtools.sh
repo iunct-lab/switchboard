@@ -30,6 +30,11 @@ COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
 PLAYWRIGHT_VERSION=1.65.1
 PLAYWRIGHT_MCP_VERSION=0.0.85
 GH_STACK_VERSION=v0.3.0
+# bun is installed by bootstrap.sh (bun install runs before this script, which may fail without stopping the bootstrap); the
+# pin lives here so the versions sit in one place. Pinned 2026-11-26 (SHASUMS256.txt of the release, bun-linux-aarch64.zip);
+# container/Dockerfile installs the same version from npm
+BUN_VERSION=1.4.4
+BUN_SHA256=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e
 DOCKER_BIN=/usr/local/lib/docker-rootless/bin
 
 # --- from the distribution (signed): sqlite3, pasta and iptables for rootless docker, Chromium's libraries, CJK fonts,

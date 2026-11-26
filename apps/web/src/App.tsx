@@ -638,7 +638,7 @@ export function App() {
       <div className="body">
         {authorized && (
           <>
-        <Rail onFeedback={() => openFeedback(view.name === "backlog" ? backlogNarrow : undefined)} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} onOpenTerminal={health?.features?.pty === false ? undefined : (workspaceId) => setView({ name: "terminal", workspaceId })} terminalWorkspaceId={view.name === "terminal" ? view.workspaceId : undefined} terminals={terminals} stopMarks={stopMarks} />
+        <Rail releaseOnly={health?.releaseOnly} onFeedback={() => openFeedback(view.name === "backlog" ? backlogNarrow : undefined)} workspaces={workspaces} tasks={tasks} currentTaskId={view.name === "task" ? view.id : undefined} approvals={approvals.length} approvalsOpen={view.name === "approvals"} onApprovals={() => setView({ name: "approvals" })} listOpen={railListOpen} onToggleList={() => setRailListOpen((o) => !o)} onOpenTask={openTaskFromRail} onHome={() => setView({ name: "home" })} onShowArchived={showArchived} onOpenTerminal={health?.features?.pty === false ? undefined : (workspaceId) => setView({ name: "terminal", workspaceId })} terminalWorkspaceId={view.name === "terminal" ? view.workspaceId : undefined} terminals={terminals} stopMarks={stopMarks} />
 
         {view.name === "home" && (
           <Home

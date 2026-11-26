@@ -431,6 +431,7 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
         // 直行で直す only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
         if (action === "direct" && item.stage !== "request") return sc.bad(`直行で始められるのは派生 PBI の無い要望だけです（#${n} は ${item.stage}）`, 409);
         // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
+        if (action === "direct" && sc.cfg.releaseOnly) return sc.bad("この構成では Switchboard 自身のフォルダに Task を始められません（Release から入れた版は書き換えても次の更新で替わります）", 409);
         if (action === "direct" && ws.kind !== "meta") return sc.bad("直行で始められるのは meta workspace の要望だけです", 409);
         if (action !== "direct" && (action === "close" ? !item.progress.closableByApi : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return sc.bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
         // the row's button does not start what backlog-next leaves for its overlap: the reason is the log's;

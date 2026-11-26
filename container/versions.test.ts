@@ -35,10 +35,17 @@ describe("container/Dockerfile pins", () => {
   }
 
   test("what only the image pins has a default version, and a sha256 where it is downloaded", () => {
-    for (const name of ["BUN_VERSION", "CLAUDE_VERSION", "CODEX_VERSION", "GH_VERSION", "GH_STACK_VERSION"]) {
+    for (const name of ["CLAUDE_VERSION", "CODEX_VERSION", "GH_VERSION", "GH_STACK_VERSION"]) {
       expect(arg(dockerfile, name)).toMatch(/^v?\d+(\.\d+)+$/);
     }
     for (const name of ["GH_SHA256", "GH_STACK_SHA256"]) expect(arg(dockerfile, name)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  // the image installs bun from npm, so there is no sha256 to compare
+  test("BUN_VERSION is the host's", () => {
+    const pin = pins.find((p) => p.name === "BUN_VERSION")!;
+    expect(pin).toBeDefined();
+    expect(arg(dockerfile, "BUN_VERSION")).toBe(pin.pinned);
   });
 
   test("PLAYWRIGHT_VERSION is the host's", () => {

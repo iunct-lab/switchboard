@@ -32,6 +32,8 @@ export interface Health {
   /** The data directory is under the OS temp area: what is recorded there can vanish. */
   homeIsTemp?: boolean;
   repoRoot: string;
+  /** A Release install: Switchboard's own row is not offered in the workspace list and picker. */
+  releaseOnly?: boolean;
   /** True when the daemon listens off-loopback and /api needs the token from ~/.switchboard/token. */
   authRequired: boolean;
   /** How a person gets in before being authorized: the cloud host's passkey page, or the token. */

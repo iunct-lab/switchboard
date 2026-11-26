@@ -9,6 +9,7 @@ import type { Ask, ProceedingQuestion } from "@switchboard/protocol";
 import { PROCEED_SETTLED, proceedingAsks, withGone, type GoneFacts } from "./asks.ts";
 import { answersOf, ASK_HISTORY_MS, asksFromBacklog, asksFromTasks, blockersOf, dedupeAsks, grantOfChoice, LAST_REPLY_MAX, lastReplyOf, ON_HOLD_RESUME, parseAskBlock, questionsChosen, questionsReply, rankAsks, resumeOfIssue, resumeOfTask } from "./asks.ts";
 import { prFacts } from "./asks.ts";
+import { WAIT_ANSWER_NEXT, WAIT_RETRYING_NEXT } from "./waits.ts";
 import { gateRecordsOf } from "./gate-records.ts";
 import { parseMergeGrants } from "./merge-grants.ts";
 import { closedHits, noticeAsks } from "./asks-notices.ts";
@@ -35,7 +36,7 @@ const stageTask = (outcome: NonNullable<BacklogItem["lastTask"]>["outcome"] = "n
   ({ id, status: "done", statusAt: NOW - 3_600_000, createdAt: NOW - 3_600_000, updatedAt: NOW - 3_600_000, action: "complete", outcome, reviewedAt: null, resumeAt: null, started: true });
 
 const stop = (over: Partial<StopSummary>): StopSummary => ({
-  key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
+  id: "s1", key: "ws_meta#5\u0000gh pr merge\u0000#7\u0000decision\u0000", work: { workspaceId: "ws_meta", issue: 5, taskId: "tk_5" }, op: "gh pr merge", target: "#7", reason: "decision", evidence: "merge-gate stop",
   safety: "unknown", count: 1, state: "waiting", firstAt: NOW - 3_600_000, lastAt: NOW - 3_600_000, contentAt: NOW - 3_600_000, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
 });
 
@@ -616,6 +617,38 @@ describe("answersOf: a wait past its limit", () => {
   test("answersOf itself: the choices of a person's open wait, none without choices, for an automatic wait or once it is answered", () => {
     const a = (over: Partial<Parameters<typeof answersOf>[0]>) => answersOf({ kind: "wait", needs: "person", state: "open", choices: ["止める", "待ち続ける"], questions: [], blockers: [], grant: null, ...over });
     expect([a({}), a({ choices: [] }), a({ needs: "auto" }), a({ state: "answered" }), a({ state: "resolved" })]).toEqual([["choice"], [], [], [], []]);
+  });
+
+  // the waits a stop makes, past their limits, asked with the stop summaries of the Task
+  const overOf = (stops: StopSummary[], keys: Array<[WaitRecord["kind"], string]>): Ask[] => {
+    const waits = keys.map(([kind, key]) => ({ kind, key, label: key, since: NOW - 4 * 86_400_000, until: NOW - 3_600_000 }));
+    const t = { id: "tk_w", workspaceId: null, title: "t", status: "done", outcome: "waits", reviewedAt: null, resumeAt: null, queuedAt: null, stage: null, statusAt: NOW - 5 * 86_400_000, createdAt: NOW - 5 * 86_400_000, updatedAt: NOW - 5 * 86_400_000, waits } as Task;
+    return asksFromTasks({ approvals: [], tasks: [t], lastTurnQuestions: () => null, permissionEvents: () => [], stops: () => stops, workspaceName: () => null, now: NOW });
+  };
+  const unmet = (...keys: string[]) => keys.map((key) => ({ key, value: "open", met: false }));
+
+  test("止めるの文: names the other waits the same stop makes, and is the plain sentence for a stop of one condition", () => {
+    const two = stop({ id: "s1", reason: "depends", op: "gh pr merge", target: "PR #12", conditions: unmet("pr#12", "issue#7") });
+    const next = (stops: StopSummary[], keys: Array<[WaitRecord["kind"], string]>) => overOf(stops, keys).find((a) => a.kind === "wait" && a.wait?.key === keys[0]![1])!.next;
+    expect(next([two], [["depends", "pr#12"], ["depends", "issue#7"]])).toBe(`${WAIT_ANSWER_NEXT}（同じ停止の Issue #7 も一緒に片づく）`);
+    const one = stop({ id: "s1", reason: "depends", conditions: unmet("pr#12") });
+    expect(next([one], [["depends", "pr#12"]])).toBe(WAIT_ANSWER_NEXT);
+  });
+
+  test("再開できない depends の停止は 1 件: no wait question over a stop that already asks the person", () => {
+    const kinds = (stops: StopSummary[], keys: Array<[WaitRecord["kind"], string]>) => overOf(stops, keys).filter((a) => a.state === "open").map((a) => a.kind);
+    // no condition: the wait is the stop's own id
+    expect(kinds([stop({ id: "s1", reason: "depends", conditions: [] })], [["stop", "s1"]])).toEqual(["stop"]);
+    // a condition whose key has no fixed form: the app does not resume it
+    expect(kinds([stop({ id: "s1", reason: "depends", conditions: unmet("tag#v1") })], [["stop", "s1:tag#v1"]])).toEqual(["stop"]);
+    // a stop the app resumes keeps its wait question
+    expect(kinds([stop({ id: "s1", reason: "depends", conditions: unmet("pr#12") })], [["depends", "pr#12"]])).toContain("wait");
+  });
+
+  test("再試行中の停止の待ち: only 止める is offered, and the sentence says nothing is needed to keep waiting", () => {
+    const a = overOf([stop({ id: "s1", reason: "transient", state: "retrying", conditions: unmet("job#3") })], [["job", "job#3"]]).find((x) => x.kind === "wait")!;
+    expect(a).toMatchObject({ choices: ["止める"], answers: ["choice"], next: WAIT_RETRYING_NEXT });
+    expect(WAIT_RETRYING_NEXT).toContain("再試行中なので、待ち続けるならこのまま何もしない");
   });
 });
 

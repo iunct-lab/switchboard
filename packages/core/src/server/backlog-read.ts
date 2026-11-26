@@ -140,6 +140,9 @@ export const storedBacklogReleased = async (sc: Pick<ServerContext, "storedBackl
 
 export const isMeta = (sc: Pick<ServerContext, "db">, t: { workspaceId: string | null }) => !!t.workspaceId && sc.db.getWorkspace(t.workspaceId)?.kind === "meta";
 
+/** A Task on the meta row of an install that develops Switchboard: only that one is checked after a turn. A release-only install runs the tree it was given and has no checks to run on it. */
+export const selfDevOn = (sc: Pick<ServerContext, "db" | "cfg">, t: { workspaceId: string | null }) => !sc.cfg.releaseOnly && isMeta(sc, t);
+
 export function setupBacklog(sc: Pick<ServerContextInit, "backlog" | "db" | "opts" | "cfg" | "backlogReads" | "uplink" | "s3" | "leases" | "clones" | "broadcast" | "githubBudget" | "sources" | "flowWorkspaces" | "flow" | "DEVELOP_SELF_OFF">): void {
   // the backlog is read from what was imported; GitHub is asked by the sync only, and for its budget (below)
   // the candidate runs on a copy of the database: it sends nothing, or what it sent would be sent again

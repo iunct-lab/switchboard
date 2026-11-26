@@ -1200,6 +1200,25 @@ describe("POST /api/asks/answer — task side", () => {
     expect(again.ask!.resume!.reason).toStartWith("使用上限の解除待ち");
   });
 
+  test("task side: 待ちの問いの再送 — a wait question's resend is answered already, with no resume of the Task", async () => {
+    const base = await boot(fakeGh().gh, scripted([[end("done")]]));
+    const id = await newTask(base, "stopped on a PR");
+    await until(() => status(id) === "done");
+    core!.db.appendEvent(id, { t: "stop.record", stop: { id: `${id}/s1`, work: { workspaceId: meta().id, issue: null, taskId: id }, op: "merge", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key: "pr#5", value: "open", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() - 4 * 86_400_000 } });
+    const since = Date.now() - 4 * 86_400_000;
+    core!.db.setTaskWaits(id, [{ kind: "depends", key: "pr#5", label: "PR #5", since, until: since + 3 * 86_400_000 }]);
+    core!.db.sqlite.query("UPDATE tasks SET outcome = 'waits' WHERE id = ?").run(id);
+    let ask: Ask | undefined;
+    await until(async () => (ask = (await asks(base)).find((a) => a.kind === "wait" && a.task?.id === id)) !== undefined);
+    const first = (await (await answer(base, ask!.id, { kind: "choice", choice: "止める" })).json()) as AskAnswerResult;
+    expect(first).toMatchObject({ already: false, ask: { state: "answered" } });
+    // the Task is queued for a limit's lift meanwhile: the wait's answer does not carry that as its own resume
+    core!.db.sqlite.query("UPDATE tasks SET resume_at = ? WHERE id = ?").run(Date.now() + 3_600_000, id);
+    const again = (await (await answer(base, ask!.id, { kind: "choice", choice: "止める" })).json()) as AskAnswerResult;
+    expect(again.already).toBe(true);
+    expect(again.ask?.resume ?? null).toBeNull();
+  });
+
   test("task side: send fails — over its budget the reply is not sent: resume failed with the reason, the question still open", async () => {
     const base = await boot(fakeGh().gh, scripted([checkTurn(CONTINUE_QS)]));
     const id = await checkTask(base, { budgetUsd: 0.01 });

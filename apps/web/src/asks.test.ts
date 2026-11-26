@@ -666,6 +666,11 @@ test("waitGroups: a wait's row has 待ち続ける and 止める, sending the qu
     ["止める", { kind: "choice", choice: "止める" }, false],
   ]);
   expect(waitChoices(waitAsk("d1", "depends", { choices: ["待ち続ける", "止める"] }))).toEqual({ stop: "止める", keep: "待ち続ける" });
+  // a retrying stop's wait has 止める only: it is still in a heading, with no 待ち続ける to send
+  const only = waitAsk("r1", "stop", { choices: ["止める"] });
+  expect(waitChoices(only)).toEqual({ stop: "止める", keep: null });
+  expect(answerButtons(only).map((b) => b.answer)).toEqual([{ kind: "choice", choice: "止める" }]);
+  expect(waitGroups([only, w]).map((g) => [g.kind, g.asks.map((x) => x.id)])).toEqual([["depends", ["waitover:d1"]], ["stop", ["waitover:r1"]]]);
   // choices that are not the two are not guessed at by position
   expect(waitChoices(waitAsk("d1", "depends", { choices: ["A: 進める", "B: やめる"] }))).toBeNull();
   expect(answerButtons(waitAsk("c1", "command", { answers: [], choices: [] }))).toEqual([]);

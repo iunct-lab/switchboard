@@ -135,9 +135,9 @@ export const pickYourself = (_sc: unknown, why: string) => new Error(`Workspace 
  * (`routing.llm` runner / model; `enabled` is not consulted — leaving the select on 自動 is the instruction,
  * `enabled` is the switch for runner suggestions) picks among the registered Workspaces.
  */
-export const chooseWorkspace = async (sc: Pick<ServerContext, "settings" | "db" | "pickYourself" | "adapterMap" | "suggestDir">, input: { title?: string; prompt: string }): Promise<{ workspace: Workspace; reason: string; usage: Extract<AgentEvent, { t: "usage" }>[]; runner: RunnerId }> => {
+export const chooseWorkspace = async (sc: Pick<ServerContext, "settings" | "db" | "cfg" | "pickYourself" | "adapterMap" | "suggestDir">, input: { title?: string; prompt: string }): Promise<{ workspace: Workspace; reason: string; usage: Extract<AgentEvent, { t: "usage" }>[]; runner: RunnerId }> => {
   const llmCfg = sc.settings().routing.llm;
-  const workspaces = sc.db.listWorkspaces().filter((ws) => existsSync(ws.path));
+  const workspaces = sc.db.listWorkspaces().filter((ws) => existsSync(ws.path) && !(sc.cfg.releaseOnly && ws.kind === "meta"));
   if (workspaces.length === 0) throw sc.pickYourself("登録済みの Workspace がありません");
   const adapter = sc.adapterMap.get(llmCfg.runner);
   if (!adapter) throw sc.pickYourself(`自動選択に使うランナー ${llmCfg.runner} が未検出`);
