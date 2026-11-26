@@ -1,6 +1,6 @@
 import { readCloudPreparation, cloudTransferNotice } from "../claude-cloud.ts";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { CreateTaskInput, ForkTaskInput, HumanEvalInput, PatchTaskInput, taskSummary, SendTaskInput, SetArchivedInput, SetOutcomeInput, SuggestInput, type Task } from "@switchboard/protocol";
 import { createdIssuesOf, deferredOf } from "../db.ts";
 import { measureFootprint } from "../footprint.ts";
@@ -17,13 +17,22 @@ import type { DeviceAuthInput } from "../deviceauth.ts";
 import type { Routes, ServerContext } from "../server/context.ts";
 import { clampLimit } from "./shared.ts";
 
+const RELEASE_FOLDER_CLOSED = "この構成では Switchboard 自身のフォルダに Task を始められません（Release から入れた版は書き換えても次の更新で替わります）";
+
 export function afterSeq(raw: string | null): number {
   const n = raw === null || raw.trim() === "" ? 0 : Number(raw);
   return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
 /** The routes under /api/tasks. */
-export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "createdRowsOf" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
+export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "createdRowsOf" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "selfDevOn" | "cfg" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
+  /** Under `<home>/releases` (the link the meta workspace is at, and every release directory), followed through links. */
+  const inReleaseFolder = (dir: string | undefined): boolean => {
+    if (dir === undefined) return false;
+    const real = (p: string) => (existsSync(p) ? realpathSync(p) : resolve(p));
+    const d = real(dir), root = real(join(sc.cfg.home, "releases"));
+    return d === root || d.startsWith(root + sep);
+  };
   return {
     "/api/tasks/:id/mcp": {
       GET: (req) => {
@@ -117,6 +126,9 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "crea
         const named = parsed.data.workspaceId ? sc.db.getWorkspace(parsed.data.workspaceId) : null;
         if (parsed.data.cwd === undefined && parsed.data.workspaceId && !named) return sc.bad("workspace not found", 404);
         if (parsed.data.cwd === undefined && named && !existsSync(named.path)) return sc.bad("workspace directory does not exist", 409);
+        // a person does not start a Task on a Release's own row or in its folder: a change there is replaced by the next update.
+        // Schedules start theirs inside the daemon, not through this route, so a schedule id here opens nothing.
+        if (sc.cfg.releaseOnly && (named?.kind === "meta" || inReleaseFolder(parsed.data.cwd ?? named?.path))) return sc.bad(RELEASE_FOLDER_CLOSED, 409);
         if (parsed.data.executionMode === "cloud" && named) {
           if (!existsSync(named.path)) return sc.bad("workspace directory does not exist", 409);
           if (parsed.data.cwd !== undefined && resolve(parsed.data.cwd) !== resolve(named.path)) return sc.bad("Cloud cwd must match the selected Workspace");
@@ -385,7 +397,7 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "crea
         const t = sc.db.getTask(String(req.params.id));
         if (!t) return sc.bad("not found", 404);
         const run = sc.selfdev.last(t.id);
-        return sc.json({ run, running: sc.selfdev.isRunning(t.id), meta: sc.isMeta(t), current: sc.selfdev.isCurrent(run) });
+        return sc.json({ run, running: sc.selfdev.isRunning(t.id), meta: sc.selfDevOn(t), current: sc.selfdev.isCurrent(run) });
       },
       // Starts (or queues) a run and returns at once; checks.updated announces the result.
       POST: (req) => {
@@ -395,7 +407,7 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "crea
         // run here would write over the result that came in with it
         const away = sc.ranElsewhere(t.id);
         if (away) return away;
-        if (!sc.isMeta(t)) return sc.bad("checks run only for tasks on the meta workspace (this repository)", 400);
+        if (!sc.selfDevOn(t)) return sc.bad("checks run only for tasks on the meta workspace (this repository)", 400);
         void sc.selfdev.run(t.id).catch(() => undefined);
         return sc.json({ run: sc.selfdev.last(t.id), running: true, meta: true, current: false }, 202);
       },
@@ -509,6 +521,7 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "crea
         if (!t) return sc.bad("not found", 404);
         const away = sc.ranElsewhere(t.id);
         if (away) return away;
+        if (sc.cfg.releaseOnly && sc.db.getWorkspace(t.workspaceId ?? "")?.kind === "meta") return sc.bad(RELEASE_FOLDER_CLOSED, 409);
         const parsed = ForkTaskInput.safeParse(await req.json().catch(() => null));
         if (!parsed.success) return sc.bad(parsed.error.message);
         try {

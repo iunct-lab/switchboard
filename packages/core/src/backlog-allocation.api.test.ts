@@ -170,7 +170,7 @@ describe("flow-improvement limit", () => {
     // a stop that ran out of retries on a Task that ended done (no reply waited for): only the stop holds it
     const decided = { ...asked, outcome: "finished" as const };
     const ask: BacklogItem["stopSummary"][number] = {
-      key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
+      id: "s1", key: "k", work: { workspaceId: "ws_meta", issue: 11, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "large", safety: "before-effect",
       count: 1, state: "exhausted", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide",
     };
     const free = flowItem({ number: 11, ...progress, lastTask: decided, commentedAt: "2026-09-29T00:00:00Z" }); // moved since the Task

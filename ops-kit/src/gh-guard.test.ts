@@ -613,6 +613,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     ["pr", "merge", "-R", "x/y", "https://github.com/x/y/pull/12", "--rebase"],
     ["stack", "merge", "12", "--rebase", "-y"],
     ["api", "-X", "PUT", "repos/x/y/pulls/12/merge"],
+    ["api", "-X", "PUT", "repos/x/y/pulls/12/merge-async"],
   ];
   // a fake app that answers the grant of PR 12 only, and records what it was asked
   // the head the person saw when they gave the grant of PR 12, and the head the PR has now (the fake gh's answer to `pr view`)
@@ -820,6 +821,9 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     expect(mergeWrite(["pr", "view", "12"])).toBeNull();
     expect(mergeWrite(["api", "repos/x/y/pulls/12/merge"])).toBeNull();
     expect(mergeWrite(["api", "-X", "PUT", "repos/x/y/pulls/12/merge"])).toEqual({ pr: 12 });
+    expect(mergeWrite(["api", "-X", "PUT", "repos/x/y/pulls/12/merge-async"])).toEqual({ pr: 12 });
+    expect(mergeWrite(["api", "repos/x/y/pulls/12/merge-async/0f3c9a1e-5b7d-4c2a-8e61-9d4b2a7c1f30"])).toBeNull();
+    expect(mergeWrite(["api", "-X", "PUT", "repos/x/y/pulls/12/merge-asyncx"])).toBeNull();
   });
 
   test("plainMergeOf: only the shape the guard reads as gh does", () => {

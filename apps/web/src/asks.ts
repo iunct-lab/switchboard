@@ -89,15 +89,16 @@ export const WAIT_KIND_LABEL: Partial<Record<WaitKind, string>> = {
 const WAIT_CHOICE = { stop: "止める", keep: "待ち続ける" } as const;
 
 /**
- * The two answers of a wait past its limit — the question's own choices, sent as they are; null = it is not answered
- * here (not open, a running Task's wait with no `choice`, or choices that are not the two). The one place that tells
- * which choice stops and which keeps waiting.
+ * The answers of a wait past its limit — the question's own choices, sent as they are; `keep` is null when the wait has
+ * only 止める (it is retrying: there is nothing to keep waiting for). null = it is not answered here (not open, a running
+ * Task's wait with no `choice`, or no 止める among the choices). The one place that tells which choice stops and which
+ * keeps waiting.
  */
-export function waitChoices(a: Pick<Ask, "kind" | "state" | "answers" | "choices" | "wait">): { stop: string; keep: string } | null {
+export function waitChoices(a: Pick<Ask, "kind" | "state" | "answers" | "choices" | "wait">): { stop: string; keep: string | null } | null {
   if (a.kind !== "wait" || !a.wait || a.state !== "open" || !a.answers.includes("choice")) return null;
   const stop = a.choices.find((c) => c === WAIT_CHOICE.stop);
   const keep = a.choices.find((c) => c === WAIT_CHOICE.keep);
-  return stop !== undefined && keep !== undefined ? { stop, keep } : null;
+  return stop !== undefined ? { stop, keep: keep ?? null } : null;
 }
 
 /** The waits past their limit that are answered here, under one heading per kind of wait in WAIT_KIND_LABEL's order; a kind with none has no heading, and each keeps the order it was given. */
@@ -279,10 +280,10 @@ export function answerButtons(a: Ask): AnswerButton[] {
     }
     return out;
   }
-  // a wait past its limit: 待ち続ける then 止める, neither the recommended one; what is sent is the question's own choice
+  // a wait past its limit: 待ち続ける (when it has one) then 止める, neither the recommended one; what is sent is the question's own choice
   const wait = waitChoices(a);
   if (wait) {
-    out.push({ label: t(pm.waitKeep), answer: { kind: "choice", choice: wait.keep }, send: wait.keep, grant: null, target, next, sub: null, primary: false });
+    if (wait.keep !== null) out.push({ label: t(pm.waitKeep), answer: { kind: "choice", choice: wait.keep }, send: wait.keep, grant: null, target, next, sub: null, primary: false });
     out.push({ label: t(pm.waitStop), answer: { kind: "choice", choice: wait.stop }, send: wait.stop, grant: null, target, next, sub: null, primary: false });
   } else if (takes.has("choice")) {
     const rec = a.recommendation ? choiceKey(a.recommendation.choice) : null;

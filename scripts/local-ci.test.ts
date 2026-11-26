@@ -7,7 +7,7 @@ import { ciExit, ciSteps } from "./ci";
 import { withHeavySlot } from "../ops-kit/src/heavy";
 import { RECORDS_HEADER } from "./perf-ratchet";
 import type { MergeRecordJob } from "../ops-kit/src/merge-records";
-import { checkoutSteps, fileSizeBaseOf, parseBuild, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, narrowTestStep, notify, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepWithIdle, TargetError, withoutPerf, collectPending, type Deps, type LocalCiResult, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash, newestCiRecord, writeJobResult } from "./local-ci";
+import { checkoutSteps, fileSizeBaseOf, parseBuild, setupFailure, quote, existingPass, failLines, incrementalBase, incrementalSteps, INCREMENTAL_ALSO, LOCAL_CI_RESULT, localCi, main, mainFork, narrowTestStep, notify, readTarget, remoteRepo, reportResult, resultComment, resolveTarget, reusablePass, runCheckout, selectTests, SHARED_ENTRY, sh as realSh, stepEnv, stepWithIdle, TargetError, withoutPerf, collectPending, type Deps, type LocalCiResult, checkoutCi, CI_STEPS_PLACES, imageRootFor, stepsHash, newestCiRecord, writeJobResult } from "./local-ci";
 import { buildFiles, ciScript, hostOffload, runBuild, OffloadStartError, pendingDirOf, recordLive, writePending, pendingFor, type Offload } from "./local-ci-offload";
 import { listedIn } from "./file-size";
 import { ciAtTips } from "./merge-gate-records";
@@ -2002,6 +2002,53 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
         expect(existsSync(FILE)).toBe(false);
       });
 
+      test("a build whose setup failed before any step is no result of the PR: nothing posted, no pending record, exit 2", async () => {
+        const root = mkdtempSync(join(CACHE, "main-root-"));
+        Bun.spawnSync(["git", "init", "-q", root]);
+        Bun.spawnSync(["git", "-C", root, "remote", "add", "origin", "https://github.com/example/development.git"]);
+        try {
+          forget();
+          const x = withOffload(() => ({ code: 1, output: "sb-setup: bun install が失敗\nsb-offload: exit 1" }));
+          const fx = x.d.sh;
+          x.d.sh = async (cmd, cwd) => (cmd.includes("get-url") ? "https://github.com/example/development.git\n" : fx(cmd, cwd));
+          const posted: string[] = [];
+          const err: string[] = [];
+          const saved = console.error;
+          console.error = (...a: unknown[]) => void err.push(a.join(" "));
+          let code: number;
+          try {
+            code = await main(["42"], root, x.d, async (_t, body) => void posted.push(body), root, CACHE);
+          } finally {
+            console.error = saved;
+          }
+          expect(code).toBe(2);
+          expect(posted).toEqual([]);
+          expect(existsSync(FILE)).toBe(false);
+          expect(err.join("\n")).toContain("外のビルドの準備に失敗した（exit 1）\nsb-setup: bun install が失敗");
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+
+      test("a collected build whose setup failed is not posted and its record is removed", async () => {
+        const rec = await cutOff();
+        const r = await collect(rec, { code: 1, output: "sb-setup: bun install が失敗\nsb-offload: exit 1" });
+        expect(r.posted).toEqual([]);
+        expect(r.code).toBe(0);
+        expect(existsSync(FILE)).toBe(false);
+        expect(r.logged.join("\n")).toContain("外のビルドの準備に失敗した（exit 1）");
+      });
+
+      test("a cut-off run resumed on a build whose setup failed returns it as not started, posts nothing and removes the record", async () => {
+        await cutOff();
+        const y = withOffload();
+        y.d.offload!.collect = async () => ({ code: 1, output: "sb-setup: bun install が失敗\nsb-offload: exit 1" });
+        const r = await localCi(42, "/repo", y.d, "example/development", CACHE);
+        expect(r.notStarted).toMatchObject({ code: 1, setup: true });
+        expect(r.results).toEqual([]);
+        expect(y.builds).toHaveLength(0);
+      });
+
       test("pending: a --local run that posted its result removes the record of an off-host build for the same head and base", async () => {
         const root = mkdtempSync(join(CACHE, "main-root-"));
         Bun.spawnSync(["git", "init", "-q", root]);
@@ -2317,9 +2364,58 @@ test.skipIf(skipRecordings(rel))("replay", () => assertRecordings(rel));`);
       });
     });
 
+    test("ciScript installs with bun only where the work tree has a package.json", () => {
+      const root = mkdtempSync(join(CACHE, "install-"));
+      try {
+        const mark = join(root, "bun-called");
+        // a fake `bun` that leaves a mark when called (a function, not a file: a tmpfs of the build may not run files)
+        const fakeBun = `bun() { echo "$*" >> ${quote(mark)}; }\n`;
+        // the script that runs inside the build (between the heredoc's lines), its fixed paths moved into the temporary directory
+        const inner = (script: string) => /<<'SB_LOCAL_CI_EOF'\n([\s\S]*?)\nSB_LOCAL_CI_EOF/.exec(script)![1]!;
+        const run = (tree: string) => {
+          mkdirSync(join(root, "tmp"), { recursive: true });
+          const body = fakeBun + inner(ciScript([{ name: "echo", run: "echo ok" }], {})).replace(/\/sb\/work|\/sb\/tmp|\/tmp\/install\.log/g, (m) => ({ "/sb/work": tree, "/sb/tmp": join(root, "tmp"), "/tmp/install.log": join(root, "install.log") })[m]!);
+          const p = Bun.spawnSync(["bash", "-c", body], { env: { PATH: process.env.PATH ?? "", HOME: root }, stdout: "pipe", stderr: "pipe" });
+          return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+        };
+        const without = join(root, "without");
+        mkdirSync(without);
+        writeFileSync(join(without, "a.txt"), "a\n");
+        const a = run(without);
+        expect(a).toMatchObject({ code: 0 });
+        expect(a.out).toContain("sb-step: 0 begin");
+        expect(a.out).not.toContain("sb-setup:");
+        expect(existsSync(mark)).toBe(false);
+        const withPkg = join(root, "with");
+        mkdirSync(withPkg);
+        writeFileSync(join(withPkg, "package.json"), "{}\n");
+        const b = run(withPkg);
+        expect(b).toMatchObject({ code: 0 });
+        expect(b.out).toContain("sb-step: 0 exit 0");
+        expect(readFileSync(mark, "utf8")).toBe("install --frozen-lockfile\n");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("setupFailure: a log with a setup line and no step mark; any step mark or no setup line is not one", () => {
+      expect(setupFailure("error: x\nsb-setup: bun install が失敗\nsb-offload: exit 1\n")).toBe("error: x\nsb-setup: bun install が失敗\nsb-offload: exit 1");
+      expect(setupFailure("sb-setup: x\nsb-step: 0 begin 1\nsb-offload: exit 1")).toBeUndefined();
+      expect(setupFailure("sb-setup: x\nsb-step: 0 exit 1 2\n")).toBeUndefined();
+      expect(setupFailure("boom\nsb-offload: exit 1")).toBeUndefined();
+    });
+
+    test("a build cut after its first step began is still that step's failure", async () => {
+      const x = withOffload(() => ({ code: 1, output: "sb-step: 0 begin 100\nsb-offload: exit 1" }));
+      const r = await localCi(42, "/repo", x.d, "example/development", CACHE);
+      expect(r.notStarted).toBeUndefined();
+      expect(r.ok).toBe(false);
+      expect(r.results.map((s) => [s.code])).toEqual([[1]]);
+    });
+
     test("ciScript: a tmpfs TMPDIR, the image's user switchboard with the image's Chromium, no tool installed, each step between marks and stopping at a failure", () => {
       const script = ciScript([{ name: "x", run: "echo 'it'" }], { repo: "o/r" });
-      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
+      for (const part of ["mount -t tmpfs", "chown -R switchboard /sb/work", 'su - switchboard -c "CHROME_BIN=${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"', "git remote add origin 'https://github.com/o/r.git'", "if [ -f package.json ]; then bun install --frozen-lockfile", `bash -e -c 'echo '\\''it'\\'''; c=$?`, '[ "$c" -eq 0 ] || exit "$c"']) expect(script).toContain(part);
       // the steps run in a new PID namespace whose init reaps orphans (the build's PID 1 does not)
       expect(script).toContain("unshare --pid --fork --mount-proc bash -c 'su - switchboard -c ");
       expect(script).toContain('sb-setup: PID 名前空間を作れない');

@@ -22,6 +22,12 @@ export interface CoreConfig {
    */
   repoRoot: string;
   /**
+   * An install that only uses a Release: sb-rescue started the daemon (`SWITCHBOARD_RESCUE_URL`) and its repo root is the
+   * link `<home>/releases/current`, not a checkout, so nobody develops in it and a change there is replaced by the next
+   * update. Decided by how the daemon was started, not by a setting. A candidate (the release directory itself) is not.
+   */
+  releaseOnly: boolean;
+  /**
    * Where「GitHub から追加」clones and the only place a workspace's directory may be deleted with it: next to the
    * development checkout (`dirname(repoRoot)`) unless SWITCHBOARD_REPOS_DIR names another — the container, whose code
    * sits in /opt, points it at the repositories' volume.
@@ -235,6 +241,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig {
     port: Number(env.SWITCHBOARD_PORT ?? DEFAULT_PORT),
     host: env.SWITCHBOARD_HOST ?? "127.0.0.1",
     repoRoot,
+    releaseOnly: !!env.SWITCHBOARD_RESCUE_URL && repoRoot === join(home, "releases", "current"),
     reposDir: env.SWITCHBOARD_REPOS_DIR ? resolve(env.SWITCHBOARD_REPOS_DIR) : dirname(repoRoot),
     codeRoot,
     candidate: env.SWITCHBOARD_CANDIDATE === "1",

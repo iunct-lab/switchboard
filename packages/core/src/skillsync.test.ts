@@ -844,7 +844,8 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 285_600 (+2,400 bytes over 283,200; the copy measured 285,411 after, with the review follow-ups that refresh the clone before the arbiter and say a later split stays with the implementer): the supervisor replaces the comparison with main and the
     // model-read rechecks (cross-runner-review 6 with how to ask, read and post it and its follow-up, pbi-complete 5 and
     // review-triage-and-merge 2, 3 and 5 pointing to it); the comparison's section and its sorting of leftovers are gone, and the first draft (+3,990) was cut to this.
-    expect(bytes).toBeLessThanOrEqual(285_600);
+    // Raised to 285_700 (+100 bytes over 285,600; the copy measured 285,659 after): the chained edit example in issue-workflow reads the body and its version once (and not again when run again), so a re-run cannot replace the original.
+    expect(bytes).toBeLessThanOrEqual(285_700);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

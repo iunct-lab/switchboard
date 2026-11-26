@@ -186,6 +186,7 @@ export function reduceStops(records: StopRecord[], opts: { newestTaskId?: string
     const lastAnswer = newest(list.filter((x) => x.answer?.ref.startsWith("seq:")));
     const unchanged = list.length > 1 && changes.length === 0;
     out.push({
+      id: last.id,
       key,
       work: last.work,
       op: last.op,

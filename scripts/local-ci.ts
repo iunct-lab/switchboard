@@ -191,7 +191,7 @@ export function workflowSteps(yaml: string): Step[] {
 /** `seconds`: a pass's type check and bun test seconds, for a checkout with scripts/ci.ts. */
 /** `selection`: what chose this run's tests, none with `--all`. `bundle`: the perf check's `bundle:` and `grew:` lines, pass or fail. */
 /** `incremental`: this run was only the commits since the earlier pass `pass` (`incrementalBase`). */
-export interface LocalCiResult { /** The build off the host could not be started (sb-offload's code and what it printed): no step ran, nothing is to be posted. */ notStarted?: { code: number; output: string }; /** The steps came from the workspace's settings kept by Switchboard, not from the checkout. */ source?: StepsSource; /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number }; /** bun test's failures taken off by the registry at the base (known-failures.json): `subtracted` are why a pass is a pass, `expired` were registered but past their date (still failures), `unreadable` = the registry could not be read (nothing taken off). */ known?: { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string } }
+export interface LocalCiResult { /** The build off the host could not be started (sb-offload's code and what it printed): no step ran, nothing is to be posted. */ notStarted?: { code: number; output: string; setup?: true }; /** The steps came from the workspace's settings kept by Switchboard, not from the checkout. */ source?: StepsSource; /** The build the result is of (off the host): its record is the one to remove. */ build?: string; sha: string; base: string; results: StepResult[]; ok: boolean; seconds?: StepSeconds; conflict?: boolean; warnings?: string[]; perf?: PerfVerdict; selection?: TestSelection; bundle?: string[]; incremental?: { pass: string; commits: number; files: number }; /** bun test's failures taken off by the registry at the base (known-failures.json): `subtracted` are why a pass is a pass, `expired` were registered but past their date (still failures), `unreadable` = the registry could not be read (nothing taken off). */ known?: { subtracted: Subtracted[]; expired: Subtracted[]; unreadable?: string } }
 
 /** What a run's bun test covered, for the comment: the seen line and the machine line; a selection's reason can list every changed file. */
 function testsLines(s: TestSelection | undefined): string[] {
@@ -312,8 +312,18 @@ export const testRun = (files: string[]) => (files.length ? `bun test ${files.ma
 const MARK = /^sb-step: (\d+) (begin|exit) (?:(\d+) )?([\d.]+)$/;
 
 /**
+ * The log of a build whose setup failed before any step began (no `sb-step:` begin or exit mark, a line starting `sb-setup:`), trimmed; `undefined` for any other log.
+ * Such a build says nothing about the code: it is a `notStarted` (no mark, exit 2), not the first step's failure.
+ */
+export function setupFailure(output: string): string | undefined {
+  const lines = output.split("\n").map((l) => l.trim());
+  if (lines.some((l) => MARK.test(l)) || !lines.some((l) => l.startsWith("sb-setup:"))) return undefined;
+  return output.trim();
+}
+
+/**
  * The steps of the build from its log, by their marks: each one's output, code and seconds. A step that began without
- * an exit mark, or the first step when none began (the setup failed), gets sb-offload's code (1 when that is 0) and
+ * an exit mark, or the first step when none began (a failure outside the setup's lines: runCheckout and resultOf take a setup failure first), gets sb-offload's code (1 when that is 0) and
  * its reason; the steps after it did not run and are left out. A build that ends non-zero after every step passed
  * fails its last step with that code and reason. A begin mark may be missing (a lossy log): an exit mark is enough to
  * read the step, its output starting after the previous step's exit mark and its seconds 0.
@@ -475,6 +485,8 @@ export interface ChangeTarget { label: string; read: () => Promise<{ head: strin
 
 /** The comment's result from a collected build: the steps read by their marks, as a run here reads them. */
 async function resultOf(p: Pending, out: { code: number; output: string }, d: Pick<Deps, "log" | "sh">, cache: string, today?: string): Promise<LocalCiResult> {
+  const setup = setupFailure(out.output);
+  if (setup !== undefined) return { sha: p.head, base: p.base, results: [], ok: false, notStarted: { code: out.code || 1, output: setup, setup: true } };
   const ran = parseBuild(out.output, p.steps, out.code);
   const { results, ok, bundle, outputs } = await settle(ran, d, `local-ci-${p.repo.replaceAll("/", "_")}-${p.pr}`, cache);
   const seconds = ok && p.ciTs ? stepSeconds(results) : undefined;
@@ -553,6 +565,11 @@ export async function collectPending(d: Deps, cache: string, post = reportResult
     const t = { pr: p.pr, repo: p.repo, root: p.root };
     try {
       const r = await resultOf(p, out, d, cache);
+      if (r.notStarted) {
+        d.log(`${p.repo}#${p.pr}: ${notStartedLines(r.notStarted)}\n結果は付けない。記録を消す`);
+        clearPending(cache, p.repo, p.pr, p.build);
+        continue;
+      }
       const { posted, readFailed } = await notifyKeeping(t, r, d, post, lateRecord(p.job));
       if (!posted && readFailed) {
         left++;
@@ -585,6 +602,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
       const job = jobIdOf(process.env.J);
       writePending(cache, { ...prior, pid: process.pid, boot: bootId(), ...(job ? { job } : {}) });
       const out = await d.offload!.collect(prior.build);
+      // a setup failure comes back as notStarted from resultOf; `built` clears the record as for any result
       if (buildSpoke(out.output)) return (built = prior.build), resultOf(prior, out, d, cache, opts.today);
       // the build is gone (its log kept 7 days) or could not be read: not a result of this head; a build of its own
       d.log(`ビルド ${prior.build} の結果が無い。新しくビルドする`);
@@ -676,7 +694,7 @@ export async function localCi(pr: number, repoRoot: string, d: Deps, repo: strin
  * `x.workspace`: the settings Switchboard keeps for the workspace, read when `dir` has no `ops.config.json` (`checkoutCi`); `source` in the result says the steps came from there.
  * `notStarted`: the build off the host could not be started (no step ran: `results` is empty and `ok` false, and the caller writes no result).
  */
-export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean, source?: StepsSource) => void, baseTree?: string, x: { imageRoot?: string; workspace?: WorkspaceSettings } = {}): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean; source?: StepsSource; notStarted?: { code: number; output: string } }> {
+export async function runCheckout(dir: string, env: Record<string, string>, label: string, d: Omit<Deps, "slot"> & { slot?: Deps["slot"] }, cache: string, tests?: string[] | null, repo?: string, withPerf = true, incremental = false, started?: (build: string, steps: Step[], incremental: boolean, source?: StepsSource) => void, baseTree?: string, x: { imageRoot?: string; workspace?: WorkspaceSettings } = {}): Promise<{ steps: Step[]; results: StepResult[]; ok: boolean; perf?: PerfVerdict; outputs: Record<string, string>; bundle: string[]; offloaded: string[]; incremental: boolean; source?: StepsSource; notStarted?: { code: number; output: string; setup?: true } }> {
   const ci = await checkoutCi(dir, env, x.workspace);
   const from = ci.source ? { source: ci.source } : {};
   // a perf step never stops the steps after it, whatever the repository's CI says: perf does not decide the result (docs/design/perf.md)
@@ -704,6 +722,9 @@ export async function runCheckout(dir: string, env: Record<string, string>, labe
     const r = await runBuild(offload, steps, dir, { caller: withPerf ? "tag-ci" : "local-ci", ...(repo ? { repo } : {}), ...(withPerf ? { perf: true as const } : {}), ...(baseTree ? { baseTree } : {}), ...(x.imageRoot ? { imageRoot: x.imageRoot } : {}), ...(base ? { fileSizeBase: base } : {}), ...(started ? { started: (build) => started(build, steps, !!inc, ci.source) } : {}) });
     // not a step's failure: the first step would otherwise carry sb-offload's own exit as if the code had failed
     if (r.notStarted) return { steps, results: [], ok: false, outputs: {}, bundle: [], offloaded: [], incremental: !!inc, ...from, notStarted: { code: r.code, output: r.output } };
+    // the build's own setup failed before any step: not the code's failure either
+    const setup = setupFailure(r.output);
+    if (setup !== undefined) return { steps, results: [], ok: false, outputs: {}, bundle: [], offloaded: [], incremental: !!inc, ...from, notStarted: { code: r.code || 1, output: setup, setup: true } };
     ran = parseBuild(r.output, steps, r.code);
     // a perf run's files come back in the log: written into `dir` as a run here would leave them, for the records and the judgement
     if (withPerf) for (const [name, bytes] of Object.entries(buildFiles(r.output))) writeFileSync(join(dir, name), bytes);
@@ -1044,6 +1065,8 @@ export async function main(args: string[], cwd: string, d: Deps, post = reportRe
   // sb-offload's own failure says nothing about the PR: no mark (a fail would name the first step), no pending record
   if (r.notStarted) {
     console.error(`${notStartedLines(r.notStarted)}\n結果は付けない`);
+    // a build whose setup failed was written down when it started: nothing for `--collect` to post
+    if (r.build) clearPending(cache ?? join(homedir(), ".cache"), t.repo, t.pr, r.build);
     return 2;
   }
   try {

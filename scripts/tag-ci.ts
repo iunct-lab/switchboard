@@ -380,7 +380,11 @@ async function runTag(tag: string, before: string | undefined, sha: string, repo
       run = await runCheckout(dir, env, `tag-ci-${repo.replaceAll("/", "_")}`, d, cache, undefined, repo, true, false, started, baseTree, x);
     }
     // sb-offload could not start the build: no step ran, so there is nothing to record or to judge
-    if (run.notStarted) return { notStarted: run.notStarted };
+    if (run.notStarted) {
+      // a build whose setup failed has left its record: reading it again would end the same way, so the next run builds anew
+      if (run.notStarted.setup) clearTagPending(cache, repo, tag);
+      return { notStarted: run.notStarted };
+    }
     await recordMeasures(repo, root, dir, tag, sha, d);
     // every failed step: a perf step's failure does not stop bun test
     const failed = run.results.filter((x) => x.code !== 0);

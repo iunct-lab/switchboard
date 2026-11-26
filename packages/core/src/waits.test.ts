@@ -552,7 +552,7 @@ describe("the daemon: a wait past its limit of a stopped Task is answered 止め
     const came = Date.now() - 4 * DAY;
     c.db.appendEvent(t.id, { t: "stop.record", stop: { id: `${t.id}/s1`, work: { workspaceId: "ws_app", issue: null, taskId: t.id }, op: "merge", target: "", reason: over.reason ?? "depends", evidence: "", safety: "unknown", conditions: over.conditions ?? [{ key: "pr#5", value: "open", met: false }], answer: null, actions: [], state: "waiting", at: came } });
     c.db.sqlite.query("UPDATE tasks SET outcome = 'waits' WHERE id = ?").run(t.id);
-    await until(async () => (await overAsks()).length === 1);
+    await until(async () => (await overAsks()).length === (over.conditions?.length ?? 1));
     const [ask] = await overAsks();
     const stopNow = () => c.db.listStopRecords([t.id]).at(-1)!;
     const prMerged = () => c.db.putBacklogSnapshot(KEY, { records: [PR5], cursor: null, syncedAt: Date.now() });
@@ -561,7 +561,7 @@ describe("the daemon: a wait past its limit of a stopped Task is answered 止め
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     };
-    return { c, t, came, ask, sends, overAsks, answer, stopNow, prMerged, resume, until, close };
+    return { c, t, came, ask, asks: await overAsks(), sends, overAsks, answer, stopNow, prMerged, resume, until, close };
   };
 
   test("止める: the stop that makes the wait is resolved, the question is gone from the open ones, and the Task is not resumed when the PR ends later", async () => {
@@ -586,6 +586,38 @@ describe("the daemon: a wait past its limit of a stopped Task is answered 止め
       expect(await d.resume()).toEqual([]);
       await new Promise((r) => setTimeout(r, 40));
       expect(d.sends).toEqual([]);
+    } finally {
+      await d.close();
+    }
+  });
+
+  test("同じ停止の待ち: of one stop's two waits, 止める on both at once answers 200 for each, with the one stop resolved once", async () => {
+    const d = await stoppedOnPr({ conditions: [{ key: "pr#1", value: "open", met: false }, { key: "pr#2", value: "open", met: false }] });
+    try {
+      expect(d.asks.map((a) => a.wait.key).sort()).toEqual(["pr#1", "pr#2"]);
+      const rs = await Promise.all(d.asks.map((a) => d.answer(a.id, { kind: "choice", choice: "止める" })));
+      expect(rs.map((r) => r.status)).toEqual([200, 200]);
+      const bodies = (await Promise.all(rs.map((r) => r.json()))) as Array<{ ask: object | null; already: boolean }>;
+      expect(bodies.map((b) => b.already).sort()).toEqual([false, true]);
+      expect(d.c.db.listStopRecords([d.t.id]).filter((r) => r.state === "resolved")).toHaveLength(1);
+      // asked again after the stop is over, the second wait's question is still told 200, with no question left
+      const late = await d.answer(d.asks.find((a) => a.wait.key === "pr#2")!.id, { kind: "choice", choice: "止める" });
+      expect([late.status, await late.json()]).toEqual([200, { ask: null, already: true, changes: [] }]);
+    } finally {
+      await d.close();
+    }
+  });
+
+  test("同じ停止の待ち: 止める on an old question of a stopped wait is refused while a newer stop on the same key is open", async () => {
+    const d = await stoppedOnPr();
+    try {
+      expect((await d.answer(d.ask.id, { kind: "choice", choice: "止める" })).status).toBe(200);
+      // the Task stops again on the same PR: that stop is still the person's to answer, not already stopped
+      d.c.db.appendEvent(d.t.id, { t: "stop.record", stop: { id: `${d.t.id}/s2`, work: { workspaceId: "ws_app", issue: null, taskId: d.t.id }, op: "merge", target: "", reason: "depends", evidence: "", safety: "unknown", conditions: [{ key: "pr#5", value: "open", met: false }], answer: null, actions: [], state: "waiting", at: Date.now() } });
+      // a tab left open on another question of that key (another limit) sends 止める
+      const stale = await d.answer(`waitover:${d.t.id}:pr#5@${d.came}`, { kind: "choice", choice: "止める" });
+      expect(stale.status).toBe(409);
+      expect(d.c.db.listStopRecords([d.t.id]).at(-1)).toMatchObject({ id: `${d.t.id}/s2`, state: "waiting", actions: [] });
     } finally {
       await d.close();
     }

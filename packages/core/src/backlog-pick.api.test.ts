@@ -515,7 +515,7 @@ test("replyWaiting: the row's waiting for a reply is backlog-next's awaitingRepl
   const later = "2026-09-28T01:00:00Z";
   const last = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}) => ({ id: "tsk_last", status: "done" as const, statusAt: Date.parse(at), createdAt: Date.parse(at), updatedAt: Date.parse(at), action: "complete" as const, outcome: "needs_action" as const, reviewedAt: null, resumeAt: null, started: true, ...over });
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
-    key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
+    id: "s1", key: "k", work: { workspaceId: "ws_meta", issue: 1, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "decision", evidence: "マージしてよいか", safety: "before-effect",
     count: 1, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: false, next: "decide", ...over,
   });
   const asked = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, commentedAt: at, lastTask: last() });
@@ -555,7 +555,7 @@ test("awaitingReply: a last stage Task still in background is not waiting for a 
 test("a stop that came again with nothing changed holds the item through an unrelated Issue update; an answer, a met condition or a new cause lets it go once", () => {
   const last = { id: "tsk_last", status: "done" as const, statusAt: 1, createdAt: 1, updatedAt: Date.parse("2026-09-10T00:00:00Z"), action: "complete" as const, outcome: "finished" as const, reviewedAt: null, resumeAt: null, started: true };
   const stopOf = (over: Partial<BacklogItem["stopSummary"][number]> = {}): BacklogItem["stopSummary"][number] => ({
-    key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
+    id: "s1", key: "k", work: { workspaceId: "ws_meta", issue: 3, taskId: "tsk_last" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown",
     count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait", ...over,
   });
   const touched = "2026-09-12T00:00:00Z"; // the Issue was updated after the Task ended

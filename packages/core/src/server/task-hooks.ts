@@ -223,7 +223,7 @@ export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoO
   }));
 };
 
-export function setupTurnEndHooks(sc: Pick<ServerContextInit, "pendingConsent" | "trustedSkills" | "tasks" | "bedrockTasks" | "loginExpired" | "detected" | "isMeta" | "selfdev" | "checksOn" | "restarting" | "countRules" | "db" | "cfg" | "artifacts" | "judgeStop" | "lastJudgingAt" | "applyPolicies" | "batchAnswers" | "settings" | "judgeReply" | "titling" | "pricingTable" | "loginKindOf" | "runnerChoice" | "opts" | "adapterMap" | "suggestDir" | "broadcast" | "rubric" | "rubricSeqNext" | "rubricSeq" | "judgeEvals">): void {
+export function setupTurnEndHooks(sc: Pick<ServerContextInit, "pendingConsent" | "trustedSkills" | "tasks" | "bedrockTasks" | "loginExpired" | "detected" | "selfDevOn" | "selfdev" | "checksOn" | "restarting" | "countRules" | "db" | "cfg" | "artifacts" | "judgeStop" | "lastJudgingAt" | "applyPolicies" | "batchAnswers" | "settings" | "judgeReply" | "titling" | "pricingTable" | "loginKindOf" | "runnerChoice" | "opts" | "adapterMap" | "suggestDir" | "broadcast" | "rubric" | "rubricSeqNext" | "rubricSeq" | "judgeEvals">): void {
   sc.pendingConsent = new Map<string, Promise<void>>();
   sc.tasks.onTurnEnd((taskId, t, turn) => {
     // A turn on Amazon Bedrock says nothing about the Claude account's login, either way
@@ -241,7 +241,7 @@ export function setupTurnEndHooks(sc: Pick<ServerContextInit, "pendingConsent" |
     sc.tasks.record(taskId, { t: "status", text: `${t.runner} のログインが切れています。Task の「ターミナル」tab で \`${info.loginHint ?? t.runner}\` を実行してから返信してください` });
   });
   sc.tasks.onTurnEnd((taskId, t) => {
-    if (!sc.isMeta(t)) return;
+    if (!sc.selfDevOn(t)) return;
     // A shadow of a meta task shares the workspace but must not invalidate the primary's checks nor start a
     // second, concurrent check run on the same tree.
     if (t.shadowOf) return;
@@ -254,7 +254,7 @@ export function setupTurnEndHooks(sc: Pick<ServerContextInit, "pendingConsent" |
   // processes went with the runner (`lost`: it exited, or the daemon is stopping and has cancelled its checks already).
   sc.tasks.onBackgroundEmpty((taskId, lost) => {
     const t = sc.db.getTask(taskId);
-    if (!t || !sc.isMeta(t) || t.shadowOf) return;
+    if (!t || !sc.selfDevOn(t) || t.shadowOf) return;
     sc.selfdev.invalidate();
     if (!lost && t.status === "done" && sc.checksOn && !sc.restarting) void sc.selfdev.run(taskId).catch(() => undefined);
   });

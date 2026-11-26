@@ -415,13 +415,17 @@ ops-kit lint --fresh                           # 規約の検査（「Ready の�
 ```
 
 - **Issue へのコメントとほかの Task への返信は単独のコマンドで送る**: 本文は先にファイルに書き（Write ツールか、その前の別の Bash の呼び出し）、`ops-kit backlog comment` / `ops-kit task send` は `cd`・`cat <<EOF`・`;`・`&&`・`|` でつながない単独のコマンドで送る。`--body-file` には書いたファイルの絶対パスを文字のまま書く（シェルの変数は Bash の呼び出しをまたがず、前の呼び出しの `$W` は空になる。`mktemp -d` が出したパスを控えて使う）。ランナーの許可ルール（エージェント管理アプリの Task なら `Bash(ops-kit backlog:*)`）はコマンド全体が合うときだけ効き、合わない部分を含む複合コマンドは自動承認の判定に回って拒まれることがある。`ops-kit task send` は許可ルールに入っていないので単独でもいつも自動承認の判定に回る（単独にするのは何を送るかを読みやすくするため）。拒まれたら「判断待ちの出し方」の許可文を止まりの報告の `grant` に書く
-- **backlog に書く連結コマンドは前段の失敗で止める**: 読む → 直す → 送るを 1 回の Bash でつなぐなら `set -euo pipefail` で始め、途中が失敗したら次の書き込みに進まない。本文や番号を作る前段（`python3`・`jq` など）の失敗を `2>/dev/null` で隠さない（隠すと空の本文のまま `edit` まで進む。読み取りがアプリの再起動などで空で返っても、空の本文の `edit` は受け付けられて GitHub に送られる）。送る前に本文の検査（下のブロックの `[ -s … ]` の行）を挟み、通らなければ `|| exit 1` で止める（`&&` の途中の失敗は `set -e` では止まらず、後ろに足した書き込みが走る）。Issue 番号は `create` や `view` の出力を `grep` で切り出さず（送信待ちの Issue や別の `#N` を拾う）、下のブロックの `N=` の行で取る（番号の付く前は `.issue.number` が 0 なので `select(. > 0)` が要る。出力が無く非 0 で終わったら書き込まずに待つか止める）。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す。読む・直す・検査を 1 回目の呼び出しにし、送る `edit` / `comment` / `task send` を 2 回目の単独の呼び出しに分けてもよい（上の単独のコマンドの箇条）
+- **backlog に書く連結コマンドは前段の失敗で止める**: 読む → 直す → 送るを 1 回の Bash でつなぐなら `set -euo pipefail` で始め、途中が失敗したら次の書き込みに進まない。本文や番号を作る前段（`python3`・`jq` など）の失敗を `2>/dev/null` で隠さない（隠すと空の本文のまま `edit` まで進む。読み取りがアプリの再起動などで空で返っても、空の本文の `edit` は受け付けられて GitHub に送られる）。送る前に本文の検査（下のブロックの `[ -s … ]` の行）を挟み、通らなければ `|| exit 1` で止める（`&&` の途中の失敗は `set -e` では止まらず、後ろに足した書き込みが走る）。Issue 番号は `create` や `view` の出力を `grep` で切り出さず（送信待ちの Issue や別の `#N` を拾う）、下のブロックの `N=` の行で取る（番号の付く前は `.issue.number` が 0 なので `select(. > 0)` が要る。出力が無く非 0 で終わったら書き込まずに待つか止める）。元の本文は、書き換えが GitHub に届いたのを見るまで `$W` に残す。やり直しで `orig.md` を読み直さない（あれば読まず、版も最初の `orig.rev`。別の Issue は新しい `$W`）。読む・直す・検査を 1 回目の呼び出しにし、送る `edit` / `comment` / `task send` を 2 回目の単独の呼び出しに分けてもよい（上の単独のコマンドの箇条）
   ```bash
   set -euo pipefail
   N=$(ops-kit backlog view <番号か localId> --json | jq -e '.issue.number | select(. > 0)')
-  ops-kit backlog view "$N" --fresh --json > "$W/view.json"; jq -r '.issue.body' "$W/view.json" > "$W/orig.md"; REV=$(jq -r .bodyRevision "$W/view.json"); <直す> "$W/orig.md" > "$W/body.md"
+  if [ ! -e "$W/orig.md" ]; then
+    ops-kit backlog view "$N" --fresh --json > "$W/view.tmp"
+    jq -er '.bodyRevision' "$W/view.tmp" > "$W/orig.rev"; jq -er '.issue.body' "$W/view.tmp" > "$W/orig.tmp"; mv "$W/orig.tmp" "$W/orig.md"
+  fi
+  REV=$(cat "$W/orig.rev"); <直す> "$W/orig.md" > "$W/body.md"
   [ -s "$W/body.md" ] && head -1 "$W/body.md" | grep -q '^## ' || { echo "本文が空か ## で始まらない" >&2; exit 1; }
-  ops-kit backlog edit "$N" --body-file "$W/body.md" --rev "$REV"   # 本文が変わっていれば「本文が変わりました」で断られる。読み直して書き足し直す
+  ops-kit backlog edit "$N" --body-file "$W/body.md" --rev "$REV"   # 本文が変わっていれば「本文が変わりました」で断られる。新しい `$W` で読み直して書き足し直す
   ```
 
 - **`--fresh` が要るとき**: 最新の `## 回答` を読むとき（工程の開始・再開）、着手・マージ・閉じるの判断の前。アプリに送信と取込みを済ませてから答える。正本はアプリの保存データで、GitHub は同期先: アプリが GitHub に届かない（上限・障害）ときは保存値と「GitHub 未同期」（最終同期の時刻つき、stderr）で答えて exit 0 なので、その値でそのまま進める。exit 2 はアプリに届かない・未取得だけで「判定できない」（下の「GitHub の接続・認証の切り分け」をしてから止める）。マージ判定は毎回 GitHub を読む

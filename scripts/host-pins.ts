@@ -28,6 +28,8 @@ const DEVTOOLS_PINS: Record<string, Source> = {
   PLAYWRIGHT_VERSION: { kind: "npm", pkg: "playwright" },
   PLAYWRIGHT_MCP_VERSION: { kind: "npm", pkg: "@playwright/mcp" },
   GH_STACK_VERSION: { kind: "github", repo: "github/gh-stack" },
+  // the github source cannot read bun's tags (bun-v1.4.4); the npm package is the same release
+  BUN_VERSION: { kind: "npm", pkg: "bun" },
 };
 
 const PLAIN = /^\d+(\.\d+)+$/;

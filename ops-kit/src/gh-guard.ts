@@ -312,8 +312,8 @@ function wordsOf(argv: string[]): string[] {
 
 /**
  * A write that merges a pull request: `gh pr merge <n|url|branch>`, `gh stack merge <n>`, `gh api` with a method other than GET /
- * HEAD on `repos/<o>/<r>/pulls/<n>/merge`, and a graphql mutation that names `mergePullRequest` in `texts`. `pr` is the PR
- * it names (a number, or the number in its URL); null when it names none (a branch, the current branch, graphql). `-R` before the
+ * HEAD on `repos/<o>/<r>/pulls/<n>/merge` or `…/pulls/<n>/merge-async` (the stack merge of gh-stack), and a graphql mutation
+ * that names `mergePullRequest` in `texts`. `pr` is the PR it names (a number, or the number in its URL); null when it names none (a branch, the current branch, graphql). `-R` before the
  * group, `--` and a URL are read as backlogWrite reads them. Null for anything else.
  */
 export function mergeWrite(argv: string[], texts: string[] = []): { pr: number | null } | null {
@@ -324,7 +324,7 @@ export function mergeWrite(argv: string[], texts: string[] = []): { pr: number |
     const call = apiCallOf(argv, at);
     if (call === null) return null;
     if (call.path === "graphql") return call.mutation && texts.some((t) => /\bmutation\b/.test(t) && /\bmergePullRequest\b/.test(t)) ? { pr: null } : null;
-    const m = /^repos\/[^/?]+\/[^/?]+\/pulls\/(\d+)\/merge(?:\?|$)/.exec(call.path);
+    const m = /^repos\/[^/?]+\/[^/?]+\/pulls\/(\d+)\/merge(?:-async)?(?:\?|$)/.exec(call.path);
     return call.writes && m ? { pr: Number(m[1]) } : null;
   }
   if (!((group === "pr" || group === "stack") && sub === "merge")) return null;

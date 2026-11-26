@@ -46,7 +46,7 @@ export interface Offload {
  * One build's script, run by `sb-offload --ci` in the ci image (git with PCRE, Bun, Codex CLI, Chromium are the image's):
  * as root, a tmpfs TMPDIR and the work tree's owner; then, in a new PID namespace, as the image's user `switchboard` (a login `su -`, so the
  * build's own environment, its credentials included, does not reach the steps; only the image's CHROME_BIN and
- * PLAYWRIGHT_BROWSERS_PATH are passed) the work tree as one commit with `origin` (a URL, no credentials), the install,
+ * PLAYWRIGHT_BROWSERS_PATH are passed) the work tree as one commit with `origin` (a URL, no credentials), the install (only a tree with a `package.json`),
  * and every step in `bash -e -c` between its marks, stopping at the first that fails (a `keepGoing` step does not stop it).
  * `fixtures`: the build has the recordings in the user's `~/.switchboard/fixtures`; `required` exports SWITCHBOARD_FIXTURES so that a missing recording fails a test.
  * `fileSizeBase`: the base's list of scripts/file-size.ts (`STILL_OVER`), read by the host: exported as FILE_SIZE_BASE_LIST, since the build has no base ref to read it from.
@@ -68,7 +68,7 @@ export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { require
     ...(o.fileSizeBase ? [`export FILE_SIZE_BASE_LIST=${quote(JSON.stringify(o.fileSizeBase))}`] : []),
     "git config --global user.name local-ci && git config --global user.email local-ci@localhost && git config --global init.defaultBranch main",
     `{ git init -q${origin} && git add -A && git commit -qm local-ci; } || { echo "sb-setup: git の作業ツリーを作れない"; exit 1; }`,
-    'bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }',
+    'if [ -f package.json ]; then bun install --frozen-lockfile >/tmp/install.log 2>&1 || { cat /tmp/install.log; echo "sb-setup: bun install が失敗"; exit 1; }; fi',
     ...steps.flatMap((s, i) => [
       `echo "sb-step: ${i} begin $(date +%s.%N)"`,
       `bash -e -c ${quote(s.run)}; c=$?; echo; echo "sb-step: ${i} exit $c $(date +%s.%N)"${s.keepGoing ? "" : '; [ "$c" -eq 0 ] || exit "$c"'}`,

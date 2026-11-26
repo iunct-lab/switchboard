@@ -185,7 +185,7 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
  * mockups, the answer, and the facts the records have folded in 記録. `liveHead` is a live approval's own head (its title
  * and command); `standalone` is a card of its own (a row's questions are drawn inside the row).
  */
-function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; liveHead: ReactNode; sending: boolean; standalone: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void; onOpenTask: (id: string) => void }) {
+function AskCard(props: { ask: Ask; was: Answered | undefined; waitAnswer?: "stop" | "keep"; live: boolean; liveHead: ReactNode; sending: boolean; standalone: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void; onOpenTask: (id: string) => void }) {
   const { ask: x, was, live, sending } = props;
   const resume = resumeLabel(x);
   const parts = askCardParts(x);
@@ -274,7 +274,11 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; live: boolean; li
       {/* seen before the answer buttons, to compare and then choose */}
       <Mockups list={x.mockups} />
       {/* before the facts: on a phone the buttons stay in the first screenful */}
-      <AnswerArea key={x.id} ask={x} busy={sending} onAnswer={props.onAnswer} />
+      {props.waitAnswer ? (
+        <div className="hint ask-wait-answered">{t(props.waitAnswer === "stop" ? m.waitAnsweredStop : m.waitAnsweredKeep)}</div>
+      ) : (
+        <AnswerArea key={x.id} ask={x} busy={sending} onAnswer={props.onAnswer} />
+      )}
       {talk && (
         <button className="ghost link ask-talk" onClick={() => props.onOpenTask(taskId)}>
           {t(m.answerInTask)}
@@ -401,6 +405,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // a heading's button of the waits past their limit is being sent, and the questions its last press could not answer
   const [waitSending, setWaitSending] = useState(false);
   const [waitFailed, setWaitFailed] = useState<WaitFailure[]>([]);
+  // the waits answered from their own card, by the id and what was answered: the card says it in place of its buttons until the list read again no longer has it (not kept anywhere)
+  const [waitAnswered, setWaitAnswered] = useState<Map<string, "stop" | "keep">>(new Map());
   const { onError } = props;
   const seq = useRef(0);
   const load = useCallback(() => {
@@ -411,6 +417,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
         if (mine !== seq.current) return; // an older answer never overwrites a newer one
         setList(l);
         setAnswered((m) => pruneAnswered(m, l.asks));
+        setWaitAnswered((w) => (w.size === 0 ? w : new Map([...w].filter(([id]) => l.asks.some((a) => a.id === id)))));
         setFailed(false);
       })
       .catch((e) => {
@@ -440,11 +447,11 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   };
   const askId = (a: PendingApproval) => `approval:${a.taskId}:${a.id}`;
   const send = (x: Ask, answer: AskAnswer, policy?: PolicyInput) => {
-    if (sending || waitSending) return;
+    if (sending || waitSending || waitAnswered.has(x.id)) return;
     setSending(x.id);
     setWaitFailed((f) => f.filter((y) => y.id !== x.id));
-    // a wait past its limit that is answered is gone from the list read again: nothing of it is kept here
-    const wait = waitChoices(x) !== null;
+    // a wait past its limit that is answered is gone from the list read again: only what it was answered is kept here until then
+    const wait = waitChoices(x);
     const done = (v: Answered) => {
       setAnswered((m) => new Map(m).set(x.id, v));
       if (x.kind === "approval") return;
@@ -454,7 +461,8 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
     api
       .answerAsk(x.id, answer, policy)
       .then((r) => {
-        if (!wait) done({ ask: r.ask ?? x, changes: r.changes.length ? r.changes : undefined });
+        if (wait) setWaitAnswered((w) => new Map(w).set(x.id, answer.kind === "choice" && answer.choice === wait.keep ? "keep" : "stop"));
+        else done({ ask: r.ask ?? x, changes: r.changes.length ? r.changes : undefined });
         const pending = props.approvals.find((a) => askId(a) === x.id);
         if (pending) props.onAnswered(pending);
         load();
@@ -488,7 +496,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   // since is not), each with its own choice. One that fails says so on its own; the others stay answered
   const answerWaits = (shown: Ask[], which: "stop" | "keep") => {
     if (sending || confirming || waitSending) return;
-    const targets = shown.flatMap((x) => { const c = waitChoices(x); return c ? [{ id: x.id, label: x.task?.title ?? x.task?.id ?? x.id, choice: c[which] }] : []; });
+    const targets = shown.flatMap((x) => { const c = waitChoices(x); const choice = c ? c[which] : null; return choice !== null && !waitAnswered.has(x.id) ? [{ id: x.id, label: x.task?.title ?? x.task?.id ?? x.id, choice }] : []; });
     setWaitSending(true);
     setWaitFailed([]);
     Promise.all(targets.map((g) => api.answerAsk(g.id, { kind: "choice", choice: g.choice }).then((): WaitFailure[] => [], (e): WaitFailure[] => [{ id: g.id, text: t(m.waitAnswerFailed, { label: g.label, error: String(e.message ?? e) }) }])))
@@ -563,7 +571,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
   const toggle = (key: string) => setExpanded((s) => { const n = new Set(s); if (!n.delete(key)) n.add(key); return n; });
   const card = (x: Ask, standalone: boolean) => {
     const a = live(x);
-    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={anySending} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
+    return <AskCard key={x.id} ask={x} was={answered.get(x.id)} waitAnswer={waitAnswered.get(x.id)} live={!!a} liveHead={a ? approvalHead(a, !x.answers.length) : null} sending={anySending} standalone={standalone} onAnswer={(an, policy) => send(x, an, policy)} onOpenTask={props.onOpenTask} />;
   };
   const rowView = (r: AskRow) => {
     const isOpen = expanded.has(r.key);
@@ -657,7 +665,7 @@ export function Approvals(props: { approvals: PendingApproval[]; onAnswered: (a:
                 {ws.rows.map(rowView)}
               </div>
             ))}
-            <WaitGroups groups={waitsShown} busy={anySending} failures={waitFailed} card={(x) => card(x, true)} onAnswerAll={answerWaits} onOpenTask={props.onOpenTask} />
+            <WaitGroups groups={waitsShown} busy={anySending} failures={waitFailed} answered={waitAnswered} card={(x) => card(x, true)} onAnswerAll={answerWaits} onOpenTask={props.onOpenTask} />
             {waitFailedGone.map((f) => (
               <div key={f.id} className="hint warn ask-wait-failed">
                 {f.text}
