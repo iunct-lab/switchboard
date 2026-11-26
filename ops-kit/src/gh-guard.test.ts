@@ -626,8 +626,10 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
       const fake = join(tree, "bin");
       mkdirSync(fake);
       const calls = join(tree, "calls.jsonl");
-      // the read of the PR's head is answered and kept apart: `ran` is whether anything else reached gh
-      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { ${headNow === null ? "process.exit(1);" : headLater === undefined ? `console.log(${JSON.stringify(headNow)}); process.exit(0);` : `const f = ${JSON.stringify(join(tree, "reads"))}; const fs = require("node:fs"); const n = fs.existsSync(f) ? 1 : 0; fs.writeFileSync(f, "x"); console.log(n ? ${JSON.stringify(headLater)} : ${JSON.stringify(headNow)}); process.exit(0);`} }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
+      // the read of the PR's head, and of its state, base and default branch (FAKE_PR_BASE), and of the PR's registered stack (FAKE_STACK; "fail" fails either read), are
+      // answered and kept apart (only for PR 12 of acme/app, the PR the merge names: a read of another lands in `calls`):
+      // `ran` is whether anything else reached gh
+      writeFileSync(join(fake, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a[0] === "api" && a[1] === "repos/acme/app/pulls/12" && a.join(" ").includes(".base.repo.default_branch")) { const b = process.env.FAKE_PR_BASE ?? "open main main"; if (b === "fail") process.exit(1); console.log(b); process.exit(0); }\nif (a[0] === "api" && a[1] === "repos/acme/app/stacks?pull_request=12") { const b = process.env.FAKE_STACK ?? "[]"; if (b === "fail") process.exit(1); console.log(b); process.exit(0); }\nif (a.includes("headRefOid")) { ${headNow === null ? "process.exit(1);" : headLater === undefined ? `console.log(${JSON.stringify(headNow)}); process.exit(0);` : `const f = ${JSON.stringify(join(tree, "reads"))}; const fs = require("node:fs"); const n = fs.existsSync(f) ? 1 : 0; fs.writeFileSync(f, "x"); console.log(n ? ${JSON.stringify(headLater)} : ${JSON.stringify(headNow)}); process.exit(0);`} }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
       chmodSync(join(fake, "gh"), 0o755);
       writeFileSync(join(tree, "ops.config.json"), JSON.stringify(mergeGate === undefined ? config : { ...config, mergeGate }));
       if (noWrite) for (const args of [["init", "-q"], ["config", "--add", "ops-kit.noWrite", noWrite]]) Bun.spawnSync(["git", ...args], { cwd: tree });
@@ -693,6 +695,7 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
     const stack = await inTree("scripts/merge-gate.ts", env, ["stack", "merge", "12"]);
     expect([stack.code, stack.ran, stack.asked, stack.err]).toEqual([1, false, [], expect.stringContaining("--rebase --match-head-commit <head>")]);
     expect(stack.err).toContain("gh stack merge は head を GitHub に渡せない");
+    expect(stack.err).toContain("merge-async -f sha=<head>");
     // a gh api merge goes only with a body `sha` that is the granted head; none, another, or a body from --input stops
     const api = ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge"];
     for (const extra of [[], ["-f", `sha=${moved}`], ["-f", "sha=abc"], ["-f", `sha=${GRANTED_HEAD.toUpperCase()}`], ["--input", "body.json"], ["-f", `sha=${GRANTED_HEAD}`, "-f", `sha=${moved}`]]) {
@@ -705,6 +708,40 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
       // gh receives the body as written, and the head is not read: the grant was checked for the head the body names
       expect([extra, ok.code, ok.calls, ok.asked]).toEqual([extra, 0, [[...api, ...extra, "-f", "merge_method=rebase"]], [`/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${GRANTED_HEAD}`]]);
     }
+    // the stack's merge: PUT …/merge-async goes the same way, and only with a body `sha` that is the granted head
+    const async = ["api", "-X", "PUT", "repos/acme/app/pulls/12/merge-async"];
+    for (const extra of [["-f", `sha=${GRANTED_HEAD}`], [`--raw-field=sha=${GRANTED_HEAD}`]]) {
+      const ok = await inTree("scripts/merge-gate.ts", env, [...async, ...extra, "-f", "merge_method=rebase"], false, {}, moved);
+      expect([extra, ok.code, ok.calls, ok.asked]).toEqual([extra, 0, [[...async, ...extra, "-f", "merge_method=rebase"]], [`/api/merge-grants?taskId=t1&repo=acme%2Fapp&kind=merge&target=12&head=${GRANTED_HEAD}`]]);
+    }
+    // it also merges the unmerged PRs below the one it names: only the bottom one (its base the default branch) goes, and a
+    // PR above another, one that is not open, or one whose base cannot be read stops before gh, after the grant
+    for (const base of ["open sb/lower main", "closed main main", "fail", ""]) {
+      const r = await inTree("scripts/merge-gate.ts", { ...env, FAKE_PR_BASE: base }, [...async, "-f", `sha=${GRANTED_HEAD}`, "-f", "merge_method=rebase"]);
+      expect([base, r.code, r.ran]).toEqual([base, 1, false]);
+      expect(r.err).toContain("最下段");
+    }
+    expect((await inTree("scripts/merge-gate.ts", { ...env, FAKE_PR_BASE: "open sb/lower main" }, [...async, "-f", `sha=${GRANTED_HEAD}`])).err).toContain("既定の枝 main ではありません");
+    // the stack GitHub has registered is read apart from the base: an unmerged PR before it there, two stacks, a stack
+    // without it, or a read that fails stops even when the base is the default branch; one merged below goes
+    const stackOf = (below: object) => JSON.stringify([{ number: 1, pull_requests: [below, { number: 12, merged_at: null }] }]);
+    for (const st of [stackOf({ number: 11, merged_at: null }), JSON.stringify([{ pull_requests: [{ number: 12 }] }, { pull_requests: [{ number: 11 }, { number: 12 }] }]), JSON.stringify([{ pull_requests: [{ number: 11 }] }]), "fail", "not json"]) {
+      const r = await inTree("scripts/merge-gate.ts", { ...env, FAKE_STACK: st }, [...async, "-f", `sha=${GRANTED_HEAD}`]);
+      expect([st, r.code, r.ran]).toEqual([st, 1, false]);
+      expect(r.err).toContain("最下段");
+    }
+    expect((await inTree("scripts/merge-gate.ts", { ...env, FAKE_STACK: stackOf({ number: 11, merged_at: null }) }, [...async, "-f", `sha=${GRANTED_HEAD}`])).err).toContain("#11");
+    const merged = await inTree("scripts/merge-gate.ts", { ...env, FAKE_STACK: stackOf({ number: 11, merged_at: "2026-11-26T00:00:00Z" }) }, [...async, "-f", `sha=${GRANTED_HEAD}`]);
+    expect([merged.code, merged.calls]).toEqual([0, [[...async, "-f", `sha=${GRANTED_HEAD}`]]]);
+    // none, another, a typed field, or a body from --input stops before gh
+    for (const extra of [[], ["-f", `sha=${moved}`], ["-f", "sha=abc"], ["-F", `sha=${GRANTED_HEAD}`], ["--field", `sha=${GRANTED_HEAD}`], ["--input", "body.json"], ["-f", "merge_method=rebase"]]) {
+      const r = await inTree("scripts/merge-gate.ts", env, [...async, ...extra]);
+      expect([extra, r.code, r.ran]).toEqual([extra, 1, false]);
+    }
+    const noSha = await inTree("scripts/merge-gate.ts", env, async);
+    expect(noSha.asked).toEqual([]);
+    expect(noSha.err).toContain("merge-async");
+    expect(noSha.err).toContain("-f sha=<head>");
     // a shape the guard cannot read as gh does (a flag's value, a group of short flags, a flag before `api`) stops before the app is asked
     for (const argv of [["pr", "merge", "12", "--subject", `--match-head-commit=${GRANTED_HEAD}`], ["pr", "merge", "12", "-dt", `--match-head-commit=${GRANTED_HEAD}`], ["-R", "acme/app", ...api, "-f", `sha=${GRANTED_HEAD}`]]) {
       const r = await inTree("scripts/merge-gate.ts", env, argv, false, {}, moved);
@@ -829,15 +866,16 @@ describe("merge: a Task's merge goes through the merge gate (mergeGate of ops.co
   test("plainMergeOf: only the shape the guard reads as gh does", () => {
     const h = "a".repeat(40);
     // the shapes that go
-    expect(plainMergeOf(["pr", "merge", "12", "--rebase", "--match-head-commit", h])).toEqual({ pr: 12, repo: null, head: h });
-    expect(plainMergeOf(["-R", "x/y", "pr", "merge", "12", "-r", "-d"])).toEqual({ pr: 12, repo: "x/y", head: null });
-    expect(plainMergeOf(["pr", "merge", "-r", "-R", "x/y", "12"])).toEqual({ pr: 12, repo: "x/y", head: null });
-    expect(plainMergeOf(["pr", "merge", "https://github.com/x/y/pull/9", "--repo=X/Y", `--match-head-commit=${h}`])).toEqual({ pr: 9, repo: "x/y", head: h });
-    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`, "--field=merge_method=rebase"])).toEqual({ pr: 12, repo: "x/y", head: h });
-    expect(plainMergeOf(["api", "--method=put", "/repos/x/y/pulls/12/merge"])).toEqual({ pr: 12, repo: "x/y", head: null });
-    for (const argv of [["api", "-XPUT", "repos/x/y/pulls/12/merge", `-fsha=${h}`], ["api", "-XPUT", "repos/x/y/pulls/12/merge", `-f=sha=${h}`], ["api", "-X=PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`]]) expect(plainMergeOf(argv)).toEqual({ pr: 12, repo: "x/y", head: h });
-    expect(plainMergeOf(["api", "-XPUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`])).toEqual({ pr: 12, repo: "x/y", head: h });
-    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "--raw-field=commit_message=a\nb"])).toEqual({ pr: 12, repo: "x/y", head: null });
+    expect(plainMergeOf(["pr", "merge", "12", "--rebase", "--match-head-commit", h])).toEqual({ pr: 12, repo: null, head: h, stack: false });
+    expect(plainMergeOf(["-R", "x/y", "pr", "merge", "12", "-r", "-d"])).toEqual({ pr: 12, repo: "x/y", head: null, stack: false });
+    expect(plainMergeOf(["pr", "merge", "-r", "-R", "x/y", "12"])).toEqual({ pr: 12, repo: "x/y", head: null, stack: false });
+    expect(plainMergeOf(["pr", "merge", "https://github.com/x/y/pull/9", "--repo=X/Y", `--match-head-commit=${h}`])).toEqual({ pr: 9, repo: "x/y", head: h, stack: false });
+    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`, "--field=merge_method=rebase"])).toEqual({ pr: 12, repo: "x/y", head: h, stack: false });
+    expect(plainMergeOf(["api", "--method=put", "/repos/x/y/pulls/12/merge"])).toEqual({ pr: 12, repo: "x/y", head: null, stack: false });
+    for (const argv of [["api", "-XPUT", "repos/x/y/pulls/12/merge", `-fsha=${h}`], ["api", "-XPUT", "repos/x/y/pulls/12/merge", `-f=sha=${h}`], ["api", "-X=PUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`]]) expect(plainMergeOf(argv)).toEqual({ pr: 12, repo: "x/y", head: h, stack: false });
+    expect(plainMergeOf(["api", "-XPUT", "repos/x/y/pulls/12/merge", "-f", `sha=${h}`])).toEqual({ pr: 12, repo: "x/y", head: h, stack: false });
+    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge", "--raw-field=commit_message=a\nb"])).toEqual({ pr: 12, repo: "x/y", head: null, stack: false });
+    expect(plainMergeOf(["api", "-X", "PUT", "repos/x/y/pulls/12/merge-async", "-f", `sha=${h}`, "-f", "merge_method=rebase"])).toEqual({ pr: 12, repo: "x/y", head: h, stack: true });
     // anything else stops: a flag's value, a group of short flags, a URL and -R that differ, two heads, a branch, other fields or flags
     for (const argv of [
       ["pr", "merge", "12", "--subject", `--match-head-commit=${h}`],

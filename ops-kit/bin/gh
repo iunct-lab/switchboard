@@ -95,7 +95,7 @@ if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   const held = mergeHeadOf(argv);
   if (!held.carries) {
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${argv.includes("api") ? "この書き方は前段がどの PR のマージか読めない" : "gh stack merge は head を GitHub に渡せない"}ので、判定の外の許可では通りません）`);
-    console.error(`最下段から 1 本ずつ gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head> でマージします（head は gh pr view <n> [-R <owner/name>] --json headRefOid）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする）`);
+    console.error(`単発の PR は gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head> で、スタックの PR は最下段から 1 本ずつ gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge-async -f sha=<head> -f merge_method=rebase でマージします（head は gh pr view <n> [-R <owner/name>] --json headRefOid）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする）`);
     process.exit(1);
   }
   // and only in the one shape the guard reads as gh reads it; any other shape stops rather than be guessed at
@@ -108,12 +108,12 @@ if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   const plain = plainMergeOf(argv);
   if (plain === null) {
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（判定の外の許可で通るのは決まった形のマージだけです。この書き方は前段が gh と同じに読めると言えないので通りません）`);
-    console.error(`決まった形: gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head>（--rebase の代わりに --merge か --squash のどれか 1 つ。ほかに付けてよいのは --delete-branch だけ）、または gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge -f sha=<head> [-f merge_method=rebase]。head は gh pr view <n> [-R <owner/name>] --json headRefOid`);
+    console.error(`決まった形: gh pr merge <n> [-R <owner/name>] --rebase --match-head-commit <head>（--rebase の代わりに --merge か --squash のどれか 1 つ。ほかに付けてよいのは --delete-branch だけ）、または gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge -f sha=<head> [-f merge_method=rebase]（スタックの PR は …/pulls/<n>/merge-async -f sha=<head> -f merge_method=rebase。merge-async は sha が要ります）。head は gh pr view <n> [-R <owner/name>] --json headRefOid`);
     process.exit(1);
   }
   if (held.at === null && plain.head === null) {
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（gh api のマージは本文に head の sha（40 桁）が要ります）`);
-    console.error("本文に -f sha=<head> を付けます（--input で本文を渡す形は通りません）。head は gh pr view <n> [-R <owner/name>] --json headRefOid。スタックは最下段から gh pr merge <n> --rebase --match-head-commit <head>");
+    console.error("本文に -f sha=<head> を付けます（--input で本文を渡す形は通りません）。head は gh pr view <n> [-R <owner/name>] --json headRefOid。単発は gh pr merge <n> --rebase --match-head-commit <head>、スタックの PR は最下段から gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge-async -f sha=<head> -f merge_method=rebase");
     process.exit(1);
   }
   // the repository gh merges: the one the URL or the api path names (a URL and -R agree in the shape), else -R / GH_REPO / the clone's
@@ -128,8 +128,33 @@ if (merge && !publicSyncMerge(argv, process.env, publicCopyOf(), merge.pr)) {
   if (!granted) {
     const why = !process.env.OPS_KIT_TASK_ID ? "Task の id（OPS_KIT_TASK_ID）が無く、許可文の記録を確かめられません" : repo === null ? NO_GRANT_REPO : head === null ? `${repo} の PR #${plain.pr} の今の head を読めず、許可文の記録を確かめられません` : granted === null ? "アプリに届かず、許可文の記録を確かめられません" : `${repo} の PR #${plain.pr} の head ${head.slice(0, 7)} に利用者の許可文の記録がありません。${NEW_HEAD}`;
     console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
-    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする。判定の外でスタックを進めるときは最下段から gh pr merge <n> --rebase --match-head-commit <head> を 1 本ずつ）`);
+    console.error(`判定の外でマージするには、利用者が Task の会話で PR #<番号> の判定の外でのマージを認めると通ります（言い方は自由。読めなかったときは「PR #<番号> を判定の外でマージしてよい」の 1 文でも通ります。許可は PR ごと、その head ごと、その Task の会話の中だけ。Task のリポジトリでない PR は、頭に「<owner/name> の 」を付けた決まった文だけが通る）。マージの判定は bun ${gate} <PR> --merge（スタックは一番上の PR を --merge-stack で名指しし、下の PR とまとめて判定・マージする。判定の外でスタックを進めるときは最下段から gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge-async -f sha=<head> -f merge_method=rebase を 1 本ずつ。下の PR が入ると上の PR の head が変わるので、上の PR は新しい head で許可を聞き直す）`);
     process.exit(1);
+  }
+  // a stack's merge (`…/merge-async`) also merges every unmerged pull request below the one it names, and `sha` pins only the
+  // named one: it goes only for the bottom one — its base the default branch, and no unmerged pull request before it in the
+  // stack GitHub has registered (read apart from the base, as the gate reads both: the two can disagree) — and stops when
+  // either cannot be read
+  if (plain.stack) {
+    const p = Bun.spawnSync([real, "api", `repos/${repo}/pulls/${plain.pr}`, "--jq", '[.state, .base.ref, .base.repo.default_branch] | join(" ")'], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [state, base, main] = p.exitCode === 0 ? p.stdout.toString().trim().split(" ") : [];
+    const s = Bun.spawnSync([real, "api", `repos/${repo}/stacks?pull_request=${plain.pr}`], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    let below: number[] | null = null;
+    try {
+      const stacks = s.exitCode === 0 ? (JSON.parse(s.stdout.toString()) as Array<{ pull_requests?: Array<{ number: number; merged_at?: string | null }> }>) : null;
+      // no registered stack: nothing is below; one: the unmerged ones before it; more than one, or it is not in it: not judged
+      const prs = stacks === null || !Array.isArray(stacks) || stacks.length > 1 ? null : (stacks[0]?.pull_requests ?? []);
+      const at = prs === null ? -1 : stacks!.length === 0 ? 0 : prs.findIndex((x) => x.number === plain.pr);
+      below = prs === null || at < 0 ? null : prs.slice(0, at).filter((x) => !x.merged_at).map((x) => x.number);
+    } catch {
+      below = null;
+    }
+    if (state !== "open" || !base || base !== main || below === null || below.length > 0) {
+      const why = !state || !base || !main ? `${repo} の PR #${plain.pr} の base を読めず、スタックの最下段か確かめられません` : state !== "open" ? `${repo} の PR #${plain.pr} は ${state} です` : base !== main ? `${repo} の PR #${plain.pr} の base は ${base} で、既定の枝 ${main} ではありません（merge-async は下のまだマージされていない PR もまとめてマージします）` : below === null ? `${repo} の PR #${plain.pr} の GitHub のスタックを読めず、スタックの最下段か確かめられません` : `GitHub のスタックで ${repo} の PR #${plain.pr} の下にまだマージされていない PR（${below.map((x) => `#${x}`).join("、")}）があります（merge-async はそれもまとめてマージします）`;
+      console.error(`gh-guard: アプリの Task の中のマージは ${gate} の --merge / --merge-stack で行います（${why}）`);
+      console.error("判定の外の merge-async はスタックの最下段（base が既定の枝で、GitHub のスタックでその下にまだマージされていない PR が無い）の PR だけ通ります。下の PR から 1 本ずつ、それぞれの許可で入れます");
+      process.exit(1);
+    }
   }
   // `gh pr merge` is told the repository the grant was checked for (gh would otherwise pick its own default, which may be
   // another remote's) and, when it named none, the head that was checked

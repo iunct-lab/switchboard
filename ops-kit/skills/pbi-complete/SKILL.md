@@ -187,8 +187,8 @@ Task の外では再チェックを直接回す。
 <!-- when mergeGate=off -->
 マージ判定のコマンドに `--merge` / `--merge-stack` が無いリポジトリ（CLAUDE.md がマージ判定を名指ししない、またはその引数が無い）では、`<マージ判定> <PR> && gh stack merge <PR> --rebase -y`、単発は `gh pr merge <n> --rebase --delete-branch` にする。
 <!-- end when -->
-判定が stop の PR（CI の理由も）を、利用者が Task の会話で判定の外でマージしてよいと認めたときは、その PR だけを `gh pr merge <n> --rebase --delete-branch --match-head-commit <head>`（スタックは最下段から 1 本ずつ、`--delete-branch` なし。`stacked-pr-delivery` の 6）でマージし、PBI の決定ログに「YYYY-MM-DD: 判定の外のマージ: PR #n（利用者が OK。<stop の理由>）」を書く。
-判定の外のマージ（`gh pr merge --match-head-commit`。CI やレビューを飛ばす）の同意は、聞く理由の許可 `PR #<n> をマージしてよい` とは別の、より強い `PR #<n> を判定の外でマージしてよい` で、前者では通らない。
+判定が stop の PR（CI の理由も）を、利用者が Task の会話で判定の外でマージしてよいと認めたときは、その PR だけを、単発は `gh pr merge <n> --rebase --delete-branch --match-head-commit <head>`、スタックの PR は最下段から 1 本ずつ `gh api -X PUT repos/<owner>/<name>/pulls/<n>/merge-async -f sha=<head> -f merge_method=rebase`（`--delete-branch` なし。`stacked-pr-delivery` の 6）でマージする。merge-async は受け付けで返るので、`ops-kit wait` で `MERGED` を待つ（判定は `sh -c 'test "$(gh pr view <n> --json state -q .state)" = MERGED'`。毎回読み直す）（切れたら上へ進まない）。上の PR は自動 rebase で head が変わるので、その後 `gh pr view <上> --json headRefOid` で読み、その head で許可を聞き直す。マージしたら、PBI の決定ログに「YYYY-MM-DD: 判定の外のマージ: PR #n（利用者が OK。<stop の理由>）」を書く。
+判定の外のマージ（`gh pr merge --match-head-commit` か merge-async。CI やレビューを飛ばす）の同意は、聞く理由の許可 `PR #<n> をマージしてよい` とは別の、より強い `PR #<n> を判定の外でマージしてよい` で、前者では通らない。
 <!-- when mergeGate=on task=in -->
 `gh pr merge` などの判定の外のマージは `gh` の前段が止める（`ops.config.json` に `mergeGate` があるリポジトリのアプリの Task）。通るのは判定のコマンド自身のマージと、利用者が選んだ `PR #<n> を判定の外でマージしてよい` の許可文が記録されている PR だけ（`gh stack merge` は head を渡せず通らない）。許可文は PR ごとにその Task の会話の中だけで、選択肢に添えて聞く。昇格と Release の作成は前段が止めない。
 <!-- end when -->

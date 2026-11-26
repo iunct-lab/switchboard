@@ -845,7 +845,9 @@ describe("the kit's skills as a Task reads them", () => {
     // model-read rechecks (cross-runner-review 6 with how to ask, read and post it and its follow-up, pbi-complete 5 and
     // review-triage-and-merge 2, 3 and 5 pointing to it); the comparison's section and its sorting of leftovers are gone, and the first draft (+3,990) was cut to this.
     // Raised to 285_700 (+100 bytes over 285,600; the copy measured 285,659 after): the chained edit example in issue-workflow reads the body and its version once (and not again when run again), so a re-run cannot replace the original.
-    expect(bytes).toBeLessThanOrEqual(285_700);
+    // Raised to 286_100 (+400 bytes over 285,700; the copy measured 286,047 after): the stacked PR merged outside the gate goes through merge-async from the bottom up, and the PR above is granted again on its head after GitHub's rebase (pbi-complete 5, pointed to from stacked-pr-delivery); the line replaces the one that named the form GitHub refuses.
+    // Raised to 286_400 (+300 bytes; the copy measured 286,299 after): the merge-async step waits for the PR below to be MERGED before the head above is read (the request returns on acceptance; the check, in `sh -c`, reads the state again on each poll), and the consent line names merge-async too.
+    expect(bytes).toBeLessThanOrEqual(286_400);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });
