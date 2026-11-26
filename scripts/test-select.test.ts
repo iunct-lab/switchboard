@@ -1,6 +1,7 @@
 // test-reads: apps/ aws/ ops-kit/ packages/ private/ rescue/ scripts/
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, namedImports, parseReads, select, selectFrom } from "./test-select";
 
@@ -410,29 +411,56 @@ describe("組み立ての口", () => {
 });
 
 describe("実行例（このリポジトリの実物）", () => {
-  const run = (...args: string[]) => Bun.spawnSync(["bun", "scripts/test-select.ts", ...args], { cwd: `${import.meta.dir}/..` }).stdout.toString();
+  // 子の終了コード・signal・stderr・stdout の先頭を、どの検査の失敗にも付ける（終了コードが 0 でも stdout が違う失敗がある）。
+  // process.execPath で動かし、前のテストファイルが PATH を変えていても別の bun に替わらないようにする。
+  const expectOut = (args: string[], check: (out: string) => void, stdin?: string) => {
+    const p = Bun.spawnSync([process.execPath, "scripts/test-select.ts", ...args], { cwd: `${import.meta.dir}/..`, stdin: stdin === undefined ? undefined : new TextEncoder().encode(stdin) });
+    const out = p.stdout.toString();
+    try {
+      if (p.exitCode !== 0) throw new Error("子が 0 で終わらなかった");
+      check(out);
+    } catch (e) {
+      throw new Error(`${e instanceof Error ? e.message : String(e)}\ntest-select.ts が exit ${p.exitCode}（signal ${p.signalCode ?? "なし"}）\nstderr: ${p.stderr.toString()}\nstdout: ${out.slice(0, 400)}`);
+    }
+  };
 
   test("引数が無ければ stdin から読み、./ と空行を除く", () => {
-    const p = Bun.spawnSync(["bun", "scripts/test-select.ts"], { cwd: `${import.meta.dir}/..`, stdin: new TextEncoder().encode("./scripts/ci.ts\n\n") });
-    expect(p.stdout.toString().split("\n")[0]).toBe("full: scripts/ci.ts: CI の手順");
+    expectOut([], (out) => expect(out.split("\n")[0]).toBe("full: scripts/ci.ts: CI の手順"), "./scripts/ci.ts\n\n");
   });
 
   test("空の stdin は全テストに倒す", () => {
-    const p = Bun.spawnSync(["bun", "scripts/test-select.ts"], { cwd: `${import.meta.dir}/..`, stdin: new TextEncoder().encode("\n") });
-    expect(p.stdout.toString().split("\n")[0]).toBe("full: 変更の一覧が空");
+    expectOut([], (out) => expect(out.split("\n")[0]).toBe("full: 変更の一覧が空"), "\n");
   });
 
   test("CI の手順は全テストに倒す", () => {
-    expect(run("scripts/ci.ts").split("\n")[0]).toBe("full: scripts/ci.ts: CI の手順");
+    expectOut(["scripts/ci.ts"], (out) => expect(out.split("\n")[0]).toBe("full: scripts/ci.ts: CI の手順"));
   });
 
   test("シェルは宣言したテストを理由つきで選ぶ", () => {
-    expect(run("aws/host/bootstrap.sh")).toContain("aws/host/host.test.ts  aws/host/bootstrap.sh ← aws/host/host.test.ts（test-reads）");
+    expectOut(["aws/host/bootstrap.sh"], (out) => expect(out).toContain("aws/host/host.test.ts  aws/host/bootstrap.sh ← aws/host/host.test.ts（test-reads）"));
   });
 
   test("db.ts は依存するテストを選ぶ", () => {
-    const out = run("packages/core/src/db.ts");
-    expect(out.split("\n")[0]).toMatch(/^selected: \d+$/);
-    expect(out).toContain("packages/core/src/db.test.ts  packages/core/src/db.ts → packages/core/src/db.test.ts");
+    expectOut(["packages/core/src/db.ts"], (out) => {
+      expect(out.split("\n")[0]).toMatch(/^selected: \d+$/);
+      expect(out).toContain("packages/core/src/db.test.ts  packages/core/src/db.ts → packages/core/src/db.test.ts");
+    });
   });
+});
+
+describe("git の一覧が読めないとき", () => {
+  test("例の失敗に git の理由が出る（子は 0 で終わる）", () => {
+    // git の作業ツリーでない 2 つのスクリプトの写しで実行例を回す。`-t "実行例"` で絞るので、この test 自身は子の run に入らない（名前に「実行例」を入れない）。
+    const root = mkdtempSync(join(tmpdir(), "no-git-"));
+    try {
+      mkdirSync(join(root, "scripts"));
+      for (const f of ["test-select.ts", "test-select.test.ts"]) copyFileSync(join(import.meta.dir, f), join(root, "scripts", f));
+      const p = Bun.spawnSync([process.execPath, "test", "./scripts/test-select.test.ts", "-t", "実行例"], { cwd: root, env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir() } });
+      const out = p.stdout.toString() + p.stderr.toString();
+      expect(p.exitCode).not.toBe(0);
+      expect(out).toContain("not a git repository");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -42,7 +42,7 @@ const ms = (t: string | null | undefined) => {
  * - `after:<at>`: the date a release waits for (`after=`) has passed, as of that date. A Task that names a date later than
  *   the time it ends has written it before the date, so the gate (`autoStartHeld`) counts a due date only when it is later than
  *   the end of the previous automatic Task; `eventsOf` only leaves out dates still to come
- * - `reviewed:<Task id>` is added where the Task's row is read (server/backlog-read.ts `withActive`)
+ * - `reviewed:<Task id>` is added where the Task's row is read (backlog-stored.ts `withStageTask`)
  */
 export function eventsOf(input: EventsInput): BacklogEvent[] {
   const { item, issues, pulls, commentsOf, now } = input;

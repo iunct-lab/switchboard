@@ -115,8 +115,8 @@ const reviewOnly = (n: number, pulls: StoredPull[], statuses: Map<number, string
  * only those, so a PBI that touches something else is not held. A PBI that cannot move now holds none, and gets its place
  * back with the same `since` once it can: not Ready / in progress (a question holds it), `on-hold`, waiting for a date,
  * a prerequisite not met, its stage Task only waiting for a planned resume (`parked`), or no mark for STALE_HOURS (a
- * session that died does not hold the line), or the queue does not resume it (`notResumed`: backlog-pick.ts — not moved since
- * its last resume, waiting for a reply, failed with no update since, stopped the same way again). A closed PBI is not an item, and a Task that no longer names the path gives none.
+ * session that died does not hold the line), or the queue does not resume it (`notResumed`: backlog-pick.ts — the gate holds its next
+ * start, it waits for a reply, it stopped the same way again). A closed PBI is not an item, and a Task that no longer names the path gives none.
  * `withOverlap` further leaves out the place of a PBI that cannot start for the places before its own.
  * `yieldsTo`: the PBIs of what it still waits for (an open PR's Tasks' parents, an open Task's parent), which its place
  * does not hold back: holding them back would keep the one it waits for from moving. Once that is closed, it holds them again.

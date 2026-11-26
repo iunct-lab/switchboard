@@ -42,6 +42,9 @@ export interface Offload {
   knows?: (flag: string) => Promise<boolean>;
 }
 
+/** Written by the steps' script before anything else, on the tmpfs the root script mounts (the steps' user can write it, the root shell reads it). */
+const STARTED = "/sb/tmp/sb-started";
+
 /**
  * One build's script, run by `sb-offload --ci` in the ci image (git with PCRE, Bun, Codex CLI, Chromium are the image's):
  * as root, a tmpfs TMPDIR and the work tree's owner; then, in a new PID namespace, as the image's user `switchboard` (a login `su -`, so the
@@ -52,6 +55,7 @@ export interface Offload {
  * `fileSizeBase`: the base's list of scripts/file-size.ts (`STILL_OVER`), read by the host: exported as FILE_SIZE_BASE_LIST, since the build has no base ref to read it from.
  * The host's AWS names reach the build as the user's `~/.aws/config`, written by the build's setup from `--names` (`runBuild`); the script holds none of them.
  * Nothing of this host's environment goes in (no token, no recordings' place). docs/design/local-ci-offload.md.
+ * Why the mount namespace: the steps' user could read the build role's credentials from `/codebuild/output/tmp/env.sh`, so the steps start inside a namespace where that directory is empty.
  * Why the PID namespace: the build's PID 1 does not reap orphans, so a killed child stays a zombie that `kill(pid, 0)` finds
  * alive and the child-cleanup tests fail. The namespace's init is a bash that reaps them; `exit $?` keeps bash from
  * replacing itself with su (then su would be PID 1 and reap nothing).
@@ -60,6 +64,8 @@ export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { require
   const lastPerf = o.perf ? steps.map((s) => isPerfStep(s)).lastIndexOf(true) : -1;
   const origin = o.repo && /^[\w.-]+\/[\w.-]+$/.test(o.repo) ? ` && git remote add origin ${quote(`https://github.com/${o.repo}.git`)}` : "";
   const user = [
+    // the steps' first action: the root shell tells a build whose steps never started from a step that failed by this file (no stage of the launch is checked on its own)
+    `: > ${STARTED}`,
     "set -u",
     "cd /sb/work",
     'export CI=true TMPDIR="$(mktemp -d /sb/tmp/t.XXXXXX)"',
@@ -76,16 +82,38 @@ export function ciScript(steps: Step[], o: { repo?: string; fixtures?: { require
       ...(i === lastPerf ? [`for f in ${BUILD_FILES.join(" ")}; do [ -f "$f" ] && echo "sb-file: $f $(base64 -w0 "$f")"; done; true`] : []),
     ]),
   ].join("\n");
+  // The steps' text comes from the repository under test, so it never goes into this root script as source: it is base64 (no quote, no newline, no
+  // line of its own), written to a file by printf and run only as the unprivileged user, inside the namespaces below.
+  const encoded = Buffer.from(user).toString("base64");
   return [
     "set -u",
-    "cat > /tmp/sb-local-ci.sh <<'SB_LOCAL_CI_EOF'",
-    user,
-    "SB_LOCAL_CI_EOF",
+    `printf '%s' '${encoded}' | base64 -d > /tmp/sb-local-ci.sh || { echo "sb-setup: 手順を書けない"; exit 1; }`,
     'mkdir -p /sb/tmp && mount -t tmpfs -o size=2g,mode=1777 tmpfs /sb/tmp || { echo "sb-setup: tmpfs を作れない"; exit 1; }',
     'chown -R switchboard /sb/work && chmod 644 /tmp/sb-local-ci.sh || { echo "sb-setup: 作業ツリーの持ち主を switchboard にできない"; exit 1; }',
     'unshare --pid --fork --mount-proc true || { echo "sb-setup: PID 名前空間を作れない"; exit 1; }',
+    'unshare --mount --propagation private true || { echo "sb-setup: mount 名前空間を作れない"; exit 1; }',
+    // the steps run in a mount namespace of their own whose /codebuild/output/tmp is an empty tmpfs: CodeBuild writes the build role's credential path and token
+    // to env.sh there (mode 666), which `su -` does not hide; the mask is in this namespace only, so the buildspec's later commands see the real directory.
+    // This launcher holds nothing of the repository's: only fixed text.
+    `rm -f ${STARTED}`,
+    `cat > /tmp/sb-run.sh <<'SB_RUN_EOF' || { echo "sb-setup: 起動の手順を書けない"; exit 1; }`,
+    'if [ -d /codebuild/output/tmp ]; then mount -t tmpfs -o size=1m,mode=755 tmpfs /codebuild/output/tmp || { echo "sb-setup: env.sh を覆えない"; exit 1; }; fi',
     `unshare --pid --fork --mount-proc bash -c 'su - switchboard -c "CHROME_BIN=\${CHROME_BIN:-} PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-} PERF_BASE_TREE=\${PERF_BASE_TREE:-} bash /tmp/sb-local-ci.sh"; exit $?'`,
+    "SB_RUN_EOF",
+    "unshare --mount --propagation private bash /tmp/sb-run.sh; c=$?",
+    // the launcher's code passes through; no marker means the steps never started (any stage before them), and then the code is kept when it is non-zero, so a step that deleted
+    // the marker (the steps' user owns it) still reads as its own result, and the marker's absence turns only a zero code (steps that could not have run) into 1; limit: a passing run whose step deleted it reads as 1
+    `[ -e ${STARTED} ] || { echo "sb-setup: 手順を起こせない"; exit "$(( c != 0 ? c : 1 ))"; }`,
+    'exit "$c"',
   ].join("\n");
+}
+
+/** The steps' script a `ciScript` carries (it is base64 in the root script, so that no step text is in the root script's source); for tests and for a reader of a built script. */
+export function stepsOf(script: string): string {
+  const m = /^printf '%s' '([^']*)' \| base64 -d > \/tmp\/sb-local-ci\.sh/m.exec(script);
+  const body = m?.[1] ?? "";
+  if (!body || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(body)) throw new Error("stepsOf: the script has no valid base64 steps body");
+  return Buffer.from(body, "base64").toString("utf8");
 }
 
 /** The files a perf build gives back in its log (`sb-file: <name> <base64>`); no other name is taken. */

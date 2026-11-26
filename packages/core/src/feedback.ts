@@ -142,28 +142,32 @@ export function feedbackTitle(text: string): string {
  * backlog's 実装 (`completeScope` in backlog-prompt.ts), with no Issue: the PR holds what the skills would write on one.
  * The reviewer is named by the review setting. `localForge` = the checkout keeps its changes in the app (no remote): the
  * PR lines give way to the local change's rules. `localBacklog` = the Issues a review may file go to the app's backlog.
+ * For another repository (`other`) both come from `otherRepoRules`, which names Switchboard's scripts by the checkout's path.
  */
-export const fixScope = (review: ReviewSetting, where: { localForge?: boolean; localBacklog?: boolean } = {}) => {
+export const fixScope = (review: ReviewSetting, where: { localForge?: boolean; localBacklog?: boolean; other?: OtherRepo } = {}) => {
   const change = where.localForge ? "変更" : "PR";
   return `## 進め方
 この依頼は、直した ${change} を main にマージするところまでを含みます。この依頼のために要望 Issue・PBI・Task の Issue は作りません（レビューで出た範囲外の指摘は、スキルどおり Issue 化してよい）。
-- 作業の場所と枝は CLAUDE.md の「作業の場所」（Task 番号の代わりに \`sb/fix-<topic>\`）。変更にはテストを添える
-${where.localForge ? `- ${localChangeRules("")}\n` : ""}- ${change} の本文に上の利用者の言葉を引用し、.claude/skills/cross-runner-review/SKILL.md で${REVIEWER_WORDS[review]}にレビューさせ、.claude/skills/review-triage-and-merge/SKILL.md で指摘を処理してマージする。スキルが Issue から作る材料（Task・PBI・再チェックの元要望）は、その引用で代える。スキルが Issue に書く記録は ${change} に書く
+- ${where.other ? "作業の場所と枝はこのリポジトリの CLAUDE.md / AGENTS.md に従う（書かれていなければ main の作業ツリーの外に worktree を作り、枝は `sb/fix-<topic>`）。変更にはテストを添える" : "作業の場所と枝は CLAUDE.md の「作業の場所」（Task 番号の代わりに `sb/fix-<topic>`）。変更にはテストを添える"}
+${where.localForge && !where.other ? `- ${localChangeRules("")}\n` : ""}- ${change} の本文に上の利用者の言葉を引用し、.claude/skills/cross-runner-review/SKILL.md で${REVIEWER_WORDS[review]}にレビューさせ、.claude/skills/review-triage-and-merge/SKILL.md で指摘を処理してマージする。スキルが Issue から作る材料（Task・PBI・再チェックの元要望）は、その引用で代える。スキルが Issue に書く記録は ${change} に書く
 - cross-runner-review が渡すレビューの材料（fresh clone のコード、${change} の本文、差分）を${REVIEWER_WORDS[review]}と CLAUDE.md の追加のレビュアーに渡すことも、この依頼に含む
-${where.localForge ? "- マージ判定が merge を返したらマージし、利用者へ聞き直さない" : "- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「Recheck」を回す"}
-${where.localBacklog ? `- ${LOCAL_ISSUE_RULES}\n` : ""}- マージ判定が \`[聞く]\` で止めたとき、デーモンを再起動する pull、認証は Task の会話で聞く。昇格はリポジトリの CLAUDE.md の決まりに従い、聞かずに昇格してよいと書いていなければ Task の会話で聞く
-- 終わったら最後の行に ${change} の番号とマージの結果を書く`;
+${where.localForge ? "- マージ判定が merge を返したらマージし、利用者へ聞き直さない" : where.other ? "- CI とマージ判定は下の読み替えのとおり。マージ判定が merge を返したらマージし、利用者へ聞き直さない" : "- CI とマージ判定は CLAUDE.md の「マージ判定とローカル CI」。マージ判定（\`scripts/merge-gate.ts\`）が merge を返したらマージし、利用者へ聞き直さない。\`[再チェック <kind>]\` は docs/merge-gate.md の「Recheck」を回す"}
+${where.localBacklog && !where.other ? `- ${LOCAL_ISSUE_RULES}\n` : ""}- マージ判定が \`[聞く]\` で止めたとき、デーモンを再起動する pull、認証は Task の会話で聞く。昇格はリポジトリの CLAUDE.md の決まりに従い、聞かずに昇格してよいと書いていなければ Task の会話で聞く
+- 終わったら最後の行に ${change} の番号とマージの結果を書く${where.other ? `\n\n${otherRepoRules(where.other, { local: where.localBacklog, localForge: where.localForge, merges: true })}${FIX_NO_ISSUES}` : ""}`;
 };
 
-/** すぐ直す: the meta workspace's brief, then the user's words as they are, where they came from, then how to carry the fix to main. No request is filed. */
-export function buildFixPrompt({ brief, text, when, screen, review = "other", localForge, localBacklog, runner = "claude" }: { brief: string; text: string; when: Date; screen?: string; review?: ReviewSetting; localForge?: boolean; localBacklog?: boolean; runner?: RunnerId }): string {
+/** The rules of another repository are written for Tasks of a PBI: a すぐ直す Task has none, and says how to read the lines that name one. */
+const FIX_NO_ISSUES = "この依頼には PBI も Task の Issue も無い。上の読み替えのうち PBI・Task の番号を使う行は、PBI の結果に書くものは PR（ローカルの変更）の本文に書き、`Backlog-Task:` の行は書かず（閉じる Task が無い。ほかの番号を書くとその Issue を閉じる）、Task を閉じる手順は飛ばし、枝の `<Task>` は `sb/fix-<topic>` と読む。";
+
+/** すぐ直す: the chosen workspace's brief, then the user's words as they are, where they came from, then how to carry the fix to main. No request is filed. */
+export function buildFixPrompt({ brief, text, when, screen, review = "other", localForge, localBacklog, other, runner = "claude" }: { brief: string; text: string; when: Date; screen?: string; review?: ReviewSetting; localForge?: boolean; localBacklog?: boolean; other?: OtherRepo; runner?: RunnerId }): string {
   // The brief ends with 「やってほしいこと:」; the request follows it directly, as with Home's 改善 →.
   return `${brief.replace(/\n*$/, "\n")}${text}
 
 ## 出典
 フィードバックボタン「すぐ直す」、${when.toISOString()}${screen ? `\n画面: ${screen.replace(/\s+/g, " ").trim()}` : ""}
 
-${skillPathsFor(fixScope(review, { localForge, localBacklog }), runner)}`;
+${skillPathsFor(fixScope(review, { localForge, localBacklog, other }), runner)}`;
 }
 
 export function fixTitle(text: string): string {

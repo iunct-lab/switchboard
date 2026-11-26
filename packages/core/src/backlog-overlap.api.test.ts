@@ -496,11 +496,12 @@ describe("overlap turn", () => {
   const lastTask = (over: Partial<NonNullable<BacklogItem["lastTask"]>> = {}): NonNullable<BacklogItem["lastTask"]> => ({ id: "tsk_p", status: "done", statusAt: T0 + 60_000, createdAt: T0, updatedAt: T0 + 60_000, action: "complete", outcome: "unknown", reviewedAt: null, resumeAt: null, started: true, ...over });
   const waitingStop: BacklogItem["stopSummary"][number] = { id: "s1", key: "k", work: { workspaceId: "ws_meta", issue: 2, taskId: "tsk_p" }, op: "gh pr merge", target: "PR #12", reason: "depends", evidence: "CI", safety: "unknown", count: 2, state: "waiting", firstAt: 1, lastAt: 2, contentAt: 1, lastAnswer: null, answered: false, grant: null, conditions: [], actions: [], changes: [], unchanged: true, next: "wait" };
   const inProgress = { stage: "in-progress" as const, tasks: { total: 2, done: 1, doneAt: null } };
-  const reasons: [string, Partial<BacklogItem>][] = [
-    ["not moved since its last resume", { ...inProgress, lastTask: lastTask() }],
-    ["waiting for a reply", { ...inProgress, lastTask: lastTask({ outcome: "needs_action" }), commentedAt: at(-1) }],
-    ["its last Task failed with no update since", { ...inProgress, lastTask: lastTask({ status: "error" }), commentedAt: at(-1) }],
-    ["stopped the same way again", { ...inProgress, lastTask: lastTask({ outcome: "finished" }), commentedAt: at(120), stopSummary: [waitingStop] }],
+  const gateHold = { previousTaskId: "tsk_p", action: "complete" as const };
+  // each reason with what releases it: a ## 回答 for a reply or a repeated stop, an event the gate counts (`autoHeld` null) for the gate's hold
+  const reasons: [string, Partial<BacklogItem>, Partial<BacklogItem>][] = [
+    ["the gate holds its next start", { ...inProgress, lastTask: lastTask(), autoHeld: gateHold }, { autoHeld: null }],
+    ["waiting for a reply", { ...inProgress, lastTask: lastTask({ outcome: "needs_action" }), commentedAt: at(-1) }, { answeredAt: at(150) }],
+    ["stopped the same way again", { ...inProgress, lastTask: lastTask({ outcome: "finished" }), commentedAt: at(120), stopSummary: [waitingStop] }, { answeredAt: at(150) }],
   ];
 
   test.each(reasons)("a PBI the queue does not resume holds no place: %s", (_name, p) => {
@@ -517,34 +518,14 @@ describe("overlap turn", () => {
     }
   });
 
-  test.each(reasons)("the place comes back with the same since once the PBI can be resumed: %s", (_name, p) => {
+  test.each(reasons)("the place comes back with the same since once the PBI can be resumed: %s", (_name, p, release) => {
     const w = world();
     try {
-      // a ## 回答 after its last Task: it is resumed again
-      const answered = { ...p, answeredAt: at(150) };
-      expect(notResumed(item({ number: 2, ...answered }))).toBe(false);
-      const back = judgeAll(w, { xOpen: false, p: answered, notResumed });
-      expect(back.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
-      expect(back.of(3)).toEqual(turnHit);
-    } finally {
-      w.done();
-    }
-  });
-
-  // a failed last Task lets go once a Task of the PBI closes after it, or once the Issue is written on
-  const failed = { ...inProgress, lastTask: lastTask({ status: "error" }), commentedAt: at(-1) };
-  const moved: [string, Partial<BacklogItem>][] = [
-    ["a Task closed after its failed Task", { ...failed, tasks: { total: 2, done: 1, doneAt: at(150) } }],
-    ["the Issue written on after its failed Task", { ...failed, commentedAt: at(150) }],
-  ];
-  test.each(moved)("the place comes back with the same since once the PBI can be resumed: %s", (_name, p) => {
-    const w = world();
-    try {
-      expect(notResumed(item({ number: 2, ...failed }))).toBe(true);
-      expect(notResumed(item({ number: 2, ...p }))).toBe(false);
-      const back = judgeAll(w, { xOpen: false, p, notResumed });
-      expect(back.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
-      expect(back.of(3)).toEqual(turnHit);
+      const back = { ...p, ...release };
+      expect(notResumed(item({ number: 2, ...back }))).toBe(false);
+      const again = judgeAll(w, { xOpen: false, p: back, notResumed });
+      expect(again.turns).toEqual([{ pbi: 2, since: at(0), task: 21, paths: ["src/a.ts"] }]);
+      expect(again.of(3)).toEqual(turnHit);
     } finally {
       w.done();
     }

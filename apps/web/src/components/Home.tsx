@@ -14,7 +14,7 @@ import { home } from "../i18n/home.ts";
 import { ago } from "../inProgress.ts";
 import { REASON_LABEL } from "../interventions.ts";
 import { stuckLine, stuckSchedules } from "../stuck.ts";
-import { stallAskOf } from "../queueStall.ts";
+import { readStall } from "../queueStall.ts";
 import { StallRows } from "./Approvals.tsx";
 import { Compose } from "./Compose.tsx";
 
@@ -70,22 +70,32 @@ export function Home(props: {
     }
   };
   // Schedules whose Tasks stopped the same way in a row: read on arriving, when any Task's row changed (a reply, the
-  // next Task ending) and on each stop record (a stop or one resolved within a turn moves no row), not on other events
-  // and, on the same signals, the backlog queue: only while it is stalled are the questions read, for its one notice
+  // next Task ending), on each stop record (a stop or one resolved within a turn moves no row) and when a stall reaches its
+  // limit, not on other events; on the same signals, the backlog queue: only while it is stalled are the questions read,
+  // for its one notice, and only while that notice is not there yet is the limit read
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [stall, setStall] = useState<Ask | null>(null);
   const tasksAt = useMemo(() => props.tasks.reduce((m, x) => Math.max(m, x.updatedAt), 0), [props.tasks]);
+  // a stall that reaches its limit (Settings) while Home stays open raises its notice with no event, so the queue is read
+  // again at that time (`stallTick` moves the effect); the limit is read only then, so a changed limit is seen
+  const [stallTick, setStallTick] = useState(0);
   useEffect(() => {
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     api.schedules().then((r) => alive && setSchedules(r), () => undefined);
-    api
-      .backlogQueue()
-      .then((q) => (q.enabled && q.stall ? api.asks().then((r) => stallAskOf(r.asks)) : null))
-      .then((a) => alive && setStall(a), () => undefined);
+    // the time before the requests: the daemon judges the notice when it takes them, so a read that crosses the limit
+    // on its way back still sets a clock
+    const at = Date.now();
+    readStall(api, at).then(({ ask, wait }) => {
+      if (!alive) return;
+      if (wait !== null) timer = setTimeout(() => setStallTick((n) => n + 1), wait);
+      setStall(ask);
+    }, () => undefined);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
-  }, [tasksAt, props.tasks.length, props.stopRev]);
+  }, [tasksAt, props.tasks.length, props.stopRev, stallTick]);
   const stuck = useMemo(() => stuckSchedules(schedules), [schedules]);
   // the first ones: 60 rows pushed the cost and the reports five screens down on a phone
   const [allAttention, setAllAttention] = useState(false);

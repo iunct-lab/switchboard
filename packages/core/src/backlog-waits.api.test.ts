@@ -12,7 +12,7 @@ import { prereqState, type WaitTarget, waitsOf } from "./backlog-waits.ts";
 import { pickNext, heldIn, isUnblocked } from "./backlog-pick.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { withOverlap, overlapHolderLines, overlapLine, isOverlapLine, isOverlapped, swapOverlapLines, overlapLinesUnder } from "./backlog-overlap.ts";
-import { FAKE_ORIGIN, STOPPED, backlogNextSchedule, boot, fixtureStage, getQueue, holdingClaude, item, metaId, metaName, putQueue, refreshed, releaseBody, runSchedule, scheduleLogAll, start, subTask, sweepAll, until, useBacklogDaemon, wait, waitsGh, waitsOfItem, withProcesses } from "./api-test-harness.ts";
+import { FAKE_ORIGIN, STOPPED, backlogNextSchedule, boot, fixtureStage, getQueue, holdingClaude, item, metaId, metaName, putQueue, refreshed, releaseBody, resumeTried, runSchedule, scheduleLogAll, start, startedTasks, subTask, sweepAll, until, useBacklogDaemon, wait, waitsGh, waitsOfItem, withProcesses } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -152,9 +152,10 @@ test("backlog-next waiting: an open wait is not started and the log names it; on
   const states = { w603: { __typename: "Issue", state: "OPEN" }, w778: { __typename: "PullRequest", state: "OPEN" } };
   const fake = waitsGh({ i304: [[releaseBody("後回し", [778]), STOPPED]], i307: [[releaseBody("後回し", [778, 603]), STOPPED]] }, states);
   const base = await boot(fake.gh, claude.adapter);
+  resumeTried();
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
-  expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toEqual(["#303 Task に分解"]);
+  expect(startedTasks().map((t) => t.title.split(":")[0])).toEqual(["#303 Task に分解"]);
   const log = await scheduleLogAll(base);
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 前提: #304（PR #778 マージ待ち） #307（#603 未完・PR #778 マージ待ち）`));
   expect(log).toContainEqual(expect.stringContaining(`${metaName()}: 実装の枠: 進められる項目が無い`));
@@ -162,7 +163,7 @@ test("backlog-next waiting: an open wait is not started and the log names it; on
   states.w603.state = "CLOSED";
   states.w778.state = "MERGED";
   expect((await runSchedule(base, id)).status).toBe(201);
-  expect(core!.db.listTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#307 実装"]);
+  expect(startedTasks().map((t) => t.title.split(":")[0]).sort()).toEqual(["#303 Task に分解", "#307 実装"]);
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#307 を complete で開始"));
 });
 

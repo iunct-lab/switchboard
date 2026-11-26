@@ -13,7 +13,8 @@ export const STALL_HOLDERS_KEEP = 10;
 /**
  * The other work that holds the queued items back on an overlap (`overlap.hits`), one per workspace and ref, the one
  * holding the most PBIs first (a PBI counted once; the same count in the order of the workspace, then the ref), at most
- * `STALL_HOLDERS_KEEP`. Counted as `overlapHolderLines` counts, and a place waited for (`turn`) counts too, as
+ * `STALL_HOLDERS_KEEP`. Counted as `overlapHolderLines` counts (a PBI the gate holds too, which the log names on the gate's
+ * line instead of the overlap's), and a place waited for (`turn`) counts too, as
  * `#N の順番` (its `pbi` = N, `working` = null: no one's work under way).
  */
 export function stallHolders(read: Array<{ workspaceId: string; items: BacklogItem[] }>): QueueStallHolder[] {

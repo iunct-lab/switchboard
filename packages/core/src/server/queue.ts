@@ -2,7 +2,7 @@ import { decidesNothing } from "../machine.ts";
 import { existsSync } from "node:fs";
 import { type BacklogQueue, BacklogAction, type BacklogItem, type Task, type Workspace } from "@switchboard/protocol";
 import { noteQueue, pruneClosed, QUEUE_KEY, readQueue } from "../backlog-queue.ts";
-import { pickNext, dueSoonOf, isUnblocked, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, flowStopped, flowOutsideQueueLine, type FlowLimit } from "../backlog-pick.ts";
+import { pickNext, notGateHeld, onGateLine, GATE_LINE, dueSoonOf, isUnblocked, flowCounted, flowHeldIn, flowHeldLine, flowLimitOf, flowStopped, flowOutsideQueueLine, type FlowLimit } from "../backlog-pick.ts";
 import { storedIssueHeads, canStartStoredBacklog } from "../backlog-stored.ts";
 import { overlapLinesUnder, swapOverlapLines } from "../backlog-overlap.ts";
 import { SLOT_OF_ACTION } from "../backlog-item.ts";
@@ -169,7 +169,9 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
     }
     const t = await sc.startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done }, auto: true });
     if ("held" in t && !("error" in t)) {
-      lines.push(`飛ばした: ${ws.name}: 実装の枠: 前回の開始から出来事が増えていない: #${p.item.number}（前回 ${t.held.previousTaskId}）`);
+      // the line of the item the first read already held is the slot's gate line (`leftLines`): said once
+      const said = `#${p.item.number}（前回 ${t.held.previousTaskId}）`;
+      if (!lines.some((l) => onGateLine(l, p.item, t.held.previousTaskId))) lines.push(`飛ばした: ${ws.name}: 実装の枠: ${GATE_LINE}: ${said}`);
       continue;
     }
     if ("active" in t) {
@@ -201,7 +203,7 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
   }
   // the flow PBIs left, said after the starts: one started in this run may be what holds the next
   for (const { ws, items, flowCounted: running, flowStopped: stopped } of read) {
-    const flowLine = flowHeldLine(flowHeldIn(items.filter((i) => !flowStarted.has(sc.queueKey(ws.id, i.number))), "implement", flowOf(ws, running, stopped)), flowOf(ws, running, stopped));
+    const flowLine = flowHeldLine(flowHeldIn(items.filter((i) => !flowStarted.has(sc.queueKey(ws.id, i.number))).filter(notGateHeld("implement")), "implement", flowOf(ws, running, stopped)), flowOf(ws, running, stopped));
     if (flowLine) lines.push(`${ws.name}: ${flowLine}`);
   }
   const after = readQueue(sc.db);

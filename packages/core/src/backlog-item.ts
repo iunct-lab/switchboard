@@ -311,6 +311,7 @@ export function toItem(raw: RawBacklogIssue, project: number, ws: Pick<BacklogWo
     heldAt: null,
     confirmations,
     closable: progress.closable,
+    autoHeld: null,
     postMerge: pbi ? postMergeOf(raw.body).filter((c) => !confirmed.has(c.n)) : [],
     progress: { closableByApi: progress.closableByApi, closesOnAnswer: progress.closesOnAnswer, checking: progress.checking },
     onHold: labels.includes(ON_HOLD_LABEL),

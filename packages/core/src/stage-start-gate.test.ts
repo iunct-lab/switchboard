@@ -4,6 +4,7 @@ import type { Ask, AskAnswerResult, Backlog, BacklogEvent, BacklogItem, Task } f
 import type { BacklogSnapshotEntry } from "./db.ts";
 import { backlogNextSchedule, boot, commentingGh, fakeGh, getQueue, holdingClaude, item, metaId, metaName, putQueue, refreshed, runSchedule, scheduleLogAll, start, until, useBacklogDaemon } from "./api-test-harness.ts";
 import type { CoreServer } from "./server.ts";
+import { flowCounted, pickNext } from "./backlog-pick.ts";
 import { autoStartHeld, eventsOf, type EventsInput } from "./stage-start-gate.ts";
 
 /* The rule for a stage Task that starts by itself: the same Issue's same stage starts again only when an event came since the last automatic start. */
@@ -181,6 +182,54 @@ describe("startStage with auto", () => {
     expect(tasksOf(9301)).toHaveLength(1);
   });
 
+  test("the stops of the removed rules stay stopped: a failed or aborted Task, a resume that did not move, a resume that ended before its mark, a 閉じる that did not close start once, and nothing starts or counts until an event", async () => {
+    const h = await world();
+    const { put, read, tasksOf } = h;
+    const inProgress = (n: number): BacklogSnapshotEntry => ({ objectKind: "project-item", externalId: `PVTI_gate${n}`, fetchState: "fetched", remote: { issue: n, owner: h.core.db.getWorkspaceBacklogSource(h.ws.id)!.project.owner, project: h.core.db.getWorkspaceBacklogSource(h.ws.id)!.project.number, fields: { Status: "In progress" } } });
+    const all = async () => ((await (await fetch(`${h.base}/api/backlog`)).json()) as Backlog).items;
+    const status = (t: Task, to: "done" | "error" | "aborted") => h.core.db.sqlite.run("UPDATE tasks SET status = ?, status_at = ? WHERE id = ?", [to, Date.now(), t.id]);
+    // [PBI, how the Task ends, the stage the item's automatic start is, extra records before the start, the sub-issues still open]
+    const scenes: Array<[number, string, "done" | "error" | "aborted", "complete" | "close", BacklogSnapshotEntry[], number]> = [
+      [9401, "failed", "error", "complete", [], 2],
+      [9411, "aborted", "aborted", "complete", [], 2],
+      [9421, "a resume that did not move: its mark says as many Tasks done as now", "done", "complete", [commentRec(9421, "M1", "## 状況\n<!-- tasks-done: 1 -->\n進んでいない", "2026-10-02T00:00:00Z")], 2],
+      [9431, "a resume that ended before writing its mark", "done", "complete", [], 2],
+      [9441, "a 閉じる that did not close", "done", "close", [], 0],
+    ];
+    for (const [n, what, end, action, before, open] of scenes) {
+      const subs = [n + 1, n + 2, n + 3].slice(0, open + 1);
+      put(
+        inProgress(n), issueRec(n, { labels: ["type:pbi", "flow-improvement"], subIssues: subs }),
+        issueRec(subs[0]!, { parent: n, state: "CLOSED", stateReason: "COMPLETED", closedAt: "2026-10-03T00:00:00Z" }),
+        ...subs.slice(1).map((m) => issueRec(m, { parent: n })), ...before,
+      );
+      const before0 = await read(n);
+      expect([what, before0.stage, before0.autoHeld, before0.closable]).toEqual([what, "in-progress", null, action === "close"]);
+      const startItem = (item: BacklogItem, a: "complete" | "close") => h.core.startStage({ ws: h.ws, meta: h.ws, item, action: a, auto: true });
+      // the automatic start the removed rules would have kept stopping happens once
+      const first = started(await startItem(before0, action));
+      await Bun.sleep(5);
+      status(first, end);
+      await Bun.sleep(5);
+      const item = await read(n);
+      expect([what, item.autoHeld]).toEqual([what, { previousTaskId: first.id, action }]);
+      expect([what, await startItem(item, action)]).toEqual([what, { held: { previousTaskId: first.id } }]);
+      // and no second start: the pick leaves it, the flow count does not count it, and nothing started
+      expect([what, pickNext((await all()).filter((i) => i.number === n), "implement")]).toEqual([what, null]);
+      expect([what, flowCounted((await all()).filter((i) => i.number === n)).map((i) => i.number)]).toEqual([what, []]);
+      expect([what, tasksOf(n).length]).toEqual([what, 1]);
+      // an event lets exactly one more start: a Task added to the PBI
+      put(issueRec(n, { labels: ["type:pbi", "flow-improvement"], subIssues: [...subs, n + 9] }), issueRec(n + 9, { parent: n, createdAt: iso(Date.now()) }));
+      const again = await read(n);
+      expect([what, again.autoHeld]).toEqual([what, null]);
+      expect([what, pickNext((await all()).filter((i) => i.number === n), "implement")?.item.number]).toEqual([what, n]);
+      expect([what, flowCounted((await all()).filter((i) => i.number === n)).map((i) => i.number)]).toEqual([what, [n]]);
+      const second = started(await startItem(again, "complete"));
+      status(second, "done");
+      expect([what, tasksOf(n).length]).toEqual([what, 2]);
+    }
+  });
+
   test("a start without auto (the button) is never held and is not the last automatic start", async () => {
     const { core, finish, start } = await bootStart();
     const auto = started(await start(withEvents(430, [])));
@@ -228,7 +277,7 @@ describe("startStage with auto", () => {
     const [first] = close307();
     expect(first!.stage).toEqual({ issue: 307, action: "close", auto: true });
     await fetch(`${base}/api/tasks/${first!.id}/abort`, { method: "POST" }); // its end starts the queue again
-    await until(async () => (await getQueue(base)).lastNote?.includes("前回の Task が失敗したまま更新が無い") ?? false);
+    await until(async () => (await getQueue(base)).lastNote?.includes("前回の開始から出来事が増えていない") ?? false);
     await Bun.sleep(5);
     c.on.v = true; // the Task's own plain comment, after it ended
     await refreshed(base);
@@ -236,7 +285,8 @@ describe("startStage with auto", () => {
     await until(async () => (await getQueue(base)).lastNote?.includes("前回の開始から出来事が増えていない") ?? false);
     const note = (await getQueue(base)).lastNote!;
     expect(heldLine([note], 307, first!.id)).toBe(true);
-    expect(note).toContain(`飛ばした: ${metaName()}: 実装の枠: `);
+    expect(note.split("\n").filter((l) => l.includes("#307"))).toHaveLength(1);
+    expect(note).toContain(`${metaName()}: 前回の開始から出来事が増えていない: #307`); // the slot's one gate line, not a second one from the start
     expect(close307()).toHaveLength(1);
   });
 

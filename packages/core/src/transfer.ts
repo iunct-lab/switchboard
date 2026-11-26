@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { chmodSync, constants, closeSync, cpSync, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createZstdCompress, type ZstdCompress } from "node:zlib";
 import type { CoreConfig } from "./config.ts";
@@ -55,6 +56,8 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
   const stage = join(cfg.home, `export-${process.pid}`);
   let zstd: ZstdCompress | undefined;
   let child: ChildProcess | null = null;
+  let sink: Writable | undefined;
+  let failed = false;
   try {
     sweepExportStages(cfg.home);
     rmSync(stage, { recursive: true, force: true }); // this pid's own leftover from an earlier, killed process
@@ -64,7 +67,7 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
     let ageErr = "";
     age?.stderr?.on("data", (b: Buffer) => (ageErr += b.toString()));
     const exited = age ? new Promise<number | null>((ok) => age.on("close", ok)) : null;
-    const done = pipeline(z, age?.stdin ?? createWriteStream("", { fd, autoClose: false }));
+    const done = pipeline(z, age?.stdin ?? (sink = createWriteStream("", { fd, autoClose: false })));
     done.catch(() => undefined); // awaited below; this only keeps an early failure from being reported as unhandled
     const write = async (b: Uint8Array) => {
       if (!z.write(b)) await Promise.race([once(z, "drain"), done]);
@@ -142,16 +145,17 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
     }
     return manifest;
   } catch (e) {
+    failed = true;
     zstd?.destroy();
     child?.kill();
     rmSync(out, { force: true }); // never leave a partial package that looks like a finished one
     throw e;
   } finally {
-    // EBADF: a pipeline that failed has already closed the fd, and that error is the one to report. Without this guard the
+    // EBADF: closing an fd that is already closed; the pipeline's own error is the one to report. Without this guard the
     // close threw in its place and the stage (a database copy, hundreds of MB) was never removed.
     try {
       try {
-        closeSync(fd);
+        await releaseFd(fd, sink, failed);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EBADF") throw e;
       }
@@ -174,8 +178,10 @@ export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Pro
   const skipped: string[] = [];
   const fd = openSync(out, "wx", 0o600);
   const z = createZstdCompress();
+  const sink = createWriteStream("", { fd, autoClose: false });
+  let failed = false;
   try {
-    const done = pipeline(z, createWriteStream("", { fd, autoClose: false }));
+    const done = pipeline(z, sink);
     done.catch(() => undefined); // awaited below; this only keeps an early failure from being reported as unhandled
     const write = async (b: Uint8Array) => {
       if (!z.write(b)) await Promise.race([once(z, "drain"), done]);
@@ -218,16 +224,41 @@ export async function writeTarZst(out: string, entries: Iterable<TarEntry>): Pro
     await done;
     return skipped;
   } catch (e) {
+    failed = true;
     z.destroy();
     rmSync(out, { force: true });
     throw e;
   } finally {
     try {
-      closeSync(fd);
+      await releaseFd(fd, sink, failed);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EBADF") throw e;
     }
   }
+}
+
+/**
+ * Close `fd` exactly once. With a file `sink` on it, the stream owns the descriptor: a failed pipeline has destroyed it
+ * and its close runs on a worker thread a moment later, so this waits for that close (or destroys the stream itself)
+ * and never calls `closeSync`. A second close of the number could take a file something else has opened since. Without
+ * a sink (the descriptor went to a child process), it is closed here. An error of the stream's close (a filesystem
+ * reporting a delayed write error: EIO, ENOSPC, EDQUOT) is thrown unless `failed`: then the pipeline's own error is the
+ * one in flight and the close error is dropped.
+ */
+async function releaseFd(fd: number, sink: Writable | undefined, failed: boolean): Promise<void> {
+  if (!sink) {
+    closeSync(fd);
+    return;
+  }
+  if (sink.closed) return;
+  const closed = new Promise<void>((ok) => sink.once("close", () => ok()));
+  let closeError: Error | undefined;
+  sink.on("error", (e) => {
+    closeError ??= e;
+  });
+  if (!sink.destroyed) sink.destroy();
+  await closed;
+  if (closeError && !failed) throw closeError;
 }
 
 /** How long the snapshot waits for a writer's lock (the Db default, which this read-only connection does not get from Db). */

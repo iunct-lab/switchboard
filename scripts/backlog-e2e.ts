@@ -32,6 +32,9 @@ let libRequest = false;
 let openPulls: Array<Record<string, unknown>> = [];
 const home = mkdtempSync(join(tmpdir(), "sb-backlog-e2e-"));
 const libDir = join(home, "lib");
+// acme/lib's `#306` waits on one question: an answer naming an older question's time is refused and leaves it as it is
+const LIB_QUESTION_AT = "2026-09-28T04:00:00Z";
+const libComments = JSON.stringify({ data: { repository: { i306: { comments: { nodes: [{ body: "## 判断待ち\n**問い**: lib の置き場所をどちらにするか", createdAt: LIB_QUESTION_AT }] } }, i304: { comments: { nodes: [] } } } } });
 mkdirSync(libDir);
 let failing = false;
 let delayMs = 0; // GitHub being slow
@@ -59,7 +62,7 @@ const gh: GhRunner = async (args, cwd) => {
   await Bun.sleep(delayMs);
   // the flow card (/api/flow) reads the budget first: none left, so it stops there instead of throwing in the handler (which makes bun exit 1)
   if (args.some((a) => a.includes("rateLimit {"))) return { code: 0, stdout: '{"data":{"rateLimit":{"remaining":0,"cost":1}}}', stderr: "" };
-  if (cwd === libDir) return { code: 0, stdout: args.some((a) => a.includes("comments(last:")) ? '{"data":{"repository":{"i306":{"comments":{"nodes":[]}},"i304":{"comments":{"nodes":[]}}}}}' : libRequest ? libWithRequest : libPage, stderr: "" };
+  if (cwd === libDir) return { code: 0, stdout: args.some((a) => a.includes("comments(last:")) ? libComments : libRequest ? libWithRequest : libPage, stderr: "" };
   if (args.some((a) => a.includes("issueOrPullRequest"))) return { code: 0, stdout: JSON.stringify({ data: { repository: waitStates } }), stderr: "" };
   if (args.some((a) => a.includes("comments(last:"))) return { code: 0, stdout: JSON.stringify(decisions), stderr: "" };
   return { code: 0, stdout: JSON.stringify(args.includes("after=CURSOR1") ? pages[1] : pages[0]), stderr: "" };
@@ -333,6 +336,17 @@ try {
   const ghCalls = issueWrites.map((a) => a.slice(0, 3).join(" ") + (a.includes("--remove-label") ? " --remove-label " + a[a.indexOf("--remove-label") + 1] : ""));
   const answered = JSON.stringify(issueWrites[0]) === JSON.stringify(["issue", "comment", "306", "-R", "acme/app", "--body", "## 回答\n\nB で。移行は不要"]) && ghCalls[1] === "issue edit 306 --remove-label needs-decision";
   assert(answered, `gh: ${JSON.stringify(issueWrites)}`);
+  // an answer to a question that is no longer the one on GitHub (an older time than acme/lib `#306`'s question) is 409,
+  // and `#306`'s question stays as it was: still 判断待ち with the same question
+  const libDecisionOf = async () => ((await (await fetch(`${base}/api/backlog`)).json()) as { items: Array<{ workspaceId: string; number: number; stage: string; decision?: { at: string } | null }> }).items.find((i) => i.workspaceId === libId && i.number === 306);
+  const libBefore = await libDecisionOf();
+  assert(libBefore?.stage === "needs-decision" && libBefore.decision?.at === LIB_QUESTION_AT, `lib #306 before the stale answer: ${JSON.stringify(libBefore)}`);
+  const staleAnswer = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspaceId: libId, text: "古い問いへの回答", at: "2026-09-27T04:00:00Z" }) });
+  const staleStatus = staleAnswer.status;
+  assert(staleStatus === 409, `the stale answer to lib #306: ${staleStatus} ${await staleAnswer.text()}`);
+  const libAfter = await libDecisionOf();
+  assert(libAfter?.stage === "needs-decision" && libAfter.decision?.at === LIB_QUESTION_AT, `lib #306 after the stale answer: ${JSON.stringify(libAfter)}`);
+  console.log(`stale answer: ${JSON.stringify({ status: staleStatus, decisionAt: libAfter.decision?.at })}`);
 
   // 実装中: each row says whether it moves, its Project Status, how long since the Issue changed, its last stage
   // Task, and the head of its newest ## 状況; 状況を確認 starts a check and the row turns 実行中
