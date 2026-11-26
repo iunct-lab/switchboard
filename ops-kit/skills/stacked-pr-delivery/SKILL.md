@@ -29,7 +29,7 @@ description: Task を Stacked PR（GitHub public preview, gh stack）として�
    `review-triage-and-merge` の 4 の形で返信し（`gh api .../comments/<id>/replies`。見送る nit は要約の表）、最後に要約コメント。Issue にも結果を記録する（`ops-kit backlog comment <Task> --body-file …`）。
 6. CI 緑・返信済みを確認して `<マージ判定> <一番上の PR番号> --merge-stack`（下の PR も今の head で判定し、全部 merge のときだけ `gh stack merge <PR番号> --rebase -y` を呼ぶ。`gh stack merge` はその PR と下の PR をまとめて atomic に merge する）。
    スタックに属さない単発 PR は `<マージ判定> <n> --merge`（`gh stack merge` は「not a stacked pull request」で失敗する）。
-   判定の外で許可されたスタックの PR は `pbi-complete` の 5 の形で入れ、上の PR の付け替わりを `gh pr view <上> --json state,baseRefName` で見る（既定の枝でなければ下の「1 本だけ残ったスタック」）。
+   判定の外で許可されたスタックの PR は `pbi-complete` の 5 の形（`merge-async`。上の PR は自動 rebase の後の head で許可を聞き直す）で入れ、上の PR の付け替わりを `gh pr view <上> --json state,baseRefName` で見る（既定の枝でなければ下の「1 本だけ残ったスタック」）。
 <!-- when mergeGate=off -->
    マージ判定のコマンド（CLAUDE.md）にその引数が無いリポジトリでは、`gh stack merge <PR番号> --rebase -y` / 単発は `gh pr merge <n> --rebase --delete-branch`。
 <!-- end when -->

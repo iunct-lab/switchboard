@@ -335,7 +335,7 @@ export function mergeWrite(argv: string[], texts: string[] = []): { pr: number |
 /**
  * The head a merge is held to on the command line, and whether the merge can carry one to GitHub. `gh pr merge`: its
  * `--match-head-commit <sha>` (null when it names none; `at` is where the flag can be added, right after `merge`).
- * A REST `gh api` PUT of `pulls/<n>/merge`: the `sha` field of its body (`-f`/`-F`/`--field`/`--raw-field`, 40 lower-case hex digits,
+ * A REST `gh api` PUT of `pulls/<n>/merge` or `…/merge-async`: the `sha` field of its body (`-f`/`-F`/`--field`/`--raw-field`, 40 lower-case hex digits,
  * read as written because gh sends it as written; null when it has none, names it twice, or the body comes from `--input`). `carries` is false for `gh stack merge` and
  * graphql, which have no place to name a head.
  */
@@ -381,11 +381,13 @@ const PLAIN_MERGE_FIELDS = new Set(["sha", "merge_method", "commit_title", "comm
  * stops it rather than guess how gh reads it: for example a flag's value or a group of short flags).
  * `gh pr merge <n|github.com PR URL>` with only `-R`/`--repo <owner/name>`, the switches above and `--match-head-commit <40 hex>`;
  * a URL and `-R` naming different repositories is not it. `gh api` first, a PUT (`-X`/`--method`) of
- * `repos/<o>/<r>/pulls/<n>/merge`, and only the fields above with `-f`/`-F`/`--field`/`--raw-field`, each once (`sha` by `-f` /
- * `--raw-field` only).
- * `repo` is the repository the merge names (null: none, the clone's own); `head` the head it names (null: none).
+ * `repos/<o>/<r>/pulls/<n>/merge` or `…/merge-async` (the one way GitHub merges a pull request of a stack), and only
+ * the fields above with `-f`/`-F`/`--field`/`--raw-field`, each once (`sha` by `-f` / `--raw-field` only).
+ * `repo` is the repository the merge names (null: none, the clone's own); `head` the head it names (null: none); `stack` is
+ * true for `…/merge-async`, which also merges the unmerged pull requests below the one it names, so the front lets it go
+ * only for the bottom one.
  */
-export function plainMergeOf(argv: string[]): { pr: number; repo: string | null; head: string | null } | null {
+export function plainMergeOf(argv: string[]): { pr: number; repo: string | null; head: string | null; stack: boolean } | null {
   // github.com only: the grant is kept by owner/name, with no host
   const url = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d{1,9})$/;
   const hex = /^[0-9a-f]{40}$/;
@@ -415,12 +417,15 @@ export function plainMergeOf(argv: string[]): { pr: number; repo: string | null;
       }
       if (a.startsWith("-") || path !== null) return null;
       // the repository is named: gh fills `{owner}/{repo}` from its own choice of remote, which the guard cannot follow
-      path = /^\/?repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d{1,9})\/merge$/.exec(a);
+      path = /^\/?repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d{1,9})\/merge(-async)?$/.exec(a);
       if (path === null) return null;
     }
     const sha = fields.get("sha");
     if (method !== "PUT" || path === null || (sha !== undefined && !hex.test(sha))) return null;
-    return { pr: Number(path[2]), repo: path[1]!, head: sha ?? null };
+    // a stack's merge names its head in `sha` (GitHub pins the named pull request to it, `expected_head_sha`); without it, it
+    // is not this shape
+    if (path[3] !== undefined && sha === undefined) return null;
+    return { pr: Number(path[2]), repo: path[1]!, head: sha ?? null, stack: path[3] !== undefined };
   }
   const words: string[] = [];
   let named: string | null = null;
@@ -449,7 +454,7 @@ export function plainMergeOf(argv: string[]): { pr: number; repo: string | null;
   const u = url.exec(ref);
   if (u === null && !/^\d{1,9}$/.test(ref)) return null;
   if (u !== null && named !== null && ownerName(u[1]!) !== ownerName(named)) return null;
-  return { pr: Number(u?.[2] ?? ref), repo: u?.[1] ?? named, head };
+  return { pr: Number(u?.[2] ?? ref), repo: u?.[1] ?? named, head, stack: false };
 }
 
 /**
