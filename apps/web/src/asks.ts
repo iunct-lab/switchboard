@@ -20,6 +20,11 @@ export const KIND_LABEL: Record<Ask["kind"], string> = {
 // open is 未回答: 保留 is the person's hold
 export const STATE_LABEL: Record<Ask["state"], string> = { open: t(m.stateOpen), held: t(m.stateHeld), answered: t(m.stateAnswered), resolved: t(m.stateResolved) };
 
+/** The state a card's badge shows: a wait answered from its card (待ち続ける / 止める) reads answered until the list is read again. */
+export function cardState(x: Ask, waitAnswer: "stop" | "keep" | undefined): Ask["state"] {
+  return waitAnswer ? "answered" : x.state;
+}
+
 type GroupKey = "person" | "proceeding" | "auto" | "done";
 const GROUPS: Array<{ key: GroupKey; label: string }> = [
   { key: "person", label: t(m.groupPerson) },

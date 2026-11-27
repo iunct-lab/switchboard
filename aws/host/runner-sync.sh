@@ -35,13 +35,55 @@ if [ "${1:-}" = restore ]; then
   # newest first, the base last, with --skip-old-files: each file is the newest copy, and one that is already here (the
   # one-time import from the Mac) is kept
   { printf '%s\n' "$KEYS" | grep -E "^$PREFIX/$SET/[0-9]{10}\.tar\.zst\$" | sort -r || true; echo "$PREFIX/$SET/base.tar.zst"; } > "$RDIR/keys"
+  # What the daily archive moved to history/runner (archive.sh) is not brought back: it is in the base this set holds,
+  # and on the disk it would be over the budget until the next daily run, which would then upload it a second time.
+  # runner-archive.tsv is one of the saved files, so it is read first, out of the newest archive that has it (the tars
+  # fetched on the way are kept for the unpacking below). A row with 6 columns (path, session id, key, date, mtime,
+  # size) leaves out every copy of that path no newer than the one moved: the copy moved (same mtime and size) and the
+  # older copies an earlier difference or the base holds, which would otherwise come back in its place. A copy appended
+  # to after the move is newer and comes back. Only the paths the archive moves count (runner records, not memory/).
+  # A row of 4 columns (from before mtime and size were listed) leaves nothing out. A list that cannot be read leaves
+  # nothing out either.
+  mkdir -p "$RDIR/list"; : > "$RDIR/moved"
+  fetch() { [ -e "$RDIR/$1.tar.zst" ] || aws s3 cp "s3://$SB_DATA_BUCKET/$2" "$RDIR/$1.tar.zst" --only-show-errors; }
   n=0
   while read -r key; do
     n=$((n + 1))
-    aws s3 cp "s3://$SB_DATA_BUCKET/$key" "$RDIR/$n.tar.zst" --only-show-errors
-    tar --zstd --skip-old-files -xf "$RDIR/$n.tar.zst" -C "$HOME"
+    fetch "$n" "$key"
+    tar --zstd -xf "$RDIR/$n.tar.zst" -C "$RDIR/list" .switchboard/runner-archive.tsv 2>/dev/null && break
+  done < "$RDIR/keys"
+  if [ -f "$RDIR/list/.switchboard/runner-archive.tsv" ]; then
+    # one line per path: the newest move (a path moved, appended to and moved again has several rows)
+    awk -F'\t' 'NF == 6 && $5 ~ /^[0-9]+$/ && $6 ~ /^[0-9]+$/ && $3 ~ /^history\/runner\// && ($1 ~ /^\.claude\/projects\// || $1 ~ /^\.codex\/sessions\//) && $1 !~ /\/memory\// {
+        if (!($1 in t) || $5 + 0 > t[$1] + 0 || ($5 + 0 == t[$1] + 0 && $6 + 0 > z[$1] + 0)) { t[$1] = $5; z[$1] = $6 }
+      } END { for (p in t) print p "\t" t[p] "\t" z[p] }' "$RDIR/list/.switchboard/runner-archive.tsv" > "$RDIR/moved" || : > "$RDIR/moved"
+  fi
+  # the paths in a tar whose copy is no newer than the one moved: an older mtime (epoch seconds, from the listing in
+  # UTC), or the same second and no bigger
+  leftout() {
+    TZ=UTC tar --zstd --full-time --quoting-style=literal -tvf "$1" | awk -v moved="$RDIR/moved" '
+      BEGIN { while ((getline l < moved) > 0) { split(l, f, "\t"); t[f[1]] = f[2] + 0; z[f[1]] = f[3] + 0 } }
+      substr($0, 1, 1) == "-" && match($0, /^[^ ]+ +[^ ]+ +[0-9]+ +[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] /) {
+        size = $3; split($4, D, "-"); split($5, T, ":")
+        y = D[1] + 0; mo = D[2] + 0; d = D[3] + 0; if (mo <= 2) y--
+        era = int(y / 400); yoe = y - era * 400; doy = int((153 * ((mo + 9) % 12) + 2) / 5) + d - 1
+        days = era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy - 719468
+        path = substr($0, RLENGTH + 1)
+        mt = days * 86400 + T[1] * 3600 + T[2] * 60 + T[3]
+        if ((path in t) && (mt < t[path] || (mt == t[path] && size + 0 <= z[path]))) print path
+      }'
+  }
+  : > "$RDIR/left"
+  n=0
+  while read -r key; do
+    n=$((n + 1))
+    fetch "$n" "$key"
+    if [ -s "$RDIR/moved" ] && leftout "$RDIR/$n.tar.zst" > "$RDIR/skip"; then :; else : > "$RDIR/skip"; fi
+    cat "$RDIR/skip" >> "$RDIR/left"
+    tar --zstd --skip-old-files -xf "$RDIR/$n.tar.zst" -C "$HOME" --no-wildcards --anchored --exclude-from="$RDIR/skip"
     rm -f "$RDIR/$n.tar.zst"
   done < "$RDIR/keys"
+  echo "runner-sync: left out $(sort -u "$RDIR/left" | wc -l) records already in history/runner"
   # devtools has already written ~/.claude.json (claude mcp add): what was saved of it goes under that file
   CLAUDE_STATE="$HOME/.switchboard/claude-state.json"
   if [ -f "$CLAUDE_STATE" ]; then

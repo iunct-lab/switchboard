@@ -1040,8 +1040,8 @@ stageOf(ci, 304);
     await call("Fetch.enable", { patterns: [{ urlPattern: "*/api/asks", requestStage: "Request" }] });
     await evaluate(`[...${card(own.ask)}.querySelectorAll('.ask-button button')].find(b => b.textContent.trim() === '待ち続ける').click()`);
     await until(async () => held.length > 0, `the list read again is held at ${width}`);
-    const shown = await until(async () => { const c = await evaluate(`(() => { const c = ${card(own.ask)}; return { buttons: [...c.querySelectorAll('.ask-button button')].length, line: c.querySelector('.ask-wait-answered')?.textContent ?? null, head: [...c.closest('.ask-waits').querySelectorAll('.ask-wait-actions button')].map(b => b.textContent.trim()) }; })()`) as Json; return c.line ? c : null; }, `the answer's line on the card at ${width}`);
-    assert(shown.buttons === 0 && shown.line === "待ち続けると答えました", `the answered wait's card at ${width}: ${JSON.stringify(shown)}`);
+    const shown = await until(async () => { const c = await evaluate(`(() => { const c = ${card(own.ask)}; return { buttons: [...c.querySelectorAll('.ask-button button')].length, line: c.querySelector('.ask-wait-answered')?.textContent ?? null, state: c.querySelector('.ask-state')?.textContent ?? null, head: [...c.closest('.ask-waits').querySelectorAll('.ask-wait-actions button')].map(b => b.textContent.trim()) }; })()`) as Json; return c.line ? c : null; }, `the answer's line on the card at ${width}`);
+    assert(shown.buttons === 0 && shown.line === "待ち続けると答えました" && shown.state === "回答済み", `the answered wait's card at ${width}: ${JSON.stringify(shown)}`);
     // the only wait under its heading is answered: the heading offers nothing more to send
     assert(shown.head.length === 0, `the heading over the answered wait at ${width}: ${JSON.stringify(shown.head)}`);
     await sideways(width, "the answered wait");

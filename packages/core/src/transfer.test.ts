@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, RunnerAdapter, StartOptions, Task } from "@switchboard/protocol";
 import { loadConfig } from "./config.ts";
-import { Db } from "./db.ts";
+import { copyRoom, Db } from "./db.ts";
 import { startServer as startDaemon } from "./server.ts";
 
 /**
@@ -365,6 +365,21 @@ describe("export stage", () => {
     await running;
     expect(readdirSync(cfg.home).filter((f) => f.startsWith("export-"))).toEqual([]);
     expect(sbExports()).toBe(before);
+  });
+
+  test("not enough disk for the database copy: it throws needs/free, writes no copy and leaves no export-<pid> or package", async () => {
+    const { cfg } = fakeHistory(join(tmp, "nd"));
+    const probe = new Database(cfg.dbPath, { readonly: true });
+    const need = copyRoom(probe);
+    const pragma = (p: string) => (probe.query(`PRAGMA ${p}`).get() as Record<string, number>)[p]!;
+    expect(need).toBe(Math.ceil((pragma("page_count") - pragma("freelist_count")) * pragma("page_size") * 1.25)); // the formula, not 0
+    probe.close();
+    const out = join(tmp, "nd.tar.zst");
+    await expect(exportHistory(cfg, out, { freeBytes: () => need - 1 })).rejects.toThrow(/not enough disk for the database copy in the export: needs \d+ MB, \d+ MB free/);
+    expect(readdirSync(cfg.home).filter((f) => f.startsWith("export-"))).toEqual([]);
+    expect(existsSync(out)).toBe(false);
+    await exportHistory(cfg, out, { freeBytes: () => need }); // enough: as before
+    expect(existsSync(out)).toBe(true);
   });
 
   test("a stage left by a killed export is removed at the next export", async () => {

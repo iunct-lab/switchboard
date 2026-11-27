@@ -557,16 +557,16 @@ ${clone}`);
     expect(run("archive.sh", [], { HOME: home }).code).toBe(0);
     expect(run("archive.sh", [], { HOME: home }).code).toBe(0);
     const lines = readFileSync(file, "utf8").trim().split("\n");
-    expect(lines).toHaveLength(1); // the second run of the day adds nothing
-    const [date, used, free, db, snapshots, releases, runner, cache] = lines[0]!.split("\t");
+    expect(lines).toHaveLength(1); // the second run of the day replaces its line
+    const [date, used, free, db, snapshots, switchboard, transcripts, cache] = lines[0]!.split("\t");
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(Number(used)).toBeGreaterThan(0);
     expect(Number(free)).toBeGreaterThan(0);
     expect(Number(db)).toBeGreaterThan(0);
     expect(Number(snapshots)).toBeGreaterThanOrEqual(2);
-    expect(Number(releases)).toBeLessThan(Number(runner));
-    expect(Number(runner)).toBeGreaterThanOrEqual(5); // both folders
-    expect(Number(cache)).toBeGreaterThan(Number(runner));
+    expect(Number(switchboard)).toBeLessThan(Number(transcripts));
+    expect(Number(transcripts)).toBeGreaterThanOrEqual(5); // both folders
+    expect(Number(cache)).toBeGreaterThan(Number(transcripts));
 
     rmSync(file);
     mkdirSync(file); // cannot be appended to

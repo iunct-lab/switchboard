@@ -39,8 +39,8 @@ export interface SmokeDeps {
   /** A new empty directory for the temporary HOME, and its removal. */
   tmp: () => string;
   remove: (dir: string) => void;
-  /** A directory to use as the whole PATH: every command of this machine but git. */
-  gitlessPath: (dir: string) => string;
+  /** A directory to use as the whole PATH: every command of this machine but git (and the commands in `without`). */
+  gitlessPath: (dir: string, without?: string[]) => string;
   /** The path `command` resolves to on `path`, or null. */
   which: (command: string, path: string) => string | null;
   freePort: () => Promise<number>;
@@ -59,10 +59,10 @@ export const GITHUB_API = "https://api.github.com";
 export const resultLine = (r: Pick<SmokeResult, "ok" | "tag" | "sha">): string => `[release-smoke] ${r.ok ? "pass" : "fail"} ${r.tag ?? "-"} ${r.sha ?? "-"}`;
 
 /**
- * Link every command on `path` into `dir` except git and its helpers (`git`, `git-*`), first directory first as PATH
- * resolves them, and return `dir`: a PATH on which this machine has no git.
+ * Link every command on `path` into `dir` except git and its helpers (`git`, `git-*`) and the names in `without`, first
+ * directory first as PATH resolves them, and return `dir`: a PATH on which this machine has no git.
  */
-export function gitlessPath(dir: string, path = process.env.PATH ?? ""): string {
+export function gitlessPath(dir: string, path = process.env.PATH ?? "", without: string[] = ["git"]): string {
   mkdirSync(dir, { recursive: true });
   for (const from of path.split(delimiter).filter(Boolean)) {
     let names: string[];
@@ -72,7 +72,7 @@ export function gitlessPath(dir: string, path = process.env.PATH ?? ""): string 
       continue; // a PATH entry that does not exist
     }
     for (const name of names) {
-      if (name === "git" || name.startsWith("git-") || existsSync(join(dir, name))) continue;
+      if (name === "git" || name.startsWith("git-") || without.includes(name) || existsSync(join(dir, name))) continue;
       try {
         if (statSync(join(from, name)).isFile()) symlinkSync(join(from, name), join(dir, name));
       } catch {
@@ -102,6 +102,8 @@ export async function smokeRelease(o: { repo: string; api?: string; waitMs?: num
       if (!r.ok) throw new Error(`GET ${url} returned ${r.status}`);
       return (await r.json()) as Record<string, unknown>;
     };
+    // Latest, which is also what the installer installs (a user's path). While `publicSync.prerelease` is on, the Release
+    // a sync just made is not Latest until release-check promotes it; the change that turns it on makes this follow it.
     const latest = (await json(`${api}/repos/${o.repo}/releases/latest`)).tag_name;
     if (typeof latest !== "string" || !TAG.test(latest)) return fail(`the latest Release of ${o.repo} is not a version tag: ${String(latest)}`);
     tag = latest;
@@ -309,7 +311,7 @@ export const realDeps = (): SmokeDeps => ({
     return dir;
   },
   remove: (dir) => rmSync(dir, { recursive: true, force: true }),
-  gitlessPath: (dir) => gitlessPath(dir),
+  gitlessPath: (dir, without) => gitlessPath(dir, process.env.PATH ?? "", without),
   which: (command, path) => Bun.which(command, { PATH: path }),
   async freePort() {
     const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });

@@ -205,7 +205,10 @@ test("start: a local workspace without a remote (localForge) gets local changes,
     expect(p).toContain("\`ops-kit job request review <変更> --change --as arbiter --prompt <指示> --out <出力>\`");
     expect(p).toContain("--head <枝> --base main");
     expect(p).toContain("Backlog-Task: <Task>");
-    for (const cmd of [`bun ${scripts}scripts/local-ci.ts --change <変更>`, `bun ${scripts}scripts/merge-gate.ts --change <変更>`, `bun ${scripts}scripts/local-merge.ts <変更>`]) expect(p).toContain(cmd);
+    // local CI is asked of the app as a job: the gate counts only the job's record, not a run from the shell
+    expect(p).toContain("\`ops-kit job request local-ci <変更> --change\`");
+    expect(p).not.toContain("scripts/local-ci.ts --change");
+    for (const cmd of [`bun ${scripts}scripts/merge-gate.ts --change <変更>`, `bun ${scripts}scripts/local-merge.ts <変更>`]) expect(p).toContain(cmd);
     expect(p).not.toContain("PR・レビュー・CI・マージはリポジトリの PR で行う");
     expect(p).not.toContain("release-tag.ts");
     expect(p).not.toContain("rollback-pr.ts");

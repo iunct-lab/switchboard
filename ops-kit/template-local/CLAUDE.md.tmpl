@@ -48,7 +48,7 @@ __TEST_ONE__
 ## マージ判定とローカル CI
 
 - 変更の本文のひな形: `docs/change-template.md`（1 行目 `Backlog-Task: <Task>`。閉じるキーワードと `#<番号>` は書かない）
-- ローカル CI: `bun <エージェント管理アプリのチェックアウト>/scripts/local-ci.ts --change <変更>`
+- ローカル CI: アプリの仕事として `ops-kit job request local-ci <変更> --change` で頼む（マージ判定が CI の合格と数えるのは仕事の記録だけで、シェルで回した結果は数えない）
 - マージ判定: `bun <エージェント管理アプリのチェックアウト>/scripts/merge-gate.ts --change <変更>`
 - マージ: `bun <エージェント管理アプリのチェックアウト>/scripts/local-merge.ts <変更>`（判定をもう一度通し、Task も閉じる）
 - どれも `--repo` は付けない。リモートが無いので `gh pr` / `git push` / リリースタグは使わない

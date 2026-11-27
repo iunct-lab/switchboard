@@ -74,6 +74,7 @@ Placed at the repository root. The type is in `src/config.ts` (an invalid key or
 | `publicSync.exclude` | What `include` does not send (things meaningful only in the private repository; directories end with `/`) |
 | `publicSync.rewrite` | Files in which the private repository name in the text is rewritten to the public repository name (for example the vulnerability report destination) |
 | `publicSync.versioning` | Optional. `"independent"` is an independent public version (below). If omitted, the development tag is used as the public version as is |
+| `publicSync.prerelease` | Optional. `true` creates the public Release as a prerelease, so it is not Latest; something else (a check of the public repository: `gh release edit --prerelease=false --latest`) must promote it |
 | `publicSync.serviceUsers` | Optional. Names of OS users that are not people (for example the service user of the host template, whose home appears in a document). The home-path check on the name of the user running the sync does not look at these names |
 | `publicSync.allowRefs` | Optional. Paths removed by `exclude` that a published document may name (references kept on purpose; for example `private/CLAUDE.md`, which someone who forks places). Listing a path that `exclude` does not remove stops with a configuration error |
 

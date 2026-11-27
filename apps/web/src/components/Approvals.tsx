@@ -12,7 +12,7 @@ import { stallRows } from "../queueStall.ts";
 import { WorkspaceTag } from "./ui.tsx";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
-import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitChoices, waitersLine, waitGroups, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
+import { answerButtons, answeredHere, cardState, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitChoices, waitersLine, waitGroups, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
 
 /** The 「次回も使う」 form of a card: the range, target, conditions and expiry, and what would be saved. */
 function PolicyDetails(props: { ask: Ask; busy: boolean; form: PolicyForm; setForm: Dispatch<SetStateAction<PolicyForm | null>>; policy: PolicyInput | undefined; answerText: string }) {
@@ -189,6 +189,7 @@ function AnswerButtons(props: { ask: Ask; busy: boolean; onAnswer: (a: AskAnswer
 function AskCard(props: { ask: Ask; was: Answered | undefined; waitAnswer?: "stop" | "keep"; live: boolean; liveHead: ReactNode; sending: boolean; standalone: boolean; onAnswer: (a: AskAnswer, policy?: PolicyInput) => void; onOpenTask: (id: string) => void }) {
   const { ask: x, was, live, sending } = props;
   const resume = resumeLabel(x);
+  const state = cardState(x, props.waitAnswer);
   const parts = askCardParts(x);
   const taskId = x.source.taskId ?? x.task?.id ?? null;
   // a question no button answers (a stop that takes no answer, a question tool's question without options) is answered in the Task's conversation
@@ -197,7 +198,7 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; waitAnswer?: "sto
     <section className={`ask${props.standalone ? " card" : " ask-item"}${live ? " approval" : ""}`} data-ask={x.id}>
       <div className="ask-tags">
         <span className={`badge ask-kind ask-kind-${x.kind}`}>{KIND_LABEL[x.kind]}</span>
-        <span className={`badge ask-state ask-state-${x.state}`}>{STATE_LABEL[x.state]}</span>
+        <span className={`badge ask-state ask-state-${state}`}>{STATE_LABEL[state]}</span>
         {isQuick(x) && <span className="badge ask-quick">{t(m.quick)}</span>}
         {waitersLine(x) && <span className="badge ask-unblocks">{waitersLine(x)}</span>}
       </div>

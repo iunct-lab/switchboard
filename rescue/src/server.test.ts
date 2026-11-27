@@ -1,14 +1,15 @@
 // test-reads: rescue/src/ rescue/install.ts rescue/package.json packages/core/src/promotion-log.ts
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, createHmac, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
-import type { Ctx } from "./promote.ts";
+import { snapshotNeeds, type Ctx } from "./promote.ts";
 import { buildRelease, currentOf, listReleases, readHistory, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
-import { sweepTmp } from "./tmp.ts";
+import { DISK_FLOOR_BYTES, sweepTmp } from "./tmp.ts";
 import { Supervisor } from "./supervisor.ts";
 
 let f: Awaited<ReturnType<typeof makeRepo>>;
@@ -703,9 +704,9 @@ test("a daemon that does not answer gives an empty list, not an error", async ()
 
 test("tmp: sweep — without a press, the old working directory goes on the interval and GET /api/tmp says so; another app's kind only where /tmp is Switchboard's; local CI's leftovers everywhere, the caches and docker only there, and the root disk's usage", async () => {
   type Sweep = { at: number; removed: number; freedBytes: number };
-  type Answer = { owned: boolean; disk: { used: number; total: number; percent: number }; sweeps: Record<"tmp" | "work" | "cache" | "docker", Sweep | null> };
+  type Answer = { owned: boolean; disk: { used: number; total: number; percent: number }; sweeps: Record<"tmp" | "work" | "cache" | "docker" | "reclaim", Sweep | null> };
   const before = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as Answer & { sweep?: unknown };
-  expect(before.sweeps).toEqual({ tmp: null, work: null, cache: null, docker: null }); // this server has the default 30 minutes
+  expect(before.sweeps).toEqual({ tmp: null, work: null, cache: null, docker: null, reclaim: null }); // this server has the default 30 minutes
   expect(before.sweep).toBeUndefined();
   expect(before.owned).toBe(false);
   expect(before.disk.total).toBeGreaterThan(0);
@@ -727,7 +728,7 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
     // interval well over that (and over the 50 ms polling) the first sweep's answer is read before a later, empty one
     // replaces it. 4 s was too close (ordering, a flake seen on a busy host): with /proc walks of 0.8 s a sweep outlasted it and the
     // second sweep's empty answer was read
-    const dockerSh = async (argv: string[]) => (docker.push(argv), "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n");
+    const dockerSh = async (argv: string[]) => (docker.push(argv), argv[2] === "ls" ? "" : "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n"); // no stopped container
     const fast = startRescue(ctx, { port: 0, tmpDir: root, cacheDir: join(home, ".cache"), home, dockerSh, tmpSweepMs: 8000, tmpOwned });
     try {
       const get = () => fetch(`http://127.0.0.1:${fast.server.port}/api/tmp`).then((r) => r.json()) as Promise<Answer>;
@@ -763,13 +764,173 @@ test("tmp: sweep — without a press, the old working directory goes on the inte
     expect(owned.sweeps.cache!.removed).toBe(1);
     expect(readdirSync(join(home, ".cache/uv/archive-v0"))).toEqual([]);
     expect(owned.sweeps.docker).toMatchObject({ removed: 1, freedBytes: 2000 });
-    expect(docker[0]).toEqual(["docker", "image", "prune", "-a", "-f", "--filter", "until=24h"]);
+    expect(docker[0]).toEqual(["docker", "container", "ls", "-a", "--filter", "status=exited", "--format", "{{.ID}}"]);
+    expect(docker[1]).toEqual(["docker", "image", "prune", "-a", "-f", "--filter", "until=24h"]);
     expect(owned.owned).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
 }, 50_000); // load (a flake seen on a busy host): two sweeps in turn, each allowed its 20 s wait; 21 s failed on the old 20 s limit (docs/design/perf.md "Test flakiness")
+
+/** A Switchboard home (`<user home>/.switchboard`) with a database of some size, as the rescue reads the reserve from it. */
+function reserveHome() {
+  const user = mkdtempSync(join(tmpdir(), "sb-rescue-reserve-"));
+  const sb = join(user, ".switchboard");
+  mkdirSync(sb, { recursive: true });
+  const db = new Database(join(sb, "switchboard.db"));
+  db.exec("CREATE TABLE t (a TEXT)");
+  for (let i = 0; i < 50; i++) db.query("INSERT INTO t VALUES (?)").run("x".repeat(2000));
+  const reserve = snapshotNeeds(db);
+  db.close();
+  return { user, sb, reserve };
+}
+
+test("tmp: reserve — GET /api/tmp gives the reserve (what a snapshot of the database needs) and the target above it", async () => {
+  const { user, sb, reserve } = reserveHome();
+  const server = startRescue({ ...ctx, home: sb }, { port: 0, tmpDir: tmpRoot, cacheDir: join(user, ".cache"), home: user });
+  try {
+    const r = (await fetch(`http://127.0.0.1:${server.server.port}/api/tmp`).then((r) => r.json())) as { disk: { reserve: number; target: number } };
+    expect(r.disk.reserve).toBe(reserve);
+    expect(reserve).toBeGreaterThan(0);
+    expect(r.disk.target).toBe(reserve + 1024 ** 3);
+    expect(DISK_FLOOR_BYTES).toBe(1024 ** 3);
+  } finally {
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+});
+
+test("tmp: reserve — a database that cannot be read answers no reserve and no target, and GET /api/tmp still answers", async () => {
+  const { user, sb } = reserveHome();
+  writeFileSync(join(sb, "switchboard.db"), "not a database ".repeat(1000));
+  const server = startRescue({ ...ctx, home: sb }, { port: 0, tmpDir: tmpRoot, cacheDir: join(user, ".cache"), home: user });
+  try {
+    const r = await fetch(`http://127.0.0.1:${server.server.port}/api/tmp`);
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { disk: { reserve: unknown; target: unknown } }).disk).toMatchObject({ reserve: null, target: null });
+  } finally {
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+});
+
+test("tmp: reserve — at the target or above it, the sweeps run and the reclaim does not", async () => {
+  const { user, sb, reserve } = reserveHome();
+  const docker: string[][] = [];
+  const dockerSh = async (argv: string[]) => (docker.push(argv), "");
+  const server = startRescue({ ...ctx, home: sb }, { port: 0, tmpDir: mkdtempSync(join(tmpdir(), "sb-rescue-reserve-tmp-")), cacheDir: join(user, ".cache"), home: user, dockerSh, tmpOwned: true, tmpSweepMs: 2000, diskFree: () => reserve + DISK_FLOOR_BYTES });
+  try {
+    const r = (await until(async () => {
+      const a = (await fetch(`http://127.0.0.1:${server.server.port}/api/tmp`).then((r) => r.json())) as { sweeps: { docker: unknown; reclaim: unknown } };
+      return a.sweeps.docker ? a : null;
+    }, "the sweeps ran", 20_000)) as { sweeps: { reclaim: unknown } };
+    expect(r.sweeps.reclaim).toBeNull();
+    expect(docker.every((a) => a.includes("--filter"))).toBe(true); // only the age-based prune
+  } finally {
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("tmp: reserve — short of the target while an operation runs (a promotion's build installs into the caches), the reclaim waits", async () => {
+  const { user, sb, reserve } = reserveHome();
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const sup = { restart: () => held, stop: async () => {} } as unknown as Ctx["sup"];
+  const server = startRescue({ ...ctx, home: sb, sup }, { port: 0, tmpDir: mkdtempSync(join(tmpdir(), "sb-rescue-reserve-tmp-")), cacheDir: join(user, ".cache"), home: user, dockerSh: async () => "", tmpOwned: true, tmpSweepMs: 2000, diskFree: () => reserve });
+  const url = `http://127.0.0.1:${server.server.port}`;
+  try {
+    expect((await fetch(`${url}/api/restart`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: "{}" })).status).toBe(202);
+    const r = (await until(async () => {
+      const a = (await fetch(`${url}/api/tmp`).then((r) => r.json())) as { sweeps: { docker: unknown; reclaim: unknown } };
+      return a.sweeps.docker ? a : null;
+    }, "the sweeps ran", 20_000)) as { sweeps: { reclaim: unknown } };
+    expect(r.sweeps.reclaim).toBeNull();
+  } finally {
+    release();
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("tmp: sweep — the image prune fails while the container list answers: the docker row is not moved (no clean run shows)", async () => {
+  const { user, sb } = reserveHome();
+  let prunes = 0;
+  const dockerSh = async (argv: string[]) => {
+    if (argv[1] !== "image") return "";
+    prunes++;
+    throw new Error("docker image prune exited 1: fake failure");
+  };
+  const server = startRescue({ ...ctx, home: sb }, { port: 0, tmpDir: mkdtempSync(join(tmpdir(), "sb-rescue-row-tmp-")), cacheDir: join(user, ".cache"), home: user, dockerSh, tmpOwned: true, tmpSweepMs: 1000 });
+  try {
+    const a = (await until(async () => {
+      const r = (await fetch(`http://127.0.0.1:${server.server.port}/api/tmp`).then((r) => r.json())) as { sweeps: { cache: unknown; docker: unknown } };
+      return prunes >= 2 && r.sweeps.cache ? r : null; // two timer rounds, each with the cache row written
+    }, "the sweeps ran", 20_000)) as { sweeps: { docker: unknown } };
+    expect(a.sweeps.docker).toBeNull();
+  } finally {
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("tmp: reserve — short of the target, one sweep takes back only what can be made again: the old uv entry goes; the one in use, the transcripts, the database, the snapshots, the releases and a Task's worktree stay", async () => {
+  const { user, sb, reserve } = reserveHome();
+  const hourAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000; // past RECLAIM_STALE_MS
+  const put = (dir: string, name: string, at = hourAgo) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "f"), "x".repeat(4096));
+    utimesSync(join(dir, name, "f"), at, at);
+    utimesSync(join(dir, name), at, at);
+  };
+  const uv = join(user, ".cache/uv/archive-v0");
+  put(uv, "old1");
+  put(uv, "busy1");
+  mkdirSync(join(user, ".claude/projects/p"), { recursive: true });
+  writeFileSync(join(user, ".claude/projects/p/s.jsonl"), "{}\n");
+  mkdirSync(join(sb, "snapshots"), { recursive: true });
+  writeFileSync(join(sb, "snapshots/2026-01-01-x.db.gz"), "snap");
+  mkdirSync(join(sb, "releases/abc123"), { recursive: true });
+  writeFileSync(join(sb, "releases/abc123/f"), "release");
+  put(join(user, "repos"), "proj-topic");
+  put(join(user, ".npm"), "_cacache"); // the npm cache goes too
+  const busy = Bun.spawn(["sleep", "60"], { cwd: join(uv, "busy1") });
+  const docker: string[][] = [];
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString();
+  const dockerSh = async (argv: string[]) => {
+    docker.push(argv);
+    if (argv[2] === "ls") return "stale\nlately\n"; // two stopped containers
+    if (argv[2] === "inspect") return argv[5] === "stale" ? hoursAgo(25) : hoursAgo(1);
+    if (argv[2] === "rm") return argv[3]!;
+    return "Deleted Images:\ndeleted: sha256:aaa\n\nTotal reclaimed space: 2kB\n";
+  };
+  const asked: number[] = [];
+  // the free space is faked below the target; the reclaim, the sweeps and sb-rescue are the real ones
+  const server = startRescue({ ...ctx, home: sb }, { port: 0, tmpDir: mkdtempSync(join(tmpdir(), "sb-rescue-reserve-tmp-")), cacheDir: join(user, ".cache"), home: user, dockerSh, tmpOwned: true, tmpSweepMs: 8000, diskFree: () => (asked.push(reserve), reserve + DISK_FLOOR_BYTES - 1) });
+  try {
+    const r = (await until(async () => {
+      const a = (await fetch(`http://127.0.0.1:${server.server.port}/api/tmp`).then((r) => r.json())) as { sweeps: { reclaim: { removed: number } | null } };
+      return a.sweeps.reclaim ? a : null;
+    }, "the reclaim ran", 20_000)) as { sweeps: { reclaim: { removed: number } } };
+    expect(asked.length).toBeGreaterThan(0);
+    expect(r.sweeps.reclaim.removed).toBe(4); // old1, the npm cache, the container stopped 25 hours ago and the one docker image
+    expect([...new Set(docker.filter((a) => a[2] === "rm").map((a) => a[3]))]).toEqual(["stale"]); // the one stopped an hour ago stays (the fake lists both on every pass)
+    expect(existsSync(join(user, ".npm/_cacache"))).toBe(false);
+    expect(readdirSync(uv)).toEqual(["busy1"]);
+    expect(docker.at(-1)).toEqual(["docker", "image", "prune", "-a", "-f"]); // no age
+    expect(readFileSync(join(user, ".claude/projects/p/s.jsonl"), "utf8")).toBe("{}\n");
+    expect(existsSync(join(sb, "switchboard.db"))).toBe(true);
+    expect(readdirSync(join(sb, "snapshots"))).toEqual(["2026-01-01-x.db.gz"]);
+    expect(readdirSync(join(sb, "releases/abc123"))).toEqual(["f"]);
+    expect(readdirSync(join(user, "repos/proj-topic"))).toEqual(["f"]);
+  } finally {
+    busy.kill();
+    await busy.exited;
+    await server.stop();
+    rmSync(user, { recursive: true, force: true });
+  }
+}, 50_000);
 
 test("tmp: GET /api/tmp shows the usage and the entries; POST /api/tmp/clean removes only the old working directory", async () => {
   const r = (await fetch(`${base}/api/tmp`).then((r) => r.json())) as { usage: { total: number; percent: number }; entries: Array<{ name: string; removable: boolean }>; cleanable: { names: string[]; bytes: number } };

@@ -49,7 +49,8 @@ The instance role, and the boundary that caps every role of the stack, allow `be
 model needs no deploy. Codex reaches the OpenAI models through Bedrock Mantle rather than `InvokeModel`, so they also
 allow `bedrock-mantle:CreateInference` on the account's projects in any region: an OpenAI model is offered in its own
 regions, which need not include the stack's, so the region set for Codex must be one that offers the model. Key creation and any other Bedrock action are not allowed. The model list on the settings screen shows
-the saved model list (else the adapter's own) by Bedrock ids, and a model with no Bedrock id is left out. The list is
+the saved model list (else the adapter's own) by Bedrock ids; a model with no Bedrock id is left out, and when two saved
+models turn into the same Bedrock id only the first is shown. The list is
 kept once, in the model choices: it is edited there under its own ids, and the daemon turns it into Bedrock ids while the
 runner is on Bedrock. What the account can call is decided by IAM.
 

@@ -62,6 +62,12 @@ export const bedrockOf = (sc: Pick<ServerContext, "adapterMap" | "settings">, ru
 // runner's last status check reported (a Claude account or an Anthropic Console one). undefined = not known.
 export const loginKindOf = (sc: Pick<ServerContext, "bedrockTasks" | "detected">, runner: RunnerId, taskId?: string): LoginKind | undefined => (taskId !== undefined && sc.bedrockTasks.has(taskId) ? "bedrock" : sc.detected.find((d) => d.adapter.id === runner)?.info.loginKind);
 
+// The saved list by Bedrock ids: a model with none there is left out, and a later one that maps to an id already listed is dropped
+const bedrockModels = (listed: RunnerInfo["models"], toBedrock: (m: RunnerInfo["models"][number]) => RunnerInfo["models"][number] | null): RunnerInfo["models"] => {
+  const seen = new Set<string>();
+  return listed.map(toBedrock).filter((m): m is RunnerInfo["models"][number] => m !== null && !seen.has(m.value) && !!seen.add(m.value));
+};
+
 export const runnerInfo = (sc: Pick<ServerContext, "detected" | "bedrockOf" | "bedrockTasks" | "db" | "loginExpired" | "settings" | "savedAutoResume" | "savedModels" | "savedDefaultMode">): RunnerInfo[] =>
   sc.detected.map(({ adapter, info }) => {
     const bedrock = sc.bedrockOf(adapter.id);
@@ -76,7 +82,7 @@ export const runnerInfo = (sc: Pick<ServerContext, "detected" | "bedrockOf" | "b
     const forks = adapter.forks === true && versionAtLeast(info.version, adapter.forkMinVersion);
     // the one list to edit, and on Bedrock the same list by Bedrock ids (a model with none there is left out)
     const listed = sc.savedModels(adapter.id) ?? adapter.models ?? [];
-    const base = { ...info, forks, login, loginKind, bedrockFrom, ...(bedrockRunning ? { bedrockRunning } : {}), loginExpiresAt, bedrockAvailable: adapter.bedrockModel !== undefined, defaultModel: sc.settings().defaultModel[adapter.id], defaultEffort: sc.settings().defaultEffort[adapter.id], subagentModel: sc.settings().subagentModel[adapter.id], subagents: adapter.id === "claude" ? true : undefined, autoResume: sc.savedAutoResume(adapter.id), models: bedrock && adapter.bedrockModel ? listed.map(adapter.bedrockModel).filter((m) => m !== null) : listed, ...(bedrock ? { listModels: listed } : {}), cliDefaultModel: adapter.cliDefaultModel?.() };
+    const base = { ...info, forks, login, loginKind, bedrockFrom, ...(bedrockRunning ? { bedrockRunning } : {}), loginExpiresAt, bedrockAvailable: adapter.bedrockModel !== undefined, defaultModel: sc.settings().defaultModel[adapter.id], defaultEffort: sc.settings().defaultEffort[adapter.id], subagentModel: sc.settings().subagentModel[adapter.id], subagents: adapter.id === "claude" ? true : undefined, autoResume: sc.savedAutoResume(adapter.id), models: bedrock && adapter.bedrockModel ? bedrockModels(listed, adapter.bedrockModel) : listed, ...(bedrock ? { listModels: listed } : {}), cliDefaultModel: adapter.cliDefaultModel?.() };
     if (!info.permissionModes.length) return base;
     const saved = sc.savedDefaultMode(adapter.id);
     const valid = saved !== undefined && info.permissionModes.some((m) => m.value === saved);

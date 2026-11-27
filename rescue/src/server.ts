@@ -7,19 +7,20 @@
  * Starter's sb_recent); the token and loopback do not.
  * /tmp is read only on request (GET /api/tmp, not in /api/status) and its clean answers 200 at once, outside `operate`.
  * Every 30 minutes sb-rescue also cleans it by itself, with the same judgement as the button, and with it local CI's leftovers
- * under ~/.cache and, on a machine of Switchboard's own, uv's and bun's caches and docker's unused images. GET /api/tmp
+ * under ~/.cache and, on a machine of Switchboard's own, uv's, bun's and npm's caches, containers stopped over a day ago and
+ * docker's unused images; short of free space, also what `reclaim` takes back. GET /api/tmp
  * says how full the root disk is (`disk`) and when each kind was last cleaned (`sweeps`).
  */
 import { createPublicKey, verify } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { RescueAgent } from "./agent.ts";
 import page from "./page.html" with { type: "text" };
 import { diffTrees, extractTarball, fetchTarball, latestRelease, shaOfTag } from "./github-release.ts";
-import { checkDaemon, holdHeavy, listSnapshots, promote, restoreDb, rollback, switchesWithoutRestart, tasksThatStop, type Ctx, type HeavyHold } from "./promote.ts";
-import { sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
-import { cleanTmp, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
+import { checkDaemon, diskReserve, holdHeavy, listSnapshots, promote, restoreDb, rollback, switchesWithoutRestart, tasksThatStop, type Ctx, type HeavyHold } from "./promote.ts";
+import { reclaim, sweepCaches, sweepCacheWork, sweepDocker, sweepNpm, sweepStoppedContainers } from "./cache.ts";
+import { cleanTmp, diskTarget, diskUsage, scanTmp, STALE_CHOICES_MS, STALE_MS, SWEEP_MS, sweepTmp, type TmpJudge, type TmpSweep } from "./tmp.ts";
 import { appendHistory, currentOf, listReleases, previousOf, readHistory, releasesDir, resolveCommit, run } from "./releases.ts";
 
 /** The tag a release was built from, or null (built from a checkout, or the file is unreadable). */
@@ -126,15 +127,18 @@ export interface RescueOptions {
   tmpDir?: string;
   /**
    * The machine is Switchboard's alone (SWITCHBOARD_RESCUE_OWNS_TMP=1, the cloud host): /tmp's clean also takes any mktemp directory
-   * and cache, and the automatic clean also takes uv's and bun's caches and the images no docker container uses.
+   * and cache, and the automatic clean also takes uv's, bun's and npm's caches, containers stopped over a day ago and the images no docker
+   * container uses.
    */
   tmpOwned?: boolean;
   /** Where local CI leaves its working directories and logs, swept with /tmp; tests pass a fake. Default ~/.cache. */
   cacheDir?: string;
-  /** Whose uv and bun caches the automatic clean takes on a machine of Switchboard's own; tests pass a fake. Default homedir(). */
+  /** Whose uv, bun and npm caches the automatic clean takes on a machine of Switchboard's own; tests pass a fake. Default homedir(). */
   home?: string;
   /** Runs the docker prune of the automatic clean; tests pass a fake. Default: the real docker. */
   dockerSh?: (argv: string[]) => Promise<string>;
+  /** Free bytes on the root file system (tests fake it; the default reads statfs). */
+  diskFree?: () => number;
   /** The interval of the automatic /tmp clean; tests shorten it. Default SWEEP_MS. */
   tmpSweepMs?: number;
 }
@@ -272,7 +276,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
   // not at start: scripts/rescue-e2e.ts starts the bundle on the host's real /tmp
   const cacheDir = o.cacheDir ?? join(homedir(), ".cache");
   const home = o.home ?? homedir();
-  const lastSweeps: Record<"tmp" | "work" | "cache" | "docker", TmpSweep | null> = { tmp: null, work: null, cache: null, docker: null };
+  const lastSweeps: Record<"tmp" | "work" | "cache" | "docker" | "reclaim", TmpSweep | null> = { tmp: null, work: null, cache: null, docker: null, reclaim: null };
+  const diskFree = o.diskFree ?? (() => { const f = statfsSync("/"); return f.bavail * f.bsize; });
   const sweepTimer = setInterval(async () => {
     try {
       lastSweeps.tmp = sweepTmp(tmpDir, tmpJudge);
@@ -285,15 +290,31 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
       console.error("cache sweep failed:", e);
     }
     if (!tmpJudge.owned) return; // the caches and docker are shared with the user's other apps
+    // each kind in its own try: one that fails does not stop the next. A pair shares its row of `sweeps`, which moves only
+    // when both kinds ran: the page shows a row's time as the last clean, so a failed kind keeps the row it had
+    const both = (a: TmpSweep | null, b: TmpSweep | null, kept: TmpSweep | null): TmpSweep | null =>
+      a && b ? { at: a.at, removed: a.removed + b.removed, freedBytes: a.freedBytes + b.freedBytes, skipped: a.skipped + b.skipped } : kept;
+    const one = async (what: string, sweep: () => TmpSweep | Promise<TmpSweep>): Promise<TmpSweep | null> => {
+      try {
+        return await sweep();
+      } catch (e) {
+        console.error(`${what} sweep failed:`, e);
+        return null;
+      }
+    };
+    const caches = await one("uv / bun cache", () => sweepCaches(home, tmpJudge));
+    const npm = await one("npm cache", () => sweepNpm(home, tmpJudge));
+    lastSweeps.cache = both(caches, npm, lastSweeps.cache);
+    const stopped = await one("stopped container", () => sweepStoppedContainers(tmpJudge, o.dockerSh)); // before the images: the ones these held go in the same prune
+    const images = await one("docker", () => sweepDocker(tmpJudge, o.dockerSh));
+    lastSweeps.docker = both(stopped, images, lastSweeps.docker);
     try {
-      lastSweeps.cache = sweepCaches(home, tmpJudge);
+      // short of the reserve (what a database snapshot needs) and the floor: take back what can be made again, not waiting for its age
+      const target = diskTarget(diskReserve(ctx.home));
+      // not under a promotion: its build installs into the caches
+      if (target !== null && !busy && diskFree() < target) lastSweeps.reclaim = await reclaim(home, cacheDir, tmpJudge, o.dockerSh);
     } catch (e) {
-      console.error("uv / bun cache sweep failed:", e);
-    }
-    try {
-      lastSweeps.docker = await sweepDocker(tmpJudge, o.dockerSh);
-    } catch (e) {
-      console.error("docker sweep failed:", e);
+      console.error("disk reclaim failed:", e);
     }
   }, o.tmpSweepMs ?? SWEEP_MS);
   const authRequired = !isLoopback(host);
@@ -421,7 +442,8 @@ export function startRescue(ctx: Ctx, o: RescueOptions) {
         // what a press of 消す takes: the owner's age (one of STALE_CHOICES_MS; any other value is the default), not the sweep's kinds
         const asked = Number(url.searchParams.get("staleMs"));
         const staleMs = STALE_CHOICES_MS.includes(asked) ? asked : STALE_MS;
-        return Response.json({ ...scanTmp(tmpDir, tmpJudge, Date.now(), { kind: "manual", staleMs }), staleMs, disk: diskUsage("/"), sweeps: lastSweeps });
+        const reserve = diskReserve(ctx.home);
+        return Response.json({ ...scanTmp(tmpDir, tmpJudge, Date.now(), { kind: "manual", staleMs }), staleMs, disk: { ...diskUsage("/"), reserve, target: diskTarget(reserve) }, sweeps: lastSweeps });
       }
       if (req.method !== "POST") return Response.json({ error: "not found" }, { status: 404 });
       if (auth === "cookie" && !recentCookieOk(req, o.sessionPublicKey)) return Response.json({ error: "操作の前にパスキーで確かめてください", reason: "recent" }, { status: 401 });

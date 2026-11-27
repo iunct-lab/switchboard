@@ -6,7 +6,7 @@ import { AnswerArea } from "./components/Approvals.tsx";
 import { t } from "./i18n.ts";
 import { task } from "./i18n/task.ts";
 import { confirmable, settledCount } from "./asks.ts";
-import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, waitersLine, waitingLine, workspaceChips, workspaceSections, waitChoices, waitGroups, WAIT_KIND_LABEL, type Answered } from "./asks.ts";
+import { answerButtons, answerRoute, choiceParts, askCardParts, batchLines, questionHead, replyPreview, replyTarget, hiddenByBatches, grantOf, taskAsks, withoutGrant, appliedLine, askFacts, initialPolicyForm, policyInput, policySummary, broadTarget, previousLines, scopeLabel, blockerLines, groupAsks, isQuick, keptAnswers, KIND_LABEL, quickRows, answeredHere, answeredInRow, askRows, rowKey, pruneAnswered, resumeLabel, UNKNOWN_WORKSPACE, issueOpenHref, unblockLinks, unblocksLine, waitersLine, waitingLine, workspaceChips, workspaceSections, waitChoices, waitGroups, WAIT_KIND_LABEL, cardState, type Answered } from "./asks.ts";
 
 const ask = (over: Partial<Ask>): Ask => ({
   id: "a", kind: "decision", needs: "person", state: "open", at: 1, changedAt: 1, workspace: null, pbi: null, issue: null, task: null, reason: null, question: null, choices: [], grants: [], grant: null, recommendation: null, next: null,
@@ -682,4 +682,12 @@ test("waitGroups: a wait's row has 待ち続ける and 止める, sending the qu
   const ws = { id: "w", name: "alpha" };
   const t1 = { id: "t1", title: "Task 1" };
   expect(workspaceChips([waitAsk("d1", "depends", { workspace: ws, task: t1 }), waitAsk("j1", "job", { workspace: ws, task: t1 }), ask({ id: "q", kind: "check", workspace: ws, task: t1, question: "q" })])).toEqual([{ key: "w", name: "alpha", count: 3 }]);
+});
+
+test("cardState: a wait answered from its card (keep or stop) shows answered, not 未回答; an unanswered card keeps its own state", () => {
+  const wait = ask({ kind: "wait", state: "open" });
+  expect(cardState(wait, "keep")).toBe("answered");
+  expect(cardState(wait, "stop")).toBe("answered");
+  expect(cardState(wait, undefined)).toBe("open");
+  expect(cardState(ask({ kind: "wait", state: "held" }), undefined)).toBe("held");
 });

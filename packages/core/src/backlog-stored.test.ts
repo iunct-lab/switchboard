@@ -257,6 +257,19 @@ describe("pickNext prerequisite", () => {
     expect(await both(ws)).toEqual({ daemon: [{ number: 2, state: "met", confirming: true }], guard: { state: "met", confirming: true } });
   });
 
+  test("a child of the prerequisite kept here and not sent yet keeps it from being left with only the user's check, for the daemon and the parallel guard alike", async () => {
+    const left = "## 到達点 / 受け入れ条件\n- [x] 作る\n- [ ] 目で見る（利用者確認: 画面を見る）";
+    const ws = imported([...pbi(1, "P0", "**前提**: #2", { subIssues: [10] }), issue(10, ["type:task"]), issue(2, ["type:pbi"], { body: left, subIssues: [20] }), issue(20, ["type:task"], { state: "CLOSED" })]);
+    const both = async () => ({
+      daemon: readStoredBacklog(db, ws).items.find((i) => i.number === 1)!.prereqs.map(({ state, confirming }) => ({ state, confirming })),
+      guard: prereqOf(await storedMaterial(readStoredRecords(db, ws)!, 10).target(2), "done", () => null),
+    });
+    expect(await both()).toEqual({ daemon: [{ state: "met", confirming: true }], guard: { state: "met", confirming: true } });
+    // an open child made here, not numbered yet: the prerequisite still has a Task to do, on both sides
+    db.applyBacklogEdit(SOURCE, { records: [{ objectKind: "issue", externalId: "local:L9", local: { ...issue(0, ["type:task"], { parent: 2 }).remote!, title: "child", url: "" } }], operations: [{ issue: "local:L9", targetKind: "issue", target: "local:L9", kind: "create", payload: { title: "child", parent: 2 } }] }, 1);
+    expect(await both()).toEqual({ daemon: [{ state: "pending", confirming: false }], guard: { state: "pending", confirming: false } });
+  });
+
   test("mergePrereqs: the entry kept is the one that holds the PBI most (a cycle, else one not met), with every naming Task", () => {
     const p = (state: "met" | "pending" | "cycle", via: number[], need: "done" | "release" = "done") => ({ number: 7, kind: "pr" as const, need, state, via, confirming: false });
     expect(mergePrereqs([p("met", []), p("pending", [11], "release"), p("met", [10])])).toEqual([p("pending", [10, 11], "release")]);

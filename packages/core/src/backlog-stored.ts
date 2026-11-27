@@ -178,7 +178,7 @@ export function readStoredBacklog(db: Db, ws: Pick<BacklogWorkspace, "id" | "nam
   }
   const unread = (n: number) => readOf.get(n)?.fetchState !== "fetched";
   for (const n of issues.keys()) {
-    const t = storedIssueTarget(n, issues, unread);
+    const t = storedIssueTarget(n, issues, unread, (m) => waitingChildren.get(m) ?? []);
     if (t) targets.set(n, t);
   }
   for (const c of comments.values()) c.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -504,9 +504,10 @@ export function readStoredRecords(db: Db, ws: Pick<BacklogWorkspace, "id" | "pat
   // knows it is a typed open Issue it cannot judge (unread), not one that does not exist
   const unread = db.listBacklogRecords(source, "issue").flatMap((r) => (r.fetchState !== "fetched" && (r.remote as BacklogIssueData | null)?.number ? [r.remote as BacklogIssueData] : []));
   const issues = records.flatMap((r) => (r.objectKind === "issue" && r.remote && r.remote.number > 0 ? [r.remote] : []));
+  const waiting = waitingChildrenOf(records);
   return {
     workspaceId: ws.id, service: syncsGithub(source) ? source.service : "switchboard", repository: source.repository, project: source.project, fetchedAt, top, shared: sharedFilesOf(ws.path, workspaceConfigPath(ws, ws.path) ?? CONFIG_FILE),
-    issues: [...issues, ...unread.filter((u) => !issues.some((i) => i.number === u.number))].map((i) => ({ ...i, fields: fields.get(i.number) ?? null })),
+    issues: [...issues, ...unread.filter((u) => !issues.some((i) => i.number === u.number))].map((i) => ({ ...i, fields: fields.get(i.number) ?? null, waitingSubIssues: waiting.get(i.number) ?? [] })),
     unread: unread.map((i) => i.number),
     pulls: records.flatMap((r) => (r.objectKind === "pull-request" && r.remote ? [r.remote] : [])),
     comments: records.flatMap((r) => (r.objectKind === "comment" && r.remote ? [{ issue: r.remote.issue, body: r.remote.body, createdAt: r.remote.createdAt }] : [])).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),

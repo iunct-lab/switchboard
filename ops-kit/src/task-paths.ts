@@ -44,7 +44,8 @@ function touchLines(text: string): string {
 /**
  * The body without the places that name a file only as a reference: a section headed 検証 or 完了条件 (up to the next `#`-`###`
  * heading outside a code block), a line that starts with 設計チェック, the list under 古い前提を持つ既存の箇所 (the line and the indented or bulleted lines
- * after it), and a parenthesis on one line that says と同じ / を参照 / のとおり.
+ * after it), a parenthesis on one line that says と同じ / を参照 / のとおり, and the backticked names right before 触らない
+ * (`docs/design/` は触らない, `a.ts`・`b.ts` を触らない).
  */
 export function withoutReferences(body: string): string {
   const out: string[] = [];
@@ -75,7 +76,10 @@ export function withoutReferences(body: string): string {
     }
     out.push(line);
   }
-  return out.join("\n").replace(/[（(][^（）()\n]*(?:と同じ|を参照|のとおり)[^（）()\n]*[）)]/g, " ");
+  return out
+    .join("\n")
+    .replace(/[（(][^（）()\n]*(?:と同じ|を参照|のとおり)[^（）()\n]*[）)]/g, " ")
+    .replace(/(?:`[^`\n]*`[ \t]*[・、,]?[ \t]*)+[はをも]?[ \t]*触らない/g, " ");
 }
 
 /**
@@ -85,8 +89,8 @@ export function withoutReferences(body: string): string {
  * `path:line` loses the line; a directory keeps its trailing slash. For overlaps, a glob (`docs/design/*.md`, `docs/a-*.md`) is
  * not a path, nor the directory before its wildcard, and a backticked span that starts with a command word and has a space
  * (`bun test scripts/a.test.ts`) names what is checked or searched, not touched. Nor are the places `withoutReferences` drops: the
- * 検証 and 完了条件 sections, a 設計チェック line, the 古い前提を持つ既存の箇所 list, and a parenthesis that says と同じ / を参照 /
- * のとおり. `scope` (merge-gate's) keeps all of these, as before.
+ * 検証 and 完了条件 sections, a 設計チェック line, the 古い前提を持つ既存の箇所 list, a parenthesis that says と同じ / を参照 /
+ * のとおり, and the names right before 触らない. `scope` (merge-gate's) keeps all of these, as before.
  */
 export function pathsIn(body: string, top: { name: string; dir: boolean }[], { scope = false }: { scope?: boolean } = {}): string[] {
   const text = scope ? body : withoutReferences(body).replace(/`[^`\n]*`/g, (span) => (isCommand(span.slice(1, -1)) ? " " : span));

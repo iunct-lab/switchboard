@@ -248,6 +248,49 @@ describe("core daemon", () => {
     }
   });
 
+  test("Bedrock models drop a second option that maps to the same Bedrock id", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-dup-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    const claude = fakeAdapter(script, { models: ["claude-haiku-5-5"], bedrockModel: claudeBedrockModel, detect: () => ({ login: "ok", loginKind: "claude.ai" }) });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const run = () => fetch(`${b}/api/health`).then(j).then((x) => x.runners.find((r: { id: string }) => r.id === "claude"));
+    const values = (l: { value: string }[]) => l.map((m) => m.value);
+    try {
+      expect((await patch({ models: { claude: [{ value: "claude-haiku-4-5", label: "haiku" }, { value: "global.anthropic.claude-haiku-4-5-20251001-v1:0", label: "haiku bedrock" }] } })).status).toBe(200);
+      expect((await patch({ bedrock: { claude: { region: "ap-northeast-1" } } })).status).toBe(200);
+      const r = await run();
+      expect(values(r.models)).toEqual(["global.anthropic.claude-haiku-4-5-20251001-v1:0"]);
+      expect(values(r.listModels)).toEqual(["claude-haiku-4-5", "global.anthropic.claude-haiku-4-5-20251001-v1:0"]);
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  test("on Bedrock 実装's Task model is saved by its original id", async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-bedrock-taskmodel-"));
+    const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");
+    const claude = fakeAdapter(script, { models: ["claude-haiku-5-5"], bedrockModel: claudeBedrockModel, detect: () => ({ login: "ok", loginKind: "claude.ai" }) });
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [claude], { port: 0, gh: NO_GH });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    const patch = (body: unknown) => fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      expect((await patch({ bedrock: { claude: { region: "ap-northeast-1" } } })).status).toBe(200);
+      expect((await patch({ autoStart: { completeTaskModel: "claude-haiku-5-5" } })).status).toBe(200);
+      expect((await patch({ autoStart: { completeTaskModel: "global.anthropic.claude-haiku-5-5" } })).status).toBe(400);
+      const saved = async () => ((await fetch(`${b}/api/settings`).then((r) => r.json())) as { autoStart: { completeTaskModel?: string } }).autoStart.completeTaskModel;
+      expect(await saved()).toBe("claude-haiku-5-5");
+      // off Bedrock the same choice stays
+      expect((await patch({ bedrock: { claude: null } })).status).toBe(200);
+      expect(await saved()).toBe("claude-haiku-5-5");
+    } finally {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   test("runner default model: PATCH saves a model / effort per runner (undetected, no-model runner, empty, bad effort are 400), a Task made without them gets them, given ones win, none saved stays empty", async () => {
     const starts: StartOptions[] = [];
     const script = SCRIPT.filter((e) => e.t !== "permission.ask" && e.t !== "tool.call" && e.t !== "tool.result");

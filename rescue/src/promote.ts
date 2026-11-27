@@ -5,8 +5,7 @@
  * taken before each promotion is for the case where going back is not enough.
  */
 import { Database } from "bun:sqlite";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip, constants } from "node:zlib";
@@ -119,12 +118,35 @@ async function compressSnapshots(home: string): Promise<void> {
  * Room to ask for per byte of live data: the copy VACUUM INTO writes is that much (free pages are left out), and the gzip
  * written next to it while the copy is still there is about a quarter of it. There is no margin beyond that: a database
  * that compresses worse can still run out of disk in the gzip, which removes the copy and fails the snapshot.
+ * The daemon's `copyRoom` (packages/core/src/db.ts) is the same formula, kept in step by hand as this bundle does not import
+ * core; the root disk budget in docs/design/host-disk.md reserves this much.
  */
 const SNAPSHOT_ROOM = 1.25;
 /** What a snapshot needs on disk, from what the database holds now, not from the size of the host. */
 export function snapshotNeeds(db: Database): number {
+  return Math.ceil(liveBytes(db) * SNAPSHOT_ROOM);
+}
+/** The live pages of the database times the page size: what a whole copy of it (VACUUM INTO, or the candidate's unpacked one) takes. */
+export function liveBytes(db: Database): number {
   const n = (pragma: string) => (db.query(`PRAGMA ${pragma}`).get() as Record<string, number>)[pragma]!;
-  return Math.ceil((n("page_count") - n("freelist_count")) * n("page_size") * SNAPSHOT_ROOM);
+  return (n("page_count") - n("freelist_count")) * n("page_size");
+}
+/**
+ * What the next database snapshot needs, read from the live database without writing; null when there is none yet, or when it
+ * cannot be read (a damaged file is what the rescue page is for: its disk figures and clean buttons still answer).
+ */
+export function diskReserve(home: string): number | null {
+  if (!existsSync(dbPath(home))) return null;
+  let db: Database | null = null;
+  try {
+    db = new Database(dbPath(home), { readonly: true });
+    return snapshotNeeds(db);
+  } catch (e) {
+    console.error("disk reserve: the database cannot be read:", e);
+    return null;
+  } finally {
+    db?.close();
+  }
 }
 const freeOn = (dir: string) => {
   const s = statfsSync(dir);
@@ -309,24 +331,75 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-/** Boot the release on a spare port, a throwaway home and a copy of the snapshot. Null = it works. */
-async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, candidateMs: number): Promise<string | null> {
-  const home = mkdtempSync(join(tmpdir(), "sb-candidate-"));
+/** The candidate's throwaway home: on the disk under the sb-rescue home (the unpacked database is too big for a RAM temp folder). */
+const candidateDir = (home: string) => join(home, `candidate-${process.pid}`);
+
+/**
+ * Remove `candidate-<pid>` homes under `home` whose process is gone (a promotion killed halfway), and with `own` this process's
+ * too (only where no candidate of this process runs: one operation at a time); returns what was removed.
+ */
+export function sweepCandidates(home: string, own = false): string[] {
+  if (!existsSync(home)) return [];
+  const removed: string[] = [];
+  const stuck: string[] = [];
+  for (const name of readdirSync(home)) {
+    const pid = /^candidate-(\d+)$/.exec(name)?.[1];
+    if (!pid) continue;
+    if (!(own && Number(pid) === process.pid)) {
+      try {
+        process.kill(Number(pid), 0);
+        continue; // alive
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ESRCH") continue; // EPERM: alive, another user's
+      }
+    }
+    try {
+      rmSync(join(home, name), { recursive: true, force: true });
+      removed.push(join(home, name));
+    } catch (e) {
+      stuck.push(`${join(home, name)} (${(e as NodeJS.ErrnoException).code ?? e})`); // the others still go
+    }
+  }
+  if (stuck.length) throw new Error(`could not remove a leftover candidate home: ${stuck.join(", ")}`);
+  return removed;
+}
+
+/**
+ * Boot the release on a spare port, a throwaway home and a copy of the snapshot. Null = it works. The room for the unpacked
+ * database is checked before anything is unpacked: short of it, nothing is written and the reason says what was needed.
+ */
+export async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | null, candidateMs: number, freeBytes: (dir: string) => number = freeOn): Promise<string | null> {
+  sweepCandidates(ctx.home);
+  if (snapshot && existsSync(dbPath(ctx.home))) {
+    let need: number;
+    const live = new Database(dbPath(ctx.home), { readonly: true });
+    try {
+      need = liveBytes(live);
+    } finally {
+      live.close();
+    }
+    const free = freeBytes(ctx.home);
+    if (free < need) return `the candidate's database does not fit: needs ${mb(need)}, ${mb(free)} free`;
+  }
+  const home = candidateDir(ctx.home);
+  rmSync(home, { recursive: true, force: true }); // this pid's own leftover (a killed sb-rescue whose pid came back): one operation runs at a time
+  mkdirSync(home, { mode: 0o700 }); // it holds a whole copy of the database
   const dir = join(releasesDir(ctx.home), sha);
   let port: number;
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    if (snapshot) await transform(join(snapshotsDir(ctx.home), snapshot), dbPath(home), createGunzip());
+    if (snapshot) await transform(join(snapshotsDir(ctx.home), snapshot), join(home, "switchboard.db"), createGunzip()); // not dbPath: SWITCHBOARD_DB names the live database
     port = await freePort();
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-    Object.assign(env, { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_REPO_ROOT: ctx.source ? dir : ctx.repo, SWITCHBOARD_CANDIDATE: "1" });
+    // its Knowledge inside its home too: the home is no temp folder, so core would otherwise take the user's ~/Knowledge
+    Object.assign(env, { SWITCHBOARD_HOME: home, SWITCHBOARD_PORT: String(port), SWITCHBOARD_REPO_ROOT: ctx.source ? dir : ctx.repo, SWITCHBOARD_CANDIDATE: "1", SWITCHBOARD_KNOWLEDGE: join(home, "Knowledge") });
     delete env.SWITCHBOARD_DB;
     // sb-rescue's own secret for 作り直す: the candidate has no use for it, as supervisor.ts does for the daemon
     delete env.SWITCHBOARD_STARTER_TOKEN;
     proc = Bun.spawn([process.execPath, join(dir, "packages", "core", "src", "main.ts")], { cwd: dir, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   } catch (e) {
-    rmSync(home, { recursive: true, force: true }); // until the candidate runs, nothing else removes its home: a full temp folder must not keep one more each promotion
+    rmSync(home, { recursive: true, force: true }); // until the candidate runs, nothing else removes its home: a whole database copy must not stay on the disk
     throw e;
   }
   const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]).then(([o, e]) => (o + e).trim().slice(-1500));
@@ -451,6 +524,14 @@ export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, e
 
 /** `promote` once its heavy-process slot is held (`slot`; null = a promotion that takes none): the slot is given back as soon as the candidate has been checked. */
 async function promoteHeld(ctx: Ctx, rev: string, times: Required<Omit<PromoteTimes, "heavyWaitMs">>, expectSha: string | undefined, ifNoRestart: boolean, from: string | null, before: string | null, slot: HeavyHold | null): Promise<HistoryEntry> {
+  // first, before the build and the snapshot need room: a killed run's candidate home (a whole database copy), this process's
+  // own too (a restarted sb-rescue can have the same pid). One that cannot be removed is logged (the others still go), and the
+  // candidate's start meets it again and rejects the promotion
+  try {
+    sweepCandidates(ctx.home, true);
+  } catch (e) {
+    console.error("promote: a leftover candidate home could not be removed:", e);
+  }
   const { candidateMs, confirmMs, settleMs, webMs, readsMs } = times;
   let sha: string;
   try {

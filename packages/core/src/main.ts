@@ -104,8 +104,8 @@ if (cmd === "relocate") {
 
 // The first open of the database on a start moves its schema: when that changes it, a snapshot is taken first (the
 // rescue page's "restore the database" offers it), and a failure to take it stops the start. A promotion candidate takes
-// none: its database is a throwaway copy with nothing to restore, and its home is under the system temp directory,
-// often a small RAM-backed filesystem that a second full copy of the database can fill.
+// none: its database is a throwaway copy with nothing to restore, and a second full copy of it in its home (sb-rescue's
+// `candidate-<pid>`, which sb-rescue checks has room for one copy) would need room nobody reserved.
 // Before anything opens (and so creates) the database: only a HOME with no database yet starts with developSelf off.
 seedNewHome(cfg.dbPath);
 const migrationSnapshot = cfg.candidate ? null : await snapshotBeforeMigrate(cfg.dbPath, cfg.home);

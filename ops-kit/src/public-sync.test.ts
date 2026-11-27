@@ -697,6 +697,42 @@ describe("public-sync", () => {
     expect(sync(opts({ source: "v1.1.0" }), gh)).toContain("release: skipped (--target-url)");
   });
 
+  test("prerelease: the public Release is made with --prerelease only when the setting is on", () => {
+    const github = `https://github.com/${TARGET}.git`;
+    const released = new Set<string>();
+    const gh: Run = (cmd, o) => {
+      if (cmd[0] === "git") return run(cmd.map((a) => (a === github ? pub : a)), o);
+      if (cmd[1] !== "release") return run(cmd, o);
+      ghCalls.push(cmd);
+      if (cmd[2] === "create") released.add(cmd[3]!);
+      return { code: cmd[2] === "view" && !released.has(cmd[3]!) ? 1 : 0, out: "" };
+    };
+    const created = () => ghCalls.filter((g) => g[1] === "release" && g[2] === "create").splice(0);
+    sync(opts({ targetUrl: undefined }), gh);
+    write("README.md", "v2\n");
+    commit("feat: two (#3)");
+    sh(priv, "git", "tag", "v1.0.0");
+    sync(opts({ targetUrl: undefined, source: "v1.0.0", prerelease: true }), gh);
+    const on = created();
+    expect(on).toHaveLength(1);
+    expect(on[0]).toContain("--prerelease");
+    write("README.md", "v3\n");
+    commit("feat: three (#4)");
+    sh(priv, "git", "tag", "v1.1.0");
+    ghCalls.length = 0;
+    sync(opts({ targetUrl: undefined, source: "v1.1.0" }), gh);
+    const off = created();
+    expect(off).toHaveLength(1);
+    expect(off[0]).not.toContain("--prerelease");
+    const cfg = (publicSync: object) => {
+      const f = join(root, "ops.config.json");
+      writeFileSync(f, JSON.stringify({ publicSync }));
+      return f;
+    };
+    expect(loadPublicSync(cfg({ target: TARGET, prerelease: true })).prerelease).toBe(true);
+    expect(() => loadPublicSync(cfg({ target: TARGET, prerelease: "yes" }))).toThrow("publicSync.prerelease");
+  });
+
   test("a repository's own security policy under .github/ or docs/ is kept too: the kit's SECURITY.md is not added beside it", () => {
     sh(priv, "git", "rm", "-q", "SECURITY.md");
     for (const own of [".github/SECURITY.md", "docs/SECURITY.md"]) {

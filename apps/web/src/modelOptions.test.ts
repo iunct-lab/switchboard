@@ -46,4 +46,8 @@ describe("taskModelOptions", () => {
     expect(taskModelOptions(claude, "claude-haiku-4-5")).toHaveLength(3);
     expect(taskModelOptions(undefined, "")).toEqual([{ value: "", label: "Task ごと: 同じ" }]);
   });
+  test("taskModelOptions offers the original ids on Bedrock", () => {
+    const bedrock = { models: [{ value: "global.anthropic.claude-fable-5-1-v1:0", label: "Fable 5.1" }], listModels: [{ value: "claude-fable-5-1", label: "Fable 5.1" }] };
+    expect(taskModelOptions(bedrock, "").map((o) => o.value)).toEqual(["", "claude-fable-5-1"]);
+  });
 });

@@ -356,6 +356,15 @@ describe("lint", () => {
     expect((await lint(fakeGh([]), cfg, { records: recordsOf("ready-without-tasks"), withProject: false })).violations).toEqual((await lint(fakeGh([page("ready-without-tasks")]), cfg, { withProject: false, sleep: noSleep })).violations);
   });
 
+  test("lint from stored records: a child kept in the app and not sent yet counts as the PBI's Task", async () => {
+    const r = recordsOf("ready-without-tasks");
+    const before = (await lint(fakeGh([]), cfg, { records: r })).violations.filter((v) => v.message.includes("Task（sub-issue）が無い")).map((v) => v.issue);
+    expect(before).toContain(10);
+    const waiting = { ...r, issues: r.issues.map((i) => (i.number === 10 ? { ...i, waitingSubIssues: [{ localId: "L9", number: 0, title: "子", state: "OPEN" }] } : i)) };
+    const after = (await lint(fakeGh([]), cfg, { records: waiting })).violations.filter((v) => v.message.includes("Task（sub-issue）が無い")).map((v) => v.issue);
+    expect(after).toEqual(before.filter((n) => n !== 10));
+  });
+
   test("lint from stored records: an open Issue the last import did not read is a fetch error (exit 2), never a pass", async () => {
     const r = recordsOf("ok");
     await expect(lint(fakeGh([]), cfg, { records: { ...r, unread: [r.issues[0]!.number] } })).rejects.toThrow(LintFetchError);
@@ -400,6 +409,12 @@ describe("判断待ちの進め方の行", () => {
     expect(await run([{ body: ask(""), createdAt: after }])).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
     expect(await run([{ body: ask(""), createdAt: before }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
     expect((await run([{ body: ask("```\n**進め方**: 推奨で進める（種類: implementation-choice）\n```"), createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
+  });
+
+  test("only the heading `## 判断待ち` itself is an ask: another heading that starts with it is not read", async () => {
+    expect(await run([{ body: "## 判断待ちの取り下げ（2026-11-25）\n前の問いは取り下げる", createdAt: after }])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect((await run([{ body: "## 判断待ち \n**問い**: どちらか", createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
+    expect((await run([{ body: "## 判断待ち", createdAt: after }]))[0]).toContain("#11: ## 判断待ち");
   });
 
   test("a new 判断待ち that says 推奨で進める without the table's leave (no kind, a kind not in the table, a safety word) is a violation that says to stop and wait; one from before the rule, or replaced by a newer ask, is not reported", async () => {

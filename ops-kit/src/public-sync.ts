@@ -84,7 +84,7 @@ export type Run = (cmd: string[], opts?: { input?: string; env?: Record<string, 
  * `user`: the name of the OS user running the sync, looked for in paths (default `os.userInfo().username`);
  * `serviceUsers`: OS users that are no one's, not looked for. `host`: the host's AWS names and accounts (`hostAws()`), looked for in
  * the change. `adoptBaseline`: with `versioning`, give a published target without a version record its baseline (`releaseBaseline`). */
-export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[]; allowRefs?: string[] };
+export type Options = { host?: HostAws; privateRepo: string; target: string; include?: string[]; exclude?: string[]; rewrite?: string[]; versioning?: "independent"; prerelease?: boolean; source?: string; targetUrl?: string; dryRun?: boolean; adopted?: boolean; adoptBaseline?: boolean; user?: string; serviceUsers?: string[]; allowRefs?: string[] };
 
 /** The first line of a failed command's stderr for its error, withheld when it has a secret's shape; the exit code when it is empty. */
 export function stderrLine(r: { code: number; err?: string }): string {
@@ -643,7 +643,8 @@ function merge(pr: string, opts: Options, run: Run, log: string[]): void {
 /**
  * The version of the last sync on the public main (a commit titled `v1.2.3`, or the `version` given) as a public tag and GitHub Release on
  * that commit, once: made through the API (`gh release create --target`), so nothing is pushed and no public workflow is
- * needed. A bare --target-url is not GitHub: its commits are not on the public repository.
+ * needed. A bare --target-url is not GitHub: its commits are not on the public repository. With `prerelease` the Release
+ * is made a prerelease, so it is not Latest: only a check of the public repository (`gh release edit --latest`) promotes it.
  */
 function releaseLast(last: string, opts: Options, run: Run, git: (args: string[]) => string, log: string[], version = /^v\d+\.\d+\.\d+$/.exec(git(["log", "-1", "--format=%s", last]))?.[0]): void {
   if (!version) return;
@@ -660,7 +661,7 @@ function releaseLast(last: string, opts: Options, run: Run, git: (args: string[]
     }
   } else if (run(["gh", "release", "view", version, "-R", opts.target, "--json", "tagName"]).code === 0) return;
   if (opts.dryRun) return void log.push(`dry-run: would release ${version} on ${opts.target} at ${last.slice(0, 7)}`);
-  ok(run(["gh", "release", "create", version, "-R", opts.target, "--target", last, "--title", version, "--notes", ""]), ["gh", "release", "create"]);
+  ok(run(["gh", "release", "create", version, "-R", opts.target, "--target", last, "--title", version, "--notes", "", ...(opts.prerelease ? ["--prerelease"] : [])]), ["gh", "release", "create"]);
   log.push(`released ${version} on ${opts.target} at ${last.slice(0, 7)}`);
 }
 
