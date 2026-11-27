@@ -113,6 +113,8 @@ export class ResumeSupersededError extends Error {
  */
 export type NewTaskInput = Omit<CreateTaskInput, "executionMode"> & {
   cwd: string; executionMode?: CreateTaskInput["executionMode"]; workspaceReason?: string; stage?: Task["stage"]; origin?: Task["origin"];
+  /** The Issues this Task is started to work on (the numbers), recorded in its provenance. Not on the API's input: only the bundle route passes it. */
+  issues?: number[];
   /** The prompt as the app writes it for a runner, when it wrote `prompt` itself: a shadow on another runner gets its own text. Not saved. */
   promptFor?: (runner: RunnerId) => string;
 };

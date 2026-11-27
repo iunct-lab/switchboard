@@ -31,6 +31,7 @@ Each element below says what it is for, what exists today, and how it is itself 
   "v": 1,
   "process": { "id": "p0-pipeline", "version": 1 },
   "processReason": "backlog stage complete",
+  "issues": null,
   "bundle": { "skills": "<sha256 of ops-kit/skills>", "repoSkills": "<sha256 of <cwd>/.claude/skills or null>", "claudeMd": "<sha256 of <cwd>/CLAUDE.md or null>", "processes": "<sha256 of ops-kit/processes>" },
   "repo": { "head": "<git HEAD of cwd or null>" },
   "runner": "claude", "model": "…", "effort": null, "permissionMode": "auto",
@@ -39,7 +40,7 @@ Each element below says what it is for, what exists today, and how it is itself 
 }
 ```
 
-`process` is null for a Task the owner typed on Home; `processReason` is free text (a stage start writes `backlog stage <action>`). `instructionBytes` is the size of the instruction files in the working directory when the Task is created (the repository's instructions file, its agents file and the skills under `.claude/skills`), a cost line that the ledger does not have. The hashes of the working directory's copies are taken at creation too, before the skill sync refreshes them; the meta source's hash (`skills`) is what the report groups by.
+`process` is null for a Task the owner typed on Home; `processReason` is free text (a stage start writes `backlog stage <action>`). `issues` is the list of Issue numbers a Task was started to work on; only the bundle start passes it (its PBIs), so it is null on every other Task and absent on a record from before it was kept. `instructionBytes` is the size of the instruction files in the working directory when the Task is created (the repository's instructions file, its agents file and the skills under `.claude/skills`), a cost line that the ledger does not have. The hashes of the working directory's copies are taken at creation too, before the skill sync refreshes them; the meta source's hash (`skills`) is what the report groups by.
 
 **Revised by.** Dropping any field that no report or query has read; adding one when a comparison needs it. The record is per Task and is not back-filled.
 

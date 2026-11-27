@@ -6,7 +6,7 @@
  * budget is under 500; none when no GitHub repository is known: the PR stages are unknown), and the Switchboard DB (SWITCHBOARD_HOME, read-only) for each PBI's Tasks.
  * `--repo` chooses the workspace whose stored values are read and the repository whose PRs are read; a repository the app
  * has not imported finds no workspace (exit 2). A backlog kept in the app only has no repository to name: leave it out.
- * After the Story Points table comes the review-rounds table (scripts/review-rounds.ts) and its candidates for review; when it
+ * After the Story Points table comes the table by process (`byProcess`: the closed PBIs by the way they were worked; `--json` has it as `byProcess`), then the review-rounds table (scripts/review-rounds.ts) and its candidates for review; when it
  * cannot be read, one line says why and the exit code does not change. `--json` has it as `reviews: { rows, candidates }`.
  * Exit 0 = printed / 1 = stopped (FlowError: budget low, a read over 100 points, gh failed…) / 2 = bad arguments, or the stored values could
  * not be read (no BACKLOG_URL — outside the app's Task —, the app not reached, not imported, no workspace for `--repo`).
@@ -17,8 +17,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowStage } from "../packages/protocol/src/index.ts";
 import { runGh } from "../packages/core/src/backlog-gh.ts";
-import { actualsByStoryPoints, backlogGrowth, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
-import { deferredTasksSince } from "../packages/core/src/db.ts";
+import { actualsByStoryPoints, backlogGrowth, byProcess, fetchFlow, FlowError, launchShare, type Spread, prRepoOf, summarize, weekStartOf, withSwitchboardTasks } from "../packages/core/src/flow.ts";
+import { bundleTasks, deferredTasksSince } from "../packages/core/src/db.ts";
 import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
 import { formatSince, spawnRun } from "./merge-audit.ts";
 import { format as formatRounds, formatCandidates, readTable, reviewCandidates, type Candidate, type TableRow } from "./review-rounds.ts";
@@ -59,10 +59,11 @@ async function main(): Promise<number> {
   const dbPath = join(process.env.SWITCHBOARD_HOME ?? join(homedir(), ".switchboard"), "switchboard.db");
   const db = existsSync(dbPath) ? new Database(dbPath, { readonly: true }) : null;
   try {
-    const { reads: read, spent, cutPbis, growth } = await fetchFlow(runGh, cwd, repo, days, records);
+    const { reads: read, prs: mergedPrs, spent, cutPbis, growth } = await fetchFlow(runGh, cwd, repo, days, records);
     // the workspace whose stored values were read: Issue numbers repeat across repositories, so a Task counts only from it
     const workspaces = [records.workspaceId];
-    const pbis = read.map((r) => withSwitchboardTasks(r, db, workspaces));
+    const bundles = db ? bundleTasks(db, workspaces) : [];
+    const pbis = read.map((r) => withSwitchboardTasks(r, db, workspaces, bundles, repo));
     const sum = summarize(pbis);
     console.log(`${name}: 直近 ${days} 日に閉じた PBI ${sum.closed} 件、Story Points 合計 ${sum.storyPoints}`);
     console.log("\n段\t中央値\tp90\t件数");
@@ -89,6 +90,13 @@ async function main(): Promise<number> {
     const range = (s: Spread, f: (n: number) => string) => (s.p50 === null ? "-" : `${f(s.p50)} (${f(s.p25!)}〜${f(s.p75!)})`);
     console.log("\nSP\t件数\tTask の数 p50 (p25〜p75)\t費用 p50 (p25〜p75)\t稼働時間 p50 (p25〜p75)");
     for (const a of bySp) console.log(`${a.storyPoints}\t${a.count}\t${range(a.taskIssues, String)}\t${range(a.costUsd, (n) => `$${n.toFixed(2)}`)}\t${range(a.runMs, dur)}`);
+    // the same PBIs by the way they were worked: a bundle Task's cost and PRs count once however many PBIs it took
+    const byProc = byProcess(pbis, mergedPrs);
+    console.log("\n型\tPBI\tSP\t着手→main p50\t着手→閉じる p50\t額\t額/SP\tレビュー往復 p50\t後退（比較した PR）");
+    for (const r of byProc) {
+      const perSp = r.costPerSp === null ? "不明" : `$${r.costPerSp.toFixed(2)}`;
+      console.log(`${r.process ?? "不明"}${r.few ? "（少ない）" : ""}\t${r.pbis}\t${r.storyPoints}\t${dur(r.toMainP50)}\t${dur(r.toCloseP50)}\t${r.costUsd === null ? "不明" : `$${r.costUsd.toFixed(2)}`}\t${perSp}\t${r.reviewsP50 ?? "不明"}\t${r.comparedPrs === 0 ? "比較なし" : `${r.regressions}（${r.comparedPrs}）`}`);
+    }
     // the review rounds of the same period: a failure here is one line, never the exit code
     let reviews: { rows: TableRow[]; candidates: Candidate[] } | null = null;
     try {
@@ -102,7 +110,7 @@ async function main(): Promise<number> {
       console.log(`\nレビューと再チェック: 読めなかった（${(e as Error).message.split("\n")[0]}）`);
     }
     const json = arg("--json");
-    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, bySp, weeks, reviews }, null, 2));
+    if (json) writeFileSync(json, JSON.stringify({ repo: name, days, cutPbis, stages: sum.stages, bottleneck: sum.bottleneck, closed: sum.closed, storyPoints: sum.storyPoints, pbis, bySp, byProcess: byProc, weeks, reviews }, null, 2));
     return 0;
   } catch (e) {
     if (!(e instanceof FlowError)) throw e;

@@ -83,6 +83,21 @@ jq '{bottleneck, closed, stages}' "$W/flow.json"
 
 標準出力の最後にある、決まりごとの往復の表（`拾った問題` と `掛かった往復` の組の行と、`決まり` で始まる見出しの行から）と `見直しの候補:` の行（無ければ `見直しの候補: なし`、読めなければ `レビューと再チェック: 読めなかった（理由）` の 1 行）は、返事（報告）にそのまま写す（表の説明は `docs/design/flow-metrics.md` の「Review rounds」と「Usage」）。候補から要望・PBI は起こさない（決まりの種類・合格の条件の上げ下げは利用者の判断）。この表は段の選び方（1 回 1 件の要望）に影響しない。
 
+### 型を並べる
+
+要望を起こす回も起こさない回も、進め方の型ごとの表を返事に貼る（要望を起こす判断には使わない。数を目標にしない: `flow-metrics.md` の「How to read the numbers」。Issue にも投稿しない）。貼るのは標準出力の型の表（`型` で始まる見出しの行から次の表の前まで。時間は読める形で出る）で、同じ値は `--json` の `byProcess` にある（時間は ms）。`flow-report` が止まったときは、表の代わりに止まった理由を書く。
+
+```bash
+jq '.byProcess' "$W/flow.json"   # 値を確かめるとき
+```
+
+読み方（数え方は `docs/design/flow-metrics.md` の「By process」）:
+
+- `few`（少ない）の型は比べない
+- `不明`（`process` が null）が多い期間は、型の比較を信じない
+- 束（`p3-bundle`）は SP の大きい PBI と、重なりで待った PBI が集まる。PBI の数でなく、`costPerSp`（額/SP）と `toMainP50`（着手→main）で比べる
+- 後退は比較した PR（`comparedPrs`）の中の数で、比較の無い PR は 0 ではない（`comparedPrs` が 0 なら比較なし）
+
 ## 3. 原因を 1 つに絞る
 
 その段が長かった PBI を 3 件選ぶ（`jq --arg st "$ST" '[.pbis[] | select(.stages[$st] != null)] | sort_by(-.stages[$st]) | .[:3] | map({number, title, ms: .stages[$st]})' "$W/flow.json"`）。PBI ごとに、その段の始まりと終わりの間に何があったかを Issue・PR のコメントで読む（`ops-kit backlog view <PBI>`、Task の着手・結果コメント、PR のレビューコメント）。
@@ -103,4 +118,4 @@ jq '{bottleneck, closed, stages}' "$W/flow.json"
 
 ## 5. 片づけ
 
-`rm -rf "$W"`（控えた実際のパスだけ）。返事には、効いたかのコメントの URL、起こした要望の番号（か、起こさなかった理由のコメントの URL）、2 の往復の表と `見直しの候補:` の行（読めなかったときはその 1 行、`flow-report` が止まったときは止まった理由）を書く。
+`rm -rf "$W"`（控えた実際のパスだけ）。返事には、効いたかのコメントの URL、2 の型の表（`byProcess`）、起こした要望の番号（か、起こさなかった理由のコメントの URL）、2 の往復の表と `見直しの候補:` の行（読めなかったときはその 1 行、`flow-report` が止まったときは止まった理由）を書く。

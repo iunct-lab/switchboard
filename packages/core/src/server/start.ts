@@ -49,7 +49,7 @@ export const autoRunner = (sc: Pick<ServerContext, "settings" | "db" | "adapterM
  * A `prompt` given as a function is written for the runner the Task starts on (known only here, after 上限のときの代わり),
  * and again for its shadow's runner.
  */
-export const startMetaTask = async (sc: Pick<ServerContext, "metaWorkspace" | "settings" | "adapterMap" | "decidedRunner" | "autoRunner" | "tasks" | "attachments" | "createRouted">, req: { kind: AutoStartKind; title: string; prompt: string | ((runner: RunnerId) => string); attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; note?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
+export const startMetaTask = async (sc: Pick<ServerContext, "metaWorkspace" | "settings" | "adapterMap" | "decidedRunner" | "autoRunner" | "tasks" | "attachments" | "createRouted">, req: { kind: AutoStartKind; title: string; prompt: string | ((runner: RunnerId) => string); attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; issues?: number[]; note?: string }): Promise<{ task: Task } | { error: string; status: number }> => {
   const meta = req.ws ?? sc.metaWorkspace();
   if (!meta) return { error: "meta workspace がありません", status: 409 };
   if (!existsSync(meta.path)) return { error: "workspace directory does not exist", status: 409 };
@@ -86,6 +86,7 @@ export const startMetaTask = async (sc: Pick<ServerContext, "metaWorkspace" | "s
     ...(budgetUsd ? { budgetUsd } : {}),
     ...(req.stage ? { stage: req.stage } : {}),
     ...(req.process ? { process: req.process, processReason: req.processReason } : {}),
+    ...(req.issues ? { issues: req.issues } : {}),
   };
   try {
     const task = sc.createRouted(input, (t) => {

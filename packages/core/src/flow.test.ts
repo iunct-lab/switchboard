@@ -1,7 +1,7 @@
 // test-reads: none
 import { describe, expect, test } from "bun:test";
-import { Db } from "./db.ts";
-import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, flowOfPbi, flowOfStored, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, summarize, withSwitchboardTasks, type RawComment, type RawPbi, type RawPr } from "./flow.ts";
+import { bundleTasks, Db } from "./db.ts";
+import { actualsByStoryPoints, backlogGrowth, fetchFlow, fetchMergedPrs, FlowCache, FlowError, byProcess, flowOfPbi, flowOfStored, prRecord, flowScope, flowView, launchShare, weekStartOf, repoOfRemote, summarize, withSwitchboardTasks, type RawComment, type StoredFlowPr, type RawPbi, type RawPr } from "./flow.ts";
 import { requestOf } from "./backlog-item.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
 import { loadConfig } from "./config.ts";
@@ -249,9 +249,79 @@ describe("switchboard tasks", () => {
     db.appendEventAt("a", { type: "log", text: "x" } as never, 5000);
     const read = { pbi: { repo: "o/r", number: 7, title: "", url: "", storyPoints: 3, closedAt: "", stages: {}, userWaitMs: 0, reviewRounds: [], tasks: null } as never, issues: [7, 8] };
     const p = withSwitchboardTasks(read, db.sqlite, ["w"]);
-    expect(p.tasks).toEqual({ count: 3, runMs: 4000 + 8000 + 8000, costUsd: 1.75, implementLaunches: 0 }); // a: last event 5000, b / c: updated_at 9000
+    expect(p.tasks).toEqual({ count: 3, runMs: 4000 + 8000 + 8000, costUsd: 1.75, implementLaunches: 0, items: expect.any(Array), bundleStartAt: null, bundlePrs: [] }); // a: last event 5000, b / c: updated_at 9000
     expect(withSwitchboardTasks(read, null, ["w"]).tasks).toBeNull();
-    expect(withSwitchboardTasks(read, db.sqlite, []).tasks).toEqual({ count: 0, runMs: 0, costUsd: 0, implementLaunches: 0 }); // no workspace of the repository: nothing is anyone's
+    expect(withSwitchboardTasks(read, db.sqlite, []).tasks).toEqual({ count: 0, runMs: 0, costUsd: 0, implementLaunches: 0, items: [], bundleStartAt: null, bundlePrs: [] }); // no workspace of the repository: nothing is anyone's
+  });
+
+  test("process of a PBI: a bundle Task that took it makes it p3-bundle, else a p0-pipeline Task, else null; the bundle Task counts once", () => {
+    const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));
+    const prov = (id: string, p: { process?: string; issues?: number[] }) =>
+      db.setTaskProvenance(id, { v: 1, process: p.process ? { id: p.process, version: 1 } : null, processReason: null, issues: p.issues ?? null } as never);
+    db.insertTask(task("b1", "まとめて入れる: #7, #11", null)); // the bundle: no stage and no `#N ` title of a PBI
+    prov("b1", { process: "p3-bundle", issues: [7, 11] });
+    db.appendEvent("b1", { t: "tool.call", id: "c1", name: "Bash", summary: "", input: { command: "gh pr create" } } as never);
+    db.appendEvent("b1", { t: "tool.result", id: "c1", ok: true, summary: "https://github.com/o/r/pull/5\nhttps://github.com/x/y/pull/6" } as never);
+    db.insertTask(task("p7", "#7 実装", null));
+    prov("p7", { process: "p0-pipeline" });
+    db.insertTask(task("p8", "#8 実装", null));
+    prov("p8", { process: "p0-pipeline" });
+    db.insertTask(task("n9", "#9 実装", null)); // no provenance
+    db.insertTask(task("o7", "別のリポジトリ", null, "other"));
+    prov("o7", { process: "p3-bundle", issues: [8] }); // a bundle of a repository that is not read
+    db.insertTask(task("b2", "#11 まとめて入れる", null)); // a bundle whose title also ties it to PBI 11: counted once
+    prov("b2", { process: "p3-bundle", issues: [11] });
+    db.insertLedger({ taskId: "b1", runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 30, billedUsd: 30, source: "api", ts: 2000 } as never);
+    const bundles = bundleTasks(db.sqlite, ["w"]);
+    expect(bundles.filter((b) => b.id === "b1").map((b) => ({ id: b.id, issues: b.issues, prs: b.prs.map((p) => p.number) }))).toEqual([{ id: "b1", issues: [7, 11], prs: [5, 6] }]);
+    const of = (n: number) => withSwitchboardTasks({ pbi: { repo: "o/r", number: n, title: "", url: "", storyPoints: 3, closedAt: "", stages: {}, userWaitMs: 0, reviewRounds: [], tasks: null, process: null } as never, issues: [n] }, db.sqlite, ["w"], bundles);
+    expect(of(7).process).toBe("p3-bundle"); // both a bundle and a p0-pipeline Task
+    expect(of(7).tasks!.items.map((t) => t.id).sort()).toEqual(["b1", "p7"]);
+    expect(of(7).tasks).toMatchObject({ count: 2, costUsd: 30, bundleStartAt: 1000, bundlePrs: [5] }); // the PR of another repository is not the PBI's
+    expect(of(8).process).toBe("p0-pipeline");
+    expect(of(8).tasks).toMatchObject({ bundleStartAt: null, bundlePrs: [] });
+    expect(of(9).process).toBeNull(); // a Task without provenance
+    expect(of(10).process).toBeNull(); // no Task
+    expect(of(11).tasks!.items.map((t) => t.id).sort()).toEqual(["b1", "b2"]); // b2 is both a title match and a bundle: once
+    // a backlog kept in the app only: its repository is the workspace id, and its PRs are read from the checkout's origin
+    const appOnly = withSwitchboardTasks({ pbi: { repo: "w", number: 7, process: null } as never, issues: [7] }, db.sqlite, ["w"], bundles, "o/r");
+    expect(appOnly.tasks!.bundlePrs).toEqual([5]);
+    expect(withSwitchboardTasks({ pbi: { repo: "w", number: 7, process: null } as never, issues: [7] }, db.sqlite, ["w"], bundles, null).tasks!.bundlePrs).toEqual([]); // no repository to read PRs from
+    expect(withSwitchboardTasks({ pbi: { number: 7, repo: "o/r", process: null } as never, issues: [7] }, db.sqlite, ["w"]).process).toBe("p0-pipeline"); // no bundles read: not a bundle
+  });
+
+  test("by process: a bundle Task that took three PBIs counts once in its type, with its PRs", () => {
+    const db = new Db(join(mkdtempSync(join(tmpdir(), "switchboard.flow.")), "s.db"));
+    db.insertTask(task("b1", "まとめて入れる: #7, #8, #9", null)); // created at 1000
+    db.setTaskProvenance("b1", { v: 1, process: { id: "p3-bundle", version: 1 }, processReason: null, issues: [7, 8, 9] } as never);
+    db.appendEvent("b1", { t: "tool.call", id: "c1", name: "Bash", summary: "", input: { command: "gh pr create" } } as never);
+    db.appendEvent("b1", { t: "tool.result", id: "c1", ok: true, summary: "https://github.com/o/r/pull/5\nhttps://github.com/o/r/pull/6" } as never);
+    db.insertLedger({ taskId: "b1", runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 30, billedUsd: 30, source: "api", ts: 2000 } as never);
+    for (const n of [10, 11]) {
+      db.insertTask(task(`p${n}`, `#${n} 実装`, null));
+      db.setTaskProvenance(`p${n}`, { v: 1, process: { id: "p0-pipeline", version: 1 }, processReason: null } as never);
+    }
+    const bundles = bundleTasks(db.sqlite, ["w"]);
+    const sec = (n: number) => new Date(n * 1000).toISOString();
+    const pr = (number: number, mergedSec: number, comments: RawComment[] = []): StoredFlowPr => ({ number, createdAt: sec(1), mergedAt: sec(mergedSec), comments, closes: [] });
+    const merged = [pr(5, 40, [{ createdAt: sec(20), body: "[codex] review" }, { createdAt: sec(21), body: "[claude] review" }]), pr(6, 90)];
+    const of = (n: number, sp: number, closedSec: number) =>
+      withSwitchboardTasks({ pbi: { repo: "o/r", number: n, title: "", url: "", storyPoints: sp, closedAt: sec(closedSec), stages: {}, userWaitMs: 0, reviewRounds: [], tasks: null, process: null, startAt: null, mainAt: null, prs: [] } as never, issues: [n] }, db.sqlite, ["w"], bundles);
+    const rows = byProcess([of(7, 2, 100), of(8, 3, 100), of(9, 5, 100), of(10, 1, 100), of(11, 1, 100)], merged);
+    expect(rows.map((r) => r.process)).toEqual(["p0-pipeline", "p3-bundle"]); // a type with no PBI is left out
+    expect(rows[0]).toMatchObject({ process: "p0-pipeline", pbis: 2, few: true });
+    expect(rows[1]).toMatchObject({ process: "p3-bundle", pbis: 3, storyPoints: 10, costUsd: 30, costPerSp: 3, prs: 2, few: false, reviewsP50: 1 });
+    expect(rows[1]!.toMainP50).toBe(89_000); // the bundle Task's creation (1s) to the last bundle PR's merge (90s)
+    expect(rows[1]!.toCloseP50).toBe(99_000);
+    expect(rows[1]).toMatchObject({ comparedPrs: 0, regressions: 0 });
+    // the cost per SP is of the PBIs that have Story Points only; a type whose Tasks were not read has no cost, not $0
+    const noSp = withSwitchboardTasks({ pbi: { repo: "o/r", number: 10, storyPoints: null, closedAt: sec(100), process: null, startAt: null, mainAt: null, prs: [] } as never, issues: [10] }, db.sqlite, ["w"], bundles);
+    db.insertLedger({ taskId: "p10", runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 100, billedUsd: 100, source: "api", ts: 2000 } as never);
+    const withCost = withSwitchboardTasks({ pbi: { repo: "o/r", number: 10, storyPoints: null, closedAt: sec(100), process: null, startAt: null, mainAt: null, prs: [] } as never, issues: [10] }, db.sqlite, ["w"], bundles);
+    expect(byProcess([of(11, 1, 100), withCost], [])[0]).toMatchObject({ process: "p0-pipeline", costUsd: 100, costPerSp: 0, storyPoints: 1 });
+    expect(noSp.tasks!.costUsd).toBe(0);
+    const unread = withSwitchboardTasks({ pbi: { repo: "o/r", number: 11, storyPoints: 1, closedAt: sec(100), process: null, tasks: null, startAt: null, mainAt: null, prs: [] } as never, issues: [11] }, null, ["w"]);
+    expect(byProcess([unread], [])[0]).toMatchObject({ process: null, costUsd: null, costPerSp: null });
   });
 
   test("implement launches: the PBI's stage Tasks of 実装 (complete), not its other stages nor its Tasks'", () => {
@@ -264,6 +334,34 @@ describe("switchboard tasks", () => {
     expect(p.tasks).toMatchObject({ count: 5, implementLaunches: 3 });
     const once = { ...p, number: 9, tasks: { ...p.tasks!, implementLaunches: 1 } };
     expect(launchShare([p, once, { ...p, number: 10, tasks: null }])).toEqual({ repeated: 1, known: 2 });
+  });
+});
+
+describe("regressions", () => {
+  const raw = (comments: RawComment[]): RawPr => ({ number: 1, createdAt: at("10:00"), mergedAt: at("11:00"), comments });
+  const compare = (runner: string, regressions: number, others = 0) =>
+    [`[${runner}] compare`, "### Compared with main", ...Array.from({ length: regressions }, (_, i) => `- REGRESSION \`a/b.ts:${i + 1}\` — x. main: ok (a:1). HEAD: ng (a:2). Conditions: c.`), ...Array.from({ length: others }, () => "- SAME \`c.ts:1\` — y. main: m. HEAD: h. Conditions: c."), "### Verdict versus main", "worse than main"].join("\n");
+
+  test("counts the REGRESSION lines of the last comparison; none is null; a review is not a regression", () => {
+    expect(prRecord(raw([comment("10:10", compare("codex", 2, 1))])).regressions).toBe(2); // SAME lines are not counted
+    expect(prRecord(raw([comment("10:10", compare("codex", 2)), comment("10:30", compare("claude", 1))])).regressions).toBe(1); // the later comparison wins
+    expect(prRecord(raw([comment("10:30", compare("codex", 1)), comment("10:10", compare("codex", 3))])).regressions).toBe(1); // by time, not by order read
+    expect(prRecord(raw([comment("10:10", compare("codex", 0))])).regressions).toBe(0);
+    expect(prRecord(raw([comment("10:10", "[codex] review\n- REGRESSION \`a.ts:1\` — x.")])).regressions).toBeNull();
+    expect(prRecord(raw([])).regressions).toBeNull();
+    // a comparison that cannot be read (no section, a row without its line) is not 0: the last one that can be read counts, else none
+    expect(prRecord(raw([comment("10:10", "[codex] compare\n(the output was cut)")])).regressions).toBeNull();
+    expect(prRecord(raw([comment("10:10", "[codex] compare\n### Compared with main\n- REGRESSION \`a.ts\` — no line")])).regressions).toBeNull();
+    expect(prRecord(raw([comment("10:10", compare("codex", 2)), comment("10:30", "[claude] compare\n(cut)")])).regressions).toBe(2);
+  });
+
+  test("flowOfPbi carries start, main and the PRs; byProcess sums only compared PRs", () => {
+    const f = flowOfPbi({ ...madeUpPbi(), subIssues: [{ ...madeUpPbi().subIssues[0]!, pullRequests: [raw([comment("10:10", compare("codex", 2)), comment("10:20", "[codex] review")])] }] }, null);
+    expect(f.startAt).toBe(Date.parse(at("10:05")));
+    expect(f.mainAt).toBe(Date.parse(at("11:00")));
+    expect(f.prs).toEqual([{ number: 1, reviews: 1, regressions: 2 }]);
+    const pbi = { ...f, repo: "o/r", url: "", tasks: null, process: "p0-pipeline" } as never;
+    expect(byProcess([pbi], [])[0]).toMatchObject({ regressions: 2, comparedPrs: 1, prs: 1, reviewsP50: 1, few: true });
   });
 });
 

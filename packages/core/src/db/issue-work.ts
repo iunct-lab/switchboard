@@ -25,18 +25,36 @@ export function artifactsOfIssues(sqlite: Database, issues: number[], workspaceI
   return rows.filter((a) => a.kind === "url" || ISSUE_ARTIFACT_FILE.test(a.entry ?? ""));
 }
 
-export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }> {
+export function tasksOfIssues(sqlite: Database, issues: number[], workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null; processId: string | null }> {
   if (issues.length === 0 || workspaceIds.length === 0) return [];
   const marks = issues.map(() => "?").join(",");
   const titles = issues.map(() => "t.title LIKE ?").join(" OR ");
   return sqlite
     .query(
-      `SELECT t.id AS id, t.created_at AS createdAt, t.stage_issue AS stageIssue, t.stage_action AS stageAction,
+      `SELECT t.id AS id, t.created_at AS createdAt, t.stage_issue AS stageIssue, t.stage_action AS stageAction, json_extract(t.provenance, '$.process.id') AS processId,
               ${taskDurationSql("t.id")} AS durationMs,
               COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = t.id), 0) AS costUsd
        FROM tasks t WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) AND (t.stage_issue IN (${marks}) OR ${titles}) ORDER BY t.created_at`,
     )
-    .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null }>;
+    .all(...workspaceIds, ...issues, ...issues.map((n) => `#${n} %`)) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; stageIssue: number | null; stageAction: string | null; processId: string | null }>;
+}
+
+/**
+ * The bundle Tasks (`p3-bundle` in the provenance) of these workspaces: the Issues they were started with (the provenance's `issues`),
+ * the same run time and cost as `tasksOfIssues`, and the pull requests each opened (`createdPullsOf`). A bundle Task is the one
+ * a title or a stage does not tie to a PBI, so this is read once for all the PBIs and not per PBI. A Task whose provenance has no `issues` is left out.
+ */
+export function bundleTasks(sqlite: Database, workspaceIds: string[]): Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; issues: number[]; prs: CreatedIssue[] }> {
+  if (workspaceIds.length === 0) return [];
+  const rows = sqlite
+    .query(
+      `SELECT t.id AS id, t.created_at AS createdAt, json_extract(t.provenance, '$.issues') AS issues,
+              ${taskDurationSql("t.id")} AS durationMs,
+              COALESCE((SELECT SUM(cost_usd) FROM ledger l WHERE l.task_id = t.id), 0) AS costUsd
+       FROM tasks t WHERE t.workspace_id IN (${workspaceIds.map(() => "?").join(",")}) AND json_extract(t.provenance, '$.process.id') = 'p3-bundle' AND json_type(t.provenance, '$.issues') = 'array' ORDER BY t.created_at`,
+    )
+    .all(...workspaceIds) as Array<{ id: string; createdAt: number; durationMs: number; costUsd: number; issues: string }>;
+  return rows.map((r) => ({ ...r, issues: JSON.parse(r.issues) as number[], prs: createdPullsOf(sqlite, r.id) }));
 }
 
 /** The words of a final report that put something off: matched as words, so a "スコープ外は無し" counts too. */

@@ -109,7 +109,7 @@ export interface ServerContext {
   readonly adviceStop: AbortController;
   readonly adviceRunning: Set<Promise<void>>;
   readonly runRoutingAdvice: (taskId: string, ctx: RoutingContext) => void;
-  readonly recordProvenance: (t: Task, input: { process?: string; processReason?: string; }) => void;
+  readonly recordProvenance: (t: Task, input: { process?: string; processReason?: string; issues?: number[]; }) => void;
   readonly defaultBudgetFor: (model: string | null | undefined, runner?: RunnerId) => number | null;
   readonly withDefaultBudget: <T extends { budgetUsd?: number | null; model?: string | null; runner?: RunnerId; }>(given: T) => T;
   readonly createRouted: (given: NewTaskInput & SuggestCtxInput, afterInsert?: (task: Task) => void, deferUntil?: number) => Task;
@@ -184,7 +184,7 @@ export interface ServerContext {
   readonly evalsFor: (t: Task) => TaskEvals;
   readonly decidedRunner: (kind: AutoStartKind, runner?: RunnerId) => RunnerId | null;
   readonly autoRunner: (decided: RunnerId) => { runner: RunnerId; note?: string; deferUntil?: number; deferNote?: string; };
-  readonly startMetaTask: (req: { kind: AutoStartKind; title: string; prompt: string | ((runner: RunnerId) => string); attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; note?: string; }) => Promise<{ task: Task; } | { error: string; status: number; }>;
+  readonly startMetaTask: (req: { kind: AutoStartKind; title: string; prompt: string | ((runner: RunnerId) => string); attachmentIds?: string[]; runner?: RunnerId; model?: string; effort?: string; scheduleId?: string; shadowRunner?: null; budgetUsd?: number | null; ws?: Workspace; stage?: Task["stage"]; process?: string; processReason?: string; issues?: number[]; note?: string; }) => Promise<{ task: Task; } | { error: string; status: number; }>;
   readonly upstreamFor: (ws: Workspace, text: string) => { url: string | null; text: string; };
   readonly startRequestTask: (input: { text: string; screen?: string; attachmentIds?: string[]; workspaceId?: string; source?: FeedbackInput["source"]; auto?: boolean; }) => Promise<{ task: Task; } | { upstream: { url: string | null; text: string; }; } | { error: string; status: number; }>;
   readonly completeTaskModelFor: (runner?: RunnerId) => string;

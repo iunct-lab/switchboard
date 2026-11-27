@@ -246,6 +246,8 @@ export const Provenance = z.object({
   v: z.literal(1),
   process: z.object({ id: z.string(), version: z.number().int() }).nullable(),
   processReason: z.string().nullable(),
+  /** The Issues the task was started to work on (a bundle: its PBIs); null = none were passed (and on a record from before this was kept). */
+  issues: z.array(z.number().int()).nullable().optional(),
   bundle: z.object({ skills: z.string().nullable(), repoSkills: z.string().nullable(), claudeMd: z.string().nullable(), processes: z.string().nullable() }),
   repo: z.object({ head: z.string().nullable() }),
   runner: RunnerId,

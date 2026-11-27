@@ -25,6 +25,7 @@ export type ProvenanceInput = {
   permissionMode: string | null;
   process?: { id: string; version: number } | null;
   processReason?: string | null;
+  issues?: number[] | null;
   now?: number;
 };
 
@@ -73,6 +74,7 @@ export function collectProvenance(input: ProvenanceInput): Provenance {
     v: 1,
     process: input.process ?? null,
     processReason: input.processReason ?? null,
+    issues: input.issues ?? null,
     bundle: {
       skills: part(() => (skillsDir && isDir(skillsDir) ? treeHash(skillsDir) : null)),
       repoSkills: part(() => (isDir(repoSkills) ? treeHash(repoSkills) : null)),
