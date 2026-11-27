@@ -473,7 +473,7 @@ export interface StoredRecords {
   /** The checkout's top level, against which a Task body's paths are read. */
   top: Array<{ name: string; dir: boolean }>;
   /** Every stored Issue (open and closed) as shown, with its fields in the workspace's Project (null = not in it). */
-  issues: Array<{ number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; createdAt: string; updatedAt: string; closedAt: string | null; fields: Record<string, string | number | null> | null; change?: NonNullable<Detail["issue"]["change"]> }>;
+  issues: Array<{ number: number; title: string; url: string; state: "OPEN" | "CLOSED"; stateReason: string | null; body: string; labels: string[]; parent: number | null; subIssues: number[]; createdAt: string; updatedAt: string; closedAt: string | null; fields: Record<string, string | number | null> | null; change?: NonNullable<Detail["issue"]["change"]>; waitingSubIssues?: NonNullable<Detail["waitingSubIssues"]> }>;
   /** The stored Issues' comments as shown (with those not sent yet), oldest first. */
   comments: Array<{ issue: number; body: string; createdAt: string }>;
   /** Issues whose last read was not complete (404 / 403 / not read yet): what is stored of them is not current. */

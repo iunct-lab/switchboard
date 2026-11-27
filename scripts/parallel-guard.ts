@@ -472,7 +472,7 @@ export function storedMaterial(r: StoredRecords, task: number, now = Date.now())
     turns: r.turns ?? [],
     // an Issue first, as the app reads a number stored as both (a workspace kept only here numbers its own)
     target: async (n) => {
-      const i = storedIssueTarget(n, issues, (m) => r.unread.includes(m));
+      const i = storedIssueTarget(n, issues, (m) => r.unread.includes(m), (m) => issues.get(m)?.waitingSubIssues ?? []);
       if (i) return i;
       const p = pulls.get(n);
       return p ? { kind: "pr", state: p.state, isDraft: p.isDraft, labels: p.labels, closes: p.closes, mergeCommit: p.mergeCommit, stateReason: null, confirmOnly: false } : undefined;

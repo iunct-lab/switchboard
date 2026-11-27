@@ -160,7 +160,7 @@ describe("rubric judge", () => {
       const t = await post(`${b}/api/tasks`, { cwd: h, title: "rubric", prompt: "依頼文", runner: "claude" }).then(j);
       await waitFor(async () => (await get(t.id)).status === "done");
       await waitFor(async () => calls.length === 1);
-      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 5 }, skills: [] });
+      expect(calls[0]!.input).toMatchObject({ title: "rubric", prompt: "依頼文", rubric: { id: "switchboard-default", version: 6 }, skills: [] });
       expect(calls[0]!.input.metrics.toolCalls).toBe(1);
       expect(calls[0]!.opts.settings).toMatchObject({ runner: "codex", model: "gpt-6-luna" });
       expect((await evals(t.id)).judge).toBeNull();
@@ -168,9 +168,9 @@ describe("rubric judge", () => {
       calls[0]!.answer(4);
       await waitFor(async () => rows(t.id) === 1);
       const e = await evals(t.id);
-      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@5", by: "codex:gpt-6-luna" });
+      expect(e.judge).toMatchObject({ scores: { goal: { score: 4, reason: "goal 4" }, safety: { score: 4 } }, summary: "総評 4", rubric: "switchboard-default@6", by: "codex:gpt-6-luna" });
       expect(Object.keys(e.judge.scores)).toHaveLength(8);
-      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@5" });
+      expect(c.db.getEval(t.id, "judge")).toMatchObject({ by: "codex:gpt-6-luna", rubric: "switchboard-default@6" });
       await waitFor(async () => updated.includes(t.id));
       expect(ledgerRows(t.id)).toBe(before + 1);
       // (b) a second turn: judged again, the row is replaced, still one

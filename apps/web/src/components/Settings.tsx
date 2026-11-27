@@ -1017,7 +1017,7 @@ function ModelChoices(props: { runner: RunnerId; list: ModelOption[]; saved: boo
  * 「CLI の表を読む」: the installed CLIs' models that are neither listed nor hidden, each to 足す (at the end of the
  * list) or 載せない; the 載せない list folded below with 取り消し. Read only on the button: the claude table is about 240 MB.
  */
-function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: RunnerId) => string[]; disabled: boolean; save: (patch: { models?: Record<string, ModelOption[]>; hiddenModels?: Record<string, string[]> }) => Promise<boolean>; onError: (msg: string) => void }) {
+export function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: RunnerId) => string[]; disabled: boolean; save: (patch: { models?: Record<string, ModelOption[]>; hiddenModels?: Record<string, string[]> }) => Promise<boolean>; onError: (msg: string) => void }) {
   const [loading, setLoading] = useState(false);
   const [found, setFound] = useState<ModelCandidates | null>(null);
   const read = async () => {
@@ -1033,7 +1033,7 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
   };
   const drop = (runner: RunnerId, value: string) => setFound((f) => f?.map((r) => (r.runner === runner && "candidates" in r ? { ...r, candidates: r.candidates.filter((m) => m.value !== value) } : r)) ?? null);
   // the list 足す appends to: the runner's own login list, as モデルの選択肢 above edits it (listModels on Bedrock)
-  const listOf = (runner: RunnerId) => props.runners.filter((r) => r.id === runner && r.models.length > 0).map((r) => r.listModels ?? r.models)[0];
+  const listOf = (runner: RunnerId) => props.runners.filter((r) => r.id === runner && (r.listModels ?? r.models).length > 0).map((r) => r.listModels ?? r.models)[0];
   const add = async (runner: RunnerId, m: ModelOption) => {
     const list = listOf(runner);
     if (!list) return;
@@ -1045,7 +1045,7 @@ function CliModelCandidates(props: { runners: RunnerInfo[]; hidden: (runner: Run
   const hide = async (runner: RunnerId, value: string) => {
     if (await props.save({ hiddenModels: { [runner]: hideModel(props.hidden(runner), value) } })) drop(runner, value);
   };
-  const catalogRunners = props.runners.filter((r) => (r.id === "claude" || r.id === "codex") && r.models.length > 0);
+  const catalogRunners = props.runners.filter((r) => (r.id === "claude" || r.id === "codex") && (r.listModels ?? r.models).length > 0);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div className="row" style={{ alignItems: "center", justifyContent: "flex-start", gap: 6 }}>

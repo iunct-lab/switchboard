@@ -559,7 +559,7 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
       if (on.has("--adopt-baseline") && cfg.versioning !== "independent") return usage(err, adoptUsage, 2);
       const r = await repoOf(gh);
       privateRepo = `${r.owner}/${r.name}`;
-      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, include: cfg.include, exclude: cfg.exclude, allowRefs: cfg.allowRefs, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted"), adoptBaseline: on.has("--adopt-baseline") }, spawnRun));
+      out(sync({ host: hostAws(), privateRepo, target: cfg.target, versioning: cfg.versioning, prerelease: cfg.prerelease, include: cfg.include, exclude: cfg.exclude, allowRefs: cfg.allowRefs, rewrite: cfg.rewrite, serviceUsers: cfg.serviceUsers, source: given["--source"], targetUrl: given["--target-url"], dryRun: on.has("--dry-run"), adopted: on.has("--adopted"), adoptBaseline: on.has("--adopt-baseline") }, spawnRun));
       return 0;
     } catch (e) {
       const message = (e as Error).message;

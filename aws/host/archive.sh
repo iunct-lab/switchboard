@@ -12,21 +12,48 @@ OUT="$HOME/.switchboard/archive-out"
 # One line the daemon reads to show a failed or stopped archive: running <epoch> / ok <epoch> <key> / failed <epoch> <code>
 # (code 3: the archive went up, but some task's events did not; code 4: the old runner records did not go up, none removed)
 STATUS="$HOME/.switchboard/archive.status"
-trap 'code=$?; [ $code -eq 0 ] || echo "failed $(date +%s) $code" > "$STATUS"; rm -rf "$OUT" || true' EXIT
-rm -rf "$OUT"; mkdir -p "$OUT"
-echo "running $(date +%s)" > "$STATUS"
-# One line a day: how full the root disk is and what fills it (docs/design/host-disk.md). A failure here never stops the archive.
+# One line a day: how full the root disk is and what fills it, one column per place of the budget in
+# docs/design/host-disk.md ("ルートディスクの予算"). Written by the EXIT trap, after the runner records moved (on a day that
+# got that far), so the transcripts column is what stays on the disk; a later run of the same day replaces the line (a rerun
+# after a failed day moves the records then). A failure here never stops the archive.
 disk_record() {
   local file="$HOME/.switchboard/disk-history.tsv" today df_line
   today="$(date -u +%F)"
-  grep -q "^$today" "$file" 2>/dev/null && return 0   # a rerun of the same day
   mb() { du -xsm "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
   df_line="$(df -Pm / | awk 'NR==2 { print $3 "\t" $4 }')" && [ -n "$df_line" ] || return 1
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$today" "$df_line" \
-    "$(mb "$HOME"/.switchboard/switchboard.db*)" "$(mb "$HOME/.switchboard/snapshots")" "$(mb "$HOME/.switchboard/releases")" \
-    "$(mb "$HOME/.claude/projects" "$HOME/.codex/sessions")" "$(mb "$HOME/.cache")" >> "$file"
+  local used="${df_line%%$'\t'*}" os swap docker runner db snapshots sb transcripts cache repos other
+  os="$(mb /usr /var /opt)"; swap="$(mb /swapfile)"; docker="$(mb "$HOME/.local/share/docker")"
+  runner="$(mb "$HOME/.codex/packages" "$HOME/.local/share/claude" "$HOME/.local/share/uv" "$HOME/.bun" "$HOME/.cache/ms-playwright")"
+  db="$(mb "$HOME"/.switchboard/switchboard.db*)"; snapshots="$(mb "$HOME/.switchboard/snapshots")"
+  # the top-level db and snapshots only, subtracted (du --exclude would also drop a nested folder of the same name)
+  sb=$(( $(mb "$HOME/.switchboard") - db - snapshots )); [ "$sb" -ge 0 ] || sb=0
+  transcripts="$(mb "$HOME/.claude/projects" "$HOME/.codex/sessions")"
+  cache=$(( $(mb "$HOME/.cache" "$HOME/.npm") - $(mb "$HOME/.cache/ms-playwright") )); [ "$cache" -ge 0 ] || cache=0   # the browsers are runner's
+  local parent; parent="$(cd "$(dirname "${SB_REPO_DIR:-/}")" 2>/dev/null && pwd -P)" || parent=/
+  repos=0; [ "$parent" -ef / ] || repos="$(mb "$parent")"   # never the whole root, whatever its spelling
+  # the rest of what df counts: the filesystem's own area, the home's settings, what cannot be read
+  other=$((used - os - swap - docker - runner - db - snapshots - sb - transcripts - cache - repos)); [ "$other" -ge 0 ] || other=0
+  # columns, in the order of the budget's place rows where they were already written: date, used, free (df; the place
+  # "free"), db, snapshots, switchboard, transcripts, cache, then os, swap, docker, runner, repos, other (added at the end)
+  local line
+  line="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$today" "$used" "${df_line#*$'\t'}" \
+    "$db" "$snapshots" "$sb" "$transcripts" "$cache" "$os" "$swap" "$docker" "$runner" "$repos" "$other")"
+  if grep -aq "^$today" "$file" 2>/dev/null; then
+    # a rerun of the same day: its line is the newer one. The other days are copied as text (-a) and counted before the
+    # copy replaces the file, so nothing but today's line can be lost
+    local keep all mine
+    all="$(grep -ac '' "$file")" && mine="$(grep -ac "^$today" "$file")" || return 1
+    { grep -av "^$today" "$file" || [ $? -eq 1 ]; printf '%s\n' "$line"; } > "$file.new" || return 1
+    keep="$(grep -ac '' "$file.new")" && [ "$keep" -eq $((all - mine + 1)) ] && mv "$file.new" "$file" || { rm -f "$file.new"; return 1; }
+  else
+    printf '%s\n' "$line" >> "$file"
+  fi
 }
-disk_record || echo "archive: disk usage not recorded" >&2
+# The day's disk line last, after the temporary files are gone (they are not what fills the disk) and on a failed day too;
+# a status line that cannot be written does not stop the cleanup or the line (disk_record is defined above, before any step can fail)
+trap 'code=$?; [ $code -eq 0 ] || { echo "failed $(date +%s) $code" > "$STATUS"; } 2>/dev/null || true; rm -rf "$OUT" || true; disk_record || echo "archive: disk usage not recorded" >&2' EXIT
+rm -rf "$OUT"; mkdir -p "$OUT"
+echo "running $(date +%s)" > "$STATUS"
 KEY="$(aws ssm get-parameter --name /switchboard/archive-age-pubkey --query Parameter.Value --output text)"
 NAME="switchboard-$(date -u +%Y%m%dT%H%M%SZ).tar.zst.age"
 # from the release sb-rescue runs, not the working tree agents edit; the checkout only before the first release
@@ -36,7 +63,8 @@ bun "$CODE/packages/core/src/main.ts" export "$OUT/$NAME" --encrypt "$KEY"
 aws s3 cp "$OUT/$NAME" "s3://$SB_DATA_BUCKET/archive/$NAME" --only-show-errors
 # --- runner records (Claude's ~/.claude/projects, Codex's ~/.codex/sessions) beyond the newest budget (a tenth of the disk) ---
 # One encrypted file per run to history/runner/ (no lifecycle), removed from the disk only once it is uploaded, each file
-# listed in runner-archive.tsv (path, session id, key, date). Kept: memory/ (not a record, and Claude reads it) and the
+# listed in runner-archive.tsv (path, session id, key, date, mtime and size at the move: runner-sync restore leaves a file
+# out when it has both). Kept: memory/ (not a record, and Claude reads it) and the
 # files of a running / waiting / idle task (they can still be resumed). The database is only read.
 # How much stays on the disk: the newest records up to a tenth of the root filesystem (a bigger EBS keeps more, and a
 # faster-growing record does not need a new number); SB_RUNNER_KEEP_MB (in the host env) overrides it.
@@ -86,7 +114,7 @@ runner_archive() {
   while IFS=$'\t' read -r ST F; do
     B="$F"; SID="$(basename "$F")"; SID="${SID%.*}"
     [[ $B =~ ^.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) ]] && SID="${BASH_REMATCH[1]}"
-    printf '%s\t%s\t%s\t%s\n' "$F" "$SID" "$RKEY" "$(date -u +%Y-%m-%d)" >> "$RUNNER_LIST" || return 1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$F" "$SID" "$RKEY" "$(date -u +%Y-%m-%d)" "${ST% *}" "${ST#* }" >> "$RUNNER_LIST" || return 1
   done < "$OUT/runner/stat.tsv"
   local N=0 RMFAIL=0
   while IFS=$'\t' read -r ST F; do

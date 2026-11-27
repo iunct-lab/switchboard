@@ -30,17 +30,17 @@ export function runnerRows(info: RunnerInfo): Array<{ key: RunnerRowKey; label: 
     subagentModel: info.subagents === true,
     subagentEffort: info.subagents === true,
     autoResume: !isAdkRunner(info.id),
-    models: info.models.length > 0,
+    models: (info.listModels ?? info.models).length > 0,
   };
   return RUNNER_ROWS.map((key) => ({ key, label: ROW_LABELS[key], editable: editable[key] }));
 }
 
 /**
  * Whether the runner's モデルの選択肢 row offers the CLI's candidates (read, add, hide). It does not depend on the row being
- * editable: a Bedrock login edits its list (the original ids, `listModels`) and also hides and unhides the candidates its CLI reports.
+ * editable: a Bedrock login reads its list as the original ids (`listModels`, not the Bedrock-mapped `models`), edits it and also hides and unhides the candidates its CLI reports.
  */
-export function showsCliCandidates(info: Pick<RunnerInfo, "id" | "models">): boolean {
-  return (info.id === "claude" || info.id === "codex") && info.models.length > 0;
+export function showsCliCandidates(info: Pick<RunnerInfo, "id" | "models" | "listModels">): boolean {
+  return (info.id === "claude" || info.id === "codex") && (info.listModels ?? info.models).length > 0;
 }
 
 /**

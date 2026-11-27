@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, namedImports, parseReads, select, selectFrom } from "./test-select";
+import { buildImportGraph, classify, findStaleReads, findUndeclared, formatSelection, namedImports, parseReads, select, repoFiles, selectFrom } from "./test-select";
 
 /** 偽のツリー。パス → 中身。 */
 function tree(src: Record<string, string>) {
@@ -463,4 +463,12 @@ describe("git の一覧が読めないとき", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+test("a change of main.ts alone selects scripts/release-check.test.ts, which starts main.ts as a child process", () => {
+  const root = join(import.meta.dir, "..");
+  const files = repoFiles(root);
+  const s = selectFrom(["packages/core/src/main.ts"], files, (p) => readFileSync(join(root, p), "utf8"));
+  expect(s.full).toBeUndefined();
+  expect(s.tests).toContain("scripts/release-check.test.ts");
 });

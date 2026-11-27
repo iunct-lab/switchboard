@@ -3,7 +3,7 @@
  * working directories that can go. Only `node:` here: sb-rescue shares no code with Switchboard.
  * Nothing takes a path from a request: a name is one level under the root, and it is judged again right before it goes.
  */
-import { chmodSync, lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, statfsSync } from "node:fs";
+import { chmodSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 
 /** A directory has to be left alone this long (itself and everything in it) before the automatic clean takes it. */
@@ -28,7 +28,7 @@ const AUTO: TmpMode = { kind: "auto" };
 export const CLEANABLE: { own: RegExp[]; shared: RegExp[] } = {
   own: [
     /^[\w.-]+\.(review|recheck)\d+[A-Za-z]*\.[A-Za-z0-9]{6}$/, // an old review clone left in /tmp from before they moved: mktemp -d /tmp/<repo>.review<PR>.XXXXXX (also review3212r), and the recheck's. Today's live under ~/.cache/ops-kit/review, swept by sweepCacheWork
-    /^sb-candidate-[A-Za-z0-9]{6}$/, // promote.ts's mkdtemp, left when its finally did not run
+    /^sb-candidate-[A-Za-z0-9]{6}$/, // a candidate home of an earlier version (promote.ts's mkdtemp), left when its finally did not run; today's are candidate-<pid> under the sb-rescue home
   ],
   shared: [
     /^node-compile-cache$/,
@@ -97,13 +97,22 @@ const LIST_LIMIT = 30;
  * rootless docker's pasta) shows only its command line, so what that names counts instead; one that uses an old directory
  * without naming it is not seen. A bound Unix socket counts by its path (`<proc>/net/unix`, this network namespace's only): in a process's fds it is only
  * `socket:[inode]`, and a daemon (tmux, ssh-agent) may hold nothing else under the directory.
+ * `deep` (the reclaim of the caches and the closed PRs' review clones, which does not wait for their ages) also reads every readable process's command line and
+ * mapped files: a program started from a cache entry may keep nothing else there (its cwd elsewhere, its interpreter outside).
+ * `root` is also compared resolved, as /proc shows resolved paths: a root reached through a symbolic link would look unused.
  * null when the processes cannot be listed (no /proc, as on macOS, or one without this process): whether a name is in use is then unknown.
  */
-export function inUse(root: string, proc = "/proc"): Set<string> | null {
+export function inUse(root: string, proc = "/proc", deep = false): Set<string> | null {
   const names = new Set<string>();
-  const prefix = root.endsWith("/") ? root : root + "/";
+  const slash = (p: string) => (p.endsWith("/") ? p : p + "/");
+  const prefixes = [slash(root)];
+  try {
+    const real = slash(realpathSync(root));
+    if (real !== prefixes[0]) prefixes.push(real);
+  } catch {}
   const note = (target: string) => {
-    if (!target.startsWith(prefix)) return;
+    const prefix = prefixes.find((p) => target.startsWith(p));
+    if (!prefix) return;
     const name = target.slice(prefix.length).split("/")[0]!;
     names.add(name);
     names.add(name.split(/[:,]/)[0]!); // a command line's /tmp/<name>:/work or /tmp/<a>,…: keeping one more is safe
@@ -118,8 +127,10 @@ export function inUse(root: string, proc = "/proc"): Set<string> | null {
   try {
     // the last field is the bound path; an unbound or abstract one has none, or starts with @
     for (const line of readFileSync(`${proc}/net/unix`, "utf8").split("\n").slice(1)) {
-      const at = line.indexOf(" " + prefix);
-      if (at >= 0) note(line.slice(at + 1));
+      for (const prefix of prefixes) {
+        const at = line.indexOf(" " + prefix);
+        if (at >= 0) note(line.slice(at + 1));
+      }
     }
   } catch {}
   const denied = (e: unknown) => ["EACCES", "EPERM"].includes((e as NodeJS.ErrnoException).code ?? "");
@@ -139,13 +150,24 @@ export function inUse(root: string, proc = "/proc"): Set<string> | null {
     } catch (e) {
       hidden ||= denied(e);
     }
-    if (hidden) {
+    if (hidden || deep) {
       try {
         for (const arg of readFileSync(`${proc}/${pid}/cmdline`, "utf8").split("\0")) {
           // every path in it: the whole argument, an option's value (--user-data-dir=/tmp/<name>) or one in a : / , list
-          for (let at = arg.indexOf(prefix); at >= 0; at = arg.indexOf(prefix, at + 1)) {
-            if (at === 0 || "=:,".includes(arg[at - 1]!)) note(arg.slice(at));
+          for (const prefix of prefixes) {
+            for (let at = arg.indexOf(prefix); at >= 0; at = arg.indexOf(prefix, at + 1)) {
+              if (at === 0 || "=:,".includes(arg[at - 1]!)) note(arg.slice(at));
+            }
           }
+        }
+      } catch {}
+    }
+    if (deep && !hidden) {
+      try {
+        // address perms offset dev inode path: the path is from the first / on (a library loaded from a cache entry)
+        for (const line of readFileSync(`${proc}/${pid}/maps`, "utf8").split("\n")) {
+          const at = line.indexOf(" /");
+          if (at >= 0) note(line.slice(at + 1).trimStart());
         }
       } catch {}
     }
@@ -219,6 +241,13 @@ export function diskUsage(path: string): TmpReport["usage"] {
   const total = fs.blocks * fs.bsize;
   const used = (fs.blocks - fs.bfree) * fs.bsize;
   return { used, total, percent: total ? Math.round((used / total) * 100) : 0 };
+}
+
+/** Free space kept above the reserve: the same value as DISK_FREE_MIN_BYTES in packages/core (rescue does not import core). */
+export const DISK_FLOOR_BYTES = 1024 ** 3;
+/** The free space a reclaim works toward: the reserve (what a database snapshot needs) and the floor. Null when there is no database or it cannot be read. */
+export function diskTarget(reserve: number | null): number | null {
+  return reserve === null ? null : reserve + DISK_FLOOR_BYTES;
 }
 
 /** The kinds and the age `inspect` takes for a mode. */

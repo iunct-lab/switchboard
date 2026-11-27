@@ -207,7 +207,9 @@ describe("new-repo template-local", () => {
   test("new-repo template-local: CLAUDE.md names the same scripts as localChangeRules and does not contradict it", () => {
     const claude = readFileSync(join(filledLocal(), "CLAUDE.md"), "utf8");
     expect(scriptsOf(claude)).toEqual(scriptsOf(localChangeRules("")));
-    expect(scriptsOf(claude)).toEqual(["local-ci", "local-merge", "merge-gate"]);
+    expect(scriptsOf(claude)).toEqual(["local-merge", "merge-gate"]);
+    // local CI is the app's job in both (the gate counts only the job's record)
+    for (const text of [claude, localChangeRules("")]) expect(text).toContain("`ops-kit job request local-ci <変更> --change`");
     expect(claude).not.toContain("request_issue.sh");
     expect(claude).not.toContain("scripts/setup/");
     expect(claude).toContain("ops-kit backlog create");

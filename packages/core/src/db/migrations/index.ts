@@ -61,6 +61,7 @@ import { migration as m0059 } from "./0059-job-model.ts";
 import { migration as m0060 } from "./0060-promotion-decisions.ts";
 import { migration as m0061 } from "./0061-operation-task.ts";
 import { migration as m0062 } from "./0062-experiments.ts";
+import { migration as m0063 } from "./0063-shadow-default-custom.ts";
 
 /**
  * Every migration, in the order `migrate` runs them: the order they were written in. A new one is a new file with the next
@@ -73,5 +74,5 @@ export const MIGRATIONS: readonly Migration[] = [
   m0025, m0026, m0027, m0028, m0029, m0030, m0031, m0032, m0033, m0034, m0035, m0036,
   m0037, m0038, m0039, m0040, m0041, m0042, m0043, m0044, m0045, m0046, m0047, m0048,
   m0049, m0050, m0051, m0052, m0053, m0054, m0055, m0056, m0057, m0058, m0059,
-  m0060, m0061, m0062,
+  m0060, m0061, m0062, m0063,
 ];

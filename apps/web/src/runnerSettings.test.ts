@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CliModelCandidates } from "./components/Settings.tsx";
 import { NewDefaultsSettings, Settings, type RunnerInfo } from "@switchboard/protocol";
 import { AUTO_START_KINDS, initialChoice, jobPatchOf, jobRows, runnerDefaultLabel, candidatesOf, effectiveDefaultEffort, homeEmptyLabel, kindChoice, kindPick, modelsRowView, resetPatch, runnerRows, showsCliCandidates } from "./runnerSettings.ts";
 
@@ -30,6 +33,10 @@ describe("runnerRows", () => {
     expect(showsCliCandidates(codex)).toBe(true);
     expect(showsCliCandidates(adk)).toBe(false);
     expect(showsCliCandidates(info({ id: "custom:y", models: [opt("m")] }))).toBe(false);
+  });
+  test("a Bedrock list with no Bedrock id stays editable", () => {
+    const bedrock = info({ id: "codex", models: [], listModels: [opt("gpt-6-sol")], loginKind: "bedrock" });
+    expect(modelsRowView(bedrock)).toEqual({ folded: true, list: true, candidates: true });
   });
   test("the モデルの選択肢 row is shown for every runner: list, candidates only, or the plain 変えられない row", () => {
     expect(modelsRowView(claude)).toEqual({ folded: true, list: true, candidates: true });
@@ -193,5 +200,14 @@ describe("kindPick", () => {
   test("a kind with its own runner, or none of its own yet, sends just the change (the daemon keeps or copies the rest)", () => {
     expect(kindPick({ runner: "codex", model: "", effort: "high" }, shown, { model: "gpt-6" }, efforts)).toEqual({ model: "gpt-6" });
     expect(kindPick(undefined, shown, { effort: "high" }, efforts)).toEqual({ effort: "high" });
+  });
+});
+
+describe("CliModelCandidates", () => {
+  const hiddenList = (runner: RunnerInfo) =>
+    renderToStaticMarkup(createElement(CliModelCandidates, { runners: [runner], hidden: () => ["gpt-hidden-by-user"], disabled: false, save: async () => true, onError: () => {} }));
+  test("on Bedrock a list with no Bedrock id still lists the hidden models to undo", () => {
+    expect(hiddenList(info({ id: "codex", models: [opt("gpt-6-sol")] }))).toContain("gpt-hidden-by-user");
+    expect(hiddenList(info({ id: "codex", models: [], listModels: [opt("gpt-6-sol")], loginKind: "bedrock" }))).toContain("gpt-hidden-by-user");
   });
 });

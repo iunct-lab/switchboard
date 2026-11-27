@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { AgentEvent, BacklogIssueData, BacklogRepositoryKey, Task } from "@switchboard/protocol";
 import { InvalidTaskOutcomeError } from "./task-status.ts";
-import { abortOrphanedTasks, createdIssuesOf, createdPullsOf, Db, deferredOf, schemaLevel, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
+import { abortOrphanedTasks, copyRoom, createdIssuesOf, createdPullsOf, Db, deferredOf, schemaLevel, DEFERRED_WORDS, eventsByPrefixSql, EVENTS_PAGE_MAX, issuesInText, needsMigration, scheduledIssuesSince, sizeClass, snapshotBeforeMigrate, type BacklogSnapshotEntry, type NewBacklogOperation } from "./db.ts";
 import { permissionEventsSql } from "./db/events.ts";
 import { MIGRATIONS } from "./db/migrations/index.ts";
 import { columnsOf } from "./db/migrate.ts";
@@ -1626,6 +1626,13 @@ test("migrate: an older database is copied to snapshots/*-before-migrate.db.gz a
   expect(needsMigration(path)).toBe(true); // the database itself was not touched
   new Db(path).close();
   expect(needsMigration(path)).toBe(false);
+});
+
+test("snapshotBeforeMigrate: with less free disk than copyRoom needs it throws needs/free and leaves no file in snapshots/; with enough it makes the .db.gz", async () => {
+  const path = join(dir, "switchboard.db"); oldDb(path);
+  const probe = new Database(path, { readonly: true }), need = copyRoom(probe); probe.close();
+  await expect(snapshotBeforeMigrate(path, dir, new Date(), () => need - 1)).rejects.toThrow(/needs \d+ MB, \d+ MB free/);
+  expect(readdirSync(join(dir, "snapshots"))).toEqual([]); expect((await snapshotBeforeMigrate(path, dir, new Date(), () => need))!.endsWith(".db.gz")).toBe(true);
 });
 
 test("a Db opened with a longer busyTimeoutMs waits out another connection's write lock held past the default 5 s", async () => {

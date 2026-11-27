@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
-import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, type Ctx } from "./promote.ts";
+import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, tryCandidate, type Ctx } from "./promote.ts";
 import { appendHistory, buildRelease, currentOf, daemonReadsOf, previousOf, readHistory, releasesDir, restartNeeded, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -320,8 +320,9 @@ test("a promotion whose database snapshot fails is rejected with the reason in t
 }, 30_000);
 
 test("a promotion whose candidate cannot be set up is rejected with the reason in the history and current stays", async () => {
-  const was = process.env.TMPDIR;
-  process.env.TMPDIR = join(f.root, "no-such-temp"); // the candidate cannot make its home
+  const taken = join(f.home, `candidate-${process.pid}`);
+  mkdirSync(join(taken, "locked"), { recursive: true });
+  chmodSync(join(taken, "locked"), 0); // a leftover the candidate cannot clear, so it cannot make its home
   try {
     const cur = currentOf(f.home);
     const good = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("v-cand", ""), "good but no candidate home");
@@ -331,9 +332,38 @@ test("a promotion whose candidate cannot be set up is rejected with the reason i
     expect(readHistory(f.home).at(-1)).toEqual(r);
     expect(currentOf(f.home)).toBe(cur);
   } finally {
-    if (was === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = was;
+    chmodSync(join(taken, "locked"), 0o700);
+    rmSync(taken, { recursive: true, force: true });
   }
+}, 30_000);
+
+test("candidate: the unpacked database is checked for room first; short of it nothing is unpacked and the reason names need and free", async () => {
+  const sha = currentOf(f.home)!;
+  const snapshot = await snapshotDb(f.home, "candidate-room");
+  const seen: string[] = [];
+  const r = await tryCandidate(ctx, sha, snapshot, 8000, (dir) => (seen.push(dir), 4096));
+  expect(r).toMatch(/^the candidate's database does not fit: needs \d+ MB, 0 MB free$/);
+  expect(seen).toEqual([f.home]); // asked about the disk the home is on
+  expect(readdirSync(f.home).filter((n) => n.startsWith("candidate-"))).toEqual([]);
+}, 30_000);
+
+test("candidate: with room its home is under the sb-rescue home and is gone afterwards; one whose process is gone is swept at the start", async () => {
+  const sha = currentOf(f.home)!;
+  const snapshot = await snapshotDb(f.home, "candidate-ok");
+  const orphan = join(f.home, "candidate-99999999");
+  mkdirSync(orphan);
+  writeFileSync(join(orphan, "switchboard.db"), "left by a killed run");
+  const mine = join(f.home, `candidate-${process.pid}`);
+  let during = false;
+  const watch = setInterval(() => (during ||= existsSync(mine)), 20);
+  try {
+    expect(await tryCandidate(ctx, sha, snapshot, 8000, () => Number.MAX_SAFE_INTEGER)).toBeNull();
+  } finally {
+    clearInterval(watch);
+  }
+  expect(during).toBe(true);
+  expect(existsSync(mine)).toBe(false);
+  expect(existsSync(orphan)).toBe(false);
 }, 30_000);
 
 test("from a source repository (no git): promote by tag builds from the tarball, the page lists tags, rollback goes back; a wrong tarball is rejected without a build", async () => {

@@ -66,13 +66,15 @@ export function readClosedTasks(subIssues: number[], issues: Map<number, Pick<St
 /**
  * What an Issue a PBI waits for is, from the stored records, for the app and the parallel guard alike. undefined = not
  * stored or not read in full by the last import (`unread`): not judged, so a prerequisite on it stays `missing`.
- * `confirmOnly` counts the Tasks closed by `readClosedTasks`.
+ * `confirmOnly` counts the Tasks closed by `readClosedTasks`, and the children kept here that GitHub's list of its sub-issues
+ * does not hold yet (`waiting`, as the backlog's rows count them).
  */
-export function storedIssueTarget(n: number, issues: Map<number, StoredIssue>, unread: (n: number) => boolean): WaitTarget | undefined {
+export function storedIssueTarget(n: number, issues: Map<number, StoredIssue>, unread: (n: number) => boolean, waiting: (n: number) => Array<{ state: string }> = () => []): WaitTarget | undefined {
   const i = issues.get(n);
   if (!i || unread(n)) return undefined;
-  const done = readClosedTasks(i.subIssues, issues, unread).length;
-  const confirmOnly = pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length, done } })).prereqMet;
+  const w = waiting(n);
+  const done = readClosedTasks(i.subIssues, issues, unread).length + w.filter((c) => c.state === "CLOSED").length;
+  const confirmOnly = pbiProgress(pbiFactsOf({ labels: i.labels, body: i.body, status: null, tasks: { total: i.subIssues.length + w.length, done } })).prereqMet;
   return { kind: "issue", state: i.state, isDraft: false, labels: i.labels, closes: [], stateReason: i.stateReason, mergeCommit: null, confirmOnly };
 }
 

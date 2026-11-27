@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { constants, createGzip } from "node:zlib";
@@ -66,11 +66,28 @@ export function needsMigration(path: string): boolean {
 }
 
 /**
+ * What a copy of the database needs on disk, from the pages it holds now: the live pages plus a quarter for the gzip written
+ * beside the plain copy. The same formula as sb-rescue's `snapshotNeeds` (that bundle does not import core, so the two are
+ * kept in step by hand); the budget is in docs/design/host-disk.md under "ルートディスクの予算".
+ */
+export function copyRoom(db: Database): number {
+  const n = (pragma: string) => (db.query(`PRAGMA ${pragma}`).get() as Record<string, number>)[pragma]!;
+  return Math.ceil((n("page_count") - n("freelist_count")) * n("page_size") * 1.25);
+}
+/** Free bytes for a normal user on the disk holding `dir`. */
+export function freeOn(dir: string): number {
+  const s = statfsSync(dir);
+  return s.bavail * s.bsize;
+}
+/** The sentence a copy that does not fit stops with, as sb-rescue's snapshot says it. */
+export const notEnoughDisk = (what: string, need: number, free: number) => `not enough disk for ${what}: needs ${Math.round(need / 1048576)} MB, ${Math.round(free / 1048576)} MB free`;
+
+/**
  * Before the schema is moved on, a copy of the database in sb-rescue's snapshot folder and form (`<home>/snapshots/<ISO>-before-migrate.db.gz`,
  * the rescue page's "restore the database" lists it). Null when nothing needs migrating. Throws when the copy cannot be
- * made: the caller must not migrate without a way back. Old snapshots are pruned by sb-rescue's next `snapshotDb`.
+ * made (including when the disk is too full for it): the caller must not migrate without a way back. Old snapshots are pruned by sb-rescue's next `snapshotDb`.
  */
-export async function snapshotBeforeMigrate(path: string, home: string, now = new Date()): Promise<string | null> {
+export async function snapshotBeforeMigrate(path: string, home: string, now = new Date(), freeBytes: (dir: string) => number = freeOn): Promise<string | null> {
   if (!needsMigration(path)) return null;
   const dir = join(home, "snapshots");
   mkdirSync(dir, { recursive: true });
@@ -80,6 +97,9 @@ export async function snapshotBeforeMigrate(path: string, home: string, now = ne
   const part = `${raw}.gz.part`;
   const db = new Database(path);
   try {
+    const need = copyRoom(db);
+    const free = freeBytes(dir);
+    if (free < need) throw new Error(notEnoughDisk("the database snapshot before the migration", need, free)); // nothing written yet
     db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
     renameSync(copy, raw);
     await pipeline(createReadStream(raw), createGzip({ level: constants.Z_BEST_SPEED }), createWriteStream(part));

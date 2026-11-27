@@ -227,7 +227,8 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
     labels: nodes(i.labels),
     // a parent not stored has no type label (the import reads every typed Issue)
     parent: i.parent === null ? null : { number: i.parent, labels: nodes(byNumber.get(i.parent)?.labels ?? []) },
-    subIssues: { totalCount: i.subIssues.length },
+    // a child kept in the app and not in GitHub's list yet counts, as the backlog's rows count it
+    subIssues: { totalCount: i.subIssues.length + (i.waitingSubIssues?.length ?? 0) },
     comments: r.comments.filter((c) => c.issue === i.number),
     ...(withProject && {
       projectItems: { nodes: i.fields ? [{ project: { number: r.project.number }, fieldValues: { nodes: Object.entries(i.fields).map(([name, v]) => (typeof v === "number" ? { number: v, field: { name } } : { name: v ?? undefined, field: { name } })) } }] : [] },
@@ -350,7 +351,8 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     return { issue: { number: row.number, body: row.body, labels: labelsOf(row) }, pbi: pbi === null ? null : { number: pbi, tasks: rows.filter((r) => r.parent?.number === pbi).map((r) => r.number) }, top };
   };
   for (const row of rows.filter((r) => labelsOf(r).some((l) => l === "type:pbi" || l === "type:task"))) {
-    const asks = row.comments.filter((c) => c.body.trimStart().startsWith("## 判断待ち"));
+    // the heading is `## 判断待ち` itself: another heading that starts with it (`## 判断待ちの取り下げ`) is not an ask
+    const asks = row.comments.filter((c) => /^## 判断待ち(?:\s|$)/.test(c.body.trimStart()));
     // an ask re-posted with the line replaces the older ones without it (a comment cannot be edited)
     const lastWithLine = Math.max(-Infinity, ...asks.filter((c) => askProceed(c.body) !== null).map((c) => Date.parse(c.createdAt)));
     for (const c of asks) {

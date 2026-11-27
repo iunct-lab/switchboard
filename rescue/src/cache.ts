@@ -71,7 +71,7 @@ function ownerGitDir(dir: string): string | null {
 
 /**
  * Removes every local-CI leftover under `cacheDir` that is removable right now, and the old review clones under `<cacheDir>/ops-kit/review`
- * (a local change's worktree by age alone; a clone only when `prState` says its PR is closed), then lets the repositories they were worktrees
+ * (a local change's worktree by age alone; a clone only when `prState` says its PR is closed, left alone `reviewStaleMs`), then lets the repositories they were worktrees
  * of forget them (`git worktree prune`). A prune that fails is logged, not counted: the directory is gone either way.
  */
 export async function sweepCacheWork(
@@ -79,6 +79,7 @@ export async function sweepCacheWork(
   judge: TmpJudge,
   now = Date.now(),
   prState: (repo: string, n: number) => Promise<string | null> = (repo, n) => ghPrState(repo, n, cacheDir),
+  reviewStaleMs = CACHE_WORK_STALE_MS,
 ): Promise<TmpSweep> {
   const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
   if (!existsSync(cacheDir)) return sweep;
@@ -106,22 +107,24 @@ export async function sweepCacheWork(
     sweep.freedBytes += entry.bytes;
     if (gitDir) gitDirs.add(gitDir);
   }
-  // the review clones: a worktree of a local change goes by age alone; a clone only once GitHub says its PR is closed (not told: it stays)
+  // the review clones: a worktree of a local change goes by age alone; a clone only once GitHub says its PR is closed (not told: it stays), and
+  // that after `reviewStaleMs` (0 when the disk is short: the closed PR is the reason, not the age)
   const reviewRoot = join(cacheDir, "ops-kit", "review");
   if (existsSync(reviewRoot)) {
-    const reviewBusy = inUse(reviewRoot, judge.proc);
+    const deep = reviewStaleMs < CACHE_WORK_STALE_MS; // a clone that does not wait for its age (the reclaim): command lines and mapped files count too
+    const reviewBusy = inUse(reviewRoot, judge.proc, deep);
     for (const name of readdirSync(reviewRoot).filter((n) => REVIEW_CLONE.test(n))) {
       const path = join(reviewRoot, name);
       let entry: TmpEntry;
       try {
-        entry = inspect(reviewRoot, name, now, reviewBusy, [REVIEW_CLONE], CACHE_WORK_STALE_MS);
-        if (!entry.removable) continue;
         const gitDir = ownerGitDir(path);
+        entry = inspect(reviewRoot, name, now, reviewBusy, [REVIEW_CLONE], gitDir ? CACHE_WORK_STALE_MS : reviewStaleMs); // a local change's worktree keeps its age
+        if (!entry.removable) continue;
         if (!gitDir) {
           if (!lstatSync(join(path, ".git"), { throwIfNoEntry: false })?.isDirectory()) continue; // a .git file that names no worktree, or none at all: not a gh clone
           const repo = await originRepo(path);
           if (!repo || (await prState(repo, Number(REVIEW_CLONE.exec(name)![1]))) !== "closed") continue;
-          entry = inspect(reviewRoot, name, now, inUse(reviewRoot, judge.proc), [REVIEW_CLONE], CACHE_WORK_STALE_MS); // judged again after the wait
+          entry = inspect(reviewRoot, name, now, inUse(reviewRoot, judge.proc, deep), [REVIEW_CLONE], reviewStaleMs); // judged again after the wait
           if (!entry.removable) continue;
         }
         rmSync(path, { recursive: true, force: true });
@@ -156,7 +159,7 @@ const ANY: RegExp[] = [/^[^.]/];
  * (`judge.owned`): elsewhere the user's other apps share these caches. Each folder's processes are read once, and the
  * folders under it again only when something under that one is in use.
  */
-export function sweepCaches(home: string, judge: TmpJudge, now = Date.now()): TmpSweep {
+export function sweepCaches(home: string, judge: TmpJudge, now = Date.now(), staleMs = CACHE_STALE_MS, deep = false): TmpSweep {
   const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
   if (!judge.owned) return sweep;
   const uv = join(home, ".cache", "uv");
@@ -170,19 +173,27 @@ export function sweepCaches(home: string, judge: TmpJudge, now = Date.now()): Tm
   };
   /** The folders under `root` whose entries are judged, each with its in-use names (`top`: root's; null = unknown). */
   const under = (root: string, top: Set<string> | null, keep: (n: string) => boolean) =>
-    subdirs(root, keep).map((dir) => ({ dir, busy: !top ? null : top.has(basename(dir)) ? inUse(dir, judge.proc) : new Set<string>() }));
-  const bunTop = inUse(bun, judge.proc);
+    subdirs(root, keep).map((dir) => ({ dir, busy: !top ? null : top.has(basename(dir)) ? inUse(dir, judge.proc, deep) : new Set<string>() }));
+  const bunTop = inUse(bun, judge.proc, deep);
   const targets = [
-    ...under(uv, inUse(uv, judge.proc), (n) => !n.startsWith(".")),
+    ...under(uv, inUse(uv, judge.proc, deep), (n) => !n.startsWith(".")),
     ...(existsSync(bun) ? [{ dir: bun, busy: bunTop }] : []),
     ...under(bun, bunTop, (n) => n.startsWith("@")),
   ];
   for (const { dir, busy } of targets) {
-    for (const name of readdirSync(dir)) {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch (e) {
+      sweep.skipped++; // one folder that cannot be read does not stop the others
+      console.error(`cache sweep: ${dir}:`, e);
+      continue;
+    }
+    for (const name of names) {
       if (dir === bun && name.startsWith("@")) continue; // a scope: its entries are judged one level down
       let entry: TmpEntry;
       try {
-        entry = inspect(dir, name, now, busy, ANY, CACHE_STALE_MS);
+        entry = inspect(dir, name, now, busy, ANY, staleMs);
       } catch {
         continue;
       }
@@ -201,8 +212,73 @@ export function sweepCaches(home: string, judge: TmpJudge, now = Date.now()): Tm
   return sweep;
 }
 
+/** The npm cache (`~/.npm/_cacache`): a download cache, fetched again when needed. */
+const NPM_CACHE = [/^_cacache$/];
+
+/**
+ * Removes `~/.npm/_cacache` whole when nothing in it was touched within `staleMs` and no running process uses it (npm's own
+ * `cache clean` needs --force and is no better at telling what is in use). Only where the machine is Switchboard's alone.
+ */
+export function sweepNpm(home: string, judge: TmpJudge, now = Date.now(), staleMs = CACHE_STALE_MS, deep = false): TmpSweep {
+  const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
+  if (!judge.owned) return sweep;
+  const root = join(home, ".npm");
+  if (!existsSync(join(root, "_cacache"))) return sweep;
+  let entry: TmpEntry;
+  try {
+    entry = inspect(root, "_cacache", now, inUse(root, judge.proc, deep), NPM_CACHE, staleMs);
+  } catch {
+    return sweep;
+  }
+  if (!entry.removable) return sweep;
+  try {
+    rmSync(join(root, "_cacache"), { recursive: true, force: true });
+  } catch (e) {
+    sweep.skipped++;
+    console.error("cache sweep: npm:", e);
+    return sweep;
+  }
+  sweep.removed++;
+  sweep.freedBytes += entry.bytes;
+  return sweep;
+}
+
+/** A stopped container has to have been stopped this long before it goes. */
+export const CONTAINER_STOPPED_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Removes the containers that stopped at least `stoppedMs` ago, chosen by `State.FinishedAt` (the time it stopped; `docker container prune
+ * --filter until` reads the time it was made, which would take one a Task stopped a moment ago). `rm` without `-f`, so one that started again
+ * since the list is refused and counted as skipped. Only where the machine is Switchboard's alone; no docker is 0 removed.
+ */
+export async function sweepStoppedContainers(judge: TmpJudge, sh: (argv: string[]) => Promise<string> = (a) => run(a, homedir()), now = Date.now(), stoppedMs = CONTAINER_STOPPED_MS): Promise<TmpSweep> {
+  const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
+  if (!judge.owned) return sweep;
+  let ids: string[];
+  try {
+    ids = (await sh(["docker", "container", "ls", "-a", "--filter", "status=exited", "--format", "{{.ID}}"])).split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT" || / exited 127:/.test(String((e as Error).message))) return sweep;
+    throw e;
+  }
+  for (const id of ids) {
+    try {
+      const finished = Date.parse((await sh(["docker", "container", "inspect", "--format", "{{.State.FinishedAt}}", id])).trim().replace(/(\.\d{3})\d*/, "$1"));
+      if (!Number.isFinite(finished) || finished < Date.UTC(2000, 0, 1) || now - finished < stoppedMs) continue; // not told, never run, or stopped too lately: it stays
+      await sh(["docker", "container", "rm", id]);
+      sweep.removed++;
+    } catch (e) {
+      sweep.skipped++;
+      console.error(`container sweep: ${id}:`, e);
+    }
+  }
+  return sweep;
+}
+
 /** The images docker can take back: ones no container (running or stopped) uses, made over a day ago. */
 export const DOCKER_PRUNE = ["docker", "image", "prune", "-a", "-f", "--filter", "until=24h"];
+/** The same without the age: what `reclaim` asks when the disk is short. Docker still keeps the images a container uses. */
+export const DOCKER_RECLAIM = DOCKER_PRUNE.slice(0, -2);
 
 /** docker's sizes ("1.2GB", "512kB", "0B") are decimal (go-units' HumanSize). */
 const DOCKER_UNITS: Record<string, number> = { "": 1, k: 1e3, m: 1e6, g: 1e9, t: 1e12 };
@@ -215,12 +291,12 @@ const dockerBytes = (size: string) => {
  * Lets docker remove the images no container uses (`DOCKER_PRUNE`: docker itself keeps the ones a container uses). Only where
  * the machine is Switchboard's alone. No docker on the machine is 0 removed; any other failure throws.
  */
-export async function sweepDocker(judge: TmpJudge, sh: (argv: string[]) => Promise<string> = (a) => run(a, homedir()), now = Date.now()): Promise<TmpSweep> {
+export async function sweepDocker(judge: TmpJudge, sh: (argv: string[]) => Promise<string> = (a) => run(a, homedir()), now = Date.now(), argv: string[] = DOCKER_PRUNE): Promise<TmpSweep> {
   const sweep: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
   if (!judge.owned) return sweep;
   let out: string;
   try {
-    out = await sh(DOCKER_PRUNE);
+    out = await sh(argv);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT" || / exited 127:/.test(String((e as Error).message))) return sweep;
     throw e;
@@ -228,4 +304,45 @@ export async function sweepDocker(judge: TmpJudge, sh: (argv: string[]) => Promi
   sweep.removed = out.split("\n").filter((l) => /^deleted:/i.test(l.trim())).length;
   sweep.freedBytes = dockerBytes(/Total reclaimed space:\s*(\S+)/.exec(out)?.[1] ?? "");
   return sweep;
+}
+
+/**
+ * How long `reclaim` still leaves a cache entry alone: one being written by an install that does not hold it open yet (bun and
+ * uv write an entry, then link it) is not seen as in use, and an hour is far past any install.
+ */
+export const RECLAIM_STALE_MS = 60 * 60 * 1000;
+
+/**
+ * What the disk being short asks for: what the caches and docker can make again, without waiting for their ages (cache
+ * entries only RECLAIM_STALE_MS; the review clones of a closed PR and the containers stopped over a day ago keep their
+ * condition: the PR closed, the stop a day old). What is in use stays (`inUse` with the command lines and mapped files too
+ * for the caches and the review clones, docker itself for the images). Only where the machine is Switchboard's alone, like the sweeps. One kind's
+ * failure does not stop the others or lose their results: it is logged and counted as skipped.
+ */
+export async function reclaim(
+  home: string,
+  cacheDir: string,
+  judge: TmpJudge,
+  sh?: (argv: string[]) => Promise<string>,
+  now = Date.now(),
+  prState?: (repo: string, n: number) => Promise<string | null>,
+): Promise<TmpSweep> {
+  const total: TmpSweep = { at: now, removed: 0, freedBytes: 0, skipped: 0 };
+  const add = (s: TmpSweep) => ((total.removed += s.removed), (total.freedBytes += s.freedBytes), (total.skipped += s.skipped));
+  const kinds: Array<[string, () => TmpSweep | Promise<TmpSweep>]> = [
+    ["caches", () => sweepCaches(home, judge, now, RECLAIM_STALE_MS, true)],
+    ["npm", () => sweepNpm(home, judge, now, RECLAIM_STALE_MS, true)],
+    ["review clones", () => (judge.owned ? sweepCacheWork(cacheDir, judge, now, prState, 0) : { at: now, removed: 0, freedBytes: 0, skipped: 0 })],
+    ["stopped containers", () => sweepStoppedContainers(judge, sh, now)], // before the images: the images they held go in the same prune
+    ["docker", () => sweepDocker(judge, sh, now, DOCKER_RECLAIM)],
+  ];
+  for (const [kind, sweep] of kinds) {
+    try {
+      add(await sweep());
+    } catch (e) {
+      total.skipped++;
+      console.error(`disk reclaim: ${kind} failed:`, e);
+    }
+  }
+  return total;
 }

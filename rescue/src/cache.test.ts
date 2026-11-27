@@ -1,9 +1,9 @@
 // test-reads: none
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CACHE_STALE_MS, CACHE_WORK_STALE_MS, DOCKER_PRUNE, sweepCaches, sweepCacheWork, sweepDocker } from "./cache.ts";
+import { CACHE_STALE_MS, CACHE_WORK_STALE_MS, DOCKER_PRUNE, DOCKER_RECLAIM, RECLAIM_STALE_MS, reclaim, sweepCaches, sweepCacheWork, sweepDocker, sweepNpm, sweepStoppedContainers } from "./cache.ts";
 import { run } from "./releases.ts";
 
 let home: string;
@@ -217,6 +217,7 @@ function entry(rel: string, days: number) {
   if (days) age(join(home, rel), (Date.now() - days * 24 * 60 * 60 * 1000) / 1000);
 }
 const ls = (rel: string) => readdirSync(join(home, rel)).sort();
+const CONTAINER_LS = ["docker", "container", "ls", "-a", "--filter", "status=exited", "--format", "{{.ID}}"];
 const PRUNED = "Deleted Images:\nuntagged: alpine:3.19\ndeleted: sha256:aaa\ndeleted: sha256:bbb\n\nTotal reclaimed space: 1.5GB\n";
 
 test("sweepCaches / sweepDocker on a machine of Switchboard's own: uv's and bun's entries untouched for CACHE_STALE_MS go, new ones and dot-names stay; docker prunes the unused images", async () => {
@@ -269,6 +270,237 @@ test("sweepCaches: an entry a running process uses stays, and without the runnin
     expect(sweepCaches(home, { owned: true, proc: join(home, "no-proc") }).removed).toBe(0);
     expect(sweepCaches(home, { owned: true }).removed).toBe(1);
     expect(ls(".cache/uv/archive-v0")).toEqual(["busy1"]);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("reclaim: past RECLAIM_STALE_MS the uv and bun entries nothing uses go; the one in use and one just written stay; docker is asked without the age; elsewhere nothing happens", async () => {
+  expect(RECLAIM_STALE_MS).toBe(60 * 60 * 1000);
+  entry(".cache/uv/archive-v0/new1", 0.1);
+  entry(".cache/uv/archive-v0/busy1", 0.1);
+  entry(".cache/uv/archive-v0/now1", 0); // an install may be writing it
+  entry(".bun/install/cache/zod@3.0.0@@@1", 1);
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(home, ".cache/uv/archive-v0/busy1") });
+  const calls: string[][] = [];
+  try {
+    const sh = async (argv: string[]) => (calls.push(argv), argv[1] === "container" ? "" : PRUNED);
+    expect(sweepCaches(home, { owned: true }).removed).toBe(0); // the default age is unchanged
+    const r = await reclaim(home, cache, { owned: true }, sh);
+    expect(ls(".cache/uv/archive-v0")).toEqual(["busy1", "now1"]);
+    expect(ls(".bun/install/cache")).toEqual([]);
+    expect(calls).toEqual([CONTAINER_LS, DOCKER_RECLAIM]);
+    expect(DOCKER_RECLAIM).toEqual(["docker", "image", "prune", "-a", "-f"]);
+    expect(r.removed).toBe(2 + 2); // two cache entries, two images
+    expect(r.freedBytes).toBeGreaterThan(1.5e9);
+    expect((await reclaim(home, cache, { owned: false }, sh)).removed).toBe(0);
+    expect(calls.length).toBe(2);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("sweepNpm: the npm cache nothing touched within the age goes whole; a new one, one in use, and elsewhere stay; at age 0 a new one goes", async () => {
+  entry(".npm/_cacache/content-v2", 15);
+  age(join(home, ".npm/_cacache"), (Date.now() - 15 * 24 * 60 * 60 * 1000) / 1000); // the directory above it too: the whole tree is judged
+  entry(".npm/_logs", 15); // npm's logs are not the cache
+  expect(sweepNpm(home, { owned: false }).removed).toBe(0);
+  const r = sweepNpm(home, { owned: true });
+  expect(r.removed).toBe(1);
+  expect(r.freedBytes).toBeGreaterThan(0);
+  expect(ls(".npm")).toEqual(["_logs"]);
+  entry(".npm/_cacache/content-v2", 1);
+  age(join(home, ".npm/_cacache"), (Date.now() - 24 * 60 * 60 * 1000) / 1000);
+  expect(sweepNpm(home, { owned: true }).removed).toBe(0); // a day old: under the age
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(home, ".npm/_cacache/content-v2") });
+  try {
+    expect(sweepNpm(home, { owned: true }, Date.now(), 0).removed).toBe(0); // in use stays even at age 0
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+  expect(sweepNpm(home, { owned: true }, Date.now(), 0).removed).toBe(1);
+  expect(ls(".npm")).toEqual(["_logs"]);
+  expect(sweepNpm(home, { owned: true }).removed).toBe(0); // none: nothing to do
+});
+
+/** A fake docker: `exited` maps a container id to when it stopped (hours ago; "bad" = unreadable); `rm`s are collected. */
+function fakeDocker(exited: Record<string, number | "bad">) {
+  const rm: string[] = [];
+  const sh = async (argv: string[]) => {
+    if (argv[2] === "ls") return Object.keys(exited).join("\n") + "\n";
+    if (argv[2] === "inspect") {
+      const h = exited[argv[5]!]!;
+      return h === "bad" ? "not a time\n" : new Date(Date.now() - h * 3600 * 1000).toISOString().replace(/\.(\d{3})Z$/, ".$1123456Z") + "\n";
+    }
+    if (argv[2] === "rm") return rm.push(argv[3]!), argv[3]!;
+    throw new Error(`unexpected ${argv.join(" ")}`);
+  };
+  return { sh, rm };
+}
+
+test("sweepStoppedContainers: only the containers that stopped over 24 hours ago are removed (by when they stopped, not when they were made); a recent one, an unreadable time and elsewhere stay", async () => {
+  const d = fakeDocker({ old: 25, recent: 1, edge: 23, bad: "bad" });
+  const r = await sweepStoppedContainers({ owned: true }, d.sh);
+  expect(d.rm).toEqual(["old"]);
+  expect(r.removed).toBe(1);
+  const all = fakeDocker({ a: 1, b: 25 });
+  await sweepStoppedContainers({ owned: true }, all.sh, Date.now(), 0);
+  expect(all.rm).toEqual(["a", "b"]); // age 0
+  const other = fakeDocker({ old: 25 });
+  expect((await sweepStoppedContainers({ owned: false }, other.sh)).removed).toBe(0);
+  expect(other.rm).toEqual([]);
+  // the list never asks docker to judge by its own age, and no docker on the machine is nothing to do
+  const calls: string[][] = [];
+  await sweepStoppedContainers({ owned: true }, async (a) => (calls.push(a), ""));
+  expect(calls).toEqual([CONTAINER_LS]);
+  expect((await sweepStoppedContainers({ owned: true }, async () => { throw Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" }); })).removed).toBe(0);
+});
+
+test("sweepStoppedContainers: one that cannot be removed (started again) is counted skipped and the rest still go", async () => {
+  const d = fakeDocker({ a: 30, b: 30 });
+  const sh = async (argv: string[]) => {
+    if (argv[2] === "rm" && argv[3] === "a") throw new Error("container a is running");
+    return d.sh(argv);
+  };
+  const r = await sweepStoppedContainers({ owned: true }, sh);
+  expect(d.rm).toEqual(["b"]);
+  expect(r).toMatchObject({ removed: 1, skipped: 1 });
+});
+
+test("reclaim: a review clone of a closed PR goes at age 0; an open PR, one GitHub does not answer for, one in use and a local-CI leftover under its age stay", async () => {
+  const rootDir = join(cache, "ops-kit", "review");
+  const make = async (name: string, url: string) => {
+    const d = join(rootDir, name);
+    mkdirSync(d, { recursive: true });
+    await run(["git", "init", "-q", d], home);
+    await run(["git", "remote", "add", "origin", url], d);
+    writeFileSync(join(d, "f"), "x".repeat(4096));
+    return d;
+  };
+  await make("switchboard.review30", "https://github.com/acme/app"); // closed, new
+  await make("switchboard.review31", "https://github.com/acme/app"); // open
+  await make("switchboard.review32", "https://github.com/acme/app"); // not told
+  const busyDir = await make("switchboard.review33", "https://github.com/acme/app"); // closed, in use
+  dir("switchboard.local-ci-4000.Ab12Cd", { fresh: true }); // new local-CI worktree: keeps its age
+  const state = async (_repo: string, n: number) => (n === 31 ? "open" : n === 32 ? null : "closed");
+  const child = Bun.spawn(["sleep", "30"], { cwd: busyDir });
+  try {
+    expect((await sweepCacheWork(cache, { owned: true }, Date.now(), state)).removed).toBe(0); // by age, none of them yet
+    const r = await reclaim(home, cache, { owned: true }, async () => "", Date.now(), state);
+    expect(readdirSync(rootDir).sort()).toEqual(["switchboard.review31", "switchboard.review32", "switchboard.review33"]);
+    expect(readdirSync(cache)).toContain("switchboard.local-ci-4000.Ab12Cd");
+    expect(r.removed).toBe(1);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("reclaim: an entry a running program was started from stays, though its cwd, executable and open files are elsewhere", async () => {
+  const env = join(home, ".cache/uv/archive-v0/env1");
+  entry(".cache/uv/archive-v0/env1", 0.1);
+  writeFileSync(join(env, "late.js"), "export default 1;\n");
+  writeFileSync(join(env, "main.js"), `console.log("ready"); for await (const _ of console) { try { await import(${JSON.stringify(join(env, "late.js"))}); console.log("loaded"); } catch { console.log("gone"); } break; }\n`);
+  age(env, (Date.now() - 0.1 * 24 * 60 * 60 * 1000) / 1000);
+  const child = Bun.spawn([process.execPath, join(env, "main.js")], { cwd: home, stdin: "pipe", stdout: "pipe" });
+  const out = child.stdout.getReader();
+  try {
+    expect(new TextDecoder().decode((await out.read()).value)).toContain("ready");
+    await reclaim(home, cache, { owned: true }, async () => "");
+    child.stdin.write("go\n");
+    child.stdin.flush();
+    expect(new TextDecoder().decode((await out.read()).value)).toContain("loaded");
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("reclaim: an entry in use stays when the cache folder is reached through a symbolic link", async () => {
+  const real = join(realpathSync(home), "moved/uv");
+  mkdirSync(join(real, "archive-v0/busy1"), { recursive: true });
+  writeFileSync(join(real, "archive-v0/busy1/f"), "x");
+  age(join(real, "archive-v0/busy1"), (Date.now() - 0.1 * 24 * 60 * 60 * 1000) / 1000);
+  mkdirSync(join(home, ".cache/uv"), { recursive: true });
+  rmSync(join(home, ".cache/uv"), { recursive: true });
+  symlinkSync(real, join(home, ".cache/uv"));
+  const child = Bun.spawn(["sleep", "30"], { cwd: join(real, "archive-v0/busy1") });
+  try {
+    await reclaim(home, cache, { owned: true }, async () => "");
+    expect(existsSync(join(real, "archive-v0/busy1"))).toBe(true);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("reclaim: one kind's failure does not stop the other or lose its result", async () => {
+  const locked = join(home, ".cache/uv/locked-v0");
+  mkdirSync(locked, { recursive: true });
+  chmodSync(locked, 0);
+  const calls: string[][] = [];
+  try {
+    const r = await reclaim(home, cache, { owned: true }, async (a) => (calls.push(a), ""));
+    expect(calls).toEqual([CONTAINER_LS, DOCKER_RECLAIM]); // the folder that cannot be read did not stop docker
+    expect(r.skipped).toBe(1);
+  } finally {
+    chmodSync(locked, 0o700);
+  }
+  entry(".cache/uv/archive-v0/old1", 0.1);
+  const r = await reclaim(home, cache, { owned: true }, async () => Promise.reject(new Error("docker exited 1: x")));
+  expect(existsSync(join(home, ".cache/uv/archive-v0/old1"))).toBe(false);
+  expect(r.removed).toBe(1); // the cache entry, kept though docker failed
+  expect(r.skipped).toBe(2); // the stopped containers and the images
+});
+
+test("reclaim: an entry whose file a running program has mapped stays, though nothing else names it", async () => {
+  const env = join(home, ".cache/uv/archive-v0/lib1");
+  entry(".cache/uv/archive-v0/lib1", 0.1);
+  const lib = join(env, "f");
+  // the path is only inside the script's text, not an argument of its own: the command line does not count it, the mapping does
+  const child = Bun.spawn([process.execPath, "-e", `const m = Bun.mmap(${JSON.stringify(lib)}); console.log("ready", m.length); await Bun.sleep(30000);`], { cwd: home, stdout: "pipe" });
+  try {
+    expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain("ready");
+    await reclaim(home, cache, { owned: true }, async () => "");
+    expect(existsSync(lib)).toBe(true);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+});
+
+test("reclaim: npm's cache stays while a running program has a file in it mapped, and while it was written within the hour", async () => {
+  entry(".npm/_cacache/index-v5/aa", 0.1);
+  age(join(home, ".npm/_cacache"), (Date.now() - 0.1 * 24 * 60 * 60 * 1000) / 1000); // the folders above it too: the cache goes as a whole
+  const file = join(home, ".npm/_cacache/index-v5/aa/f");
+  const child = Bun.spawn([process.execPath, "-e", `const m = Bun.mmap(${JSON.stringify(file)}); console.log("ready", m.length); await Bun.sleep(30000);`], { cwd: home, stdout: "pipe" });
+  try {
+    expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain("ready");
+    await reclaim(home, cache, { owned: true }, async () => "");
+    expect(existsSync(file)).toBe(true);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
+  entry(".npm/_cacache/index-v5/bb", 0); // just written: an install may be at work
+  await reclaim(home, cache, { owned: true }, async () => "");
+  expect(existsSync(join(home, ".npm/_cacache"))).toBe(true);
+});
+
+test("reclaim: a closed PR's review clone that a running program was started from stays", async () => {
+  const clone = join(cache, "ops-kit/review/app.review30");
+  mkdirSync(clone, { recursive: true });
+  await run(["git", "init", "-q", clone], home);
+  await run(["git", "remote", "add", "origin", "https://github.com/acme/app"], clone);
+  writeFileSync(join(clone, "main.js"), `console.log("ready"); await Bun.sleep(30000);\n`);
+  const child = Bun.spawn([process.execPath, join(clone, "main.js")], { cwd: home, stdout: "pipe" });
+  try {
+    expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain("ready");
+    await reclaim(home, cache, { owned: true }, async () => "", Date.now(), async () => "closed");
+    expect(existsSync(clone)).toBe(true);
   } finally {
     child.kill();
     await child.exited;

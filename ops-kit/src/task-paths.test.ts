@@ -108,6 +108,16 @@ describe("task-paths pathsIn: a place that only names a file as a reference", ()
     expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["aws/promote.ts", "docs/design/evals.md", "packages/core/b.ts", "aws/d.ts", "aws/f.ts"]));
   });
 
+  test("a path said not to be touched is not touched, and stays in the merge gate's scope", () => {
+    const body = [
+      "触る場所: なし（集計と Issue への記録だけ。触るパスの名指し: `docs/design/` は触らない）",
+      "## 手順",
+      "1. `apps/web/a.ts`: 直す。`docs/c.md`・`aws/d.ts` を触らない",
+    ].join("\n");
+    expect(pathsIn(body, top)).toEqual(["apps/web/a.ts"]);
+    expect(scopeIn(body, top)).toEqual(expect.arrayContaining(["docs/design/", "docs/c.md", "aws/d.ts"]));
+  });
+
   test("a path in the old-assumption list is not touched, and stays in the merge gate's scope", () => {
     const body = [
       "古い前提を持つ既存の箇所（`ops-kit old-paths list HEAD \"c.createdAt\"` の項目。PR で 1 行ずつ確かめる）:",

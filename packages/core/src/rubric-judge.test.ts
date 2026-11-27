@@ -49,7 +49,7 @@ describe("rubric judge", () => {
     const j = await judgeRubric(INPUT, { adapters: new Map([["codex", replayAdapter("codex", answer(GOOD, "gpt-6-luna"), { starts })], ["claude", replayAdapter("claude", [])]]), settings: SETTINGS, cwd: "/tmp/switchboard-home/suggest", onUsage: (runner, ev) => usage.push({ runner, model: ev.model }) });
     expect(Object.keys(j.scores).sort()).toEqual(["communication", "efficiency", "goal", "instructions", "safety"]);
     expect(j.scores.goal).toEqual({ score: 5, reason: "直して報告" });
-    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@5" });
+    expect(j).toMatchObject({ summary: "小さな修正を確実に終えた", by: "codex:gpt-6-luna", rubric: "switchboard-default@6" });
     expect(j.ts).toBeGreaterThan(0);
     expect(starts[0]).toMatchObject({ cwd: "/tmp/switchboard-home/suggest", model: "gpt-6-luna", permissionMode: "read-only" });
     const prompt = starts[0]!.prompt;
@@ -60,6 +60,10 @@ describe("rubric judge", () => {
     expect(goal).toContain("未達に数えない（3 以下にしない）");
     expect(goal).toContain("後回しの理由を示さずに止めたのは未達に数える");
     expect(goal).toContain("依頼が名指ししたスキルの規則どおりに手段を変えた");
+    const value = prompt.split("\n").find((l) => l.startsWith("- value（"))!;
+    expect(value).toContain("引き受けた範囲");
+    expect(value).toContain("マージや PBI のクローズが無いことを理由に 2 以下にしない");
+    expect(value).toContain("待ちの理由を示さずに止めた回、成果が目的につながらない回は 1〜2");
     expect(prompt).toContain("依頼は、最初の依頼文と、その後の利用者の発言（範囲の変更・許可文・選択への答え）で変わった最新のものとして読み");
     expect(prompt).toContain("## 会話");
     expect(prompt).toContain("利用者: README の誤字を直して");

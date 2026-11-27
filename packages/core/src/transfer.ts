@@ -8,6 +8,7 @@ import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createZstdCompress, type ZstdCompress } from "node:zlib";
 import type { CoreConfig } from "./config.ts";
+import { copyRoom, freeOn, notEnoughDisk } from "./db.ts";
 
 /**
  * Moving the history to another machine: one tar.zst with the database snapshot, Claude Code's and Codex's
@@ -46,7 +47,7 @@ function packageDirs(cfg: CoreConfig) {
  * snapshot is staged, and no more than one read chunk is held at once, so the history never sits in memory or in a
  * copy as a whole (a 3.8 GB host was oom-killed doing that).
  */
-export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryptTo?: string; /** tests: called before each file is opened */ beforePack?: (path: string) => void } = {}): Promise<Manifest> {
+export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryptTo?: string; /** tests: called before each file is opened */ beforePack?: (path: string) => void; /** tests: free bytes on the disk holding a folder */ freeBytes?: (dir: string) => number } = {}): Promise<Manifest> {
   const ageBin = opts.encryptTo ? ageBinary() : null;
   // wx: never overwrite (a mistyped <out> must not replace the database or a previous export); 0600: transcripts are private.
   const fd = openSync(out, "wx", 0o600);
@@ -117,6 +118,9 @@ export async function exportHistory(cfg: CoreConfig, out: string, opts: { encryp
       const db = new Database(cfg.dbPath, { readonly: true });
       try {
         db.exec(`PRAGMA busy_timeout = ${SNAPSHOT_BUSY_TIMEOUT_MS}`); // Bun's default is 0: a checkpoint in progress would fail at once
+        const need = copyRoom(db);
+        const free = (opts.freeBytes ?? freeOn)(stage);
+        if (free < need) throw new Error(notEnoughDisk("the database copy in the export", need, free)); // before the copy is written; the stage goes in the finally
         db.exec(`VACUUM INTO '${join(stage, DB_ENTRY).replace(/'/g, "''")}'`);
       } finally {
         db.close();

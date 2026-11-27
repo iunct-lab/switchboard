@@ -18,6 +18,8 @@ const TreePath = z.string().min(1).refine((p) => !p.startsWith("/") && !p.split(
 export const PublicSync = z
   .object({
     versioning: z.literal("independent").optional(),
+    /** The public Release a sync makes is a prerelease (not Latest) until a check of the public repository promotes it (`gh release edit --latest`). Only for a repository that has such a check. */
+    prerelease: z.boolean().optional(),
     target: z.string().regex(/^[\w.-]+\/[\w.-]+$/, "target は <owner>/<name>"),
     /** What goes public. A top-level entry not named here, one added later too, stays private; a file added under a named directory goes. Omitted = the whole tree. */
     include: z.array(TreePath).min(1).optional(),
