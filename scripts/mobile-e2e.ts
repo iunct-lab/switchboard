@@ -97,9 +97,15 @@ try {
   await new Promise<void>((resolve, reject) => { ws!.onopen = () => resolve(); ws!.onerror = () => reject(new Error("CDP socket failed")); });
   let seq = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  const failing = new Set<string>();
   const errors: unknown[] = [];
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
+    if (m.method === "Fetch.requestPaused") { // only while scheduleFormHoldsStill has Fetch on: the answer comes a second late, or fails
+      const path = new URL(m.params.request.url).pathname;
+      setTimeout(() => void (failing.has(path) ? call("Fetch.failRequest", { requestId: m.params.requestId, errorReason: "Failed" }) : call("Fetch.continueRequest", { requestId: m.params.requestId })).catch(() => undefined), 1000);
+      return;
+    }
     if (m.id) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result); }
     if (m.method === "Log.entryAdded" && m.params.entry.source === "security") errors.push(m);
     if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) errors.push(m);
@@ -321,6 +327,57 @@ try {
     await until(() => evaluate(`!!document.querySelector('.main.${cls}')`), `${name} opens`);
     await Bun.sleep(500); // its data (the ledger, gh's answer) lands after the first paint
   };
+  // Schedules' form keeps still while its late answers land: "+ 追加" waits for the queue (a failed read frees it too), and the
+  // sample row holds its place, so the title field does not move when the samples arrive.
+  const scheduleFormHoldsStill = async () => {
+    const add = `[...document.querySelectorAll('.schedules .card .row.head button')].find(b => b.textContent.includes('追加'))`;
+    const titleY = () => evaluate(`document.querySelector('.schedules .fields input:not(.mono)').getBoundingClientRect().y`) as Promise<number>;
+    const sample = `document.querySelector('.schedules .fields select')`;
+    const reopen = async (viaTab: string) => {
+      await evaluate(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent === ${JSON.stringify(viaTab)}).click()`);
+      await until(() => evaluate(`!!document.querySelector('.main.${viaTab === "Ledger" ? "ledger" : "schedules"}')`), `${viaTab} opens`);
+    };
+    await size(390, 844, true);
+    await call("Fetch.enable", { patterns: ["*/api/queue", "*/api/schedules/samples"].map((urlPattern) => ({ urlPattern, requestStage: "Request" })) });
+    try {
+      await reopen("Ledger");
+      await reopen("Schedules");
+      assert(await evaluate(`${add}.disabled`), "the queue is late: + 追加 is pressable before it lands");
+      await until(() => evaluate(`!${add}.disabled`), "+ 追加 is pressable once the queue lands");
+      await tap(add, true);
+      await until(() => evaluate(`!!document.querySelector('.schedules .fields input:not(.mono)')`), "the form opens");
+      const loadingText = await evaluate(`${sample}.options[0].textContent`) as string;
+      const before = await titleY();
+      assert(await evaluate(`${sample}.disabled`), "the samples are late: the sample row is pressable (or absent) while they load");
+      await until(async () => (await evaluate(`${sample}.options[0].textContent`)) !== loadingText, "the samples land");
+      await until(() => evaluate(`!${sample}.disabled && ${sample}.options.length > 1`), "the sample row is pressable once the samples land");
+      const after = await titleY();
+      assert(before === after, `the title field moved from y=${before} to y=${after} when the late answers landed`);
+      // a failed queue read frees + 追加 as well
+      failing.add("/api/queue");
+      await tap(`[...document.querySelectorAll('.schedules .card .row.head button')].find(b => b.textContent.includes('やめる'))`, true);
+      await reopen("Ledger");
+      await reopen("Schedules");
+      assert(await evaluate(`${add}.disabled`), "the queue read is late and fails: + 追加 is pressable before the failure");
+      await until(() => evaluate(`!${add}.disabled`), "+ 追加 is pressable after the queue read fails");
+      results.scheduleFormHoldsStill = { titleYBefore: before, titleYAfter: after, loadingRow: loadingText };
+    } finally {
+      failing.clear();
+      await call("Fetch.disable");
+      await reopen("Ledger"); // leave the form closed: the loop below opens Schedules itself
+    }
+    if (shots) {
+      // the form on a PC, with the sample row in place (the screens loop below shoots it only on a phone)
+      await size(1280, 900, false);
+      await reopen("Schedules");
+      await until(() => evaluate(`!${add}.disabled`), "1280x900: + 追加 is pressable");
+      await evaluate(`${add}.click()`);
+      await until(() => evaluate(`!!document.querySelector('.schedules .fields select') && !document.querySelector('.schedules .fields select').disabled`), "1280x900: the sample row is pressable");
+      await shoot("schedule-form-1280x900.png");
+      await reopen("Ledger");
+    }
+  };
+  await scheduleFormHoldsStill();
   for (const [width, height] of [[390, 844], [844, 390]] as const) {
     const label = `screens ${width}x${height}`;
     await size(width, height, true);
@@ -329,7 +386,9 @@ try {
       await openTab(name, cls);
       if (cls === "ledger") await until(() => evaluate(`[...document.querySelectorAll('.ledger .row .hint.mono')].some(e => e.textContent.includes('0123456789abcdef'))`), `${label}: Ledger shows the long model id`);
       if (cls === "schedules") {
-        await tap(`[...document.querySelectorAll('.schedules .card .row.head button')].find(b => b.textContent.includes('追加'))`, true);
+        const add = `[...document.querySelectorAll('.schedules .card .row.head button')].find(b => b.textContent.includes('追加'))`;
+        await until(() => evaluate(`!${add}.disabled`), `${label}: + 追加 is pressable`); // it waits for the queue
+        await tap(add, true);
         await until(() => evaluate(`!!document.querySelector('.schedules .fields textarea')`), `${label}: the schedule form opens`);
       }
       if (cls === "settings") {

@@ -129,6 +129,12 @@ export const AutoStartSettings = z
   .prefault({});
 export type AutoStartSettings = z.infer<typeof AutoStartSettings>;
 
+/** The kernel's own tunables (the part of the Tasks that picks by evidence). */
+const kernelFields = {
+  /** The share of Tasks (a ratio of counts, 0 to 1) spent on exploring instead of the best-known choice. A count, not a cost: a cost is known only as an estimate, and a count can be compared with the strata's n as it is. */
+  explorationShare: z.number().min(0).max(1),
+};
+
 /**
  * Values the person may want to tune while running, one group per section of the settings screen. The ranges
  * are written once here (no defaults) and used by both `Settings` (with the defaults) and `SettingsPatch` (partial).
@@ -264,6 +270,13 @@ export const QuotaAndResumeSettings = z
   .prefault({});
 export type QuotaAndResumeSettings = z.infer<typeof QuotaAndResumeSettings>;
 
+export const KernelSettings = z
+  .object({
+    explorationShare: kernelFields.explorationShare.default(0.1),
+  })
+  .prefault({});
+export type KernelSettings = z.infer<typeof KernelSettings>;
+
 export const JudgeAndChoiceSettings = z
   .object({
     judgeFallbackRunner: judgeAndChoiceFields.judgeFallbackRunner.default("claude"),
@@ -314,6 +327,8 @@ export const Settings = z.object({
    * (`seedNewHome`, written by main.ts).
    */
   developSelf: z.boolean().default(true),
+  /** Whether the backlog's automatic processing starts a small request in the direct candidate by its `auto` criteria, in every registered workspace alike. false: it never does, anywhere (the row's button is separate). */
+  autoDirect: z.boolean().default(true),
   /** LLM runner suggestions. Off by default: switching it on spends the runner's quota on every task creation. */
   routing: RoutingSettings.prefault({}),
   /** Judge each finished turn as done / needs action. On by default: it spends the runner's quota once per turn. */
@@ -338,6 +353,8 @@ export const Settings = z.object({
   titles: TitlesSettings.prefault({}),
   /** Usage threshold and automatic resume. */
   quotaAndResume: QuotaAndResumeSettings.prefault({}),
+  /** The kernel's exploration share. */
+  kernel: KernelSettings.prefault({}),
   /** The judge's fallback and timeouts, the Workspace choice's timeout. */
   judgeAndChoice: JudgeAndChoiceSettings.prefault({}),
   /** What the creation forms start with. */
@@ -409,6 +426,7 @@ export const SettingsPatch = z.object({
   hiddenModels: z.record(z.string(), z.array(z.string()).nullable()).nullable().optional(),
   shadowRunner: RunnerId.nullable().optional(),
   developSelf: z.boolean().nullable().optional(),
+  autoDirect: z.boolean().nullable().optional(),
   /** Partial: `{ outbound: { classifierLog: true } }` leaves the other value alone. */
   outbound: z.object({ classifierLog: z.boolean(), runnerTelemetry: z.boolean() }).partial().nullable().optional(),
   /** Partial: `{ routing: { llm: { enabled: true } } }` leaves the saved runner / model alone. */
@@ -461,6 +479,7 @@ export const SettingsPatch = z.object({
   titles: z.object({ auto: z.boolean(), runner: RunnerId, model: z.string(), effort: z.string() }).partial().nullable().optional(),
   /** Partial: `{ quotaAndResume: { maxLimitStops: 3 } }` leaves the rest alone; null puts the whole group back to the defaults. */
   quotaAndResume: z.object(quotaAndResumeFields).partial().nullable().optional(),
+  kernel: z.object(kernelFields).partial().nullable().optional(),
   judgeAndChoice: z.object(judgeAndChoiceFields).partial().nullable().optional(),
   newDefaults: z.object(newDefaultsFields).partial().nullable().optional(),
   release: z.object(releaseFields).partial().nullable().optional(),

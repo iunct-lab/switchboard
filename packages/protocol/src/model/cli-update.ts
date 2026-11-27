@@ -28,6 +28,8 @@ export const CliUpdateRunnerState = z.object({
   current: z.string().nullable(),
   /** The version a rollback goes to; null = none recorded. */
   previous: z.string().nullable(),
+  /** `previous` is recorded but its files are not on disk (a rebuilt host lost them), so the button cannot go back. */
+  previousGone: z.boolean(),
   /** A version found and held back, and why (the wait in hours, the Tasks that run). */
   waiting: z.object({ version: z.string(), reason: z.string() }).nullable(),
   /** A rollback was asked for and waits for the Tasks to end. */

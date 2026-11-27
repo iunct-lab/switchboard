@@ -98,7 +98,7 @@ async function rig(opts: { candidate?: boolean; installed?: string | null; env?:
       dist.latest = v;
     },
     settings: (cliUpdate: object | null) => send("PATCH", "/api/settings", { cliUpdate }),
-    state: async () => (await (await send("GET", "/api/runners/updates")).json()) as { enabled: boolean; runners: Array<{ runner: string; current: string | null; previous: string | null; waiting: { version: string; reason: string } | null; rollbackWaiting: boolean; note: string | null }>; records: Array<{ outcome: string; toVersion: string; fromVersion: string | null; reason: string; by: string; sha256: string | null }> },
+    state: async () => (await (await send("GET", "/api/runners/updates")).json()) as { enabled: boolean; runners: Array<{ runner: string; current: string | null; previous: string | null; previousGone: boolean; waiting: { version: string; reason: string } | null; rollbackWaiting: boolean; note: string | null }>; records: Array<{ outcome: string; toVersion: string; fromVersion: string | null; reason: string; by: string; sha256: string | null }> },
     rows: () => core.db.listCliUpdates(50).reverse().map((r) => `${r.outcome} ${r.fromVersion ?? "-"}->${r.toVersion}`),
     startTask: async (title = "busy") => (await send("POST", "/api/tasks", { cwd: dir, title, prompt: "p", runner: "claude" }).then(j)).id as string,
     /** the version is in: the link moved and the record says so (the link moves a moment before the row) */
@@ -189,7 +189,13 @@ describe("host CLI updates through the daemon", () => {
     await r.installed("2.2.0");
     r.publish("2.3.0");
     await r.installed("2.3.0");
-    expect((await r.state()).runners[0]).toMatchObject({ current: "2.3.0", previous: "2.2.0" });
+    expect((await r.state()).runners[0]).toMatchObject({ current: "2.3.0", previous: "2.2.0", previousGone: false });
+    // the state says whether the file of that target is still on disk: the screen shows no button when it is not
+    rmSync(r.p.dir("2.2.0"), { recursive: true, force: true });
+    expect((await r.state()).runners[0]).toMatchObject({ previous: "2.2.0", previousGone: true });
+    writeFileSync(r.p.bin("2.2.0"), content("2.2.0"));
+    chmodSync(r.p.bin("2.2.0"), 0o755);
+    expect((await r.state()).runners[0]).toMatchObject({ previous: "2.2.0", previousGone: false });
     // a Task runs: the answer is "when it is free", and the link stays until then
     const task = await r.startTask();
     await until(() => r.core.db.listWorkingTasks("gate").length === 1);

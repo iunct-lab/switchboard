@@ -5,7 +5,7 @@ import type { CliRollbackResult, CliUpdateRow, CliUpdateRunnerState } from "@swi
 import { CliRunnerRow, CliUpdateRecords, currentSince, rollbackNotice, shaHead } from "./components/CliUpdateSettings.tsx";
 
 const row = (o: Partial<CliUpdateRow>): CliUpdateRow => ({ id: 1, runner: "claude", at: Date.UTC(2026, 10, 19, 11, 10), fromVersion: null, toVersion: "2.1.328", outcome: "installed", sha256: null, reason: "", by: "auto", ...o });
-const state = (o: Partial<CliUpdateRunnerState>): CliUpdateRunnerState => ({ runner: "claude", current: "2.1.328", previous: "2.1.327", waiting: null, rollbackWaiting: false, checkedAt: null, note: null, ...o });
+const state = (o: Partial<CliUpdateRunnerState>): CliUpdateRunnerState => ({ runner: "claude", current: "2.1.328", previous: "2.1.327", previousGone: false, waiting: null, rollbackWaiting: false, checkedAt: null, note: null, ...o });
 
 test("a record row shows when, runner, the move of versions, the result, the sha256 head and the reason, one block per row", () => {
   const sha = "307f8badaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaeb521";
@@ -35,9 +35,14 @@ test("the runner's line names the current and the previous version on the button
   expect(h).toContain("2.1.328");
   expect(h).toContain("2.1.327 に戻す</button>");
   expect(h).toContain("に入れた");
+  expect(h).not.toContain("ファイルが無いので戻せません");
   const none = renderToStaticMarkup(createElement(CliRunnerRow, { state: state({ previous: null }), since: null, busy: false, onRollback: () => undefined }));
   expect(none).not.toContain("<button");
   expect(none).toContain("ここで確かめて入れた版だけに戻せます");
+  // the previous version is recorded but its files are gone: the reason is shown and there is nothing to press
+  const gone = renderToStaticMarkup(createElement(CliRunnerRow, { state: state({ previousGone: true }), since: null, busy: false, onRollback: () => undefined }));
+  expect(gone).not.toContain("<button");
+  expect(gone).toContain("前の版 2.1.327 のファイルが無いので戻せません");
   // a rollback already waiting for the Tasks cannot be asked twice
   const waiting = renderToStaticMarkup(createElement(CliRunnerRow, { state: state({ rollbackWaiting: true }), since: null, busy: false, onRollback: () => undefined }));
   expect(waiting).toContain("disabled");

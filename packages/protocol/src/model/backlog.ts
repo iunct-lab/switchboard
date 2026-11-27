@@ -190,6 +190,11 @@ export const BacklogItem = z.object({
    */
   autoHeld: z.object({ previousTaskId: z.string(), action: BacklogAction }).nullable(),
   /**
+   * When the newest 実装 or 閉じる stage Task of the item was created (ms), read only for an item with waits (`waitsAt`);
+   * null = none, or no waits. One created after the waits means the work went on since: the waits no longer lift it.
+   */
+  lastWorkAt: z.number().nullable(),
+  /**
    * The other answers of `packages/core/src/pbi-progress.ts` (docs/design/pbi-progress.md): `closableByApi` = the API
    * takes 閉じる (Tasks all closed, confirmations left or not); `closesOnAnswer` = the one confirmation line whose answer
    * closes the PBI, null = none does; `checking` = built, every Task closed and only `postMerge` lines unchecked.
@@ -220,7 +225,7 @@ export const BacklogItem = z.object({
   /**
    * What a Ready / in-progress PBI stopped to wait for: the PRs / Issues of the same repository named by its newest
    * /pbi-complete release, with whether each is still open. Deferred PRs and explicitly recorded overlap waits on decision Tasks are excluded. Empty when there is no such record, a later one cleared it,
-   * the item is not a Ready / in-progress PBI, or an 実装 (`complete`) stage Task was created after `waitsAt` (the daemon empties it then).
+   * or the item is not a Ready / in-progress PBI. An 実装 started after the waits were written does not empty it; `autoHeld` says the one automatic start they allow has been made.
    * `open` null = its state could not be read (not stored; `kind` is then "issue"), neither open nor closed, and it
    * still holds the PBI. `reason` = why the release named it: "overlap" (`--overlap-waits`, the files overlap) or
    * "prerequisite" (`--waits`, a Task it builds on is not done; a `waits=` written before `--overlap-waits` existed may

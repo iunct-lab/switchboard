@@ -12,9 +12,9 @@ const OFFERED: ReadonlySet<BacklogAction> = new Set<BacklogAction>(["to-pbi", "d
  * The buttons of one Issue the Task opened: the Backlog row's (`startButton`, then `directButton`), kept to the steps
  * the Task screen starts. None for a row with no backlog item (a request with a derived PBI).
  */
-export function createdRowButtons(row: CreatedIssueRow, metaId: string | null): Array<[BacklogAction, string]> {
+export function createdRowButtons(row: CreatedIssueRow): Array<[BacklogAction, string]> {
   if (!row.item) return [];
-  return [startButton(row.item), directButton(row.item, metaId)].filter((b): b is [BacklogAction, string] => b !== null && OFFERED.has(b[0]));
+  return [startButton(row.item), directButton(row.item)].filter((b): b is [BacklogAction, string] => b !== null && OFFERED.has(b[0]));
 }
 
 /**

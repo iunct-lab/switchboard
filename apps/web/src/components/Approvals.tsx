@@ -9,6 +9,7 @@ import { t } from "../i18n.ts";
 import { panels as m } from "../i18n/panels.ts";
 import { home as hm } from "../i18n/home.ts";
 import { stallRows } from "../queueStall.ts";
+import { WorkspaceTag } from "./ui.tsx";
 import { task as tm } from "../i18n/task.ts";
 import { answerOf, answersOf, type QuestionChoice } from "../questions.ts";
 import { answerButtons, answeredHere, answeredInRow, answerRoute, appliedLine, askCardParts, askRows, questionHead, replyPreview, replyTarget, takesReply, BATCH_LABEL, batchLines, blockerLines, groupAsks, confirmable, settledCount, hiddenByBatches, isQuick, initialPolicyForm, keptAnswers, KIND_LABEL, policyInput, policySummary, previousLines, pruneAnswered, quickRows, resumeLabel, rowKey, scopeLabel, STATE_LABEL, issueOpenHref, unblockLinks, waitChoices, waitersLine, waitGroups, workspaceChips, workspaceKey, workspaceSections, type Answered, type AnsweredHere, type AskRow, type PolicyForm } from "../asks.ts";
@@ -312,34 +313,53 @@ function AskCard(props: { ask: Ask; was: Answered | undefined; waitAnswer?: "sto
  * The lines of a stalled queue's notice (queueStall.ts), on Home's card and on the notice's card here: what waits for the
  * person, each opening its Task (else its Issue), then what holds the queue, each opening its PR / Issue in a new tab.
  */
-export function StallRows(props: { ask: Ask; onOpenTask: (id: string) => void }) {
-  const { person, holders } = stallRows(props.ask);
+export function StallRows(props: { ask: Ask; onOpenTask: (id: string) => void; shown?: number; onOpenAsks?: () => void }) {
+  const { person, more, holders } = stallRows(props.ask, { shown: props.shown });
   return (
     <div className="stall-rows">
       {person.length > 0 && <div className="stall-group">{t(hm.stallPersonHeading)}</div>}
       {person.map((r, i) => (
         <div key={`p${i}`} className="stall-row">
           <span className="t">
-            {r.text}
-            {r.badge && <span className="badge stall-head-moved">{r.badge}</span>}
+            <span className="stall-one">
+              <WorkspaceTag name={r.workspace} />
+              {r.text}
+            </span>
+            <span className="stall-count">
+              {r.count}
+              {r.badge && <span className="badge stall-head-moved">{r.badge}</span>}
+            </span>
           </span>
           {r.taskId ? (
             <button className="ghost link" onClick={() => props.onOpenTask(r.taskId!)}>
               {t(hm.stallOpenTask)}
             </button>
+          ) : r.href ? (
+            <a href={r.href} target="_blank" rel="noreferrer">
+              {t(hm.stallOpenIssue)}
+            </a>
           ) : (
-            r.href && (
-              <a href={r.href} target="_blank" rel="noreferrer">
-                {t(hm.stallOpenIssue)}
-              </a>
+            r.openAsks &&
+            props.onOpenAsks && (
+              <button className="ghost link" onClick={props.onOpenAsks}>
+                {t(hm.stallOpenAsks)}
+              </button>
             )
           )}
         </div>
       ))}
+      {more > 0 && props.onOpenAsks && (
+        <button className="ghost link stall-more" onClick={props.onOpenAsks}>
+          {t(hm.stallMore, { n: more })}
+        </button>
+      )}
       {holders.length > 0 && <div className="stall-group">{t(hm.stallHoldersHeading)}</div>}
       {holders.map((r, i) => (
         <div key={`h${i}`} className="stall-row">
-          <span className="t">{r.text}</span>
+          <span className="t">
+            <WorkspaceTag name={r.workspace} />
+            {r.text}
+          </span>
           {r.href && (
             <a href={r.href} target="_blank" rel="noreferrer">
               {t(hm.stallOpen)}

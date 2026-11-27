@@ -12,7 +12,7 @@ import { IssueLink } from "./BacklogOwner.tsx";
  * the step it can start now as another Task (the Backlog row's buttons), or the link to its running stage Task.
  * Nothing when the Task opened none.
  */
-export function CreatedIssues(props: { rows: CreatedIssueRow[]; metaId: string | null; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onError: (msg: string) => void }) {
+export function CreatedIssues(props: { rows: CreatedIssueRow[]; onStarted: (task: Task) => void; onOpenTask: (id: string) => void; onError: (msg: string) => void }) {
   const [starting, setStarting] = useState<string | null>(null);
   if (props.rows.length === 0) return null;
   const now = Date.now();
@@ -26,7 +26,7 @@ export function CreatedIssues(props: { rows: CreatedIssueRow[]; metaId: string |
       {props.rows.map((r) => {
         const stage = createdRowStage(r);
         const active = r.item?.activeTaskId ?? null;
-        const buttons = active ? [] : createdRowButtons(r, props.metaId);
+        const buttons = active ? [] : createdRowButtons(r);
         return (
           <div key={`${r.workspaceId}#${r.number}`} className="created-issue" data-issue={r.url}>
             <span className="t">

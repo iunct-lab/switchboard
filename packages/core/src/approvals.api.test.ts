@@ -658,6 +658,8 @@ describe("merge grants", () => {
     try {
       writeFileSync(join(t.cwd, "ops.config.json"), JSON.stringify({ mergeGate: "scripts/merge-gate.ts" }));
       const calls = join(tree, "calls.jsonl");
+      // a made-up AWS config, so that the host's own is never read
+      writeFileSync(join(tree, "aws-config"), "[default]\n");
       writeFileSync(join(tree, "gh"), `#!/usr/bin/env bun\nconst a = process.argv.slice(2);\nif (a.includes("headRefOid")) { console.log(${JSON.stringify(headNow)}); process.exit(0); }\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + "\\n");\n`);
       chmodSync(join(tree, "gh"), 0o755);
       const p = Bun.spawn([GUARD, ...argv], { cwd: t.cwd, env: { ...process.env, GH_REPO: undefined, GH_HOST: undefined, OPS_MERGE_GATE_PR: undefined, OPS_PUBLIC_SYNC_PR: undefined, BACKLOG_URL: `${b}/api/backlog`, OPS_KIT_TASK_ID: t.id, AWS_CONFIG_FILE: join(tree, "aws-config"), PATH: `${dirname(GUARD)}:${tree}:${process.env.PATH}` }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });

@@ -57,14 +57,17 @@ export function CliRunnerRow(props: { state: CliUpdateRunnerState; since: number
         {s.previous !== null ? (
           <>
             <span className="hint">{t(settings.cliPrevious, { version: s.previous })}</span>
-            <button disabled={props.busy || s.rollbackWaiting} onClick={props.onRollback}>
-              {t(settings.cliRollbackTo, { version: s.previous })}
-            </button>
+            {!s.previousGone && (
+              <button disabled={props.busy || s.rollbackWaiting} onClick={props.onRollback}>
+                {t(settings.cliRollbackTo, { version: s.previous })}
+              </button>
+            )}
           </>
         ) : (
           s.current !== null && <span className="hint">{t(settings.cliNoPrevious)}</span>
         )}
       </div>
+      {s.previous !== null && s.previousGone && <div className="hint">{t(settings.cliPreviousGone, { version: s.previous })}</div>}
       {s.rollbackWaiting && <div className="hint">{t(settings.cliRollbackWaiting)}</div>}
       {s.waiting && <div className="hint">{t(settings.cliWaiting, { version: s.waiting.version, reason: s.waiting.reason })}</div>}
       {s.note && <div className="hint">{s.note}</div>}

@@ -180,6 +180,27 @@ describe("main", () => {
     expect(r.json.uncountedAudits).toBe(2);
   });
 
+  test("select on a repository the app has no GitHub workspace for (404) → exit 2 naming it, with nothing selected", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-post-audit-"));
+    writeFileSync(join(dir, "key"), "k\n");
+    const out: string[] = [];
+    const errs: string[] = [];
+    const log = console.log, err = console.error;
+    console.log = (x: string) => void out.push(x);
+    console.error = (x: string) => void errs.push(x);
+    try {
+      const code = await main(["select", "--since", "2026-11-01", "--until", "2026-11-07", "--repo", "nobody/none"], failing, Date.parse("2026-11-07T12:00:00Z"), { MERGE_RECORDS_URL: "http://app.test", MERGE_RECORDS_TOKEN_FILE: join(dir, "key") }, async () => Response.json({ error: "nobody/none はアプリに登録されていない（GitHub のバックログにも、workspace の checkout にも無く、head のある仕事の記録も無い）。集計にはそのリポジトリの登録が要る" }, { status: 404 }));
+      expect(code).toBe(2);
+    } finally {
+      console.log = log;
+      console.error = err;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(errs.join("\n")).toContain("nobody/none");
+    expect(errs.join("\n")).toContain("登録");
+    expect(out).toEqual([]);
+  });
+
   test("an audit job the implementing Task asked for is no audit; a finding job settles the PR only once its PBI is in the backlog", async () => {
     // 16's passing audit asked for by the Task that asked for its verdict: not counted, 16 is selected again
     const self: MergeHistory = { ...history, jobs: history.jobs.map((j) => (j.id === 9 ? { ...j, taskId: "t16" } : j)) };

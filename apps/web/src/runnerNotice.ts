@@ -2,7 +2,7 @@ import type { RunnerId, RunnerInfo } from "@switchboard/protocol";
 import { t } from "./i18n.ts";
 import { home } from "./i18n/home.ts";
 
-/** What is missing when the daemon gave no note (or no runner list): the words Home used to show only on hover. */
+/** What is missing when the daemon gave no note (or no runner list): the words Home showed on hover before the notice became text read without hovering. */
 const MISSING: Record<"claude" | "codex" | "dak", string> = {
   claude: t(home.missingClaude),
   codex: t(home.missingCodex),

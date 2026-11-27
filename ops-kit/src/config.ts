@@ -3,6 +3,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { GhClient } from "./gh.ts";
 import { z } from "zod";
 
+/** The choice every `fields.kernel` field has: the value for "not known", apart from a field not set. */
+export const KERNEL_UNKNOWN = "不明";
+const KERNEL_RESERVED = ["Status", "Priority", "Phase", "Story Points"];
+
 const Section = z.union([z.string().min(1), z.object({ name: z.string().min(1), hint: z.string().min(1) }).strict()]);
 export type Section = z.infer<typeof Section>;
 export const sectionName = (s: Section) => (typeof s === "string" ? s : s.name);
@@ -82,10 +86,24 @@ export const OpsConfig = z
     owner: z.string().min(1).optional(),
     /** `<envPrefix>_PROJECT_URL` in the environment overrides `projectUrl`. */
     envPrefix: z.string().regex(/^[A-Z][A-Z0-9_]*$/, "envPrefix は大文字・数字・_"),
-    /** The choices of the single-select fields Priority, and Phase if the Project has one. */
+    /**
+     * The choices of the single-select fields Priority, and Phase if the Project has one; `kernel` is a table of
+     * more single-select fields (field name → choices) that mark the nature and origin of a piece of work. Every
+     * field of it has the choice `不明` (unknown), so that "not known" is a value and differs from "not marked yet".
+     */
     fields: z.object({
       priority: z.array(z.string().min(1)).min(1),
       phase: z.array(z.string().min(1)).min(1).optional(),
+      kernel: z
+        .record(z.string().min(1), z.array(z.string().min(1)).min(1))
+        .superRefine((k, ctx) => {
+          for (const [name, options] of Object.entries(k)) {
+            if (!options.includes(KERNEL_UNKNOWN)) ctx.addIssue({ code: "custom", path: [name], message: `${name} の選択肢に ${KERNEL_UNKNOWN} がありません` });
+            // the fields the kit already owns keep their own choices
+            if (KERNEL_RESERVED.includes(name)) ctx.addIssue({ code: "custom", path: [name], message: `${name} は印のフィールドに使えません（${KERNEL_RESERVED.join(" / ")} は既にあるフィールド）` });
+          }
+        })
+        .optional(),
     }),
     /** A Phase's Milestone title matches this (a RegExp source). */
     milestone: z.object({ pattern: z.string().min(1) }).optional(),

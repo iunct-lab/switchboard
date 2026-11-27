@@ -330,8 +330,9 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
           const { text } = parsed.data;
           if (by.via === "screen") {
             // a grant sentence in the screen's answer is for the PR as it is when the answer is taken. The answer is kept
-            // first, each such PR with no head; the heads are read after the reply and put with the answer. One not read,
-            // or read after a stage Task took the answer, stays without a head: the grant then answers for none
+            // first, each such PR with no head. The read of the heads starts right after the answer is saved; the reply does
+            // not wait for it, and the heads are put with the answer when the read returns. One not read, or read after a
+            // stage Task took the answer, stays without a head: the grant then answers for none
             const operation = answerStoredDecision(sc.db, source, asked, text, Date.now(), { question, screen: true, heads: sc.pendingGrantHeads(ws, text) });
             void sc.answerGrantHeads(ws, text).then((heads) => Object.keys(heads).length && setAnswerHeads(sc.db, operation, heads)).catch((e) => console.warn(`backlog answer: heads not kept (${String((e as Error).message ?? e)})`));
           } else answerStoredDecision(sc.db, source, asked, text, Date.now(), { question, by: by.sender ? `task:${by.sender}` : "api" });
@@ -428,16 +429,14 @@ export function backlogRoutes(sc: Pick<ServerContext, "callingTask" | "grantSour
         // 閉じる goes with progress.closableByApi (Tasks all closed, 利用者確認 may remain), not with a stage; complete on an in-progress item is backlog-next's resume
         // of a stalled one, started from a waiting row's 続きを始める
         const resume = action === "complete" && item.stage === "in-progress";
-        // 直行で直す only from a request with no PBI yet, like PBI にする; it is not a stage, so backlog-next never picks it
+        // 直行で直す only from a request with no PBI yet, like PBI にする; it is not a stage (backlog-next picks it only by the direct candidate's own criteria, with autoDirect on)
         if (action === "direct" && item.stage !== "request") return sc.bad(`直行で始められるのは派生 PBI の無い要望だけです（#${n} は ${item.stage}）`, 409);
-        // another repository's worktree and branch rules are its own (the PBI's scope: the meta workspace first)
-        if (action === "direct" && sc.cfg.releaseOnly) return sc.bad("この構成では Switchboard 自身のフォルダに Task を始められません（Release から入れた版は書き換えても次の更新で替わります）", 409);
-        if (action === "direct" && ws.kind !== "meta") return sc.bad("直行で始められるのは meta workspace の要望だけです", 409);
+        if (action === "direct" && ws.kind === "meta" && sc.cfg.releaseOnly) return sc.bad("この構成では Switchboard 自身のフォルダに Task を始められません（Release から入れた版は書き換えても次の更新で替わります）", 409);
         if (action !== "direct" && (action === "close" ? !item.progress.closableByApi : !(ACTION_FOR_STAGE[item.stage] === action || resume))) return sc.bad(`#${n} は ${item.stage}${action === "close" ? "（閉じられない）" : ""} なので ${action} は始められません`, 409);
         // the row's button does not start what backlog-next leaves for its overlap: the reason is the log's;
         // a running stage Task is the 409 with its taskId below (the row opens it), not a refusal
         if (action === "complete" && !sc.activeStageTask(ws.id, n) && isOverlapped(item)) return sc.json({ error: overlapLine([item]).join("・") }, 409);
-        const r = await sc.startStage({ ws, meta: meta!, item, action, resume: resume ? { tasksDone: item.tasks?.done ?? 0 } : undefined, ...(wantRunner ? { extra: { runner: wantRunner, model: wantModel, effort: wantEffort } } : {}) });
+        const r = await sc.startStage({ ws, meta: meta!, item, action, resume: resume || undefined, ...(wantRunner ? { extra: { runner: wantRunner, model: wantModel, effort: wantEffort } } : {}) });
         if ("active" in r) return sc.json({ error: `#${n} の工程 Task が実行中です`, taskId: r.active.id }, 409);
         return "task" in r ? sc.json(r.task, 201) : sc.bad(r.error, r.status);
       },

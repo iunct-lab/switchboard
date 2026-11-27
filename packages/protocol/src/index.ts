@@ -10,6 +10,7 @@ export * from "./model/bundle.ts";
 export * from "./model/checks.ts";
 export * from "./model/cli-update.ts";
 export * from "./model/evals.ts";
+export * from "./model/experiments.ts";
 export * from "./model/feedback.ts";
 export * from "./model/flow.ts";
 export * from "./model/history.ts";

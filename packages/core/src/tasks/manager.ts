@@ -305,8 +305,10 @@ export class TaskManager extends TaskSettings {
     this.requireOwn(this.mustGet(taskId));
     const live = this.live.get(taskId);
     if (live?.heldReplies?.length) {
+      const dropped = live.heldReplies;
       live.heldReplies = undefined; // the process leaves `live` before the status moves: drop what was held here
       this.record(taskId, { t: "status", text: "中断したので、保留した返信は渡しません" });
+      for (const r of dropped) r.dropped?.();
     }
     let task = this.mustGet(taskId);
     if (task.executionMode === "cloud") {

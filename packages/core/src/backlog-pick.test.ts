@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BacklogItem } from "@switchboard/protocol";
-import { awaitingReply, claimedLine, flowCounted, notResumed, pickNext } from "./backlog-pick.ts";
+import { awaitingReply, claimedLine, flowCounted, isUnblocked, notResumed, pickNext } from "./backlog-pick.ts";
 import { turnWorks } from "./backlog-overlap.ts";
 import { item } from "./api-test-harness.ts";
 
@@ -63,8 +63,15 @@ describe("a PBI the gate holds is neither counted nor keeps a turn", () => {
     expect(turns(flowing({ autoHeld: hold }))).toEqual([]);
     expect(turns(flowing({ autoHeld: null })).map((t) => t.task)).toEqual([71]);
   });
-  test("an unblocked PBI goes on though the gate would hold it", () => {
-    const unblocked = flowing({ autoHeld: hold, waitsAt: iso(T0), waits: [{ number: 5, kind: "issue", open: false, state: "met", reason: "overlap", pbi: null }] });
-    expect(pickNext([unblocked], "implement")).toMatchObject({ item: { number: 7 } });
+  test("an unblocked PBI the gate holds is not picked, not counted and keeps no place; once the gate lets go it goes on", () => {
+    const wait = { waitsAt: iso(T0), waits: [{ number: 5, kind: "issue" as const, open: false, state: "met" as const, reason: "overlap" as const, pbi: null }] };
+    const unblocked = flowing({ autoHeld: hold, ...wait });
+    expect(isUnblocked(unblocked)).toBe(false);
+    expect(pickNext([unblocked], "implement")).toBeNull();
+    expect(flowCounted([unblocked]).map((i) => i.number)).toEqual([]);
+    const free = flowing({ autoHeld: null, ...wait });
+    expect(isUnblocked(free)).toBe(true);
+    expect(pickNext([free], "implement")).toMatchObject({ item: { number: 7 } });
+    expect(flowCounted([free]).map((i) => i.number)).toEqual([7]);
   });
 });

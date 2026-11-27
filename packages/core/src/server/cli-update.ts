@@ -294,10 +294,12 @@ export const cliUpdateState = (sc: Sc): CliUpdateState => {
     runners: RUNNERS.map((runner) => {
       const current = currentVersion(runner, inst);
       const ready = rt.ready.get(runner);
+      const previous = rollbackTarget(runner, inst);
       return {
         runner,
         current,
-        previous: rollbackTarget(runner, inst),
+        previous,
+        previousGone: previous !== null && !existsSync(placesOf(runner, inst.home, inst.codexTarget).bin(previous)),
         waiting: ready ? { version: ready.release.version, reason: sc.drainBusy() > 0 ? WAIT_TASKS : "確かめは通った。入れ替え中" } : (rt.held.get(runner) ?? null),
         rollbackWaiting: rt.rollbackWanted.has(runner),
         checkedAt: rt.checkedAt.get(runner) ?? null,

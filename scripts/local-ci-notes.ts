@@ -40,7 +40,10 @@ export function markerSeconds(body: string): StepSeconds | undefined {
 /** A result's machine line of its tests: how many files ran, null = all of them, of how many. */
 export const LOCAL_CI_TESTS = /^<!-- local-ci-tests (\{.*\}) -->$/m;
 
-/** The tests a result's body carries, or undefined when it has none (a run from before the tests were narrowed, `--all`). */
+/**
+ * The tests a result's body carries, or undefined when it has none (a run from before local-ci narrowed a PR's tests
+ * to the affected ones, `--all`).
+ */
 export function testsOf(body: string): { ran: number | null; total: number } | undefined {
   const m = LOCAL_CI_TESTS.exec(body);
   if (!m) return undefined;

@@ -133,6 +133,65 @@ describe("GET /api/merge-records", () => {
     }
   });
 
+  test("history of a repository no GitHub workspace is registered for is 404 naming it, and a registered one with no records is an empty 200", async () => {
+    const x = await boot();
+    try {
+      const meta = ((await fetch(`${x.b}/api/workspaces`).then(j)) as Array<{ id: string; kind: string }>).find((w) => w.kind === "meta")!;
+      x.c.db.setWorkspaceBacklogSource(meta.id, { service: "github", host: "github.com", repository: "Acme/App", project: { owner: "o", number: 1 } });
+      const none = await fetch(`${x.b}/api/merge-records/history?repo=nobody/none&since=1`);
+      expect(none.status).toBe(404);
+      const error = ((await none.json()) as { error: string }).error;
+      expect(error).toContain("nobody/none");
+      expect(error).toContain("登録");
+      await expect(mergeHistory({ MERGE_RECORDS_URL: x.b, MERGE_RECORDS_TOKEN_FILE: x.tokenFile }, { repo: "nobody/none", sinceMs: 1 })).rejects.toThrow("nobody/none");
+      // registered (any case) with no jobs and no stored PRs: nothing to count, which is not unregistered
+      const empty = await fetch(`${x.b}/api/merge-records/history?repo=acme/app&since=1`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toMatchObject({ jobs: [], pulls: [], comments: [], since: null });
+    } finally {
+      await x.stop();
+    }
+  });
+
+  const checkouts = [
+    { name: "backlog kept in the app", backlog: "switchboard", origin: "https://github.com/acme/local.git", key: "acme/local" },
+    { name: "GitHub backlog not imported yet", backlog: "github", origin: "https://github.com/acme/local.git", key: "acme/local" },
+    { name: "origin with a trailing slash", backlog: "switchboard", origin: "https://github.com/acme/local/", key: "acme/local" },
+    { name: "origin naming a user", backlog: "switchboard", origin: "https://someone@github.com/acme/local.git", key: "acme/local" },
+    { name: "GitLab project (forge setting)", backlog: "switchboard", origin: "https://gitlab.example.com/Group/App.git", key: "group/app", config: { forge: { service: "gitlab", host: "gitlab.example.com", project: "Group/App" } } },
+    { name: "folder removed after its jobs", backlog: "switchboard", origin: "https://github.com/acme/local.git", key: "acme/local", removed: true },
+  ] as const;
+  for (const k of checkouts) {
+    test(`history of a registered checkout (${k.name}) is read by the keys the checkout goes by, not answered as unregistered`, async () => {
+      const x = await boot();
+      const dir = mkdtempSync(join(tmpdir(), "switchboard-merge-records-checkout-"));
+      try {
+        const git = (...a: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...a], { encoding: "utf8" });
+        git("init", "-q");
+        git("remote", "add", "origin", k.origin);
+        if ("config" in k) writeFileSync(join(dir, "ops.config.json"), JSON.stringify(k.config));
+        git("commit", "-q", "--allow-empty", "-m", "root");
+        const ws = (await fetch(`${x.b}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: dir, backlog: k.backlog }) }).then(j)) as { id: string };
+        expect(x.c.db.getWorkspaceBacklogSource(ws.id)?.service === "github").toBe(false);
+        if (!("removed" in k)) {
+          // no records yet: an empty 200
+          const empty = await fetch(`${x.b}/api/merge-records/history?repo=${k.key.toUpperCase()}&since=1`);
+          expect(empty.status).toBe(200);
+          expect(await empty.json()).toMatchObject({ jobs: [] });
+        }
+        const t = x.c.tasks.create({ workspaceId: ws.id, cwd: dir, title: "t", prompt: "p", runner: "claude" });
+        x.c.db.insertJob({ kind: "gate", taskId: t.id, pr: 12, runner: null, cwd: dir, startedAt: 10, repo: k.key, head: HEAD, as: null, kinds: [] });
+        if ("removed" in k) rmSync(dir, { recursive: true, force: true });
+        const r = await fetch(`${x.b}/api/merge-records/history?repo=${k.key}&since=1`);
+        expect(r.status).toBe(200);
+        expect(((await r.json()) as { jobs: unknown[] }).jobs.length).toBe(1);
+      } finally {
+        await x.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
   test("a call without a repository, with a pr that is no positive integer or with a head that is no sha is 400", async () => {
     const x = await boot();
     try {

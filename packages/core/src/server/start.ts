@@ -152,7 +152,7 @@ export const startStage = async <A extends true | undefined = undefined>(sc: Pic
   meta: Workspace;
   item: BacklogItem;
   action: BacklogAction;
-  resume?: { tasksDone: number };
+  resume?: true;
   /** Why this candidate (backlog-next: `chooseProcess`'s); the buttons leave it out and are recorded as the button / the stage. */
   processReason?: string;
   /**
@@ -218,7 +218,7 @@ export const startStage = async <A extends true | undefined = undefined>(sc: Pic
     if (answer && "task" in r && !sc.db.mergeGrantSourceSpent(answer.id)) await sc.noteMergeGrant(r.task.id, answer.text, { source: answer.id, via: "screen", heads: answer.heads, ...(answer.parts ? { parts: answer.parts } : {}) });
     return r;
   };
-  if (action === "direct") return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildDirectPrompt(item, { review: sc.settings().reviewRunner, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, runner }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra })));
+  if (action === "direct") return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildDirectPrompt(item, { other, review: sc.settings().reviewRunner, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, runner }, def), process: def.id, processReason: input.processReason ?? "direct button", ...input.extra })));
   const taskModel = action === "complete" ? sc.completeTaskModelFor(input.extra?.runner) : "";
   return orGiveBack(await granting(await sc.startMetaTask({ kind: action, ws, title: startTitle(item, action), stage, prompt: (runner) => buildStartPrompt(item, action, { review: sc.settings().reviewRunner, other, resume: input.resume, local: ws.backlog === "switchboard", localForge: ws.backlog === "switchboard" && localForgeOf(ws.path, savedConfigFile(ws.id)), answer, taskModel, runner }, def), process: def.id, processReason: input.processReason ?? `backlog stage ${action}`, ...(taskModel ? { note: delegatedNote(taskModel) } : {}), ...input.extra })));
 };

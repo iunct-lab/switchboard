@@ -105,7 +105,7 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .row.stuck { background: var(--amber-soft); border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; }
 .row.stuck .t, .main .row.stuck:not(.head) > .t { white-space: normal; display: block; -webkit-line-clamp: unset; overflow-wrap: anywhere; }
 .row.stuck .why { font-size: 12px; color: var(--ink3); }
-/* the stalled queue's notice: first under 要対応 on Home, and on its card in the questions; lines wrap, links stay whole */
+/* the stalled queue's notice: first under 要対応 on Home, and on its card in the questions; an answer's text is cut to one line, links stay whole */
 .stall-card { background: var(--amber-soft); border: 1px solid var(--amber); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
 .stall-q { font-weight: 600; overflow-wrap: anywhere; }
 .stall-sub { font-size: 12px; color: var(--ink2); overflow-wrap: anywhere; }
@@ -114,6 +114,10 @@ h5 { margin: 0 0 6px; font: 500 10px/1.2 var(--mono); letter-spacing: .1em; text
 .stall-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; font-size: 13px; border-top: 1px dashed var(--line); }
 .stall-row .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .stall-row a, .stall-row button.link { white-space: nowrap; font-size: 12px; flex: none; color: var(--acc); text-decoration: underline; padding: 0; border: 0; background: none; }
+.stall-one { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stall-count { display: block; font-size: 12px; color: var(--ink2); }
+.stall-rows .stall-more { display: block; margin: 4px 0 0; font-size: 12px; color: var(--acc); text-decoration: underline; padding: 0; border: 0; background: none; }
+.stall-row .tag.ws { margin: 0 4px 0 0; max-width: 24ch; vertical-align: bottom; }
 .stall-row .badge.stall-head-moved { display: inline-block; margin-left: 4px; padding: 0 5px; background: var(--red); font-family: inherit; font-weight: 500; white-space: nowrap; }
 /* 要対応: a group = the first Task's row, and under it the same-cause line with its 確認済み; 待ち folds below */
 .attn-group { border-bottom: 1px solid var(--line2); }

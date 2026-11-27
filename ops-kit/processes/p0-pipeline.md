@@ -12,7 +12,7 @@ fits:
 
 キットの親のアプリがこれまで回してきた工程を、候補の 1 つとして定義したもの。工程の中身はスキル（`ops-kit/skills/`）が持ち、ここにあるのは工程の Task に渡す**入口の文**だけ。キットの親のアプリは `## entry <name>` の節を読み、`{{n}}` などの穴を埋めて Task の最初のプロンプトにする（`packages/core/src/process-defs.ts` の `renderEntry`）。
 
-穴: `{{n}}` = Issue の番号、`{{subIssues}}` = sub-issue の数、`{{reportFormat}}` = `## 状況` コメントの形、`{{tasksDoneMark}}` = 閉じた Task の数の印。
+穴: `{{n}}` = Issue の番号、`{{subIssues}}` = sub-issue の数、`{{reportFormat}}` = `## 状況` コメントの形。
 
 ## entry to-pbi
 
@@ -36,7 +36,7 @@ PBI #{{n}} は Task（sub-issue {{subIssues}} 件）に分解済みですが、P
 
 ## entry complete-resume
 
-PBI #{{n}} は実装中のまま止まっています。sub-issue の Task（状態・PR）、関連する PR、受け入れ条件を確かめ、Issue #{{n}} に {{reportFormat}}その末尾に `{{tasksDoneMark}}` を 1 行そのまま入れてください（この PBI を選んだ時点の閉じた Task の数。数え直さない。次に Task が閉じるか `## 回答` が付くまで、定期実行がこの PBI を再開しないための印です）。利用者の判断が要るもの（要件の読み・設計の選択・受け入れ条件の利用者確認など）があれば、.claude/skills/issue-workflow/SKILL.md の「判断待ちの出し方」で `## 判断待ち` を出して止めてください。無ければ続けて .claude/skills/pbi-complete/SKILL.md に従い、PBI #{{n}} を完了させてください。
+PBI #{{n}} は実装中のまま止まっています。sub-issue の Task（状態・PR）、関連する PR、受け入れ条件を確かめ、Issue #{{n}} に {{reportFormat}}利用者の判断が要るもの（要件の読み・設計の選択・受け入れ条件の利用者確認など）があれば、.claude/skills/issue-workflow/SKILL.md の「判断待ちの出し方」で `## 判断待ち` を出して止めてください。無ければ続けて .claude/skills/pbi-complete/SKILL.md に従い、PBI #{{n}} を完了させてください。
 
 ## entry check
 

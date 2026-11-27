@@ -192,7 +192,7 @@ export interface ServerContext {
   /** The previous automatic Task a start of this item and stage is held for (stage-start-gate.ts), or null: backlog-next says it before it reads GitHub again. */
   readonly autoHeldOf: (ws: Workspace, item: BacklogItem, action: BacklogAction) => { previousTaskId: string } | null;
   /** `{ held }` comes back only to a start made with `auto`: the button's and the API's never get it. */
-  readonly startStage: <A extends true | undefined = undefined>(input: { ws: Workspace; meta: Workspace; item: BacklogItem; action: BacklogAction; resume?: { tasksDone: number }; processReason?: string; auto?: A; extra?: Pick<Parameters<ServerContext["startMetaTask"]>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd"> }) => Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true } | (A extends true ? { held: { previousTaskId: string } } : never)>;
+  readonly startStage: <A extends true | undefined = undefined>(input: { ws: Workspace; meta: Workspace; item: BacklogItem; action: BacklogAction; resume?: true; processReason?: string; auto?: A; extra?: Pick<Parameters<ServerContext["startMetaTask"]>[0], "runner" | "model" | "effort" | "scheduleId" | "shadowRunner" | "budgetUsd"> }) => Promise<{ task: Task } | { active: Task } | { error: string; status: number; held?: true } | (A extends true ? { held: { previousTaskId: string } } : never)>;
   readonly ghLoginRefused: (ws: Workspace) => boolean;
   readonly authStopHeld: (ws: Workspace) => string | null;
   readonly notSettled: (e: unknown) => string;
@@ -370,6 +370,7 @@ export interface ServerContext {
   readonly grantHeadOf: (task: { workspaceId?: string | null; cwd: string }, repo: string, target: number) => Promise<string | null>;
   readonly grantSource: (req: Request, srv: Peer, sender?: string) => Promise<{ sender?: string; via: "screen" | "api" }>;
   readonly noteMergeGrant: (taskId: string, text: string, from?: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean; heads?: GrantHeads; read?: { said: string; asked: string; full?: string }; parts?: string[] }) => Promise<void>;
+  readonly grantRecorder: (taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean; heads: GrantHeads; read?: { said: string; asked: string; full?: string }; parts?: string[] }) => () => void;
   readonly ownGrantRepos: (ws: { id: string } | null, cwd: string) => string[];
   readonly answerGrantHeads: (ws: { id: string; path: string }, text: string, checked?: GrantHeads, parts?: string[]) => Promise<GrantHeads>;
   readonly pendingGrantHeads: (ws: { id: string; path: string }, text: string, checked?: GrantHeads, parts?: string[]) => GrantHeads;

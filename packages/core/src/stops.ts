@@ -308,19 +308,20 @@ export const stopWork = (task: Task): StopRecord["work"] => {
 /** How many of a schedule's newest Tasks its stops are read from. */
 const SCHEDULE_TASKS = 30;
 
-/** Every stop of the task's work: of all the stage Tasks of its Issue when it has one (another Task on the same Issue stops the same work), else of its schedule's recent Tasks, else its own. */
+/** Every stop of the task's work: of all the stage Tasks of its Issue when it has one (another Task on the same Issue stops the same work), else of its schedule's recent Tasks, else its own; the Task's own are always read, even when it is older than the schedule's newest. */
 export function stopRecordsFor(db: Db, task: Task): StopRecord[] {
   const issue = issueOf(task);
   if (issue !== null) return db.listStopRecords(db.stageTaskIds(task.workspaceId!, issue));
-  return db.listStopRecords(task.scheduleId ? db.recentScheduleTaskIds(task.scheduleId, SCHEDULE_TASKS) : [task.id]);
+  if (!task.scheduleId) return db.listStopRecords([task.id]);
+  const ids = db.recentScheduleTaskIds(task.scheduleId, SCHEDULE_TASKS);
+  return db.listStopRecords(ids.includes(task.id) ? ids : [...ids, task.id]);
 }
 
 /**
  * The last stop of each stopped Task that is not reviewed (確認済み), whatever its outcome: waiting, done, error or aborted,
  * read in one query (`listStopRecordsOfStopped`). Of each, the newest series (`reduceStops` puts the latest `lastAt` first)
  * among the stops that Task itself reported — not `stopRecordsFor`, which also reads the other Tasks of the same Issue /
- * schedule (their newer stop is not this Task's last stop) and only the schedule's latest Tasks (an older Task's own stop
- * would be lost). A Task with no stop record of its own, or that waits on no one (`personWait`), is left out. The mark
+ * schedule (their newer stop is not this Task's last stop). A Task with no stop record of its own, or that waits on no one (`personWait`), is left out. The mark
  * only carries what the stop was; whether the person is wanted is the Task's outcome.
  */
 export function stopMarks(db: Db, tasks: Task[], now: number): Record<string, TaskStopMark> {

@@ -60,6 +60,7 @@ import { perfRoutes } from "./routes/perf.ts";
 import { opsRoutes } from "./routes/ops.ts";
 import { jobsRoutes } from "./routes/jobs.ts";
 import { evalsRoutes } from "./routes/evals.ts";
+import { experimentsRoutes } from "./routes/experiments.ts";
 import { knowledgeRoutes } from "./routes/knowledge.ts";
 import { materializeRoutes } from "./routes/materialize.ts";
 import { wsRoutes } from "./routes/ws.ts";
@@ -283,6 +284,7 @@ export async function startServer(cfg: CoreConfig, adapters: RunnerAdapter[], op
       opsRoutes(sc),
       jobsRoutes(sc),
       evalsRoutes(sc),
+      experimentsRoutes(sc),
       knowledgeRoutes(sc),
       materializeRoutes(sc),
       wsRoutes(sc),

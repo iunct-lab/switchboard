@@ -52,6 +52,24 @@ describe("bootstrap", () => {
     ]);
   });
 
+  test("fields.kernel: every field of the table is created as a single select with its choices; one the Project already has is left alone", async () => {
+    const kernel = { Problem: ["明確", "不明"], Scale: ["小", "不明"] };
+    const cfg = { ...noPhase, fields: { ...noPhase.fields, kernel } };
+    const have = { name: "Problem", dataType: "SINGLE_SELECT", options: [{ name: "明確" }, { name: "不明" }] };
+    const existing = { id: "P7", number: 7, title: "Backlog", url: "https://github.com/orgs/example-org/projects/7", fields: { nodes: [status(STATUS_OPTIONS), { name: "Priority", dataType: "SINGLE_SELECT", options: noPhase.fields.priority.map((name) => ({ name })) }, { name: "Story Points", dataType: "NUMBER" }, have] } };
+    const gh = fakeGh([page([existing]), () => ({})]);
+    const log: string[] = [];
+    await bootstrap(gh, cfg, { title: "Backlog" }, (s) => log.push(s), {});
+    expect(gh.calls).toHaveLength(2);
+    expect(g(gh.calls[1]).vars).toEqual({ p: "P7", n: "Scale", o: [{ name: "小", color: "GRAY", description: "" }, { name: "不明", color: "GRAY", description: "" }] });
+    expect(log).toContain(">> フィールド 'Problem' は既に存在（スキップ）");
+    expect(log).toContain(">> フィールド 'Scale' を作成");
+    const dry: string[] = [];
+    await bootstrap(fakeGh([page([{ ...existing, fields: { nodes: [status(STATUS_OPTIONS)] } }])]), cfg, { title: "Backlog", dryRun: true }, (s) => dry.push(s), {});
+    expect(dry).toContain("DRY_RUN> フィールド 'Problem' を作る（明確 / 不明）");
+    expect(dry).toContain("DRY_RUN> フィールド 'Scale' を作る（小 / 不明）");
+  });
+
   test("the Project is looked up on every page; a number match with another title is used but noted", async () => {
     const other = { id: "P1", number: 1, title: "Sibling", url: "https://github.com/users/example/projects/1", fields: { nodes: [status(STATUS_OPTIONS)] } };
     const gh = fakeGh([page([], "C1"), page([other])]);

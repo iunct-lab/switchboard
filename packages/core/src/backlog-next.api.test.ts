@@ -82,19 +82,33 @@ test("backlog-next: each request starts in the candidate its own criteria choose
   expect(startedTasks().filter((x) => x.stage?.issue === 302 && x.stage.action === "direct")).toHaveLength(1);
 });
 
-test("backlog-next: 直行で直す is the meta workspace's only — another repository's small request goes to PBI にする", async () => {
+test("backlog-next: a small request goes direct on every workspace alike", async () => {
   const claude = holdingClaude();
   const { base, ids } = await threeWorkspaces(claude.adapter, undefined, requestsGh({ on: false }).gh);
   const id = await backlogNextSchedule(base);
   expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
   expect((await runSchedule(base, id)).status).toBe(201);
-  const of = (ws: string) => startedTasks().find((t) => t.workspaceId === ws && t.stage?.issue === 302)!;
-  expect(of(ids.switchboard!).stage!.action).toBe("direct");
-  for (const ws of [ids.lib!, ids.app!]) {
-    const t = of(ws);
-    expect(t.stage!.action).toBe("to-pbi");
-    expect(await fetch(`${base}/api/tasks/${t.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p0-pipeline" }, processReason: "auto pipeline: 自動の基準を持つ候補なし" });
+  for (const ws of [ids.switchboard!, ids.lib!, ids.app!]) {
+    const t = startedTasks().find((x) => x.workspaceId === ws && x.stage?.issue === 302)!;
+    expect(t.stage!.action).toBe("direct");
+    expect(await fetch(`${base}/api/tasks/${t.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p1-direct" }, processReason: expect.stringMatching(/^auto direct: /) });
   }
+});
+
+test("backlog-next: a small request goes direct on none with autoDirect off, and the row's button still starts one", async () => {
+  const claude = holdingClaude();
+  const { base, ids } = await threeWorkspaces(claude.adapter, undefined, requestsGh({ on: false }).gh);
+  const id = await backlogNextSchedule(base);
+  expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ autoDirect: false }) })).status).toBe(200);
+  expect((await runSchedule(base, id)).status).toBe(201);
+  for (const ws of [ids.switchboard!, ids.lib!, ids.app!]) {
+    const t = startedTasks().find((x) => x.workspaceId === ws && x.stage?.issue === 302)!;
+    expect(t.stage!.action).toBe("to-pbi");
+    expect(await fetch(`${base}/api/tasks/${t.id}/provenance`).then((r) => r.json())).toMatchObject({ process: { id: "p0-pipeline" } });
+  }
+  for (const t of startedTasks()) core!.db.updateTask(t.id, { status: "error" });
+  expect((await start(base, 302, { action: "direct" })).status).toBe(201);
 });
 
 test("backlog-next: unreadable candidate definitions start no request, and say why; other stages go on", async () => {
@@ -148,8 +162,8 @@ test("backlog-next stalled: Issue 305, which the gate does not hold, is resumed 
   expect(await scheduleLogAll(base)).toContainEqual(expect.stringContaining("#305 を complete で開始"));
   for (let i = 0; claude.starts.length < 2 && i < 100; i++) await Bun.sleep(10);
   const prompt = claude.starts.find((x) => x.prompt.includes("#305"))!.prompt;
-  expect(prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 2 } }));
-  expect(prompt).toContain("`<!-- tasks-done: 2 -->` を 1 行そのまま入れて");
+  expect(prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: true }));
+  expect(prompt).not.toContain("<!--");
 });
 
 describe("on-hold", () => {
@@ -997,8 +1011,8 @@ test("backlog-next held without a new event is logged and the button still start
 
 test.each([
   ["a failed Task with no update since", 304, "complete", "error", 1],
-  ["a resume whose mark did not move", 305, "complete", "done", 1],
-  ["a resume that ended before writing its mark", 305, "complete", "done", 2],
+  ["a resume that did not move the PBI", 305, "complete", "done", 1],
+  ["a resume that ended before writing its 状況", 305, "complete", "done", 2],
   ["a 閉じる that did not close", 307, "close", "done", 1],
 ] as const)("a held item has one reason in the log: %s", async (_, n, action, status, closed) => {
   const subs = [subTask(310, "CLOSED", ["type:task"], []), subTask(311, closed === 2 ? "CLOSED" : "OPEN", ["type:task"], []), subTask(312, "OPEN", ["type:task"], [])];
@@ -1135,6 +1149,8 @@ test("two workspaces of the same name each name their own held request", async (
   core!.db.upsertWorkspace({ path: dirs.lib!, name: "app", kind: "repo" }); // a name is not unique, only the path is
   insertHeld("tsk_a302", 302, "to-pbi", 2000, "done", ids.app!);
   insertHeld("tsk_b302", 302, "to-pbi", 2000, "done", ids.lib!);
+  // the held to-pbi is what is under test: no automatic direct start on the way
+  await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ autoDirect: false }) });
   const id = await backlogNextSchedule(base);
   expect((await sweepAll(base, { implement: 0, plan: 3 })).status).toBe(200);
   await runSchedule(base, id);

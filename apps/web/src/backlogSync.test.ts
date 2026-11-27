@@ -1,7 +1,7 @@
 // test-reads: apps/web/src/scheduleActions.ts apps/web/src/scheduleResult.ts apps/web/src/scheduleEdit.ts apps/web/src/i18n.ts apps/web/src/i18n/backlog.ts
 import { describe, expect, test } from "bun:test";
 import type { BacklogIssueDetail, BacklogSyncInfo } from "@switchboard/protocol";
-import { backlogHeading, createWord, decisionQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, issueArtifactsShown, labelList, loadDraft, loadNewIssueDraft, newIssueDraftKey, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
+import { backlogHeading, createWord, decisionQuestion, draftQuestion, syncSummary, draftKey, heldIssueText, issueHref, savedWords, editOf, formAfterRead, formOf, githubSyncText, heldEditName, issueArtifactsShown, labelList, loadDraft, loadNewIssueDraft, newIssueDraftKey, PROJECT_SETUP_DOC, type FormBase, rebaseForm, syncLine, valueText, workspaceErrorGuide } from "./backlogSync.ts";
 
 const fmt = (ms: number) => `t${ms}`;
 const info = (over: Partial<BacklogSyncInfo>): BacklogSyncInfo => ({ state: "synced", reason: null, lastSuccessfulSync: 1000, retryAt: null, pendingCount: 0, conflicts: [], guarantee: "A", ...over });
@@ -298,5 +298,33 @@ describe("syncSummary / decisionQuestion (Backlog on a phone)", () => {
     expect(decisionQuestion("## 判断待ち\n**問い**: この要望を統合して閉じるか\n**選択肢**:\n- A")).toBe("この要望を統合して閉じるか");
     expect(decisionQuestion("## 判断待ち\n\nどちらで作るか **太字** で\n- A")).toBe("どちらで作るか 太字 で");
     expect(decisionQuestion("")).toBe("");
+  });
+});
+
+describe("draft question", () => {
+  const A = { issue: 306, at: "2026-09-22T01:00:00.000Z" };
+  const B = { issue: 306, at: "2026-09-22T02:00:00.000Z" };
+  test("the first word starts a draft for the question shown then", () => {
+    expect(draftQuestion({ text: "", asked: null }, "A", A)).toEqual(A);
+  });
+  test("the question changes while words stay: the draft keeps the one it was started for", () => {
+    expect(draftQuestion({ text: "A", asked: A }, "A で", B)).toEqual(A);
+  });
+  test("an emptied box follows the question now", () => {
+    expect(draftQuestion({ text: "A で", asked: A }, "", B)).toEqual(B);
+  });
+  test("a draft started after the box was emptied is for the question shown when its first word is typed", () => {
+    // typed under A, erased under A, the card now shows B, and the first word of a new draft is typed
+    let asked = draftQuestion({ text: "", asked: null }, "x", A);
+    asked = draftQuestion({ text: "x", asked }, "", A);
+    asked = draftQuestion({ text: "", asked }, "y", B);
+    expect(asked).toEqual(B);
+  });
+  test("a draft started with no question shown takes the one that arrives at its next word", () => {
+    expect(draftQuestion({ text: "A", asked: null }, "A で", B)).toEqual(B);
+  });
+  test("no question gives none", () => {
+    expect(draftQuestion({ text: "", asked: null }, "", null)).toBeNull();
+    expect(draftQuestion({ text: "", asked: null }, "A で", null)).toBeNull();
   });
 });

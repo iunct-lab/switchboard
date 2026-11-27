@@ -51,6 +51,19 @@ describe("config", () => {
     expect(parseConfig(old).fields).toEqual(base.fields);
   });
 
+  test("fields.kernel is a table of field name to choices, optional; every field must have 不明", () => {
+    const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
+    const kernel = { Problem: ["明確", "不明"], Fit: ["合う", "どの候補にも合わない", "不明"] };
+    expect(parseConfig({ ...base, fields: { ...base.fields, kernel } }).fields.kernel).toEqual(kernel);
+    expect(noPhase().fields.kernel).toBeUndefined();
+    expect(() => parseConfig({ ...base, fields: { ...base.fields, kernel: { Problem: ["明確", "曖昧"] } } })).toThrow(/Problem の選択肢に 不明 がありません/);
+    expect(() => parseConfig({ ...base, fields: { ...base.fields, kernel: { Problem: [] } } })).toThrow(/kernel/);
+    // a field the kit already owns keeps its own choices
+    expect(() => parseConfig({ ...base, fields: { ...base.fields, kernel: { Priority: ["x", "不明"] } } })).toThrow(/Priority は印のフィールドに使えません/);
+    // this repository's own config carries the six marks
+    expect(Object.keys(loadConfig(join(import.meta.dir, "../../ops.config.json")).fields.kernel ?? {})).toEqual(["Problem", "Solution", "Reversibility", "Scale", "Origin", "Fit"]);
+  });
+
   test("a config with forge parses; its keys are checked", () => {
     const base = JSON.parse(require("node:fs").readFileSync(join(fixtures, "config-no-phase.json"), "utf8"));
     expect(parseConfig({ ...base, forge: { service: "github" } }).forge).toEqual({ service: "github" });

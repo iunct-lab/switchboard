@@ -294,32 +294,37 @@ test("backlog-next waiting: a 状況確認 started after the waits were written 
   expect(core!.db.listTasks().map((t) => t.title.split(":")[0])).toContain("#307 実装");
 });
 
-test("backlog-next waiting: a 状況確認 after an 実装 that made the waits old does not bring them back", async () => {
+test("backlog-next waiting: a 状況確認 after an automatic 実装 does not let the used-up waits go again, and the closable PBI goes on with 閉じる", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, title: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
-  // the resumed 実装 failed before it claimed, then the row's 状況を確認 ran: the newest stage Task is the check
-  task("tsk_impl", "#307 実装: PBI: 実装中の PBI", Date.parse(LATER), "error");
+  const task = (id: string, title: string, at: number, status: TaskStatus, auto = false) => core!.db.insertTask({ id, workspaceId: metaId(), title, runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: auto ? { ...fixtureStage(title)!, auto: true } : fixtureStage(title), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  // the automatic 実装 failed before it claimed, then the row's 状況を確認 ran: the newest stage Task is the check, but the 実装
+  // still counts as the work that went on since the waits (`lastWorkAt`), so the waits do not lift it again; the closable PBI's
+  // next stage is 閉じる, which never ran
+  task("tsk_impl", "#307 実装: PBI: 実装中の PBI", Date.parse(LATER), "error", true);
   task("tsk_check", "#307 状況確認: PBI: 実装中の PBI", Date.parse(LATER) + 60_000, "done");
-  expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [], waitsAt: null });
+  expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED, lastWorkAt: Date.parse(LATER), autoHeld: null });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 実装: "))).toHaveLength(1);
+  expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 閉じる: "))).toHaveLength(1);
 });
 
-test("backlog-next waiting: a stage Task started after the waits were written makes them old — a resumed 実装 that failed before claiming is not started again", async () => {
+test("backlog-next waiting: the waits stand after a later 実装, and after an automatic one that failed before claiming a closable PBI goes on with 閉じる, not 実装 again", async () => {
   const fake = waitsGh({ i307: [[releaseBody("後回し", [778]), STOPPED]] }, { w778: { __typename: "PullRequest", state: "MERGED" } });
   const base = await boot(fake.gh, holdingClaude().adapter);
-  const task = (id: string, at: number, status: TaskStatus) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
+  const task = (id: string, at: number, status: TaskStatus, auto = false) => core!.db.insertTask({ id, workspaceId: metaId(), title: "#307 実装: PBI: 実装中の PBI", runner: "claude", cwd: home!, scope: [home!], status, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: auto ? { ...fixtureStage("#307 実装: PBI: 実装中の PBI")!, auto: true } : fixtureStage("#307 実装: PBI: 実装中の PBI"), statusAt: at, createdAt: at, updatedAt: Date.now() });
   // the 実装 that wrote the release started before it: the waits stand
   task("tsk_before", Date.parse(STOPPED) - 3_600_000, "done");
   expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED });
-  // the resumed one started after it and failed before it claimed: the waits are old, shown nowhere, and nothing restarts it
-  task("tsk_after", Date.parse(LATER), "error");
-  expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [], waitsAt: null });
+  // the resumed one started after it, by itself, and failed before it claimed: the waits stay on record but no longer lift
+  // it (the work went on since), so the closable PBI's next stage is 閉じる, which never ran: the gate does not hold that
+  task("tsk_after", Date.parse(LATER), "error", true);
+  expect(await waitsOfItem(base, 307)).toMatchObject({ waits: [{ number: 778, open: false }], waitsAt: STOPPED, autoHeld: null });
   const id = await backlogNextSchedule(base);
   expect((await runSchedule(base, id)).status).toBe(201);
   expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 実装: "))).toHaveLength(2);
+  expect(core!.db.listTasks().filter((t) => t.title.startsWith("#307 閉じる: "))).toHaveLength(1);
 });
 
 describe("backlog-next prerequisite", () => {

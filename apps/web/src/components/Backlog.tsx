@@ -2,7 +2,7 @@ import { createContext, Fragment, useContext, useEffect, useRef, useState } from
 import type { Artifact, Backlog as BacklogData, BacklogAction, BacklogIssueDetail, BacklogItem, BacklogQueue, BacklogQueueEntry, BacklogQueueInput, BacklogStage, BacklogSyncInfo, Task, Workspace } from "@switchboard/protocol";
 import type { FeedbackTarget } from "../feedbackTarget.ts";
 import { api } from "../api/index.ts";
-import { BACKLOG_CHANGED_EVENT, backlogHeading, createWord, decisionQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm } from "../backlogSync.ts";
+import { BACKLOG_CHANGED_EVENT, backlogHeading, createWord, decisionQuestion, draftQuestion, heldEditName, syncSummary, draftKey, editOf, formAfterRead, GUARANTEE_A, githubSyncText, heldIssueText, loadDraft, savedWords, syncLine, textDraftKey, valueText, workspaceErrorGuide, type EditForm } from "../backlogSync.ts";
 import { activeTaskLine, ago, autoByWorkspace, inProgressState, readyPending, startButton, directButton, lastTaskLine, prereqLine, waitChain, waitOwner, waitRef, waitText, waitUrl, type PrereqPart } from "../inProgress.ts";
 import { promotionLine } from "../release.ts";
 import { changeMarks, changeStateLabel, mergedPair, short } from "../changes.ts";
@@ -448,7 +448,7 @@ function Changes(props: { changes: BacklogData["changes"] }) {
 
 /** The open question of a needs-decision item as plain text (no Markdown renderer) and a free-text answer. */
 function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (item: BacklogItem) => void; onError: (msg: string) => void }) {
-  const [text, setText] = useState("");
+  const [draft, setDraft] = useState<{ text: string; asked: { issue: number; at: string } | null }>({ text: "", asked: null }); // `asked`: the question on screen when the draft was started; the answer goes to it
   const [sending, setSending] = useState(false);
   const d = props.item.decision;
   // the screen mockups of the same question on the asks list; none when it cannot be read — the answer goes on
@@ -472,8 +472,8 @@ function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (ite
   const send = () => {
     setSending(true);
     api
-      .answerBacklog(props.item.workspaceId, props.item.number, text, d?.issue, d?.at)
-      .then(() => props.onAnswered(props.item))
+      .answerBacklog(props.item.workspaceId, props.item.number, draft.text, draft.asked?.issue, draft.asked?.at)
+      .then(() => { setDraft({ text: "", asked: null }); props.onAnswered(props.item); })
       .catch((e) => props.onError(t(m.answerFailed, { n: props.item.number, error: String(e.message ?? e) })))
       .finally(() => setSending(false));
   };
@@ -497,8 +497,8 @@ function Decision(props: { item: BacklogItem; folded?: boolean; onAnswered: (ite
       ) : (
         <div className="muted">{t(m.noDecision)}</div>
       )}
-      <textarea rows={3} value={text} placeholder={t(m.answerPlaceholder)} onChange={(e) => setText(e.target.value)} />
-      <button className="pri" disabled={sending || !text.trim()} onClick={send}>
+      <textarea rows={3} value={draft.text} placeholder={t(m.answerPlaceholder)} onChange={(e) => setDraft({ text: e.target.value, asked: draftQuestion(draft, e.target.value, d ?? null) })} />
+      <button className="pri" disabled={sending || !draft.text.trim()} onClick={send}>
         {t(m.answer)}
       </button>
     </>
@@ -670,7 +670,7 @@ function Prereqs(props: { item: BacklogItem }) {
  * A row's buttons (a board tile's too): the running stage Task's link, else the stage's start button and 閉じる
  * when the PBI can be closed.
  */
-function RowActions(props: { item: BacklogItem; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
+function RowActions(props: { item: BacklogItem; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onOpenTask: (id: string) => void }) {
   const { item: i, now, starting } = props;
   if (i.activeTaskId)
     return (
@@ -679,7 +679,7 @@ function RowActions(props: { item: BacklogItem; now: number; starting: number | 
       </button>
     );
   const action = startButton(i);
-  const direct = directButton(i, props.metaId);
+  const direct = directButton(i);
   return (
     <>
       {action && (
@@ -761,7 +761,7 @@ function ItemDetail(props: { item: BacklogItem; items: BacklogItem[]; auto: bool
  * stopped, the last stage Task) and ItemDetail, the same part an opened board tile shows; whether it is open is not
  * kept. A closed row shows the stops that need the person (not folded); an open one has all of them in ItemDetail.
  */
-function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onStartPbi: (pbi: number) => void; onOpenTask: (id: string) => void; onChanged: () => void; onError: (msg: string) => void }) {
+function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onStartPbi: (pbi: number) => void; onOpenTask: (id: string) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { item: i } = props;
   const [open, setOpen] = useState(false);
   const label = t(open ? m.closeTile : m.openRow);
@@ -783,7 +783,7 @@ function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean
             {x.label}
           </span>
         ))}
-        <RowActions item={i} now={props.now} starting={props.starting} metaId={props.metaId} onStart={props.onStart} onOpenTask={props.onOpenTask} />
+        <RowActions item={i} now={props.now} starting={props.starting} onStart={props.onStart} onOpenTask={props.onOpenTask} />
       </div>
       {open ? (
         <div className="backlog-row-detail">
@@ -806,7 +806,7 @@ function ListRow(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean
  * opens on the list card's parts: the sync line, the question and the answer box (which stays, with what was typed,
  * when it is closed again) and 編集.
  */
-function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { item: i } = props;
   const [opened, setOpened] = useState(false);
   const [open, setOpen] = useState(false);
@@ -850,7 +850,7 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
             ))}
           </>
         )}
-        <RowActions item={i} now={props.now} starting={props.starting} metaId={props.metaId} onStart={props.onStart} onOpenTask={props.onOpenTask} />
+        <RowActions item={i} now={props.now} starting={props.starting} onStart={props.onStart} onOpenTask={props.onOpenTask} />
       </div>
       {open && (
         <div className="backlog-tile-detail">
@@ -866,7 +866,7 @@ function Tile(props: { item: BacklogItem; items: BacklogItem[]; auto: boolean; n
  * marks, its buttons and 外す; ▶ opens what the list row shows under it (a needs-decision item: the question and the
  * answer box). `item` null = its workspace's backlog does not have it here: the number and 外す only.
  */
-function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: number | null; onDown: (e: React.PointerEvent<HTMLSpanElement>) => void; onMove: (e: React.PointerEvent<HTMLSpanElement>) => void; onUp: (e: React.PointerEvent<HTMLSpanElement>) => void; onCancel: () => void }; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; metaId: string | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onRemove: () => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: number | null; onDown: (e: React.PointerEvent<HTMLSpanElement>) => void; onMove: (e: React.PointerEvent<HTMLSpanElement>) => void; onUp: (e: React.PointerEvent<HTMLSpanElement>) => void; onCancel: () => void }; items: BacklogItem[]; auto: boolean; now: number; starting: number | null; onStart: (action: BacklogAction) => void; onContinue: (pbi: number) => void; onRemove: () => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { row, order } = props;
   const [open, setOpen] = useState(false);
   const i = row.item;
@@ -960,7 +960,7 @@ function QueueItem(props: { row: QueueRow; order: number | null; drag?: { dy: nu
  * and the waiting PBIs in order (外す), the PBIs not in it (a box on each row; 「キューに入れる」 in the selection bar adds the chosen ones) and the newest left ones (folded). Every
  * change is saved at once (`PUT /api/backlog/queue`); no save button, no draft.
  */
-function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; metaId: string | null; onSave: (input: BacklogQueueInput) => unknown; onSelect: (entries: BacklogQueueEntry[]) => void; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
+function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (workspaceId: string) => boolean; auto: Record<string, boolean>; now: number; starting: number | null; onSave: (input: BacklogQueueInput) => unknown; onSelect: (entries: BacklogQueueEntry[]) => void; onStart: (item: BacklogItem, action: BacklogAction) => void; onOpenTask: (id: string) => void; onAnswered: (item: BacklogItem) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const { queue, items } = props;
   const s = queueSections(queue, items);
   // the waiting row being dragged — by its entry, with the waiting entries when it was taken, where the pointer
@@ -1009,7 +1009,6 @@ function QueueView(props: { queue: BacklogQueue; items: BacklogItem[]; inView: (
       auto={r.item ? (props.auto[r.item.workspaceId] ?? false) : false}
       now={props.now}
       starting={props.starting}
-      metaId={props.metaId}
       onStart={(action) => r.item && props.onStart(r.item, action)}
       onContinue={(pbi) => r.item && props.onStart({ ...r.item, number: pbi }, "complete")}
       onRemove={() => props.onSave({ items: withRemoved(queue, r.entry) })}
@@ -1419,7 +1418,7 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
                   {label} <span className="hint">{items.length}</span>
                 </h5>
                 {items.map((i) => (
-                  <Tile key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onContinue={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onAnswered={answered} onChanged={() => load(false)} onError={props.onError} />
+                  <Tile key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onContinue={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onAnswered={answered} onChanged={() => load(false)} onError={props.onError} />
                 ))}
               </section>
             ))}
@@ -1435,7 +1434,6 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
           auto={auto}
           now={now}
           starting={starting}
-          metaId={metaId}
           onSave={saveQueue}
           onSelect={setSelected}
           onStart={(i, action) => start(i.workspaceId, i.number, action)}
@@ -1471,7 +1469,7 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
                     <EditToggle target={i} onChanged={() => load(false)} onError={props.onError} />
                   </div>
                 ) : (
-                <ListRow key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} metaId={metaId} onStart={(action) => start(i.workspaceId, i.number, action)} onStartPbi={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onChanged={() => load(false)} onError={props.onError} />
+                <ListRow key={key(i)} item={i} items={data.items} auto={auto[i.workspaceId] ?? false} now={now} starting={starting} onStart={(action) => start(i.workspaceId, i.number, action)} onStartPbi={(pbi) => start(i.workspaceId, pbi, "complete")} onOpenTask={props.onOpenTask} onChanged={() => load(false)} onError={props.onError} />
                 ),
               )}
             </section>

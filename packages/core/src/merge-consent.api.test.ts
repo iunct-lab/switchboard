@@ -56,7 +56,7 @@ describe("a reply in the person's own words as a merge grant", () => {
       await c.stop();
       rmSync(h, { recursive: true, force: true });
     };
-    return { b, c, t, sent, readerStarts, heads, stop };
+    return { b, c, t, task, sent, readerStarts, heads, stop };
   };
   const reads = (...g: Array<{ kind: string; target: number }>) => JSON.stringify({ grants: g });
 
@@ -209,7 +209,7 @@ describe("a reply in the person's own words as a merge grant", () => {
     }
   });
 
-  // the daemon, `answerTask`, `noteMergeGrant` and `tasks.send` are the real ones; the check is the kit's own, as `gh`'s guard asks it
+  // the daemon, `answerTask`, `noteMergeGrant`, `grantRecorder` and `tasks.send` are the real ones; the check is the kit's own, as `gh`'s guard asks it
   test("refused send leaves no grant: a grant answered on the screen or replied in the conversation to a Task over its budget is not recorded, and the kit's check is not granted", async () => {
     const GRANT = "PR #12 を判定の外でマージしてよい";
     const x = await boot(reads());
@@ -237,6 +237,89 @@ describe("a reply in the person's own words as a merge grant", () => {
       x.c.db.updateTask(x.t.id, { budgetUsd: 100 });
       expect(((await (await post(x.b, "/api/asks/answer", { id: ask.id, answer: { kind: "grant", grant: GRANT } })).json()) as { ask: unknown }).ask).toMatchObject({ state: "answered" });
       expect(x.sent).toContain(GRANT);
+      expect(await kit()).toBe(true);
+    } finally {
+      await x.stop();
+    }
+  });
+
+  test("refused hand-over leaves no grant (asks): a grant pressed on the screen is not recorded when the Task's budget runs out while the head is read, nor when its runner cannot start", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const sql = (q: string) => (x.c.db.sqlite.query(q).get() as { n: number }).n;
+    const x = await boot(reads());
+    try {
+      const kit = () => mergeGranted({ BACKLOG_URL: `${x.b}/api/backlog`, OPS_KIT_TASK_ID: x.t.id }, "o/a", "merge", 12, fetch, HEAD);
+      const stopAsk = async () => {
+        x.c.db.appendEvent(x.t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: x.t.id }, op: "gh pr merge", target: "PR #12", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant: GRANT, at: Date.now() - 30_000 } });
+        x.c.db.updateTask(x.t.id, { outcome: "needs_action" });
+        return ((await fetch(`${x.b}/api/asks`).then(j)).asks as Array<{ id: string; kind: string; grant: string | null }>).find((a) => a.kind === "stop")!;
+      };
+      const press = async (id: string) => ((await (await post(x.b, "/api/asks/answer", { id, answer: { kind: "grant", grant: GRANT } })).json()) as { ask: unknown }).ask;
+      const ask = await stopAsk();
+      // (a) the budget runs out while the PR's head is read (the read the grant is recorded with): the reply is refused
+      Object.defineProperty(x.heads, "asked", {
+        get: () => 0,
+        set: () => {
+          x.c.db.updateTask(x.t.id, { budgetUsd: 0.01 });
+          x.c.db.insertLedger({ taskId: x.t.id, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
+        },
+      });
+      expect(await press(ask.id)).toMatchObject({ state: "open", resume: { state: "failed" } });
+      expect(await kit()).toBe(false);
+      expect(sql("SELECT count(*) AS n FROM task_grants")).toBe(0);
+      expect(x.sent).not.toContain(GRANT);
+      // (b) the Task has no process and its runner cannot start: the reply passed every check but was not handed over
+      Object.defineProperty(x.heads, "asked", { value: 0, writable: true });
+      x.c.db.updateTask(x.t.id, { budgetUsd: 100 });
+      await x.c.tasks.releaseAndWait(x.t.id);
+      const start = x.task.start;
+      x.task.start = () => {
+        throw new Error("runner cannot start");
+      };
+      expect(await press(ask.id)).toMatchObject({ state: "open", resume: { state: "failed", reason: "runner cannot start" } });
+      expect(await kit()).toBe(false);
+      expect(sql("SELECT count(*) AS n FROM task_grants")).toBe(0);
+      // the runner back, the same press goes through and its grant answers the check
+      x.task.start = start;
+      expect(await press(ask.id)).toMatchObject({ state: "answered" });
+      expect(await kit()).toBe(true);
+    } finally {
+      await x.stop();
+    }
+  });
+
+  test("refused hand-over leaves no grant (send): a grant replied in the conversation is not recorded when the Task's budget runs out while the head is read, nor when its runner cannot start", async () => {
+    const GRANT = "PR #12 を判定の外でマージしてよい";
+    const sql = (q: string) => (x.c.db.sqlite.query(q).get() as { n: number }).n;
+    const x = await boot(reads());
+    try {
+      const kit = () => mergeGranted({ BACKLOG_URL: `${x.b}/api/backlog`, OPS_KIT_TASK_ID: x.t.id }, "o/a", "merge", 12, fetch, HEAD);
+      // (a) the budget runs out while the PR's head is read (the read the grant is recorded with): the reply is refused
+      Object.defineProperty(x.heads, "asked", {
+        get: () => 0,
+        set: () => {
+          x.c.db.updateTask(x.t.id, { budgetUsd: 0.01 });
+          x.c.db.insertLedger({ taskId: x.t.id, runner: "claude", model: "m", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, costUsd: 1, billedUsd: 0, source: "reported", ts: Date.now() });
+        },
+      });
+      expect((await post(x.b, `/api/tasks/${x.t.id}/send`, { text: GRANT })).status).toBe(409);
+      expect(await kit()).toBe(false);
+      expect(sql("SELECT count(*) AS n FROM task_grants")).toBe(0);
+      expect(x.sent).not.toContain(GRANT);
+      // (b) the Task has no process and its runner cannot start: the reply passed every check but was not handed over
+      Object.defineProperty(x.heads, "asked", { value: 0, writable: true });
+      x.c.db.updateTask(x.t.id, { budgetUsd: 100 });
+      await x.c.tasks.releaseAndWait(x.t.id);
+      const start = x.task.start;
+      x.task.start = () => {
+        throw new Error("runner cannot start");
+      };
+      expect((await post(x.b, `/api/tasks/${x.t.id}/send`, { text: GRANT })).status).toBe(409);
+      expect(await kit()).toBe(false);
+      expect(sql("SELECT count(*) AS n FROM task_grants")).toBe(0);
+      // the runner back, the same reply goes through and its grant answers the check
+      x.task.start = start;
+      expect((await post(x.b, `/api/tasks/${x.t.id}/send`, { text: GRANT })).status).toBe(200);
       expect(await kit()).toBe(true);
     } finally {
       await x.stop();
@@ -612,6 +695,145 @@ describe("a reply in the person's own words as a merge grant", () => {
       expect(x.heads.asked).toBe(0);
       mr.head = "e".repeat(40);
       expect(await facts()).not.toHaveProperty("granted");
+    } finally {
+      await x.stop();
+    }
+  });
+});
+
+const PROBE_HEAD = "a".repeat(40);
+const [PA, PB] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
+const sameOrigin = (b: string, path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
+
+const bootProbe = async (onHeadRead: () => void = () => undefined) => {
+  const h = mkdtempSync(join(tmpdir(), "switchboard-handover-"));
+  const clone = join(h, "clone");
+  mkdirSync(clone);
+  Bun.spawnSync(["git", "init", "-q"], { cwd: clone });
+  Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/o/a.git"], { cwd: clone });
+  const sent: string[] = [];
+  const events: AgentEvent[] = [{ t: "session.start", runner: "claude", runnerSessionId: "s1", cwd: "/tmp" }, { t: "session.end", status: "ok", turn: "t1", summary: "ok?" }];
+  const task = fakeAdapter(events, { sends: sent, lingers: true });
+  const gh = async (...a: unknown[]) => {
+    if (!(a[0] as string[]).includes("headRefOid")) return { code: 1, stdout: "", stderr: "no" };
+    onHeadRead();
+    return { code: 0, stdout: JSON.stringify({ headRefOid: PROBE_HEAD }), stderr: "" };
+  };
+  const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [task], { port: 0, selfdevChecks: false, gh });
+  const b = `http://127.0.0.1:${c.server.port}`;
+  const t = (await sameOrigin(b, "/api/tasks", { cwd: clone, title: "t", prompt: "p" }).then(j)) as Task;
+  await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+  const refuse = (grant: string, at = Date.now()) => {
+    c.db.appendEvent(t.id, { t: "stop.record", stop: { id: "s1", work: { workspaceId: null, issue: null, taskId: t.id }, op: "gh pr merge", target: "PR", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant, at } });
+    c.db.updateTask(t.id, { outcome: "needs_action" });
+  };
+  const ask = async () => ((await fetch(`${b}/api/asks`).then(j)).asks as Array<{ id: string; kind: string }>).find((a) => a.kind === "stop")!;
+  const stop = async () => {
+    await c.stop();
+    rmSync(h, { recursive: true, force: true });
+  };
+  return { b, c, t, sent, refuse, ask, stop };
+};
+
+// what the hand-over check must not change: the early 409, a resume 中断 cancelled, and the rows noteMergeGrant writes first
+describe("the hand-over keeps what came before it", () => {
+  test("a stop that moved during the head read is refused before the Task's planned resume is touched", async () => {
+    let move: () => void = () => undefined;
+    const x = await bootProbe(() => move());
+    try {
+      x.refuse(PA, Date.now() - 30_000);
+      const a = await x.ask();
+      const forgotten: string[] = [];
+      x.c.tasks.onPlanForgotten((id) => void forgotten.push(id));
+      move = () => x.refuse(PB);
+      const r = await sameOrigin(x.b, "/api/asks/answer", { id: a.id, answer: { kind: "grant", grant: PA } });
+      expect(r.status).toBe(409);
+      // the check after `checkSend` returns the 409 before `send`, so no pending plan is forgotten
+      expect(forgotten).toEqual([]);
+    } finally {
+      await x.stop();
+    }
+  });
+
+  test("中断 during the wait for the closing process: the 409 does not bring the cancelled resume back", async () => {
+    const x = await bootProbe();
+    try {
+      x.c.db.updateTask(x.t.id, { resumeAt: Date.now() + 3_600_000, resumeReason: "limit" });
+      x.refuse(PA, Date.now() - 30_000);
+      const a = await x.ask();
+      await x.c.tasks.releaseAndWait(x.t.id);
+      let closed!: () => void;
+      (x.c.tasks as unknown as { closing: Map<string, Promise<void>> }).closing.set(x.t.id, new Promise<void>((r) => (closed = r)));
+      const reply = sameOrigin(x.b, "/api/asks/answer", { id: a.id, answer: { kind: "grant", grant: PA } });
+      await Bun.sleep(100);
+      expect((await sameOrigin(x.b, `/api/tasks/${x.t.id}/abort`, {})).status).toBe(200);
+      x.refuse(PB);
+      closed();
+      expect((await reply).status).toBe(409);
+      expect(x.c.db.getTask(x.t.id)!.resumeAt).toBeNull();
+    } finally {
+      await x.stop();
+    }
+  });
+
+  test("noteMergeGrant without heads spends the answer's source before anything is waited for", async () => {
+    const rows: unknown[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const task = { id: "t1", cwd: "/nonexistent", workspaceId: null };
+    const sc = {
+      db: { getTask: () => task, getWorkspace: () => null, getWorkspaceBacklogSource: () => null, recordMergeGrants: (r: unknown[]) => void rows.push(...r), recordMergeGrant: () => undefined },
+      originRepoOf: () => "o/a",
+      opts: { gh: async () => (await gate, { code: 0, stdout: JSON.stringify({ headRefOid: PROBE_HEAD }), stderr: "" }) },
+    } as unknown as Parameters<typeof noteMergeGrant>[0];
+    const done = noteMergeGrant(sc, "t1", PA, { via: "screen", source: "op1" });
+    // the rows (and so the spent source) are there as soon as the call returns
+    const atOnce = rows.length;
+    open();
+    await done;
+    expect(atOnce).toBe(1);
+  });
+});
+
+// a reply in words is read once handed over, but for what stood when it came in: the reply it answers and its PRs' heads then
+describe("when a conversation reply's grant is recorded", () => {
+  const HEAD = "a".repeat(40);
+  const MOVED = "b".repeat(40);
+  const post = (b: string, path: string, body: unknown) => fetch(`${b}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: b, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
+  const granted = (b: string, id: string, head: string) => fetch(`${b}/api/merge-grants?taskId=${id}&repo=o%2Fa&kind=merge&target=12&head=${head}`).then(j) as Promise<{ granted: boolean }>;
+
+  const boot = async () => {
+    const h = mkdtempSync(join(tmpdir(), "switchboard-reply-grant-"));
+    const clone = join(h, "clone");
+    mkdirSync(clone);
+    Bun.spawnSync(["git", "init", "-q"], { cwd: clone });
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/o/a.git"], { cwd: clone });
+    const heads = { now: HEAD };
+    const task = fakeAdapter([{ t: "session.start", runner: "claude", runnerSessionId: "s1", cwd: "/tmp" }, { t: "session.end", status: "ok", turn: "t1", summary: "PR #12 をマージしてよいですか？" }], { lingers: true, closeMs: 800 });
+    const reader = fakeAdapter([{ t: "message.delta", role: "assistant", text: JSON.stringify({ grants: [{ kind: "merge", target: 12 }] }) }, { t: "session.end", status: "ok" }], { id: "codex" });
+    const gh: typeof NO_GH = async (...a: unknown[]) => ((a[0] as string[]).includes("headRefOid") ? { code: 0, stdout: JSON.stringify({ headRefOid: heads.now }), stderr: "" } : NO_GH());
+    const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [task, reader], { port: 0, selfdevChecks: false, gh });
+    const b = `http://127.0.0.1:${c.server.port}`;
+    await fetch(`${b}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ judge: { runner: "codex" } }) });
+    const t = (await post(b, "/api/tasks", { cwd: clone, title: "t", prompt: "p" }).then(j)) as Task;
+    await waitFor(async () => (await fetch(`${b}/api/tasks/${t.id}`).then(j)).task.status === "done");
+    const stop = async () => {
+      await c.stop();
+      rmSync(h, { recursive: true, force: true });
+    };
+    return { b, c, t, heads, stop };
+  };
+
+  test("a free-words grant is for the head at the time of the reply, not one pushed while send waits for the old process to close", async () => {
+    const x = await boot();
+    try {
+      const closing = x.c.tasks.release(x.t.id);
+      const reply = post(x.b, `/api/tasks/${x.t.id}/send`, { text: "merge許可する" });
+      await Bun.sleep(300);
+      x.heads.now = MOVED; // pushed after the person replied, before the hand-over
+      expect((await reply).status).toBe(200);
+      await closing;
+      expect({ asReplied: await granted(x.b, x.t.id, HEAD), pushedLater: await granted(x.b, x.t.id, MOVED) }).toEqual({ asReplied: { granted: true }, pushedLater: { granted: false } });
     } finally {
       await x.stop();
     }

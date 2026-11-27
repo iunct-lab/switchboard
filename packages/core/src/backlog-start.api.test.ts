@@ -1,15 +1,19 @@
 // test-reads: packages/core/fixtures/ ops.config.json scripts/parallel-guard.ts ops-kit/processes/p0-pipeline.md
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig } from "./config.ts";
+import { importing } from "../fixtures/github-import.ts";
 import type { Backlog, BacklogItem, RunnerAdapter, Task } from "@switchboard/protocol";
 import { type CoreServer } from "./server.ts";
 import { RESUME_MARGIN_MS } from "./ratelimit.ts";
 import { delegatedNote } from "./evals.ts";
 import { buildDirectPrompt, buildStartPrompt, subagentModelAlias, otherRepoRules } from "./backlog-prompt.ts";
+import { otherRepo } from "./server/helpers.ts";
 import { canStartStoredBacklog } from "./backlog-stored.ts";
 import type { GhRunner } from "./backlog-gh.ts";
-import { DECOMPOSED_READY, backlogNextSchedule, boot, closeTried, decomposedGh, fakeGh, holdingClaude, importedAs, limitedGh, metaId, openTaskAndConfirmationGh, patch, queued, refreshed, runSchedule, scheduleLogAll, start, startedTasks, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
+import { DECOMPOSED_READY, FAKE_ORIGIN, backlogNextSchedule, boot, closeTried, decomposedGh, fakeGh, holdingClaude, importedAs, limitedGh, metaId, openTaskAndConfirmationGh, patch, queued, refreshed, runSchedule, scheduleLogAll, start, startedTasks, threeWorkspaces, startServer, useBacklogDaemon, waitsGh } from "./api-test-harness.ts";
 
 let core: CoreServer | undefined;
 let home: string | undefined;
@@ -129,7 +133,7 @@ describe("stage prompts by what the stage does and by runner", () => {
     expect(buildStartPrompt({ number: 9 }, "complete", { taskModel: "claude-sonnet-4-5" })).toBe(claude); // the default is Claude Code
 
     for (const where of wheres) {
-      for (const resume of [undefined, { tasksDone: 1 }]) {
+      for (const resume of [undefined, true as const]) {
         const codex = buildStartPrompt({ number: 9 }, "complete", { ...where, resume, taskModel: "claude-sonnet-4-5", runner: "codex" });
         for (const w of ["/pbi-complete 9", "Agent ツール", "run_in_background", ".claude/skills"]) expect({ where: Object.keys(where), w, has: codex.includes(w) }).toEqual({ where: Object.keys(where), w, has: false });
         expect(codex).toContain(".agents/skills/pbi-complete/SKILL.md に従い、PBI #9 を完了させてください。");
@@ -226,7 +230,7 @@ test("start: complete on an in-progress item resumes it", async () => {
   expect(((await r.json()) as Task).title.startsWith("#305 実装: ")).toBe(true);
   for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
   // the same Task backlog-next starts for a stalled in-progress PBI: the closed Tasks when it was chosen
-  expect(claude.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 } }));
+  expect(claude.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: true }));
   expect(claude.starts[0]!.prompt).toContain("PBI #305 は実装中のまま止まっています");
 });
 
@@ -239,7 +243,7 @@ test("complete task model: with a model chosen the 実装 Task's prompt hands ea
   expect(r.status).toBe(201);
   const t = (await r.json()) as Task;
   for (let i = 0; !c2.starts.length && i < 100; i++) await Bun.sleep(10);
-  expect(c2.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 }, taskModel: "claude-sonnet-5-5" }));
+  expect(c2.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: true, taskModel: "claude-sonnet-5-5" }));
   expect(c2.starts[0]!.prompt).toContain("Agent ツールの model に `sonnet` を指定したサブエージェントに前景で任せてください");
   expect(c2.starts[0]!.prompt).toContain("並べる順・レビューの処理・マージ判定・PBI を閉じるのはこの会話で行ってください");
   expect(c2.starts[0]!.prompt).not.toContain("試験");
@@ -267,14 +271,14 @@ test("complete task model: an 実装 Task that starts on codex (its kind's runne
   const t = (await r.json()) as Task;
   for (let i = 0; !codex.starts.length && i < 100; i++) await Bun.sleep(10);
   expect(t.runner).toBe("codex");
-  expect(codex.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 1 }, runner: "codex" }));
+  expect(codex.starts[0]!.prompt).toBe(buildStartPrompt({ number: 305 }, "complete", { resume: true, runner: "codex" }));
   expect(core!.db.listEvents(t.id).some((e) => e.ev.t === "status" && e.ev.text === delegatedNote("claude-sonnet-5-5"))).toBe(false);
 });
 
 test("buildStartPrompt task model: every complete entry carries the alias's paragraph; another action, an unaliased model or none leaves the prompt as before", () => {
   const para = (a: string) => `Agent ツールの model に \`${a}\` を指定したサブエージェントに前景で任せてください`;
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-sonnet-5-5" })).toContain(para("sonnet"));
-  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-opus-5-5", resume: { tasksDone: 2 } })).toContain(para("opus"));
+  expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-opus-5-5", resume: true })).toContain(para("opus"));
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-haiku-4-5", other: { meta: "/work/switchboard", projectVar: "APP_PROJECT_URL", setup: { config: true, kit: [], copies: [] } } })).toContain(para("haiku"));
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "claude-fable-5-1" })).toContain(para("fable"));
   expect(buildStartPrompt({ number: 1 }, "complete", { taskModel: "gpt-6" })).toBe(buildStartPrompt({ number: 1 }, "complete"));
@@ -385,6 +389,96 @@ test("buildDirectPrompt: carries the screen answer as the person's words, and a 
   expect(local).toContain(buildStartPrompt({ number: 302 }, "to-pbi", { local: true }).split("（GitHub には無い）。")[1]!);
   expect(buildDirectPrompt({ number: 302 }, { local: true, localForge: true })).toContain(buildStartPrompt({ number: 302 }, "to-pbi", { local: true, localForge: true }).split("（GitHub には無い）。")[1]!);
   expect(buildDirectPrompt({ number: 302 })).not.toContain("GitHub には無い");
+});
+
+test("start: direct on another workspace's request starts there, with the other repository's rules", async () => {
+  const claude = holdingClaude();
+  const { base, ids } = await threeWorkspaces(claude.adapter);
+  await refreshed(base);
+  const meta = core!.db.listWorkspaces().find((w) => w.kind === "meta")!;
+  const lib = core!.db.getWorkspace(ids.lib!)!;
+  const r = await start(base, 302, { workspaceId: lib.id, action: "direct" });
+  expect(r.status).toBe(201);
+  const task = await r.json() as Task;
+  expect(task.workspaceId).toBe(lib.id);
+  expect(task.stage).toEqual({ issue: 302, action: "direct" });
+  for (let i = 0; !claude.starts.length && i < 100; i++) await Bun.sleep(10);
+  const s = claude.starts[0]!;
+  expect(s.cwd).toBe(lib.path);
+  const other = otherRepo(meta, lib)!;
+  expect(other.meta).toBe(meta.path); // the rules below are the other repository's, not the meta workspace's own
+  expect(s.prompt).toBe(buildDirectPrompt({ number: 302 }, { other, local: false, localForge: false, answer: null }));
+  expect(s.prompt).toContain("#302 はこのディレクトリのリポジトリ（`gh repo view` が答えるもの）の Issue です。");
+  expect(s.prompt).toContain("必ず `--repo <このリポジトリの owner/name>` を付けて実行し、その判定に従う");
+  // the running Task marks lib's Issue 302 only: the meta workspace's can still start
+  expect((await start(base, 302, { workspaceId: lib.id, action: "direct" })).status).toBe(409);
+  expect((await start(base, 302, { action: "direct" })).status).toBe(201);
+});
+
+test("start: direct with developSelf off is 409 on the meta workspace and 201 on another", async () => {
+  const claude = holdingClaude();
+  const { base, ids } = await threeWorkspaces(claude.adapter);
+  await refreshed(base);
+  expect((await fetch(`${base}/api/settings`, { method: "PATCH", body: JSON.stringify({ developSelf: false }) })).status).toBe(200);
+  const refused = await start(base, 302, { action: "direct" });
+  expect(refused.status).toBe(409);
+  expect(await refused.text()).toContain("Switchboard 自体を開発しない設定です");
+  expect(core!.db.listTasks()).toHaveLength(0);
+  expect((await start(base, 302, { workspaceId: ids.lib!, action: "direct" })).status).toBe(201);
+  expect(core!.db.listTasks().map((t) => t.workspaceId)).toEqual([ids.lib!]);
+});
+
+// a Release install closes only Switchboard's own folder: another repository's request still goes direct
+test("start: direct on a Release install is 409 on the meta workspace and 201 on another", async () => {
+  const h = mkdtempSync(join(tmpdir(), "sb-direct-release-"));
+  const libDir = join(h, "lib");
+  mkdirSync(libDir);
+  const inner = fakeGh().gh;
+  const cfg = { ...loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", SWITCHBOARD_KNOWLEDGE: join(h, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(h, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0" }), releaseOnly: true };
+  const c = await startServer(cfg, [holdingClaude().adapter], {
+    port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: FAKE_ORIGIN, backlogAutoImport: true, tagCi: async () => "pass" as const,
+    gh: importing(async (args, cwd) => (cwd === libDir && args[0] === "repo" ? { code: 0, stdout: "acme/lib true\n", stderr: "" } : inner(args, cwd)), () => []),
+  });
+  try {
+    const base = `http://127.0.0.1:${c.server.port}`;
+    const lib = (await (await fetch(`${base}/api/workspaces`, { method: "POST", body: JSON.stringify({ path: libDir, name: "lib" }) })).json()) as { id: string };
+    await refreshed(base);
+    const meta = c.db.listWorkspaces().find((w) => w.kind === "meta")!;
+    const direct = (workspaceId: string) => fetch(`${base}/api/backlog/302/start`, { method: "POST", body: JSON.stringify({ workspaceId, action: "direct" }) });
+    const refused = await direct(meta.id);
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain("Switchboard 自身のフォルダに Task を始められません");
+    expect((await direct(lib.id)).status).toBe(201);
+  } finally {
+    await c.stop();
+    rmSync(h, { recursive: true, force: true });
+  }
+});
+
+test("buildDirectPrompt: for another repository the invariants are read from Switchboard's checkout and the repository's own rules come first", () => {
+  const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
+  const p = buildDirectPrompt({ number: 7 }, { other });
+  expect(p).toContain("上の入口が指す不変条件のファイルは /work/switchboard/ops-kit/invariants.md です。");
+  expect(p).toContain("このリポジトリの CLAUDE.md / AGENTS.md に書かれていればそれに従ってください。");
+  expect(p).toContain("`Backlog-Task:` の行は書かず（閉じる Task が無い。ほかの番号を書くとその Issue を閉じる）、Task を閉じる手順は飛ばし、枝の `<Task>` は `sb/direct-<topic>` と読む。");
+  expect(p).toContain(otherRepoRules(other, { merges: true }));
+  expect(buildDirectPrompt({ number: 7 }, { other, local: true })).toContain("#7 はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。" + otherRepoRules(other, { local: true, localForge: false, merges: true }));
+  // Switchboard's own workspace says none of it
+  expect(buildDirectPrompt({ number: 7 })).not.toContain("/work/switchboard");
+  expect(buildDirectPrompt({ number: 7 })).not.toContain("不変条件のファイルは");
+});
+
+test("buildDirectPrompt: for another repository no Switchboard-only path stands bare", () => {
+  const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
+  const p = buildDirectPrompt({ number: 7 }, { other });
+  // what the entry itself says is the shared definition; the paragraphs after it are what is written for this repository
+  const added = p.slice(p.indexOf("対象: #7"));
+  // the absolute-path mentions go; the sentences that say what `scripts/…` means and the one that reads the scripts with `--repo` name them on purpose
+  const bare = added.replace(/\/work\/switchboard\/\S*/g, "").split("。").filter((sentence) => !sentence.includes("scripts/…") && !sentence.includes("--repo")).join("。");
+  expect(bare).not.toMatch(/ops-kit\/invariants\.md|docs\/merge-gate\.md|scripts\/[a-z]/);
+  expect(added).toContain("/work/switchboard/ops-kit/invariants.md");
+  expect(added).toContain("/work/switchboard/docs/merge-gate.md");
+  expect(added).toContain("必ず `--repo <このリポジトリの owner/name>` を付けて実行し");
 });
 
 test("start: direct while PBI にする runs is 409; direct on anything but a request is 409", async () => {
@@ -614,11 +708,11 @@ test("start: close through the API also takes an in-progress PBI whose Tasks are
   expect((await start(mixed, 308, { action: "close" })).status).toBe(409);
 });
 
-test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認's form with the tasks-done mark, asks with ## 判断待ち, else goes on with pbi-complete", () => {
-  const p = buildStartPrompt({ number: 305 }, "complete", { resume: { tasksDone: 3 } });
+test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認's form, asks with ## 判断待ち, else goes on with pbi-complete", () => {
+  const p = buildStartPrompt({ number: 305 }, "complete", { resume: true });
   expect(p).toContain("PBI #305 は実装中のまま止まっています");
   expect(p).toContain("Issue #305 に `## 状況` で始まるコメントを 1 件書いてください。中身は `### 済んだこと` / `### 残り` / `### 止まっている理由`");
-  expect(p).toContain("`<!-- tasks-done: 3 -->` を 1 行そのまま入れて");
+  expect(p).not.toContain("<!--");
   expect(p).toContain("`## 判断待ち` を出して止めてください");
   // a slash command is expanded only at the start of a prompt: the resume names the skill's file
   expect(p).toContain("無ければ続けて .claude/skills/pbi-complete/SKILL.md に従い、PBI #305 を完了させてください");
@@ -629,15 +723,15 @@ test("start: the resume of a stalled PBI writes a ## 状況 in the 状況確認'
   expect(buildStartPrompt({ number: 305 }, "check")).toContain(report);
   // another repository: the skill file, not the slash command; without resume, the plain 実装
   const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
-  expect(buildStartPrompt({ number: 7 }, "complete", { other, resume: { tasksDone: 0 } })).toContain("`<!-- tasks-done: 0 -->`");
-  expect(buildStartPrompt({ number: 7 }, "complete", { other, resume: { tasksDone: 0 } })).toContain(".claude/skills/pbi-complete/SKILL.md に従い、PBI #7 を完了させてください。");
-  expect(buildStartPrompt({ number: 7 }, "complete")).not.toContain("tasks-done");
+  expect(buildStartPrompt({ number: 7 }, "complete", { other, resume: true })).not.toContain("<!--");
+  expect(buildStartPrompt({ number: 7 }, "complete", { other, resume: true })).toContain(".claude/skills/pbi-complete/SKILL.md に従い、PBI #7 を完了させてください。");
+  expect(buildStartPrompt({ number: 7 }, "complete")).not.toContain("<!--");
 });
 
 test("start: a complete prompt says the request covers merges the merge gate passes and closing the PBI", () => {
   const other = { meta: "/work/switchboard", setup: { config: false, kit: [], copies: [] } };
   const scope = "この依頼は、マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ、リリースタグ、PBI を閉じるところまでを含みます。";
-  for (const opts of [{}, { resume: { tasksDone: 1 } }, { other }, { other, resume: { tasksDone: 1 } }]) {
+  for (const opts of [{}, { resume: true as const }, { other }, { other, resume: true as const }]) {
     const p = buildStartPrompt({ number: 305 }, "complete", opts);
     expect(p).toContain(scope);
     expect(p).toContain("マージ判定が `[聞く]` で止めたとき、デーモンを再起動する pull、認証は、これまでどおり Task の会話で聞いてください（.claude/skills/pbi-complete/SKILL.md の「この依頼が含む範囲」）。昇格は");

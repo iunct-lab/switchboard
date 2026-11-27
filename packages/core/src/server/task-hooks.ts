@@ -2,7 +2,7 @@ import { otherMachineOf } from "../machine.ts";
 import { githubRepoOfRemote } from "../claude-cloud.ts";
 import { capSnapshot, collectTaskDiff, mergeSnapshot, WRITE_TOOLS } from "../taskdiff.ts";
 import { API, OWNER, changeRepoOf, grantHeadKey, parseMergeGrants, type GrantHeads, type MergeGrant } from "../merge-grants.ts";
-import { noteConsent, ownReposOf } from "./merge-consent.ts";
+import { ownReposOf, readyConsent } from "./merge-consent.ts";
 import { changeSourceOf, runGh } from "../backlog-gh.ts";
 import { branchTip } from "../backlog-local.ts";
 import { readStoredIssue } from "../backlog-stored.ts";
@@ -12,7 +12,7 @@ import { gitlabTargetOf } from "../workspace-config.ts";
 import { runGlab, viewGitlabMr } from "../../../../ops-kit/src/forge-gitlab.ts";
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import type { RunnerId, AgentEvent, EventEnvelope } from "@switchboard/protocol";
+import type { RunnerId, AgentEvent, EventEnvelope, Task } from "@switchboard/protocol";
 import { suggestTitle } from "../suggest-title.ts";
 import { loadRubric } from "../rubric.ts";
 import { loadTrustedSkills } from "../rubric-judge.ts";
@@ -172,6 +172,55 @@ export const taskGrantHeads = async (sc: Pick<ServerContext, "db" | "opts" | "or
 export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Request, srv: Parameters<ServerContext["screenLook"]>[1], sender?: string): Promise<{ sender?: string; via: "screen" | "api" }> =>
   sender ? { sender, via: "api" } : { via: (await sc.screenLook(req, srv)) ? "screen" : "api" };
 
+type GrantFrom = { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean; heads?: GrantHeads; read?: { said: string; asked: string; full?: string }; parts?: string[] };
+type GrantContext = Pick<ServerContext, "db" | "originRepoOf" | "opts" | "grantHeadOf" | "adapterMap" | "settings" | "runnerChoice" | "suggestDir" | "judgeStop" | "tasks" | "pendingConsent" | "pricingTable" | "loginKindOf">;
+type GrantRow = { taskId: string; repo: string; kind: MergeGrant["kind"]; target: number; by: string; source?: string };
+
+/**
+ * What a text grants, read when it comes in: null = nothing is recorded (no task here, a Task of another machine, a
+ * text of no fixed sentence that is not read); `consent` = the read of the person's own words, its moment taken
+ * (`readyConsent`), started when called; else the rows of its fixed sentences.
+ */
+const grantsOf = (sc: GrantContext, taskId: string, text: string, from: GrantFrom): { consent: () => Promise<void> } | { task: Task | null; by: string; rows: GrantRow[] } | null => {
+  // `parts`: the texts of an answer read by letters one by one (a chosen option's sentence, a free text); else the text is one message
+  const grants = from.parts ? from.parts.flatMap(parseMergeGrants) : parseMergeGrants(text);
+  const task = sc.db.getTask(taskId);
+  const by = from.sender ? `task:${from.sender}` : (from.via ?? "api") === "screen" ? OWNER : API;
+  // a Task of another machine gets no grant here: this instance neither answers for it nor merges for it
+  if (otherMachineOf(task)) return null;
+  if (!grants.length) {
+    // no fixed sentence: the person's own words are read for one, without the caller waiting (the check in front of `gh` does)
+    const consent = by === OWNER && task && !from.source && !from.taskWrote ? readyConsent(sc, task, text, from.read) : null;
+    return consent ? { consent } : null;
+  }
+  // the task's own repositories: the ones its workspace's backlog and its directory's origin name
+  let own: string[] | undefined;
+  const ownRepos = (): string[] => (own ??= task ? ownGrantRepos(sc, task.workspaceId ? { id: task.workspaceId } : null, task.cwd) : []);
+  return { task, by, rows: grants.flatMap((g) => grantRepos(g, ownRepos, task?.workspaceId).map((repo) => ({ taskId, repo, kind: g.kind, target: g.target, by, source: from.source }))) };
+};
+
+/**
+ * `noteMergeGrant` for a caller that hands the text to the Task itself, with the heads already read (`from.heads`: a
+ * head not in it is none): what the text grants is taken now — the time of the grant, the reply and the heads a read of
+ * the person's own words goes by — and recorded, with nothing waited for, when the returned function is called. The
+ * caller calls it right after the hand-over (`send`'s `sent`), so a reply that was not handed over leaves no grant.
+ */
+export const grantRecorder = (sc: GrantContext, taskId: string, text: string, from: Omit<GrantFrom, "heads"> & { heads: GrantHeads }): (() => void) => {
+  const g = grantsOf(sc, taskId, text, from);
+  const at = Date.now();
+  return () => {
+    if (!g) return;
+    if ("consent" in g) return void g.consent();
+    sc.db.recordMergeGrants(g.rows, at, from.source);
+    // only a record that can answer needs the head; a trace of another sender's text keeps none
+    if (g.by !== OWNER || !g.task) return;
+    for (const r of g.rows) {
+      const head = from.heads[grantHeadKey(r.repo, r.target)] ?? null;
+      if (head) sc.db.recordMergeGrant({ ...r, head }, at);
+    }
+  };
+};
+
 /**
  * A merge-grant sentence in a text sent to a task is recorded for the check in front of `gh` (merge-grants.ts): for the
  * repository the sentence names, else the task's own — its workspace's backlog repository, else its directory's origin,
@@ -193,30 +242,19 @@ export const grantSource = async (sc: Pick<ServerContext, "screenLook">, req: Re
  * that read. A screen answer with a `source` and a sentence the Task wrote are not read: a read that ends after another
  * start, or that finds nothing, would not spend the answer once, and a Task's own words are no grant.
  */
-export const noteMergeGrant = async (sc: Pick<ServerContext, "db" | "originRepoOf" | "opts" | "grantHeadOf" | "adapterMap" | "settings" | "runnerChoice" | "suggestDir" | "judgeStop" | "tasks" | "pendingConsent" | "pricingTable" | "loginKindOf">, taskId: string, text: string, from: { sender?: string; source?: string; via?: "screen" | "api"; taskWrote?: boolean; heads?: GrantHeads; read?: { said: string; asked: string; full?: string }; parts?: string[] } = {}): Promise<void> => {
+export const noteMergeGrant = async (sc: GrantContext, taskId: string, text: string, from: GrantFrom = {}): Promise<void> => {
   // (every caller passes what `grantSource` said of its request; the start of a stage passes "screen" for an answer that route marked)
-  // `parts`: the texts of an answer read by letters one by one (a chosen option's sentence, a free text); else the text is one message
-  const grants = from.parts ? from.parts.flatMap(parseMergeGrants) : parseMergeGrants(text);
-  const task = sc.db.getTask(taskId);
-  const by = from.sender ? `task:${from.sender}` : (from.via ?? "api") === "screen" ? OWNER : API;
-  // a Task of another machine gets no grant here: this instance neither answers for it nor merges for it
-  if (otherMachineOf(task)) return;
-  if (!grants.length) {
-    // no fixed sentence: the person's own words are read for one, without the caller waiting (the check in front of `gh` does)
-    if (by === OWNER && task && !from.source && !from.taskWrote) void noteConsent(sc, task, text, from.read);
-    return;
-  }
-  // the task's own repositories: the ones its workspace's backlog and its directory's origin name
-  let own: string[] | undefined;
-  const ownRepos = (): string[] => (own ??= task ? ownGrantRepos(sc, task.workspaceId ? { id: task.workspaceId } : null, task.cwd) : []);
+  const g = grantsOf(sc, taskId, text, from);
+  if (!g) return;
+  if ("consent" in g) return void g.consent();
+  const { task, by, rows } = g;
   const at = Date.now();
-  const rows = grants.flatMap((g) => grantRepos(g, ownRepos, task?.workspaceId).map((repo) => ({ taskId, repo, kind: g.kind, target: g.target, by, source: from.source })));
   // every row is there before anything is waited for (a source is spent from here on: two starts cannot both take one
   // answer's grants — and spent for a release rolled back to as well, in the setting it reads); a merge / answer row
   // answers nothing until its head is in
   sc.db.recordMergeGrants(rows, at, from.source);
   // only a record that can answer needs the head; a trace of another sender's text keeps none
-  await Promise.all(rows.filter((r) => by === OWNER && task).map(async (r) => {
+  await Promise.all(rows.filter(() => by === OWNER && task).map(async (r) => {
     // a screen answer's heads were read when it was taken: the PR is not read again, and a head not read then is none
     const head = from.heads ? (from.heads[grantHeadKey(r.repo, r.target)] ?? null) : await grantHeadOf(sc, task!, r.repo, r.target).catch(() => null);
     if (head) sc.db.recordMergeGrant({ ...r, head }, at);

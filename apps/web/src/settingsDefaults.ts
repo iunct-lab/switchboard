@@ -34,7 +34,7 @@ export const RESETTABLE_CARDS = {
   ],
   shadowDefault: ["shadowRunner"],
   developSelfCard: ["developSelf"],
-  sweep: ["maxRunners", "quotaAndResume.flowShareLimit"],
+  sweep: ["maxRunners", "autoDirect", "quotaAndResume.flowShareLimit"],
   usage: ["quotaAndResume.backlogQuotaLimit", "quotaAndResume.retryDelayMs", "quotaAndResume.retryMaxDelayMs", "quotaAndResume.maxLimitStops", "quotaAndResume.resumePrompt", "quotaAndResume.maxStopResumes", "quotaAndResume.thinSample", "quotaAndResume.flowLimit", "quotaAndResume.silentAfterMs", "quotaAndResume.waitLimitMs", "quotaAndResume.queueStallMs", "quotaAndResume.dependsLimitMs"],
   newSchedule: ["newDefaults.scheduleCron"],
   judgeAndChoice: ["judge.enabled", "evals.judge.enabled", "judgeAndChoice.judgeTimeoutMs", "judgeAndChoice.workspaceChoiceTimeoutMs"],

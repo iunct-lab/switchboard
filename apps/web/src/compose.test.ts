@@ -5,10 +5,11 @@ import { backlogTargetName, feedbackArgs } from "./compose.ts";
 const ws = (id: string, kind: Workspace["kind"] = "repo") => ({ id, name: `name-${id}`, path: `/${id}`, kind }) as Workspace;
 const base = { text: "直したい", attachmentIds: ["a1"], screen: "Home" };
 
-test("request は workspaceId と source を付け、fix は付けない", () => {
+test("request は workspaceId と source を付け、fix は workspaceId だけ付ける", () => {
   const source = { kind: "eval" as const, taskId: "task_1" };
   expect(feedbackArgs("request", { ...base, workspaceId: "ws_lib", source })).toEqual(["直したい", ["a1"], "Home", "request", "ws_lib", source]);
-  expect(feedbackArgs("fix", { ...base, workspaceId: "ws_lib", source })).toEqual(["直したい", ["a1"], "Home", "fix", undefined, undefined]);
+  expect(feedbackArgs("fix", { ...base, workspaceId: "ws_lib", source })).toEqual(["直したい", ["a1"], "Home", "fix", "ws_lib", undefined]);
+  expect(feedbackArgs("fix", { ...base, workspaceId: null })[4]).toBeUndefined();
   // 自動 (null): nothing names the repository, so the daemon files it in Switchboard itself as before
   expect(feedbackArgs("request", { ...base, workspaceId: null })[4]).toBeUndefined();
 });

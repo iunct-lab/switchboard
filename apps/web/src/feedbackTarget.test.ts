@@ -15,13 +15,13 @@ test("the form starts on the repository it was opened for, else on 自動", () =
   expect(startWorkspace([])).toEqual({ initial: "", extra: null });
 });
 
-test("feedbackModes: off hides fix and sends Switchboard requests upstream", () => {
+test("feedbackModes: off offers fix for another workspace, not for Switchboard itself", () => {
   const list = [ws("ws_lib"), ws("ws_meta", "meta")];
   expect(feedbackModes(false, ws("ws_meta", "meta"), list)).toEqual({ fix: false, upstream: true });
   // a form left on 自動 files in the meta workspace
   expect(feedbackModes(false, undefined, list)).toEqual({ fix: false, upstream: true });
-  // the user's own app still makes a Task
-  expect(feedbackModes(false, ws("ws_lib"), list)).toEqual({ fix: false, upstream: false });
+  // the user's own app still makes a Task, and can be fixed right away
+  expect(feedbackModes(false, ws("ws_lib"), list)).toEqual({ fix: true, upstream: false });
 });
 
 test("feedbackModes: on keeps both as today", () => {

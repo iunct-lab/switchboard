@@ -649,6 +649,14 @@ test("a screen answer is kept before its heads are read: a stage Task started be
   // the answer's grants were given once, to that Task, with no head: they answer for none, whatever is read later
   expect(grantRows(task)).toEqual([{ target: 12, by: "owner", head: "" }, { target: 13, by: "owner", head: "" }]);
   expect(db.mergeGrantAt(task, "acme/app", "merge", 12, HEAD12)).toBeNull();
+  // the head read late does not reach a second stage Task either: the answer was spent by the first, so a second started once the first has stopped is not granted it
+  db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [task]);
+  const again = await start(base, 306, { action: "complete" });
+  expect(again.status).toBe(201);
+  const second = ((await again.json()) as { id: string }).id;
+  expect(second).not.toBe(task);
+  expect(grantRows(second)).toEqual([]);
+  expect(db.mergeGrantAt(second, "acme/app", "merge", 12, HEAD12)).toBeNull();
 });
 
 test("an operation keeps the Task that asked for it: the proof's Task on a create, an edit and a comment; no proof is null; an edit of a create not sent yet keeps its Task", async () => {

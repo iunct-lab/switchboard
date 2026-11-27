@@ -22,10 +22,10 @@ export function startButton(item: BacklogItem): [BacklogAction, string] | null {
 
 /**
  * The row's second button, 直行で直す: on the same rows as PBI にする (a request with no PBI, not waiting for a
- * decision), of the meta workspace only (`metaId`; the start refuses another repository's for now).
+ * decision), of any workspace.
  */
-export function directButton(item: BacklogItem, metaId: string | null): [BacklogAction, string] | null {
-  return item.stage === "request" && item.workspaceId === metaId ? ["direct", t(m.direct)] : null;
+export function directButton(item: BacklogItem): [BacklogAction, string] | null {
+  return item.stage === "request" ? ["direct", t(m.direct)] : null;
 }
 
 /** A Task's state as the backlog row names it. */
@@ -105,12 +105,16 @@ export const waitUrl = (item: BacklogItem, w: Wait) => item.url.replace(/\/issue
  * closed; `cond` = how it comes undone, by why it waits; `next` = whether backlog-next goes on by itself (`auto`: an
  * enabled バックログを進める with an implement slot) or the row's button is needed (also when one was not read). A
  * record whose waits all left (deferred PRs) is 待ちが解けた with none named, as backlog-next and 判断待ち take it.
- * null = no record.
+ * null = no record, or all closed and the work went on since (the one automatic start they allow, `autoHeld`, or a Task after them).
  */
 export function waitText(item: BacklogItem, auto: boolean): { label: string; done: boolean; cond: string; next: string } | null {
   if (item.waitsAt === null) return null;
   const until = item.waitsUntil && !item.waitsUntil.met ? item.waitsUntil : null;
   const done = item.waits.every((w) => w.state === "met") && !until;
+  // closed and already used up, as core's isUnblocked reads it: the gate holds the next automatic start (`autoHeld`), or an
+  // 実装 / 閉じる started after the waits were written (how that Task stopped holds the row then), so nothing resumes it as 待ちが解けた
+  const workedSince = item.lastWorkAt !== null && item.lastWorkAt > Date.parse(item.waitsAt);
+  if (done && (item.autoHeld !== null || workedSince)) return null;
   const cond = [
     item.waits.some((w) => w.reason === "overlap") ? t(m.condOverlap) : null,
     item.waits.some((w) => w.reason === "prerequisite") ? t(m.condPrereq) : null,

@@ -12,11 +12,12 @@ export function startWorkspace(workspaces: Workspace[], opened?: FeedbackTarget)
 }
 
 /**
- * What the instruction form offers. `developSelf` off: no 「要望にしてすぐ直す」, and a request for Switchboard itself (the meta
- * workspace, which is also where a form with 自動 chosen files it) goes upstream instead of making a Task.
+ * What the instruction form offers. `developSelf` off: no 「要望にしてすぐ直す」 for Switchboard itself, and a request for it (the meta
+ * workspace, which is also where a form with 自動 chosen files it) goes upstream instead of making a Task. Another repository is
+ * unaffected: its fix is offered whatever the setting.
  * One place for the decision, so the render does not branch on the setting.
  */
 export function feedbackModes(developSelf: boolean, target: FeedbackTarget | undefined, workspaces: Workspace[]): { fix: boolean; upstream: boolean } {
   const kind = target ? workspaces.find((w) => w.id === target.id)?.kind : "meta";
-  return { fix: developSelf, upstream: !developSelf && kind === "meta" };
+  return { fix: developSelf || kind !== "meta", upstream: !developSelf && kind === "meta" };
 }

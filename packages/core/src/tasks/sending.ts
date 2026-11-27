@@ -6,9 +6,12 @@ import { REPLY_QUEUED } from "@switchboard/protocol";
 import { withAttachments } from "../attachments.ts";
 import { IN_FLIGHT } from "../task-status.ts";
 import { answerableStops } from "../stops.ts";
-import { type LiveSession, ResumeSupersededError } from "./state.ts";
+import { type HeldReply, type LiveSession, ResumeSupersededError } from "./state.ts";
 import { TaskAdmission } from "./admission.ts";
 import type { TaskManager } from "./manager.ts";
+
+/** Every held reply was refused right before the hand-over: nothing goes, and each refusal already has its line. */
+class NothingHanded extends Error {}
 
 /** A prompt or a reply on its way to a Task: checked, queued while no slot is free or a hold is on, then given to the runner. */
 export abstract class TaskSending extends TaskAdmission {
@@ -86,24 +89,57 @@ export abstract class TaskSending extends TaskAdmission {
    * `answers`: which of the Task's answerable stops this reply is the person's answer to (none given = all of them, as a
    * reply typed in the Task's conversation is). A reply to one question passes the stops of that question; a reply
    * another Task sent (`from` on the send route) is no person's answer and passes none, so it leaves every stop open.
+   * `going`: called synchronously right before the text is handed over (to the live process, a new one, or the queue); one
+   * that throws refuses the reply, nothing is handed over, and the resume that was planned comes back — unless 中断 or
+   * another turn forgot it too while `send` waited. `sent`: called
+   * synchronously right after the hand-over, before the stops are marked answered — never when the hand-over failed.
    */
-  async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[]; answers?: (s: StopRecord) => boolean } = {}): Promise<Task> {
+  async send(taskId: string, text: string, opts: { asResume?: boolean; daemon?: boolean; mirror?: boolean; attachmentIds?: string[]; answers?: (s: StopRecord) => boolean; going?: () => void; sent?: () => void; dropped?: () => void } = {}): Promise<Task> {
     // Everything that can refuse the turn (unknown task, a superseded resume, the budget) runs before any file moves:
     // a refused turn leaves the uploads in the inbox, reusable. Attachments are taken once, by the primary;
     // the shadow reads the same files (its scope is widened to them).
-    await this.preflight(taskId, opts);
-    const atts = this.takeAttachments(opts.attachmentIds, taskId);
-    this.recordAttachments(taskId, atts);
-    text = withAttachments(text, atts);
-    const before = this.db.nextSeq(taskId);
-    const task = await this.dispatch(taskId, text, atts, !!(opts.asResume || opts.daemon));
-    // The person's turn answers the task's open stops, by its user message (none echoed = nothing recorded).
-    if (!opts.asResume && !opts.daemon) {
-      // a reply put in the queue echoes no message yet (it is sent when the Task starts): the status line that says so is the answer
-      const added = this.db.listEvents(taskId, before - 1);
-      const said = added.find((e) => e.ev.t === "message.delta" && e.ev.role === "user") ?? added.find((e) => e.ev.t === "status" && e.ev.text.startsWith(REPLY_QUEUED));
-      // only the stops the reply is an answer to (`answers`): one that came while the reply was sent, or that says another grant, stays open
-      if (said) this.moveOpenStops(taskId, (s) => (opts.answers && !opts.answers(s) ? null : { ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
+    const planned = this.db.getTask(taskId);
+    // the plan is forgotten once by this reply's own preflight; one more time is 中断 or another turn while it waited,
+    // after which the plan stays forgotten even if this reply is refused
+    let forgotten = 0;
+    const off = opts.going ? this.onPlanForgotten((id) => void (id === taskId && forgotten++)) : null;
+    const person = !opts.asResume && !opts.daemon;
+    let task: Task;
+    let held: boolean;
+    let before: number;
+    let atts: Attachment[];
+    // past send: a held reply's `going` runs when the reply is flushed, long after the plan it would restore
+    let handed = false;
+    try {
+      await this.preflight(taskId, opts);
+      atts = this.takeAttachments(opts.attachmentIds, taskId);
+      this.recordAttachments(taskId, atts);
+      text = withAttachments(text, atts);
+      before = this.db.nextSeq(taskId);
+      const going = opts.going && (() => {
+        const others = forgotten > 1;
+        off?.();
+        try {
+          opts.going!();
+        } catch (e) {
+          // refused before anything was handed over: the plan preflight dropped comes back, so the Task still resumes (as in
+          // startDeferred) — unless 中断 or another turn forgot it too while preflight waited, or send is past (a held reply)
+          if (!handed && !others && planned && planned.resumeAt !== null && this.db.getTask(taskId)?.resumeAt === null && planned.resumeReason) {
+            this.setResumeAt(taskId, planned.resumeAt, planned.resumeReason, { window: planned.resumeWindow, since: planned.resumeSince, plannedAt: planned.resumePlannedAt });
+          }
+          throw e;
+        }
+      });
+      ({ task, held } = await this.dispatch(taskId, text, atts, !person, going, person ? { sent: opts.sent, dropped: opts.dropped, answers: opts.answers ?? (() => true) } : undefined));
+    } finally {
+      off?.();
+      handed = true;
+    }
+    // a reply held for the process's background jobs is not handed over yet: its record and its answer wait for the hand-over (flushHeldReplies)
+    if (!held) {
+      opts.sent?.();
+      // The person's turn answers the task's open stops, by its user message (none echoed = nothing recorded).
+      if (person) this.markAnswered(taskId, before, opts.answers);
     }
     const shadow = opts.asResume || opts.daemon || opts.mirror === false ? null : this.db.shadowTaskOf(taskId);
     if (shadow && !shadow.shadowStopped) {
@@ -122,6 +158,15 @@ export abstract class TaskSending extends TaskAdmission {
     return task;
   }
 
+  /** Marks the stops a person's reply answers (`answers`; none given = all) by the message it echoed since `before` (none echoed = nothing recorded). */
+  private markAnswered(taskId: string, before: number, answers?: (s: StopRecord) => boolean): void {
+    // a reply put in the queue echoes no message yet (it is sent when the Task starts): the status line that says so is the answer
+    const added = this.db.listEvents(taskId, before - 1);
+    const said = added.find((e) => e.ev.t === "message.delta" && e.ev.role === "user") ?? added.find((e) => e.ev.t === "status" && e.ev.text.startsWith(REPLY_QUEUED));
+    // only the stops the reply is an answer to (`answers`): one that came while the reply was sent, or that says another grant, stays open
+    if (said) this.moveOpenStops(taskId, (s) => (answers && !answers(s) ? null : { ...s, answer: { ref: `seq:${said.seq}`, at: said.ts } }), answerableStops);
+  }
+
   /**
    * One task's follow-up turn. Reuses the live process; otherwise restarts the runner with --resume once any release
    * has finished. A person's turn supersedes a planned resume the moment it is asked for; the resumer's own
@@ -130,7 +175,7 @@ export abstract class TaskSending extends TaskAdmission {
    */
   private async sendOne(taskId: string, text: string, opts: { asResume?: boolean; atts?: Attachment[] } = {}): Promise<Task> {
     await this.preflight(taskId, opts);
-    return this.dispatch(taskId, text, opts.atts ?? [], !!opts.asResume);
+    return (await this.dispatch(taskId, text, opts.atts ?? [], !!opts.asResume)).task;
   }
 
   /**
@@ -216,13 +261,21 @@ export abstract class TaskSending extends TaskAdmission {
    * Hand the text to the runner: the live process, or a restart with --resume. `auto` = a turn nobody asked for (a resume, a daemon turn): if it waits in the queue it is marked so. `atts` = the turn's attachments: the
    * scope must cover their folders, and the adapter gets them with the text (DAK sends the contents).
    */
-  private async dispatch(taskId: string, text: string, atts: Attachment[], auto: boolean): Promise<Task> {
+  private async dispatch(taskId: string, text: string, atts: Attachment[], auto: boolean, going?: () => string | void, held?: Omit<HeldReply, "text" | "going">): Promise<{ task: Task; held: boolean }> {
+    // the last check right before each hand-over below; a check that returns a text hands that one over (flushHeldReplies: the replies that passed)
+    const go = () => {
+      const t = going?.();
+      if (typeof t === "string") text = t;
+    };
     let task = this.mustGet(taskId);
     const dirs = Array.from(new Set(atts.map((a) => dirname(a.path))));
     let widened = false;
     if (dirs.length) ({ task, widened } = this.widenScope(task, dirs));
     // a Task still in the queue starts from drain() with its first prompt: the reply goes after it
-    if (task.queuedAt !== null) return this.queueReply(task, text, this.startBlock(task), atts, auto);
+    if (task.queuedAt !== null) {
+      go();
+      return { task: this.queueReply(task, text, this.startBlock(task), atts, auto), held: false };
+    }
     const live = this.live.get(taskId);
     // a new turn is a new start: under the hold a process left open after its turn is closed and the reply waits (a turn
     // in flight is sent to as before). A process still running background jobs keeps them: the reply waits on it
@@ -230,19 +283,26 @@ export abstract class TaskSending extends TaskAdmission {
     if (live && task.status === "background") {
       const hold = this.holdBlock();
       if (hold) {
-        (live.heldReplies ??= []).push(text);
+        // not handed over: `going`, `sent` and the answered stops come when flushHeldReplies hands it over. It answers only
+        // the stops open now, each with the grant it shows now (as `stopsAnswered` compares them): a stop that comes, or is
+        // reported again with another grant, while it waits is not one the person saw when they wrote it
+        const seen = (r: StopRecord) => `${r.id}\n${r.grant ?? ""}`;
+        const open = new Set(answerableStops(this.db.listStopRecords([taskId])).map(seen));
+        const answers = held?.answers;
+        (live.heldReplies ??= []).push({ text, ...(going ? { going: () => void going() } : {}), ...held, ...(answers ? { answers: (s: StopRecord) => open.has(seen(s)) && answers(s) } : {}) });
         // the input box is cleared: this line is where the text stays in the log until the Task is queued
         this.record(taskId, { t: "status", text: `${REPLY_QUEUED}（${hold.wait}、裏の処理の終わりを待って待ち列に入れます、${hold.detail}）: 「${text.trim()}」` });
         this.broadcast({ type: "task.updated", task: this.mustGet(taskId) });
-        return this.mustGet(taskId);
+        return { task: this.mustGet(taskId), held: true };
       }
     }
     if (live && !IN_FLIGHT.has(task.status)) {
       const hold = this.holdBlock();
       if (hold && (await this.release(taskId))) {
+        go();
         this.queueReply(this.mustGet(taskId), text, hold, atts, auto);
         this.drain(); // the hold may have lifted while the process closed
-        return this.mustGet(taskId);
+        return { task: this.mustGet(taskId), held: false };
       }
     }
     // A process flagged for restart is released first; release() refuses while a turn is in flight, and then the
@@ -251,24 +311,29 @@ export abstract class TaskSending extends TaskAdmission {
       if (widened) {
         this.onEvent(taskId, live, { t: "status", text: "添付ディレクトリを scope に加えました。実行中のプロセスには渡せないため、この返信の添付を読むときに承認が出ることがあります。次のターンで再開します" });
       }
+      go();
       this.disarmIdle(live);
       live.turnErrors = [];
       live.turnQuota = undefined;
       live.turnQuestion = undefined;
       live.lastEventAt = Date.now();
       live.session.send(text, atts);
-      return this.setStatus(taskId, "running");
+      return { task: this.setStatus(taskId, "running"), held: false };
     }
     if (widened && live) this.record(taskId, { t: "status", text: "添付ディレクトリを scope に加えたので、プロセスを再開します（--resume）" });
     task = this.mustGet(taskId); // the release above was awaited: a model or mode chosen meanwhile is the one to start with
     // no process, and no slot for a new one (preflight saw a live process that a release above may have closed): wait in the queue
     const block = this.startBlock(task);
-    if (block !== null) return this.queueReply(task, text, block, atts, auto);
+    if (block !== null) {
+      go();
+      return { task: this.queueReply(task, text, block, atts, auto), held: false };
+    }
+    go();
     const { resume, preamble } = this.resumeArgs(task);
     const warning = this.memoryWarning(task);
     if (warning) this.record(taskId, { t: "status", text: warning });
     this.startOrFail(this.withResolvedMode(task), text, atts, resume, preamble);
-    return this.mustGet(taskId);
+    return { task: this.mustGet(taskId), held: false };
   }
 
   /**
@@ -279,16 +344,59 @@ export abstract class TaskSending extends TaskAdmission {
    * means it does not come back on its own; abort() drops them first), and so does a daemon that is stopping.
    */
   protected flushHeldReplies(taskId: string, live: LiveSession): void {
-    const texts = live.heldReplies;
+    const replies = live.heldReplies;
     const task = this.db.getTask(taskId);
-    if (!texts?.length || !task) return;
+    if (!replies?.length || !task) return;
     if ((task.status === "background" || IN_FLIGHT.has(task.status)) && this.holdBlock()) return;
     live.heldReplies = undefined;
     if (task.status === "aborted" || this.stopped) {
       this.record(taskId, { t: "status", text: task.status === "aborted" ? "中断したので、保留した返信は渡しません" : "デーモンが止まるので、保留した返信は渡しません" });
+      for (const r of replies) r.dropped?.();
       return;
     }
     if (task.resumeAt !== null) this.setResumeAt(taskId, null);
-    this.dispatch(taskId, texts.join("\n\n"), [], false).catch((e) => this.record(taskId, { t: "error", message: `保留した返信を渡せませんでした: ${String((e as Error).message ?? e)}` }));
+    const refuse = (r: HeldReply, why: string) => {
+      this.record(taskId, { t: "status", text: `保留した返信は渡しません（${why}）: 「${r.text.trim()}」` });
+      r.dropped?.();
+    };
+    // right before the hand-over (after dispatch's own waits: the process that closes), each reply's sender checks again
+    // (`going`): one that throws is not handed over. A reply that answers a question (it has `going`) is not handed over
+    // either when an earlier reply of these already answers the same stop
+    let passed: HeldReply[] | null = null;
+    const going = (): string => {
+      const claimed = new Set<string>();
+      const stops = answerableStops(this.db.listStopRecords([taskId]));
+      passed = replies.filter((r) => {
+        try {
+          r.going?.();
+        } catch (e) {
+          refuse(r, String((e as Error).message ?? e) || "問いが新しくなりました");
+          return false;
+        }
+        const mine = r.answers ? stops.filter((s) => r.answers!(s)).map((s) => s.id) : [];
+        if (r.going && mine.some((id) => claimed.has(id))) {
+          refuse(r, "停止は先の返信で答えました");
+          return false;
+        }
+        for (const id of mine) claimed.add(id);
+        return true;
+      });
+      if (!passed.length) throw new NothingHanded();
+      return passed.map((r) => r.text).join("\n\n");
+    };
+    const before = this.db.nextSeq(taskId);
+    this.dispatch(taskId, replies.map((r) => r.text).join("\n\n"), [], false, going)
+      .then(() => {
+        for (const r of passed ?? []) {
+          r.sent?.();
+          if (r.answers) this.markAnswered(taskId, before, r.answers);
+        }
+      })
+      .catch((e) => {
+        if (e instanceof NothingHanded) return;
+        this.record(taskId, { t: "error", message: `保留した返信を渡せませんでした: ${String((e as Error).message ?? e)}` });
+        // refused before the checks ran: none of them was handed over
+        for (const r of passed ?? replies) r.dropped?.();
+      });
   }
 }

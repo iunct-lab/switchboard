@@ -259,8 +259,21 @@ describe("the stall's notice", () => {
     expect(got.stall!.person).toEqual([
       { askId: "decision:ws_a#50@x", workspace: { id: "ws_a", name: "a" }, pbi: pbiRef(50), label: "判断待ち: 進め方の問い", taskId: null, url: pbiRef(50).url, held: 4, headMoved: false },
       { askId: "stop:tk_40", workspace: { id: "ws_a", name: "a" }, pbi: pbiRef(40), label: "止まり: PR #12 のマージの許可", taskId: "tk_40", url: null, held: 3, headMoved: false },
-      { askId: "check:tk_3", workspace: { id: "ws_a", name: "a" }, pbi: pbiRef(3), label: "返事待ち: 昇格してよいか", taskId: "tk_3", url: null, held: 0, headMoved: false },
+      { askId: "check:tk_3", workspace: { id: "ws_a", name: "a" }, pbi: pbiRef(3), label: "返事待ち: 昇格してよいか", taskId: "tk_3", url: null, held: 1, headMoved: false },
     ]);
+  });
+
+  test("a question of a queued PBI counts the PBI itself", () => {
+    // PBI 3 is queued and held by nobody; PBI 40 is not queued, its holder PR 9 holds 1 and 2
+    const items = [overlapped(1, "ws_a", [hit("PR #9", 40)]), overlapped(2, "ws_a", [hit("PR #9", 40)]), overlapped(3, "ws_a", [])];
+    saveQueue(db, { enabled: true, items: [1, 2, 3].map((number) => ({ workspaceId: "ws_a", number })) });
+    noteQueue(db, ["進められる項目が無い"], 0, nextStall(null, { stalled: true, holders: stallHolders([{ workspaceId: "ws_a", items }]) }, 0));
+    const asks = [
+      question({ id: "decision:ws_a#3@x", kind: "decision", pbi: pbiRef(3), question: "自分の問い" }),
+      question({ id: "decision:ws_a#40@x", kind: "decision", pbi: pbiRef(40), question: "相手の問い" }),
+    ];
+    const got = stallAsk({ now: HOUR, asks, pbiOf: (_w, n) => pbiRef(n), refUrl: (_w, ref) => `url of ${ref}` })!;
+    expect(got.stall!.person.map((p) => [p.pbi.number, p.held])).toEqual([[40, 2], [3, 1]]);
   });
 
   test("an answer made stale by a moved head is listed as waiting again", async () => {

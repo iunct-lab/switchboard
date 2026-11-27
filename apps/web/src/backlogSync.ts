@@ -282,3 +282,13 @@ export function decisionQuestion(body: string): string {
   const q = lines.find((l) => /^\*{0,2}問い\*{0,2}[:：]/.test(l));
   return (q ?? lines[0] ?? "").replace(/^\*{0,2}問い\*{0,2}[:：]\s*/, "").replace(/\*\*/g, "");
 }
+
+/**
+ * The question an answer box's draft is for: the one on screen when the first word was typed, kept while words stay
+ * (the card may show a newer question meanwhile, and the draft was written for the older one). An empty box has no
+ * draft, so it follows the question now.
+ */
+export function draftQuestion(prev: { text: string; asked: { issue: number; at: string } | null }, text: string, now: { issue: number; at: string } | null): { issue: number; at: string } | null {
+  // a draft keeps its question only while it has words: the first word after an empty box starts a draft for the question shown then
+  return text === "" || prev.text === "" ? now : (prev.asked ?? now);
+}

@@ -649,6 +649,7 @@ export function App() {
             runnerOk={runnerOk}
             onCreate={createTask}
             onOpenTask={openTask}
+            onOpenAsks={() => setView({ name: "approvals" })}
             onError={setError}
             stopRev={stopRev}
             stopMarks={stopMarks}
@@ -692,7 +693,6 @@ export function App() {
               openArtifact={view.artifact}
               onArchive={(archived) => archiveTask(currentTask.id, archived)}
               onLoadOlder={() => loadOlder(currentTask.id)}
-              metaId={workspaces.find((w) => w.kind === "meta")?.id ?? null}
               onStarted={(task) => { upsertTask(task); openTask(task.id); }}
             />
             <Brief open={briefOpen} onClose={() => setBriefOpen(false)} focus={briefFocus ?? undefined} onFocused={() => setBriefFocus(null)} task={currentTask} detail={current} ledger={ledger} onAbort={() => api.abort(currentTask.id).catch((e) => setError(e.message))} checksRev={checksRev} evalsRev={evalsRev[currentTask.id] ?? 0} onImprove={improveFromEvals} onRestarting={() => setRestarting(true)} runners={health?.runners} noTerminal={health?.features?.pty === false} onTask={upsertTask} tasks={tasks} onOpenTask={openTask} workspaces={workspaces} />
