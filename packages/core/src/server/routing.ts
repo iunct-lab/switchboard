@@ -80,11 +80,11 @@ export const runRoutingAdvice = (sc: Pick<ServerContext, "settings" | "adviceSto
  * with. A failure to record never stops the task (it is noted on it). The process named by the input must exist
  * (checked where the input is parsed); `version` comes from the definition as it is at this moment.
  */
-export const recordProvenance = (sc: Pick<ServerContext, "metaWorkspace" | "db" | "tasks">, t: Task, input: { process?: string; processReason?: string }) => {
+export const recordProvenance = (sc: Pick<ServerContext, "metaWorkspace" | "db" | "tasks">, t: Task, input: { process?: string; processReason?: string; issues?: number[] }) => {
   try {
     const meta = sc.metaWorkspace();
     const def = input.process ? loadProcess(input.process, meta?.path) : null;
-    sc.db.setTaskProvenance(t.id, collectProvenance({ cwd: t.cwd, metaPath: meta?.path ?? null, runner: t.runner, model: t.model, effort: t.effort, permissionMode: t.permissionMode, process: def ? { id: def.id, version: def.version } : null, processReason: input.processReason ?? null }));
+    sc.db.setTaskProvenance(t.id, collectProvenance({ cwd: t.cwd, metaPath: meta?.path ?? null, runner: t.runner, model: t.model, effort: t.effort, permissionMode: t.permissionMode, process: def ? { id: def.id, version: def.version } : null, processReason: input.processReason ?? null, issues: input.issues ?? null }));
   } catch (e) {
     sc.tasks.record(t.id, { t: "status", text: `由来を記録できませんでした: ${(e as Error).message ?? e}` });
   }

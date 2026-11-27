@@ -3,15 +3,16 @@
  * and of the merged PRs GitHub holds (`createdAt`), and cuts them at the marks the skills leave. The Project's Status history is not read — a Status changed
  * through the API leaves no timeline event. A stage whose mark is missing is null, never guessed. docs/design/flow-metrics.md.
  */
-import { FlowStage, type CreatedIssue, type FlowPbi, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
+import { FlowStage, type CreatedIssue, type FlowPbi, type FlowPrRecord, type FlowProcessRow, type FlowStageSummary, type FlowSummary, type FlowView, type FlowWeek } from "@switchboard/protocol";
 import type { Database } from "bun:sqlite";
-import { deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
+import { bundleTasks, deferredTasksSince, tasksOfIssues, type Db } from "./db.ts";
 import { readStoredRecords } from "./backlog-stored.ts";
 import { requestOf } from "./backlog-item.ts";
 import { questionsAnswered } from "./backlog-comments.ts";
 import type { GhRunner } from "./backlog-gh.ts";
 import { closesOf } from "./backlog-fetch.ts";
 import type { StoredRecords } from "../../../ops-kit/src/backlog-client.ts";
+import { parseCompared } from "../../../ops-kit/src/review-compare.ts";
 
 export type RawComment = { createdAt: string; body: string };
 export type RawPr = { number: number; createdAt: string; mergedAt: string | null; comments: RawComment[] };
@@ -29,6 +30,7 @@ export type RawPbi = {
 
 /** The same shape as merge-gate's review mark, plus DAK (the extra reviewer). */
 const REVIEW = /^\[(codex|claude|dak)\] review/;
+const COMPARE = /^\[(codex|claude|dak)\] compare/;
 const CLAIM = /^(<!-- parallel-guard:task-claim -->|着手)/m; // a line of its own, not only the comment's first
 const CLAIM_TOKEN = /^<!-- parallel-guard:task-claim (\S+) -->/m;
 const WITHDRAW = /<!-- parallel-guard:withdraw (\S+) -->/; // a Task that yielded takes its claim back: it had not started
@@ -77,7 +79,16 @@ function userWait(comments: RawComment[]): number {
   return total;
 }
 
-export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<FlowPbi, "tasks" | "repo" | "url"> {
+/**
+ * One PR's review rounds, and the REGRESSION lines of its last comparison with main that can be read (`parseCompared`, the reader
+ * `ops-kit review-compare` uses; a comparison it finds unreadable is passed over, as `review-compare check` refuses it); null = none.
+ */
+export function prRecord(p: RawPr): FlowPrRecord {
+  const last = sorted(p.comments).filter((c) => COMPARE.test(c.body)).map((c) => parseCompared(c.body)).filter((c) => c.bad.length === 0).at(-1);
+  return { number: p.number, reviews: p.comments.filter((c) => REVIEW.test(c.body)).length, regressions: last ? last.rows.filter((r) => r.cls === "REGRESSION").length : null };
+}
+
+export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<FlowPbi, "tasks" | "process" | "repo" | "url"> {
   const tasks = raw.subIssues;
   // A PR can close several sibling Tasks; count it once.
   const prs = [...new Map(tasks.flatMap((t) => t.pullRequests).map((p) => [p.number, p])).values()];
@@ -117,6 +128,9 @@ export function flowOfPbi(raw: RawPbi, requestCreatedAt: string | null): Omit<Fl
     userWaitMs: [raw.comments, ...tasks.map((t) => t.comments)].reduce((sum, cs) => sum + userWait(cs), 0), // pair ask and answer within one Issue
     reviewRounds: prs.map((p) => p.comments.filter((c) => REVIEW.test(c.body)).length),
     taskIssues: tasks.length,
+    startAt: start,
+    mainAt: lastMerge,
+    prs: prs.filter((p) => p.mergedAt).map(prRecord),
   };
 }
 
@@ -246,7 +260,7 @@ export function flowOfStored(records: StoredRecords, prs: StoredFlowPr[], days: 
     const req = requestOf(p.body);
     const f = flowOfPbi(raw, req === null ? null : (byNumber.get(req)?.createdAt ?? null));
     const url = records.service === "github" ? `https://github.com/${records.repository}/issues/${p.number}` : p.url;
-    return { pbi: { ...f, repo: records.repository, url, tasks: null }, issues: [p.number, ...p.subIssues] };
+    return { pbi: { ...f, repo: records.repository, url, tasks: null, process: null }, issues: [p.number, ...p.subIssues] };
   });
   const weeks = weekStarts(days, now);
   const growth = weeks.map((w): GrowthCounts => ({ weekStart: ymd(w), pbiOpened: 0, pbiClosed: 0, requestOpened: 0, requestClosed: 0 }));
@@ -278,13 +292,13 @@ export function prRepoOf(records: StoredRecords, path: string): string | null {
  * the command (scripts/flow-report.ts): the Issues from the app's stored values (`records`), the merged PRs of `repo` from
  * GitHub (fetchMergedPrs, under `maxCost`; null = none read, the PR stages unknown). `cutPbis`: PBIs with a PR whose comments were cut (their numbers come out low).
  */
-export async function fetchFlow(gh: GhRunner, cwd: string, repo: string | null, days: number, records: StoredRecords, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; spent: number; cutPbis: number[]; growth: GrowthCounts[] }> {
+export async function fetchFlow(gh: GhRunner, cwd: string, repo: string | null, days: number, records: StoredRecords, now = Date.now(), maxCost = MAX_COST): Promise<{ reads: FlowRead[]; prs: StoredFlowPr[]; spent: number; cutPbis: number[]; growth: GrowthCounts[] }> {
   const read = closedPbis(records, days, now);
   const since = read.length ? ymd(Math.min(...read.map((p) => ms(p.createdAt)))) : null;
   const { prs, spent, cutPrs } = repo && since ? await fetchMergedPrs(gh, cwd, repo, since, maxCost, now) : { prs: [], spent: 0, cutPrs: [] };
   const { reads, growth } = flowOfStored(records, prs, days, now);
   const cut = new Set(prs.filter((p) => cutPrs.includes(p.number)).flatMap((p) => p.closes));
-  return { reads, spent, cutPbis: reads.filter((r) => r.issues.some((n) => cut.has(n))).map((r) => r.pbi.number), growth };
+  return { reads, prs, spent, cutPbis: reads.filter((r) => r.issues.some((n) => cut.has(n))).map((r) => r.pbi.number), growth };
 }
 
 const WEEK_COUNTS = ["pbiOpened", "pbiClosed", "requestOpened", "requestClosed", "net", "deferredTasks", "deferredIssues"] as const;
@@ -310,12 +324,32 @@ export function backlogGrowth(counts: GrowthCounts[], deferred: Array<{ endedAt:
   return weeks;
 }
 
-/** Fills `tasks` with the Switchboard Tasks of the PBI or one of its Tasks in these workspaces (stage Task or title `#N `). `db` null = not read. */
-export function withSwitchboardTasks(read: FlowRead, db: Database | null, workspaceIds: string[]): FlowPbi {
+/**
+ * Fills `tasks` with the Switchboard Tasks of the PBI or one of its Tasks in these workspaces (stage Task or title `#N `), and the
+ * bundle Tasks (`bundles`, read once by the caller with `bundleTasks`) that took this PBI, each once. `process`: a bundle Task
+ * that took the PBI makes it `p3-bundle`, else a Task under `p0-pipeline` makes it `p0-pipeline`, else null. `db` null = not read.
+ * `prRepo`: the repository whose PRs the flow reads (`prRepoOf`; a backlog kept in the app only reads its checkout's origin), and so
+ * the one a bundle Task's PRs are kept from; null = none is read. A bundle Task is counted in full on each PBI it took (its cost is
+ * the PBI's too); `byProcess` counts it once per process.
+ */
+export function withSwitchboardTasks(read: FlowRead, db: Database | null, workspaceIds: string[], bundles: ReturnType<typeof bundleTasks> = [], prRepo: string | null = read.pbi.repo): FlowPbi {
   if (!db) return read.pbi;
   const rows = tasksOfIssues(db, read.issues, workspaceIds);
   const implementLaunches = rows.filter((r) => r.stageIssue === read.pbi.number && r.stageAction === "complete").length;
-  return { ...read.pbi, tasks: { count: rows.length, runMs: rows.reduce((s, r) => s + r.durationMs, 0), costUsd: rows.reduce((s, r) => s + r.costUsd, 0), implementLaunches } };
+  const mine = bundles.filter((b) => b.issues.includes(read.pbi.number));
+  const extra = mine.filter((b) => !rows.some((r) => r.id === b.id));
+  const items = [...rows.map((r) => ({ id: r.id, costUsd: r.costUsd, runMs: r.durationMs })), ...extra.map((b) => ({ id: b.id, costUsd: b.costUsd, runMs: b.durationMs }))];
+  const repo = prRepo?.toLowerCase() ?? null;
+  const tasks = {
+    count: items.length,
+    runMs: items.reduce((s, t) => s + t.runMs, 0),
+    costUsd: items.reduce((s, t) => s + t.costUsd, 0),
+    implementLaunches,
+    items,
+    bundleStartAt: mine.length ? Math.min(...mine.map((b) => b.createdAt)) : null,
+    bundlePrs: [...new Set(mine.flatMap((b) => b.prs.filter((p) => p.repo.toLowerCase() === repo).map((p) => p.number)))],
+  };
+  return { ...read.pbi, tasks, process: mine.length ? "p3-bundle" : rows.some((r) => r.processId === "p0-pipeline") ? "p0-pipeline" : null };
 }
 
 /** Of the PBIs whose Switchboard Tasks were read (`known`), how many had 実装 started 3 times or more (`repeated`). */
@@ -337,6 +371,51 @@ export function summarize(pbis: FlowPbi[]): FlowSummary {
   const known = FlowStage.options.filter((st) => stages[st].p50 !== null);
   const bottleneck = known.length ? known.reduce((a, b) => (stages[b].p50! > stages[a].p50! ? b : a)) : null;
   return { stages, bottleneck, closed: pbis.length, storyPoints: pbis.reduce((s, p) => s + (p.storyPoints ?? 0), 0) };
+}
+
+const PROCESS_ORDER: FlowProcessRow["process"][] = ["p0-pipeline", "p3-bundle", null];
+const earliest = (xs: Array<number | null | undefined>): number | null => { const v = xs.filter((x): x is number => typeof x === "number"); return v.length ? Math.min(...v) : null; };
+const latest = (xs: Array<number | null | undefined>): number | null => { const v = xs.filter((x): x is number => typeof x === "number"); return v.length ? Math.max(...v) : null; };
+
+/**
+ * The PBIs by the way they were worked (`process`; a way no PBI has is left out), in the order p0-pipeline, p3-bundle, null. Start = the
+ * earlier of the PBI's first start mark and its bundle Task's creation; main = the later of its last merge and its bundle Task's PRs'
+ * merges (`prs`, the merged PRs read). A Task is added once by its id and a PR once by its number, so a bundle that took
+ * several PBIs is not counted per PBI. `few`: under 3 PBIs. `costUsd` is null when no PBI of the way had its Tasks read (no DB);
+ * `costPerSp` divides the cost of the PBIs with Story Points by their Story Points.
+ */
+export function byProcess(pbis: FlowPbi[], prs: StoredFlowPr[]): FlowProcessRow[] {
+  const merged = new Map(prs.map((p) => [p.number, p]));
+  return PROCESS_ORDER.flatMap((process) => {
+    const of = pbis.filter((p) => p.process === process);
+    if (of.length === 0) return [];
+    const toMain: number[] = [];
+    const toClose: number[] = [];
+    for (const p of of) {
+      const start = earliest([p.startAt, p.tasks?.bundleStartAt]);
+      const main = latest([p.mainAt, ...(p.tasks?.bundlePrs ?? []).map((n) => { const m = merged.get(n)?.mergedAt; return m ? ms(m) : null; })]);
+      const a = between(start, main);
+      const b = between(start, ms(p.closedAt));
+      if (a !== null) toMain.push(a);
+      if (b !== null) toClose.push(b);
+    }
+    // a Task once by its id
+    const costOf = (ps: FlowPbi[]): number => [...new Map(ps.flatMap((p) => p.tasks?.items ?? []).map((t) => [t.id, t.costUsd])).values()].reduce((s, c) => s + c, 0);
+    const read = of.filter((p) => p.tasks !== null);
+    const costUsd = read.length ? costOf(read) : null;
+    const storyPoints = of.reduce((s, p) => s + (p.storyPoints ?? 0), 0);
+    const pointed = read.filter((p) => (p.storyPoints ?? 0) > 0);
+    const pointedSp = pointed.reduce((s, p) => s + p.storyPoints!, 0);
+    const records = new Map<number, FlowPrRecord>();
+    for (const p of of) for (const r of p.prs) records.set(r.number, r);
+    for (const p of of) for (const n of p.tasks?.bundlePrs ?? []) { const m = merged.get(n); if (m && !records.has(n)) records.set(n, prRecord(m)); }
+    const rs = [...records.values()];
+    const compared = rs.filter((r) => r.regressions !== null);
+    return [{
+      process, pbis: of.length, storyPoints, toMainP50: median(toMain), toCloseP50: median(toClose), costUsd, costPerSp: pointedSp > 0 ? costOf(pointed) / pointedSp : null,
+      reviewsP50: median(rs.map((r) => r.reviews)), regressions: compared.reduce((s, r) => s + r.regressions!, 0), comparedPrs: compared.length, prs: rs.length, few: of.length < 3,
+    }];
+  });
 }
 
 /** p25 / p50 / p75 of a set of numbers (nearest rank for p25 and p75, as `percentile`); null when it is empty. */
@@ -399,7 +478,9 @@ export async function flowView(gh: GhRunner, workspaces: FlowWorkspace[], db: Db
       const deferred = db ? deferredTasksSince(db.sqlite, ws.map((w) => w.id), weekStartOf(now - days * DAY)) : [];
       const mine = backlogGrowth(growth, deferred, records.repository, days, now);
       for (const [i, w] of mine.entries()) for (const k of WEEK_COUNTS) weeks[i]![k] += w[k];
-      pbis.push(...reads.map((r) => withSwitchboardTasks(r, db?.sqlite ?? null, ws.map((w) => w.id))));
+      const ids = ws.map((w) => w.id);
+      const bundles = db ? bundleTasks(db.sqlite, ids) : [];
+      pbis.push(...reads.map((r) => withSwitchboardTasks(r, db?.sqlite ?? null, ids, bundles, prRepo)));
     } catch (e) {
       if (!(e instanceof FlowError)) throw e;
       for (const w of ws) errors.push({ workspace: w.name, message: e.message });

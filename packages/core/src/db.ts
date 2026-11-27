@@ -21,7 +21,7 @@ export type { QuotaWindowRow } from "./db/quota.ts";
 export { displayPath } from "./db/history.ts";
 export type { HistoryImportRow } from "./db/history.ts";
 export type { EvalRow } from "./db/evals.ts";
-export { artifactsOfIssues, tasksOfIssues, DEFERRED_WORDS, issuesInText, pullsInText, createdPullsOf, createdIssuesOf, deferredOf, deferredTasksSince, scheduledIssuesSince } from "./db/issue-work.ts";
+export { artifactsOfIssues, bundleTasks, tasksOfIssues, DEFERRED_WORDS, issuesInText, pullsInText, createdPullsOf, createdIssuesOf, deferredOf, deferredTasksSince, scheduledIssuesSince } from "./db/issue-work.ts";
 export { jstDay, jstDayStart } from "./db/ledger.ts";
 export { SCHEDULE_LOG_KEEP_MS } from "./db/schedules.ts";
 export { sizeClass, nearestRank } from "./db/ops.ts";

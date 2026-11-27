@@ -43,7 +43,7 @@ export function bundleRoutes(sc: Pick<ServerContext, "json" | "bad" | "db" | "sc
           // the version to go back to is read first: between the Task's start and its hold nothing is waited on
           const status = await sc.releaseStatus();
           const base = "current" in status ? status.current ?? null : null;
-          const r = await sc.startMetaTask({ kind: "bundle", title: `まとめて入れる: ${parsed.data.pbis.map((n) => "#" + n).join(", ")}`, prompt, process: def.id, processReason: "bundle button" });
+          const r = await sc.startMetaTask({ kind: "bundle", title: `まとめて入れる: ${parsed.data.pbis.map((n) => "#" + n).join(", ")}`, prompt, process: def.id, processReason: "bundle button", issues: [...new Set(parsed.data.pbis)].sort((a, b) => a - b) });
           if ("error" in r) return sc.bad(r.error, r.status);
           holdForBundle(sc, r.task.id, base);
           return sc.json(r.task, 201);

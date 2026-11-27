@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { triageUsage } from "./backlog-client.ts";
 import { main } from "./cli.ts";
+import { findConfig } from "./config.ts";
 import { fakeGh, type FakeCall } from "./gh.ts";
 
 const config = join(import.meta.dir, "../fixtures/config-with-phase.json");
@@ -450,6 +451,107 @@ test("lint names another workspace by the app's stored values and checks （リ�
     expect(gh.calls.map((c) => (c.kind === "api" ? c.path : c.kind))).toEqual(["repos/acme/other/issues/7"]);
   } finally {
     server.stop(true);
+  }
+});
+
+test("backlog create, triage, set and lint --fresh run from a directory with no ops.config.json on the settings OPS_KIT_CONFIG names", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ops-kit.kept-settings."));
+  // settings that differ from the default template's and the fixture's: the Project, the choices and the PBI's sections can only come from here
+  const settings = {
+    projectUrl: "https://github.com/orgs/acme/projects/73",
+    envPrefix: "KEPT",
+    fields: { priority: ["緊急", "通常"], phase: ["第一"] },
+    milestone: { pattern: "^Wave \\d+ — " },
+    sections: { pbi: ["背景", "受け入れ"], task: ["やること"], request: ["要望"] },
+  };
+  const work = join(dir, "work");
+  mkdirSync(work);
+  Bun.spawnSync(["git", "init", "-q", work]);
+  Bun.spawnSync(["git", "-C", work, "remote", "add", "origin", "https://github.com/acme/app.git"]);
+  const kept = join(dir, "kept.json");
+  writeFileSync(kept, JSON.stringify(settings));
+  writeFileSync(join(work, "body.md"), "## 背景\nx\n## 受け入れ\n- [ ] 1. x\n\n**Story Points**: 5\n");
+  const cwd = process.cwd();
+  const savedConfig = process.env.OPS_KIT_CONFIG;
+  const savedGhRepo = process.env.GH_REPO;
+  const runKit = async (argv: string[], env: Record<string, string | undefined>, responses: Parameters<typeof fakeGh>[0]) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const gh = fakeGh(responses);
+    const code = await main(argv, gh, (s) => out.push(s), (s) => err.push(s), async () => {}, { ...process.env, BACKLOG_TOKEN_FILE: undefined, BACKLOG_WORKSPACE: undefined, ...env });
+    return { code, out: out.join("\n"), err: err.join("\n"), gh };
+  };
+  const select = (name: string, value: string) => ({ id: `F_${name}`, name, options: [{ id: `O_${value}`, name: value }] });
+  const pbi = { state: "OPEN", stateReason: null, updatedAt: "", parent: null, subIssues: [] as number[], number: 2, title: "PBI: x", labels: ["type:pbi"], fields: { Status: "Backlog", Priority: "緊急", "Story Points": 5 } };
+  const records = (body: string, priority: string) => ({ workspaceId: "ws_kept", service: "github", repository: "acme/app", project: { owner: "acme", number: 73 }, fetchedAt: 1, unread: [], pulls: [], top: [], comments: [], issues: [{ ...pbi, body, fields: { ...pbi.fields, Priority: priority } }] });
+  try {
+    process.chdir(work);
+    process.env.OPS_KIT_CONFIG = kept;
+    delete process.env.GH_REPO;
+    // no ops.config.json up the tree: the Project and the choices are the settings', and the calls reach GitHub (BACKLOG_URL unset)
+    expect(findConfig(undefined, work)).toBe(kept);
+    const env = { BACKLOG_URL: undefined, GH_REPO: undefined };
+    const create = await runKit(["backlog", "create", "--title", "PBI: 新しい", "--body-file", join(work, "body.md"), "--label", "type:pbi", "--milestone", "Wave 1 — 始まり", "--field", "Priority=緊急"], env, [
+      () => "https://github.com/acme/app/issues/21\n",
+      () => ({ repositoryOwner: { projectV2: { id: "P7", fields: { nodes: [select("Priority", "緊急")] }, field: { id: "F_Priority", dataType: "SINGLE_SELECT", options: [{ id: "O_緊急", name: "緊急" }] } } }, repository: { issue: { id: "I21", projectItems: { nodes: [] } } } }),
+      () => ({ addProjectV2ItemById: { item: { id: "IT21" } } }),
+      () => ({}),
+    ]);
+    expect([create.code, create.out]).toEqual([0, "#21 を作りました（GitHub）"]);
+    expect(create.err).toContain("#21  Priority = 緊急");
+    const calls = create.gh.calls;
+    expect(calls[0]).toMatchObject({ kind: "run" });
+    expect((calls[0] as { args: string[] }).args).toContain("Wave 1 — 始まり");
+    const projectCalls = calls.filter((c) => c.kind === "graphql");
+    // the Project is the one the settings' projectUrl names
+    expect(projectCalls[0]).toMatchObject({ vars: { o: "acme", p: 73 } });
+
+    // a choice is checked against the settings' (the default template's P0 / P1 are not there)
+    const refused = await runKit(["backlog", "triage", "21", "P1", "第一"], env, []);
+    expect([refused.code, refused.gh.calls.length]).toEqual([1, 0]);
+    expect(refused.err).toContain("緊急 / 通常");
+    const triage = await runKit(["backlog", "triage", "21", "通常", "第一", "", "Ready"], env, [
+      () => ({ repositoryOwner: { projectV2: { id: "P7", fields: { nodes: [select("Priority", "通常"), select("Phase", "第一"), select("Status", "Ready")] } } }, repository: { issue: { id: "I21", projectItems: { nodes: [{ id: "IT21", project: { number: 73 } }] } } } }),
+      () => ({}),
+    ]);
+    expect([triage.code, triage.out]).toEqual([0, "#21 を保存しました"]);
+    expect(triage.gh.calls[0]).toMatchObject({ vars: { o: "acme", p: 73 } });
+    expect(triage.gh.calls[1]).toMatchObject({ vars: { o0: "O_通常", o1: "O_第一", o2: "O_Ready" } });
+    const set = await runKit(["backlog", "set", "21", "Priority", "緊急"], env, [
+      () => ({ repositoryOwner: { projectV2: { id: "P7", field: { id: "F_Priority", dataType: "SINGLE_SELECT", options: [{ id: "O_緊急", name: "緊急" }] } } }, repository: { issue: { id: "I21", projectItems: { nodes: [{ id: "IT21", project: { number: 73 } }] } } } }),
+      () => ({}),
+    ]);
+    expect(set.code).toBe(0);
+    expect(set.gh.calls[0]).toMatchObject({ vars: { o: "acme", p: 73 } });
+    expect(set.gh.calls[1]).toMatchObject({ vars: { value: "O_緊急" } });
+    const badSet = await runKit(["backlog", "set", "21", "Priority", "P0"], env, []);
+    expect([badSet.code, badSet.gh.calls.length]).toEqual([1, 0]);
+    expect(badSet.err).toContain("緊急 / 通常");
+
+    // lint --fresh on the app's stored values: the sections and the Priority choices are the settings'
+    let served = records(readFileSync(join(work, "body.md"), "utf8"), "緊急");
+    const sync = { workspaceId: "ws_kept", repository: "acme/app", syncedAt: 1, sync: { state: "synced", reason: null, lastSuccessfulSync: 1 } };
+    const server = Bun.serve({ port: 0, fetch: (req) => Response.json(new URL(req.url).pathname.endsWith("/records") ? served : req.method === "POST" ? {} : { syncs: [sync], items: [] }) });
+    try {
+      const appEnv = { BACKLOG_URL: `http://127.0.0.1:${server.port}/api/backlog`, BACKLOG_WORKSPACE: "ws_kept", GH_REPO: undefined };
+      const clean = await runKit(["lint", "--fresh"], appEnv, []);
+      expect([clean.code, clean.out]).toEqual([0, "violations: 0  warnings: 0  (api errors: 0)"]);
+      expect(clean.err).not.toContain("既定の選択肢");
+      // a section the settings require and the body lacks, and a Priority outside the settings' choices
+      served = records("## 背景\nx\n- [ ] 1. x\n\n**Story Points**: 5\n", "P1");
+      const dirty = await runKit(["lint", "--fresh"], appEnv, []);
+      expect(dirty.code).toBe(1);
+      expect(dirty.out).toContain("受け入れ");
+      expect(dirty.out).toContain("Priority が 緊急 / 通常 以外（P1）");
+    } finally {
+      server.stop(true);
+    }
+  } finally {
+    process.chdir(cwd);
+    if (savedConfig === undefined) delete process.env.OPS_KIT_CONFIG;
+    else process.env.OPS_KIT_CONFIG = savedConfig;
+    if (savedGhRepo !== undefined) process.env.GH_REPO = savedGhRepo;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

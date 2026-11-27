@@ -80,6 +80,18 @@ test("starts one Task under p3-bundle", async () => {
   expect((await b.hold())?.taskId).toBe(r.body.id);
 });
 
+test("provenance issues: the PBIs a bundle was started with stay on its Task, sorted; another entrance leaves null", async () => {
+  const b = await boot();
+  const r = await b.post({ pbis: [12, 11] });
+  expect(r.status).toBe(201);
+  const prov = async (id: string) => (await (await fetch(`${b.base}/api/tasks/${id}/provenance`)).json()) as Provenance;
+  expect((await prov(r.body.id)).issues).toEqual([11, 12]);
+  // a body that names Issues (and the bundle's process) on another entrance does not get them recorded
+  const other = await fetch(`${b.base}/api/tasks`, { method: "POST", body: JSON.stringify({ workspaceId: b.meta.id, prompt: "x", runner: "claude", process: "p3-bundle", issues: [7] }) });
+  expect(other.status).toBe(201);
+  expect((await prov(((await other.json()) as Task).id)).issues).toBeNull();
+});
+
 test("refuses fewer than two PBIs", async () => {
   const b = await boot();
   const refused = [{ pbis: [11] }, { pbis: [11, 11] }, { pbis: [11, 13] }, { pbis: [11, 14] }, { pbis: [11, 99] }, { pbis: [] }, null];
