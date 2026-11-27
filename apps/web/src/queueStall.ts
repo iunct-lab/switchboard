@@ -10,28 +10,52 @@ export function stallAskOf(asks: Ask[]): Ask | null {
   return asks.find((a) => a.id.startsWith(STALL_PREFIX)) ?? null;
 }
 
-export type StallPersonRow = { text: string; badge: string | null; href: string | null; taskId: string | null };
-export type StallHolderRow = { text: string; href: string | null };
+/** How many of the person's rows Home's card shows; the rest are counted (the same size as the holders' top 3). */
+export const STALL_PERSON_SHOWN = 3;
+
+export type StallPersonRow = {
+  text: string;
+  count: string;
+  badge: string | null;
+  href: string | null;
+  taskId: string | null;
+  /** No Task and no link to open: Home sends the person to the questions. */
+  openAsks: boolean;
+  workspace: string | null;
+};
+export type StallHolderRow = { text: string; href: string | null; workspace: string | null };
 
 /**
  * The lines of a stalled queue's notice, as Home and the questions' card show them: what waits for the person
- * (`#<PBI> <label> — <n> 件待ち`, marked when the head moved after the person's answer; it opens its Task, else its Issue)
- * and the holders (`<ref> — <n> 件（作業中 | 作業していない）`; a place waited for has no work, so no brackets). A
- * notice without `stall` has no lines.
+ * (`#<PBI> <label>`, its count `<n> 件待ち` apart, marked when the head moved after the person's answer; it opens its
+ * Task, else its Issue) and the holders (`<ref> — <n> 件（作業中 | 作業していない）`; a place waited for has no work, so
+ * no brackets). `shown` keeps that many of the person's rows and counts the rest in `more`. A row names its workspace
+ * only when the rows shown (the person's kept rows and the holders) name two or more. A notice without `stall` has no lines.
  */
-export function stallRows(a: Ask): { person: StallPersonRow[]; holders: StallHolderRow[] } {
+export function stallRows(a: Ask, opts?: { shown?: number }): { person: StallPersonRow[]; more: number; holders: StallHolderRow[] } {
   const s = a.stall;
-  if (!s) return { person: [], holders: [] };
+  if (!s) return { person: [], more: 0, holders: [] };
+  const kept = opts?.shown === undefined ? s.person : s.person.slice(0, opts.shown);
+  const ids = new Set<string>();
+  for (const r of [...kept, ...s.holders]) if (r.workspace) ids.add(r.workspace.id);
+  const named = ids.size >= 2;
+  const wsOf = (r: { workspace: { name: string } | null }) => (named ? (r.workspace?.name ?? null) : null);
+  const person = kept.map((p) => ({
+    text: t(home.stallPersonRow, { pbi: p.pbi.number, label: p.label }),
+    count: t(home.stallPersonCount, { n: p.held }),
+    badge: p.headMoved ? t(home.stallHeadMoved) : null,
+    href: p.url,
+    taskId: p.taskId,
+    openAsks: p.taskId === null && p.url === null,
+    workspace: wsOf(p),
+  }));
   return {
-    person: s.person.map((p) => ({
-      text: t(home.stallPersonRow, { pbi: p.pbi.number, label: p.label, n: p.held }),
-      badge: p.headMoved ? t(home.stallHeadMoved) : null,
-      href: p.url,
-      taskId: p.taskId,
-    })),
+    person,
+    more: s.person.length - person.length,
     holders: s.holders.map((h) => ({
       text: h.working === null ? t(home.stallHolderRow, { ref: h.ref, n: h.held }) : t(home.stallHolderRowWork, { ref: h.ref, n: h.held, work: t(h.working ? home.stallWorking : home.stallIdle) }),
       href: h.url,
+      workspace: wsOf(h),
     })),
   };
 }

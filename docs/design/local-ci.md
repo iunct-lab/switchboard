@@ -99,6 +99,8 @@ The same applies to a result collected later from an external build (`--collect`
 
 Tag CI does the same with the registry at the tag's own commit: a tag whose only failures are registered ones in date is a `[tag-ci] pass <sha>`, and the Release's `## CI` lists the subtracted tests under the heading `既知の失敗を差し引いた（known-failures.json、このタグのコミットの登録）:` and the expired ones under `期限切れで差し引かなかった:`, apart from the `が落ちた:` part that a later run reads.
 
+The public copy (`publicSync`) does not receive this file (`publicSync.exclude`). Its `issue` is a number in the development repository, which cannot be opened on the public side, and in a fork's checkout `ops-kit lint` and the backlog's next-PBI pick would read that number as the fork's own issue. Every reader (local-ci, tag CI, lint, the backlog pick) treats a missing file as no entries, so the public copy and a fork run with an empty registry, and a fork creates its own file when it registers a failure.
+
 ### Local changes (`--change`)
 
 A change of a repository without a remote (the kit's `forgeOf` is `app`: no `forge` and no `origin`, or `forge: { "service": "app" }`) runs with `bun scripts/local-ci.ts --change <n> [--all] [--force]`, from inside its checkout, with `BACKLOG_URL` and `BACKLOG_WORKSPACE` (an app Task has them) to read the change. With a PR number or `--repo` it exits 2, and so it does in a checkout whose `forgeOf` is not `app` (the result is never posted on a PR of the same number). The other way round, a PR number in a checkout whose `forge` names `app` exits 2 too (it is never posted on the change of the same number).

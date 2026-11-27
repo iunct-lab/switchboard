@@ -2,7 +2,7 @@
  * Run after `bun run --cwd apps/web build`: bun scripts/compose-e2e.ts. Requires Chrome (CHROME_BIN overrides).
  * The Home box (`Compose`) end to end on a daemon with a fake runner and the fixtures' fake gh: 今すぐ始める starts a Task,
  * バックログに積む files a request (the agent turns it into a PBI), there is no switch to choose between them, 要望にしてすぐ直す
- * is in 詳細 while developSelf is on and absent when it is off, 詳細 also holds 自分で書いて保存 (an Issue saved as written,
+ * is in 詳細 while developSelf is on and absent for Switchboard itself when it is off (another repository keeps it and its Task starts there), 詳細 also holds 自分で書いて保存 (an Issue saved as written,
  * no Task), and a draft kept for 自分で書いて保存 opens it. Prints how many controls the box shows unfolded.
  * SHOTS=<dir> picks where the pictures of the opened 詳細 at 390 and 1280 wide go; the directory is printed at the end.
  */
@@ -248,14 +248,23 @@ try {
   }
   await call("Emulation.clearDeviceMetricsOverride");
 
-  // 6197 (d), the other side: developSelf off → no 要望にしてすぐ直す in 詳細
+  // 6197 (d), the other side: developSelf off → no 要望にしてすぐ直す in 詳細 for Switchboard itself (the box's 自動), but another repository keeps it
   const patched = await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ developSelf: false }) });
   assert(patched.status === 200, `PATCH developSelf: ${patched.status}`);
   await openHome();
   await openDetails();
   await until(() => evaluate(`!!document.querySelector('${BOX} [data-compose-save]')`), "自分で書いて保存 is drawn");
   await Bun.sleep(500); // the form reads the setting once, after it is drawn
-  assert(await evaluate(`!document.querySelector('${BOX} [data-compose-fix]') && !!document.querySelector('${BOX} [data-compose-save]')`), "with developSelf off there is no 要望にしてすぐ直す, and 自分で書いて保存 stays");
+  assert(await evaluate(`!document.querySelector('${BOX} [data-compose-fix]') && !!document.querySelector('${BOX} [data-compose-save]')`), "with developSelf off there is no 要望にしてすぐ直す for Switchboard itself, and 自分で書いて保存 stays");
+  // the same setting, another repository chosen: 要望にしてすぐ直す is there and its Task starts in that repository
+  known = await knownIds();
+  await write("E2E lib をすぐ直して", libId);
+  await until(() => evaluate(`!!document.querySelector('${BOX} [data-compose-fix]')`), "要望にしてすぐ直す for another repository with developSelf off");
+  await clickEl(`${BOX} [data-compose-fix]`);
+  const libFix = await tasksAfter(known);
+  assert(libFix.title.startsWith("直す: ") && libFix.workspaceId === libId, `fix on another repository: ${libFix.title} in ${libFix.workspaceId}`);
+  await until(() => starts.find((s) => s.prompt.includes("E2E lib をすぐ直して")), "the runner's prompt of the fix on another repository");
+  result.fixOtherRepo = libFix.title;
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ ...result, consoleErrors: errors.length }));

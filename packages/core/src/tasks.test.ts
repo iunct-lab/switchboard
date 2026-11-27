@@ -11,6 +11,11 @@ import { STOP_NOTE } from "./evals.ts";
 import { isFableModel, type TurnEnd, versionAtLeast, stopArmedQueues } from "./tasks/state.ts";
 import { kitPath, taskAllowRules } from "./tasks/sessions.ts";
 import { TaskManager } from "./tasks/manager.ts";
+import { stopAskId } from "./asks.ts";
+import { grantHeadKey } from "./merge-grants.ts";
+import { reduceStops, StopReport } from "./stops.ts";
+import { stopsAnswered } from "./stop-answer.ts";
+import { grantRecorder } from "./server/task-hooks.ts";
 
 /**
  * A lingering runner like `claude -p --input-format stream-json`: the first turn ends, the process stays, and the test
@@ -368,6 +373,74 @@ describe("admission hold", () => {
     expect(fakes[0]!.sent).toEqual(["次の指示"]);
     expect(fakes.length).toBe(1);
     expect(db.getTask(t.id)!.status).toBe("running");
+  });
+
+  describe("a held reply's grant and answer", () => {
+    const [GA, GB] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
+    const grantRows = () => (db.sqlite.query("SELECT count(*) AS n FROM task_grants").get() as { n: number }).n;
+    const refuse = (taskId: string, grant: string) =>
+      db.appendEvent(taskId, { t: "stop.record", stop: { id: "s1", work: { workspaceId: wsId, issue: 306, taskId }, op: "gh pr merge", target: "PR", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant, at: Date.now() } });
+    const stopOf = (taskId: string) => reduceStops(db.listStopRecords([taskId]))[0]!;
+    /** A reply shaped as `answerTask` sends it (the stops it answers read again in `going`, the grant recorded in `sent`); the answer route itself is driven in held-reply.test.ts. */
+    const reply = (taskId: string, grant: string) => {
+      const ask = { id: stopAskId(stopOf(taskId)), kind: "stop" as const, grant };
+      const answered = () => stopsAnswered(ask, { kind: "grant", grant }, db.listStopRecords([taskId]));
+      let answers = answered();
+      expect(answers).not.toBeNull();
+      return held.send(taskId, grant, {
+        answers: (s) => answers!(s),
+        going: () => {
+          answers = answered();
+          if (!answers) throw new Error("問いが新しくなりました");
+        },
+        sent: grantRecorder({ db, originRepoOf: () => "o/r" } as unknown as Parameters<typeof grantRecorder>[0], taskId, grant, { via: "screen", heads: { [grantHeadKey("o/r", 12)]: "1".repeat(40) }, taskWrote: true }),
+      });
+    };
+    /** A Task left on background jobs with a permission stop, under the hold; the reply to it is held. */
+    const heldTask = async (grant: string) => {
+      const t = held.create({ workspaceId: wsId, cwd: home, title: "t", prompt: "p", runner: "claude" });
+      await sleep(0);
+      fakes[0]!.emit({ t: "background", count: 1 });
+      refuse(t.id, grant);
+      hold = { wait: "昇格待ち", detail: "デーモンを入れ替えます" };
+      await reply(t.id, grant);
+      return t;
+    };
+
+    test("held reply: nothing is recorded or answered while it waits, both when it is handed over", async () => {
+      const t = await heldTask(GA);
+      expect(grantRows()).toBe(0);
+      expect(stopOf(t.id)).toMatchObject({ next: "decide" });
+      expect(stopOf(t.id).answered).toBeFalsy();
+      fakes[0]!.emit({ t: "background", count: 0 });
+      await sleep(0);
+      expect(db.getTask(t.id)!.queuedAt).not.toBeNull();
+      expect(grantRows()).toBe(1);
+      expect(stopOf(t.id).answered).toBeTruthy();
+      expect(db.listStopRecords([t.id]).at(-1)!.answer?.ref).toMatch(/^seq:/);
+    });
+
+    test("held reply: dropped when the daemon stops, it leaves no grant and the stop stays the person's question", async () => {
+      const t = await heldTask(GA);
+      await held.shutdown();
+      await sleep(5);
+      expect(grantRows()).toBe(0);
+      expect(stopOf(t.id)).toMatchObject({ next: "decide" });
+      expect(stopOf(t.id).answered).toBeFalsy();
+    });
+
+    test("held reply: not handed over when the stop shows another grant by then, and a line says so", async () => {
+      const t = await heldTask(GA);
+      refuse(t.id, GB);
+      hold = null;
+      held.resumeAdmission();
+      await sleep(0);
+      expect(fakes[0]!.sent).toEqual([]);
+      expect(fakes.length).toBe(1);
+      expect(statusLines(t.id).filter((l) => l.includes("保留した返信は渡しません"))).toHaveLength(1);
+      expect(grantRows()).toBe(0);
+      expect(stopOf(t.id).answered).toBeFalsy();
+    });
   });
 });
 
@@ -936,6 +1009,31 @@ describe("preamble", () => {
     expect(starts[2]).toMatchObject({ resumeSessionId: "sess", prompt: "続き" });
     expect(starts[2]!.preamble).toContain("- 操作「ops-kit public-sync --source v1」、対象「owner/name」: decision（止まったのは 1 回、waiting）");
     expect(starts[2]!.preamble).toContain("- 操作「git fetch」、対象「owner/name」: transient（止まったのは 1 回、exhausted");
+    m.shutdown();
+  });
+
+  test("an old run resumed has its own open stop past the schedule's newest 30 Tasks; the same stop reported again is a second record of it", async () => {
+    const starts: StartOptions[] = [];
+    const m = new TaskManager(db, new Map([["claude", recording("claude", starts)]]), () => undefined, { idleMs: 0 });
+    const old = m.create({ cwd: home, title: "最初の回", prompt: "p", runner: "claude", scheduleId: "sch_old" });
+    await sleep(5);
+    const report = (evidence: string) => StopReport.parse({ id: "ask", op: "ops-kit public-sync --source v1", target: "owner/name", reason: "decision", evidence });
+    expect(m.recordStop(old.id, report("最初の回")).ok).toBe(true);
+    for (let i = 0; i < 30; i++) m.create({ cwd: home, title: `回 ${i}`, prompt: "p", runner: "claude", scheduleId: "sch_old" });
+    await sleep(20);
+    expect(db.recentScheduleTaskIds("sch_old", 30)).not.toContain(old.id);
+    const before = starts.length;
+    await m.send(old.id, "続き");
+    await sleep(5);
+    const resumed = starts.slice(before).find((s) => s.prompt === "続き");
+    expect(resumed!.preamble).toContain("この作業でまだ解けていない停止");
+    expect(resumed!.preamble).toContain("- 操作「ops-kit public-sync --source v1」、対象「owner/name」: decision（止まったのは 1 回、waiting）");
+    // reported again with the same id and new evidence: a second record of the same stop, and no other stop
+    expect(m.recordStop(old.id, report("出し直し")).ok).toBe(true);
+    expect(db.listStopRecords([old.id]).map((r) => r.id)).toEqual([`${old.id}/ask`, `${old.id}/ask`]);
+    // the very same report once more is not stored again: this holds only when the Task's own earlier record is read
+    m.recordStop(old.id, report("出し直し"));
+    expect(db.listStopRecords([old.id])).toHaveLength(2);
     m.shutdown();
   });
 

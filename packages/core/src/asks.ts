@@ -523,8 +523,8 @@ export function asksFromBacklog(items: BacklogItem[], now: number, opts: { resum
         route: "backlog",
       });
     }
-    // all closed and not resumed yet stays open (every condition met): once an 実装 starts, the server empties the waits,
-    // so a wait that went on is not in the records to be told resolved
+    // all closed and not resumed yet stays open (every condition met): once an automatic 実装 starts, the gate holds the
+    // next one (`autoHeld`), so `isUnblocked` is false and a wait that went on is not told open again
     // not read is not closed: it holds the PBI as an open one does
     const open = i.waits.filter((w) => w.open !== false);
     // nothing automatic reads it again (GitHub answered not found / forbidden): a person looks and starts 実装

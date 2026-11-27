@@ -5,6 +5,12 @@
  * to the reader; Tasks from before provenance was recorded are their own group.
  *
  *   bun scripts/kernel-report.ts [--days N] [--db <path>] [--json] [--by-bundle] [--baseline YYYY-MM-DD] [--repo-dir <git dir>]
+ *   bun scripts/kernel-report.ts --backlog [--repository <owner/name>] [--repo-dir <dir>] [--json]
+ *
+ * `--backlog` is a different report: the marks (the `fields.kernel` fields of `ops.config.json`) on the open PBIs and requests
+ * of the stored backlog — how many carry each choice, how many carry none — and the ones marked as fitting no candidate.
+ * It reads the records the app shows (`readRecords`, stored values only: unsent edits laid over, the config's Project), not the
+ * database, so `--db` does not apply to it. It needs the running app (`BACKLOG_URL`, as `ops-kit backlog` does) and exits 1 without it.
  *
  * Reads the Switchboard database read-only (`--db`, else `$SWITCHBOARD_HOME/switchboard.db`, else `~/.switchboard/switchboard.db`).
  */
@@ -14,6 +20,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Provenance } from "../packages/protocol/src/index.ts";
+import { readRecords, type StoredRecords } from "../ops-kit/src/backlog-client.ts";
+import { findConfig, KERNEL_UNKNOWN, loadConfig } from "../ops-kit/src/config.ts";
 import { currentRepo } from "./repo.ts";
 
 export const NO_PROVENANCE = "記録なし";
@@ -77,7 +85,14 @@ export type Outcome = { key: "bytes" | "closeDays" | "rework"; baseline: Outcome
 
 export type Report = { days: number; since: number; tasks: number; byBundle: boolean; strata: Stratum[]; choices: ChoiceScore[]; baselineDate: string; outcomes: Outcome[];
   /** PR numbers merged in the window by a merge verdict that skipped the main review (the app's gate jobs); null when they could not be read. */
-  directMerges: number[] | null };
+  directMerges: number[] | null;
+  /**
+   * The experiments registered in the window (`registered_at >= since`), and of those how many have a recorded decision
+   * (`decided_at`) and how many of them changed the decision (`changed = 1`). `decided` and `changed` count only that subset, so
+   * `registered - decided` (still waiting for the record) is never negative. `changedShare` is null when none is decided.
+   * All zero when the database has no `experiments` table (an older daemon's).
+   */
+  experiments: { registered: number; decided: number; changed: number; changedShare: number | null } };
 
 /**
  * The kind of reason, with the numbers a chooser writes into it left out so equal rules count together:
@@ -402,6 +417,14 @@ function reworkSides(db: Database, windows: Record<"baseline" | "recent", readon
 /** The baseline date is the end of that day (UTC): the window is the 28 days up to and including it. */
 export const baselineEndMs = (date: string | undefined): number => Date.parse(`${date ?? DEFAULT_BASELINE}T00:00:00Z`) + 86_400_000;
 
+/** The experiments row (see `Report.experiments`); the table is looked up in `sqlite_master` because a read-only report never migrates an older daemon's database. */
+function experimentStats(db: Database, since: number): Report["experiments"] {
+  const has = db.query("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'experiments'").get();
+  if (!has) return { registered: 0, decided: 0, changed: 0, changedShare: null };
+  const r = db.query("SELECT COUNT(*) AS registered, COUNT(decided_at) AS decided, COALESCE(SUM(CASE WHEN decided_at IS NOT NULL AND changed = 1 THEN 1 ELSE 0 END), 0) AS changed FROM experiments WHERE registered_at >= ?").get(since) as { registered: number; decided: number; changed: number };
+  return { ...r, changedShare: r.decided === 0 ? null : r.changed / r.decided };
+}
+
 /** `git`: the history the rework row reads (`readGit`); none given or null = that row has no record. */
 export function kernelReport(db: Database, opts: { days: number; now?: number; byBundle?: boolean; baseline?: string; git?: GitHistory | null; directMerges?: number[] | null }): Report {
   const now = opts.now ?? Date.now();
@@ -454,7 +477,7 @@ export function kernelReport(db: Database, opts: { days: number; now?: number; b
   const baselineDate = opts.baseline ?? DEFAULT_BASELINE;
   const baselineMs = baselineEndMs(baselineDate);
   if (!Number.isFinite(baselineMs)) throw new Error(`--baseline must be a date (YYYY-MM-DD): ${baselineDate}`);
-  return { days: opts.days, since, tasks: rows.length, byBundle, strata, choices, baselineDate, outcomes: hasProvenance ? outcomes(db, baselineMs, now, opts.git ?? null) : noOutcomes(), directMerges: opts.directMerges ?? null };
+  return { days: opts.days, since, tasks: rows.length, byBundle, strata, choices, baselineDate, outcomes: hasProvenance ? outcomes(db, baselineMs, now, opts.git ?? null) : noOutcomes(), directMerges: opts.directMerges ?? null, experiments: experimentStats(db, since) };
 }
 
 const fmtMs = (ms: number | null) => (ms === null ? "-" : `${(ms / 60_000).toFixed(1)} 分`);
@@ -521,6 +544,69 @@ export function renderReport(r: Report): string {
   }
   lines.push("", "値を並べるだけで、良し悪しは書かない（利用者が決める）。b は窓内に始めた Task（shadow を除く）の由来の記録から、c は窓内に閉じた要望（type:request）のうち、workspace のバックログが指すリポジトリのものから。a は窓内にマージされた PR（PR 記録の mergedAt があるもの）のうち、p0-pipeline の Task が出した仕事とそれ以外の Task が出した仕事（PR が閉じた Issue かその親を、Task が stage_issue に持つもの。由来の記録が無い Task の PR は入れない）に分け、main のコミット（fix / revert で始まる題、PR のマージから 7 日以内、同じファイルを触る。PR 自身のマージコミットは除く）で再作業になった割合。a の n は「p0-pipeline の PR 数 + それ以外の PR 数」。git が読めなければ記録なし。");
   lines.push("", `レビューなしで出た PR（判定が主レビューを省いてマージ）: ${r.directMerges === null ? "数えられない（リポジトリか仕事の記録が読めない）" : `${r.directMerges.length} 件`}`);
+  const e = r.experiments;
+  lines.push("", e.changedShare === null ? (e.registered > 0 ? `実験の記録なし、記録待ち ${e.registered} 件` : "実験の記録なし") : `決定を変えた実験: ${e.changed}/${e.decided}（${Math.round(e.changedShare * 100)}%）、記録待ち ${e.registered - e.decided} 件`);
+  return lines.join("\n");
+}
+
+/** The field and the choice of it that says no candidate process fits the work. */
+export const FIT_FIELD = "Fit";
+export const NO_FIT = "どの候補にも合わない";
+/** A field the work has no value for, or one outside the choices the config lists. */
+export const UNMARKED = "未印";
+
+export type BacklogAxis = { field: string; counts: Record<string, number>; unmarked: number };
+export type BacklogReport = {
+  repository: string;
+  total: number;
+  byKind: { pbi: number; request: number };
+  axes: BacklogAxis[];
+  unfit: Array<{ number: number; title: string; kind: "pbi" | "request" }>;
+  /** Open PBIs and requests the last import could not read: not counted (their stored values are not current). */
+  unread: number;
+};
+
+/**
+ * The marks on the open PBIs and requests (`type:pbi` / `type:request`) of the records the app shows. Tasks and closed
+ * Issues are not counted. `kernel` is `fields.kernel` of the config: each field with its choices. A value outside the
+ * choices, or an Issue not in the config's Project (`fields` null), counts as unmarked.
+ */
+export function backlogReport(stored: Pick<StoredRecords, "repository" | "issues" | "unread">, kernel: Record<string, string[]>): BacklogReport {
+  const axes: BacklogAxis[] = Object.entries(kernel).map(([field, options]) => ({ field, counts: Object.fromEntries(options.map((o) => [o, 0])), unmarked: 0 }));
+  const byKind = { pbi: 0, request: 0 };
+  const unfit: BacklogReport["unfit"] = [];
+  let unread = 0;
+  for (const issue of stored.issues) {
+    if (issue.state !== "OPEN") continue;
+    const kind = issue.labels.includes("type:pbi") ? "pbi" : issue.labels.includes("type:request") ? "request" : null;
+    if (!kind) continue;
+    if (stored.unread.includes(issue.number)) {
+      unread++;
+      continue;
+    }
+    byKind[kind]++;
+    for (const axis of axes) {
+      const value = issue.fields?.[axis.field];
+      if (typeof value === "string" && value in axis.counts) axis.counts[value]!++;
+      else axis.unmarked++;
+    }
+    if (issue.fields?.[FIT_FIELD] === NO_FIT) unfit.push({ number: issue.number, title: issue.title, kind });
+  }
+  unfit.sort((a, b) => a.number - b.number);
+  return { repository: stored.repository, total: byKind.pbi + byKind.request, byKind, axes, unfit, unread };
+}
+
+export function renderBacklogReport(r: BacklogReport): string {
+  const lines = [`# バックログの印 — ${r.repository} の open の PBI ${r.byKind.pbi} 件・要望 ${r.byKind.request} 件（Task と closed は数えない）`, ""];
+  for (const a of r.axes) {
+    const choices = Object.keys(a.counts);
+    lines.push(`## ${a.field}`, "", `| ${choices.join(" | ")} | ${UNMARKED} |`, `|${choices.map(() => "---:|").join("")}---:|`, `| ${choices.map((c) => a.counts[c]).join(" | ")} | ${a.unmarked} |`, "");
+  }
+  lines.push(`## ${NO_FIT}（${FIT_FIELD}）`, "");
+  if (r.unfit.length === 0) lines.push("なし");
+  else for (const u of r.unfit) lines.push(`- #${u.number} [${u.kind}] ${u.title}`);
+  if (r.unread > 0) lines.push("", `最後の取込みで読めていない PBI・要望 ${r.unread} 件は数えていない（保存値は今の値ではない）。`);
+  lines.push("", `${KERNEL_UNKNOWN} = 見たが決められなかった印、${UNMARKED} = まだ印を付けていない（値が無い、または選択肢に無い）。印は仮説の軸で、記録が溜まれば見直す。`);
   return lines.join("\n");
 }
 
@@ -530,6 +616,25 @@ function arg(name: string): string | undefined {
 }
 
 if (import.meta.main) {
+  if (process.argv.includes("--backlog")) {
+    for (const flag of ["--days", "--db"]) {
+      if (process.argv.includes(flag)) {
+        console.error(`--backlog は ${flag} と併用できません（アプリが見せる保存済みのバックログの今の印を数える）`);
+        process.exit(1);
+      }
+    }
+    const cwd = arg("--repo-dir") ?? process.cwd();
+    try {
+      const kernel = loadConfig(undefined, cwd).fields.kernel;
+      if (!kernel) throw new Error(`${findConfig(undefined, cwd)} に fields.kernel がありません（印の軸と選択肢はそこから読む）`);
+      const r = backlogReport(await readRecords(process.env, { fresh: false, repo: arg("--repository"), cwd }), kernel);
+      console.log(process.argv.includes("--json") ? JSON.stringify(r, null, 2) : renderBacklogReport(r));
+      process.exit(0);
+    } catch (e) {
+      console.error((e as Error).message);
+      process.exit(1);
+    }
+  }
   const days = Number(arg("--days") ?? 30);
   if (!Number.isFinite(days) || days <= 0) {
     console.error("--days must be a positive number");

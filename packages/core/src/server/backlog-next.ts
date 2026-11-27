@@ -134,13 +134,13 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
   // every action, 直行で直す too: a request starts in the candidate its own criteria choose
   const sweepActions = BacklogAction.options;
   // the candidates' definitions (the meta checkout's, like startStage's). Unreadable: no request is started on a guess —
-  // each is left with why; 直行で直す is the meta workspace's only, like its button (routes/backlog.ts /start)
+  // each is left with why. The automatic direct choice is one setting for every workspace (autoDirect); off leaves out the candidates with `auto`
   let defsError = "";
-  const defs = (() => { try { return listProcesses(meta?.path); } catch (e) { defsError = (e as Error).message ?? String(e); return []; } })();
+  const autoDirect = sc.settings().autoDirect;
+  const defs = (() => { try { return listProcesses(meta?.path).filter((d) => autoDirect || !d.auto); } catch (e) { defsError = (e as Error).message ?? String(e); return []; } })();
   const dueSoonAt = Date.now(); // the registry of each workspace's checkout, read once per firing
   const dueSoonBy = new Map<string, Set<number>>();
   const dueSoon = (ws: Workspace) => dueSoonBy.get(ws.id) ?? (dueSoonBy.set(ws.id, dueSoonOf(ws.path, dueSoonAt)), dueSoonBy.get(ws.id)!);
-  const defsFor = (ws: Workspace) => (ws.kind === "meta" ? defs : defs.filter((d) => !d.auto));
   const targetOf = Object.fromEntries(sweepActions.map((a) => [a, ((d) => (d ? sc.autoRunner(d).runner : null))(sc.decidedRunner(a, schedule?.runner))])) as Record<BacklogAction, RunnerId | null>;
   // Only a window that has not reset yet counts: a row from before the reset would otherwise hold the sweep for good,
   // since only a turn of that runner writes a new one (resetsAt is in seconds).
@@ -218,7 +218,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
   const startableIn = (r: ReadOk, slot: (typeof SLOTS)[number]) => {
     const held = new Set<number>();
     for (;;) {
-      const next = pickNext(r.items.filter((i) => !held.has(i.number)), slot, undefined, flowOfRead(r), defsFor(r.ws), dueSoon(r.ws), holdOf(r.ws));
+      const next = pickNext(r.items.filter((i) => !held.has(i.number)), slot, undefined, flowOfRead(r), defs, dueSoon(r.ws), holdOf(r.ws));
       if (!next) return false;
       if (!sc.autoHeldOf(r.ws, next.item, next.action)) return true;
       held.add(next.item.number);
@@ -263,7 +263,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         if (n === 0) skipped.push(`${ws.name}: ${SLOT_NAME[slot]}: ${lines(slotHeld).join(" / ")}`);
         break;
       }
-      const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defsFor(ws), dueSoon(ws), hold);
+      const next = pickNext(r.items.filter((i) => !picked.has(i.number)), slot, undefined, flow(), defs, dueSoon(ws), hold);
       if (n === 0) {
         const left = sc.leftLines(r.items, slot, flow(), hold);
         skipped.push(...left.map((l) => `${ws.name}: ${SLOT_NAME[slot]}: ${l}`));
@@ -304,7 +304,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
         continue;
       }
       // what to do is picked again on the item as it is now (a Task reopened meanwhile makes a 閉じる a 実装, or nothing)
-      const again = can.ok ? pickNext([fresh!], slot, undefined, undefined, defsFor(ws)) : null;
+      const again = can.ok ? pickNext([fresh!], slot, undefined, undefined, defs) : null;
       if (!can.ok || !again || again.action !== next.action || !again.resume !== !next.resume) {
         skipped.push(`${ws.name}: #${next.item.number} を始めない: ${can.ok ? "照合の間に変わった（次の発火で選び直す）" : can.why}`);
         continue;
@@ -322,7 +322,7 @@ export const startNext = async (sc: Pick<ServerContext, "cfg" | "metaWorkspace" 
       }
       // Unattended: no shadow (like prompt schedules) and the schedule's budget applies to the stage Task.
       const t = await sc.startStage({
-        ws, meta, item: again.item, action: again.action, resume: again.resume && { tasksDone: again.item.tasks!.done }, processReason: again.reason, auto: true,
+        ws, meta, item: again.item, action: again.action, resume: again.resume, processReason: again.reason, auto: true,
         extra: { runner: schedule?.runner, model: schedule?.model, effort: schedule?.effort, scheduleId, shadowRunner: null, budgetUsd: schedule?.budgetUsd },
       });
       if ("held" in t && !("error" in t)) {

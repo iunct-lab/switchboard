@@ -8,10 +8,10 @@ import { PROCEED_CONFIRMED, PROCEED_OVERTURNED, proceedAnswerLine, proceedingAns
 import { storedEnds } from "./backlog-stored.ts";
 import { answerStoredDecision, BacklogEditError, createStoredIssue, editStoredIssue, commentStoredIssue } from "./backlog-edit.ts";
 import { askWithdrawnPrereqs, mergePrereqs, prereqOf } from "./backlog-waits.ts";
-import { isUnblocked, overlapIn, pickNext, heldIn, autoActionsOf } from "./backlog-pick.ts";
+import { isUnblocked, overlapIn, pickNext, heldIn, autoActionsOf, flowCounted, notResumed } from "./backlog-pick.ts";
 import { withStageTask, readStoredBacklog, readStoredIssue, readStoredRecords, workspaceSyncOf } from "./backlog-stored.ts";
 import { asksFromBacklog } from "./asks.ts";
-import { overlapLine } from "./backlog-overlap.ts";
+import { overlapLine, turnWorks } from "./backlog-overlap.ts";
 import { readOthers, storedMaterial } from "../../../scripts/parallel-guard.ts";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
 
@@ -647,7 +647,7 @@ describe("pickNext overlap", () => {
   });
 
   test("a PBI with no stage Task on record keeps its place, even when its ## 状況 says it did not move", async () => {
-    // P (2) still waits for the PR it yielded to, and has a resume's ## 状況 whose tasks-done mark equals its closed Tasks,
+    // P (2) still waits for the PR it yielded to, and has a resume's ## 状況 that says it did not move,
     // but this daemon has no stage Task of it
     const task = (n: number, parent: number, ...files: string[]) => issue(n, ["type:task"], { body: `触る場所: ${files.map((f) => `\`${f}\``).join("、")}`, parent });
     const ws = imported([
@@ -655,7 +655,7 @@ describe("pickNext overlap", () => {
       issue(3, ["type:pbi"], { subIssues: [30, 901, 902] }), item(3, { Status: "Ready" }), task(30, 3, "src/a.ts"),
       pr(90, ["src/a.ts"]),
       comment(2, "c2", "<!-- pbi-complete:release overlap=90 -->", ago(3)),
-      comment(2, "c2s", "## 状況\n進んでいない\n<!-- tasks-done: 0 -->", ago(2)),
+      comment(2, "c2s", "## 状況\n進んでいない", ago(2)),
     ]);
     const read = readStoredBacklog(db, ws);
     expect(read.items.find((i) => i.number === 2)!.report).not.toBeNull();
@@ -1269,6 +1269,37 @@ describe("autoHeld is the gate's answer", () => {
     expect(held).toBeLessThan(cases.length);
     // a stage with no automatic start of its own carries none
     expect(withStageTask(db, { ...base, stage: "needs-decision" }).autoHeld).toBeNull();
+  });
+
+  test("a met wait is used up by one automatic start", () => {
+    const ws = imported([issue(5, ["type:pbi"])]);
+    const base = readStoredBacklog(db, ws).items.find((i) => i.number === 5)!;
+    const wait = { number: 9, kind: "issue" as const, open: false, state: "met" as const, reason: "overlap" as const, pbi: null };
+    const waited = (events: BacklogItem["events"]): BacklogItem => ({ ...base, stage: "in-progress", flow: true, closable: false, tasks: { total: 3, done: 1, doneAt: null }, waits: [wait], waitsAt: new Date(500).toISOString(), events });
+    // PBI 5 yielded to PR 90 (a.ts) and has one open Task naming a.ts
+    const issues = new Map([[5, { subIssues: [51] }], [51, { state: "OPEN", parent: 5 }]]) as never;
+    const pulls = [{ number: 90, state: "OPEN", closes: [], files: ["a.ts"] }] as never;
+    const comments = () => [{ body: "<!-- pbi-complete:release overlap=90 -->", createdAt: new Date(1500).toISOString() }] as never;
+    const where = (i: BacklogItem) => ({
+      unblocked: isUnblocked(i),
+      picked: pickNext([i], "implement")?.item.number ?? null,
+      counted: flowCounted([i]).length,
+      turn: turnWorks([i], issues, pulls, new Map(), comments, (n) => (n === 51 ? ["a.ts"] : []), 2000, () => false, notResumed).length,
+      asked: asksFromBacklog([i], 2000).filter((a) => a.kind === "wait").length,
+    });
+    // the wait closed and nothing started since: it is taken, counted, and shown as a wait that went on
+    const fresh = withStageTask(db, waited([]));
+    expect(fresh.autoHeld).toBeNull();
+    expect(where(fresh)).toEqual({ unblocked: true, picked: 5, counted: 1, turn: 1, asked: 1 });
+    // an automatic 実装 started after it (it is on record as an automatic stage Task): none of the five
+    task(ws, "t_auto", 5, "complete", true, 1000);
+    const used = withStageTask(db, waited([]));
+    expect(used.autoHeld).toMatchObject({ previousTaskId: "t_auto", action: "complete" });
+    expect(used.waitsAt).not.toBeNull();
+    expect(where(used)).toEqual({ unblocked: false, picked: null, counted: 0, turn: 0, asked: 0 });
+    // a new event after it lets the gate go: the PBI goes on as any stalled one (the work went on since the waits, so they
+    // no longer lift it and the inbox has no wait for it)
+    expect(where(withStageTask(db, waited([{ key: "pr:1", at: 3000 }])))).toEqual({ unblocked: false, picked: 5, counted: 1, turn: 1, asked: 0 });
   });
 
   test("autoHeld is about the stage pickNext starts next", () => {

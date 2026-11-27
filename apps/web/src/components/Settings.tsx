@@ -8,6 +8,7 @@ import { type SettingsResponse } from "../api/settings.ts";
 import { type WorkspaceClone } from "../api/workspaces.ts";
 import { ModelSelect } from "./ModelSelect.tsx";
 import { optionText, taskModelOptions } from "../modelOptions.ts";
+import { AutoDirectToggle, DevelopSelfToggle } from "./SettingsToggles.tsx";
 import { LoginSettings } from "./LoginSettings.tsx";
 import { ReleasePanel } from "./ReleasePanel.tsx";
 import { ReleaseAutoFields } from "./ReleaseAutoFields.tsx";
@@ -258,6 +259,8 @@ export function Settings(props: { tasks: TaskSummary[]; focus?: { id: string; n:
         {/* the limit of Tasks running at once: over it a Task waits for a run slot; the daemon starts the waiting ones as soon as it is raised */}
         <NumberField label={t(settings.maxRunnersLabel)} hint={t(settings.maxRunnersHint)} value={s.maxRunners} def={d.maxRunners} min={1} max={8} disabled={saving} onSave={(v) => save({ maxRunners: v })} />
         <div className="muted">{t(settings.maxRunnersHint)}</div>
+        <AutoDirectToggle checked={s.autoDirect} disabled={saving} onChange={(on) => void save({ autoDirect: on })} />
+        <DefaultNote on={d.autoDirect} />
         {reset.sweep}
       </SettingsCard>
       {/* the tunables: saved on blur / Enter; 既定に戻す puts back the values this card shows (RESETTABLE_CARDS) */}
@@ -1455,18 +1458,5 @@ function CustomRunnersSection(props: { onError: (msg: string) => void }) {
       {error && <div className="error">{error}</div>}
       {changed && <div className="hint">{t(settings.adkSaved)}</div>}
     </SettingsCard>
-  );
-}
-
-/** 「Switchboard 自体の開発」: off = Switchboard's own backlog is not read, no improve / すぐ直す, requests go upstream. */
-export function DevelopSelfToggle({ checked, disabled, onChange }: { checked: boolean; disabled: boolean; onChange: (developSelf: boolean) => void }) {
-  return (
-    <>
-      <label className="hint toggle">
-        <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-        {t(settings.developSelfToggle)}
-      </label>
-      <div className="muted">{t(settings.developSelfHint)}</div>
-    </>
   );
 }

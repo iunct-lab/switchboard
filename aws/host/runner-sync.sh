@@ -3,7 +3,8 @@
 # on it: ~/.claude/projects (Claude's sessions, which --resume needs, and its memory), ~/.codex/sessions,
 # ~/.switchboard/artifacts (the copies; their rows are in the DB), the attachments, the recordings, Knowledge and the
 # user's own settings (SAVE below). The DB comes back from Litestream; these would not. Same protection as the Litestream replica (the bucket's encryption, this stack's role): the user's
-# decision when this was added.
+# decision (2026-09-27): the host must restore these on its own after a rebuild, which an age key kept outside AWS
+# would not allow.
 # Every key is written once, never over: the bucket keeps old versions of an overwritten key for 30 days, so a whole
 # archive uploaded again on every run leaves one old version per run, many times its own size. A "set" is a base
 # plus what changed after it:

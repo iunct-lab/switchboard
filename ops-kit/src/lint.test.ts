@@ -94,6 +94,39 @@ describe("lint", () => {
     ]);
   });
 
+  test("lint: kernel marks — a value outside the config's choices on a PBI is a violation; one not set, or one of the choices (including 不明), is not", async () => {
+    const withKernel = { ...cfg, fields: { ...cfg.fields, kernel: { Problem: ["明確", "曖昧", "不明"], Scale: ["小", "大", "不明"] } } };
+    const run = async (marks: Array<[string, string]>, config: typeof cfg = withKernel) => {
+      const json = JSON.parse(readFileSync(join(fixtures, "lint", "ok.json"), "utf8"));
+      const pbi = json.repository.issues.nodes.find((n: { number: number }) => n.number === 10);
+      pbi.projectItems.nodes[0].fieldValues.nodes.push(...marks.map(([field, name]) => ({ name, field: { name: field } })));
+      return formatLint((await lint(fakeGh([() => json]), config, { sleep: noSleep })).violations);
+    };
+    expect(await run([])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([["Problem", "曖昧"], ["Scale", "不明"]])).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect(await run([["Problem", "x"], ["Scale", "中"]])).toEqual([
+      "#10: Project の Problem が 明確 / 曖昧 / 不明 以外（x）",
+      "#10: Project の Scale が 小 / 大 / 不明 以外（中）",
+      "violations: 2  warnings: 0  (api errors: 0)",
+    ]);
+    // a config without fields.kernel reads no mark
+    expect(await run([["Problem", "x"]], cfg)).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+  });
+
+  test("lint: kernel marks on a request — a value outside the config's choices is a violation; a request not in the Project is not", async () => {
+    const withKernel = { ...cfg, fields: { ...cfg.fields, kernel: { Problem: ["明確", "曖昧", "不明"] } } };
+    const run = async (item: unknown) => {
+      const json = JSON.parse(readFileSync(join(fixtures, "lint", "ok.json"), "utf8"));
+      const request = json.repository.issues.nodes.find((n: { labels: { nodes: Array<{ name: string }> } }) => n.labels.nodes.some((l) => l.name === "type:request"));
+      request.projectItems = { nodes: item ? [item] : [] };
+      return { number: request.number as number, lines: formatLint((await lint(fakeGh([() => json]), withKernel, { sleep: noSleep })).violations) };
+    };
+    const bad = await run({ project: { number: 1 }, fieldValues: { nodes: [{ name: "x", field: { name: "Problem" } }] } });
+    expect(bad.lines).toEqual([`#${bad.number}: Project の Problem が 明確 / 曖昧 / 不明 以外（x）`, "violations: 1  warnings: 0  (api errors: 0)"]);
+    expect((await run({ project: { number: 1 }, fieldValues: { nodes: [{ name: "曖昧", field: { name: "Problem" } }] } })).lines).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+    expect((await run(null)).lines).toEqual(["violations: 0  warnings: 0  (api errors: 0)"]);
+  });
+
   test("lint: sp-13 — a body / Project mismatch, not in the set, missing in the body", async () => {
     expect(await lines("sp-13")).toEqual([
       "#10: Story Points が本文（13）と Project（8）で違う",

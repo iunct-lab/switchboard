@@ -213,7 +213,7 @@ export const panels = msgs({
   requestHintUpstream: { ja: "Switchboard への要望は、この環境では Task にしません。送ると、Switchboard の取得元（origin）のリポジトリの要望フォームを本文入りで開くリンクを出します。Issue は自動では作らず、出すかはフォームで決めます。", en: "A request for Switchboard is not made into a Task here. Sending shows a link that opens the request form of the repository Switchboard came from (its origin) with your text; no Issue is created automatically, and you decide on the form whether to file it." },
   upstreamOpen: { ja: "{repo} の要望フォームを開く（GitHub。まだ出していません）", en: "Open the request form of {repo} (GitHub; nothing has been filed yet)" },
   upstreamCopyHint: { ja: "取得元（origin）が GitHub ではない（または読めない）ので、何も出していません。本文をコピーして、そこの要望の受け口に貼ってください。", en: "The origin is not on GitHub (or could not be read), so nothing has been filed: copy the text and paste it into its request channel." },
-  fixHint: { ja: "Switchboard を直す Task をすぐ始めます（要望 Issue は作りません）。", en: "Starts a Task that fixes Switchboard right away (no request Issue is made)." },
+  fixHint: { ja: "{target} を直す Task をすぐ始めます（要望 Issue は作りません）。", en: "Starts a Task that fixes {target} right away (no request Issue is made)." },
   sentFromTask: { ja: "Task「{title}」({id})", en: "Task \"{title}\" ({id})" },
   sentFrom: { ja: "送信元: {screen}", en: "Sent from: {screen}" },
   sentFromArtifact: { ja: "送信元: {screen}・成果物「{title}」", en: "Sent from: {screen}, artifact \"{title}\"" },

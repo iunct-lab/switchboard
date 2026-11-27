@@ -296,12 +296,19 @@ export const autoActionsOf = (i: BacklogItem): BacklogAction[] =>
   i.stage === "in-progress" ? [isAnswered(i) || isUnblocked(i) || !i.closable ? "complete" : "close"] : i.stage === "request" ? ["to-pbi", "direct"] : ACTION_FOR_STAGE[i.stage] ? [ACTION_FOR_STAGE[i.stage]!] : [];
 
 /**
- * A Ready / in-progress PBI whose waits closed or became deferred.
- * waitsAt also preserves the resumption trigger when all parked PRs are removed from the current wait list.
- * It stopped with a release that came before its 実装 finished. Taken once: the 実装 it starts is a stage Task started after the waits, which makes them
- * old (backlog-stored.ts withStageTask), and it claims and releases the PBI again.
+ * A Ready / in-progress PBI whose waits closed or became deferred, and whose next automatic start the gate does not hold
+ * (`autoHeld` null). waitsAt also preserves the resumption trigger when all parked PRs are removed from the current wait list.
+ * It stopped with a release that came before its 実装 finished. Used up by one automatic start: the 実装 it starts is
+ * recorded as an automatic stage Task, which makes the gate hold the next one until an event happens after it.
  */
-export const isUnblocked = (i: BacklogItem) => (i.stage === "in-progress" || i.stage === "ready") && i.waitsAt !== null && !isWaiting(i);
+export const isUnblocked = (i: BacklogItem) => (i.stage === "in-progress" || i.stage === "ready") && i.waitsAt !== null && !isWaiting(i) && i.autoHeld === null && !workedSinceWaits(i);
+/**
+ * An 実装 or a 閉じる started after the waits were written (`lastWorkAt`, the newest of them; a 状況確認 after it does not
+ * count): the work went on since, by the button or by itself, so how the stage Tasks stopped (waiting for the person, the
+ * same stop again, the gate) holds the item, not the waits. The waits stay on record; only the release they came with is
+ * lifted by their closing.
+ */
+const workedSinceWaits = (i: BacklogItem) => i.lastWorkAt !== null && i.lastWorkAt > Date.parse(i.waitsAt!);
 
 /**
  * The items of a slot backlog-next leaves because of their waits and prerequisites, with what holds each:
@@ -364,7 +371,7 @@ function candidates(items: BacklogItem[], slot: Slot, order?: number[], flow?: F
   const tried = (i: BacklogItem) => (triedThisStage(i) ? 1 : 0);
   // a PBI of (or itself) an Issue a known failure's registry entry names, close to its end, goes before Priority
   const due = (i: BacklogItem) => (dueSoon.has(i.number) || (i.origin !== null && dueSoon.has(i.origin)) ? 0 : 1);
-  // A Task that stopped asking, the same stop again or the gate's hold (`notResumed`) leaves the item in any stage (an unblocked one still goes on)
+  // A Task that stopped asking, the same stop again or the gate's hold (`notResumed`) leaves the item in any stage (a wait that closed does not let the gate's hold go: only an event after the last automatic start does)
   // a request a direct Task ran on is not made a PBI after it, whatever that Task came to — unless it came back (`direct-returned`);
   // one whose direct Task never started (queued at the limit, then its start cancelled) is picked again
   const flowHeld = new Set([...flowHeldIn(items, slot, flow), ...flowShareHeldIn(items, slot, hold), ...maintenanceHeldIn(items, slot, hold)]);

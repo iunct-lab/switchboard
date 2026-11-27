@@ -1,11 +1,12 @@
-// test-reads: packages/core/src/db.ts
+// test-reads: packages/core/src/db.ts ops.config.json
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "../packages/core/src/db.ts";
-import { directMerges, kernelReport, median, NO_PROCESS, NO_PROVENANCE, reasonGroup, reasonKind, renderReport, reworkOf, type GitCommit } from "./kernel-report.ts";
+import { backlogReport, directMerges, kernelReport, median, NO_PROCESS, NO_PROVENANCE, reasonGroup, reasonKind, renderBacklogReport, renderReport, reworkOf, type GitCommit } from "./kernel-report.ts";
 
 const prov = (process: string | null, skills: string, bytes: number | null, reason: string | null = null) => JSON.stringify({ v: 1, process: process ? { id: process, version: 1 } : null, processReason: reason, bundle: { skills, repoSkills: null, claudeMd: null, processes: null }, repo: { head: null }, runner: "claude", model: null, effort: null, permissionMode: null, instructionBytes: bytes, recordedAt: 1 });
 
@@ -403,4 +404,105 @@ test("directMerges is null when the repository cannot be named or the database h
   expect(directMerges(jobsDb(), 7, 0, () => { throw new Error("Cannot resolve repository"); })).toBeNull();
   expect(directMerges(emptyDb(), 7, 0, () => "o/r")).toBeNull();
   expect(renderReport(kernelReport(emptyDb(), { days: 1, now: 1000, directMerges: null }))).toContain("数えられない（リポジトリか仕事の記録が読めない）");
+});
+
+const experimentsDb = () => {
+  const db = emptyDb();
+  db.exec("CREATE TABLE experiments (id TEXT PRIMARY KEY, question TEXT NOT NULL, branch_a TEXT NOT NULL, branch_b TEXT NOT NULL, metric TEXT NOT NULL, window_days INTEGER NOT NULL, registered_at INTEGER NOT NULL, decided_at INTEGER, changed INTEGER, note TEXT)");
+  return db;
+};
+const experiment = (db: Database, id: string, registeredAt: number, decidedAt: number | null, changed: number | null) =>
+  db.query("INSERT INTO experiments (id, question, branch_a, branch_b, metric, window_days, registered_at, decided_at, changed) VALUES (?, 'q', 'a', 'b', 'm', 7, ?, ?, ?)").run(id, registeredAt, decidedAt, changed);
+
+test("a database without the experiments table reports 実験の記録なし and zeros", () => {
+  const r = kernelReport(emptyDb(), { days: 30, now: 1000 });
+  expect(r.experiments).toEqual({ registered: 0, decided: 0, changed: 0, changedShare: null });
+  expect(renderReport(r)).toContain("実験の記録なし");
+});
+
+test("experiments: 3 registered, 2 decided, 1 changed is 50% with 1 waiting for its record", () => {
+  const db = experimentsDb();
+  const now = 10_000_000_000;
+  experiment(db, "e1", now - 1000, now - 500, 1);
+  experiment(db, "e2", now - 1000, now - 500, 0);
+  experiment(db, "e3", now - 1000, null, null);
+  const r = kernelReport(db, { days: 30, now });
+  expect(r.experiments).toEqual({ registered: 3, decided: 2, changed: 1, changedShare: 0.5 });
+  expect(renderReport(r)).toContain("決定を変えた実験: 1/2（50%）、記録待ち 1 件");
+});
+
+test("experiments registered before the window are not counted, even when decided inside it", () => {
+  const db = experimentsDb();
+  const now = 10_000_000_000;
+  const day = 86_400_000;
+  experiment(db, "old", now - 40 * day, now - day, 1); // registered outside, decided inside: left out whole
+  experiment(db, "new", now - day, now - 1000, 0);
+  const r = kernelReport(db, { days: 30, now });
+  expect(r.experiments).toEqual({ registered: 1, decided: 1, changed: 0, changedShare: 0 });
+  expect(renderReport(r)).toContain("決定を変えた実験: 0/1（0%）、記録待ち 0 件");
+});
+
+test("experiments registered but none decided read 実験の記録なし with the waiting count", () => {
+  const db = experimentsDb();
+  experiment(db, "e1", 900, null, null);
+  const r = kernelReport(db, { days: 1, now: 1000 });
+  expect(r.experiments).toMatchObject({ registered: 1, decided: 0, changedShare: null });
+  expect(renderReport(r)).toContain("実験の記録なし、記録待ち 1 件");
+});
+
+const KERNEL = { Problem: ["明確", "曖昧", "不明"], Fit: ["合う", "どの候補にも合わない", "不明"] };
+const stored = (issues: Array<[number, string, "OPEN" | "CLOSED", Record<string, string> | null]>, unread: number[] = []) => ({
+  repository: "acme/app",
+  unread,
+  issues: issues.map(([number, label, state, fields]) => ({ number, title: `t${number}`, state, labels: [label] , fields })),
+}) as unknown as Parameters<typeof backlogReport>[0];
+
+test("backlogReport counts the open PBIs' and requests' marks per axis, lists the ones that fit no candidate, and leaves Tasks, closed Issues and unread ones out", () => {
+  const r = backlogReport(
+    stored([
+      [1, "type:pbi", "OPEN", { Problem: "明確", Fit: "合う" }],
+      [9, "type:pbi", "OPEN", { Problem: "不明", Fit: "どの候補にも合わない" }],
+      [5, "type:request", "OPEN", { Problem: "選択肢に無い値" }], // outside the choices: unmarked
+      [7, "type:request", "OPEN", null], // not in the config's Project: unmarked on every axis, still counted
+      [2, "type:task", "OPEN", { Problem: "明確", Fit: "どの候補にも合わない" }], // a Task: not counted
+      [3, "type:pbi", "CLOSED", { Problem: "曖昧", Fit: "どの候補にも合わない" }], // closed: not counted
+      [4, "type:pbi", "OPEN", { Problem: "曖昧", Fit: "どの候補にも合わない" }], // the last import could not read it: not counted, said
+    ], [4]),
+    KERNEL,
+  );
+  expect(r.byKind).toEqual({ pbi: 2, request: 2 });
+  expect(r.unread).toBe(1);
+  expect(r.axes).toEqual([
+    { field: "Problem", counts: { 明確: 1, 曖昧: 0, 不明: 1 }, unmarked: 2 },
+    { field: "Fit", counts: { 合う: 1, どの候補にも合わない: 1, 不明: 0 }, unmarked: 2 },
+  ]);
+  expect(r.unfit).toEqual([{ number: 9, title: "t9", kind: "pbi" }]);
+  const text = renderBacklogReport(r);
+  expect(text).toContain("PBI 2 件・要望 2 件");
+  expect(text).toContain("| 明確 | 曖昧 | 不明 | 未印 |");
+  expect(text).toContain("| 1 | 0 | 1 | 2 |");
+  expect(text).toContain("- #9 [pbi] t9");
+  expect(text).toContain("読めていない PBI・要望 1 件は数えていない");
+  expect(text).toContain("記録が溜まれば見直す");
+  expect(renderBacklogReport(backlogReport(stored([[1, "type:pbi", "OPEN", { Fit: "合う" }]]), KERNEL))).toContain("\nなし\n");
+});
+
+test("kernel-report --backlog refuses --days and --db, and a config without fields.kernel, with exit 1 and the reason", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-kernel-cli-"));
+  try {
+    const cfg = JSON.parse(readFileSync(join(import.meta.dir, "..", "ops.config.json"), "utf8"));
+    delete cfg.fields.kernel;
+    writeFileSync(join(dir, "ops.config.json"), JSON.stringify(cfg));
+    const run = (...args: string[]) => spawnSync("bun", [join(import.meta.dir, "kernel-report.ts"), "--backlog", ...args], { encoding: "utf8", env: { ...process.env, BACKLOG_URL: "" } });
+    for (const flag of ["--days", "--db"]) {
+      const r = run(flag, "1");
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(`--backlog は ${flag} と併用できません`);
+    }
+    const r = run("--repo-dir", dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("fields.kernel がありません");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

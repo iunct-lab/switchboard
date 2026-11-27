@@ -360,6 +360,24 @@ describe("readTable and main", () => {
     expect(await main(["--json"])).toBe(2);
   });
 
+  test("a repository the app has no GitHub workspace for (404) exits 2 naming it, with no table", async () => {
+    const out: string[] = [];
+    const errs: string[] = [];
+    const log = console.log, err = console.error;
+    console.log = (l: string) => void out.push(l);
+    console.error = (l: string) => void errs.push(l);
+    try {
+      const fetch = async () => Response.json({ error: "nobody/none はアプリに登録されていない（GitHub のバックログにも、workspace の checkout にも無く、head のある仕事の記録も無い）。集計にはそのリポジトリの登録が要る" }, { status: 404 });
+      expect(await main(["--days", "3", "--repo", "nobody/none"], now, noGh, { env, fetch })).toBe(2);
+    } finally {
+      console.log = log;
+      console.error = err;
+    }
+    expect(errs.join("\n")).toContain("nobody/none");
+    expect(errs.join("\n")).toContain("登録");
+    expect(out).toEqual([]);
+  });
+
   test("the app not answering exits 2, with nothing printed; the table's first line says when the records begin", async () => {
     expect(await main(["--days", "3", "--repo", "o/r"], now, noGh, { env, fetch: async () => { throw new Error("boom"); } })).toBe(2);
     const out: string[] = [];

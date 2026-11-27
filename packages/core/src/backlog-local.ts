@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { CONFIG_FILE, STORY_POINTS, configFileOf, defaultConfig, loadConfig, type OpsConfig } from "../../../ops-kit/src/config.ts";
 import { STATUS_OPTIONS } from "../../../ops-kit/src/bootstrap.ts";
-import { fieldChoice, UsageError } from "../../../ops-kit/src/set.ts";
+import { fieldChoice, fieldChoices, UsageError } from "../../../ops-kit/src/set.ts";
 import { forgeOf, LOCAL_SERVICE } from "../../../ops-kit/src/forge.ts";
 
 /**
@@ -155,7 +155,7 @@ export function checkFieldChoices(dir: string, fields: Record<string, string | n
 /**
  * The Project fields and the Milestone of an edit of a backlog kept here, checked against the workspace's
  * `ops.config.json` before anything is stored — there is no GitHub Project to resolve them when sent: Status takes the
- * kit's STATUS_OPTIONS, Priority / Phase the config's `fields`, Story Points one of the kit's STORY_POINTS (a
+ * kit's STATUS_OPTIONS, Priority / Phase / the `fields.kernel` marks the config's `fields`, Story Points one of the kit's STORY_POINTS (a
  * number; a numeric text, as `ops-kit backlog create --field` sends it, is read as one), the Milestone `milestone.pattern`.
  * null (a value taken off) passes. Without a config the kit's template (`defaultConfig`) gives the choices; with
  * one that cannot be read, any field or Milestone is refused. Throws BacklogEditError 422; returns the fields to store.
@@ -171,9 +171,7 @@ export function checkLocalFields(dir: string, input: { fields?: Record<string, s
   } catch {
     throw new BacklogEditError(`${CONFIG_FILE} を読めないので Project のフィールドと Milestone は付けられません`, 422);
   }
-  const choices: Record<string, ReadonlyArray<string | number> | undefined> = {
-    Status: STATUS_OPTIONS, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS,
-  };
+  const choices = fieldChoices(cfg);
   const out: Record<string, string | number | null> = {};
   for (const [name, raw] of Object.entries(fields ?? {})) {
     // own names only: `toString` / `constructor` are no fields either
@@ -200,6 +198,7 @@ export function localProjectFields(dir: string, saved = ""): BacklogProjectField
   const select = (name: string, options: readonly (string | number)[] | undefined): BacklogProjectField[] => (options ? [{ name, dataType: "SINGLE_SELECT", options: options.map(String) }] : []);
   return [
     ...select("Status", STATUS_OPTIONS), ...select("Priority", cfg.fields.priority), ...select("Phase", cfg.fields.phase),
+    ...Object.entries(cfg.fields.kernel ?? {}).flatMap(([name, options]) => select(name, options)),
     { name: "Story Points", dataType: "NUMBER", options: [] },
   ];
 }

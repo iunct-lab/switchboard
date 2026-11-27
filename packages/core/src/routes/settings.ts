@@ -212,6 +212,7 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
         }
         if (data.maxRunners !== undefined) next.maxRunners = data.maxRunners;
         if (data.developSelf !== undefined) next.developSelf = data.developSelf;
+        if (data.autoDirect !== undefined) next.autoDirect = data.autoDirect;
         if (data.titles) {
           const patch = data.titles;
           if (patch.runner !== undefined && !choosable(patch.runner, shipped.titles.runner)) return sc.bad(`runner "${patch.runner}" is not installed`);
@@ -289,10 +290,11 @@ export function settingsRoutes(sc: Pick<ServerContext, "opts" | "adapterMap" | "
           }
         }
         // The tunables: a partial patch over the saved group. Read on every use, so the next use takes the new value without a restart.
-        const { quotaAndResume: qr, judgeAndChoice: jc, newDefaults: nd, release: rel, cliUpdate: cu } = data;
+        const { quotaAndResume: qr, kernel: kn, judgeAndChoice: jc, newDefaults: nd, release: rel, cliUpdate: cu } = data;
         if (rel !== undefined) next.release = { ...next.release, ...rel };
         if (cu !== undefined) next.cliUpdate = { ...next.cliUpdate, ...cu };
         if (qr !== undefined) next.quotaAndResume = { ...next.quotaAndResume, ...qr };
+        if (kn !== undefined) next.kernel = { ...next.kernel, ...kn };
         const fallbackRunnerChanged = jc?.judgeFallbackRunner !== undefined && jc.judgeFallbackRunner !== next.judgeAndChoice.judgeFallbackRunner;
         const taskRunnerChanged = nd?.taskRunner !== undefined && nd.taskRunner !== next.newDefaults.taskRunner;
         if (jc !== undefined) next.judgeAndChoice = { ...next.judgeAndChoice, ...(fallbackRunnerChanged ? { judgeFallbackModel: "", judgeFallbackEffort: "" } : {}), ...jc };

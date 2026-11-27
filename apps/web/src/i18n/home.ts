@@ -122,7 +122,10 @@ export const home = msgs({
   // the notice of a stalled backlog queue (queueStall.ts), first under 要対応 and on its card in the questions
   stallPersonHeading: { ja: "返事が要る", en: "Waiting for your answer" },
   stallHoldersHeading: { ja: "止めている相手（上位 3）", en: "What holds it (top 3)" },
-  stallPersonRow: { ja: "#{pbi} {label} — {n} 件待ち", en: "#{pbi} {label} — {n} waiting" },
+  stallPersonRow: { ja: "#{pbi} {label}", en: "#{pbi} {label}" },
+  stallPersonCount: { ja: "{n} 件待ち", en: "{n} waiting" },
+  stallMore: { ja: "ほか {n} 件 — 判断待ちで見る", en: "{n} more — see the questions" },
+  stallOpenAsks: { ja: "判断待ちで開く", en: "Open in the questions" },
   stallHeadMoved: { ja: "回答の後に head が動いた", en: "head moved after the answer" },
   stallHolderRow: { ja: "{ref} — {n} 件", en: "{ref} — {n}" },
   stallHolderRowWork: { ja: "{ref} — {n} 件（{work}）", en: "{ref} — {n} ({work})" },

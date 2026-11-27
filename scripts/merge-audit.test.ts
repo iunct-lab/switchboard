@@ -748,6 +748,30 @@ describe("main", () => {
     expect(without.filed).toEqual([]);
   });
 
+  test("a repository the app has no GitHub workspace for (404) → exit 2 naming it, with no table and nothing filed", async () => {
+    const { filed, file } = filing();
+    const dir = mkdtempSync(join(tmpdir(), "switchboard-merge-audit-"));
+    writeFileSync(join(dir, "key"), "k\n");
+    const out: string[] = [];
+    const errs: string[] = [];
+    const log = console.log, err = console.error;
+    console.log = (x: string) => void out.push(x);
+    console.error = (x: string) => void errs.push(x);
+    try {
+      const f = async () => Response.json({ error: "nobody/none はアプリに登録されていない（GitHub のバックログにも、workspace の checkout にも無く、head のある仕事の記録も無い）。集計にはそのリポジトリの登録が要る" }, { status: 404 });
+      const code = await main(["--since", "2026-09-26", "--until", "2026-10-02", "--repo", "nobody/none", "--file-request"], replay().run, NOW, file, { env: { MERGE_RECORDS_URL: "http://app.test", MERGE_RECORDS_TOKEN_FILE: join(dir, "key") }, fetch: f });
+      expect(code).toBe(2);
+    } finally {
+      console.log = log;
+      console.error = err;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(errs.join("\n")).toContain("nobody/none");
+    expect(errs.join("\n")).toContain("登録");
+    expect(out).toEqual([]);
+    expect(filed).toEqual([]);
+  });
+
   test("a failing read (the app, or git) → exit 2 and nothing filed", async () => {
     const { filed, file } = filing();
     const a = app();

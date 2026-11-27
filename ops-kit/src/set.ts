@@ -38,13 +38,21 @@ export async function ensureItem(gh: GhClient, projectId: string, projectNumber:
 }
 
 /**
+ * The fields that have a list of choices here, by name: the kit's Status and Story Points, the config's Priority and
+ * Phase (if any) and the fields of `fields.kernel`. One table for `fieldChoice` and for a backlog the app keeps.
+ */
+export function fieldChoices(cfg: OpsConfig): Record<string, ReadonlyArray<string | number> | undefined> {
+  return { Status: STATUS_OPTIONS, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS, ...cfg.fields.kernel };
+}
+
+/**
  * A field value as the choice it names: a value that differs from one of the field's choices only in case is
  * written as that choice; one no choice matches is refused before anything is stored or written. The choices are the
  * config's (the Project is made from it) and the kit's Status; a field without choices here (TEXT, DATE, …) and null
  * pass as they are. No other spelling is guessed: only the case, which names one choice.
  */
 export function fieldChoice(cfg: OpsConfig, name: string, value: string | number | null): string | number | null {
-  const choices: Record<string, ReadonlyArray<string | number> | undefined> = { Status: STATUS_OPTIONS, Priority: cfg.fields.priority, Phase: cfg.fields.phase, "Story Points": STORY_POINTS };
+  const choices = fieldChoices(cfg);
   const options = Object.hasOwn(choices, name) ? choices[name] : undefined;
   if (!options || value === null) return value;
   const given = typeof value === "string" && /^[0-9]+$/.test(value) && options.every((o) => typeof o === "number") ? Number(value) : value;

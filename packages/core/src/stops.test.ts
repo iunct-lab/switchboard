@@ -515,6 +515,25 @@ describe("stops of a schedule", () => {
     }
   });
 
+  test("an old run reads its own stops", () => {
+    const { db, dir } = open();
+    try {
+      const t = Array.from({ length: 31 }, (_, i) => mk(`o${String(i).padStart(2, "0")}`, "so", i + 1));
+      for (const x of t) db.insertTask(x);
+      const oldest = t[0]!, newest = t[30]!;
+      db.appendEvent(oldest.id, { t: "stop.record", stop: stopOf(oldest, { id: "own" }) });
+      db.appendEvent(newest.id, { t: "stop.record", stop: stopOf(newest, { id: "new" }) });
+      // outside the newest 30, the oldest still reads its own stop (and those of the newest 30)
+      expect(db.recentScheduleTaskIds("so", 30)).not.toContain(oldest.id);
+      expect(stopRecordsFor(db, oldest).map((r) => r.id).sort()).toEqual(["new", "own"]);
+      // a newer Task reads the newest 30 only, as before
+      expect(stopRecordsFor(db, newest).map((r) => r.id)).toEqual(["new"]);
+    } finally {
+      db.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("stuckSchedule: a Task whose stop ended resolved breaks the run", () => {
     const { db, dir } = open();
     try {
@@ -621,7 +640,7 @@ describe("stopMarks", () => {
       for (const t of [older, newer]) db.insertTask(t);
       db.appendEvent("old", { t: "stop.record", stop: stop({ reason: "decision", evidence: "どちらか決めてください", work: { workspaceId: "ws1", issue: 939, taskId: "old" } }) });
       db.appendEvent("new", { t: "stop.record", stop: stop({ reason: "depends", state: "resolved", work: { workspaceId: "ws1", issue: 939, taskId: "new" } }) });
-      // more newer Tasks of the schedule than stopRecordsFor reads: the old Task's own stop is still its mark
+      // more newer Tasks of the schedule than the schedule's window of 30: the old Task's own stop is still its mark
       for (let i = 0; i < 40; i++) db.insertTask(mk(`later${i}`, { scheduleId: "sch1", createdAt: 10 + i, status: "running", outcome: "unknown" }));
       const marks = stopMarks(db, db.listTasks(), NOW);
       expect(marks.old).toMatchObject({ reason: "decision", state: "waiting" });

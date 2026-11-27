@@ -50,9 +50,12 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
 
+  // Rows that land late push the form down: "+ 追加" waits for the queue's first read (success or failure), and the sample row holds its place from the moment the form opens.
+  const [queueRead, setQueueRead] = useState(false);
+  const [samplesRead, setSamplesRead] = useState(false);
   const load = () => {
     api.schedules().then(setSchedules).catch((e) => props.onError(String(e.message ?? e)));
-    api.queue().then(setQueue).catch(() => undefined);
+    api.queue().then(setQueue).catch(() => undefined).finally(() => setQueueRead(true));
     api.scheduleLog().then(setLog).catch(() => undefined);
   };
   useEffect(() => {
@@ -84,8 +87,17 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
   }, [showNew, defaultsReady]);
   useEffect(() => {
     setSampleId("");
+    setSamplesRead(false);
     if (!showNew) return;
-    api.scheduleSamples().then(setSamples).catch(() => setSamples([]));
+    let live = true; // a read from an earlier opening of the form does not mark this one as read
+    api
+      .scheduleSamples()
+      .then((x) => live && setSamples(x))
+      .catch(() => live && setSamples([]))
+      .finally(() => live && setSamplesRead(true));
+    return () => {
+      live = false;
+    };
   }, [showNew]);
   // Choosing a sample fills the form (the row is made by 追加); "none" puts back the defaults a new form starts from
   const chooseSample = (id: string) => {
@@ -235,25 +247,24 @@ export function Schedules(props: { workspaces: Workspace[]; runners: RunnerInfo[
       <section className="card">
         <div className="row head">
           <h5>{t(m.schedulesHeading)}</h5>
-          <button className="ghost" onClick={() => setShowNew((v) => !v)}>
+          <button className="ghost" disabled={!showNew && !queueRead} onClick={() => setShowNew((v) => !v)}>
             {showNew ? t(m.cancel) : t(m.add)}
           </button>
         </div>
         {showNew && (
           <div className="fields" style={{ marginBottom: 10 }}>
-            {samples.length > 0 && (
-              <label>
-                <span>{t(m.fromSample)}</span>
-                <select value={sampleId} disabled={!defaultsReady} onChange={(e) => chooseSample(e.target.value)}>
-                  <option value="">{t(m.sampleNone)}</option>
-                  {samples.map((x) => (
+            <label>
+              <span>{t(m.fromSample)}</span>
+              <select value={sampleId} disabled={!samplesRead || !defaultsReady || samples.length === 0} onChange={(e) => chooseSample(e.target.value)}>
+                <option value="">{samplesRead ? t(m.sampleNone) : t(m.loading)}</option>
+                {samplesRead &&
+                  samples.map((x) => (
                     <option key={x.id} value={x.id}>
                       {x.title}
                     </option>
                   ))}
-                </select>
-              </label>
-            )}
+              </select>
+            </label>
             <label>
               <span>{t(m.kind)}</span>
               <select

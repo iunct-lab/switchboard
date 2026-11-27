@@ -68,8 +68,6 @@ export function TaskView(props: {
   onArchive: (archived: boolean) => void;
   /** 「以前の会話を読む」: reads the page before the first event held; resolves with that page. */
   onLoadOlder: () => Promise<EventEnvelope[]>;
-  /** The meta workspace's id (null = none): an Issue this Task opened offers 直行で直す only there, as the Backlog row does. */
-  metaId: string | null;
   /** A step of an Issue this Task opened started another Task: put it in the list and open it. */
   onStarted: (task: Task) => void;
 }) {
@@ -464,7 +462,7 @@ export function TaskView(props: {
 
       {cloud && <CloudSessionNotice session={props.task.cloudSession} onTeleport={startTeleport} onRefresh={importEnded} teleportReason={teleportReason} progress={teleportProgress} onAnswerInTerminal={answerInTerminal} localTasks={(importDetail ?? props.detail)?.localContinuations} onOpenTask={props.onOpenTask} />}
       {cloud && transcript.lastStatus && <p className="hint" role="status">{transcript.lastStatus}</p>}
-      <CreatedIssues rows={props.detail?.createdRows ?? []} metaId={props.metaId} onStarted={props.onStarted} onOpenTask={(id) => props.onOpenTask?.(id)} onError={props.onError} />
+      <CreatedIssues rows={props.detail?.createdRows ?? []} onStarted={props.onStarted} onOpenTask={(id) => props.onOpenTask?.(id)} onError={props.onError} />
       {props.detail?.stopSummary && props.detail.stopSummary.length > 0 && <Stops stops={props.detail.stopSummary} issue={props.task.id} />}
       {!cloud && <DeviceAuth auth={props.deviceAuth} onError={props.onError} />}
       {!cloud && <TaskAsks task={props.task} stops={props.detail?.stopSummary ?? []} onError={props.onError} />}

@@ -398,7 +398,7 @@ try {
   // The line under the row names them with their states and links, how it comes undone, and whether backlog-next goes
   // on by itself (an enabled バックログを進める); no session works on `#305`, so the wait on `#30501` is met and has no chain
   const comments = (n: number) => ((decisions.data.repository[`i${n}`] as { comments: { nodes: Array<{ body: string; createdAt: string }> } }).comments.nodes);
-  // after `#305`'s 実装 above: an 実装 started after the waits would make them old
+  // after `#305`'s 実装 above: the releases are written later, so that 実装 is not one started after the waits
   let at = Date.now();
   const release = (n: number, reason: string, waits: number[] = [], overlap = false) => comments(n).push({ body: releaseBody(reason, waits, overlap), createdAt: new Date((at += 60_000)).toISOString() });
   release(307, "後回し: #30x（PR #778 と重なる）", [778, 30501], true);

@@ -120,7 +120,7 @@ describe("SETTINGS_GROUPS", () => {
     // (maxRunners was saved by its own component before and is a box of バックログを進める now)
     // (the review's rows save in ReviewJobCells.tsx; recheckRunner, reviewModel and reviewEffort were added with them)
     const keys = new Set([...(source + reviewCells).matchAll(/save\(\{ ?(\w+):/g)].map((m) => m[1]));
-    expect([...keys].sort()).toEqual(["autoResume", "autoStart", "bedrock", "cliUpdate", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "recheckRunner", "release", "reviewEffort", "reviewModel", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
+    expect([...keys].sort()).toEqual(["autoDirect", "autoResume", "autoStart", "bedrock", "cliUpdate", "defaultEffort", "defaultModel", "defaultPermissionMode", "developSelf", "evals", "hiddenModels", "judge", "judgeAndChoice", "maxRunners", "models", "newDefaults", "outbound", "prices", "quotaAndResume", "recheckRunner", "release", "reviewEffort", "reviewModel", "reviewRunner", "routing", "shadowRunner", "subagentEffort", "subagentModel", "titles"]);
   });
 
   test("レビュー is a row of どの仕事をどのランナーで and saves reviewRunner with its two choices", () => {

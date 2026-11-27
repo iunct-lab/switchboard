@@ -9,7 +9,15 @@
     "packages/core/src/api-test-harness.ts"
   ],
   "fields": {
-    "priority": ["P0", "P1", "P2", "P3"]
+    "priority": ["P0", "P1", "P2", "P3"],
+    "kernel": {
+      "Problem": ["明確", "曖昧", "不明"],
+      "Solution": ["特定済み", "選択肢が複数", "未知", "不明"],
+      "Reversibility": ["戻せる", "補償できる", "戻せない", "不明"],
+      "Scale": ["小", "中", "大", "不明"],
+      "Origin": ["利用者の言葉", "不具合", "観察", "エージェントの推測", "不明"],
+      "Fit": ["合う", "どの候補にも合わない", "不明"]
+    }
   },
   "sections": {
     "pbi": ["ユーザーストーリー", "到達点 / 受け入れ条件", "スコープ外", {"name": "元要望", "hint": "要望 Issue の番号。無ければ「なし（理由）」"}],
@@ -171,6 +179,7 @@
       "docs/design/task-outcome.md",
       "docs/design/test-audit.md",
       "docs/design/web-csp.md",
+      "known-failures.json",
       "private/",
       "scripts/github-api-bench.test.ts",
       "scripts/github-api-bench.ts",
@@ -181,7 +190,7 @@
     ],
     "rewrite": ["SECURITY.md"],
     "serviceUsers": ["switchboard"],
-    "allowRefs": ["private/CLAUDE.md", ".github/workflows/project-autoadd.yml"],
+    "allowRefs": ["private/CLAUDE.md", ".github/workflows/project-autoadd.yml", "known-failures.json"],
     "versioning": "independent"
   },
   "depsCheck": { "extraConditions": ["typecheck と test を通す。"] }

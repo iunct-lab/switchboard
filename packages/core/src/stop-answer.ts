@@ -8,8 +8,8 @@ const shownGrant = (s: { reason: StopRecord["reason"]; grant?: string | null }):
 /**
  * The one check of an answer to a Task's stop against the stop as its records say it now: which of the Task's stops
  * the answer is an answer to, or null when the question the person saw is no longer the one that stands — nothing is
- * then sent or recorded. Asked when the answer comes in and again right before the grant is recorded and the reply
- * sent (the head of a PR is read in between), with the Task's records read anew each time.
+ * then sent or recorded. Asked when the answer comes in, again once the head of a PR is read, and last right before the
+ * reply is handed to the Task (the grant is recorded after that), with the Task's records read anew each time.
  *
  * `ask` = the question as listed when the answer came in; `answer` = what was sent for it. The grant the person saw is
  * the one the answer carries (`grant`), or for an answer in words the one the listed question showed. It has to be the

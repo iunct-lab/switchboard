@@ -237,7 +237,7 @@ describe("overlap free tasks", () => {
   test("free tasks line: the 実装 prompt names them; a resume, another stage and a PBI with none do not", () => {
     const line = "重ならないと判定した Task: #5, #7（アプリの判定。この Task から着手の判定にかける）。";
     expect(buildStartPrompt({ number: 1, freeTasks: [5, 7] }, "complete")).toContain(`${line}\n\n対象: #1。`);
-    for (const p of [buildStartPrompt({ number: 1 }, "complete"), buildStartPrompt({ number: 1, freeTasks: [] }, "complete"), buildStartPrompt({ number: 1, freeTasks: [5, 7] }, "complete", { resume: { tasksDone: 0 } }), buildStartPrompt({ number: 1, freeTasks: [5, 7] }, "to-tasks")]) {
+    for (const p of [buildStartPrompt({ number: 1 }, "complete"), buildStartPrompt({ number: 1, freeTasks: [] }, "complete"), buildStartPrompt({ number: 1, freeTasks: [5, 7] }, "complete", { resume: true }), buildStartPrompt({ number: 1, freeTasks: [5, 7] }, "to-tasks")]) {
       expect(p).not.toContain("重ならないと判定した Task");
     }
   });

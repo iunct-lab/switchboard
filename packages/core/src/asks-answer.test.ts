@@ -319,6 +319,45 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(stageTasks(306)).toHaveLength(0);
   });
 
+  test("the later answer is told the question now: its 409 has what changed and the question as it stands (none when nothing is open, the new one when another was asked since)", async () => {
+    const run = async (newer: boolean) => {
+      const fake = fakeGh({ place: "PR #12（+40/-3）", pr: { state: "OPEN", head: HEAD, comments: [], commits: [] } });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let reading!: () => void;
+      const started = new Promise<void>((r) => (reading = r));
+      const base = await boot(async (args, cwd) => {
+        if (args[0] === "pr" && args[1] === "view" && args.at(-1)!.startsWith("state,")) {
+          reading();
+          await gate;
+        }
+        return fake.gh(args, cwd);
+      });
+      const ask = await decisionOf306(base);
+      const first = answer(base, ask.id, { kind: "text", text: "A で" });
+      await started;
+      const second = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, text: "B で", at: new Date(ask.at).toISOString() }) });
+      expect(second.status).toBe(202);
+      if (newer) commentStoredIssue(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, 306, ["## 判断待ち", "", "**問い**: 次はどうするか", "**選択肢**:", "- A: 続ける", "- B: 止める", "**推奨**: A — 戻せる", "**進め方**: 推奨で進める"].join("\n"), Date.now() + 60_000);
+      release();
+      const late = await first;
+      const body = (await late.json()) as AskChanged;
+      return { status: late.status, body, ask };
+    };
+    const none = await run(false);
+    expect(none.status).toBe(409);
+    expect(none.body.changes.length).toBeGreaterThanOrEqual(1);
+    expect(none.body).toEqual({ error: "問いが変わりました。読み直してから回答してください", changes: ["問いが変わりました。読み直してから回答してください"], current: null });
+    await core?.stop();
+    core = null;
+    const next = await run(true);
+    expect(next.status).toBe(409);
+    expect(next.body.changes.length).toBeGreaterThanOrEqual(1);
+    expect(next.body.current).not.toBeNull();
+    expect(next.body.current!.id).not.toBe(next.ask.id);
+    expect(next.body.current).toMatchObject({ kind: "decision", state: "open", pbi: { number: 306 } });
+  });
+
   test("unchanged PR: the head its [merge-ask] named is still the head → written and going on", async () => {
     const fake = fakeGh({ place: "PR #12", pr: { state: "OPEN", head: ASKED, comments: [{ body: `[merge-ask] security ${ASKED}`, createdAt: "2026-09-22T02:00:00Z" }], commits: [] } });
     const base = await boot(fake.gh);
@@ -431,7 +470,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(again.already).toBe(true);
     await Bun.sleep(50);
     expect(prompts).toEqual([GRANT]);
-    expect(grantRows().filter((g) => g.by === "owner")).toHaveLength(1);
+    expect(grantRows(t.id).filter((g) => g.by === "owner")).toHaveLength(1);
   });
 
   test("merge grant on a stage Task's stop: the grant is not copied to a shadow running alongside that Task", async () => {
@@ -479,7 +518,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect([n, r.status]).toEqual([n, 201]);
     return ((await r.json()) as { id: string }).id;
   };
-  const grantRows = () => core!.db.sqlite.query("SELECT task_id, repo, kind, target, by, source FROM task_grants ORDER BY rowid").all() as Array<{ task_id: string; repo: string; kind: string; target: number; by: string; source: string }>;
+  const grantRows = (taskId: string) => core!.db.sqlite.query("SELECT task_id, repo, kind, target, by, source FROM task_grants WHERE task_id = ? ORDER BY rowid").all(taskId) as Array<{ task_id: string; repo: string; kind: string; target: number; by: string; source: string }>;
   // the screen's answer as the routes keep it: to the question on the Issue (306 carries one, its Task none), with the head of the PR its grant names
   const screenAnswerOn = (n: number, text: string) => answerStoredDecision(core!.db, core!.db.getWorkspaceBacklogSource(meta().id)!, n, text, Date.now(), { ...(n === 306 ? { question: { at: "2026-09-22T03:00:00Z" } } : {}), screen: true, heads: { "acme/app#12": HEAD12 } });
 
@@ -522,7 +561,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const t = stageTasks(306)[0]!;
     await Bun.sleep(300);
     expect(core!.db.hasMergeGrant(t.id, "acme/app", "answer", 12, HEAD12)).toBe(false);
-    expect(grantRows()).toEqual([]);
+    expect(grantRows(t.id)).toEqual([]);
   });
 
   test("merge grant: a chosen option whose own line is a quoted line grants nothing, as it never did", async () => {
@@ -532,7 +571,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect((await answer(base, ask.id, { kind: "choice", choice: QUOTED })).status).toBe(200);
     expect(stageTasks(306)).toHaveLength(1);
     await Bun.sleep(300);
-    expect(grantRows()).toEqual([]);
+    expect(grantRows(stageTasks(306)[0]!.id)).toEqual([]);
   });
 
   test("merge grant: a quoted chosen option gives nothing, but a memo sent with it that is only the ask sentence is recorded: the memo is the person's own message", async () => {
@@ -553,7 +592,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
       expect((await answer(base, ask.id, { kind: "choice", choice: QUOTED })).status).toBe(200);
       expect(stageTasks(306)).toHaveLength(1);
       await Bun.sleep(300);
-      expect([sentence, grantRows()]).toEqual([sentence, []]);
+      expect([sentence, grantRows(stageTasks(306)[0]!.id)]).toEqual([sentence, []]);
       await core!.stop();
       core = null;
     }
@@ -562,11 +601,13 @@ describe("POST /api/asks/answer — the Issue side", () => {
   test("merge grant: an answer without a grant sentence leaves nothing behind, however many stage Tasks start on it", async () => {
     const base = await boot(fakeGh().gh, { ...holding, start: (o) => holding.start(o, () => {}) });
     screenAnswerOn(306, "直してから進めて\n> PR #12 を判定の外でマージしてよい");
+    const ids: string[] = [];
     for (let n = 0; n < 3; n++) {
       const id = await startStage(base, 306);
+      ids.push(id);
       core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [id]);
     }
-    expect(grantRows()).toEqual([]);
+    expect(ids.map((id) => grantRows(id))).toEqual([[], [], []]);
     expect(core!.db.getSetting<unknown>("mergeGrantAnswers", null)).toBeNull(); // no list of used answers is kept beside the grants
   });
 
@@ -581,7 +622,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(screenAnswer(core!.db, source, 306)).toBeNull();
     const first = await startStage(base, 306);
     core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
-    expect(grantRows()).toEqual([]);
+    expect(grantRows(first)).toEqual([]);
     expect(marks()).toEqual(["api"]);
   });
 
@@ -598,7 +639,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     for (let n = 0; n < 200 && !prompts.length; n++) await Bun.sleep(10);
     expect(prompts.some((p) => p.includes(GRANT))).toBe(true);
     expect(stageTasks(306)).toHaveLength(1);
-    expect(grantRows().filter((g) => g.by === "owner")).toEqual([]);
+    expect(grantRows(t.id).filter((g) => g.by === "owner")).toEqual([]);
     expect(core!.db.hasMergeGrant(t.id, "acme/app", "merge", 12, HEAD12)).toBe(false);
   });
 
@@ -612,7 +653,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(core!.db.listBacklogOperations(source).filter((o) => o.kind === "comment").map((o) => (o.payload as { by?: string }).by)).toEqual(["task:task_abc"]);
     const first = await startStage(base, 306);
     core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
-    expect(grantRows()).toEqual([]);
+    expect(grantRows(first)).toEqual([]);
   });
 
   test("merge grant: the page's answer on the answer route is the person's, and its grant goes to the stage Task started after it", async () => {
@@ -623,7 +664,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(r.status).toBe(202);
     expect(screenAnswer(core!.db, source, 306)?.text).toBe(GRANT);
     const first = await startStage(base, 306);
-    expect(grantRows()).toEqual([{ task_id: first, repo: "acme/app", kind: "merge", target: 12, by: "owner", source: expect.stringMatching(/./) }]);
+    expect(grantRows(first)).toEqual([{ task_id: first, repo: "acme/app", kind: "merge", target: 12, by: "owner", source: expect.stringMatching(/./) }]);
   });
 
   test("merge grant: an answer that gave its grant here is used for the release before this one too — its id is in the setting that release reads, in its form and within its bound, so a rollback does not give the grant again", async () => {
@@ -634,7 +675,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     core!.db.setSetting("mergeGrantAnswers", before);
     screenAnswerOn(306, GRANT);
     const first = await startStage(base, 306);
-    const [row] = grantRows();
+    const [row] = grantRows(first);
     expect(row).toMatchObject({ task_id: first, by: "owner" });
     // what that release does at the start of a stage: `used.includes(answer.id)` over this array decides whether the grant is given
     const used = core!.db.getSetting<string[]>("mergeGrantAnswers", []);
@@ -642,8 +683,9 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(used).toEqual([...before.slice(1), row!.source]);
     // a second stage Task on the same answer: nothing more is granted, and the id is not written twice
     core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
-    await startStage(base, 306);
-    expect(grantRows()).toEqual([row!]);
+    const second = await startStage(base, 306);
+    expect(grantRows(first)).toEqual([row!]);
+    expect(grantRows(second)).toEqual([]);
     expect(core!.db.getSetting<string[]>("mergeGrantAnswers", [])).toEqual(used);
   });
 
@@ -656,7 +698,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     screenAnswerOn(3061, `B — 許可: ${GRANT}`);
     const first = await startStage(base, 306);
     core!.db.sqlite.run("UPDATE tasks SET status = 'done' WHERE id = ?", [first]);
-    const rows = grantRows();
+    const rows = grantRows(first);
     expect(rows).toEqual([{ task_id: first, repo: "acme/app", kind: "merge", target: 12, by: "owner", source: expect.stringMatching(/./) }]);
     // far more grants than any list of used answers would hold are recorded in between: the answer's own record still says it is spent
     for (let n = 0; n < 250; n++) core!.db.recordMergeGrant({ taskId: `tsk_other_${n}`, repo: "acme/app", kind: "merge", target: 1000 + n, by: "owner", source: `op_other_${n}` });
@@ -666,7 +708,9 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const third = await startStage(base, 306);
     for (const id of [second, third]) expect([id, core!.db.hasMergeGrant(id, "acme/app", "merge", 12, HEAD12)]).toEqual([id, false]);
     expect(core!.db.hasMergeGrant(first, "acme/app", "merge", 12, HEAD12)).toBe(true);
-    expect(grantRows().filter((r) => r.source === rows[0]!.source)).toEqual(rows);
+    expect(grantRows(first).filter((r) => r.source === rows[0]!.source)).toEqual(rows);
+    // and no other stage Task holds a row of the answer, with a head or without
+    for (const id of [second, third]) expect([id, grantRows(id)]).toEqual([id, []]);
   });
 
   // the check as the kit makes it in front of `gh` (the function `ops-kit/bin/gh` calls), asked of this daemon for the Issue's repository
@@ -680,7 +724,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     const source = core!.db.getWorkspaceBacklogSource(meta().id)!;
     const r = await fetch(`${base}/api/backlog/306/answer`, { method: "POST", headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify({ workspaceId: meta().id, text: GRANT }) });
     expect(r.status).toBe(202);
-    // the head the PR has when the answer is taken is kept with the answer (read after the reply)
+    // the head the PR has when the answer is taken is kept with the answer (the read starts once the answer is saved; the reply does not wait for it)
     for (let n = 0; n < 200 && !screenAnswer(core!.db, source, 306)?.heads?.["acme/app#12"]; n++) await Bun.sleep(10);
     expect(screenAnswer(core!.db, source, 306)?.heads).toEqual({ "acme/app#12": HEAD12 });
     // a commit is pushed between the answer and the start: the grant is of what the person saw
@@ -718,7 +762,7 @@ describe("POST /api/asks/answer — the Issue side", () => {
     expect(await kit(base, bare, 12)).toBe(false);
     // the screen's grant is that Task's alone, and the bare call's is on the record as a call's
     expect(await kit(base, screen, 12)).toBe(true);
-    expect(grantRows().map((g) => [g.task_id, g.by])).toEqual([[screen, "owner"], [bare, "api"]]);
+    expect([grantRows(screen), grantRows(bare)].map((rows) => rows.map((g) => [g.task_id, g.by]))).toEqual([[[screen, "owner"]], [[bare, "api"]]]);
   });
 
   test("permission stop grant reply: a stage Task's refused stop is answered by its grant as one reply to that Task — nothing on the Issue, no next stage Task", async () => {
@@ -1328,8 +1372,8 @@ describe("GET /api/asks — mockups", () => {
 });
 
 // An answer to a Task's stop is for the stop the person saw: the grant on the screen is sent with the answer and has to be
-// the stop's grant when the answer comes in and again right before it is recorded and sent, and the reply marks only the
-// stops it answers. The daemon, `answerTask`, `noteMergeGrant` and `tasks.send` are the real ones; gh and the runner are fakes.
+// the stop's grant when the answer comes in and again right before it is handed over, and the reply marks only the
+// stops it answers. The daemon, `answerTask`, `grantRecorder` and `tasks.send` are the real ones; gh and the runner are fakes.
 describe("POST /api/asks/answer — the stop the person saw", () => {
   const [GA, GB] = ["PR #12 を判定の外でマージしてよい", "PR #13 を判定の外でマージしてよい"];
   const HEAD12 = "1".repeat(40);
@@ -1338,7 +1382,7 @@ describe("POST /api/asks/answer — the stop the person saw", () => {
     for (let n = 0; n < 400 && !(await ok()); n++) await Bun.sleep(10);
   };
   const userTurns = (id: string) => core!.db.listEvents(id).filter((e) => e.ev.t === "message.delta" && e.ev.role === "user").map((e) => (e.ev as { text: string }).text);
-  const grantCount = () => (core!.db.sqlite.query("SELECT count(*) AS n FROM task_grants").get() as { n: number }).n;
+  const grantCount = (taskId: string) => (core!.db.sqlite.query("SELECT count(*) AS n FROM task_grants WHERE task_id = ?").get(taskId) as { n: number }).n;
   /** A permission stop of the stage Task `t` of Issue 306, written straight to its log (the outcome its record would set is set by hand). */
   const refuse = (t: Task, id: string, grant: string, at = Date.now()) => {
     core!.db.appendEvent(t.id, { t: "stop.record", stop: { id, work: { workspaceId: meta().id, issue: 306, taskId: t.id }, op: "gh pr merge", target: "PR", reason: "permission", evidence: "refused", safety: "before-effect", conditions: [], answer: null, actions: [], state: "waiting", grant, at } });
@@ -1388,7 +1432,7 @@ describe("POST /api/asks/answer — the stop the person saw", () => {
     expect((await answer(base, seen.id, { kind: "grant", grant: "PR #99 を判定の外でマージしてよい" })).status).toBe(409);
     await Bun.sleep(50);
     expect(userTurns(t.id)).toEqual([]);
-    expect(grantCount()).toBe(0);
+    expect(grantCount(t.id)).toBe(0);
     // the grant the stop shows now is taken
     expect((await answer(base, seen.id, { kind: "grant", grant: GB })).status).toBe(200);
     await until(() => userTurns(t.id).length === 1);
@@ -1414,7 +1458,7 @@ describe("POST /api/asks/answer — the stop the person saw", () => {
     expect((await r.json()) as AskChanged).toMatchObject({ error: "問いが新しくなりました", current: { id: seen.id, grant: GB } });
     await Bun.sleep(50);
     expect(userTurns(id)).toEqual([]);
-    expect(grantCount()).toBe(0);
+    expect(grantCount(id)).toBe(0);
     expect((await answer(base, seen.id, { kind: "grant", grant: GB })).status).toBe(200);
     await until(() => userTurns(id).length === 1);
     expect(userTurns(id)).toEqual([GB]);
@@ -1444,7 +1488,31 @@ describe("POST /api/asks/answer — the stop the person saw", () => {
     expect(body.current!.id).not.toBe(seen.id);
     await Bun.sleep(50);
     expect(userTurns(t.id)).toEqual([]);
-    expect(grantCount()).toBe(0);
+    expect(grantCount(t.id)).toBe(0);
+  });
+
+  test("grant changed before hand-over: the stop reported with another grant while the previous process closes is 409 — nothing is handed over, no grant is recorded, and the planned resume stays", async () => {
+    const base = await boot(fakeGh({ pr: PR12 }).gh, echoing());
+    const t = stage();
+    refuse(t, "s1", GA, Date.now() - 30_000);
+    const resumeAt = Date.now() + 3_600_000;
+    core!.db.updateTask(t.id, { resumeAt, resumeReason: "limit" });
+    const seen = await stopOf306(base);
+    // the previous process is still closing: `send` waits for it after every check `answerTask` made before, and the Task reports its stop again meanwhile
+    let closed!: () => void;
+    (core!.tasks as unknown as { closing: Map<string, Promise<void>> }).closing.set(t.id, new Promise<void>((r) => (closed = r)));
+    const reply = answer(base, seen.id, { kind: "grant", grant: GA });
+    await Bun.sleep(100);
+    refuse(t, "s1", GB);
+    closed();
+    const r = await reply;
+    expect(r.status).toBe(409);
+    const body = (await r.json()) as AskChanged;
+    expect(body).toMatchObject({ error: "問いが新しくなりました", current: { grant: GB } });
+    await Bun.sleep(50);
+    expect(userTurns(t.id)).toEqual([]);
+    expect(grantCount(t.id)).toBe(0);
+    expect(core!.db.getTask(t.id)).toMatchObject({ resumeAt, resumeReason: "limit" });
   });
 
   for (const how of ["grant", "text"] as const) {

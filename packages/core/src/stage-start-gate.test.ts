@@ -122,7 +122,7 @@ describe("startStage with auto", () => {
     const writes: Array<[string, () => BacklogSnapshotEntry[]]> = [
       ["a plain comment", () => [commentRec(9201, "C1", "着手のコメント", iso(Date.now()))]],
       ["a claim", () => [commentRec(9201, "C2", "<!-- pbi-complete:claim 00000000-0000-4000-8000-000000000001 -->\n開始", iso(Date.now()))]],
-      ["a 状況 with the tasks-done mark", () => [commentRec(9201, "C3", "## 状況\n<!-- tasks-done -->\n全部終えた", iso(Date.now()))]],
+      ["a 状況", () => [commentRec(9201, "C3", "## 状況\n全部終えた", iso(Date.now()))]],
       ["a ## 回答 recording a confirmation it counted", () => [commentRec(9201, "C6", "## 回答\n受け入れ条件 1「x」は、判断待ち #9202 への回答を確認として数えました。", iso(Date.now()))]],
       ["the body and a label", () => [issueRec(9201, { labels: ["type:pbi", "flow-improvement"], subIssues: [9202, 9203], body: "決定ログを足した", updatedAt: iso(Date.now()) })]],
       // an overlap wait on what already closed, on a Task of a PBI nobody works on (met at once), and a date it names that is already past
@@ -182,7 +182,7 @@ describe("startStage with auto", () => {
     expect(tasksOf(9301)).toHaveLength(1);
   });
 
-  test("the stops of the removed rules stay stopped: a failed or aborted Task, a resume that did not move, a resume that ended before its mark, a 閉じる that did not close start once, and nothing starts or counts until an event", async () => {
+  test("the stops of the removed rules stay stopped: a failed or aborted Task, a resume that did not move, a resume that ended before its 状況, a 閉じる that did not close start once, and nothing starts or counts until an event", async () => {
     const h = await world();
     const { put, read, tasksOf } = h;
     const inProgress = (n: number): BacklogSnapshotEntry => ({ objectKind: "project-item", externalId: `PVTI_gate${n}`, fetchState: "fetched", remote: { issue: n, owner: h.core.db.getWorkspaceBacklogSource(h.ws.id)!.project.owner, project: h.core.db.getWorkspaceBacklogSource(h.ws.id)!.project.number, fields: { Status: "In progress" } } });
@@ -192,8 +192,8 @@ describe("startStage with auto", () => {
     const scenes: Array<[number, string, "done" | "error" | "aborted", "complete" | "close", BacklogSnapshotEntry[], number]> = [
       [9401, "failed", "error", "complete", [], 2],
       [9411, "aborted", "aborted", "complete", [], 2],
-      [9421, "a resume that did not move: its mark says as many Tasks done as now", "done", "complete", [commentRec(9421, "M1", "## 状況\n<!-- tasks-done: 1 -->\n進んでいない", "2026-10-02T00:00:00Z")], 2],
-      [9431, "a resume that ended before writing its mark", "done", "complete", [], 2],
+      [9421, "a resume that wrote a 状況 and did not move", "done", "complete", [commentRec(9421, "M1", "## 状況\n進んでいない", "2026-10-02T00:00:00Z")], 2],
+      [9431, "a resume that ended before writing its 状況", "done", "complete", [], 2],
       [9441, "a 閉じる that did not close", "done", "close", [], 0],
     ];
     for (const [n, what, end, action, before, open] of scenes) {
@@ -415,7 +415,7 @@ describe("eventsOf", () => {
     const quiet = eventsOf(base());
     const written = [
       { body: "<!-- pbi-complete:claim 00000000-0000-4000-8000-000000000001 -->\n開始", createdAt: "2026-11-20T23:00:00Z" },
-      { body: "## 状況\n<!-- tasks-done -->\n全部終えた", createdAt: "2026-11-20T23:30:00Z" },
+      { body: "## 状況\n全部終えた", createdAt: "2026-11-20T23:30:00Z" },
       { body: "<!-- pbi-complete:release overlap=200,201 -->\n後回し", createdAt: "2026-11-20T23:59:00Z" },
       { body: "着手のコメント", createdAt: "2026-11-20T23:59:30Z" },
     ];

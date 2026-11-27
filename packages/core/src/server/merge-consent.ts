@@ -46,6 +46,17 @@ const SAID = (g: ConsentGrant): string => (g.kind === "merge" ? `PR #${g.target}
  * be read, is one line in the task's conversation; a text that grants nothing says nothing.
  */
 export function noteConsent(sc: ConsentContext, task: Task, text: string, read?: { said: string; asked: string; full?: string }): Promise<void> {
+  const ready = readyConsent(sc, task, text, read);
+  return ready ? ready() : Promise.resolve();
+}
+
+/**
+ * The part of `noteConsent` that belongs to the moment the text comes in — the reply it answers, the time of the grant,
+ * the heads its PRs have now — taken at once; the read itself starts when the returned function is called (null = there
+ * is nothing to read). A caller that hands the text to the Task calls it once the text is handed over, so a text that
+ * was not handed over is not read, and what it grants is still what stood when the person sent it.
+ */
+export function readyConsent(sc: ConsentContext, task: Task, text: string, read?: { said: string; asked: string; full?: string }): (() => Promise<void>) | null {
   // what the person answers: the Task's last reply, and the questions of a question tool it asked (the Task's words, not the
   // person's). `read.said` pairs each chosen answer with its question by number; the Task's own ask is its reply's
   const reply = sc.db.lastReplyText(task.id) ?? "";
@@ -62,7 +73,7 @@ export function noteConsent(sc: ConsentContext, task: Task, text: string, read?:
   const prRepos = ownReposOf(sc, task);
   const repoOf = (g: ConsentGrant): string[] => (g.change ? (task.workspaceId ? [changeRepoOf(task.workspaceId)] : []) : prRepos);
   const allRepos = [...prRepos, ...(task.workspaceId ? [changeRepoOf(task.workspaceId)] : [])];
-  if (!candidates.length || !allRepos.length) return Promise.resolve();
+  if (!candidates.length || !allRepos.length) return null;
   // the heads as of now, before the read: a commit pushed while the reader answers is not granted
   const heads = new Map<string, Promise<string | null>>();
   for (const repo of allRepos) for (const n of candidates) heads.set(`${repo}#${n}`, sc.grantHeadOf(task, repo, n).catch(() => null));
@@ -102,10 +113,12 @@ export function noteConsent(sc: ConsentContext, task: Task, text: string, read?:
       if (!sc.judgeStop.signal.aborted) say(`返信から読んだ許可を記録できませんでした（${why(e)}）。決まった文でも送れます`);
     }
   };
-  const after = sc.pendingConsent.get(task.id) ?? Promise.resolve();
-  const mine: Promise<void> = after.then(run, run).finally(() => {
-    if (sc.pendingConsent.get(task.id) === mine) sc.pendingConsent.delete(task.id);
-  });
-  sc.pendingConsent.set(task.id, mine);
-  return mine;
+  return () => {
+    const after = sc.pendingConsent.get(task.id) ?? Promise.resolve();
+    const mine: Promise<void> = after.then(run, run).finally(() => {
+      if (sc.pendingConsent.get(task.id) === mine) sc.pendingConsent.delete(task.id);
+    });
+    sc.pendingConsent.set(task.id, mine);
+    return mine;
+  };
 }

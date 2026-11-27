@@ -146,6 +146,9 @@ CREATE INDEX IF NOT EXISTS cli_updates_runner ON cli_updates (runner, id);
 -- ask for a restart (at most 5), file_count how many there were; rows older than 90 days are dropped when one is written
 CREATE TABLE IF NOT EXISTS promotion_decisions (sha TEXT NOT NULL, kind TEXT NOT NULL, tag TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, times INTEGER NOT NULL, tasks INTEGER NOT NULL, reason TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]', file_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (sha, kind));
 CREATE INDEX IF NOT EXISTS promotion_decisions_last ON promotion_decisions (last_at);
+-- experiments registered before the work (question, the two branches, the metric, the days watched) and, once, what they decided after
+-- (decided_at, changed 0/1, note); not linked to a Task (db/experiments.ts)
+CREATE TABLE IF NOT EXISTS experiments (id TEXT PRIMARY KEY, question TEXT NOT NULL, branch_a TEXT NOT NULL, branch_b TEXT NOT NULL, metric TEXT NOT NULL, window_days INTEGER NOT NULL, registered_at INTEGER NOT NULL, decided_at INTEGER, changed INTEGER, note TEXT);
 -- not read any more; kept because a rolled-back release reads it (like merge_scope_stops)
 CREATE TABLE IF NOT EXISTS task_scope_stops (task_id TEXT NOT NULL, repo TEXT NOT NULL, issue INTEGER NOT NULL, pr INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (task_id, repo, issue));
 -- every change asked of a workspace's settings kept here (workspaces.config), whoever asked: what the settings were

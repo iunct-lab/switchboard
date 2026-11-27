@@ -7,7 +7,7 @@ import type { BacklogAction, BacklogItem, TaskStatus } from "@switchboard/protoc
 import { listProcesses, loadProcess, parseProcessDef } from "./process-defs.ts";
 import { type CoreServer } from "./server.ts";
 import { fmtTime } from "./ratelimit.ts";
-import { buildStartPrompt, tasksDoneMark, TASKS_DONE_MARK } from "./backlog-prompt.ts";
+import { buildStartPrompt } from "./backlog-prompt.ts";
 import { pickNext, dueSoonIssues, dueSoonOf, unchangedIn, gateHeldIn, heldIn, awaitingReply, isAnswered, plannedResumeLine, checksOnlyLine, checkingLine, isReplyWaiting, replyWaitingIn, stopHeld } from "./backlog-pick.ts";
 import { toItem, requestTextChars, chooseProcess, type RawBacklogIssue } from "./backlog-item.ts";
 import { STOPPED, backlogNextSchedule, boot, fixtureStage, holdingClaude, item, metaId, raw, runSchedule, scheduleLogAll, subTask, taskDecisionGh, useBacklogDaemon, wait } from "./api-test-harness.ts";
@@ -135,8 +135,6 @@ test("buildStartPrompt: the stage text comes from the p0-pipeline definition —
   expect(buildStartPrompt({ number: 305 }, "check", {}, swapped)).toBe(buildStartPrompt({ number: 305 }, "check"));
   const { complete: _dropped, ...rest } = def.entries;
   expect(() => buildStartPrompt({ number: 305 }, "check", {}, { ...def, entries: rest })).toThrow("lacks entries complete");
-  // the tasks-done mark is given only on a resume: an entry that asks for it otherwise does not render a 0
-  expect(() => buildStartPrompt({ number: 305 }, "complete", {}, { ...def, entries: { ...def.entries, complete: "X {{tasksDoneMark}}" } })).toThrow("uses {{tasksDoneMark}}, which was not given");
   const bare = parseProcessDef("---\nid: x\nversion: 1\ntitle: X\n---\n## entry complete\nonly\n", "x.md");
   expect(() => buildStartPrompt({ number: 1 }, "complete", {}, bare)).toThrow("lacks entries to-pbi, to-tasks, to-tasks-ready, complete-other, complete-resume, check, close");
 });
@@ -235,8 +233,8 @@ test("pickNext waiting: a Ready PBI whose waits closed goes before untried Ready
   }
 });
 
-test("pickNext stalled: an in-progress PBI with every Task closed is closed; one with Tasks left is resumed unless it did not move since its last resume", () => {
-  const report = (n: number | null, at = "2026-09-29T00:00:00Z") => ({ body: `## 状況\n### 残り\n- #12${n === null ? "" : `\n${TASKS_DONE_MARK(n)}`}`, at });
+test("pickNext stalled: an in-progress PBI with every Task closed is closed; one with Tasks left is resumed unless the gate holds it", () => {
+  const report = { body: "## 状況\n### 残り\n- #12", at: "2026-09-29T00:00:00Z" };
   const closable = item({ number: 1, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true });
   const stalled = item({ number: 2, stage: "in-progress", tasks: { total: 3, done: 1, doneAt: null } });
   expect(pickNext([closable], "implement")).toEqual({ item: closable, action: "close" });
@@ -247,7 +245,7 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   // a running stage Task or a question holds it
   expect(pickNext([{ ...closable, activeTaskId: "tsk_run" }, { ...stalled, activeTaskId: "tsk_run" }], "implement")).toBeNull();
   expect(pickNext([{ ...stalled, stage: "needs-decision", decision: { body: "## 判断待ち", at: "2026-09-29T00:00:00Z", issue: 2 } }], "implement")).toBeNull();
-  // what the gate holds (`autoHeld`) is not picked; whatever the last Task's end or the Issue's marks say does not hold it by itself
+  // what the gate holds (`autoHeld`) is not picked; whatever the last Task's end or the Issue's comments say does not hold it by itself
   const lastDone = { id: "tsk_close", status: "error" as const, statusAt: Date.parse("2026-09-29T00:00:00Z"), createdAt: Date.parse("2026-09-29T00:00:00Z"), updatedAt: Date.parse("2026-09-29T00:00:00Z"), action: "close" as const, outcome: "unknown" as const, reviewedAt: null, resumeAt: null, started: true };
   const triedClose = { ...closable, lastTask: lastDone };
   const gateHeld = { ...triedClose, autoHeld: { previousTaskId: "tsk_close", action: "close" as const } };
@@ -259,17 +257,14 @@ test("pickNext stalled: an in-progress PBI with every Task closed is closed; one
   expect(gateHeldIn([gateHeld], "plan")).toEqual([]);
   // a running Task, a wait still open: named elsewhere, not as held by the gate
   expect(gateHeldIn([{ ...gateHeld, activeTaskId: "tsk_run" }, { ...gateHeld, number: 9, waits: [wait(778, "pr", true)] }], "implement")).toEqual([]);
-  // a stalled PBI is resumed whatever its ## 状況 mark or the end of its last Task says, unless the gate holds it
-  const spun = { ...stalled, report: report(1), lastTask: { ...lastDone, action: "complete" as const, status: "done" as const } };
+  // a stalled PBI is resumed whatever its ## 状況 or the end of its last Task says, unless the gate holds it
+  const spun = { ...stalled, report, lastTask: { ...lastDone, action: "complete" as const, status: "done" as const } };
   expect(pickNext([spun], "implement")).toMatchObject({ action: "complete", resume: true });
   expect(pickNext([{ ...spun, autoHeld: { previousTaskId: "tsk_close", action: "complete" as const } }], "implement")).toBeNull();
   expect(pickNext([{ ...spun, autoHeld: { previousTaskId: "tsk_close", action: "complete" as const }, answeredAt: "2026-09-29T01:00:00Z", commentedAt: "2026-09-29T01:00:00Z" }], "implement")).toBeNull(); // the gate's answer is the whole judgment
   // a Task closing does not answer a question the resume asked the person
   const asking = { ...stalled, lastTask: { ...lastDone, action: "complete" as const, status: "done" as const, outcome: "needs_action" as const } };
   expect(pickNext([{ ...asking, tasks: { total: 3, done: 2, doneAt: "2026-09-30T01:00:00Z" } }], "implement")).toBeNull();
-  expect(tasksDoneMark(report(4))).toBe(4);
-  expect(tasksDoneMark(report(null))).toBeNull();
-  expect(tasksDoneMark(null)).toBeNull();
 });
 
 test("pickNext stalled: the implement slot's order is 回答済みの実装中 → 閉じられる実装中 → 止まった実装中 → Ready", () => {
@@ -355,10 +350,11 @@ test("pickNext failed: an item whose last stage Task failed is held by the gate'
     expect(pickNext([{ ...stalled, lastTask }], "implement")).toMatchObject({ action: "complete", resume: true });
     expect(pickNext([{ ...stalled, lastTask, ...held("complete") }], "implement")).toBeNull();
   }
-  // a closable one is held the same way; its waits closing still goes on
+  // a closable one is held the same way; its waits closing does not let it go while the gate holds it, and does once the gate lets go
   const closable = item({ number: 2, stage: "in-progress", tasks: { total: 2, done: 2, doneAt: null }, closable: true, commentedAt: at, lastTask: failed(), ...held("close") });
   expect(pickNext([closable], "implement")).toBeNull();
-  expect(pickNext([{ ...closable, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toMatchObject({ item: { number: 2 } });
+  expect(pickNext([{ ...closable, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toBeNull();
+  expect(pickNext([{ ...closable, autoHeld: null, waits: [wait(778, "pr", false)], waitsAt: at }], "implement")).toMatchObject({ item: { number: 2 } });
   // a Ready item too, and the plan slot's stages
   expect(pickNext([item({ number: 3, stage: "ready", commentedAt: at, lastTask: failed(), ...held("complete") })], "implement")).toBeNull();
   expect(pickNext([item({ number: 4, stage: "needs-tasks", commentedAt: at, lastTask: { ...failed(), action: "to-tasks" }, ...held("to-tasks") })], "plan")).toBeNull();

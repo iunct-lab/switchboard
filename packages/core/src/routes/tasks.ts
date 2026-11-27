@@ -25,7 +25,7 @@ export function afterSeq(raw: string | null): number {
 }
 
 /** The routes under /api/tasks. */
-export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "createdRowsOf" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "selfDevOn" | "cfg" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
+export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "createdRowsOf" | "bad" | "json" | "mcp" | "deviceAuths" | "tasks" | "staging" | "adapterMap" | "dangerMode" | "recentCheck" | "attachments" | "metaWorkspace" | "chooseWorkspace" | "opts" | "pricingTable" | "loginKindOf" | "recordProvenance" | "createRouted" | "logOp" | "suggestFor" | "routing" | "taskMcpServers" | "history" | "teleports" | "titling" | "ranElsewhere" | "startTeleport" | "catchUpWithShadow" | "noteMergeGrant" | "grantRecorder" | "taskGrantHeads" | "screenLook" | "artifacts" | "readJson" | "artifactResult" | "resumer" | "selfdev" | "isMeta" | "selfDevOn" | "cfg" | "evalsFor" | "judgeEvals" | "broadcast" | "applyPolicies">): Routes {
   /** Under `<home>/releases` (the link the meta workspace is at, and every release directory), followed through links. */
   const inReleaseFolder = (dir: string | undefined): boolean => {
     if (dir === undefined) return false;
@@ -267,11 +267,18 @@ export function tasksRoutes(sc: Pick<ServerContext, "grantSource" | "db" | "crea
         const text = from ? `（Task ${from} からの返信）\n\n${parsed.data.text}` : parsed.data.text;
         try {
           sc.catchUpWithShadow(String(req.params.id)); // a terminal turn that just finished goes in before this one
-          // a reply the Task refuses (its budget) is refused before a grant in it is recorded: no grant stays for a reply that did not go
+          // the order: ask early whether the reply can go (`checkSend`), read the source of a grant sentence and its heads (what is
+          // waited for), take what the reply grants as of now (`grantRecorder`: the time, the heads, for words with no fixed
+          // sentence the reply they answer and their PRs' heads), then `send`, which checks again: the grant is recorded — or the
+          // words read — once the reply is handed over (`sent`), so a reply the Task refuses or cannot start records none and
+          // the check in front of `gh` does not pass for it, and what it grants is still what stood when it came in
           await sc.tasks.checkSend(String(req.params.id));
-          await sc.noteMergeGrant(String(req.params.id), parsed.data.text, await sc.grantSource(req, srv, from));
+          const source = await sc.grantSource(req, srv, from);
+          const task = sc.db.getTask(String(req.params.id));
+          const heads = task && !from && source.via === "screen" ? await sc.taskGrantHeads(task, parsed.data.text) : {};
+          const record = sc.grantRecorder(String(req.params.id), parsed.data.text, { ...source, heads });
           // another Task's reply is no person's answer: it marks none of this Task's stops answered
-          return sc.json(await sc.tasks.send(String(req.params.id), text, { attachmentIds, ...(from ? { answers: () => false } : {}) }));
+          return sc.json(await sc.tasks.send(String(req.params.id), text, { attachmentIds, ...(from ? { answers: () => false } : {}), sent: record }));
         } catch (e) {
           return sc.bad(String((e as Error).message ?? e), 409);
         }

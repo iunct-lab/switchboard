@@ -90,8 +90,7 @@ export const completeScope = (review: ReviewSetting) => "この依頼は、マ�
  *
  * `local`: the workspace's backlog is kept in Switchboard only — the Task works on it with `ops-kit backlog` alone.
  *
- * `resume`: backlog-next resumes a stalled in-progress PBI, which had `tasksDone` closed Tasks when it was picked;
- * the ## 状況 it writes first carries that number, so the next firing leaves the PBI until another Task closes.
+ * `resume`: backlog-next resumes a stalled in-progress PBI (the resume's text differs from a first start's).
  *
  * `answer`: the newest `## 回答` the person gave on the screen (screenAnswer), put in the prompt as the person's
  * words — read with a tool, an operation it allows is not the person's say to the runner's approval. Not for a check.
@@ -100,7 +99,7 @@ export const completeScope = (review: ReviewSetting) => "この依頼は、マ�
 export const PIPELINE_ENTRIES = ["to-pbi", "to-tasks", "to-tasks-ready", "complete", "complete-other", "complete-resume", "check", "close"] as const;
 
 /** The stage Task's first prompt: the entry's text from `def` (the pipeline candidate; `opts` are explained above `PIPELINE_ENTRIES`), then what the daemon adds around it (the answer to read, the scope of a complete, where the Issue is). */
-export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks" | "freeTasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: { tasksDone: number }; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; taskModel?: string; review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p0-pipeline")): string {
+export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pick<BacklogItem, "tasks" | "freeTasks">>, action: BacklogAction, opts: { other?: OtherRepo; resume?: true; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; taskModel?: string; review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p0-pipeline")): string {
   const n = item.number;
   const runner = opts.runner ?? "claude";
   const merges = actionMerges(action);
@@ -114,8 +113,7 @@ export function buildStartPrompt(item: Pick<BacklogItem, "number"> & Partial<Pic
       : action === "complete"
         ? opts.resume ? "complete-resume" : opts.other || runner !== "claude" ? "complete-other" : "complete" // every complete, from Ready too: backlog-next also uses it to resume an in-progress PBI whose Task was answered; a resume names the skill's file: a slash command is expanded only at the start of a prompt, and only Claude Code has that slash command
         : action;
-  // the mark only exists on a resume: an entry that uses it without one is refused by renderEntry, not rendered as 0
-  const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT, ...(opts.resume ? { tasksDoneMark: TASKS_DONE_MARK(opts.resume.tasksDone) } : {}) }, entryConditions({ runner, review: opts.review ?? "other", local: !!opts.local }));
+  const rendered = renderEntry(def, entry, { n, subIssues, reportFormat: REPORT_FORMAT }, entryConditions({ runner, review: opts.review ?? "other", local: !!opts.local }));
   // Task ごとの実装のモデル: every complete entry, a resume too; a model without an alias adds nothing, and so does a
   // runner without the Agent tool the paragraph names
   const alias = action === "complete" && runner === "claude" && opts.taskModel ? subagentModelAlias(opts.taskModel) : null;
@@ -160,27 +158,26 @@ function saidOf(answer: { issue: number; text: string } | null | undefined): str
 
 /**
  * The first prompt of a 直行で直す: the `direct` entry of the `p1-direct` candidate with the request as its signal,
- * then the answer to read, a local backlog's rules and the screen answer as a stage Task has them (the meta workspace's
- * only: another repository's is refused before). No PBI or Task Issue: the entry itself says what it leaves on the request.
+ * then the answer to read, the rules of a local backlog or of another repository and the screen answer as a stage Task
+ * has them. No PBI or Task Issue: the entry itself says what it leaves on the request.
  */
-export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p1-direct")): string {
+export function buildDirectPrompt(item: Pick<BacklogItem, "number">, opts: { other?: OtherRepo; local?: boolean; localForge?: boolean; answer?: { issue: number; text: string } | null; review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p1-direct")): string {
   const n = item.number;
   const body = renderEntry(def, "direct", { signal: `#${n}`, reviewer: REVIEWER_WORDS[opts.review ?? "other"] }, entryConditions({ runner: opts.runner ?? "claude", review: opts.review ?? "other", local: !!opts.local }));
-  const elsewhere = opts.local ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${localBacklogRules({ localForge: opts.localForge, merges: true })}` : "";
-  return `${skillPathsFor(`${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}`, opts.runner ?? "claude")}${saidOf(opts.answer)}`;
+  const elsewhere = opts.local
+    ? `\n\n#${n} はこの workspace の Switchboard のバックログの Issue です（GitHub には無い）。${opts.other ? otherRepoRules(opts.other, { local: true, localForge: !!opts.localForge, merges: true }) : localBacklogRules({ localForge: opts.localForge, merges: true })}`
+    : opts.other ? `\n\n#${n} はこのディレクトリのリポジトリ（\`gh repo view\` が答えるもの）の Issue です。${otherRepoRules(opts.other, { merges: true })}` : "";
+  const inOther = opts.other ? `\n\n${directOther(opts.other)}` : "";
+  return `${skillPathsFor(`${body}\n\n対象: #${n}。始める前に Issue #${n} の最新の \`## 回答\` コメントを読み（\`ops-kit backlog view ${n} --fresh\`。アプリが GitHub と同期してから答え、GitHub に届かなければ保存値と未同期の印で答える）、あればそれに従ってください。${elsewhere}${inOther}`, opts.runner ?? "claude")}${saidOf(opts.answer)}`;
+}
+
+/** What the `direct` entry's own paths mean in another repository: the invariants are Switchboard's, the working rules are the repository's. */
+function directOther(other: OtherRepo): string {
+  return `上の入口が指す不変条件のファイルは ${other.meta}/ops-kit/invariants.md です。そこを読んでください。worktree・枝・テストのコマンドは、このリポジトリの CLAUDE.md / AGENTS.md に書かれていればそれに従ってください。この Task には PBI も Task の Issue も無い。上の読み替えのうち PBI・Task の番号を使う行は、PBI の結果に書くものは PR（ローカルの変更）の本文に書き、\`Backlog-Task:\` の行は書かず（閉じる Task が無い。ほかの番号を書くとその Issue を閉じる）、Task を閉じる手順は飛ばし、枝の \`<Task>\` は \`sb/direct-<topic>\` と読む。`;
 }
 
 /** The first prompt of a 束: the `bundle` entry of the `p3-bundle` candidate with the PBIs to put in together and who reviews. */
 export function buildBundlePrompt(pbis: number[], opts: { review?: ReviewSetting; runner?: RunnerId } = {}, def: ProcessDef = loadProcess("p3-bundle")): string {
   const body = renderEntry(def, "bundle", { pbis: pbis.map((n) => "#" + n).join(", "), reviewer: REVIEWER_WORDS[opts.review ?? "other"] });
   return skillPathsFor(body, opts.runner ?? "claude");
-}
-
-/** The mark a resume of a stalled PBI ends its ## 状況 with: how many of its Tasks were closed then. */
-export const TASKS_DONE_MARK = (n: number) => `<!-- tasks-done: ${n} -->`;
-
-/** The number in a ## 状況's tasks-done mark; null = no report, or one without the mark (a 状況確認's). */
-export function tasksDoneMark(report: { body: string } | null): number | null {
-  const m = report && /<!-- tasks-done: (\d+) -->/.exec(report.body);
-  return m ? Number(m[1]) : null;
 }

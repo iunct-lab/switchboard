@@ -67,7 +67,7 @@ const stalledFor = (ms: number): string => {
  * one that changed since the last firing takes it away. It names the holders holding the most PBIs (top 3) and the
  * questions the person has to answer (`needs: "person"`, open or held, a decision / check / stop / approval, and a stop
  * `staleGrant` marks though it waits by itself) of a PBI in the queue or of a holder's PBI, the most held first: held =
- * the PBIs its PBI's holders hold in its workspace and those that wait for its PBI (`unblocks` / `waiting`), each once.
+ * the PBIs its PBI's holders hold in its workspace and those that wait for its PBI (`unblocks` / `waiting`), each once, and the PBI itself when it is in the queue (it cannot start before the answer).
  * `staleGrant`: the stop asks again for a PR the person allowed its Task (its head moved since; `headMoved`). No answer
  * is taken on the notice itself.
  */
@@ -108,7 +108,7 @@ export function queueStallAsk(input: {
     // a stop that asks again for what the person allowed waits by itself (`needs: "auto"`), yet only the person moves it
     const headMoved = input.staleGrant(a);
     if (a.needs !== "person" && !headMoved) return [];
-    const held = new Set([...stall.holders.filter((h) => h.workspaceId === ws && h.pbi === n).flatMap((h) => h.held), ...a.unblocks.map((p) => p.number), ...a.waiting.map((p) => p.number)]);
+    const held = new Set([...stall.holders.filter((h) => h.workspaceId === ws && h.pbi === n).flatMap((h) => h.held), ...a.unblocks.map((p) => p.number), ...a.waiting.map((p) => p.number), ...(queued.has(key(ws, n)) ? [n] : [])]);
     const text = (a.question ?? a.reason ?? "").split("\n")[0]!.slice(0, 80);
     return [{
       askId: a.id,

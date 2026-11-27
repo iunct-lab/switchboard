@@ -581,6 +581,24 @@ describe("core daemon", () => {
     }
   });
 
+  test("kernel.explorationShare: defaults to 0.1, PATCH is partial and saved, out of 0..1 is 400 and saves nothing, null puts the group back", async () => {
+    const patch = (body: unknown) => fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const get = () => fetch(`${base}/api/settings`).then(j);
+    const first = await get();
+    expect(first.kernel).toEqual({ explorationShare: 0.1 });
+    expect(first.defaults.kernel).toEqual({ explorationShare: 0.1 });
+    expect((await patch({ kernel: { explorationShare: 0.25 } })).status).toBe(200);
+    expect((await get()).kernel).toEqual({ explorationShare: 0.25 });
+    expect((core.db.getSetting("settings", {}) as { kernel: unknown }).kernel).toEqual({ explorationShare: 0.25 });
+    for (const bad of [1.5, -0.1, "0.2"]) expect((await patch({ kernel: { explorationShare: bad } })).status).toBe(400);
+    expect((await get()).kernel).toEqual({ explorationShare: 0.25 });
+    expect((await patch({ kernel: { explorationShare: 0 } })).status).toBe(200); // the edges are in range
+    expect((await patch({ kernel: { explorationShare: 1 } })).status).toBe(200);
+    expect((await patch({ kernel: {} })).status).toBe(200); // nothing sent leaves it
+    expect((await get()).kernel.explorationShare).toBe(1);
+    expect((await patch({ kernel: null }).then(j)).kernel).toEqual({ explorationShare: 0.1 });
+  });
+
   test("settings reset to defaults: GET's defaults hold every setting, and a key sent as null goes back to its default", async () => {
     const h = mkdtempSync(join(tmpdir(), "switchboard-test-reset-"));
     const c = await startServer(loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY }), [fakeAdapter(SCRIPT, { lingers: true }), fakeAdapter(SCRIPT, { id: "codex", lingers: true })], { port: 0 });
@@ -602,6 +620,7 @@ describe("core daemon", () => {
         maxRunners: 5,
         reviewRunner: "same",
         developSelf: !first.defaults.developSelf,
+        autoDirect: !first.defaults.autoDirect,
         shadowRunner: "codex",
         judge: { enabled: !first.defaults.judge.enabled },
         evals: { judge: { enabled: !first.defaults.evals.judge.enabled } },
@@ -609,6 +628,7 @@ describe("core daemon", () => {
         autoStart: { runner: "codex", fallbackAt: 0.6, byKind: { fix: { budgetUsd: 3 } } },
         release: { checkMinutes: 99 },
         quotaAndResume: { maxLimitStops: 3 },
+        kernel: { explorationShare: 0.25 },
         prices: { "model-x": { input: 1, output: 2 } },
         autoResume: { claude: true },
       };

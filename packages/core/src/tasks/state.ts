@@ -11,6 +11,19 @@ import { MAX_STOP_RESUMES } from "../interrupted.ts";
 import { FenceReader, StopFenceReader } from "../stops.ts";
 import { foreignWorkspaceOf, RunnerConfigUnconfirmed, runnerConfigOf } from "../runner-config.ts";
 
+/** A reply held for a process's background jobs (see `LiveSession.heldReplies`). */
+export interface HeldReply {
+  text: string;
+  /** The sender's last check, run right before the hand-over; one that throws is not handed over. */
+  going?: () => void;
+  /** Run once the reply is handed over. */
+  sent?: () => void;
+  /** Run when the reply is not handed over: dropped (中断, the daemon stopping) or refused by `going`. */
+  dropped?: () => void;
+  /** The stops the reply answers: only ones that were open when it was sent. */
+  answers?: (s: StopRecord) => boolean;
+}
+
 export interface LiveSession {
   session: RunnerSession;
   /** The runner's events not yet taken in, oldest first: more than the one in hand only while the database is locked (fromRunner). */
@@ -41,8 +54,10 @@ export interface LiveSession {
    * Replies sent under the admission hold while the Task sat on background jobs, oldest first. The queue holds only idle
    * rows and the process must keep running its jobs, so the text waits here (memory: it goes with the process) until the
    * Task leaves its jobs and turns, or the hold ends; then it is dispatched like a reply sent at that moment (flushHeldReplies).
+   * `going` / `sent` are the sender's last check and its record (a grant) and `answers` the stops the reply answers: all
+   * three run only when the text is handed over, so a reply dropped here leaves no grant and no answered stop.
    */
-  heldReplies?: string[];
+  heldReplies?: HeldReply[];
   /**
    * The next turn must restart the runner (--resume) instead of reusing this process: its mode changed and it could
    * not switch live, or its scope grew (an attachment directory) and roots are only read at start.

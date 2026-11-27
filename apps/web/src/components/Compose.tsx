@@ -557,7 +557,7 @@ export function Compose(props: {
         {offer.fix && (
           <div className="compose-fix">
             <button data-compose-fix disabled={!canFile} onClick={() => void file("fix")}>{sending === "fix" ? t(home.sendingRequest) : t(home.fixNow)}</button>
-            <span className="hint">{t(feedbackText.fixHint)}</span>
+            <span className="hint">{t(feedbackText.fixHint, { target: targetName })}</span>
           </div>
         )}
         {props.workspaces.length > 0 && <SaveIssue workspaces={props.workspaces} current={wsId} />}

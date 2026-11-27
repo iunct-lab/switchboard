@@ -378,7 +378,13 @@ export const answerAsk = async (sc: Pick<ServerContext, "currentAsks" | "db" | "
       await keep(written, screen, ownParts(answer));
     }
   } catch (e) {
-    if (e instanceof BacklogEditError) return { status: e.status, body: { error: e.message } };
+    if (e instanceof BacklogEditError) {
+      if (e.status !== 409) return { status: e.status, body: { error: e.message } };
+      // another route answered first: the screen is told the question as it is now (none when nothing is open), so it reads the list again
+      const now = (await sc.currentAsks()).asks.filter((a) => a.state === "open" || a.state === "held");
+      const current = now.find((a) => a.id === id) ?? now.find((a) => askIdBase(a.id) === askIdBase(id)) ?? null;
+      return changed(e.message, [e.message], current);
+    }
     throw e;
   }
   sc.backlog.send(ws);
@@ -604,19 +610,28 @@ export const stopForRefusedProceed = (sc: Pick<ServerContext, "db" | "tasks">, w
   return refused.why;
 };
 
+/** The stop the person saw is no longer the one that stands, found right before the reply was handed over (`answerTask`). */
+class StopMoved extends Error {
+  constructor() {
+    super("問いが新しくなりました");
+  }
+}
+
 /**
  * Answers one question of a Task: a tool approval through the Task's pending permission, a check of a Task with no Issue or a stop of
  * any Task as the person's reply — the reply is its record and its resume. A Task's question reads no PR: the
  * Task checks what it stopped at again when it goes on (a merge goes through merge-gate again).
  * An answer to a stop is for the stop the person saw, by the one check `stopsAnswered`: a grant comes with the sentence
  * the screen showed (`answer.grant`), and that sentence has to be the stop's grant when the answer comes in and again
- * after everything that is waited for (the PR's head, what can refuse the reply) — else 409 with the question now, and
- * nothing is sent or recorded. The order is: check, read the heads, ask whether the reply can go (`checkSend`), check
- * again, record the grant, send — so a reply the Task refuses (its budget) records no grant (the question stays open,
- * its resume failed), and nothing is waited for between the last check and the record. The reply marks only the stops
- * it answers (`answers`): one that came with another grant while it was sent stays open.
+ * after everything that is waited for (the PR's head, what can refuse the reply, the process that closes first) — else
+ * 409 with the question now, and nothing is sent or recorded. The order is: check, read the heads, ask early whether the
+ * reply can go (`checkSend`), check again, `send`'s own checks, the last check right before the hand-over (`going`),
+ * hand over, record the grant (`sent`) — so a reply the Task refuses or cannot start records no grant (the question
+ * stays open, its resume failed), and nothing is waited for between the last check and the hand-over or between the
+ * hand-over and the record. The reply marks only the stops it answers (`answers`): one that came with another grant
+ * while it was sent stays open.
  */
-export const answerTask = async (sc: Pick<ServerContext, "tasks" | "noteMergeGrant" | "taskGrantHeads" | "currentAsks" | "db" | "policyGone" | "basisLine">, id: string, ask: Ask, answer: AskAnswer, by: AnswerPolicy | null = null, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
+export const answerTask = async (sc: Pick<ServerContext, "tasks" | "grantRecorder" | "taskGrantHeads" | "currentAsks" | "db" | "policyGone" | "basisLine">, id: string, ask: Ask, answer: AskAnswer, by: AnswerPolicy | null = null, via: "screen" | "api" = "api"): Promise<{ status: number; body: object }> => {
   const taskId = ask.task!.id;
   const changed = (error: string, changes: string[]) => ({ status: 409, body: { error, changes, current: ask } satisfies AskChanged });
   if (!ask.answers.includes(answer.kind) || (answer.kind === "choice" && !ask.choices.includes(answer.choice))) return changed("選択肢が変わりました", ["選択肢が変わりました"]);
@@ -670,14 +685,30 @@ export const answerTask = async (sc: Pick<ServerContext, "tasks" | "noteMergeGra
   } catch (e) {
     return failedWith(e);
   }
-  const answers = answered();
+  // checked again after the waits above, before `send` forgets the planned resume and waits for the process that closes
+  let answers = answered();
   if (!answers) return renewed();
+  // what the reply grants is taken now (the time of the grant, the heads read above) and recorded once it is handed over:
+  // a reply that was refused or did not start leaves none
+  const record = noted !== null ? sc.grantRecorder(taskId, noted, { via, heads, ...(chosen ? { read: { said: chosen.readerSaid, asked: chosen.readerAsked, full: chosen.questionsText } } : {}), ...(parts ? { parts } : {}), ...(grant !== null ? { taskWrote: true } : {}) }) : undefined;
   try {
-    if (noted !== null) await sc.noteMergeGrant(taskId, noted, { via, heads, ...(chosen ? { read: { said: chosen.readerSaid, asked: chosen.readerAsked, full: chosen.questionsText } } : {}), ...(parts ? { parts } : {}), ...(grant !== null ? { taskWrote: true } : {}) });
     // the person allowed this Task's own refused operation: a pressed grant is not copied to a shadow running alongside it
-    const t = await sc.tasks.send(taskId, grant ?? (by ? `${sc.basisLine(by, ask.subject)}\n\n${text}` : text), { answers, ...(grant !== null ? { mirror: false } : {}) });
+    const t = await sc.tasks.send(taskId, grant ?? (by ? `${sc.basisLine(by, ask.subject)}\n\n${text}` : text), {
+      answers: (s) => answers!(s),
+      // a reply held for the Task's background jobs and then not handed over (dropped, or its stop moved by then) leaves
+      // this question unanswered, so the person can answer it again
+      dropped: () => sc.db.rememberAskAnswer(id, { at: Date.now(), result: null }),
+      ...(grant !== null ? { mirror: false } : {}),
+      // the last check, right before the hand-over: what `send` waits for (the process that closes) comes before it
+      going: () => {
+        answers = answered();
+        if (!answers) throw new StopMoved();
+      },
+      ...(record ? { sent: record } : {}),
+    });
     return result("answered", resumeOfTask({ task: t, repliedAt: at, failure: null }));
   } catch (e) {
+    if (e instanceof StopMoved) return renewed();
     return failedWith(e);
   }
 };

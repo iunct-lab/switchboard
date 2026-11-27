@@ -51,6 +51,17 @@ test("waitText: a date not passed is a wait with the date in the condition; pass
   expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z", waitsUntil: { at, met: true } }), true)).toMatchObject({ label: "待ちが解けた", done: true, cond: "" });
 });
 
+test("waitText: a closed record the gate holds for its next automatic start is not shown as 待ちが解けた; an open wait is shown either way", () => {
+  const held = { previousTaskId: "t_auto", action: "complete" as const };
+  expect(waitText(item({ waits: [], waitsAt: "2026-10-01T00:00:00Z", autoHeld: held }), true)).toBeNull();
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)], autoHeld: held }), true)).toBeNull();
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)], autoHeld: null }), true)).toMatchObject({ label: "待ちが解けた", done: true });
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", true)], autoHeld: held }), true)).toMatchObject({ label: "待ち", done: false });
+  // an 実装 or 閉じる started after the waits (the button's too; `lastWorkAt`): the work went on, so the row does not say 待ちが解けた
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)], autoHeld: null, lastWorkAt: Date.parse("2026-10-02T00:00:00Z") }), true)).toBeNull();
+  expect(waitText(item({ waitsAt: "2026-10-01T00:00:00Z", waits: [wait(603, "issue", false)], autoHeld: null, lastWorkAt: Date.parse("2026-09-30T00:00:00Z") }), true)).toMatchObject({ label: "待ちが解けた" });
+});
+
 test("waitText: nothing / one open / all closed / one not read; the condition by reason; whether backlog-next goes on by itself", () => {
   expect(waitText(item({}), true)).toBeNull();
   // a record whose waits all left (deferred PRs): 待ちが解けた, as backlog-next takes it
@@ -246,13 +257,11 @@ test("readyPending / startButton: a decomposed PBI in 分解待ち is marked and
   expect(startButton(item({ type: "request", stage: "request", tasks: null }))).toEqual(["to-pbi", "PBI にする"]);
 });
 
-test("directButton: 直行で直す on the meta workspace's requests with no PBI only, the same rows as PBI にする", () => {
+test("directButton: 直行で直す on any workspace's request with no PBI, the same rows as PBI にする", () => {
   const request = item({ type: "request", stage: "request", tasks: null });
-  expect(directButton(request, "ws_meta")).toEqual(["direct", "直行で直す"]);
+  expect(directButton(request)).toEqual(["direct", "直行で直す"]);
+  expect(directButton({ ...request, workspaceId: "ws_other" })).toEqual(["direct", "直行で直す"]);
   expect(startButton(request)).toEqual(["to-pbi", "PBI にする"]);
-  for (const stage of ["needs-tasks", "ready", "in-progress", "needs-decision"] as const) expect(directButton(item({ stage }), "ws_meta")).toBeNull();
-  expect(directButton(item({ type: "request", stage: "needs-decision", tasks: null }), "ws_meta")).toBeNull();
-  // another repository's request, or the workspaces not read yet
-  expect(directButton(request, "ws_other")).toBeNull();
-  expect(directButton(request, null)).toBeNull();
+  for (const stage of ["needs-tasks", "ready", "in-progress", "needs-decision"] as const) expect(directButton(item({ stage }))).toBeNull();
+  expect(directButton(item({ type: "request", stage: "needs-decision", tasks: null }))).toBeNull();
 });

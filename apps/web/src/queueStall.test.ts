@@ -36,15 +36,53 @@ test("stallAskOf picks the stalled queue's notice and nothing else", () => {
 test("stall rows say the holders and the person's waits", () => {
   const rows = stallRows(stalled);
   expect(rows.person).toEqual([
-    { text: "#5796 止まり: PR #5838 のマージの許可 — 13 件待ち", badge: "回答の後に head が動いた", href: "https://github.com/o/r/issues/5797", taskId: "task_1" },
-    { text: "#5664 判断待ち: 進め方の問い — 8 件待ち", badge: null, href: "https://github.com/o/r/issues/5664", taskId: null },
+    { text: "#5796 止まり: PR #5838 のマージの許可", count: "13 件待ち", badge: "回答の後に head が動いた", href: "https://github.com/o/r/issues/5797", taskId: "task_1", openAsks: false, workspace: null },
+    { text: "#5664 判断待ち: 進め方の問い", count: "8 件待ち", badge: null, href: "https://github.com/o/r/issues/5664", taskId: null, openAsks: false, workspace: null },
   ]);
   expect(rows.holders).toEqual([
-    { text: "#4045 の順番 — 16 件", href: "https://github.com/o/r/issues/4045" },
-    { text: "PR #5845 — 9 件（作業していない）", href: "https://github.com/o/r/pull/5845" },
-    { text: "Task #5841 — 4 件（作業中）", href: null },
+    { text: "#4045 の順番 — 16 件", href: "https://github.com/o/r/issues/4045", workspace: null },
+    { text: "PR #5845 — 9 件（作業していない）", href: "https://github.com/o/r/pull/5845", workspace: null },
+    { text: "Task #5841 — 4 件（作業中）", href: null, workspace: null },
   ]);
-  expect(stallRows(ask({ id: "notice:x", kind: "notice" }))).toEqual({ person: [], holders: [] });
+  expect(rows.more).toBe(0);
+  expect(stallRows(ask({ id: "notice:x", kind: "notice" }))).toEqual({ person: [], more: 0, holders: [] });
+});
+
+const withPerson = (n: number, over: Partial<NonNullable<Ask["stall"]["person"][number]>> = {}) =>
+  ask({
+    ...stalled,
+    stall: { ...stalled.stall!, person: Array.from({ length: n }, (_, i) => ({ askId: `d:${i}`, workspace: ws, pbi: pbi(100 + i), label: `判断待ち ${i}`, taskId: `task_${i}`, url: null, held: 10 - i, headMoved: false, ...over })) },
+  });
+
+test("Home names the first three answers and counts the rest", () => {
+  const a = withPerson(5);
+  const home = stallRows(a, { shown: 3 });
+  expect(home.person.map((r) => r.text)).toEqual(["#100 判断待ち 0", "#101 判断待ち 1", "#102 判断待ち 2"]);
+  expect(home.more).toBe(2);
+  const all = stallRows(a);
+  expect(all.person).toHaveLength(5);
+  expect(all.more).toBe(0);
+});
+
+test("rows name their workspace only when the notice names two", () => {
+  expect(stallRows(withPerson(2)).person.every((r) => r.workspace === null)).toBe(true);
+  const two = ask({ ...withPerson(2), stall: { ...withPerson(2).stall!, holders: [{ workspace: { id: "w2", name: "other" }, ref: "PR #1", url: null, pbi: null, held: 1, working: false }] } });
+  const rows = stallRows(two);
+  expect(rows.person.map((r) => r.workspace)).toEqual(["switchboard", "switchboard"]);
+  expect(rows.holders.map((r) => r.workspace)).toEqual(["other"]);
+  // only the rows Home shows count: a second workspace on a hidden answer names no row
+  const hidden = ask({ ...withPerson(4), stall: { ...withPerson(4).stall!, person: withPerson(4).stall!.person.map((p, i) => (i === 3 ? { ...p, workspace: { id: "w2", name: "other" } } : p)) } });
+  expect(stallRows(hidden, { shown: 3 }).person.every((r) => r.workspace === null)).toBe(true);
+  expect(stallRows(hidden).person.map((r) => r.workspace)).toEqual(["switchboard", "switchboard", "switchboard", "other"]);
+});
+
+test("an answer with no Task and no link opens the questions", () => {
+  const rows = stallRows(ask({ ...withPerson(0), stall: { ...stalled.stall!, person: [
+    { askId: "a", workspace: ws, pbi: pbi(1), label: "x", taskId: null, url: null, held: 1, headMoved: false },
+    { askId: "b", workspace: ws, pbi: pbi(2), label: "y", taskId: "task_2", url: null, held: 1, headMoved: false },
+    { askId: "c", workspace: ws, pbi: pbi(3), label: "z", taskId: null, url: "https://github.com/o/r/issues/3", held: 1, headMoved: false },
+  ] } })).person;
+  expect(rows.map((r) => r.openAsks)).toEqual([true, false, false]);
 });
 
 test("Home reads the queue again when the stall reaches the limit", () => {

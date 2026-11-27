@@ -47,15 +47,21 @@ export interface MergeHistory {
 /**
  * What a period's tables read of a repository (`repo`, any case) in one call, from the app's own records: the jobs of
  * the PRs the period touched (all of them, so an ask before `sinceMs` still gives the wait), the person's grants, the
- * stored PRs and their comments. Nothing is asked of the service.
+ * stored PRs and their comments. Nothing is asked of the service. Null when the app knows nothing of `repo`: no GitHub
+ * backlog of a workspace is it, no workspace's checkout goes by it (`keysOf`: the key its jobs are recorded under and its
+ * origin, as a Task's own grants are keyed — for a backlog kept here, one not imported yet or a GitLab project), and no
+ * job with a head was ever recorded under it (a checkout moved or removed since). There is nothing to read then, which
+ * an empty answer would not say.
  */
-export function mergeHistoryOf(db: Pick<Db, "jobsOf" | "ownerMergeGrantsOf" | "firstHeadedJobAt" | "getTask" | "listWorkspaces" | "getWorkspaceBacklogSource" | "listBacklogRecords" | "jobsSince">, q: { repo: string; sinceMs: number; titlePrefix?: string }): MergeHistory {
+export function mergeHistoryOf(db: Pick<Db, "jobsOf" | "ownerMergeGrantsOf" | "firstHeadedJobAt" | "getTask" | "listWorkspaces" | "getWorkspaceBacklogSource" | "listBacklogRecords" | "jobsSince">, q: { repo: string; sinceMs: number; titlePrefix?: string }, keysOf: (w: { id: string; path: string }) => (string | null)[]): MergeHistory | null {
   const repo = q.repo.toLowerCase();
   const sources = new Map<string, NonNullable<ReturnType<Db["getWorkspaceBacklogSource"]>>>();
   for (const w of db.listWorkspaces()) {
     const s = db.getWorkspaceBacklogSource(w.id);
     if (s && s.service === "github" && s.repository.toLowerCase() === repo) sources.set(`${s.host}/${s.repository}`, s);
   }
+  const since = db.firstHeadedJobAt(repo);
+  if (!sources.size && since === null && !db.listWorkspaces().some((w) => keysOf(w).some((k) => k?.toLowerCase() === repo))) return null;
   const stored = new Map<number, BacklogPullRequestData>();
   for (const s of sources.values()) {
     for (const r of db.listBacklogRecords(s, "pull-request")) {
@@ -92,5 +98,5 @@ export function mergeHistoryOf(db: Pick<Db, "jobsOf" | "ownerMergeGrantsOf" | "f
       }
     }
   }
-  return { jobs, grants: db.ownerMergeGrantsOf(repo, numbers), pulls, comments, titles, since: db.firstHeadedJobAt(repo) };
+  return { jobs, grants: db.ownerMergeGrantsOf(repo, numbers), pulls, comments, titles, since };
 }

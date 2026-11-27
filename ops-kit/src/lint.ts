@@ -282,6 +282,15 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
   const isPoint = (n: number) => STORY_POINTS.includes(n);
 
   const origin = cfg.sections.origin;
+  // the marks of `fields.kernel` on a PBI's or a request's Project item: a value outside the choices is a violation; one
+  // not set is not (the report counts it as not marked yet)
+  type Item = NonNullable<Row["projectItems"]>["nodes"][number];
+  const kernelMarks = (n: number, item: Item) => {
+    for (const [field, options] of Object.entries(cfg.fields.kernel ?? {})) {
+      const mark = item.fieldValues.nodes.find((v) => v.field?.name === field)?.name;
+      if (mark && !options.includes(mark)) bad(n, `Project の ${field} が ${options.join(" / ")} 以外（${mark}）`);
+    }
+  };
   for (const row of rows.filter((r) => labelsOf(r).includes("type:pbi"))) {
     const n = row.number;
     const body = row.body.replace(/\r\n/g, "\n");
@@ -319,6 +328,7 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const priorities = cfg.fields.priority.join(" / ");
     if (!priority) bad(n, `Project の Priority が未設定（backlog set ${n} Priority <${priorities}>）`);
     else if (!cfg.fields.priority.includes(priority)) bad(n, `Project の Priority が ${priorities} 以外（${priority}）`);
+    kernelMarks(n, item);
     const status = value("Status")?.name;
     if ((status === "Ready" || status === "In progress") && row.subIssues.totalCount === 0) bad(n, `Status=${status} なのに Task（sub-issue）が無い`);
   }
@@ -371,6 +381,8 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     const body = row.body.replace(/\r\n/g, "\n");
     for (const s of cfg.sections.request) if (!hasSection(body, sectionName(s))) bad(row.number, missing("要望", s));
     if (hasSection(body, "出典") && !speakerOf(body)) bad(row.number, SPEAKER_MISSING);
+    const item = withProject ? row.projectItems?.nodes.find((i) => i.project.number === projectNumber) : undefined;
+    if (item) kernelMarks(row.number, item);
   }
 
   for (const k of opts.knownFailures ?? []) {

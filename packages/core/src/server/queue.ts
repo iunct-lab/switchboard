@@ -167,7 +167,7 @@ export const queueOnce = async (sc: Pick<ServerContext, "prunedQueue" | "schedul
       lines.push(`${ws.name}: #${p.item.number} を始めない: ${why}`);
       continue;
     }
-    const t = await sc.startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume && { tasksDone: p.item.tasks!.done }, auto: true });
+    const t = await sc.startStage({ ws, meta, item: p.item, action: p.action, resume: p.resume, auto: true });
     if ("held" in t && !("error" in t)) {
       // the line of the item the first read already held is the slot's gate line (`leftLines`): said once
       const said = `#${p.item.number}（前回 ${t.held.previousTaskId}）`;

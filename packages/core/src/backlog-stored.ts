@@ -258,8 +258,7 @@ export function readAutoHeld(db: Db, workspaceId: string, item: Pick<BacklogItem
 }
 
 /**
- * An item with its last stage Task (`lastTask`), the record of how its stage Tasks stopped (`stopSummary`), and its waits
- * dropped when an 実装 started after they were written: the part of server/backlog-read.ts `withActive` that reads only the
+ * An item with its last stage Task (`lastTask`) and the record of how its stage Tasks stopped (`stopSummary`): the part of server/backlog-read.ts `withActive` that reads only the
  * stage Tasks' rows, which `readStoredBacklog` needs before it judges the places (`notResumed`). The person's check of the
  * last stage Task is an event too (it is on the Task's row, which the stored read does not have), so `autoHeld` is read here,
  * last, for the stage `autoActionsOf` names from the rest; a request is held only when both of its ways are (the start asks the
@@ -267,19 +266,19 @@ export function readAutoHeld(db: Db, workspaceId: string, item: Pick<BacklogItem
  */
 export function withStageTask(db: Db, i: BacklogItem): BacklogItem {
   const t = db.lastStageTask(i.workspaceId, i.number);
-  // an 実装 started after the waits were written makes them old: it claimed, or it ended before it could —
-  // then it is not started again by itself. A 状況確認 only reads, so the newest 実装 is the one compared
-  const impl = i.waitsAt ? db.lastStageTask(i.workspaceId, i.number, "complete") : null;
-  const old = !!impl && impl.createdAt > Date.parse(i.waitsAt!);
+  // the newest 実装 / 閉じる, not the newest stage Task: a 状況確認 after it only reads, so it does not undo that the work went on
+  const work = i.waitsAt ? [db.lastStageTask(i.workspaceId, i.number, "complete"), db.lastStageTask(i.workspaceId, i.number, "close")].map((x) => x?.createdAt ?? null) : [];
+  const lastWorkAt = work.some((x) => x !== null) ? Math.max(...work.filter((x): x is number => x !== null)) : null;
   const reviewed = t?.reviewedAt != null ? [{ key: `reviewed:${t.id}`, at: t.reviewedAt }] : [];
   const s: BacklogItem = {
     ...i,
     events: [...i.events, ...reviewed],
+    lastWorkAt,
     lastTask: t ? { id: t.id, status: t.status, statusAt: t.statusAt, createdAt: t.createdAt, updatedAt: t.updatedAt, action: t.stage?.action ?? null, outcome: t.outcome, reviewedAt: t.reviewedAt, resumeAt: t.resumeAt, started: t.runnerSessionId !== null } : null,
     stopSummary: reduceStops(db.listStopRecords(db.stageTaskIds(i.workspaceId, i.number)), { newestTaskId: t?.id ?? null }),
-    ...(old ? { waits: [], waitsAt: null, waitsUntil: null } : {}),
   };
-  const held = autoActionsOf(s).map((action) => ((h) => h && { ...h, action })(readAutoHeld(db, i.workspaceId, s, action)));
+  // `autoHeld` is what this reads, so the stages are named as if the item were not held (`isUnblocked` reads it)
+  const held = autoActionsOf({ ...s, autoHeld: null }).map((action) => ((h) => h && { ...h, action })(readAutoHeld(db, i.workspaceId, s, action)));
   return { ...s, autoHeld: held.length && held.every((h) => h !== null) ? held[0]! : null };
 }
 

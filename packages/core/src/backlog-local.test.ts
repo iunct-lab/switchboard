@@ -290,6 +290,13 @@ test("local fields take the choices of ops.config.json", async () => {
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 13 } })).status).toBe(202);
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 21 } })).status).toBe(422);
   expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { "Story Points": 3 } })).status).toBe(202);
+  // the marks of `fields.kernel` are fields with choices of the config: a choice passes, a value outside it is 422, and the Project's definitions list them
+  const kernelCfg = { ...JSON.parse(readFileSync(cfgPath, "utf8")), fields: { priority: ["P0", "P1"], kernel: { Problem: ["明確", "曖昧", "不明"] } } };
+  writeFileSync(cfgPath, JSON.stringify(kernelCfg));
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Problem: "曖昧" } })).status).toBe(202);
+  expect((await t.view(ws, 1)).fields?.Problem).toBe("曖昧");
+  expect((await t.view(ws, 1)).projectFields.find((f) => f.name === "Problem")?.options).toEqual(["明確", "曖昧", "不明"]);
+  expect((await t.send("PATCH", "/api/backlog/1", { workspaceId: ws.id, fields: { Problem: "x" } })).status).toBe(422);
   // no ops.config.json: the kit's template gives the choices; what it has not, and any Milestone, is refused
   const bare = await t.local("bare");
   expect((await t.create(bare, { title: "PBI: z", labels: ["type:pbi"], fields: { Status: "Ready", Priority: "P1", "Story Points": 5 } })).status).toBe(202);

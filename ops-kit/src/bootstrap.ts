@@ -45,7 +45,7 @@ async function projectsOf(gh: GhClient, owner: string): Promise<{ ownerId: strin
 
 /**
  * Make the Project ready: find the config's Project (by number, else by `title`), create it if there is none, then
- * create the single-select fields of the config (Priority, Phase if any) and the number field
+ * create the single-select fields of the config (Priority, Phase if any, and the fields of `fields.kernel`) and the number field
  * `Story Points` that are missing. Idempotent: an existing field is never changed (a wrong type or missing choices
  * are listed for the UI). Status is given the kit's choices only on a Project this run created — rewriting the
  * choices of an existing Status would clear every item's Status. Views cannot be made through the API.
@@ -75,6 +75,7 @@ export async function bootstrap(gh: GhClient, cfg: OpsConfig, opts: { title: str
     { name: "Status", options: STATUS_OPTIONS },
     { name: "Priority", options: cfg.fields.priority },
     ...(cfg.fields.phase ? [{ name: "Phase", options: cfg.fields.phase }] : []),
+    ...Object.entries(cfg.fields.kernel ?? {}).map(([name, options]) => ({ name, options })),
     { name: "Story Points" },
   ];
   for (const f of want) {

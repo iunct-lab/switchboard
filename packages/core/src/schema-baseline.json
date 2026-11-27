@@ -28,6 +28,7 @@
   "quota": ["runner","window","utilization","resets_at","ts"],
   "quota_by_account": ["runner","account","window","utilization","resets_at","ts"],
   "quota_windows": ["runner","window","resets_at","peak","first_ts","last_ts"],
+  "experiments": ["id","question","branch_a","branch_b","metric","window_days","registered_at","decided_at","changed","note"],
   "request_evals": ["workspace_id","issue","json","ts"],
   "routing_log": ["id","task_id","workspace_id","cwd","suggested","rule_id","reason","chosen","ts","suggested_by","src_id"],
   "schedule_log": ["ts","schedule_id","text"],

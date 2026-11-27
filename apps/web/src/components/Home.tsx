@@ -14,7 +14,7 @@ import { home } from "../i18n/home.ts";
 import { ago } from "../inProgress.ts";
 import { REASON_LABEL } from "../interventions.ts";
 import { stuckLine, stuckSchedules } from "../stuck.ts";
-import { readStall } from "../queueStall.ts";
+import { readStall, STALL_PERSON_SHOWN } from "../queueStall.ts";
 import { StallRows } from "./Approvals.tsx";
 import { Compose } from "./Compose.tsx";
 
@@ -29,6 +29,7 @@ export function Home(props: {
   runnerOk: Set<RunnerId>;
   onCreate: (input: CreateTaskInput) => Promise<void>;
   onOpenTask: (id: string) => void;
+  onOpenAsks: () => void;
   onError: (msg: string) => void;
   /** Moves on each stop record: the stuck schedules are read again. */
   stopRev: number;
@@ -152,7 +153,7 @@ export function Home(props: {
             <div className="stall-card" data-ask={stall.id}>
               <div className="stall-q">⚠ {stall.question}</div>
               {stall.reason && <div className="stall-sub">{stall.reason}</div>}
-              <StallRows ask={stall} onOpenTask={props.onOpenTask} />
+              <StallRows ask={stall} onOpenTask={props.onOpenTask} shown={STALL_PERSON_SHOWN} onOpenAsks={props.onOpenAsks} />
             </div>
           )}
           {needs.length === 0 && !stall && <div className="muted">{t(home.none)}</div>}
