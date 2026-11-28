@@ -31,7 +31,7 @@ function fake(o: { check: (n: number, now: number) => number; progress?: (now: n
   return { deps, lines, checks: () => checks, now: () => now };
 }
 
-const opts = (over: Partial<WaitOpts> = {}): WaitOpts => ({ label: "PR 12 のマージ", timeoutSec: 600, onTimeout: "fail", intervalSec: 5, check: ["check"], ...over });
+const opts = (over: Partial<WaitOpts> = {}): WaitOpts => ({ label: "PR 12 のマージ", keys: [], timeoutSec: 600, onTimeout: "fail", intervalSec: 5, check: ["check"], ...over });
 
 test("parseWaitArgs: a wait for a person's answer or leave cannot go on when it runs out (proceed is refused); other waits may", () => {
   const args = (label: string, on: string) => ["--for", label, "--timeout", "60", "--on-timeout", on, "--", "true"];
@@ -44,7 +44,7 @@ test("parseWaitArgs: a wait for a person's answer or leave cannot go on when it 
 
 test("parseWaitArgs: what is waited for, the limit and what a cut does are all required", () => {
   const full = ["--for", "x", "--timeout", "60", "--on-timeout", "fail", "--", "true"];
-  expect(parseWaitArgs(full)).toEqual({ label: "x", timeoutSec: 60, onTimeout: "fail", intervalSec: 5, check: ["true"] });
+  expect(parseWaitArgs(full)).toEqual({ label: "x", keys: [], timeoutSec: 60, onTimeout: "fail", intervalSec: 5, check: ["true"] });
   for (const flag of ["--for", "--timeout", "--on-timeout"]) {
     const at = full.indexOf(flag);
     expect(parseWaitArgs([...full.slice(0, at), ...full.slice(at + 2)])).toBeNull();
@@ -63,7 +63,7 @@ test("parseWaitArgs: what is waited for, the limit and what a cut does are all r
   // the progress command and its limit go together
   expect(parseWaitArgs([...full.slice(0, 6), "--progress", "wc -c log", "--", "true"])).toBeNull();
   expect(parseWaitArgs([...full.slice(0, 6), "--stall", "30", "--", "true"])).toBeNull();
-  expect(parseWaitArgs([...full.slice(0, 6), "--progress", "wc -c log", "--stall", "30", "--interval", "2", "--", "sh", "-c", "x"])).toEqual({ label: "x", timeoutSec: 60, onTimeout: "fail", intervalSec: 2, progress: "wc -c log", stallSec: 30, check: ["sh", "-c", "x"] });
+  expect(parseWaitArgs([...full.slice(0, 6), "--progress", "wc -c log", "--stall", "30", "--interval", "2", "--", "sh", "-c", "x"])).toEqual({ label: "x", keys: [], timeoutSec: 60, onTimeout: "fail", intervalSec: 2, progress: "wc -c log", stallSec: 30, check: ["sh", "-c", "x"] });
 });
 
 test("runWait: the check succeeding ends the wait", async () => {
@@ -109,7 +109,7 @@ test("runWait: inside a Task the wait has a record while it lasts; success remov
     const read = () => readdirSync(waitsDir(home)).filter((n) => n.endsWith(".json")).map((n) => WaitFile.parse(JSON.parse(readFileSync(join(waitsDir(home), n), "utf8"))));
     const ok = fake({ check: (n) => (n === 2 ? 0 : 1), env, during: () => seen.push(...read()) });
     await runWait(opts({ timeoutSec: 60 }), ok.deps);
-    expect(seen).toEqual([{ taskId: "task_abc", pid: process.pid, label: "PR 12 のマージ", startedAt: 1_000_000, timeoutAt: 1_060_000, stallSec: null, progressAt: 1_000_000, cut: null }]);
+    expect(seen).toEqual([{ taskId: "task_abc", pid: process.pid, label: "PR 12 のマージ", keys: [], startedAt: 1_000_000, timeoutAt: 1_060_000, stallSec: null, progressAt: 1_000_000, cut: null }]);
     expect(read()).toEqual([]);
     const cut = fake({ check: () => 1, env });
     await runWait(opts({ timeoutSec: 60 }), cut.deps);
@@ -125,6 +125,34 @@ test("runWait: inside a Task the wait has a record while it lasts; success remov
     expect(existsSync(join(home, "other"))).toBe(false);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("--key names the other side of a wait: repeatable, recorded in the record file; a malformed key is a usage error; a record with no keys still reads", async () => {
+  const base = ["--for", "x", "--timeout", "60", "--on-timeout", "fail"];
+  expect(parseWaitArgs([...base, "--key", "pr#12", "--key", "issue#5", "--", "true"])?.keys).toEqual(["pr#12", "issue#5"]);
+  expect(parseWaitArgs([...base, "--", "true"])?.keys).toEqual([]);
+  expect(parseWaitArgs([...base, "--key", "pr#1", "--key", "pr#1", "--", "true"])?.keys).toEqual(["pr#1"]);
+  for (const bad of ["PR12", "pr#", "pr#1x", "task#3", " pr#1", "pr#1\n"]) expect({ bad, parsed: parseWaitArgs([...base, "--key", bad, "--", "true"]) }).toEqual({ bad, parsed: null });
+  expect(parseWaitArgs([...base, "--key"].concat(["--", "true"]))).toBeNull();
+  const home = mkdtempSync(join(tmpdir(), "ops-kit-wait-key-"));
+  try {
+    const env = { OPS_KIT_WAITS_DIR: join(home, "waits"), OPS_KIT_TASK_ID: "task_k" };
+    await runWait(opts({ timeoutSec: 60, keys: ["pr#12", "issue#5"] }), fake({ check: () => 1, env }).deps);
+    const [name] = readdirSync(join(home, "waits"));
+    expect(WaitFile.parse(JSON.parse(readFileSync(join(home, "waits", name!), "utf8"))).keys).toEqual(["pr#12", "issue#5"]);
+    // the shape of a record with no keys (before the field existed) is still read, with none
+    const old = { taskId: "t", pid: 1, label: "x", startedAt: 1, timeoutAt: 2, stallSec: null, progressAt: 1 };
+    expect(WaitFile.parse(old)).toMatchObject({ keys: [], cut: null });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "ops-kit-wait-key-cwd-"));
+  try {
+    const r = Bun.spawnSync(["bun", CLI, "wait", ...base, "--key", "PR12", "--", "true"], { cwd, stdout: "pipe", stderr: "pipe" });
+    expect(r.exitCode).toBe(2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

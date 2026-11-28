@@ -14,7 +14,7 @@ import type { MergeHistory } from "../ops-kit/src/merge-records.ts";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const kind = RECHECK_KINDS[0]!;
 const pr = (n: number, o: Partial<MergedPr> = {}): MergedPr => ({
-  number: n, mergedAt: `2026-11-0${(n % 7) + 1}T00:00:00Z`, headSha: SHA, mergeSha: `${n}`.padStart(40, "0"), marks: [], reviewed: true, audited: false, implementer: null, ...o,
+  number: n, mergedAt: `2026-11-0${(n % 7) + 1}T00:00:00Z`, headSha: SHA, mergeSha: `${n}`.padStart(40, "0"), marks: [], reviewed: true, audited: false, uncountedAudits: 0, implementer: null, ...o,
 });
 const recheck = { kind: "recheck" as const, kinds: [kind], sha: SHA, at: "2026-11-01T00:00:00Z" };
 const yes = { kind: "yes" as const, kinds: [kind], sha: SHA, at: "2026-11-01T01:00:00Z" };
@@ -115,7 +115,7 @@ describe("main", () => {
   };
   const job = (id: number, pr: number, over: object) => ({ id, kind: "gate", taskId: `t${pr}`, pr, runner: null, status: "pass", exitCode: 0, startedAt: Date.parse("2026-11-02T00:00:00Z") + id, endedAt: Date.parse("2026-11-02T00:00:00Z") + id, repo: "o/r", head: SHA, base: null, as: null, kinds: [], result: null, taskRunner: "claude", ...over });
   const gate = (merged: boolean, over: object = {}) => ({ gate: { verdict: "merge", head: SHA, ask: [], recheck: [], reasons: [], allowLarge: false, reviewSkipped: false, merged, ...over } });
-  const pull = (number: number, mergedAt: string | null, mergeCommit: string | null) => ({ number, stored: mergeCommit !== null, state: mergedAt ? "MERGED" : null, mergedAt, closedAt: mergedAt, head: SHA, mergeCommit });
+  const pull = (number: number, mergedAt: string | null, mergeCommit: string | null) => ({ number, stored: mergeCommit !== null, state: mergedAt ? "MERGED" as const : null, mergedAt, closedAt: mergedAt, head: SHA, mergeCommit });
   const history: MergeHistory = {
     jobs: [
       // 11: merged, its verdict skipped the main review (direct); the Task is a codex one

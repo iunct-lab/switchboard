@@ -21,7 +21,6 @@ const base = (over: Partial<PrFacts> = {}): PrFacts => ({
   unresolvedThreads: 0,
   mergeState: "CLEAN",
   reviewed: true,
-  answers: [],
   ...over,
 });
 /** A local CI pass as the app records it, with the hash of the steps it ran when they came from the settings Switchboard keeps (`JobCi.stepsHash`). */

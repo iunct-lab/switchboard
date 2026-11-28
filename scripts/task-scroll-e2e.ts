@@ -148,7 +148,8 @@ try {
       const t = document.querySelector('.side .brief-instruction .tx'), r = t?.getBoundingClientRect();
       return t ? { text: t.innerText, inside: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth && r.height > 0 } : null;
     })()`) as { text: string; inside: boolean } | null;
-    assert(shown?.text === PROMPT, `${size}: the Brief's instruction is ${JSON.stringify(shown?.text)}`);
+    if (!shown) throw new Error(`${size}: the Brief has no instruction`);
+    assert(shown.text === PROMPT, `${size}: the Brief's instruction is ${JSON.stringify(shown.text)}`);
     assert(shown.inside, `${size}: the Brief's instruction is off screen`);
     if (mobile) {
       if (process.env.SCREENSHOT_DIR) {

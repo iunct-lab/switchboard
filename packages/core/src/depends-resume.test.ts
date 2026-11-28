@@ -1,14 +1,17 @@
+// test-reads: none
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StopRecord, type AgentEvent, type BacklogRecord, type RunnerAdapter, type RunnerSession } from "@switchboard/protocol";
 import { Db, type BacklogSnapshotEntry } from "./db.ts";
-import { answeredFromRecords, decisionIssueWaits, dependsResumePrompt, dependsWaits, jobResumePrompt, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed } from "./depends-resume.ts";
+import { answeredFromRecords, decisionIssueWaits, dependsResumePrompt, dependsWaits, jobResumePrompt, meetJobConditions, resumeDepends, resumeDueAfters, resumeJobsOnTurnEnd, stateFromRecords, waitsClosed, type WaitState } from "./depends-resume.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { blockersOf } from "./asks.ts";
 import { lastStopMark, reduceStops, type StopReport } from "./stops.ts";
 import { TaskManager } from "./tasks/manager.ts";
+import { releasedOf } from "./server/backlog-read.ts";
+import { resumeDueWaits } from "./server/lifecycle.ts";
 
 // A Task that stopped on another session's work is resumed when that work closes: which stops wait on what.
 
@@ -47,10 +50,10 @@ describe("depends-resume", () => {
       stop({ conditions: [{ key: "pr#12", value: "merged", met: true }] }), // nothing left to wait for
       stop({ state: "resolved" }),
     ];
-    expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34], jobs: [] }]);
+    expect(dependsWaits(records)).toEqual([{ stop: pick, numbers: [12, 34], jobs: [], promoted: [] }]);
     // a job of the daemon is a wait too, kept apart from GitHub's numbers
     const job = stop({ conditions: [{ key: "job#7", value: "done", met: false }, { key: "pr#12", value: "open", met: false }] });
-    expect(dependsWaits([job])).toEqual([{ stop: job, numbers: [12], jobs: [7] }]);
+    expect(dependsWaits([job])).toEqual([{ stop: job, numbers: [12], jobs: [7], promoted: [] }]);
     // the newest record of a stop decides: one resolved later is not open
     const later = { ...pick, state: "resolved" as const, at: pick.at + 1 };
     expect(dependsWaits([pick, later])).toEqual([]);
@@ -61,8 +64,8 @@ describe("depends-resume", () => {
     const only = stop({ conditions: [{ key: "after", value: due, met: false }] });
     const both = stop({ conditions: [{ key: "pr#12", value: "open", met: false }, { key: "after", value: due, met: false }] });
     expect(dependsWaits([only, both])).toEqual([
-      { stop: only, numbers: [], jobs: [], after: Date.parse(due) },
-      { stop: both, numbers: [12], jobs: [], after: Date.parse(due) },
+      { stop: only, numbers: [], jobs: [], promoted: [], after: Date.parse(due) },
+      { stop: both, numbers: [12], jobs: [], promoted: [], after: Date.parse(due) },
     ]);
     // no zone, or no time at all: nothing to wait for by the clock
     expect(dependsWaits([stop({ conditions: [{ key: "after", value: "2026-11-20T09:00:00", met: false }] }), stop({ conditions: [{ key: "after", value: "soon", met: false }] })])).toEqual([]);
@@ -298,6 +301,243 @@ describe("resumeDepends", () => {
     expect(sends).toEqual([]);
     // an Issue not read gives no answer
     expect(answeredFromRecords([{ ...issue(34, "CLOSED", []), fetchState: "unavailable" } as BacklogRecord])(34, 0)).toBe(false);
+  });
+
+  describe("promoted", () => {
+    const SHA = "a1b2c3d4e5f6";
+    const startPromoted = async () => {
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app" });
+      await settle();
+      expect(tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: `promoted#${SHA}`, value: "open", met: false }] }).ok).toBe(true);
+      return t;
+    };
+
+    test("promoted: dependsWaits names the sha; waitsClosed needs every sha closed and reads none as unknown", () => {
+      const s = stop({ conditions: [{ key: `promoted#${SHA}`, value: "open", met: false }, { key: "promoted#0123456", value: "open", met: true }] });
+      expect(dependsWaits([s])).toEqual([{ stop: s, numbers: [], jobs: [], promoted: [SHA] }]);
+      const w = { numbers: [], promoted: [SHA, "0123456"] };
+      const only = (closed: string) => (sha: string): WaitState => (sha === closed ? "closed" : "open");
+      expect(waitsClosed(w, () => "closed", () => "closed", 0, only(SHA))).toBe(false);
+      expect(waitsClosed({ numbers: [], promoted: [SHA] }, () => "closed", () => "closed", 0, only(SHA))).toBe(true);
+      expect(waitsClosed({ numbers: [], promoted: [SHA] }, () => "closed")).toBe(false); // no judge given
+    });
+
+    test("promoted: closed sends one turn and resolves the stop; open and unknown send nothing; each sha is asked once", async () => {
+      const t = await startPromoted();
+      const asked: string[] = [];
+      const judge = (state: WaitState) => async (sha: string) => (asked.push(sha), state);
+      for (const state of ["open", "unknown"] as const) {
+        expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: judge(state) })).toEqual([]);
+        expect(stopOf(t.id).state).toBe("waiting");
+      }
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now() })).toEqual([]); // no judge: unknown
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: judge("closed") })).toEqual([t.id]);
+      await settle();
+      expect(sends).toEqual([dependsResumePrompt([`promoted#${SHA}`])]);
+      expect(stopOf(t.id)).toMatchObject({ state: "resolved", conditions: [{ key: `promoted#${SHA}`, met: true }] });
+      expect(asked).toEqual([SHA, SHA, SHA]);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: judge("closed") })).toEqual([]);
+    });
+
+    /** A judge whose answers are held until `release` (as a git read is). */
+    const held = () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      return { release, judge: async (): Promise<WaitState> => (await gate, "closed") };
+    };
+
+    test("promoted: two passes that overlap send one turn", async () => {
+      await startPromoted();
+      const a = held();
+      const b = held();
+      const first = resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: a.judge });
+      const second = resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: b.judge });
+      a.release();
+      await first;
+      await settle(); // the first follow-up turn ends
+      b.release();
+      await second;
+      await settle();
+      expect(sends).toHaveLength(1);
+    });
+
+    test("promoted: a stop the person resolved while the judge was answering sends no turn", async () => {
+      const t = await startPromoted();
+      const j = held();
+      const run = resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: j.judge });
+      tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: `promoted#${SHA}`, value: "open", met: false }], state: "resolved", actions: [{ attempt: 1, at: Date.now(), what: "利用者が止めた", ok: true }] });
+      j.release();
+      await run;
+      await settle();
+      expect(sends).toEqual([]);
+    });
+
+    test("promoted: two Tasks waiting on one sha ask it once in the pass", async () => {
+      await startPromoted();
+      await startPromoted();
+      const asked: string[] = [];
+      await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: async (sha) => (asked.push(sha), "open") });
+      expect(asked).toEqual([SHA]);
+    });
+
+    test("promoted: a stage Task gets its turn, without the overlap step", async () => {
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", stage: { issue: 50, action: "complete" } });
+      await settle();
+      expect(tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: `promoted#${SHA}`, value: "open", met: false }] }).ok).toBe(true);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: async () => "closed" })).toEqual([t.id]);
+      await settle();
+      expect(stopOf(t.id).state).toBe("resolved");
+      expect(sends).toEqual([dependsResumePrompt([`promoted#${SHA}`])]);
+      expect(sends[0]).not.toContain("overlap");
+      expect(dependsResumePrompt([`promoted#${SHA}`, "pr#12"])).toContain("overlap");
+    });
+
+    const stageTask = async () => {
+      const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId: "ws_app", stage: { issue: 50, action: "complete" } });
+      await settle();
+      return t;
+    };
+    const PROMO = { ...WAIT, id: "promo", conditions: [{ key: `promoted#${SHA}`, value: "open", met: false }] };
+    const closedJudge = { promotedOf: async (): Promise<WaitState> => "closed" };
+
+    test("promoted: a stage Task a newer stage Task of its Issue took over gets no turn", async () => {
+      const older = await stageTask();
+      expect(tasks.recordStop(older.id, PROMO).ok).toBe(true);
+      await Bun.sleep(5);
+      const newer = await stageTask();
+      expect(db.lastStageTask("ws_app", 50)!.id).toBe(newer.id);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), ...closedJudge })).toEqual([]);
+      await settle();
+      expect(sends).toEqual([]);
+    });
+
+    test("promoted: a stage Task gets one turn whichever of its waits closes last", async () => {
+      const t = await stageTask();
+      expect(tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: "pr#12", value: "open", met: false }] }).ok).toBe(true);
+      expect(tasks.recordStop(t.id, PROMO).ok).toBe(true);
+      store([pr(12, "OPEN")]);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), ...closedJudge })).toEqual([]); // the promotion closed first
+      expect(stopOf(t.id, "promo").state).toBe("waiting");
+      store([pr(12, "MERGED")]);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), ...closedJudge })).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+      expect([stopOf(t.id).state, stopOf(t.id, "promo").state]).toEqual(["resolved", "resolved"]);
+    });
+
+    test("promoted: a stage Task's closed PR stop is recorded at once while only its promotion stop is held", async () => {
+      const t = await stageTask();
+      const OTHER = "0123456789ab";
+      expect(tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: "pr#12", value: "open", met: false }] }).ok).toBe(true);
+      expect(tasks.recordStop(t.id, PROMO).ok).toBe(true);
+      expect(tasks.recordStop(t.id, { ...WAIT, id: "promo2", conditions: [{ key: `promoted#${OTHER}`, value: "open", met: false }] }).ok).toBe(true);
+      store([pr(12, "MERGED")]);
+      const judge = async (sha: string): Promise<WaitState> => (sha === SHA ? "closed" : "open");
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: judge })).toEqual([]);
+      expect([stopOf(t.id).state, stopOf(t.id, "promo").state, stopOf(t.id, "promo2").state]).toEqual(["resolved", "waiting", "waiting"]);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), ...closedJudge })).toEqual([t.id]);
+      await settle();
+      expect(sends).toHaveLength(1);
+    });
+
+    test("promoted: a judge that throws reads as unknown and the pass goes on", async () => {
+      const t = await startPromoted();
+      const other = await start();
+      store([pr(12, "MERGED"), issue(34, "CLOSED")]);
+      expect(await resumeDepends({ db, tasks, workspaceId: "ws_app", now: Date.now(), promotedOf: async () => { throw new Error("git"); } })).toEqual([other.id]);
+      expect(stopOf(t.id).state).toBe("waiting");
+    });
+
+    // the judgement wired to a real repository: two commits, the running version is the newer one
+    describe("promoted: the running version judged by git", () => {
+      let repo: string;
+      let old: string;
+      let current: string;
+      const gitIn = (args: string[]) => {
+        const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+        return r.exitCode === 0 ? Promise.resolve(r.stdout.toString().trim()) : Promise.reject(Object.assign(new Error(r.stderr.toString()), { exitCode: r.exitCode }));
+      };
+      let gitCalls = 0;
+      const git = (args: string[]) => {
+        gitCalls++;
+        return gitIn(args);
+      };
+      // one context for the whole test, as the daemon's: the answers kept for `current` are shared across looks
+      let ctx: { db: Db; git: typeof git; releaseKnown: { current: string; of: Map<string, boolean> } | null; releaseStatus: () => Promise<never> };
+      const sc = () => ctx;
+      // the daemon's own look (lifecycle.ts), with the daemon's judge
+      const patrol = () => resumeDueWaits({ db, tasks, releasedOf: (sha) => releasedOf(sc(), sha) });
+      const waitOn = async (sha: string, workspaceId: string) => {
+        const t = tasks.create({ cwd: home, title: "t", prompt: "go", runner: "claude", workspaceId });
+        await settle();
+        expect(tasks.recordStop(t.id, { ...WAIT, conditions: [{ key: `promoted#${sha}`, value: "open", met: false }] }).ok).toBe(true);
+        return t;
+      };
+
+      beforeEach(async () => {
+        repo = mkdtempSync(join(tmpdir(), "sb-depends-git-"));
+        await git(["init", "-q"]);
+        await git(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "one"]);
+        old = await git(["rev-parse", "HEAD"]);
+        await git(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "two"]);
+        current = await git(["rev-parse", "HEAD"]);
+        db.upsertWorkspace({ id: "ws_meta", name: "meta", path: repo, kind: "meta" });
+        ctx = { db, git, releaseKnown: null, releaseStatus: async () => ({ managed: true, current }) as never };
+        gitCalls = 0;
+      });
+      afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+      test("promoted: a sha the running version contains sends one turn and resolves the stop", async () => {
+        const t = await waitOn(old, "ws_meta");
+        expect(await patrol()).toEqual([t.id]);
+        await settle();
+        expect(sends).toEqual([dependsResumePrompt([`promoted#${old}`])]);
+        expect(stopOf(t.id)).toMatchObject({ state: "resolved", conditions: [{ key: `promoted#${old}`, met: true }] });
+        expect(await patrol()).toEqual([]); // once
+      });
+
+      test("promoted: a sha the running version does not contain sends nothing", async () => {
+        await git(["checkout", "-q", "-b", "later"]);
+        await git(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "three"]);
+        const ahead = await git(["rev-parse", "HEAD"]);
+        const t = await waitOn(ahead, "ws_meta");
+        expect(await patrol()).toEqual([]);
+        await settle();
+        expect(sends).toEqual([]);
+        expect(stopOf(t.id).state).toBe("waiting");
+        // the answer is kept for this `current`: the next look does not ask git again, a new `current` does
+        const asked = gitCalls;
+        expect(await patrol()).toEqual([]);
+        expect(gitCalls).toBe(asked);
+        current = ahead;
+        expect(await patrol()).toEqual([t.id]);
+        expect(gitCalls).toBe(asked + 1);
+      });
+
+      test("promoted: a sha this checkout does not have sends nothing", async () => {
+        const t = await waitOn("0123456789abcdef0123456789abcdef01234567", "ws_meta");
+        expect(await patrol()).toEqual([]);
+        await settle();
+        expect(sends).toEqual([]);
+        expect(stopOf(t.id).state).toBe("waiting");
+      });
+
+      test("promoted: the Task of a workspace that is not the meta one is resumed the same", async () => {
+        const t = await waitOn(old, "ws_app");
+        expect(await patrol()).toEqual([t.id]);
+        await settle();
+        expect(sends).toEqual([dependsResumePrompt([`promoted#${old}`])]);
+        expect(stopOf(t.id).state).toBe("resolved");
+      });
+
+      test("promoted: not under sb-rescue, or with no meta workspace, no sha is judged", async () => {
+        await waitOn(old, "ws_app");
+        expect(await releasedOf({ ...sc(), releaseStatus: async () => ({ managed: false }) }, old)).toBeNull();
+        db.sqlite.query("DELETE FROM workspaces WHERE id = 'ws_meta'").run();
+        expect(await releasedOf(sc(), old)).toBeNull();
+        expect(await patrol()).toEqual([]);
+      });
+    });
   });
 
   describe("after", () => {

@@ -32,14 +32,14 @@ describe("perf-ratchet judge", () => {
     expect(judge(loaded(5001), withLoaded)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5001, ceiling: 5000 }], improved: [] });
   });
   test("judge: loaded.healthMaxMs far below its ceiling is not improved, so update keeps it", () => {
-    const b: Budgets = { github: budget, local: { ...budget, loaded: { healthMaxMs: 5440 } } };
+    const b: Budgets = { github: budget, local: { ...budget, loaded: { healthMaxMs: 5440 } }, offload: budget };
     // a quiet host: 1714 far below the ceiling (5440 − 2 × 1750 = 1940 with the band then), yet not improved
     const { over, improved } = judge(loaded(1714), b.local);
     expect([over, improved]).toEqual([[], []]);
     expect(loweredBy(b.local, "local", []).budget.loaded).toEqual({ healthMaxMs: 5440 });
     expect(judge(loaded(5441), b.local)).toEqual({ over: [{ key: "loaded.healthMaxMs", value: 5441, ceiling: 5440 }], improved: [] });
     // a journey count below ceiling − 2 × band is still improved
-    expect(judge({ ...result({ requests: 3 }), loaded: { healthMaxMs: 1714, healthMaxMsP90: 1901 } }, b.local).improved.map((i) => i.key)).toEqual(["journeys.send.requests"]);
+    expect(judge({ ...result({ requests: 3 }), loaded: { healthMaxMs: 1714 } }, b.local).improved.map((i) => i.key)).toEqual(["journeys.send.requests"]);
   });
   test("judge: a result that skipped loaded leaves its ceiling out; one without loaded and no reason still throws", () => {
     expect(judge({ ...result({}), loadedSkipped: "変更 1 ファイルのどれも scripts/perf-bench.ts に届かない" }, withLoaded)).toEqual({ over: [], improved: [] });
@@ -241,7 +241,8 @@ describe("perf-ratchet PERF_BASE_REF", () => {
       };
       // a commit (no ref, just objects) whose budget has a lower launch.requests ceiling than the checkout's
       const lower = structuredClone(budgets);
-      lower.local.journeys.launch!.requests--;
+      const launch = lower.local.journeys.launch!;
+      launch.requests = launch.requests! - 1;
       const blob = git(JSON.stringify(lower), "hash-object", "-w", "--stdin");
       const scripts = git(`100644 blob ${blob}\tperf-budget.json\n`, "mktree");
       const top = git(`040000 tree ${scripts}\tscripts\n`, "mktree");
@@ -300,11 +301,11 @@ describe("perf-ratchet exceptions", () => {
     expect(judge(result({ layoutShift: 0.07 }), budget).over).toEqual([]);
   });
   test("known exception by open issue: an exception main does not have is added; the same key for another Issue too", () => {
-    const budgets = { exceptions, github: budget, local: budget };
+    const budgets = { exceptions, github: budget, local: budget, offload: budget };
     expect(addedExceptions(budgets, {})).toEqual(exceptions);
     expect(addedExceptions(budgets, { exceptions })).toEqual([]);
     expect(addedExceptions(budgets, { exceptions: [{ ...exceptions[0]!, issue: 8 }] })).toEqual(exceptions);
-    expect(addedExceptions({ github: budget, local: budget }, { exceptions })).toEqual([]);
+    expect(addedExceptions({ github: budget, local: budget, offload: budget }, { exceptions })).toEqual([]);
   });
 });
 
@@ -331,7 +332,7 @@ describe("perf-ratchet environments", () => {
       }
       const regression = structuredClone(b);
       regression.journeys.send!.requests!++;
-      expect(judge(regression, b).over).toContainEqual({ key: "journeys.send.requests", value: b.journeys.send!.requests! + 1, ceiling: b.journeys.send!.requests });
+      expect(judge(regression, b).over).toContainEqual({ key: "journeys.send.requests", value: b.journeys.send!.requests! + 1, ceiling: b.journeys.send!.requests! });
     }
   });
   test("github in Actions, local elsewhere (local-ci's CI=true is not Actions); --env overrides", () => {
@@ -443,7 +444,7 @@ describe("perf-ratchet bundle growth", () => {
       expect(big.out).toContain("bundle: js 101100 B (main 100000 B, +1100 B, +1.10%)");
       expect(big.out).toContain("grew: bundle.js +1.10% (100000 → 101100 B) ≥ 1%: merging is the user's call (docs/design/perf.md)");
       const more = structuredClone(budgets.local.journeys);
-      more.launch!.requests++;
+      more.launch!.requests = more.launch!.requests! + 1;
       const over = await run({ js: 100000, css: 10000 }, more);
       expect(over.code).toBe(1);
       expect(over.out).toContain(`over: journeys.launch.requests = ${more.launch!.requests} > ceiling ${budgets.local.journeys.launch!.requests}`);
@@ -542,7 +543,7 @@ describe("perf-ratchet counts records and spread", () => {
   const A = "a".repeat(40);
   const AT = (d: number, h = 9) => `2026-11-0${d}T0${h}:00:00.000Z`;
   const measured = (nl: number, req = 6, shift = 0.07) => ({ journeys: { send: { msMedian: 9, requests: req, layoutCount: nl, recalcStyleCount: 5, layoutShift: shift, bytes: 1 } }, loaded: { healthMaxMs: 99 } });
-  const budgets = { github: budget, local: { journeys: { send: { requests: 6, layoutCount: 7, recalcStyleCount: 5, layoutShift: 0.0727 } } } } as Budgets;
+  const budgets = { github: budget, offload: budget, local: { journeys: { send: { requests: 6, layoutCount: 7, recalcStyleCount: 5, layoutShift: 0.0727 } } } } as Budgets;
   const rowsOf = (vals: [string, number, number?][]) => parseCountsRows([COUNTS_RECORDS_HEADER, ...vals.flatMap(([at, nl, hh]) => countsRows(at, "local", `t${at.slice(8, 10)}${hh ?? ""}`, A, measured(nl) as Budget)), ""].join("\n"));
   test("countsRows / parseCountsRows round trip: the four counts of each journey, not times, bytes or loaded; bad rows are passed over", () => {
     const lines = countsRows(AT(5), "local", "v1.0.0", A, measured(6) as Budget);

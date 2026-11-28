@@ -2,7 +2,7 @@
  * Run after `bun run --cwd apps/web build`: bun scripts/backlog-e2e.ts. Requires Chrome (CHROME_BIN overrides).
  * The daemon's `gh` answers from packages/core/fixtures/backlog-graphql.json (the meta workspace, acme/app) and
  * backlog-graphql-2.json (a second registered workspace, acme/lib), so no GitHub access is needed.
- * SCREENSHOT=<file.png> also saves what the screen looked like.
+ * SCREENSHOT=<file.png> also saves what the screen looked like; SCREENSHOT_DIR=<dir> saves the answer box of a waiting question (390 and 1280 wide).
  */
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +34,9 @@ const home = mkdtempSync(join(tmpdir(), "sb-backlog-e2e-"));
 const libDir = join(home, "lib");
 // acme/lib's `#306` waits on one question: an answer naming an older question's time is refused and leaves it as it is
 const LIB_QUESTION_AT = "2026-09-28T04:00:00Z";
-const libComments = JSON.stringify({ data: { repository: { i306: { comments: { nodes: [{ body: "## 判断待ち\n**問い**: lib の置き場所をどちらにするか", createdAt: LIB_QUESTION_AT }] } }, i304: { comments: { nodes: [] } } } } });
+const LIB_QUESTION_AT_2 = "2026-09-28T06:00:00Z"; // a newer question on the same Issue, posted while an answer box for the first is open
+const libQuestion = (body: string, createdAt: string) => JSON.stringify({ data: { repository: { i306: { comments: { nodes: [{ body, createdAt }] } }, i304: { comments: { nodes: [] } } } } });
+let libComments = libQuestion("## 判断待ち\n**問い**: lib の置き場所をどちらにするか", LIB_QUESTION_AT);
 mkdirSync(libDir);
 let failing = false;
 let delayMs = 0; // GitHub being slow
@@ -119,7 +121,7 @@ const libId = core.db.listWorkspaces().find((w) => w.name === "lib")!.id;
 {
   const at = Date.now() - 60_000;
   const metaWs = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
-  core.db.insertTask({ id: "task_e2emock", workspaceId: metaWs.id, title: "画面イメージを作る Task", stage: null, runner: "claude", cwd: home, scope: [home], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
+  core.db.insertTask({ id: "task_e2emock", workspaceId: metaWs.id, title: "画面イメージを作る Task", stage: null, runner: "claude", cwd: home, scope: [home], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, forkOf: null, forkSeq: null, forkTurn: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, statusAt: at, createdAt: at, updatedAt: at });
   await Bun.write(join(home, "e2emock.html"), `<!doctype html><meta charset="utf-8"><body><p>e2e mockup body</p></body>`);
   const r = await fetch(`${base}/api/tasks/task_e2emock/artifacts`, { method: "POST", body: JSON.stringify({ source: join(home, "e2emock.html"), title: "画面イメージ: e2e" }) });
   if (r.status !== 201) throw new Error(`mockup artifact: ${r.status}`);
@@ -145,10 +147,12 @@ try {
   let seq = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   const errors: unknown[] = [];
+  let onPaused: ((p: { requestId: string; request: { method: string; url: string } }) => Promise<void>) | null = null;
   ws.onmessage = (event) => {
     const m = JSON.parse(String(event.data));
     if (m.id) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p?.reject(new Error(JSON.stringify(m.error))) : p?.resolve(m.result); }
     if (m.method === "Log.entryAdded" && m.params.entry.source === "security") errors.push(m);
+    if (m.method === "Fetch.requestPaused") void onPaused?.(m.params);
     if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) errors.push(m);
   };
   const call = (method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws!.send(JSON.stringify({ id, method, params })); });
@@ -346,7 +350,49 @@ try {
   assert(staleStatus === 409, `the stale answer to lib #306: ${staleStatus} ${await staleAnswer.text()}`);
   const libAfter = await libDecisionOf();
   assert(libAfter?.stage === "needs-decision" && libAfter.decision?.at === LIB_QUESTION_AT, `lib #306 after the stale answer: ${JSON.stringify(libAfter)}`);
-  console.log(`stale answer: ${JSON.stringify({ status: staleStatus, decisionAt: libAfter.decision?.at })}`);
+  console.log(`stale answer: ${JSON.stringify({ status: staleStatus, decisionAt: libAfter?.decision?.at })}`);
+
+  // the same through the screen: the answer box of lib `#306` is open with a text typed for the first question, a newer
+  // question arrives on GitHub (the screen is not told: its reads of the list answer what they answered when the box was
+  // opened), and 回答する sends the first question's time. The reply is 409, the screen says so, nothing is written to
+  // GitHub, and once the screen reads again the newer question is what it shows.
+  const libBox = `document.querySelector('section[data-stage="needs-decision"] details.decision')`;
+  await evaluate(`${libBox}.open = true`);
+  await evaluate(`${libBox}.querySelector('textarea').focus()`);
+  await call("Input.insertText", { text: "古い問いへの回答（画面から）" });
+  const boxShots = process.env.SCREENSHOT_DIR;
+  if (boxShots) {
+    for (const [prefix, width, height, mobile] of [["390", 390, 844, true], ["1280", 1280, 900, false]] as const) {
+      await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
+      await Bun.sleep(300);
+      // the card from its Issue title down, so the title is in the frame too
+      await evaluate(`${libBox}.closest('.decision-card').scrollIntoView({ block: 'start' })`);
+      const png = await call("Page.captureScreenshot", { format: "png" });
+      await Bun.write(join(boxShots, `${prefix}-answer-box.png`), Buffer.from(png.data, "base64"));
+    }
+    await call("Emulation.clearDeviceMetricsOverride");
+  }
+  await evaluate(`(async () => { const f = window.fetch.bind(window); window.__realFetch = f; const kept = await (await f('/api/backlog')).text(); window.__answerReplies = []; window.fetch = async (...a) => { const u = String(a[0]); if (u === '/api/backlog' && (!a[1] || !a[1].method || a[1].method === 'GET')) return new Response(kept, { status: 200, headers: { 'content-type': 'application/json' } }); if (!u.includes('/api/backlog/306/answer')) return f(...a); try { const r = await f(...a); window.__answerReplies.push({ status: r.status, body: await r.clone().text() }); return r; } catch (e) { window.__answerReplies.push({ failed: String(e) }); throw e; } }; return true; })()`);
+  libComments = libQuestion("## 判断待ち\n**問い**: lib の置き場所を、新しい案のどちらにするか", LIB_QUESTION_AT_2);
+  await fetch(`${base}/api/backlog?refresh=1`);
+  await until(async () => (await libDecisionOf())?.decision?.at === LIB_QUESTION_AT_2, "the daemon holds the newer question of lib #306");
+  const writesBeforeStale = issueWrites.length;
+  await click("回答する");
+  const screenReply = await until(() => evaluate(`window.__answerReplies[0] ?? null`), "the screen's answer is replied to") as { status?: number };
+  assert(screenReply.status === 409, `the screen's stale answer: ${JSON.stringify(screenReply)}`);
+  await until(() => evaluate(`document.body.textContent.includes('#306 に回答できませんでした')`), "the screen says the answer failed");
+  // an answer the daemon took is kept at once and reaches gh only after its send window: look at what it kept as well
+  const staleKept = () => core.db.listPendingBacklogOperations().filter((o) => o.kind === "comment" && JSON.stringify(o.payload).includes("古い問いへの回答（画面から）")).length;
+  await Bun.sleep(500);
+  assert(issueWrites.length === writesBeforeStale && staleKept() === 0, `kept or written after the stale answer: ${staleKept()} ${JSON.stringify(issueWrites.slice(writesBeforeStale))}`);
+  // the screen reads again: lib `#306` is still waiting, on the newer question
+  await evaluate(`window.fetch = window.__realFetch`);
+  await click("再読込");
+  await until(() => evaluate(`(document.querySelector('section[data-stage="needs-decision"] pre.wrap')?.textContent ?? '').includes('新しい案のどちらにするか')`), "the screen shows the newer question", 30_000);
+  const libNow = await libDecisionOf();
+  assert(libNow?.stage === "needs-decision" && libNow.decision?.at === LIB_QUESTION_AT_2, `lib #306 after the screen's stale answer: ${JSON.stringify(libNow)}`);
+  const staleScreenAnswer = { status: screenReply.status, written: issueWrites.length - writesBeforeStale + staleKept() };
+  console.log(`staleScreenAnswer: ${JSON.stringify(staleScreenAnswer)}`);
 
   // 実装中: each row says whether it moves, its Project Status, how long since the Issue changed, its last stage
   // Task, and the head of its newest ## 状況; 状況を確認 starts a check and the row turns 実行中
@@ -370,7 +416,7 @@ try {
   // (c) a finished stage Task of `#305` → 最後の Task: 完了, which opens that Task
   const meta = core.db.listWorkspaces().find((w) => w.kind === "meta")!;
   const finishedAt = Date.now() - 3 * 60 * 60_000;
-  const finished = core.db.insertTask({ id: "task_e2e305", workspaceId: meta.id, title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: meta.path, scope: [meta.path], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, stage: { issue: 305, action: "complete" }, statusAt: finishedAt, createdAt: finishedAt, updatedAt: finishedAt });
+  const finished = core.db.insertTask({ id: "task_e2e305", workspaceId: meta.id, title: "#305 実装: PBI: 実装中の PBI", runner: "claude", cwd: meta.path, scope: [meta.path], status: "done", runnerSessionId: null, executionMode: "local", cloudSession: null, sourceCloudTaskId: null, model: null, routing: null, budgetUsd: null, scheduleId: null, permissionMode: "auto", effort: null, origin: "switchboard", resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, forkOf: null, forkSeq: null, forkTurn: null, shadowOf: null, shadowStopped: false, workspaceReason: null, outcome: "unknown", reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: { issue: 305, action: "complete" }, statusAt: finishedAt, createdAt: finishedAt, updatedAt: finishedAt });
   await click("再読込");
   await until(() => evaluate(`${read} && (${ipRow(305)}?.textContent ?? "").includes("最後の Task: 完了（")`), "#305 last Task");
   const lastTaskShown = (await rowText(305)).includes("止まっている: 最後の工程 Task は完了");
@@ -648,7 +694,7 @@ try {
   // `#305`, which goes on with pbi-complete's SKILL.md and leaves the merge procedure to the skill (it names the merge gate's scope only).
   // Only the prompts sent since the firing are read: the earlier button resume of `#305` has the same opening
   const scheduled = core.db.listTasks().find((t) => t.scheduleId && t.title.startsWith("#305 実装: ") && t.workspaceId === core.db.listWorkspaces().find((w) => w.kind === "meta")!.id);
-  const scheduledPrompt = await until(() => prompts.slice(promptsBeforeFiring).findLast((p) => p.startsWith("PBI #305 は実装中のまま止まっています")), "the scheduled implementation's prompt");
+  const scheduledPrompt = await until(() => [...prompts.slice(promptsBeforeFiring)].reverse().find((p) => p.startsWith("PBI #305 は実装中のまま止まっています")), "the scheduled implementation's prompt");
   assert(scheduled && scheduledPrompt.includes(".claude/skills/pbi-complete/SKILL.md") && scheduledPrompt.includes("マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ") && !scheduledPrompt.includes("gh stack merge") && !scheduledPrompt.includes("--allow-large"), `scheduled: ${core.db.listTasks().filter((t) => t.scheduleId).map((t) => t.title).join(" / ")}`);
 
   // the slots per workspace: on the 設定 screen, the meta's implement 1 → 2, 保存, and a reload still shows 2
@@ -971,6 +1017,105 @@ try {
   const mixed = await evaluate(`(() => { const b = document.querySelector('[data-select-bundle]'); return { disabled: b?.disabled ?? null, reason: document.querySelector('[data-select-bundle-reason]')?.textContent ?? '' }; })()`) as { disabled: boolean | null; reason: string };
   assert(mixed.disabled === true && mixed.reason.includes("lib") && mixed.reason.includes(`#${keyOf(libKey).number}`), `mixed bundle: ${JSON.stringify(mixed)}`);
   await clearSelection();
+  // (i)-(iii) the bundle's hold and the workspace list are read again each time the list is read, and a failed read says so under the button.
+  // Answers are made up in the page's requests (CDP Fetch); the daemon is not touched
+  type Answer = { status: number; body: string };
+  const requests = new Map<string, number>();
+  const intercept = async (answer: (path: string, n: number) => Answer | null) => {
+    requests.clear();
+    onPaused = async (p) => {
+      const path = new URL(p.request.url).pathname;
+      const n = (requests.get(path) ?? 0) + 1;
+      requests.set(path, n);
+      const a = p.request.method === "GET" ? answer(path, n) : null;
+      const sent = a
+        ? call("Fetch.fulfillRequest", { requestId: p.requestId, responseCode: a.status, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(a.body).toString("base64") })
+        : call("Fetch.continueRequest", { requestId: p.requestId });
+      await sent.catch(() => undefined);
+    };
+    await call("Fetch.enable", { patterns: [{ urlPattern: "*/api/*", requestStage: "Request" }] });
+  };
+  const stopIntercept = async () => {
+    await call("Fetch.disable");
+    onPaused = null;
+  };
+  const reopenBacklog = async () => {
+    await click("Schedules");
+    await until(() => evaluate(`!!document.querySelector('main.schedules')`), "Schedules");
+    await click("Backlog");
+    await until(() => evaluate(`${read} && !!document.querySelector('[data-select]')`), "the backlog reopened");
+  };
+  const gateNow = () => evaluate(`(() => ({ disabled: document.querySelector('[data-select-bundle]')?.disabled ?? null, reason: document.querySelector('[data-select-bundle-reason]')?.textContent ?? '' }))()`) as Promise<{ disabled: boolean | null; reason: string }>;
+  const tickTwo = async () => {
+    await clearSelection();
+    await tick(appKey);
+    await tick(appKey2);
+    await countIs(2, "two rows of acme/app");
+  };
+  const holdBody = JSON.stringify({ taskId: "task_e2ehold", since: Date.now() - 60_000, schedules: ["a", "b"], base: "v1.0.0" });
+  // (i) the hold is read on opening and again by 再読込, even when the list answers with the same fetchedAt: the line goes when the second answer is null
+  const listBody = await (await fetch(`${base}/api/backlog`)).text();
+  const fetchedAt = (JSON.parse(listBody) as { fetchedAt: number }).fetchedAt;
+  const listAnswers: number[] = [];
+  await intercept((path, n) => {
+    if (path === "/api/backlog") {
+      listAnswers.push((JSON.parse(listBody) as { fetchedAt: number }).fetchedAt);
+      return { status: 200, body: listBody };
+    }
+    if (path === "/api/bundle") return { status: 200, body: n === 1 ? holdBody : "null" };
+    return null;
+  });
+  await reopenBacklog();
+  await until(() => evaluate(`!!document.querySelector('[data-bundle-hold]')`), "the hold line read on opening");
+  await click("再読込");
+  await until(() => evaluate(`!document.querySelector('[data-bundle-hold]')`), "the hold line gone after 再読込");
+  assert((requests.get("/api/bundle") ?? 0) === 2, `bundle reads: ${requests.get("/api/bundle")}`);
+  assert(listAnswers.length >= 2 && listAnswers.every((f) => f === fetchedAt), `list answers: ${JSON.stringify(listAnswers)} / ${fetchedAt}`);
+  await stopIntercept();
+  // (ii) the workspace list fails on opening: two PBIs of acme/app give the reason; 再読込 (answered this time) lets the button work
+  let failWorkspaces = true;
+  await intercept((path) => {
+    if (path === "/api/workspaces" && failWorkspaces) {
+      failWorkspaces = false;
+      return { status: 503, body: JSON.stringify({ error: "unavailable" }) };
+    }
+    return null;
+  });
+  await reopenBacklog();
+  await tickTwo();
+  const wsGate = await until(async () => { const g = await gateNow(); return g.reason ? g : null; }, "a reason for the unread workspaces");
+  assert(wsGate.disabled === true && wsGate.reason.includes("リポジトリの一覧を読めなかった"), `unread workspaces: ${JSON.stringify(wsGate)}`);
+  await click("再読込");
+  await until(async () => (await gateNow()).disabled === false, "the bundle button after 再読込");
+  await stopIntercept();
+  // (iii) the hold fails: the reason says the hold could not be read
+  await intercept((path) => (path === "/api/bundle" ? { status: 503, body: JSON.stringify({ error: "unavailable" }) } : null));
+  await reopenBacklog();
+  await tickTwo();
+  const holdGate = await until(async () => { const g = await gateNow(); return g.reason ? g : null; }, "a reason for the unread hold");
+  assert(holdGate.disabled === true && holdGate.reason.includes("束の作業中かどうかを読めなかった"), `unread hold: ${JSON.stringify(holdGate)}`);
+  await stopIntercept();
+  await click("再読込");
+  await until(async () => (await gateNow()).disabled === false, "the bundle button once the hold reads again");
+  await clearSelection();
+  selectBar.reread = { holdReads: 2, workspaces: wsGate.reason, hold: holdGate.reason };
+  // (iv) a row is unticked while the confirmation is open: it closes, and the line under the button says why; opening it again clears the line
+  await tickTwo();
+  await press(`document.querySelector('[data-select-bundle]')`, "the bundle button");
+  await until(() => evaluate(`!!document.querySelector('dialog[data-bundle-confirm]')?.open`), "the confirmation before a row changes");
+  await evaluate(`document.querySelector('[data-select="${appKey2}"]').click()`);
+  await until(() => evaluate(`!document.querySelector('dialog[data-bundle-confirm]')`), "the confirmation closed by the changed selection");
+  const closedLine = await until(async () => { const g = await gateNow(); return g.reason ? g : null; }, "the closed reason under the button");
+  assert(closedLine.reason.includes("選んだ行が変わったため確認を閉じました"), `closed reason: ${JSON.stringify(closedLine)}`);
+  await tick(appKey2);
+  await countIs(2, "two rows again");
+  await press(`document.querySelector('[data-select-bundle]')`, "the bundle button again");
+  await until(() => evaluate(`!!document.querySelector('dialog[data-bundle-confirm]')?.open`), "the confirmation opened again");
+  assert((await gateNow()).reason === "", "the closed reason stays after opening again");
+  await press(`document.querySelector('dialog[data-bundle-confirm] [data-bundle-cancel]')`, "やめる");
+  await until(() => evaluate(`!document.querySelector('dialog[data-bundle-confirm]')?.open`), "the confirmation closed by やめる");
+  await clearSelection();
+  selectBar.closedReason = closedLine.reason;
   // (e) two of acme/app: the button opens the confirmation (both titles, the warning); やめる starts nothing; まとめて始める starts the bundle
   const [pa, pb] = [keyOf(appKey).number, keyOf(appKey2).number];
   const titles = [await pbiTitle(metaId, pa), await pbiTitle(metaId, pb)];

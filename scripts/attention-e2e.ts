@@ -101,7 +101,7 @@ try {
   await call("Page.navigate", { url: `${base}/` });
 
   // (a) the three under 要対応, in outcome order, on Home and in the rail; 最近 empty
-  const a = await until(async () => { const s = await state(); return s.home.length === 3 && s.rail.length === 3 && s; }, "three under 要対応");
+  const a = await until(async () => { const s = await state(); return s.home.length === 3 && s.rail.length === 3 ? s : null; }, "three under 要対応");
   assert(same(a.home, ["task-ask", "task-err", "task-ok"]) && same(a.rail, a.home) && a.recent.length === 0, `(a) ${JSON.stringify(a)}`);
   assert(same(a.order.rail.slice(0, 2), ["Running", "要対応"]) && same(a.order.home.slice(0, 2), ["実行中", "要対応"]), `(a) order ${JSON.stringify(a.order)}`);
   await shot(process.env.SCREENSHOT);
@@ -111,10 +111,10 @@ try {
   await click(`[...document.querySelectorAll('.task-head button.review-toggle')].find((b) => b.textContent === '確認済みにする')`, "確認済みにする");
   await until(() => evaluate(`document.querySelector('.task-head button.review-toggle')?.textContent === '確認済みを取り消す'`), "button flips");
   await shot(process.env.SCREENSHOT_TASK);
-  const bRail = await until(async () => { const s = await state(); return s.rail.length === 2 && s; }, "rail drops task-ok");
+  const bRail = await until(async () => { const s = await state(); return s.rail.length === 2 ? s : null; }, "rail drops task-ok");
   await goHome();
-  const b = await until(async () => { const s = await state(); return s.onHome && s.home.length === 2 && s; }, "Home drops task-ok");
-  assert(same(bRail.rail, ["task-ask", "task-err"]) && same(b.home, ["task-ask", "task-err"]) && b.recent.includes("task-ok"), `(b) ${JSON.stringify({ rail: bRail.rail, ...b })}`);
+  const b = await until(async () => { const s = await state(); return s.onHome && s.home.length === 2 ? s : null; }, "Home drops task-ok");
+  assert(same(bRail.rail, ["task-ask", "task-err"]) && same(b.home, ["task-ask", "task-err"]) && b.recent.includes("task-ok"), `(b) ${JSON.stringify({ ...b, rail: bRail.rail })}`);
   assert((await tasks()).find((t) => t.title === "task-ok")!.reviewedAt !== null, "(b) reviewedAt stored");
 
   // (c) take it back → under 要対応 again, gone from 最近
@@ -122,27 +122,27 @@ try {
   await click(`[...document.querySelectorAll('.task-head button.review-toggle')].find((b) => b.textContent === '確認済みを取り消す')`, "確認済みを取り消す");
   await until(async () => (await state()).rail.length === 3, "rail has task-ok again");
   await goHome();
-  const c = await until(async () => { const s = await state(); return s.onHome && s.home.length === 3 && s; }, "Home has task-ok again");
+  const c = await until(async () => { const s = await state(); return s.onHome && s.home.length === 3 ? s : null; }, "Home has task-ok again");
   assert(same(c.home, ["task-ask", "task-err", "task-ok"]) && !c.recent.includes("task-ok"), `(c) ${JSON.stringify(c)}`);
 
   // (d) set task-ok's outcome to 要対応 → first under 要対応 (newest of the 要対応 ones)
   await openFromRail("task-ok");
   await until(() => evaluate(`(() => { const s = document.querySelector('.task-head select.outcome'); if (!s || s.disabled) return false;
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'needs_action'); s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`), "outcome select");
-  const dRail = await until(async () => { const s = await state(); return s.rail[0] === "task-ok" && s; }, "task-ok first in the rail");
+  const dRail = await until(async () => { const s = await state(); return s.rail[0] === "task-ok" ? s : null; }, "task-ok first in the rail");
   await goHome();
-  const d = await until(async () => { const s = await state(); return s.onHome && s.home[0] === "task-ok" && s; }, "task-ok first on Home");
-  assert(same(d.home, ["task-ok", "task-ask", "task-err"]) && same(dRail.rail, d.home), `(d) ${JSON.stringify({ rail: dRail.rail, ...d })}`);
+  const d = await until(async () => { const s = await state(); return s.onHome && s.home[0] === "task-ok" ? s : null; }, "task-ok first on Home");
+  assert(same(d.home, ["task-ok", "task-ask", "task-err"]) && same(dRail.rail, d.home), `(d) ${JSON.stringify({ ...d, rail: dRail.rail })}`);
   assert((await tasks()).find((t) => t.title === "task-ok")!.outcome === "needs_action", "(d) outcome stored");
 
   // (e) set task-ok's outcome to 完了 → out of 要対応 (still not 確認済み), into Home's 最近
   await openFromRail("task-ok");
   await until(() => evaluate(`(() => { const s = document.querySelector('.task-head select.outcome'); if (!s || s.disabled) return false;
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'finished'); s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`), "outcome select");
-  const eRail = await until(async () => { const s = await state(); return s.rail.length === 2 && s; }, "rail drops task-ok (完了)");
+  const eRail = await until(async () => { const s = await state(); return s.rail.length === 2 ? s : null; }, "rail drops task-ok (完了)");
   await goHome();
-  const e = await until(async () => { const s = await state(); return s.onHome && s.home.length === 2 && s; }, "Home drops task-ok (完了)");
-  assert(same(e.home, ["task-ask", "task-err"]) && same(eRail.rail, e.home) && e.recent.includes("task-ok"), `(e) ${JSON.stringify({ rail: eRail.rail, ...e })}`);
+  const e = await until(async () => { const s = await state(); return s.onHome && s.home.length === 2 ? s : null; }, "Home drops task-ok (完了)");
+  assert(same(e.home, ["task-ask", "task-err"]) && same(eRail.rail, e.home) && e.recent.includes("task-ok"), `(e) ${JSON.stringify({ ...e, rail: eRail.rail })}`);
   const ok = (await tasks()).find((t) => t.title === "task-ok")!;
   assert(ok.outcome === "finished" && ok.reviewedAt === null, `(e) stored ${ok.outcome} ${ok.reviewedAt}`);
 
@@ -157,7 +157,7 @@ try {
   await goHome();
   const foldedJs = `[...document.querySelectorAll('.waiting-folded .t')].map((n) => n.textContent)`;
   const headsJs = `(() => { const n = (s) => Number(s.match(/·\\s*(\\d+)/)?.[1]); const rail = [...document.querySelectorAll('.rail-list > .grp')].find((g) => g.textContent.startsWith('要対応')); const home = [...document.querySelectorAll('h5')].find((h) => h.textContent.startsWith('要対応')); return { rail: rail ? n(rail.textContent) : null, home: home ? n(home.textContent) : null, labels: [...document.querySelectorAll('.attn-group > .row .m')].map((m) => m.textContent.split(' · ')[0]) }; })()`;
-  const f = await until(async () => { const s = await state(); return s.onHome && s.home.includes("task-stop-decision") && s.rail.includes("task-stop-decision") && !s.rail.includes("task-stop-depends") && s; }, "task-stop-decision under 要対応, task-stop-depends out of the rail");
+  const f = await until(async () => { const s = await state(); return s.onHome && s.home.includes("task-stop-decision") && s.rail.includes("task-stop-decision") && !s.rail.includes("task-stop-depends") ? s : null; }, "task-stop-decision under 要対応, task-stop-depends out of the rail");
   const folded = (await until(async () => { const l = (await evaluate(foldedJs)) as string[]; return l.includes("task-stop-depends") && l; }, "task-stop-depends in the folded 待ち")) as string[];
   // `home` also picks up the folded 待ち's first row (its `<details>` follows the 要対応 rows), so the folded titles are set aside
   const homeRows = f.home.filter((x) => !folded.includes(x));

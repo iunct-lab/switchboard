@@ -153,7 +153,7 @@ try {
 } finally {
   ws?.close();
   chrome.kill();
-  await core.close?.();
+  await core.stop();
   rmSync(home, { recursive: true, force: true });
 }
 process.exit(0);

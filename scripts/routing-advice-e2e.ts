@@ -57,7 +57,7 @@ const stored = async (title: string): Promise<Task | undefined> => {
 const create = async (title: string) => {
   const res = await fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: cfg.repoRoot, title, prompt: title, runner: "claude" }) });
   assert(res.status === 201, `${title}: ${res.status}`);
-  return await until(async () => { const t = await stored(title); return t?.status === "done" && t; }, `${title} done`);
+  return await until(async () => { const t = await stored(title); return t?.status === "done" ? t : null; }, `${title} done`);
 };
 
 const profile = join(home, "chrome");

@@ -156,7 +156,7 @@ export class TaskManager extends TaskSettings {
       status: "idle",
       runnerSessionId: null, executionMode: input.executionMode ?? "local", cloudSession: null, sourceCloudTaskId: null,
       model: model ?? null,
-      routing: suggestion ? { suggested: suggestion.runner, ruleId: suggestion.ruleId, reason: suggestion.reason, overridden: suggestion.runner !== input.runner, llm: suggestion.llm ?? null } : null,
+      routing: suggestion ? { suggested: suggestion.runner, ruleId: suggestion.ruleId, reason: suggestion.reason, overridden: suggestion.runner !== input.runner, suggestedModel: suggestion.model ?? null, chosenModel: model ?? null, llm: suggestion.llm ?? null } : null,
       budgetUsd: input.budgetUsd ?? (!cloud && isFableModel(model) ? this.defaultFableBudget?.() ?? null : null),
       scheduleId: input.scheduleId ?? null,
       permissionMode,

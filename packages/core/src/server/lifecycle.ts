@@ -8,7 +8,7 @@ import { readShippedDefaults, seedWorkspaces } from "./helpers.ts";
 import { homedir } from "node:os";
 import { abortOrphanedTasks, Db } from "../db.ts";
 import { OpsLoadSampler } from "../ops-load.ts";
-import { AFTER_CHECK_MS, resumeDueAfters, resumeJobsOnTurnEnd } from "../depends-resume.ts";
+import { AFTER_CHECK_MS, resumeDueAfters, resumeJobsOnTurnEnd, type WaitState } from "../depends-resume.ts";
 import { boundsOf, checkWaits, WAIT_CHECK_MS, waitsDirOf } from "../waits.ts";
 import { startWorktreeSweep } from "../worktree-sweep.ts";
 import { startSettleSweep } from "../task-settle.ts";
@@ -32,7 +32,7 @@ export async function performRestart(sc: Pick<ServerContext, "db" | "restarting"
   }
   if (supervised) process.exit(RESTART_EXIT_CODE);
   try {
-    spawnDetached(argv, sc.cfg.home, process.cwd(), sc.cfg.idleStopCmd ? { SWITCHBOARD_IDLE_STOP_CMD: sc.cfg.idleStopCmd } : {});
+    spawnDetached(argv, sc.cfg.home, process.cwd(), { ...ownUplinkEnv, ...(sc.cfg.idleStopCmd ? { SWITCHBOARD_IDLE_STOP_CMD: sc.cfg.idleStopCmd } : {}) });
   } catch (e) {
     console.error(`restart: could not spawn the replacement (${String((e as Error).message ?? e)}); restarting on the old code`);
     process.exit(RESTART_EXIT_CODE);
@@ -142,11 +142,36 @@ export const idleInput = (sc: Pick<ServerContextInit, "db" | "tasks" | "wsCount"
   nextWakeAt: sc.nextWakeAt(),
 });
 
-export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db" | "tasks" | "wsCount" | "pty" | "nextWakeAt" | "dockerdIdle" | "afterTimer" | "opts" | "waitsChecking" | "waitTimer" | "settings" | "broadcast" | "stopWorktreeSweep" | "stopSettleSweep" | "restarting">): void {
+/** The uplink's mode, which only this daemon and its own replacement may carry (setupTimers removes it from the environment). */
+const UPLINK_OWN = ["SWITCHBOARD_UPLINK", "SWITCHBOARD_UPLINK_PREVIEW", "SWITCHBOARD_UPLINK_MACHINES"] as const;
+const ownUplinkEnv: Record<string, string> = {};
+
+/**
+ * The look for stops whose wait is over without an import or a job saying so: a date that has passed, and a promotion the
+ * running version now contains (`promoted#<sha>`). An import or a job's end does not ask git.
+ */
+export const resumeDueWaits = (sc: Pick<ServerContextInit, "db" | "tasks" | "releasedOf">, now = Date.now()): Promise<string[]> => {
+  const promotedOf = (sha: string) => sc.releasedOf(sha).then((r): WaitState => (r === null ? "unknown" : r ? "closed" : "open"));
+  return resumeDueAfters({ db: sc.db, tasks: sc.tasks, now, promotedOf }).catch((e) => {
+    console.error(`[stops] depends resume after a date or a promotion: ${String((e as Error)?.message ?? e)}`);
+    return [];
+  });
+};
+
+export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db" | "tasks" | "wsCount" | "pty" | "nextWakeAt" | "dockerdIdle" | "afterTimer" | "opts" | "waitsChecking" | "waitTimer" | "settings" | "broadcast" | "stopWorktreeSweep" | "stopSettleSweep" | "restarting" | "resumeDueWaits">): void {
   // The stop command is this daemon's alone: runners, terminal shells and what they start must not inherit it. A
   // scratch daemon a Task boots with `loadConfig({ ...process.env, … })` would otherwise count only its own empty
   // database, and 20 minutes later stop the host under the Tasks this daemon is running.
   delete process.env.SWITCHBOARD_IDLE_STOP_CMD;
+  // The uplink's mode is this daemon's alone too (the instance's sb-env or a work machine's env file sets it): a scratch
+  // daemon a Task boots from the inherited environment would otherwise take leases and write exports as this machine.
+  // Without the second variable no mode is read (loadUplink), and the others name nothing a child needs.
+  // Its own replacement (a restart without a supervisor) gets them back, as the stop command (performRestart).
+  for (const name of UPLINK_OWN) {
+    const v = process.env[name];
+    if (v !== undefined) ownUplinkEnv[name] = v;
+    delete process.env[name];
+  }
   sc.hostIdle = sc.cfg.idleStopCmd && !sc.cfg.candidate
       ? new HostIdle(
           () => idleInput(sc),
@@ -166,10 +191,10 @@ export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db
   sc.dockerdIdle?.start();
   sc.tasks.onTurnEnd(() => sc.hostIdle?.touch());
   if (!decidesNothing(sc.cfg)) resumeJobsOnTurnEnd(sc.db, sc.tasks);
-  // a stop that waits on a date goes on once the date has passed, in a workspace with no import too
-  sc.afterTimer = decidesNothing(sc.cfg) ? null : setInterval(() => {
-    void resumeDueAfters({ db: sc.db, tasks: sc.tasks, now: Date.now() }).catch((e) => console.error(`[stops] depends resume after a date: ${String((e as Error)?.message ?? e)}`));
-  }, sc.opts.afterCheckMs ?? AFTER_CHECK_MS);
+  // a stop that waits on a date goes on once the date has passed, in a workspace with no import too, and one that waits on a
+  // promotion once the running version contains it (looked at once more after the port is ours: setupAfterListen)
+  const resumeDue = () => void sc.resumeDueWaits();
+  sc.afterTimer = decidesNothing(sc.cfg) ? null : setInterval(resumeDue, sc.opts.afterCheckMs ?? AFTER_CHECK_MS);
   sc.afterTimer?.unref();
   // what every Task waits for and until when, looked at in one place: the screens show it, and a wait past its limit or a silent runner is the person's to see
   sc.waitsChecking = false;
@@ -189,13 +214,16 @@ export function setupTimers(sc: Pick<ServerContextInit, "hostIdle" | "cfg" | "db
   sc.restarting = false;
 }
 
-export function setupAfterListen(sc: Pick<ServerContextInit, "db" | "settings" | "tasks" | "countRules" | "opsLoadSampler" | "cfg" | "runId" | "lastJudgingAt" | "judgeReply" | "firstPass" | "history">): void {
+export function setupAfterListen(sc: Pick<ServerContextInit, "db" | "settings" | "tasks" | "resumeDueWaits" | "afterTimer" | "countRules" | "opsLoadSampler" | "cfg" | "runId" | "lastJudgingAt" | "judgeReply" | "firstPass" | "history">): void {
   // Only once the port is ours: a second daemon on the same home would otherwise close the live daemon's tasks and
   // then die on EADDRINUSE. Tasks still running / waiting now belong to nobody.
   const orphaned = abortOrphanedTasks(sc.db, Date.now(), sc.settings().quotaAndResume.maxStopResumes);
   if (orphaned.length) console.warn(`tasks: ${orphaned.length} left running/waiting by a previous daemon marked aborted (${orphaned.join(", ")})`);
   // The Tasks the previous daemon left waiting for a slot start now (a candidate leaves them: `holdQueue`)
   sc.tasks.drain();
+  // A promotion restarts the daemon, so a Task waiting on it can go on right now (a date that passed while no daemon ran too).
+  // Not before the port is ours: a second daemon on the same home would otherwise resolve the live daemon's waits.
+  if (sc.afterTimer) void sc.resumeDueWaits();
   // their rows were saved at the turn before the cut; the stop just written changes the counts
   for (const id of orphaned) {
     const t = sc.db.getTask(id);

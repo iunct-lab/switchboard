@@ -24,6 +24,8 @@ export const brief = msgs({
   overridden: { ja: "手動で上書き（推奨は {suggested}: {reason}）", en: "Overridden by hand (recommended: {suggested}: {reason})" },
   asRecommended: { ja: "推奨どおり — {reason}", en: "As recommended — {reason}" },
   manualChoice: { ja: "手動選択", en: "Chosen by hand" },
+  modelSuggested: { ja: "モデル: 提案は {suggested}、始まったのは {actual}", en: "Model: suggested {suggested}, started on {actual}" },
+  modelDefault: { ja: "既定", en: "the default" },
   llmTitle: { ja: "作成後に届いた LLM の助言です。ランナーは変えません", en: "Advice from an LLM that arrived after creation. It does not change the runner" },
   llmSuggest: { ja: "LLM の提案: {runner} — {reason} · 実際: {actual}（{outcome}）", en: "LLM's suggestion: {runner} — {reason} · Actual: {actual} ({outcome})" },
   cloudModel: { ja: "公式 Web で操作してください", en: "Use the official web app" },

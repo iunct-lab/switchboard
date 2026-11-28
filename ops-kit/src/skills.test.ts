@@ -1329,3 +1329,12 @@ echo '{"issue":{"number":7,"body":"## A"},"bodyRevision":"r1"}'
     }
   }
 });
+
+test("skills: the wait rule in issue-workflow names --key and the reason a timed-out wait stops with", () => {
+  const read = (name: string) => readFileSync(join(skills, name, "SKILL.md"), "utf8");
+  const line = read("issue-workflow")
+    .split("\n")
+    .find((l) => l.includes("待つのは `ops-kit wait` で、素のループで待たない"));
+  expect(line).toBeDefined();
+  for (const part of ["[--key <pr#N|issue#N|job#N>]", "その相手を `--key`", "鍵つきの待ちなら `depends`", "鍵が無く人の答えの待ちでないなら `transient`", "鍵が無く人の答えの待ちなら `decision`"]) expect({ part, says: line!.includes(part) }).toEqual({ part, says: true });
+});

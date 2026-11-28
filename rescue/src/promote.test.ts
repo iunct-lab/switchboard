@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitFile, daemonSource, freePort, health, makeRepo, until } from "./fixture.ts";
-import { checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, tryCandidate, type Ctx } from "./promote.ts";
+import { CONFIRM_LIMIT_MS, checkDaemon, checkFeatures, KEEP_SNAPSHOTS, listSnapshots, promote, restoreDb, rollback, snapshotDb, tryCandidate, type Ctx } from "./promote.ts";
 import { appendHistory, buildRelease, currentOf, daemonReadsOf, previousOf, readHistory, releasesDir, restartNeeded, run, switchTo } from "./releases.ts";
 import { startRescue } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -87,6 +87,44 @@ test("a release that first answers late in the window still gets its full settle
   const r = await promote(ctx, slow, { candidateMs: 8000, confirmMs: 1500, settleMs: 1000 }); // first answer at ~1.1 s, settled at ~2.1 s > 1.5 s
   expect(r).toMatchObject({ action: "promote", ok: true, to: slow });
   expect(currentOf(f.home)).toBe(slow);
+}, 30_000);
+
+// After the switch (not as a candidate), /api/health answers through \`wrap\`: it gets the request and the real answer, and may replace it.
+const afterSwitch = (wrap: string) => `if (!process.env.SWITCHBOARD_CANDIDATE) { const serve = Bun.serve; (Bun as any).serve = (o: any) => { const real = o.fetch; o.fetch = (req: Request, srv: unknown) => { const answer = real(req, srv); return new URL(req.url).pathname === "/api/health" ? (${wrap})(answer) : answer; }; return serve(o); }; }`;
+
+test("a release whose first answer comes after the old 60 s window is promoted once it settles", async () => {
+  expect(CONFIRM_LIMIT_MS).toBeGreaterThan(87_000); // the longest start measured on the cloud host, with the database copy
+  const late = await commitFile(f.repo, "packages/core/src/main.ts", `if (!process.env.SWITCHBOARD_CANDIDATE) await Bun.sleep(2500);\n${daemonSource("late")}`, "answers late");
+  const r = await promote(ctx, late, { candidateMs: 8000, confirmMs: 8000, settleMs: 800 }); // the first answer at ~2.6 s; a first-answer deadline of 2 s would reject it
+  expect(r).toMatchObject({ action: "promote", ok: true, to: late });
+  expect(currentOf(f.home)).toBe(late);
+}, 30_000);
+
+test("a release that exits while the switch waits goes back at once, not at the limit", async () => {
+  const exits = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("exits", `if (!process.env.SWITCHBOARD_CANDIDATE) setTimeout(() => process.exit(1), 600);`), "exits while waited for");
+  const before = currentOf(f.home);
+  const t0 = Date.now();
+  const r = await promote(ctx, exits, { candidateMs: 8000, confirmMs: 20_000, settleMs: 5000 });
+  expect(r).toMatchObject({ action: "auto-rollback", ok: false, from: exits, to: before });
+  expect(r.reason).toContain("crashed after the switch");
+  expect(Date.now() - t0).toBeLessThan(12_000); // the limit is 20 s
+  expect(currentOf(f.home)).toBe(before);
+}, 40_000);
+
+test("a release that runs but never answers goes back at the limit and says the seconds", async () => {
+  const mute = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("mute", afterSwitch(`() => new Response("not yet", { status: 503 })`)), "runs but does not answer");
+  const before = currentOf(f.home);
+  const r = await promote(ctx, mute, { candidateMs: 8000, confirmMs: 3000, settleMs: 800 });
+  expect(r).toMatchObject({ action: "auto-rollback", ok: false, from: mute, to: before });
+  expect(r.reason).toContain("not confirmed within 3 s");
+  expect(currentOf(f.home)).toBe(before);
+}, 40_000);
+
+test("a release that misses one check after its first answer is still promoted", async () => {
+  const flaky = await commitFile(f.repo, "packages/core/src/main.ts", daemonSource("flaky", `let answered = 0; ` + afterSwitch(`(real: Response | Promise<Response>) => (answered++ === 1 ? new Response("blip", { status: 503 }) : real)`)), "one missed check");
+  const r = await promote(ctx, flaky, { candidateMs: 8000, confirmMs: 8000, settleMs: 800 });
+  expect(r).toMatchObject({ action: "promote", ok: true, to: flaky });
+  expect(currentOf(f.home)).toBe(flaky);
 }, 30_000);
 
 test("restoring the oldest snapshot at the retention limit keeps that snapshot and brings its rows back", async () => {

@@ -55,7 +55,7 @@ const front = Bun.serve<Relay>({
     if (url.pathname === "/_auth/challenge") return Response.json({ challenge: randomBytes(32).toString("base64url"), rpId: "localhost" });
     if (url.pathname === "/_auth/login") {
       const now = Date.now();
-      return new Response(JSON.stringify({ ok: true }), { headers: [["content-type", "application/json"], ["set-cookie", `sb_session=${sessionValue(seed, "pk1", now + 86_400_000)}; Path=/; Max-Age=86400`], ["set-cookie", `sb_recent=${recentValue(seed, "pk1", now + 300_000)}; Path=/; Max-Age=300`]] });
+      return new Response(JSON.stringify({ ok: true }), { headers: [["content-type", "application/json"], ["set-cookie", `sb_session=${sessionValue(seed, "pk1", now + 86_400_000, now + 86_400_000)}; Path=/; Max-Age=86400`], ["set-cookie", `sb_recent=${recentValue(seed, "pk1", now + 300_000)}; Path=/; Max-Age=300`]] });
     }
     const target = `http://${daemon}${url.pathname}${url.search}`;
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
@@ -80,7 +80,8 @@ const cfg = loadConfig({
 });
 const core = await startServer(cfg, [adapter], { port: daemonPort, selfdevChecks: false, dryRunRestart: true });
 const page = `http://localhost:${proxyPort}`;
-const session = sessionValue(seed, "pk1", Date.now() + 86_400_000);
+const sessionEnd = Date.now() + 86_400_000;
+const session = sessionValue(seed, "pk1", sessionEnd, sessionEnd);
 const asCookie = { cookie: `sb_session=${session}`, "content-type": "application/json" };
 const created = (await (await fetch(`http://${daemon}/api/tasks`, { method: "POST", headers: asCookie, body: JSON.stringify({ cwd: cfg.repoRoot, title: "task-e2e", prompt: "hi", runner: "claude" }) })).json()) as Task;
 assert(created.id, "task created");

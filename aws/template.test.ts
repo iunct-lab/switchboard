@@ -362,6 +362,15 @@ describe("aws/template.yaml", () => {
     expect([...read, ...EXTERNAL_PARAMS, ...DAEMON_PARAMS].sort()).toEqual([...hostParams()].sort());
   });
 
+  test("the instance role reads /switchboard/uplink-machines (sb-env: the receiving side) but can write no parameter, so the host cannot switch itself", () => {
+    expect(hostParams().has("uplink-machines")).toBe(true);
+    expect(resource("InstanceRole")).not.toContain("ssm:PutParameter");
+    expect(resource("InstanceRole")).not.toContain("ssm:*");
+    expect(hostSsmStatement()).not.toContain("ssm:PutParameter");
+    // the boundary is the ceiling of every role the stack makes for the host
+    expect(resource("Boundary")).not.toMatch(/ssm:(PutParameter|\*)/);
+  });
+
   test("the host permits only the named Anthropic parameter in addition to existing script parameters", async () => {
     const scripts = await scriptParams();
     const extra = [...hostParams()].filter((p) => !scripts.has(p));

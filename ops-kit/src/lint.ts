@@ -13,6 +13,9 @@ export interface Violation {
 /** The open Issues could not be read, or came back in a shape the checks do not know: exit 2, never "0 violations". */
 export class LintFetchError extends Error {}
 
+/** `--issue <n>` names something that is not an open PBI: the scope cannot be checked (exit 2). */
+export class LintScopeError extends Error {}
+
 interface Row {
   number: number;
   body: string;
@@ -244,7 +247,7 @@ export function storedRows(r: StoredRecords, withProject: boolean): Row[] {
  * Priority, or an open request with such a PBI (no extra API calls: an Issue not among the open rows is read as closed).
  * Without the Project (`withProject: false`) the Priority is not checked, only that the Issue and a PBI are open.
  */
-export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; sleep?: (ms: number) => Promise<void>; records?: StoredRecords; knownFailures?: KnownFailure[]; /** The names at the top of the linted repository's checkout (`repoTop`); absent = no checkout of it here, and a question's kind is not checked against its paths. */ top?: { name: string; dir: boolean }[] } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
+export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: boolean; /** Only this open PBI and the open Tasks under it count: the checks run over every Issue, then the output is cut to these numbers. */ scope?: number; sleep?: (ms: number) => Promise<void>; records?: StoredRecords; knownFailures?: KnownFailure[]; /** The names at the top of the linted repository's checkout (`repoTop`); absent = no checkout of it here, and a question's kind is not checked against its paths. */ top?: { name: string; dir: boolean }[] } = {}): Promise<{ violations: Violation[]; warnings: Violation[]; fetched: number }> {
   const withProject = opts.withProject ?? true;
   const project = !withProject ? null : opts.records ? opts.records.project : projectOf(cfg);
   const projectNumber = project?.number ?? 0;
@@ -407,14 +410,20 @@ export async function lint(gh: GhClient, cfg: OpsConfig, opts: { withProject?: b
     if (!pbis.some(hasPriority)) bad(k.issue, `${at}が指す #${k.issue} に、Priority の付いた open の PBI が無い（${pbis.length === 0 ? "PBI が無いか、閉じている" : "Priority が未設定"}）。${fix}`);
   }
 
+  if (opts.scope !== undefined) {
+    const scope = opts.scope;
+    if (!rows.some((r) => r.number === scope && labelsOf(r).includes("type:pbi"))) throw new LintScopeError(`#${scope} は開いた PBI でない（Task・要望・閉じた Issue・無い番号は範囲にできない）`);
+    const inScope = new Set(rows.filter((r) => r.number === scope || (r.parent?.number === scope && labelsOf(r).includes("type:task"))).map((r) => r.number));
+    return { violations: violations.filter((v) => inScope.has(v.issue)), warnings: warnings.filter((v) => inScope.has(v.issue)), fetched: rows.length };
+  }
   return { violations, warnings, fetched: rows.length };
 }
 
 /** The lines `lint_backlog.sh` printed: `#N: message` per violation, `warning: #N: message` per warning, then the counts. */
-export function formatLint(violations: Violation[], warnings: Violation[] = []): string[] {
+export function formatLint(violations: Violation[], warnings: Violation[] = [], scope?: number): string[] {
   return [
     ...violations.map((v) => `#${v.issue}: ${v.message}`),
     ...warnings.map((w) => `warning: #${w.issue}: ${w.message}`),
-    `violations: ${violations.length}  warnings: ${warnings.length}  (api errors: 0)`,
+    `violations: ${violations.length}  warnings: ${warnings.length}  (api errors: 0)${scope === undefined ? "" : `  （範囲: #${scope} と子の Task）`}`,
   ];
 }

@@ -30,7 +30,7 @@
   "quota_windows": ["runner","window","resets_at","peak","first_ts","last_ts"],
   "experiments": ["id","question","branch_a","branch_b","metric","window_days","registered_at","decided_at","changed","note"],
   "request_evals": ["workspace_id","issue","json","ts"],
-  "routing_log": ["id","task_id","workspace_id","cwd","suggested","rule_id","reason","chosen","ts","suggested_by","src_id"],
+  "routing_log": ["id","task_id","workspace_id","cwd","suggested","rule_id","reason","chosen","ts","suggested_by","src_id","suggested_model","chosen_model"],
   "schedule_log": ["ts","schedule_id","text"],
   "schedules": ["id","title","cron","workspace_id","runner","prompt","budget_usd","enabled","last_run_at","last_task_id","next_run_at","created_at","action","model","last_result","effort"],
   "settings": ["key","json"],

@@ -316,7 +316,7 @@ Replace "apply and restart the daemon" with "promote this version":
 1. Make the release (currently: build on the machine. `rescue/src/releases.ts`. CI only tags a green merge and places no artifacts)
 2. Take a DB snapshot just before the promotion (currently: `VACUUM INTO` into `snapshots/`, the newest 10. Litestream's replication runs separately and continuously)
 3. Start the candidate version on another port. The DB is a copy of the snapshot. Check `/api/health`, the Task list, the WebSocket connection and runner detection
-4. If it passes, switch `current` and restart on the production port. If the same check does not pass within 60 seconds (currently it must also pass 10 seconds after that), return to `previous` and restart
+4. If it passes, switch `current` and restart on the production port. If the process crashes, or the same check does not pass within 300 seconds while it stays up (currently it must also keep passing for 10 seconds), return to `previous` and restart
 5. The result is recorded in the rescue service (6.3) and shown in the UI
 
 DB migrations are additive only (no column is dropped). An old version can run on the new schema, so rolling back does not need the DB to be rolled back.

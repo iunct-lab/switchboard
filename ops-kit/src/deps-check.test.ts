@@ -1,10 +1,10 @@
-// test-reads: ops-kit/template/ops.config.json
+// test-reads: ops-kit/template/ops.config.json ops.config.json ops-kit/src/cli.ts
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseConfig } from "./config.ts";
-import { buildBody, depsCheck, directDeps, excludeFiled, findUvDirs, judge, newerVersion, parseBunAudit, parseBunOutdated, parsePipAudit, parseUvUpgrade, STALE_DAYS, titleOf, type Dep, type DepsCheckDeps, type OpenPr } from "./deps-check.ts";
+import { buildBody, depsCheck, SANDBOX_LINE, directDeps, excludeFiled, findUvDirs, judge, newerVersion, parseBunAudit, parseBunOutdated, parsePipAudit, parseUvUpgrade, STALE_DAYS, titleOf, type Dep, type DepsCheckDeps, type OpenPr } from "./deps-check.ts";
 import { checkRequestBody } from "./request.ts";
 import { openLockPrs } from "./deps-check-io.ts";
 import { fakeGh, type FakeCall } from "./gh.ts";
@@ -132,7 +132,7 @@ test("depsCheck.extraConditions is optional in the config", () => {
 });
 
 // a repository with bun.lock, tools answering with the fixtures, and a fake backlog that records what was done
-function fake(o: { audit?: string; auditCode?: number; outdated?: string; open?: Array<{ ref: string; title: string }>; prs?: OpenPr[] | null; toolCode?: number } = {}) {
+function fake(o: { audit?: string; auditCode?: number; outdated?: string; open?: Array<{ ref: string; title: string }>; prs?: OpenPr[] | null; toolCode?: number; networkClosed?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "deps-check.test."));
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "bun.lock"), "");
@@ -142,6 +142,7 @@ function fake(o: { audit?: string; auditCode?: number; outdated?: string; open?:
   const times = JSON.stringify({ "5.9.3": "2025-10-01T00:00:00.000Z", "7.0.2": "2026-07-08T00:00:00.000Z", "8.3.5": "2026-10-20T00:00:00.000Z", "3.1161.0": "2026-10-30T00:00:00.000Z", "3.1166.0": "2026-11-05T00:00:00.000Z", "8.3.7": "2026-11-05T00:00:00.000Z" });
   const deps: DepsCheckDeps = {
     cwd: dir,
+    networkClosed: o.networkClosed ?? false,
     fetchJson: async () => null,
     now: () => NOW,
     exec: async (cmd) => {
@@ -211,6 +212,89 @@ test("open PRs that cannot be read: 既出の確認なし in the body", async ()
   expect(f.out.join("\n")).toContain("既出の確認なし");
   f.done();
 });
+
+test("sandbox: with the network closed the first line of stderr says to rerun once approved on exit 2; a failed check files nothing", async () => {
+  const open = { fileRequest: true, extraConditions: [] };
+  // a tool did not run
+  const tool = fake({ toolCode: 3, networkClosed: true });
+  expect(await depsCheck(open, tool.deps)).toBe(2);
+  expect(tool.err[0]).toBe(SANDBOX_LINE);
+  expect(tool.err[1]).toContain("検査の道具が走らなかった");
+  expect(tool.log).toEqual([]);
+  // the filing failed after the check hit: no request was made or commented
+  const filing = fake({ networkClosed: true });
+  let attempts = 0;
+  filing.deps.fileRequest = async () => {
+    attempts++;
+    throw new Error("request が exit 1 で終わった");
+  };
+  filing.deps.comment = async () => {
+    attempts++;
+  };
+  expect(await depsCheck(open, filing.deps)).toBe(2);
+  expect(filing.err[0]).toBe(SANDBOX_LINE);
+  expect(filing.err[1]).toContain("要望を出せなかった");
+  expect(attempts).toBe(1);
+  expect(filing.log).toEqual([]);
+  // no lockfile has nothing to do with the network: no mark
+  const none = fake({ networkClosed: true });
+  const empty = mkdtempSync(join(tmpdir(), "deps-check.empty."));
+  expect(await depsCheck(open, { ...none.deps, cwd: empty })).toBe(2);
+  expect(none.err.join("\n")).not.toContain("サンドボックス");
+  rmSync(empty, { recursive: true, force: true });
+  // with the network open, the same failures say nothing about a sandbox
+  const failed = fake({ toolCode: 3 });
+  expect(await depsCheck(open, failed.deps)).toBe(2);
+  expect(failed.err.join("\n")).not.toContain("サンドボックス");
+  const refused = fake();
+  refused.deps.fileRequest = async () => {
+    throw new Error("x");
+  };
+  expect(await depsCheck(open, refused.deps)).toBe(2);
+  expect(refused.err.join("\n")).not.toContain("サンドボックス");
+  // the line comes before any tool runs, so a run that goes through says it too, and still exits 0 / 1
+  const through = fake({ networkClosed: true });
+  expect(await depsCheck(open, through.deps)).toBe(1);
+  expect(through.err).toEqual([SANDBOX_LINE]);
+  expect(through.log[0]).toStartWith("file ");
+  for (const f of [tool, filing, none, failed, refused, through]) f.done();
+});
+
+// The real CLI in a child process with a fake `bun` and `gh` on PATH: what the tool and the kit's own commands write to
+// the process's stderr comes before anything printed after their failure, so only a line printed first stays first.
+async function runCli(fakeBun: string, env: Record<string, string>) {
+  const dir = mkdtempSync(join(tmpdir(), "deps-check.cli."));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  for (const [name, body] of [["bun", fakeBun], ["gh", "exit 1"]] as const) {
+    writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", dependencies: { zod: "3.0.0" } }));
+  writeFileSync(join(dir, "bun.lock"), "{}");
+  const root = resolve(import.meta.dir, "../..");
+  const p = Bun.spawn([process.execPath, join(root, "ops-kit/src/cli.ts"), "--config", join(root, "ops.config.json"), "deps-check", "--file-request"], {
+    cwd: dir,
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, TMPDIR: tmpdir(), CODEX_SANDBOX_NETWORK_DISABLED: "1", ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stderr, code] = await Promise.all([new Response(p.stderr).text(), p.exited, new Response(p.stdout).text()]);
+  rmSync(dir, { recursive: true, force: true });
+  return { code, lines: stderr.split("\n").filter(Boolean) };
+}
+
+test("sandbox: the real CLI's first line of stderr is the sandbox line when the tool or the filing writes its own error", async () => {
+  const tool = await runCli("echo 'error: DNSResolveFailed' >&2; exit 3", {});
+  expect(tool.code).toBe(2);
+  expect(tool.lines[0]).toBe(SANDBOX_LINE);
+  expect(tool.lines.join("\n")).toContain("DNSResolveFailed");
+  const audit = JSON.stringify({ zod: [{ id: 1, url: "https://example.invalid/GHSA-x", title: "t", severity: "high" }] });
+  const filing = await runCli(`if [ "$1" = audit ]; then echo '${audit}'; exit 1; fi; exit 0`, { BACKLOG_URL: "http://127.0.0.1:1/api/backlog", BACKLOG_TOKEN_FILE: "/dev/null" });
+  expect(filing.code).toBe(2);
+  expect(filing.lines[0]).toBe(SANDBOX_LINE);
+  expect(filing.lines.join("\n")).toContain("要望を出せなかった");
+}, 30_000);
 
 test("exit 2 when a tool did not run, or there is no lockfile; nothing is filed", async () => {
   const failed = fake({ toolCode: 3 });
@@ -308,6 +392,7 @@ function fakeUv(o: { pipAudit?: "ok" | "missing" | "garbled" | "exit2"; upgrade?
   const out: string[] = [];
   const deps: DepsCheckDeps = {
     cwd: dir,
+    networkClosed: false,
     now: () => NOW,
     fetchJson: async (url) => (o.fetched?.push(url), PYPI[url] ?? null),
     exec: async (cmd, opts) => {

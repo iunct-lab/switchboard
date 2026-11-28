@@ -3,12 +3,14 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "@switchboard/protocol";
+import type { AgentEvent, StartOptions } from "@switchboard/protocol";
 import { isTempDir, loadConfig } from "./config.ts";
 import { abortOrphanedTasks, Db } from "./db.ts";
 import { HistoryImporter } from "./history.ts";
 import { RateLimitResumer } from "./ratelimit.ts";
 import { Scheduler } from "./scheduler.ts";
+import { StopReport } from "./stops.ts";
+import { stopArmedQueues } from "./tasks/state.ts";
 import { NO_GH, NO_HISTORY, SCRIPT, base, core, fakeAdapter, getTask, home, j, startServer, useCoreDaemon, waitFor } from "./api-test-harness.ts";
 
 useCoreDaemon();
@@ -288,4 +290,59 @@ describe("core daemon", () => {
       else process.env.SWITCHBOARD_SUPERVISED = supervised;
     }
   });
+});
+
+// A second daemon on the same home that cannot take the port leaves the live daemon's database alone: the look for
+// waits that are over (a date, a promotion) runs only once the port is ours.
+test("a daemon that fails to listen resumes no due wait of the live daemon's Task", async () => {
+  const h = mkdtempSync(join(tmpdir(), "switchboard-test-startup-resume-"));
+  const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
+  const script: AgentEvent[] = [
+    { t: "session.start", runner: "claude", runnerSessionId: "sess-r", cwd: "/tmp" },
+    { t: "session.end", status: "ok", summary: "done" },
+  ];
+  const secondStarts: StartOptions[] = [];
+  const live = await startServer(cfg, [fakeAdapter(script)], { port: 0, gh: NO_GH });
+  try {
+    const t = live.tasks.create({ cwd: h, title: "t", prompt: "go", runner: "claude" });
+    await waitFor(async () => live.db.getTask(t.id)!.status === "done");
+    expect(live.tasks.recordStop(t.id, StopReport.parse({ id: "wait", op: "wait", target: "date", reason: "depends", conditions: [{ key: "after", value: "2020-01-01T00:00:00Z", met: false }], state: "waiting" })).ok).toBe(true);
+    await expect(startServer(cfg, [fakeAdapter(script, { starts: secondStarts })], { port: live.server.port, gh: NO_GH })).rejects.toThrow();
+    await Bun.sleep(500);
+    expect({ secondDaemonRunnerStarts: secondStarts.length, stopStates: live.db.listStopRecords([t.id]).map((s) => s.state) }).toEqual({ secondDaemonRunnerStarts: 0, stopStates: ["waiting"] });
+  } finally {
+    await live.stop();
+    stopArmedQueues(); // the queue of the daemon that failed to listen (it is never stopped: that is not what this test is about)
+    rmSync(h, { recursive: true, force: true });
+  }
+});
+
+// The daemon that does take the port looks once right away (a promotion restarts it, so a wait on it is over then): a due
+// wait recorded before the restart is resolved without waiting for the first patrol.
+test("a daemon that takes the port resumes a due wait once at the start", async () => {
+  const h = mkdtempSync(join(tmpdir(), "switchboard-test-startup-resume-"));
+  const cfg = loadConfig({ SWITCHBOARD_HOME: h, SWITCHBOARD_PORT: "0", ...NO_HISTORY });
+  const script: AgentEvent[] = [
+    { t: "session.start", runner: "claude", runnerSessionId: "sess-r", cwd: "/tmp" },
+    { t: "session.end", status: "ok", summary: "done" },
+  ];
+  const first = await startServer(cfg, [fakeAdapter(script)], { port: 0, gh: NO_GH });
+  let id = "";
+  try {
+    const t = first.tasks.create({ cwd: h, title: "t", prompt: "go", runner: "claude" });
+    id = t.id;
+    await waitFor(async () => first.db.getTask(t.id)!.status === "done");
+    expect(first.tasks.recordStop(t.id, StopReport.parse({ id: "wait", op: "wait", target: "date", reason: "depends", conditions: [{ key: "after", value: "2020-01-01T00:00:00Z", met: false }], state: "waiting" })).ok).toBe(true);
+  } finally {
+    await first.stop();
+  }
+  const starts: StartOptions[] = [];
+  const second = await startServer(cfg, [fakeAdapter(script, { starts })], { port: 0, gh: NO_GH });
+  try {
+    await waitFor(async () => second.db.listStopRecords([id]).some((s) => s.state === "resolved"));
+    await waitFor(async () => starts.length === 1);
+  } finally {
+    await second.stop();
+    rmSync(h, { recursive: true, force: true });
+  }
 });

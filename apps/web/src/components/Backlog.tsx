@@ -20,7 +20,7 @@ import { backlog as m } from "../i18n/backlog.ts";
 import { common } from "../i18n/common.ts";
 import { dropIndex, holderOwner, moveEntry, noteParts, noteSummary, noteUrlOf, queueFacts, queueSaver, queueSections, withRemoved, withWaiting, type QueueRow } from "../backlogQueue.ts";
 import { keepOpen, queueWithSelected, rowsOf, toggleSelected } from "../backlogSelect.ts";
-import { bundleGate } from "../bundle.ts";
+import { bundleGate, UNREAD } from "../bundle.ts";
 import { applyView, itemMarks, loadView, PRIORITIES, resetView, saveView, SORTS, STAGES, TYPES, viewSummary, type BacklogView } from "../backlogView.ts";
 
 /** The first lines of a ## 状況 comment shown under its row; the rest is on the Issue. */
@@ -1172,7 +1172,8 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   // the rows chosen, in the order chosen: the one place the choice lives (the queue and the bundle both read it); not kept past this screen
   const [selected, setSelected] = useState<BacklogQueueEntry[]>([]);
-  const [hold, setHold] = useBundleHold(data?.fetchedAt);
+  const [hold, setHold, readHold] = useBundleHold();
+  const [workspacesUnread, setWorkspacesUnread] = useState(false);
   // whether backlog-next resumes a row whose waits closed: an enabled バックログを進める and an implement slot
   const [auto, setAuto] = useState<Record<string, boolean>>({});
   const [shown, setShown] = useState(() => localStorage.getItem(SHOWN_KEY) ?? "");
@@ -1242,10 +1243,11 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
   };
   const load = (refresh: boolean) => {
     setBusy(refresh ? "refresh" : "open");
+    readHold();
+    const workspacesRead = api.workspaces();
+    workspacesRead.then((ws) => (setWorkspaces(ws), setWorkspacesUnread(false))).catch(() => setWorkspacesUnread(true));
     // read with the list (opened, 再読込): backlog-next may have been turned on or off meanwhile
-    Promise.all([api.schedules(), api.workspaces()])
-      .then(([schedules, workspaces]) => setAuto(autoByWorkspace(schedules, workspaces)))
-      .catch(() => setAuto({}));
+    Promise.all([api.schedules(), workspacesRead]).then(([sc, ws]) => setAuto(autoByWorkspace(sc, ws))).catch(() => setAuto({}));
     api
       .backlogQueue()
       .then((q) => {
@@ -1278,10 +1280,6 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
       .queue()
       .then((q) => setApprovals(q.waiting.length))
       .catch(() => setApprovals(0));
-    api
-      .workspaces()
-      .then(setWorkspaces)
-      .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // an Issue saved from the instruction form (「自分で書いて保存」) while this screen is open
@@ -1294,7 +1292,7 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
 
   const keptHere = (workspaceId: string) => workspaces?.find((w) => w.id === workspaceId)?.backlog === "switchboard";
   const chosen = rowsOf(selected, data?.items ?? []);
-  const gate = bundleGate(chosen, metaId, hold);
+  const gate = bundleGate(chosen, workspaces ? metaId : workspacesUnread ? UNREAD : null, hold);
   return (
     <KeptHere.Provider value={keptHere}>
     <Selection.Provider value={{ selected, toggle: (e) => setSelected((s) => toggleSelected(s, e)) }}>
@@ -1378,7 +1376,6 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
                 loaded={projectVars !== null}
                 projectVar={projectVars?.[e.workspaceId]}
                 onSaved={() => {
-                  api.workspaces().then(setWorkspaces).catch(() => undefined);
                   load(true);
                 }}
                 onError={props.onError}
@@ -1492,8 +1489,8 @@ export function Backlog(props: { onNarrow: (workspace?: FeedbackTarget) => void;
       >
         <BundleDoor
           chosen={chosen}
-          gate={gate}
-          onChanged={() => api.bundleHold().then(setHold).catch(() => undefined)}
+          gate={gate} hold={hold}
+          onChanged={readHold}
           onStarted={(task) => {
             setSelected([]);
             props.onStarted(task);

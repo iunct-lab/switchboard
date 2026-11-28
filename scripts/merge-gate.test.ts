@@ -74,7 +74,7 @@ const HEAD = "a".repeat(40);
 const yes = (_kinds: string, over: Partial<PrFacts> = {}) => base({ ...over, head: HEAD, granted: true });
 
 describe("the record of a verdict names every recheck kind the change asks for", () => {
-  const files = [{ path: "packages/core/src/auth.test.ts", additions: 1, deletions: 0, status: "modified" }];
+  const files = [{ path: "packages/core/src/auth.test.ts", additions: 1, deletions: 0, status: "modified" as const }];
   test("judge's `required` holds the kinds whose recheck is already recorded too; `recheck` only those still without one", () => {
     const j = judge(base({ files, rechecks: ["security:tests"] }), off);
     expect(j.required).toEqual(["security:tests"]);
@@ -1049,7 +1049,7 @@ describe("task scope", () => {
 });
 
 describe("viewpoints", () => {
-  const file = (path: string, additions = 1) => ({ path, additions, deletions: 0, status: "modified" });
+  const file = (path: string, additions = 1) => ({ path, additions, deletions: 0, status: "modified" as const });
 
   test("viewpoints: the kinds of the PR's [再チェック] reasons, each under its heading; none is empty; a kind already rechecked is still a viewpoint", () => {
     // size alone: a change over the line limit
@@ -1632,7 +1632,7 @@ describe("merge-gate readPr", () => {
       { id: 2, name: "CI", status: "queued", conclusion: null, created_at: "2026-09-24T13:00:00Z" }, // a later run just started
       { id: 3, name: "release", status: "completed", conclusion: "skipped", created_at: "2026-09-24T12:00:00Z" },
     ])).toEqual([{ name: "CI", conclusion: "" }, { name: "release", conclusion: "SKIPPED" }]);
-    expect(judge({ files: [], checks: checksFromRuns([{ id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "x" }]), unresolvedThreads: 0, mergeState: "CLEAN", reviewed: true, answers: [] }, { allowLarge: false }).reasons)
+    expect(judge({ files: [], checks: checksFromRuns([{ id: 1, name: "CI", status: "completed", conclusion: "failure", created_at: "x" }]), unresolvedThreads: 0, mergeState: "CLEAN", reviewed: true }, { allowLarge: false }).reasons)
       .toEqual(["CI のチェック CI が FAILURE"]);
     expect(checksFromRuns([])).toEqual([]);
   });
@@ -1905,7 +1905,7 @@ describe("merge-gate readPr", () => {
         return { reviewed: f.reviewed, attacked: f.attacked, rechecks: f.rechecks === undefined ? undefined : [...f.rechecks].sort(), ci: f.localCi === true };
       };
       // the same head: all of them count (the command recheck is of this head)
-      expect(await read(S.b2!, S.b1!, jobsAt(S.b2!))).toEqual({ reviewed: true, attacked: true, rechecks: [...READING, "migration"].sort(), ci: true });
+      expect(await read(S.b2!, S.b1!, jobsAt(S.b2!))).toEqual({ reviewed: true, attacked: true, rechecks: [...READING, "migration" as const].sort(), ci: true });
       // a fix commit since (the diff of the PR is not the job's): none of them
       expect(await read(S.b2fix!, S.b1!, jobsAt(S.b2!))).toEqual({ reviewed: undefined, attacked: undefined, rechecks: undefined, ci: false });
       // GitHub's rebase after the PR below merged keeps each commit's diff: what the jobs read still counts, but a recheck a command decides is run again for every head
@@ -2901,7 +2901,7 @@ describe("local change", () => {
     const w = { github: true, body: CLOSES, issues: TASK("触る場所: `src/b.ts`、`scripts/merge-gate.ts`"), workspace: WS };
     // the reading side: the app's records call, answered from the same database
     const records = (q: URLSearchParams) => {
-      const { granted, direct } = mergeRecordsOf({ jobsOf: () => [], hasMergeGrant: (...a) => db.hasMergeGrant(...a), getTask: () => undefined, createdPullsOf: () => [] } as unknown as Parameters<typeof mergeRecordsOf>[0], { repo: q.get("repo")!, prs: q.getAll("pr").map(Number), taskId: q.get("taskId") ?? undefined, head: q.get("head") ?? undefined });
+      const { granted, direct } = mergeRecordsOf(db, { repo: q.get("repo")!, prs: q.getAll("pr").map(Number), taskId: q.get("taskId") ?? undefined, head: q.get("head") ?? undefined });
       return { granted, direct };
     };
     try {

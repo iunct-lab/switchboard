@@ -114,7 +114,7 @@ function github(opts: {
     if (args.includes("POST")) {
       const issue = Number(/issues\/(\d+)\/comments/.exec(path)![1]);
       opts.beforePost?.(issue);
-      return JSON.stringify(add(issue, args[args.length - 1].slice("body=".length)));
+      return JSON.stringify(add(issue, args[args.length - 1]!.slice("body=".length)));
     }
     if (args.includes("DELETE")) {
       const id = Number(path.split("/").pop());
@@ -143,7 +143,7 @@ function github(opts: {
       })).join("\n");
     }
     if (args[1] === "graphql") {
-      const n = Number(args[args.length - 1].slice(2));
+      const n = Number(args[args.length - 1]!.slice(2));
       const p = opts.parents?.[n];
       return JSON.stringify({ data: { repository: { issue: {
         body: opts.bodies[n] ?? "",
@@ -499,9 +499,9 @@ describe("parallel-guard prereqs", () => {
 
   test("an Issue named （リリース） carries how to fix it; a PR does not", async () => {
     const issue = await overlap(ghBoard(REPO, task("**前提**: #71（リリース）", { targets: { 71: { state: "closed" } } }).run), 52, false, now);
-    expect(issue.prereqs[0]).toMatchObject({ ref: "#71", state: "unknown", fix: expect.stringContaining("PR の番号に書き直す") });
+    expect(issue.prereqs![0]).toMatchObject({ ref: "#71", state: "unknown", fix: expect.stringContaining("PR の番号に書き直す") });
     const pr = await overlap(ghBoard(REPO, task("**前提**: #70（リリース）", { targets: { 70: { state: "open", pr: true } } }).run), 52, false, now);
-    expect(pr.prereqs[0]).not.toHaveProperty("fix");
+    expect(pr.prereqs![0]).not.toHaveProperty("fix");
   });
 
   test("a merged （リリース） prerequisite goes: whether it runs is the daemon's to judge before it starts the PBI", async () => {
@@ -730,7 +730,7 @@ describe("parallel-guard on a backlog kept in the app", () => {
     let seq = 0;
     const comments: Record<number, Array<{ id: string; seq: number; body: string; createdAt: string }>> = {};
     const add = (n: number, body: string) => (comments[n] ??= []).push({ id: `sb:${String(++seq).padStart(12, "0")}`, seq, body, createdAt: fresh });
-    const records: StoredRecords = { workspaceId: "ws_l", service: "switchboard", repository: "ws_l", project: { owner: "switchboard", number: 0 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], issues, unread: [], pulls: [] };
+    const records: StoredRecords = { workspaceId: "ws_l", service: "switchboard", repository: "ws_l", project: { owner: "switchboard", number: 0 }, fetchedAt: 1, top: [{ name: "packages", dir: true }], issues, comments: [], unread: [], pulls: [] };
     const calls: string[] = [];
     const fetch = (async (url: string, init: RequestInit = {}) => {
       const method = init.method ?? "GET";
@@ -808,7 +808,7 @@ describe("parallel-guard on a backlog kept in the app", () => {
 
   test("on a local backlog, claim / release / overlap go through the app, never gh", async () => {
     const db = "`packages/core/src/db.ts`";
-    const task = (n: number) => ({ number: n, title: "", state: "OPEN" as const, stateReason: null, body: db, labels: ["type:task"], parent: null, subIssues: [], updatedAt: fresh, fields: { Status: "In progress" } });
+    const task = (n: number) => ({ number: n, title: "", url: "", state: "OPEN" as const, stateReason: null, body: db, labels: ["type:task"], parent: null, subIssues: [], createdAt: fresh, updatedAt: fresh, closedAt: null, fields: { Status: "In progress" } });
     const a = app([task(40), task(60)]);
     expect((await claim(a.board, 1, false)).held).toBe(true);
     // a rival's claim stored first: this session withdraws its own with a mark (a stored comment cannot be deleted)

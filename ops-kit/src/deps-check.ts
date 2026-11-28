@@ -290,6 +290,8 @@ export interface DepsCheckDeps {
   exec: Exec;
   now: () => Date;
   cwd: string;
+  /** The runner's sandbox keeps the network closed (Codex sets `CODEX_SANDBOX_NETWORK_DISABLED=1`): stderr starts with `SANDBOX_LINE`. */
+  networkClosed: boolean;
   /** A JSON document over HTTP (PyPI); null when it could not be read. */
   fetchJson: (url: string) => Promise<unknown | null>;
   /** The open PRs that change a lockfile or manifest; null = could not be read. */
@@ -530,6 +532,13 @@ export const uvEcosystem: Ecosystem = {
 /** The package managers this check knows; a repository uses every one it has a lockfile for. */
 export const ECOSYSTEMS: Ecosystem[] = [bunEcosystem, uvEcosystem];
 
+/**
+ * First line of stderr while the runner's sandbox keeps the network closed. It is printed before any tool runs, because
+ * the tools (`bun audit`) and the kit's own commands write their errors to the same stderr when they fail. The second
+ * run is the runner's approved run, which the runner's own reviewer decides.
+ */
+export const SANDBOX_LINE = "deps-check: サンドボックスが通信を止めている（CODEX_SANDBOX_NETWORK_DISABLED）。この回が exit 2 で終わったら、ランナーの承認つきの実行で同じコマンドを 1 回やり直す（Codex は承認を求める実行。利用者に聞かない）";
+
 export type DepsCheckOptions = { fileRequest: boolean; extraConditions: string[] };
 
 /** exit 0 = nothing meets a condition, 1 = something does, 2 = a tool did not run (or the request could not be filed). */
@@ -539,6 +548,8 @@ export async function depsCheck(opts: DepsCheckOptions, deps: DepsCheckDeps): Pr
     deps.err(`依存の検査に使える lockfile（${ECOSYSTEMS.map((e) => e.name).join(" / ")}）が ${deps.cwd} に無い`);
     return 2;
   }
+  // before any tool: a failing tool writes to stderr first, and this line has to be the first one
+  if (deps.networkClosed) deps.err(SANDBOX_LINE);
   const now = deps.now();
   let rows: Dep[] = [];
   const audits: string[] = [];

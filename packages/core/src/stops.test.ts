@@ -305,6 +305,7 @@ describe("reserveStopRetry / stopRecoveryPrompt", () => {
     expect(plain).toContain("```switchboard-stop");
     expect(plain).toContain("待てるのは 7 日まで）。7 日を超えるなら conditions を省く。");
     expect(plain).toContain("pr#N / issue#N / job#N");
+    expect(plain).toContain("昇格を待つ（depends）は conditions に promoted#<sha>（動いている版がその sha を含めば片づく）");
     expect(plain).toContain("どの鍵でも書けない待ちはアプリが再開できないので、利用者の要対応に出る。");
     expect(plain).toContain("依頼の範囲外の書き込み（リポジトリの CLAUDE.md が認めていない昇格、依頼に無い Issue を閉じる）はしない。");
     // the wait rule names the kit's command with the flags it requires and the exit of a cut wait
@@ -753,19 +754,21 @@ describe("resumableDepends", () => {
     ["a PR", stop({ id: "pr", reason: "depends", state: "waiting", conditions: [c("pr#12")] })],
     ["a job", stop({ id: "job", reason: "depends", state: "waiting", conditions: [c("job#3")] })],
     ["a date", stop({ id: "date", reason: "depends", state: "waiting", conditions: [c("after", "2099-01-01T00:00:00+09:00")] })],
+    ["a promotion", stop({ id: "promo", reason: "depends", state: "waiting", conditions: [c("promoted#a1b2c3d")] })],
+    ["a promotion with no sha", stop({ id: "badpromo", reason: "depends", state: "waiting", conditions: [c("promoted#xyz")] })],
     ["a date it cannot read", stop({ id: "baddate", reason: "depends", state: "waiting", conditions: [c("after", "tomorrow")] })],
     ["no condition", stop({ id: "none", reason: "depends", state: "waiting" })],
     ["a subagent", stop({ id: "sub", reason: "depends", state: "waiting", conditions: [c("subagent")] })],
     ["a PR and a subagent", stop({ id: "mix", reason: "depends", state: "waiting", conditions: [c("pr#12"), c("subagent")] })],
     ["a PR already met", stop({ id: "met", reason: "depends", state: "waiting", conditions: [{ key: "pr#12", value: "merged", met: true }] })],
   ];
-  test("depends the app does not resume needs the person", () => {
+  test("depends the app does not resume needs the person; a promoted#<sha> is resumed, one without a sha is not", () => {
     for (const [name, record] of cases) {
       const resumed = dependsWaits([record]).length > 0;
       expect(resumableDepends(record), name).toBe(resumed);
       expect(outcomeFromStops([record], false), name).toBe(resumed ? "waits" : "needs_action");
     }
-    expect(cases.filter(([, r]) => resumableDepends(r)).map(([n]) => n)).toEqual(["a PR", "a job", "a date"]);
+    expect(cases.filter(([, r]) => resumableDepends(r)).map(([n]) => n)).toEqual(["a PR", "a job", "a date", "a promotion"]);
   });
 });
 

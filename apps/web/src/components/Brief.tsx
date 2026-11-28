@@ -18,6 +18,7 @@ import { HumanEvalForm, humanEvalKey } from "./HumanEvalForm.tsx";
 import { humanAnswerMark, humanLabel, judgeAverage, judgeRows, metricRows, modelsLabel } from "../evals.ts";
 import { jstDateTime } from "../time.ts";
 import { t } from "../i18n.ts";
+import { modelSuggestionNote } from "../routingNote.ts";
 import { brief as m } from "../i18n/brief.ts";
 
 /** How long 再評価 shows 判定中 without word from the daemon: the judge's 90 s, a fallback turn, and slack. */
@@ -84,6 +85,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
   // Model: stored now, used from the next turn (the daemon resumes the session with it).
   const [modelErr, setModelErr] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
+  const modelNote = modelSuggestionNote(props.task.routing);
   useEffect(() => setModelErr(null), [props.task.id]);
   const changeModel = (model: string) => {
     setModelBusy(true);
@@ -346,6 +348,7 @@ export function Brief(props: { task: Task; detail?: TaskDetail; ledger: LedgerSu
                 {" · "}{t(m.llmSuggest, { runner: props.task.routing.llm.runner, reason: props.task.routing.llm.reason, actual: props.task.runner, outcome: outcomeLabel(props.task.outcome) })}
               </span>
             )}
+            {modelNote && <><br /><span className="hint">{t(m.modelSuggested, modelNote)}</span></>}
           </span>
           <span>{t(m.model)}</span>
           <span>

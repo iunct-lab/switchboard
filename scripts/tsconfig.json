@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    "typeRoots": ["../ops-kit/node_modules/@types"],
+    "paths": {
+      "@switchboard/protocol": ["../packages/protocol/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

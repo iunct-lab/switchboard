@@ -282,6 +282,8 @@ try {
   assert(created.status === 201, `the plain preset: ${created.status}`);
   const targetPreset = "レビュー対応からマージまで";
   const targetTemplate = "PR {{target}} のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）";
+  const targetFirstLine = targetTemplate.split("\n")[0];
+  if (targetFirstLine === undefined) throw new Error("the target template has no first line");
   const targetText = `PR ${REPO}#12 のレビュー指摘に対応してマージまで進めてください（review-triage-and-merge）`;
   const presetRequests = () => evaluate(`performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/presets')).length`) as Promise<number>;
   const boxOf = (where: "home" | "task") => (where === "home" ? ".compose textarea" : ".composer textarea");
@@ -311,7 +313,7 @@ try {
     await focusBox(boxOf(where));
     // the first line of both presets is in the candidates (a preset with a target shows its template's first line, not the filled-in one)
     const shown = await evaluate(`document.querySelector('.preset-suggest').innerText`) as string;
-    const visible = (await suggestions()).length === 2 && shown.includes(planText) && shown.includes(targetTemplate.split("\n")[0].slice(0, 80));
+    const visible = (await suggestions()).length === 2 && shown.includes(planText) && shown.includes(targetFirstLine.slice(0, 80));
     n += 1; // a press on the candidate
     await page(`opt(${JSON.stringify(name)}).click()`);
     if (withTarget) {
@@ -403,7 +405,7 @@ try {
     const read = () => evaluate(`[...(${title ? `${rowSel(title)}` : "document"}).querySelectorAll('.preset-replies')].reduce((a, e) => a + e.getBoundingClientRect().height, 0)`) as Promise<number>;
     // the screen is still filling in: the value counts once it has not moved for 300 ms
     let last = NaN, since = Date.now();
-    return until(async () => { const h = await read(); if (h !== last) { last = h; since = Date.now(); } return Date.now() - since >= 300 && (h > 0 || h === 0 ? { h } : null); }, "the reply row's height to settle").then((v) => v.h);
+    return until(async () => { const h = await read(); if (h !== last) { last = h; since = Date.now(); } return Date.now() - since >= 300 && (h > 0 || h === 0) ? { h } : null; }, "the reply row's height to settle").then((v) => v.h);
   };
   const showReplies = (title?: string) => evaluate(`(${title ? `${rowSel(title)}` : "document"}).querySelector('.preset-replies')?.scrollIntoView({ block: "center" })`);
   const sideways = () => evaluate(`document.documentElement.scrollWidth`) as Promise<number>;

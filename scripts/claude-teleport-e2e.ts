@@ -242,7 +242,8 @@ let buf='';for await(const chunk of Bun.stdin.stream()){buf+=new TextDecoder().d
   finally { await call("Emulation.clearDeviceMetricsOverride"); }
   cases++; await ended(false);
   assert(entries().filter(e => e.answer === "y").length === 1 && entries().filter(e => e.stdin === "/exit").length === 2, "one answer from the person, /rename and /exit from the daemon"); cases++;
-  for (const [m, hint] of [["unpushed", "push済み"], ["repo", "同じリポジトリ"], ["account", "同じアカウント"], ["permission", "アクセス権"], ["provider", "サブスクリプション"], ["subscription", "サブスクリプション"]]) {
+  const failureCases: Array<[string, string]> = [["unpushed", "push済み"], ["repo", "同じリポジトリ"], ["account", "同じアカウント"], ["permission", "アクセス権"], ["provider", "サブスクリプション"], ["subscription", "サブスクリプション"]];
+  for (const [m, hint] of failureCases) {
     await start(m); await ended();
     assert((await progressText()).includes(hint) && core.db.listLocalTasksForCloud(cloud.id).length === 1, "localized failure preserves ownership"); cases++;
   }

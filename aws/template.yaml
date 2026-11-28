@@ -495,6 +495,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/start-token'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/starter-url'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/uplink-bucket'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/uplink-machines'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/switchboard/web-url'
               # writes only where the host itself produces data: the sqlite replica (Litestream also prunes it) and the
               # daily archives. Releases are read-only here: an agent that could rewrite one would get it run later.

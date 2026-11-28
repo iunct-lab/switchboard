@@ -264,6 +264,8 @@ export type StopReport = z.infer<typeof StopReport>;
 export const JOB_KEY = /^job#(\d+)$/;
 /** A wait key of a stop's condition: a PR or an Issue of the workspace's repository, by number, or a job of the daemon, by id. */
 export const WAIT_KEY = /^(pr|issue|job)#(\d+)$/;
+/** A wait for a promotion: the condition's key names a commit (a sha of 7 to 40 hex digits); it is over when the running version contains it. */
+export const PROMOTED_KEY = /^promoted#([0-9a-f]{7,40})$/;
 /** A wait for a date: the condition's value is an ISO 8601 time with a time zone, like the `runner#<runner>` value of a usage limit. */
 export const AFTER_KEY = "after";
 
@@ -272,12 +274,12 @@ export const isAfterWait = (c: { key: string; value: string }): boolean => c.key
 
 /**
  * Whether the app continues a `depends` stop when what it waits for is over: every condition is a PR / Issue / job
- * (`WAIT_KEY`) or a date it can read (`after`), and one of them is still unmet. Any other `depends` (no condition, one
+ * (`WAIT_KEY`), a promotion (`PROMOTED_KEY`) or a date it can read (`after`), and one of them is still unmet. Any other `depends` (no condition, one
  * the app cannot watch, like a subagent or a background run, or every condition already met) is never continued, so it
  * waits for the person.
  */
 export function resumableDepends(stop: Pick<StopRecord, "reason" | "conditions">): boolean {
-  return stop.reason === "depends" && stop.conditions.some((c) => !c.met) && stop.conditions.every((c) => WAIT_KEY.test(c.key) || isAfterWait(c));
+  return stop.reason === "depends" && stop.conditions.some((c) => !c.met) && stop.conditions.every((c) => WAIT_KEY.test(c.key) || PROMOTED_KEY.test(c.key) || isAfterWait(c));
 }
 
 /**
@@ -580,7 +582,7 @@ export function stopRecoveryPrompt(open: StopSummary[], cond: PreambleConditions
           "```",
         ]),
     `再実行してよいのは、一時障害（通信の切断・タイムアウト・HTTP 502/503/504）で、読み取り専用か何かする前に失敗したと確かめられる操作だけ。同じ操作を最大 ${RETRY_DELAYS_MS.length} 回（${RETRY_DELAYS_MS.map((d) => `${d / 1000} 秒後`).join("、")}）まで。再実行の前に state "retrying" と試行番号を報告し、承認はいつもどおり毎回受ける。成功したら "resolved"、使い切ったら "exhausted" を報告して止まる。認証・権限・入力のエラー、ディスクの空き切れや、何かしたか分からない操作は再実行しない。${cond.workspaceMcp ? "Workspace MCP の exec.run は自分で再試行するので、その失敗は再実行しない。" : ""}`,
-    `依存の待ち（depends）は待っている PR・Issue・デーモンに頼んだ仕事を conditions に pr#N / issue#N / job#N で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。${
+    `依存の待ち（depends）は待っている PR・Issue・デーモンに頼んだ仕事を conditions に pr#N / issue#N / job#N で、昇格を待つ（depends）は conditions に promoted#<sha>（動いている版がその sha を含めば片づく）で、使用上限（usage-limit）は止めたランナーを runner#<ランナー>（value は戻る時刻を ISO 8601 のタイムゾーンつきで、分からなければ unknown）で書く。日数の経過を待つ（depends）は conditions に {"key":"after","value":"<ISO 8601 のタイムゾーンつき日時>"}（pr#N などと一緒でもよく、全部が済んでから続く。待てるのは 7 日まで）。${
       cond.stage
         ? "7 日を超えるなら PBI の工程 Task は占有の解放の --after で引き渡す（ほかの停止は conditions を省く）。並列ガードの overlap が重なり（defer）で進めないと言ったら、その出力の conditions をそのまま写す（前提の待ちを定期実行に引き渡すときの書き方は、手順にあればそれに従う）。"
         : "7 日を超えるなら conditions を省く。"

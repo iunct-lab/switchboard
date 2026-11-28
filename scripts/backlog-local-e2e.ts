@@ -70,7 +70,7 @@ const check = (name: string, ok: boolean, detail?: unknown) => {
   cases[name] = ok;
   if (!ok) console.error(`✗ ${name}`, detail === undefined ? "" : JSON.stringify(detail));
 };
-async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Promise<T> {
+async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Promise<NonNullable<T>> {
   for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(20)) {
     const v = await f();
     if (v) return v;

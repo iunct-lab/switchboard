@@ -9,6 +9,9 @@ import { z } from "zod";
  * its limit); a wait cut with `fail` leaves its record behind with the reason, and the app tells the person.
  */
 
+/** The shape of a key naming the other side of a wait (`--key`); the same as the keys of a stop's conditions. */
+export const WAIT_KEY_RE = /^(pr|issue|job)#\d+$/;
+
 /**
  * The record of one wait: `<OPS_KIT_WAITS_DIR>/<taskId>-<pid>.json`, written only when the app that started the Task
  * gave both that directory and OPS_KIT_TASK_ID. The app reads it; nothing else is sent to the app.
@@ -21,6 +24,8 @@ export const WaitFile = z.object({
   startedAt: z.number(),
   /** The limit (`--timeout`): the wait is cut at this time at the latest. */
   timeoutAt: z.number(),
+  /** The other sides of the wait, by key (`--key`, repeatable: `pr#N` / `issue#N` / `job#N`); none when the wait has no such side. */
+  keys: z.array(z.string().regex(WAIT_KEY_RE)).default([]),
   /** `--stall`: cut earlier once the progress command's output has not changed for this long; null = no progress command. */
   stallSec: z.number().nullable(),
   /** When the progress command's output last changed (the start, without one). */
@@ -46,10 +51,12 @@ export const WAIT_INTERVAL_SEC = 5;
  */
 export const waitsOnPerson = (label: string): boolean => /利用者|所有者|本人|人の|承認|許可|回答|返事|返信|確認|判断|レビュー|マージ|昇格|approv|answer|repl(y|ies)|confirm|decision|review|merge|promot|owner|user|person|human/i.test(label);
 
-export const WAIT_USAGE = "wait --for <何を待つか> --timeout <秒> --on-timeout <fail|proceed> [--interval <秒>] [--progress <進みを出すコマンド> --stall <秒>] -- <判定コマンド…>\n秒は 1 から 604800（7 日）まで\n人の回答・承認・確認・レビュー・マージ・昇格を待つ待ち（--for にその語がある）は --on-timeout fail だけ（切れたら止まって利用者に伝わる。proceed は不可）";
+export const WAIT_USAGE = "wait --for <何を待つか> --timeout <秒> --on-timeout <fail|proceed> [--key <pr#N|issue#N|job#N>]… [--interval <秒>] [--progress <進みを出すコマンド> --stall <秒>] -- <判定コマンド…>\n秒は 1 から 604800（7 日）まで\n人の回答・承認・確認・レビュー・マージ・昇格を待つ待ち（--for にその語がある）は --on-timeout fail だけ（切れたら止まって利用者に伝わる。proceed は不可）";
 
 export interface WaitOpts {
   label: string;
+  /** The other sides of the wait (`--key`, any number). */
+  keys: string[];
   timeoutSec: number;
   onTimeout: "fail" | "proceed";
   intervalSec: number;
@@ -88,8 +95,14 @@ export function parseWaitArgs(args: string[]): WaitOpts | null {
   const check = args.slice(at + 1);
   const flags = args.slice(0, at);
   const given: Record<string, string> = {};
+  const keys: string[] = [];
   for (let i = 0; i < flags.length; i += 2) {
     const [name, value] = [flags[i]!, flags[i + 1]];
+    if (name === "--key") {
+      if (value === undefined || !WAIT_KEY_RE.test(value)) return null;
+      if (!keys.includes(value)) keys.push(value);
+      continue;
+    }
     if (!["--for", "--timeout", "--on-timeout", "--interval", "--progress", "--stall"].includes(name) || value === undefined || name in given) return null;
     given[name] = value;
   }
@@ -106,7 +119,7 @@ export function parseWaitArgs(args: string[]): WaitOpts | null {
   const stallSec = seconds(given["--stall"]);
   // the two go together: a progress command with no limit cuts nothing, a limit with nothing to watch cannot be told
   if ((given["--progress"] === undefined) !== (given["--stall"] === undefined) || (given["--progress"] !== undefined && (!progress || stallSec === null))) return null;
-  return { label, timeoutSec, onTimeout, intervalSec, check, ...(progress ? { progress, stallSec: stallSec! } : {}) };
+  return { label, keys, timeoutSec, onTimeout, intervalSec, check, ...(progress ? { progress, stallSec: stallSec! } : {}) };
 }
 
 /**
@@ -125,7 +138,7 @@ export async function runWait(o: WaitOpts, deps: WaitDeps = realWaitDeps()): Pro
     if (!path) return;
     try {
       mkdirSync(dir!, { recursive: true });
-      const record: WaitFile = { taskId: taskId!, pid: deps.pid, label: o.label, startedAt, timeoutAt, stallSec: o.stallSec ?? null, progressAt, cut };
+      const record: WaitFile = { taskId: taskId!, pid: deps.pid, label: o.label, keys: o.keys, startedAt, timeoutAt, stallSec: o.stallSec ?? null, progressAt, cut };
       writeFileSync(`${path}.tmp`, JSON.stringify(record));
       renameSync(`${path}.tmp`, path);
     } catch {

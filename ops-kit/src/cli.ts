@@ -63,13 +63,14 @@ const USAGE = `使い方: bun ops-kit/src/cli.ts <command> [--config <ops.config
       Actions の project-autoadd が動かないときの代わり。--dry-run は追加するものを出すだけ
       BACKLOG_URL がある（アプリの Task の中）なら GitHub を読み書きせず exit 1（--dry-run も）。取り込み済みの要望・PBI・Task 1 件なら backlog triage、ほかは Task の外で回す
 
-  lint [--no-project] [--fresh]
+  lint [--no-project] [--fresh] [--issue <PBI>]
       open の PBI / Task / 要望が記載規約（設定の sections とキットの Story Points の尺度）を満たすか検査する。1 つのクエリ（100 件ずつ）で読む
       BACKLOG_URL がある（アプリの Task の中）なら GitHub ではなくアプリの保存値を読む（Project はアプリがその workspace に読むもの）。
       --fresh: その前にアプリに送信と取込みをさせる。アプリが GitHub に届かなければ保存値を検査し「GitHub 未同期」を出す。
       アプリに届かない・未取得は 2（gh には切り替えない）
       exit 0 = 合格、1 = 違反あり、2 = 検査できなかった（取得の失敗、形の違い、Project が見つからない）
       --no-project: Project（Story Points / Status）を見ない。gh に project の権限が無い環境用
+      --issue <PBI>: その PBI と子の Task の違反だけで exit を決める（Ready の判定用）。開いた PBI でなければ 2
       GitHub 連携の無い workspace（BACKLOG_WORKSPACE があり GH_REPO が無い）で ops.config.json が無ければ、雛形 ops-kit/template/ops.config.json の値で検査する
 
   bootstrap <title> [--dry-run]
@@ -726,7 +727,12 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         return 0;
       }
       case "lint": {
-        if (rest.some((a) => a !== "--no-project" && a !== "--fresh") || new Set(rest).size !== rest.length) return usage(err, "lint [--no-project] [--fresh]", 2);
+        const lintUsage = "lint [--no-project] [--fresh] [--issue <PBI>]";
+        const issueAt = rest.indexOf("--issue");
+        const scopeArg = issueAt < 0 ? undefined : rest[issueAt + 1];
+        const flags = issueAt < 0 ? rest : rest.filter((_, i) => i !== issueAt && i !== issueAt + 1);
+        if (flags.some((a) => a !== "--no-project" && a !== "--fresh") || new Set(flags).size !== flags.length || (issueAt >= 0 && (scopeArg === undefined || !/^[1-9][0-9]*$/.test(scopeArg)))) return usage(err, lintUsage, 2);
+        const scope = scopeArg === undefined ? undefined : Number(scopeArg);
         const records = stored ? await readRecords(env, { fresh: rest.includes("--fresh") }) : undefined;
         if (records) err(`アプリの保存値を検査（${records.repository}、最終取得 ${new Date(records.fetchedAt).toISOString()}${rest.includes("--fresh") && !records.unsynced ? "、取込み済み" : ""}）`);
         if (records?.unsynced) err(records.unsynced);
@@ -742,8 +748,8 @@ export async function main(argv: string[], gh: GhClient = realGh(), out: (s: str
         // the paths a question names are read against this checkout's top level only when it is the linted repository's
         const here = dir ? (() => { try { const origin = originOf(dir); return origin ? (remoteOf(origin)?.path ?? null) : null; } catch { return null; } })() : null;
         const mine = !!dir && !!here && !!target && here.toLowerCase() === target.toLowerCase();
-        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records, knownFailures, ...(mine ? { top: repoTop(dir!) } : {}) });
-        for (const line of formatLint(violations, warnings)) out(line);
+        const { violations, warnings } = await lint(gh, cfg, { withProject: !rest.includes("--no-project"), records, knownFailures, scope, ...(mine ? { top: repoTop(dir!) } : {}) });
+        for (const line of formatLint(violations, warnings, scope)) out(line);
         return violations.length > 0 ? 1 : 0;
       }
       case "bootstrap": {
