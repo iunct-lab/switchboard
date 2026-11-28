@@ -77,9 +77,9 @@ export interface PromoteTimes {
   candidateMs?: number;
   /** How long an `ifNoRestart` promotion waits for a heavy-process slot when its caller did not take one. */
   heavyWaitMs?: number;
-  /** After the switch: answer within this, … */
+  /** After the switch: how long to keep waiting while the daemon process stays up (a crash goes back at once); past it the switch is not confirmed. */
   confirmMs?: number;
-  /** … and still be up and answering this much later. */
+  /** Once it answers, it must keep answering this long (a failed check starts the count again). */
   settleMs?: number;
   /** A switch without a restart: the daemon must report the new release in `/api/health` within this after SIGHUP. */
   webMs?: number;
@@ -423,7 +423,10 @@ export async function tryCandidate(ctx: Ctx, sha: string, snapshot: string | nul
   }
 }
 
-/** After the switch: a first good answer within `confirmMs`, and still answering — without a crash — `settleMs` after it. */
+/** How long the daemon may take, after the switch, to answer while its process stays up (measured: up to 87 s, with the database copy at start). */
+export const CONFIRM_LIMIT_MS = 300_000;
+
+/** After the switch: while the process stays up (no crash), wait up to `confirmMs` for answers that last `settleMs`; a crash goes back at once. */
 async function confirm(ctx: Ctx, confirmMs: number, settleMs: number): Promise<string | null> {
   const end = Date.now() + confirmMs;
   let reason = "did not start";
@@ -510,7 +513,7 @@ async function buildFromSource(source: string, tag: string, home: string, expect
  * it) is the daemon started again, on the older release.
  */
 export async function promote(ctx: Ctx, rev: string, times: PromoteTimes = {}, expectSha?: string, ifNoRestart = false, held?: HeavyHold): Promise<HistoryEntry> {
-  const { candidateMs = 30_000, confirmMs = 60_000, settleMs = 10_000, webMs = 10_000, readsMs = 10_000 } = times;
+  const { candidateMs = 30_000, confirmMs = CONFIRM_LIMIT_MS, settleMs = 10_000, webMs = 10_000, readsMs = 10_000 } = times;
   const from = currentOf(ctx.home);
   const before = previousOf(ctx.home);
   const slot = ifNoRestart ? (held ?? (await holdHeavy(ctx.heavy, times.heavyWaitMs ?? 15_000))) : null;

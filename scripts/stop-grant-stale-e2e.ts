@@ -5,7 +5,10 @@
  * grant (A), the 判断待ち screen shows its card; the list is then not read again (its GET blocked, as a slow read would
  * leave it), the same stop is reported again with another grant (B) and the card's own button is pressed — the answer
  * is 409 with 「問いが新しくなりました」, the card says so, and nothing reaches the runner. When the list is read again
- * the card is B. The daemon is the real one (startServer); the runner is a fake.
+ * the card is B. Then the card of B is pressed: the grant B reaches the runner once and the Task goes on; the card stays,
+ * answered (its buttons gone), until the screen is opened again, and then it is gone.
+ * SCREENSHOT_DIR=<dir> saves the card when it is first shown, at 390x844 and 1280x900 (390-stop-grant.png, 1280-stop-grant.png).
+ * The daemon is the real one (startServer); the runner and `gh` are fakes (nothing reaches GitHub).
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +26,10 @@ const started: string[] = [];
 // what the scenario's Task was sent or started with: the daemon's own helper turns (the rubric judge runs when a Task ends) are not counted
 const scenarioDeliveries = () => sent.length + started.filter((p) => p === "stop-grant").length;
 const sent: string[] = [];
+// what the runner got that carries grant B (a sent line or a resumed start's prompt): the scenario's delivery
+// (the daemon's judge turn quotes the conversation, so its prompt carries the grant too: it is not the delivery)
+const delivered: string[] = [];
+const isGrant = (text: string) => text.includes(GRANT_B) && !text.includes("ルーブリック");
 let reportB: (() => void) | undefined;
 const adapter: RunnerAdapter = {
   id: "claude", detect: async () => ({ available: true }),
@@ -30,8 +37,12 @@ const adapter: RunnerAdapter = {
     started.push(opts.prompt);
     let exit!: (code: number | null) => void;
     const exited = new Promise<number | null>((r) => (exit = r));
+    const granted = isGrant(opts.prompt);
+    if (granted) delivered.push(opts.prompt);
     queueMicrotask(() => {
       emit({ t: "session.start", runner: "claude", runnerSessionId: `s-${opts.prompt}`, cwd: opts.cwd });
+      // the grant went through: the Task goes on and ends its turn with no stop
+      if (granted) { emit({ t: "message.delta", role: "assistant", text: "許可を受けて続けました。", messageId: `g-${Math.random()}` }); emit({ t: "session.end", status: "ok", summary: "stop-grant" }); exit(0); return; }
       emit({ t: "message.delta", role: "assistant", text: stop(GRANT_A), messageId: `a-${Math.random()}` });
       // the stop changes only when the scenario says so: the same run reports the stop again with another grant
       reportB = () => {
@@ -40,11 +51,11 @@ const adapter: RunnerAdapter = {
         exit(0);
       };
     });
-    return { send(text: string) { sent.push(text); }, respondPermission() {}, async abort() { exit(null); }, async close() { exit(0); }, exited };
+    return { send(text: string) { sent.push(text); if (isGrant(text)) { delivered.push(text); emit({ t: "message.delta", role: "assistant", text: "許可を受けて続けました。", messageId: `g-${Math.random()}` }); emit({ t: "session.end", status: "ok", summary: "stop-grant" }); } }, respondPermission() {}, async abort() { exit(null); }, async close() { exit(0); }, exited };
   },
 };
 const cfg = loadConfig({ SWITCHBOARD_HOME: home, SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_PORT: "0" });
-const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true });
+const core = await startServer(cfg, [adapter], { port: 0, selfdevChecks: false, dryRunRestart: true, gh: async () => ({ code: 1, stdout: "", stderr: "no gh in this e2e" }), judge: async () => ({ result: "finished", reason: "許可を受けて続けた", runner: "claude", model: "fake" }) });
 const base = `http://127.0.0.1:${core.server.port}`;
 const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
 async function until<T>(fn: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
@@ -90,6 +101,18 @@ try {
     const api = await (await fetch(`${base}/api/asks`)).json();
     throw new Error(`${(e as Error).message}\npage: ${shown}\napi: ${JSON.stringify(api).slice(0, 900)}`);
   });
+  // the screen shown to a person: the card as it is first shown, at the phone's width first and then the desktop's
+  const shots = process.env.SCREENSHOT_DIR;
+  if (shots) {
+    for (const [prefix, width, height, mobile] of [["390", 390, 844, true], ["1280", 1280, 900, false]] as const) {
+      await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
+      await Bun.sleep(300);
+      await evaluate(`[...document.querySelectorAll('[data-ask]')].find(c => c.textContent.includes(${JSON.stringify(GRANT_A)}))?.scrollIntoView({ block: 'center' })`);
+      const png = await call("Page.captureScreenshot", { format: "png" });
+      await Bun.write(join(shots, `${prefix}-stop-grant.png`), Buffer.from(png.data, "base64"));
+    }
+    await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  }
   // stop the list from being read again, then report the stop again with grant B
   await call("Network.enable");
   // no block: the list is read again every 5 s, so the click follows the report at once (a read that lands first shows B, and the check below says so)
@@ -117,7 +140,26 @@ try {
   assert(scenarioDeliveries() === sentBefore, `the runner got something after the stale answer: sent=${JSON.stringify(sent)} started=${JSON.stringify(started)}`);
   // the list is read again: the card is B
   await until(() => evaluate(`[...document.querySelectorAll('[data-ask]')].some(c => c.textContent.includes(${JSON.stringify(GRANT_B)}))`), "the card shows grant B after the list is read");
-  console.log(JSON.stringify({ notice: "問いが新しくなりました", runnerAfterStale: scenarioDeliveries() - sentBefore, cardAfterRead: GRANT_B }));
+  const runnerAfterStale = scenarioDeliveries() - sentBefore;
+  // the card of B, pressed now (it is the Task's current question): B reaches the runner once, as the grant itself, and the card goes
+  const cardB = `[...document.querySelectorAll('[data-ask]')].find(c => c.textContent.includes(${JSON.stringify(GRANT_B)}))?.querySelectorAll('button')`;
+  await evaluate(`window.__answers = []`);
+  const atB = await evaluate(`(() => { const b = [...(${cardB} ?? [])].find(b => b.textContent.trim() === 'この操作だけ許可して続ける'); b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`) as { x: number; y: number };
+  await call("Input.dispatchMouseEvent", { type: "mousePressed", x: atB.x, y: atB.y, button: "left", clickCount: 1 });
+  await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: atB.x, y: atB.y, button: "left", clickCount: 1 });
+  const granted = await until(() => evaluate(`window.__answers.find(a => a.status !== undefined) ?? null`), "the grant's reply") as { status: number; body: string };
+  assert(granted.status === 200, `the grant's reply: ${JSON.stringify(granted)}`);
+  await until(() => delivered.length > 0, "grant B delivered to the runner");
+  await Bun.sleep(500);
+  assert(delivered.length === 1 && delivered[0]!.includes(GRANT_B), `delivered: ${JSON.stringify(delivered)}`);
+  // the list keeps a closed question for a while as history (resolved): what is gone is the open one
+  await until(async () => !((await (await fetch(`${base}/api/asks`)).json()) as { asks: Array<{ id: string; state: string }> }).asks.some((a) => a.id.startsWith("stop:") && a.state === "open"), "no open stop question left");
+  // a question answered here stays in the person's row, with what the answer did, until the screen is opened again: no button to press on it
+  await until(() => evaluate(`![...document.querySelectorAll('[data-ask] button')].some(b => b.textContent.trim() === 'この操作だけ許可して続ける')`), "the answered card has no grant button");
+  // opened again: no question awaits, and the stop is only under 済んだもの as 解消済み (no grant, no button to press)
+  await call("Page.navigate", { url: `${base}/approvals` });
+  await until(async () => { await reveal(); return evaluate(`(() => { const cards = [...document.querySelectorAll('[data-ask]')]; return cards.length > 0 && cards.every(c => c.textContent.includes('解消済み') && !c.textContent.includes(${JSON.stringify(GRANT_B)}) && !c.querySelector('button')) && /判断待ち\\s*0/.test(document.body.innerText); })()`); }, "the card is gone from the questions once the screen is opened again");
+  console.log(JSON.stringify({ notice: "問いが新しくなりました", runnerAfterStale, cardAfterRead: GRANT_B, grantDelivered: delivered[0], deliveredCount: delivered.length }));
 } finally {
   ws?.close();
   chrome.kill();

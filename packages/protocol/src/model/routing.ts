@@ -31,6 +31,10 @@ export const TaskRouting = z.object({
   ruleId: z.string(),
   reason: z.string(),
   overridden: z.boolean(),
+  /** The model the rule table proposed with its runner (null when the rule names none, or when the task was created before this was kept). */
+  suggestedModel: z.string().nullable().default(null),
+  /** The model the task was created with, after the runner's saved default (null = the CLI's default). Later changes to the task's model — the user switching it, the id the runner reports — do not rewrite it. Null when the task was created before this was kept. */
+  chosenModel: z.string().nullable().default(null),
   /** What the LLM suggested, if it was on and answered in time. It may arrive after the task was created, or after it ended. The task's runner never follows it. */
   llm: LlmSuggestion.nullable().default(null),
 });
@@ -47,6 +51,9 @@ export const RoutingLogRow = z.object({
   ruleId: z.string(),
   reason: z.string(),
   chosen: RunnerId,
+  /** The model the rule proposed, and the model the task was created with (the runner's default applied; null = none named, or the row is older than these columns). Null on an LLM row. */
+  suggestedModel: z.string().nullable(),
+  chosenModel: z.string().nullable(),
   /** Which suggester produced this row: the rule table, or the LLM asked alongside it. */
   suggestedBy: z.enum(["rule", "llm"]),
   /** Status the task is in now — only whether the runner has stopped, not whether it went well. */

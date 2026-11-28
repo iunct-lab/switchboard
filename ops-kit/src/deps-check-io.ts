@@ -79,6 +79,7 @@ export function realDepsCheckDeps(gh: GhClient, env: Record<string, string | und
     },
     now: () => new Date(),
     cwd,
+    networkClosed: env.CODEX_SANDBOX_NETWORK_DISABLED === "1",
     openPrs: () => openLockPrs(gh, env, cwd),
     openRequests: () => openRequestsOf(kit),
     fileRequest: (title, body) =>

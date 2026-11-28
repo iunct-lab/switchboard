@@ -772,6 +772,13 @@ describe("the kit's skills as a Task reads them", () => {
     expect(render("pbi-complete", { extra: "on" })).toContain("レビュー（codex/<extra>）");
   });
 
+  test("a Task's copy of pbi-to-tasks keeps the app under development off the agent app's environment", () => {
+    const text = render("pbi-to-tasks");
+    expect(text).toContain("2026-11-24 の利用者の指摘");
+    const line = text.split("\n").find((l) => l.includes("2026-11-24 の利用者の指摘")) ?? "";
+    expect(line).not.toContain("Switchboard");
+  });
+
   test("a Task's copies of the 11 skills stay under the measured ceiling, and are smaller than their sources", () => {
     const bytes = names.reduce((n, name) => n + Buffer.byteLength(render(name)), 0);
     const sources = names.reduce((n, name) => n + Buffer.byteLength(readFileSync(join(kit, name, "SKILL.md"))), 0);
@@ -847,7 +854,9 @@ describe("the kit's skills as a Task reads them", () => {
     // Raised to 285_700 (+100 bytes over 285,600; the copy measured 285,659 after): the chained edit example in issue-workflow reads the body and its version once (and not again when run again), so a re-run cannot replace the original.
     // Raised to 286_100 (+400 bytes over 285,700; the copy measured 286,047 after): the stacked PR merged outside the gate goes through merge-async from the bottom up, and the PR above is granted again on its head after GitHub's rebase (pbi-complete 5, pointed to from stacked-pr-delivery); the line replaces the one that named the form GitHub refuses.
     // Raised to 286_400 (+300 bytes; the copy measured 286,299 after): the merge-async step waits for the PR below to be MERGED before the head above is read (the request returns on acceptance; the check, in `sh -c`, reads the state again on each poll), and the consent line names merge-async too.
-    expect(bytes).toBeLessThanOrEqual(286_400);
+    // Raised to 286_900 (+500 bytes; the copy measured 286,825 after): the wait rule in issue-workflow names `--key` for a wait with a PR, Issue or job on the other side (and when the app resumes it), and says which reason a timed-out wait stops with.
+    // Raised to 287_400 (+500 bytes; the copy measured 287,299 after): Ready's lint is the one scoped to the PBI and its Tasks (`ops-kit lint --fresh --issue <PBI>`), named in pbi-to-tasks 1 and 5 and issue-workflow's Ready check, and the whole lint's violations do not stop Ready; the first draft (+560 over the old ceiling) was cut to this.
+    expect(bytes).toBeLessThanOrEqual(287_400);
     // the other sides of the conditions are not carried: a rule written on both sides without marks would not shrink the copy
     expect(bytes).toBeLessThan(sources);
   });

@@ -20,3 +20,6 @@ packages/core/src/fixtures/flow/*.json
 
 # Generated from the pinned Codex (CODEX_VERSION in container/Dockerfile) by `bun run codex:types` (typecheck runs it).
 packages/adapters/codex/src/generated/
+
+# A work machine's settings and AWS credentials; see container/work-machine.env.example
+container/work-machine.env

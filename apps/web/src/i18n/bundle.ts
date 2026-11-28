@@ -19,6 +19,18 @@ export const bundle = msgs({
     en: "Implementing together works only with two or more PBIs of Switchboard itself (only one is selected)",
   },
   gateHeld: { ja: "束の作業中は始められません", en: "Cannot start while a bundle is under way" },
+  gateHoldUnread: {
+    ja: "束の作業中かどうかを読めなかったため始められません。「再読込」で読み直してください",
+    en: "Cannot start: whether a bundle is under way could not be read. Read again with Reload",
+  },
+  gateWorkspacesUnread: {
+    ja: "リポジトリの一覧を読めなかったため始められません。「再読込」で読み直してください",
+    en: "Cannot start: the list of repositories could not be read. Read again with Reload",
+  },
+  closedHeld: { ja: "束の作業中になったため確認を閉じました", en: "The confirmation was closed because a bundle is now under way" },
+  closedChanged: { ja: "選んだ行が変わったため確認を閉じました", en: "The confirmation was closed because the selected rows changed" },
+  closedThen: { ja: "{closed}。{next}", en: "{closed}. {next}" },
+  reopen: { ja: "選び直した行で開き直してください", en: "Open it again with the rows as chosen now" },
   start: { ja: "まとめて始める", en: "Start the bundle" },
   startFailed: { ja: "束を始められませんでした: {error}", en: "Could not start the bundle: {error}" },
   holdLine: {

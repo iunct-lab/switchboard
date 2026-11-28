@@ -120,12 +120,15 @@ let buf='';for await (const chunk of Bun.stdin.stream()) {buf+=new TextDecoder()
       assert(JSON.stringify(captured.args) === JSON.stringify(["--cloud", prompt]) && captured.cwd === [a,b,unknown][index] && captured.tty.every(Boolean) && !captured.force && !captured.device && !captured.token && captured.mcp.length === 0, "Cloud PTY/argv/env"); cases++;
     }
   }
-  for (const [prompt, help] of [["deny", "/web-setup"], ["auth", "claude auth login"], ["provider", "外部 provider"], ["policy", "管理者"], ["unsupported", "更新"], ["key", "APIキー"]]) {
+  const errorCases: Array<[string, string]> = [["deny", "/web-setup"], ["auth", "claude auth login"], ["provider", "外部 provider"], ["policy", "管理者"], ["unsupported", "更新"], ["key", "APIキー"]];
+  for (const [prompt, help] of errorCases) {
     await homePage(); await set('[aria-label="実行場所"]', "cloud"); await set(".fields select", workspaces[0].id); await set(".compose textarea", prompt);
     const count = core.db.listTasks().length; await click(".compose button.pri");
     await until(() => core!.db.listTasks().length > count && latest()?.status === "error", "Cloud error");
     await until(() => evaluate(`document.querySelector('.main')?.textContent.includes(${JSON.stringify(help)})`), "error view");
-    assert(latest().cloudSession === null && latest().outcome === "failed", "error shows failed");
+    const failed = latest();
+    if (!failed) throw new Error("no Cloud task after the error");
+    assert(failed.cloudSession === null && failed.outcome === "failed", "error shows failed");
     assert(!await evaluate(`document.body.textContent.includes('fixture-secret')`), "raw error redacted"); cases++;
   }
   // Folder trust: the guidance shows before Start for a known-untrusted folder, no CLI is started, nothing is written.

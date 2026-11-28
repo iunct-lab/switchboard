@@ -388,7 +388,7 @@ function pcWithTask(ts = 900_000) {
   for (let i = 0; i < 5; i++) h.db.appendEventAt("t-1", { t: "status", text: `e${i}` }, ts + i);
   ledger(h.db, "t-1", ts);
   ledger(h.db, "t-1", ts + 1);
-  h.db.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts) VALUES ('t-1', ?, '/work/repo', 'claude', 'r', 'why', 'claude', ?)").run(ws.id, ts);
+  h.db.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_model, chosen_model) VALUES ('t-1', ?, '/work/repo', 'claude', 'r', 'why', 'claude', ?, 'claude-haiku-5-5', 'claude-fable-5-2')").run(ws.id, ts);
   h.db.sqlite.query("INSERT INTO task_evals (task_id, source, by, rubric, json, ts) VALUES ('t-1', 'rule', 'r', NULL, '{}', ?)").run(ts);
   h.db.sqlite.query("INSERT INTO check_runs (task_id, ok, json, ts) VALUES ('t-1', 1, '{}', ?)").run(ts);
   h.db.sqlite.query("INSERT INTO staging (id, task_id, path, rel, kind, before_text, after_text, status, ts, decided_at) VALUES ('s1', 't-1', '/p', 'p', 'edit', NULL, 'x', 'applied', ?, ?)").run(ts, ts);
@@ -415,6 +415,15 @@ function instance() {
 }
 
 describe("applyDelta", () => {
+  test("routing_log models: the proposed and the started model of a row come over with it", async () => {
+    const pc = pcWithTask();
+    const here = instance();
+    const [d] = await buildDelta(pc.db, pc.cfg, readCursor(pc.db), "pc1");
+    await applyDelta(here.db, here.cfg, d!.file, PC);
+    expect(here.db.sqlite.query("SELECT suggested_model, chosen_model FROM routing_log").all()).toEqual([{ suggested_model: "claude-haiku-5-5", chosen_model: "claude-fable-5-2" }]);
+    expect(here.db.routingLog()[0]).toMatchObject({ suggestedModel: "claude-haiku-5-5", chosenModel: "claude-fable-5-2" });
+  });
+
   test("taking a delta in twice changes no row and no value, and every table has what the Task has", async () => {
     const pc = pcWithTask();
     const here = instance();

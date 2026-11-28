@@ -61,7 +61,7 @@ export class RoutingQueries extends EventQueries {
   routingLog(limit = 200): RoutingLogRow[] {
     return this.sqlite
       .query(
-        `SELECT r.task_id AS taskId, t.title AS title, r.suggested, r.rule_id AS ruleId, r.reason, r.chosen, r.suggested_by AS suggestedBy, t.status, ${OUTCOME_SQL} AS outcome,
+        `SELECT r.task_id AS taskId, t.title AS title, r.suggested, r.rule_id AS ruleId, r.reason, r.chosen, r.suggested_by AS suggestedBy, r.suggested_model AS suggestedModel, r.chosen_model AS chosenModel, t.status, ${OUTCOME_SQL} AS outcome,
                 ${TASK_COST_SQL} AS costUsd, ${taskDurationSql("r.task_id")} AS durationMs, r.ts
          FROM routing_log r JOIN tasks t ON t.id = r.task_id ORDER BY r.ts DESC, r.id DESC LIMIT ?`,
       )

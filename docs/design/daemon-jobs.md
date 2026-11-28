@@ -222,11 +222,12 @@ To check a reviewer's input on your own machine:
 
 ## How the Task is resumed
 
-A stop whose conditions are all `pr#N`, `issue#N` or `job#<id>` is resumed by the daemon without a person
-(`packages/core/src/depends-resume.ts`, `WAIT_KEY`). `pr#N` and `issue#N` close when GitHub says so, at the
+A stop whose conditions are all `pr#N`, `issue#N`, `job#<id>` or `promoted#<sha>` is resumed by the daemon without a person
+(`packages/core/src/depends-resume.ts`, `WAIT_KEY` and `PROMOTED_KEY`). `pr#N` and `issue#N` close when GitHub says so, at the
 backlog import. A `job#<id>` closes when the job ends (pass, fail or aborted), and the end of a job runs the same
 resume. The resume message carries each job's kind, runner, PR, status, exit code and a summary, so the Task reads the
 result and continues. A Task whose job has not ended is not resumed.
+A `promoted#<sha>` (a sha of 7 to 40 hex digits) closes when the running version contains that commit; `resumeDepends` asks a judge it is given (`promotedOf`) once per sha in each pass, before it looks at the Tasks, and reads no judge, or an answer it cannot give, as not closed. A stage Task gets its turn for a promotion too (backlog-next starts nothing on one) when the stop waits on promotions with no `pr#N` / `issue#N`, every wait of the Task has closed, and it is still its Issue's latest stage Task; the turn does not ask it to run the overlap check again.
 A `job#<id>` on a stop whose reason is other than depends (a decision, for one) is met when the job ends too, also when the Task reports it open again afterwards; that stop keeps waiting for the person's answer, and no resume message is sent for it.
 A job's result reaches the Task without waiting for its PR or Issue waits, which are resumed on their own when they close.
 Results are batched only while the same Task still waits on a running job: the last job's end sends one message with every result.

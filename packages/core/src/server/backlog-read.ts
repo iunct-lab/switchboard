@@ -120,20 +120,47 @@ export const syncEntry = (sc: Pick<ServerContext, "db">, ws: Workspace, stored: 
  */
 export const storedBacklogReleased = async (sc: Pick<ServerContext, "storedBacklog" | "releaseStatus" | "releaseKnown" | "git">, ws: Workspace): Promise<StoredBacklog> => {
   if (ws.kind !== "meta") return sc.storedBacklog(ws);
-  const status = await sc.releaseStatus();
-  const current = status.managed ? (status as ReleaseState).current : null;
+  const current = await runningVersion(sc);
   if (!current) return sc.storedBacklog(ws);
-  if (sc.releaseKnown?.current !== current) sc.releaseKnown = { current, of: new Map() };
-  const known = sc.releaseKnown;
+  const known = knownOf(sc, current);
   const asked = new Set<string>();
   const stored = sc.storedBacklog(ws, (oid) => known.of.get(oid) ?? (asked.add(oid), null));
   if (!asked.size) return stored;
-  for (const oid of asked) {
-    // exit 1 = not an ancestor; any other failure (a commit this checkout does not have, a time out) cannot tell, and is not kept
-    const r = await sc.git(["merge-base", "--is-ancestor", oid, current]).then(() => true, (e: { exitCode?: number }) => (e.exitCode === 1 ? false : null));
-    if (r !== null) known.of.set(oid, r);
-  }
+  for (const oid of asked) await containedIn(sc, known, oid);
   return sc.storedBacklog(ws, (oid) => known.of.get(oid) ?? null);
+};
+
+/** The commit the daemon runs (sb-rescue's `current`); null when it does not run under sb-rescue. */
+const runningVersion = async (sc: Pick<ServerContext, "releaseStatus">): Promise<string | null> => {
+  const status = await sc.releaseStatus();
+  return status.managed ? ((status as ReleaseState).current ?? null) : null;
+};
+
+/** The answers kept for `current`: a different `current` throws the table away. */
+const knownOf = (sc: Pick<ServerContext, "releaseKnown">, current: string): NonNullable<ServerContext["releaseKnown"]> => {
+  if (sc.releaseKnown?.current !== current) sc.releaseKnown = { current, of: new Map() };
+  return sc.releaseKnown;
+};
+
+/** Whether `oid` is in the running version, asked of git once per `current` (the table). Exit 1 = not an ancestor; any other failure (a commit this checkout does not have, a time out) cannot tell, and is not kept. */
+const containedIn = async (sc: Pick<ServerContext, "git">, known: NonNullable<ServerContext["releaseKnown"]>, oid: string): Promise<boolean | null> => {
+  const kept = known.of.get(oid);
+  if (kept !== undefined) return kept;
+  const r = await sc.git(["merge-base", "--is-ancestor", oid, known.current]).then(() => true, (e: { exitCode?: number }) => (e.exitCode === 1 ? false : null));
+  if (r !== null) known.of.set(oid, r);
+  return r;
+};
+
+/**
+ * Whether the running version contains `sha`, for a Task waiting on a promotion (`promoted#<sha>`). Null when it cannot be
+ * told: the daemon does not run under sb-rescue, no meta workspace is registered, or the checkout does not have the commit.
+ * It shares the table of `storedBacklogReleased`: a yes or no is kept for the same `current`; a "cannot tell" is not, and is asked again
+ * on the next look (the checkout may have fetched the commit by then).
+ */
+export const releasedOf = async (sc: Pick<ServerContext, "db" | "releaseStatus" | "releaseKnown" | "git">, sha: string): Promise<boolean | null> => {
+  if (!sc.db.listWorkspaces().some((w) => w.kind === "meta")) return null;
+  const current = await runningVersion(sc);
+  return current ? containedIn(sc, knownOf(sc, current), sha) : null;
 };
 
 export const isMeta = (sc: Pick<ServerContext, "db">, t: { workspaceId: string | null }) => !!t.workspaceId && sc.db.getWorkspace(t.workspaceId)?.kind === "meta";

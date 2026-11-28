@@ -252,11 +252,11 @@ export class TaskQueries extends GrantQueries {
         )
         .run(t.id, t.workspaceId, t.title, t.runner, t.cwd, JSON.stringify(t.scope), t.status, t.runnerSessionId, t.model, t.routing ? JSON.stringify(t.routing) : null, t.budgetUsd, t.scheduleId, t.permissionMode, t.effort, t.subagentEffort ?? null, t.subagentModel ?? null, t.origin, t.resumeAt, t.resumeReason, t.resumeWindow, t.resumeSince, t.resumePlannedAt, t.queuedAt, t.deferredPrompt, t.shadowOf, t.forkOf, t.forkSeq, t.forkTurn, t.shadowStopped ? 1 : 0, t.workspaceReason, storedOutcome, t.reviewedAt, t.archivedAt, t.judgedResult, t.judgedReason, t.judgedBy, t.createdAt, t.updatedAt, t.executionMode, t.cloudSession ? JSON.stringify(t.cloudSession) : null, t.sourceCloudTaskId, t.stage?.issue ?? null, t.stage?.action ?? null, t.stage?.auto ? 1 : 0, t.judgingAt, t.statusAt, t.titlePending ? 1 : 0, t.machine ?? null);
       if (t.routing) {
-        const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule");
+        const logRow = this.sqlite.query("INSERT INTO routing_log (task_id, workspace_id, cwd, suggested, rule_id, reason, chosen, ts, suggested_by, suggested_model, chosen_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        logRow.run(t.id, t.workspaceId, t.cwd, t.routing.suggested, t.routing.ruleId, t.routing.reason, t.runner, t.createdAt, "rule", t.routing.suggestedModel ?? null, t.model);
         // An LLM suggestion is a second opinion on the same decision, so it is a second row rather than a
         // column: each source is then scored against the same `chosen` on its own (`routingStats`).
-        if (t.routing.llm) logRow.run(t.id, t.workspaceId, t.cwd, t.routing.llm.runner, "llm", t.routing.llm.reason, t.runner, t.createdAt, "llm");
+        if (t.routing.llm) logRow.run(t.id, t.workspaceId, t.cwd, t.routing.llm.runner, "llm", t.routing.llm.reason, t.runner, t.createdAt, "llm", null, null);
       }
     })();
     return t;
@@ -404,6 +404,12 @@ export class TaskQueries extends GrantQueries {
   }
 }
 
+/** A `routing` stored before `suggestedModel` and `chosenModel` were kept has no such keys; read them as null, as the protocol type says. */
+function readRouting(json: string): Task["routing"] {
+  const routing = safeJson<Task["routing"]>(json, null);
+  return routing ? { ...routing, suggestedModel: routing.suggestedModel ?? null, chosenModel: routing.chosenModel ?? null } : null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function rowToTask(r: any): Task {
   return {
@@ -419,7 +425,7 @@ export function rowToTask(r: any): Task {
     cloudSession: r.cloud_session === null ? null : CloudSessionRef.parse(JSON.parse(r.cloud_session)),
     runnerSessionId: r.runner_session_id ?? null,
     model: r.model ?? null,
-    routing: r.routing ? safeJson(r.routing, null) : null,
+    routing: r.routing ? readRouting(r.routing) : null,
     budgetUsd: r.budget_usd ?? null,
     scheduleId: r.schedule_id ?? null,
     permissionMode: r.permission_mode ?? null,

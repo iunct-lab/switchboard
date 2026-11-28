@@ -32,6 +32,8 @@ cat > "$W/release.yaml" <<YAML
 services:
   switchboard:
     image: sb-e2e-release
+    # a machine made a work machine has container/work-machine.env; the test container must not read it
+    env_file: !reset []
     environment:
       SWITCHBOARD_GITHUB_API: $API
   releases:
@@ -47,6 +49,8 @@ cat > "$W/clone.yaml" <<YAML
 services:
   switchboard:
     image: sb-e2e-release
+    # a machine made a work machine has container/work-machine.env; the test container must not read it
+    env_file: !reset []
     environment:
       SWITCHBOARD_REPO_ROOT: /home/switchboard/repos/switchboard
 YAML

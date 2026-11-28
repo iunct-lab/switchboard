@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS ledger_task ON ledger (task_id);
 CREATE TABLE IF NOT EXISTS routing_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, workspace_id TEXT, cwd TEXT NOT NULL,
   suggested TEXT NOT NULL, rule_id TEXT NOT NULL, reason TEXT NOT NULL, chosen TEXT NOT NULL, ts INTEGER NOT NULL,
-  suggested_by TEXT NOT NULL DEFAULT 'rule'
+  suggested_by TEXT NOT NULL DEFAULT 'rule', suggested_model TEXT, chosen_model TEXT
 );
 CREATE INDEX IF NOT EXISTS routing_log_task ON routing_log (task_id);
 CREATE TABLE IF NOT EXISTS knowledge_docs (

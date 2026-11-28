@@ -26,7 +26,7 @@ export const TEST_LIMIT = 2000;
 /** path → ceiling (the lines it has now: lowered whenever it shrinks, never raised). One entry per line — `listedIn` reads the base's list from this text. See the head of this file. */
 export const STILL_OVER: Record<string, number> = {
   // the screen's components: splitting them needs a look at the screens, which the split of the core's code left out
-  "apps/web/src/components/Backlog.tsx": 1508,
+  "apps/web/src/components/Backlog.tsx": 1505,
   "apps/web/src/components/Settings.tsx": 1462,
 };
 

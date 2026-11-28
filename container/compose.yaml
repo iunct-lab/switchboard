@@ -12,6 +12,12 @@ services:
     # the container shares the machine's network (Linux Docker): the daemon (47831) and sb-rescue (47841) listen on the
     # machine's 127.0.0.1 only, as on the EC2 host, and nothing on a docker bridge can reach them
     network_mode: host
+    # Only when the machine is made a work machine (docs/design/work-machine.md, section 1): container/work-machine.env,
+    # kept out of Git, holds its settings and AWS credentials (a template is container/work-machine.env.example). Without
+    # the file the daemon runs alone, as before.
+    env_file:
+      - path: work-machine.env
+        required: false
     environment:
       # the role: empty = releases from the public repository; a clone's path in sb-repos = releases from its tags
       # (container/entrypoint.sh)

@@ -196,10 +196,10 @@ Task の完了条件に文書更新を加えるのは、触る doc のファイ�
 4. 実行環境の上で検証できないものは Task にせず、PBI の「スコープ外」に理由つきで書くか、受け入れ条件の行に `（利用者確認: …）` が付いている
 5. 誰かに伝える・投稿する受け入れ条件（〜に知らせる、〜にコメントする、〜に返す）は、投稿先をリポジトリ `owner/name` と Issue の番号か URL で名指しする。名指しできない（「呼び出し元」のような言い方だけ、公開リポジトリで非公開の投稿先を伏せた、など）なら Ready にせず、`## 判断待ち` で投稿先を聞く
 
-`ops-kit lint --fresh` が機械的に見られる分（節の有無、`## 元要望`、Story Points の値と本文 / Project の一致、親、Ready なのに Task なし、要望 Issue の `## 要望` / `## 出典`、要望の `## 出典` の `- 誰の言葉:` が 3 つの値のどれか（`request-to-backlog` の「誰の言葉」））を検査する。
+`ops-kit lint --fresh` は機械的に見られる分（節の有無、`## 元要望`、Story Points の値と本文 / Project の一致、親、Ready なのに Task なし、要望 Issue の `## 要望` / `## 出典`、要望の `## 出典` の `- 誰の言葉:` が 3 つの値のどれか（`request-to-backlog` の「誰の言葉」））を検査する。Ready の判定は `ops-kit lint --fresh --issue <PBI>` が exit 0（その PBI と子の Task の違反が 0）で、全体の lint の違反は Ready を止めない。
 自由文の前提（フェンスの外の `前提: #n`）があって `**前提**:` 行が無い PBI は `warning: #N: …` の行で出す（警告は violations に数えず、exit は変えない）。
-exit 0 = 合格、1 = 違反あり、2 = 検査できなかった（アプリや GitHub・Project の取得失敗。0 件で合格にはしない）。
-**PBI や Task を作った・書き直したら必ず走らせ、`violations: 0` と exit 0 を確認する**（2・3・5 は目視）。
+exit 0 = 合格、1 = 違反あり、2 = 検査できなかった（アプリや GitHub・Project の取得失敗。0 件で合格にはしない。`--issue` は開いた PBI でない番号も 2）。
+**PBI や Task を作った・書き直したら必ず走らせ、`violations: 0` と exit 0 を確認する**（Ready の判定は `--issue <PBI>`。2・3・5 は目視）。
 
 ## PBI と Task の境界（過去の失敗）
 
@@ -411,7 +411,8 @@ ops-kit backlog triage <num> <P0-P3> [<parent>] [<Status>]   # Project のフィ
 <!-- end when -->
 #   親を飛ばすなら "" を渡す。例: ops-kit backlog triage 56 P1 "" "In review"
 ops-kit backlog retry <num>   # GitHub が断った（failed）編集を、原因を直した後に送り直す
-ops-kit lint --fresh                           # 規約の検査（「Ready の判定」）
+ops-kit lint --fresh                           # 規約の検査
+ops-kit lint --fresh --issue <PBI>             # Ready の判定
 ```
 
 - **Issue へのコメントとほかの Task への返信は単独のコマンドで送る**: 本文は先にファイルに書き（Write ツールか、その前の別の Bash の呼び出し）、`ops-kit backlog comment` / `ops-kit task send` は `cd`・`cat <<EOF`・`;`・`&&`・`|` でつながない単独のコマンドで送る。`--body-file` には書いたファイルの絶対パスを文字のまま書く（シェルの変数は Bash の呼び出しをまたがず、前の呼び出しの `$W` は空になる。`mktemp -d` が出したパスを控えて使う）。ランナーの許可ルール（エージェント管理アプリの Task なら `Bash(ops-kit backlog:*)`）はコマンド全体が合うときだけ効き、合わない部分を含む複合コマンドは自動承認の判定に回って拒まれることがある。`ops-kit task send` は許可ルールに入っていないので単独でもいつも自動承認の判定に回る（単独にするのは何を送るかを読みやすくするため）。拒まれたら「判断待ちの出し方」の許可文を止まりの報告の `grant` に書く
@@ -470,7 +471,7 @@ Project: `ops.config.json` の `projectUrl`（Status: Backlog / Ready / In progr
 
 - **進め方はスキルに従い、そのたびに聞かない**: commit・push・PR・Issue の作成はスキルの手順で自分で進める。止めて聞くのはスキルが定めるときだけ（「判断待ちの出し方」）
 - **コマンドは自分で走らせる**: 利用者に実行を頼まない。本人にしかできない一手（承認のコードの入力など）だけを頼む。実行環境の権限で止められたときは、その事実と要る許可を書く
-- **待つのは `ops-kit wait` で、素のループで待たない**: 何かが済むのを待つときは `ops-kit wait --for "<何を待つか>" --timeout <秒> --on-timeout <fail|proceed> [--interval <秒>] -- <判定コマンド>` を使う。`until` / `while` と `sleep` の繰り返しでは待たない。ほかの作業の処理を待つなら `--progress '<進むと変わる値を出すコマンド>' --stall <秒>` を付ける。`fail` で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を止まりの報告に書いて止まる
+- **待つのは `ops-kit wait` で、素のループで待たない**: 何かが済むのを待つときは `ops-kit wait --for "<何を待つか>" --timeout <秒> --on-timeout <fail|proceed> [--key <pr#N|issue#N|job#N>]… [--interval <秒>] -- <判定コマンド>` を使う。鍵で書ける相手（PR・Issue・頼んだ仕事）のある待ちは、その相手を `--key`（繰り返し可）に付ける（その PR・Issue が閉じるか仕事が終わるとアプリが Task を再開する。自分で済ませる相手には付けない）。`until` / `while` と `sleep` の繰り返しでは待たない。ほかの作業の処理を待つなら `--progress '<進むと変わる値を出すコマンド>' --stall <秒>` を付ける。`fail` で切れたら（exit 124）同じ待ちに入り直さず、切れた理由を止まりの報告に書いて止まる。reason は、鍵つきの待ちなら `depends`（conditions にその鍵）、鍵が無く人の答えの待ちでないなら `transient`（conditions なし）、鍵が無く人の答えの待ちなら `decision`
 - **確かめてから言う**: 事実（リポジトリの公開・非公開、影響の有無、今の設定）はコマンドで確かめてから書く。確かめていないことは「未確認」と書く
 - **頼まれずに Issue を閉じない**: 「ここまででいい」「このセッションは終わり」はセッションを終える意味で、Issue をやめる意味ではない。片づけ（占有の解除・worktree・報告）だけして、Issue の状態（open / closed・Status・Priority）は変えない。not planned で閉じるのは明示の指示があるときだけ
 - **偽の相手だけで作った連携は「実物では未検証」と最初に言う**: 外部サービスとの連携を偽の依存（知識から書いた fixture を含む）だけで確かめたら、報告の最初にそう書く。実物に繋ぐ・アカウントやトークンを作る前に、そのサービスの脆弱性と要る最小権限を調べて利用者の OK を取る

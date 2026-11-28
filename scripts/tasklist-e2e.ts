@@ -74,7 +74,7 @@ try {
   // the titles of the Tasks group's rows: the `.it` rows after the Tasks heading
   const rows = async () => (await evaluate(`(() => { const out = []; let on = false; for (const n of document.querySelectorAll('.rail-list > *')) {
     if (n.classList.contains('grp')) { on = n.textContent === 'Tasks'; continue; } if (on && n.matches('button.it')) out.push(n.querySelector('.t')?.textContent ?? ''); } return out; })()`)) as string[];
-  const rowsAre = (n: number, label: string) => until(async () => { const r = await rows(); return r.length === n && r; }, `${label}: ${n} rows`);
+  const rowsAre = (n: number, label: string) => until(async () => { const r = await rows(); return r.length === n ? r : null; }, `${label}: ${n} rows`);
   const click = (js: string, label: string) => until(() => evaluate(`(() => { const el = ${js}; if (!el || el.disabled) return false; el.click(); return true; })()`), label);
   const setValue = (selector: string, proto: "HTMLInputElement" | "HTMLSelectElement", value: string, event: "input" | "change") =>
     until(() => evaluate(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false;

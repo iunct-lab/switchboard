@@ -12,6 +12,8 @@ cat > "$W/override.yaml" <<'YAML'
 services:
   switchboard:
     image: sb-e2e
+    # a machine made a work machine has container/work-machine.env; the test container must not read it
+    env_file: !reset []
     entrypoint: ["bun", "/opt/switchboard/container/boot-fake.ts"]
 YAML
 DOCKER_GID=$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)

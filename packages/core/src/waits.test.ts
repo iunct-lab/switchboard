@@ -20,7 +20,7 @@ const DAY = 24 * HOUR;
 const BOUNDS: WaitBounds = { silentMs: 10 * MIN, ownMs: 6 * HOUR, othersMs: 3 * DAY, graceMs: 30 * MIN };
 const T0 = Date.parse("2026-11-10T00:00:00Z");
 
-const wfile = (over: Partial<WaitFile> = {}): WaitFile => ({ taskId: "task_a", pid: process.pid, label: "PR 12 のマージ", startedAt: T0, timeoutAt: T0 + 30 * MIN, stallSec: null, progressAt: T0, cut: null, ...over });
+const wfile = (over: Partial<WaitFile> = {}): WaitFile => ({ taskId: "task_a", pid: process.pid, label: "PR 12 のマージ", keys: [], startedAt: T0, timeoutAt: T0 + 30 * MIN, stallSec: null, progressAt: T0, cut: null, ...over });
 
 test("the settings' defaults are the constants here, and the grace of a due resume is six looks", () => {
   const d = QuotaAndResumeSettings.parse({});

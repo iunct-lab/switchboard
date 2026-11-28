@@ -40,10 +40,13 @@ export interface StopInput {
 const SWITCHES = new Set(["promote", "rollback", "auto-rollback", "restore-db"]);
 
 /**
- * sb-rescue writes a promotion's line after it confirmed the new daemon (confirm + settle, up to 70 s,
- * rescue/src/promote.ts): a line that early in a run is about how the run began, not how it ended.
+ * A line that early in a run is about how the run began, not how it ended. sb-rescue writes most switches' lines right
+ * after it restarts the daemon, but a promotion's line only after the confirmation (up to 300 s + settle 10 s, then the
+ * feature check and the pruning; `CONFIRM_LIMIT_MS` in rescue/src/promote.ts), so that one gets a longer window.
  */
 export const HISTORY_GRACE_MS = 90_000;
+export const PROMOTE_GRACE_MS = 360_000;
+const graceOf = (action: string) => (action === "promote" ? PROMOTE_GRACE_MS : HISTORY_GRACE_MS);
 
 /** `1792501259.542994 host systemd[1]: …` → ms, or null for a line without the short-unix stamp. */
 function lineTime(line: string): number | null {
@@ -54,13 +57,13 @@ function lineTime(line: string): number | null {
 /**
  * Why `prev` ended; the first rule that fits wins. sb-rescue writes a promotion to
  * history.jsonl only after the new daemon is confirmed, so a start right after one finds no line yet (a changed
- * version stands for it), and the line falls in the first moments of the next run (HISTORY_GRACE_MS).
+ * version stands for it), and the line falls in the first moments of the next run (`graceOf`).
  */
 export function classifyStop(prev: DaemonRun, input: StopInput): { reason: StopReason; detail: string; endedAt: number } {
   const fallback = prev.ended_at ?? input.now;
   const at = (reason: StopReason, detail: string, endedAt = fallback) => ({ reason, detail, endedAt });
   if (prev.clean_exit === "restart") return at("restart", "the daemon exited 75 for a restart");
-  const switched = input.history.find((h) => h.ts >= prev.started_at + HISTORY_GRACE_MS && h.ts <= input.now && (SWITCHES.has(h.action) || h.action === "restart"));
+  const switched = input.history.find((h) => h.ts >= prev.started_at + graceOf(h.action) && h.ts <= input.now && (SWITCHES.has(h.action) || h.action === "restart"));
   if (switched && SWITCHES.has(switched.action)) return at("promote", `history.jsonl: ${switched.action}`);
   if (prev.version && input.version && prev.version !== input.version) return at("promote", `version ${prev.version} → ${input.version}`);
   if (switched) return at("restart", "history.jsonl: restart");

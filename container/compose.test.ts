@@ -1,6 +1,8 @@
-// test-reads: container/compose.yaml container/entrypoint.sh container/up.sh
+// test-reads: container/compose.yaml container/entrypoint.sh container/up.sh container/work-machine.env.example .gitignore .dockerignore packages/core/src/config.ts container/e2e.sh container/e2e-release.sh
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const read = (name: string) => readFileSync(join(import.meta.dir, name), "utf8");
@@ -72,4 +74,67 @@ test("the role is sb-rescue's own: a clone when SWITCHBOARD_REPO_ROOT is passed 
   expect(release).toContain("unset SWITCHBOARD_REPO_ROOT");
   expect(release.some((l) => l.includes('bun "$SRC/rescue/install.ts" --source "$SOURCE"'))).toBe(true);
   expect(release.some((l) => l.includes(".publicSync.target") && l.includes("ops.config.json"))).toBe(true);
+});
+
+test("work-machine: compose reads container/work-machine.env as an optional env_file, so no file means the daemon runs alone as before", () => {
+  const service = Bun.YAML.parse(compose).services.switchboard;
+  // required: false is what lets a PC without the file start; the only other source of the daemon's settings is the role
+  expect(service.env_file).toEqual([{ path: "work-machine.env", required: false }]);
+  expect(Object.keys(service.environment)).toEqual(["SWITCHBOARD_REPO_ROOT"]);
+  // one entrance: no mount of the machine's AWS directory
+  expect(service.volumes.filter((v: string) => v.includes(".aws"))).toEqual([]);
+});
+
+test("work-machine: the file with the credentials is out of Git and out of the build context; the example is not", () => {
+  const root = join(import.meta.dir, "..");
+  const ignored = (path: string) => spawnSync("git", ["check-ignore", "-q", path], { cwd: root }).status === 0;
+  expect(ignored("container/work-machine.env")).toBe(true);
+  expect(ignored("container/work-machine.env.example")).toBe(false);
+  expect(readFileSync(join(root, ".dockerignore"), "utf8").split("\n")).toContain("container/work-machine.env");
+});
+
+test("work-machine: the example names the four variables of a work machine that loadUplink reads, and the AWS credentials, with no value", () => {
+  const keys = read("work-machine.env.example").split("\n").filter((l) => l && !l.startsWith("#"));
+  expect(keys.every((l) => /^[A-Z_]+=$/.test(l))).toBe(true);
+  const names = keys.map((l) => l.slice(0, -1));
+  const loader = readFileSync(join(import.meta.dir, "..", "packages/core/src/config.ts"), "utf8");
+  const uplink = loader.slice(loader.indexOf("export function loadUplink"));
+  for (const name of ["SWITCHBOARD_UPLINK", "SWITCHBOARD_UPLINK_PREVIEW", "SWITCHBOARD_MACHINE", "SWITCHBOARD_UPLINK_BUCKET"]) {
+    expect({ name, example: names.includes(name), read: new RegExp(`env\\.${name}\\b`).test(uplink) }).toEqual({ name, example: true, read: true });
+  }
+  expect(names).toEqual(expect.arrayContaining(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"]));
+});
+
+test("work-machine: the e2e scripts' containers do not read the machine's container/work-machine.env", () => {
+  // their override files are layered on compose.yaml, which keeps the base env_file unless the override resets it: on a
+  // machine made a work machine the test container would otherwise start with its real settings and AWS key
+  for (const script of ["e2e.sh", "e2e-release.sh"]) {
+    const text = read(script);
+    const services = text.split("\n").filter((l) => /^ {4}image: sb-e2e(-release)?$/.test(l)).length;
+    const resets = text.split("\n").filter((l) => l.trim() === "env_file: !reset []").length;
+    expect({ script, uses: text.includes("-f container/compose.yaml"), resets }).toEqual({ script, uses: true, resets: script === "e2e.sh" ? 1 : 2 });
+    expect(services).toBeGreaterThanOrEqual(resets);
+  }
+});
+
+const hasCompose = spawnSync("docker", ["compose", "version"], { stdio: "ignore" }).status === 0;
+test.skipIf(!hasCompose)("work-machine: with the file the container's environment carries the work machine's settings, without it none, and an e2e override drops them", () => {
+  // Compose itself resolves the file (`docker compose config`): a copy of compose.yaml in a directory of its own, so the
+  // machine's own container/work-machine.env, if any, is not read
+  const dir = mkdtempSync(join(tmpdir(), "sb-compose-"));
+  try {
+    writeFileSync(join(dir, "compose.yaml"), compose);
+    const env = (...extra: string[]) => {
+      const r = spawnSync("docker", ["compose", "-f", join(dir, "compose.yaml"), ...extra, "config", "--format", "json"], { cwd: dir, encoding: "utf8", env: { ...process.env, SWITCHBOARD_REPO_ROOT: "" } });
+      expect(r.status).toBe(0);
+      return JSON.parse(r.stdout).services.switchboard.environment as Record<string, string>;
+    };
+    expect(Object.keys(env()).filter((k) => k !== "SWITCHBOARD_REPO_ROOT")).toEqual([]);
+    writeFileSync(join(dir, "work-machine.env"), "SWITCHBOARD_UPLINK=send\nSWITCHBOARD_MACHINE=pc1\nAWS_DEFAULT_REGION=ap-northeast-1\n");
+    expect(env()).toMatchObject({ SWITCHBOARD_UPLINK: "send", SWITCHBOARD_MACHINE: "pc1", AWS_DEFAULT_REGION: "ap-northeast-1" });
+    writeFileSync(join(dir, "override.yaml"), "services:\n  switchboard:\n    env_file: !reset []\n");
+    expect(Object.keys(env("-f", join(dir, "override.yaml"))).filter((k) => k !== "SWITCHBOARD_REPO_ROOT")).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

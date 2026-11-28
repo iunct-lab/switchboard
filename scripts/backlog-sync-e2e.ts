@@ -148,7 +148,7 @@ async function boot(home: string, adapters: RunnerAdapter[] = []): Promise<{ cor
   const core = await startServer(cfg, adapters, { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: () => null, gh, backlogAutoImport: true });
   return { core, base: `http://127.0.0.1:${core.server.port}` };
 }
-async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Promise<T> {
+async function until<T>(f: () => T | Promise<T>, what: string, ms = 10_000): Promise<NonNullable<T>> {
   for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(20)) {
     const v = await f();
     if (v) return v;

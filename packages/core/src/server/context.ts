@@ -255,6 +255,10 @@ export interface ServerContext {
   readonly promotionFirst: (meta: Workspace, { report, by }: { report: boolean; by: "check" | "backlog-next" | "idle"; }) => Promise<string | null>;
   releaseKnown: { current: string; of: Map<string, boolean> } | null;
   readonly storedBacklogReleased: (ws: Workspace) => Promise<StoredBacklog>;
+  /** Whether the running version contains a commit (null = cannot tell): what a promotion wait is judged by. */
+  readonly releasedOf: (sha: string) => Promise<boolean | null>;
+  /** Resume the stops whose wait is over without an import or a job saying so (a date that passed, a promotion the running version contains). */
+  readonly resumeDueWaits: (now?: number) => Promise<string[]>;
   promotionAsking: { asking: Promise<string | null>; report: boolean } | null;
   readonly askPromotion: (by: "check" | "backlog-next" | "idle") => Promise<string | null>;
   readonly promoteWhenIdle: () => void;

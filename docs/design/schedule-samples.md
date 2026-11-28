@@ -34,6 +34,10 @@ Everything comes from the environment the daemon gives a Task.
 | Switchboard's repository | The `path` of the workspace whose `kind` is `meta`. This document, the skills (`ops-kit/skills/`) and the scripts are there |
 | The backlog | `ops-kit backlog <list, view, create, comment or edit> --workspace <id>` (`ops-kit backlog --help`). Not `gh issue`: the app keeps the backlog and sends the writes |
 
+When the runner's sandbox keeps the network closed, an API read (`curl`) fails at the connection: `curl` exits
+non-zero, and through the `api` helper below the read comes back empty (for example `WS` is empty). Run the same
+command once more as an approved run (the runner's approved execution); do not retry it further.
+
 ```bash
 API="${BACKLOG_URL%/api/backlog}"
 api() { curl -sf -H "Authorization: Bearer $(cat "$BACKLOG_TOKEN_FILE")" "$API$1"; }
@@ -153,9 +157,15 @@ Turns the last week's changes in what this workspace's repository depends on int
 ### Dependency updates
 
 - Run `ops-kit deps-check --file-request` once, in the workspace's folder, and report its exit code and output as they
-  are, including the last line that starts with `要望:`. Do not repeat the command.
+  are, including the last line that starts with `要望:`. Do not repeat the command, with one exception: when it exits 2
+  and the first line of its standard error says the sandbox stopped the network (`サンドボックスが通信を止めている`),
+  run the same command once more as an approved run (the runner's approved execution, which the runner's own reviewer
+  decides, not the person) and report the exit code and output of that second run. That approved run is part of this
+  schedule's request. The second run does not file twice: when a request with the same title is already open, it adds
+  to that request instead of filing another.
 - Exit code 2 means the check could not decide: report it with a `switchboard-stop` fence, with the first line of the
-  output as the reason.
+  output as the reason (the first line after the sandbox line, when the output starts with it). This includes the
+  second run when it also exits 2.
 - The command files to the repository by itself; the Task files nothing else.
 
 ### Public repository sync

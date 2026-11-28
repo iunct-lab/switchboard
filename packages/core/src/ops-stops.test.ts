@@ -20,6 +20,11 @@ test("classifyStop: a promotion in history.jsonl, or a changed version, is a pro
   expect(classifyStop(prev({ clean_exit: "shutdown" }), input({ history: [{ ts: T0 + 600_000, action: "restore-db" }] })).reason).toBe("promote");
   // the line of the promotion that started this run, written once it was confirmed: not how the run ended
   expect(classifyStop(prev(), input({ history: [{ ts: T0 + 15_000, action: "promote" }], journal: [OOMD] })).reason).toBe("oomd");
+  // a slow start confirmed near the end of sb-rescue's 300 s wait (+ 10 s settle) still began this run
+  expect(classifyStop(prev(), input({ history: [{ ts: T0 + 315_000, action: "promote" }], journal: [OOMD] })).reason).toBe("oomd");
+  // only the promotion's line waits that long: a DB restore or a rescue-page restart 200 s into a run still ends it
+  expect(classifyStop(prev({ clean_exit: "shutdown" }), input({ history: [{ ts: T0 + 200_000, action: "restore-db" }] })).reason).toBe("promote");
+  expect(classifyStop(prev({ clean_exit: "shutdown" }), input({ journal: null, history: [{ ts: T0 + 200_000, action: "restart" }] })).reason).toBe("restart");
   // sb-rescue writes the line only after the new daemon is confirmed: the version tells it at once
   expect(classifyStop(prev({ clean_exit: "shutdown" }), input({ version: "bbb" })).reason).toBe("promote");
   // a line from before the run is not about this stop

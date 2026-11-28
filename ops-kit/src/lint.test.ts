@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { main } from "./cli.ts";
 import { loadConfig } from "./config.ts";
 import { fakeGh, GhError, type FakeCall } from "./gh.ts";
-import { askProceed, bodyLoss, formatLint, lint, LintFetchError, postMergeProblems, releasePrereqs, speakerOf } from "./lint.ts";
+import { askProceed, bodyLoss, formatLint, lint, LintFetchError, LintScopeError, postMergeProblems, releasePrereqs, speakerOf } from "./lint.ts";
 import type { StoredRecords } from "./backlog-client.ts";
 
 const fixtures = join(import.meta.dir, "../fixtures");
@@ -378,6 +378,67 @@ describe("lint", () => {
     const after = "2026-11-14T00:00:00+09:00";
     r.comments = [{ issue: 11, body: ask(""), createdAt: after }, { issue: 11, body: ask("**進め方**: 推奨で進める（種類: implementation-choice）"), createdAt: after }, { issue: 11, body: "## 回答\nA", createdAt: after }];
     expect(formatLint((await lint(fakeGh([]), cfg, { records: r })).violations)).toEqual([`#11: ## 判断待ち（${after}）に「**進め方**: 推奨で進める（種類: <種類>） / 止めて待つ — 理由」の行が無い`, "violations: 1  warnings: 0  (api errors: 0)"]);
+  });
+});
+
+describe("lint --issue", () => {
+  /** PBI 10 (clean) with Task 11 and request 1 (clean), plus request 2 without a speaker, PBI 20 (a free-text prerequisite: a warning) and its Task 21 without a section. */
+  const scoped = (taskBroken: boolean) => {
+    const d = page("ok")();
+    const nodes = d.repository.issues.nodes as any[];
+    const bare = (number: number, label: string, body: string, parent: number | null) => ({ number, body, labels: { nodes: [{ name: label }] }, parent: parent === null ? null : { number: parent, labels: { nodes: [{ name: "type:pbi" }] } }, subIssues: { totalCount: 0 }, projectItems: { nodes: [] } });
+    nodes.push(bare(2, "type:request", "## 要望\nx\n\n## 出典\n- いつ: 2026-01-01 / チャット\n", null));
+    nodes.push({ ...nodes[0], number: 20, body: "## ユーザーストーリー\nとして…\n\n前提: #10 が Done\n", subIssues: { totalCount: 1 } });
+    nodes.push(bare(21, "type:task", "## 親 PBI\n#20\n", 20));
+    if (taskBroken) nodes[1].body = nodes[1].body.replace("## 完了条件\n- [ ] …\n", "");
+    return d;
+  };
+  const recordsOf = (d: any): StoredRecords => {
+    const issues = (d.repository.issues.nodes as any[]).map((r) => ({ number: r.number, title: "", url: "", state: "OPEN", stateReason: null, body: r.body, labels: r.labels.nodes.map((l: any) => l.name), parent: r.parent?.number ?? null, subIssues: Array.from({ length: r.subIssues.totalCount }, (_, k) => 1000 + k), createdAt: "", updatedAt: "", closedAt: null, fields: r.projectItems.nodes.length ? { Priority: "P2", "Story Points": 3, Status: "Ready" } : null, comments: [] }));
+    return { workspaceId: "w", service: "github", repository: "example/repo", project: { owner: "example", number: 1 }, fetchedAt: 1, top: [], issues: issues as any, unread: [], pulls: [], comments: [] };
+  };
+  const speaker = "要望の「## 出典」に「- 誰の言葉: 利用者 / エージェント / 定期の検査」の行が無い";
+
+  test("lint --issue: a violation outside the PBI and its Tasks does not count", async () => {
+    const all = await lint(fakeGh([() => scoped(false)]), cfg, { sleep: noSleep });
+    expect(all.violations.map((v) => v.issue)).toContain(2);
+    expect(all.warnings.map((v) => v.issue)).toContain(20);
+    const r = await lint(fakeGh([() => scoped(false)]), cfg, { sleep: noSleep, scope: 10 });
+    expect(r.violations).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(formatLint(r.violations, r.warnings, 10)).toEqual(["violations: 0  warnings: 0  (api errors: 0)  （範囲: #10 と子の Task）"]);
+  });
+
+  test("lint --issue: a violation on a child Task counts", async () => {
+    const r = await lint(fakeGh([() => scoped(true)]), cfg, { sleep: noSleep, scope: 10 });
+    expect(r.violations).toEqual([{ issue: 11, message: "Task に「## 完了条件」が無い" }]);
+  });
+
+  test("lint --issue: a number that is not an open PBI cannot be checked", async () => {
+    for (const n of [11, 1, 99]) await expect(lint(fakeGh([() => scoped(false)]), cfg, { sleep: noSleep, scope: n })).rejects.toBeInstanceOf(LintScopeError);
+    const err: string[] = [];
+    const code = await main(["lint", "--config", configPath, "--issue", "11"], fakeGh([() => scoped(false)]), () => undefined, (s) => err.push(s), noSleep, { ...process.env, BACKLOG_URL: undefined });
+    expect({ code, err }).toEqual({ code: 2, err: [expect.stringContaining("#11 は開いた PBI でない")] });
+  });
+
+  test("lint --issue: the stored records and GitHub's answer give the same scope", async () => {
+    const viaGh = await lint(fakeGh([() => scoped(true)]), cfg, { sleep: noSleep, scope: 10 });
+    const viaRecords = await lint(fakeGh([]), cfg, { records: recordsOf(scoped(true)), scope: 10 });
+    expect(viaRecords.violations).toEqual(viaGh.violations);
+    expect(viaRecords.violations.map((v) => v.issue)).toEqual([11]);
+    expect((await lint(fakeGh([]), cfg, { records: recordsOf(scoped(true)) })).violations.some((v) => v.message === speaker)).toBe(true);
+  });
+
+  test("lint --issue: the CLI takes a positive integer and exits on the scope's violations only", async () => {
+    const run = async (extra: string[], d: unknown) => {
+      const out: string[] = [];
+      const code = await main(["lint", "--config", configPath, ...extra], fakeGh([() => d]), (s) => out.push(s), () => undefined, noSleep, { ...process.env, BACKLOG_URL: undefined });
+      return { code, last: out.at(-1) };
+    };
+    expect(await run(["--issue", "10"], scoped(false))).toEqual({ code: 0, last: "violations: 0  warnings: 0  (api errors: 0)  （範囲: #10 と子の Task）" });
+    expect((await run([], scoped(false))).code).toBe(1);
+    expect((await run(["--issue", "10"], scoped(true))).code).toBe(1);
+    for (const bad of [["--issue"], ["--issue", "x"], ["--issue", "0"], ["--issue", "10", "--issue", "10"]]) expect((await run(bad, scoped(false))).code).toBe(2);
   });
 });
 

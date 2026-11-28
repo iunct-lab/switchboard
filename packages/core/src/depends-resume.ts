@@ -12,7 +12,7 @@ import type { Db } from "./db.ts";
 import { ANSWER_HEADING } from "./backlog-comments.ts";
 import { AUTO_RESUME_HEAD } from "./evals.ts";
 import { afterTime } from "../../../scripts/parallel-guard.ts";
-import { AFTER_KEY, isAfterWait, issueAnsweredAction, issueOf, JOB_KEY, openStops, resumableDepends, WAIT_KEY, type StopReport } from "./stops.ts";
+import { AFTER_KEY, isAfterWait, issueAnsweredAction, issueOf, JOB_KEY, openStops, PROMOTED_KEY, resumableDepends, WAIT_KEY, type StopReport } from "./stops.ts";
 import { ResumeSupersededError } from "./tasks/state.ts";
 import type { TaskManager } from "./tasks/manager.ts";
 import { isWorking } from "./task-status.ts";
@@ -21,12 +21,12 @@ import { isWorking } from "./task-status.ts";
 export const STOP_WAITS_MS = 7 * 24 * 3600_000;
 
 /**
- * The open `depends` stops that wait only on PRs / Issues / jobs (every condition a WAIT_KEY, at least one not met yet),
- * with what they still wait for: `numbers` the PRs / Issues (GitHub's), `jobs` the daemon's jobs, `after` the
+ * The open `depends` stops that wait only on PRs / Issues / jobs / promotions (every condition a WAIT_KEY or PROMOTED_KEY, at least one not met yet),
+ * with what they still wait for: `numbers` the PRs / Issues (GitHub's), `jobs` the daemon's jobs, `promoted` the commits (shas) the running version must contain, `after` the
  * latest date (ms) among the stop's `after` conditions (a value that is no time with a zone is not a wait). A stop
  * with any other condition is not one of these.
  */
-export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; jobs: number[]; after?: number }[] {
+export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers: number[]; jobs: number[]; promoted: string[]; after?: number }[] {
   return openStops(records).flatMap((stop) => {
     if (!resumableDepends(stop)) return [];
     const times = stop.conditions.filter((c) => !c.met && isAfterWait(c)).map((c) => afterTime(c.value));
@@ -34,7 +34,8 @@ export function dependsWaits(records: StopRecord[]): { stop: StopRecord; numbers
     const open = stop.conditions.filter((c) => !c.met && WAIT_KEY.test(c.key)).map((c) => WAIT_KEY.exec(c.key)!);
     const numbers = [...new Set(open.filter((m) => m[1] !== "job").map((m) => Number(m[2])))];
     const jobs = [...new Set(open.filter((m) => m[1] === "job").map((m) => Number(m[2])))];
-    return numbers.length || jobs.length || after !== undefined ? [{ stop, numbers, jobs, ...(after !== undefined ? { after } : {}) }] : [];
+    const promoted = [...new Set(stop.conditions.filter((c) => !c.met).map((c) => PROMOTED_KEY.exec(c.key)).filter((m) => m !== null).map((m) => m![1]!))];
+    return numbers.length || jobs.length || promoted.length || after !== undefined ? [{ stop, numbers, jobs, promoted, ...(after !== undefined ? { after } : {}) }] : [];
   });
 }
 
@@ -47,8 +48,8 @@ export function stopWaitNumbers(db: Db, workspaceId: string, now: number): numbe
 export type WaitState = "closed" | "open" | "unknown";
 
 /** Every wait closed: a date is closed at its time and after. One open, or one not read, keeps the stop. */
-export const waitsClosed = (w: { numbers: number[]; jobs?: number[]; after?: number }, stateOf: (n: number) => WaitState, jobStateOf: (id: number) => WaitState = () => "unknown", now: number = Date.now()): boolean =>
-  w.numbers.every((n) => stateOf(n) === "closed") && (w.jobs ?? []).every((id) => jobStateOf(id) === "closed") && (w.after === undefined || now >= w.after);
+export const waitsClosed = (w: { numbers: number[]; jobs?: number[]; promoted?: string[]; after?: number }, stateOf: (n: number) => WaitState, jobStateOf: (id: number) => WaitState = () => "unknown", now: number = Date.now(), promotedStateOf: (sha: string) => WaitState = () => "unknown"): boolean =>
+  w.numbers.every((n) => stateOf(n) === "closed") && (w.jobs ?? []).every((id) => jobStateOf(id) === "closed") && (w.promoted ?? []).every((sha) => promotedStateOf(sha) === "closed") && (w.after === undefined || now >= w.after);
 
 /** How a waited-for job stands: running is open, ended (pass / fail / aborted) is closed, no such job is unknown. */
 export const jobWaitState = (db: Pick<Db, "getJob">) => (id: number): WaitState => {
@@ -127,11 +128,11 @@ export function decisionIssueWaits(records: StopRecord[]): { stop: StopRecord; n
 
 /**
  * The follow-up turn of a Task whose waits closed: it says what closed, and — when it waited for a PR or an Issue —
- * to look at the overlap again before going on. A Task that waited for a date only held nothing another work could
- * have taken meanwhile, so it is not told about the guard.
+ * to look at the overlap again before going on. A Task that waited for a date or a promotion only held nothing another
+ * work could have taken meanwhile, so it is not told about the guard.
  */
 export const dependsResumePrompt = (keys: string[], afters: string[] = []) =>
-  `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。${keys.length ? "並列ガードの overlap をやり直してから、" : ""}中断した箇所から作業を続けてください。`;
+  `${AUTO_RESUME_HEAD} ${[...(keys.length ? [`待っていた ${keys.join("、")} が片づきました`] : []), ...afters.map((a) => `期日 ${a} を過ぎました`)].join("。")}。${keys.some((k) => !PROMOTED_KEY.test(k)) ? "並列ガードの overlap をやり直してから、" : ""}中断した箇所から作業を続けてください。`;
 
 /**
  * The follow-up turn of a Task whose waited-for jobs ended: each job's result and summary (status, exit code, the
@@ -149,7 +150,10 @@ export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: stri
  * turn (`dependsResumePrompt`, every key of those stops), in the same runner session — once no depends stop of it still
  * waits (a runner that stopped twice has two stops; one still open holds the turn back) — except a job's result, which
  * does not wait for PR / Issue stops and is held only while another job of the Task still runs. A stage Task (one for an Issue) gets none: what comes next
- * is backlog-next's, which starts the PBI's next stage Task — sending here too would run two on one PBI.
+ * is backlog-next's, which starts the PBI's next stage Task — sending here too would run two on one PBI. A stage Task's
+ * wait on a promotion (`promoted#<sha>`, with no PR / Issue in the same stop) is the exception: backlog-next does not
+ * start anything on it. The turn goes once every wait of the Task closed, and only to its Issue's latest stage Task. `promotedOf` answers whether the running version contains a sha; each sha is asked once in the
+ * pass, before the Tasks are looked at (without it, a promotion is not read and its stop stays waiting).
  * Left as it is: a stop with a wait still open or not read, and a Task with no runner session, one running or waiting,
  * or one with a resume planned (that resume continues it). The record is written before the turn, so the next import
  * does not send a second; a turn that could not be sent puts it back to waiting with the reason, and the next import
@@ -159,14 +163,24 @@ export function jobResumePrompt(jobs: Job[], others: string[] = [], afters: stri
  * that waits on a job gets its turn on a stage Task too, with the jobs' results (`jobResumePrompt`): it waits on its own
  * PR's CI or review, which backlog-next does not start. Returns the ids of the Tasks it sent a turn to.
  */
-export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; workspaceId: string | null; now: number }): Promise<string[]> {
-  const { db, tasks, workspaceId, now } = deps;
+export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; workspaceId: string | null; now: number; promotedOf?: (sha: string) => Promise<WaitState> }): Promise<string[]> {
+  const { db, tasks, workspaceId, now, promotedOf } = deps;
   const source = workspaceId === null ? null : db.getWorkspaceBacklogSource(workspaceId);
   const stored = source ? db.listBacklogRecords(source) : [];
   const stateOf: (n: number) => WaitState = source ? stateFromRecords(stored, source.project) : () => "unknown";
   const answered = answeredFromRecords(stored);
   const jobStateOf = jobWaitState(db);
   const sent: string[] = [];
+  // every sha the Tasks' stops wait on is asked once in this pass, before any Task's stops are read for its turn: no
+  // await lies between reading a Task's stops and recording them (another pass or the person may move them meanwhile)
+  const promotedState = new Map<string, WaitState>();
+  if (promotedOf) {
+    const ids = db.listTasksUpdatedSince(now - STOP_WAITS_MS).filter((t) => t.workspaceId === workspaceId).map((t) => t.id);
+    const shas = new Set(ids.length ? dependsWaits(db.listStopRecords(ids)).flatMap((w) => w.promoted) : []);
+    // a judge that throws answers unknown for that sha: the other waits of the pass go on
+    for (const sha of shas) promotedState.set(sha, await promotedOf(sha).catch((): WaitState => "unknown"));
+  }
+  const promotedStateOf = (sha: string): WaitState => promotedState.get(sha) ?? "unknown";
   for (const task of db.listTasksUpdatedSince(now - STOP_WAITS_MS)) {
     if (task.workspaceId !== workspaceId) continue;
     // an answered decision stop stays waiting (the person's answer is read by the next stage Task); only its Issue condition is met
@@ -188,14 +202,23 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
       });
     }
     const waits = dependsWaits(db.listStopRecords([task.id])).filter((w) => w.stop.work.taskId === task.id);
-    const closed = waits.filter((w) => waitsClosed(w, stateOf, jobStateOf, now));
+    const closed = waits.filter((w) => waitsClosed(w, stateOf, jobStateOf, now, promotedStateOf));
     if (!closed.length) continue;
     const jobKeys = closed.flatMap((w) => w.stop.conditions.filter((c) => JOB_KEY.test(c.key)).map((c) => c.key));
     // jobs are batched among themselves: a stop on a job stays open while the Task still waits on a running job, so the
     // last job's turn carries every result. A PR / Issue wait does not hold a job's result back
     if (jobKeys.length && waits.some((w) => w.jobs.some((id) => jobStateOf(id) === "open"))) continue;
-    // a stage Task gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs
-    const turn = issueOf(task) === null || jobKeys.length > 0;
+    // a stage Task gets no turn here for a PR / Issue — that is backlog-next's — but does for its own jobs and for a
+    // promotion it asked for (backlog-next does not start anything on a promotion): a stop on promotions with no PR /
+    // Issue, once every wait of the Task closed (that stop is left as it is while another is open, so the turn comes
+    // whichever closes last), and only while it is still its Issue's latest stage Task (`superseded` in `waits.ts`)
+    const issue = issueOf(task);
+    const promotionStop = (w: (typeof waits)[number]) => w.promoted.length > 0 && w.numbers.length === 0;
+    const promotion = issue !== null && closed.some(promotionStop);
+    // only the promotion stops are held: a closed PR / Issue stop of the stage Task is recorded at once as before
+    const hold = promotion && !jobKeys.length && closed.length < waits.length;
+    const latest = issue !== null && workspaceId !== null && db.lastStageTask(workspaceId, issue)?.id === task.id;
+    const turn = issue === null || jobKeys.length > 0 || (promotion && !hold && latest);
     if (turn && (!task.runnerSessionId || isWorking(task, "dedupe"))) continue;
     const report = (w: (typeof waits)[number], state: StopRecord["state"], what: string, ok: boolean): StopReport => ({
       id: w.stop.id.slice(task.id.length + 1),
@@ -209,7 +232,7 @@ export async function resumeDepends(deps: { db: Db; tasks: Pick<TaskManager, "se
       state,
       ...(w.stop.grant !== undefined ? { grant: w.stop.grant } : {}),
     });
-    for (const w of closed) tasks.recordStop(task.id, report(w, "resolved", `待ちが片づいた: ${w.stop.conditions.map((c) => c.key).join(", ")}`, true));
+    for (const w of closed) if (!(hold && promotionStop(w))) tasks.recordStop(task.id, report(w, "resolved", `待ちが片づいた: ${w.stop.conditions.map((c) => c.key).join(", ")}`, true));
     // one turn for the Task, once none of its waits is open any more (a runner that stopped twice has two stops); a job's
     // result is sent without waiting for the PR / Issue waits
     if (!turn || (!jobKeys.length && closed.length < waits.length)) continue;
@@ -263,14 +286,15 @@ export const AFTER_CHECK_MS = 5 * 60_000;
 /**
  * A date passes without any import or job saying so, and a workspace whose backlog is kept here only, or a Task without a
  * workspace, has no import at all. So every AFTER_CHECK_MS the daemon runs `resumeDepends` for each workspace
- * (null = no workspace) that has a Task with an open depends stop whose date has passed. Returns the Tasks it sent a turn to.
+ * (null = no workspace) that has a Task with an open depends stop whose date has passed, or (given `promotedOf`) one that waits on a promotion. Returns the Tasks it sent a turn to.
  */
-export async function resumeDueAfters(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; now: number }): Promise<string[]> {
-  const { db, tasks, now } = deps;
+export async function resumeDueAfters(deps: { db: Db; tasks: Pick<TaskManager, "send" | "recordStop">; now: number; promotedOf?: (sha: string) => Promise<WaitState> }): Promise<string[]> {
+  const { db, tasks, now, promotedOf } = deps;
   const recent = db.listTasksUpdatedSince(now - STOP_WAITS_MS);
   const wsOf = new Map(recent.map((t) => [t.id, t.workspaceId ?? null] as const));
-  const due = new Set(dependsWaits(db.listStopRecords(recent.map((t) => t.id))).filter((w) => w.after !== undefined && now >= w.after).map((w) => wsOf.get(w.stop.work.taskId) ?? null));
+  // a wait on a promotion has no date: it is looked at here too (every workspace with one open), and only when a judge is given
+  const due = new Set(dependsWaits(db.listStopRecords(recent.map((t) => t.id))).filter((w) => (w.after !== undefined && now >= w.after) || (promotedOf && w.promoted.length > 0)).map((w) => wsOf.get(w.stop.work.taskId) ?? null));
   const sent: string[] = [];
-  for (const workspaceId of due) sent.push(...(await resumeDepends({ db, tasks, workspaceId, now })));
+  for (const workspaceId of due) sent.push(...(await resumeDepends({ db, tasks, workspaceId, now, ...(promotedOf ? { promotedOf } : {}) })));
   return sent;
 }

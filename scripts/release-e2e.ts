@@ -37,6 +37,7 @@ const rescue = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
 // Stays running until it is stopped, waiting on an approval: the Task counts as busy.
 // The public copy's check is a read-only (`plan`) Task: it answers at once with the fence the prompt asks for.
 const checks: Array<{ cwd: string; permissionMode?: string; prompt: string }> = [];
+const checkAt = (index: number) => { const check = checks[index]; if (!check) throw new Error(`no check at ${index}`); return check; };
 // A check answers once the gate is open, so a tag can be seen with its check still running.
 let openGate = () => {};
 let gate: Promise<void> = Promise.resolve();
@@ -228,13 +229,13 @@ try {
   await Bun.sleep(400);
   assert(promoted.length === stopped, "a tag with the check still running must not be promoted");
   assert((await releaseInfo()).review?.state === "running", "the check is running");
-  assert(checks[0].permissionMode === "plan" && checks[0].cwd.endsWith("/release-review/v1.0.0"), `check: ${JSON.stringify(checks[0])}`);
-  assert(checks[0].prompt.includes("diff.patch") && checks[0].prompt.includes(`${running}`) && checks[0].prompt.includes(sha1), "the prompt names the diff and the range");
+  assert(checkAt(0).permissionMode === "plan" && checkAt(0).cwd.endsWith("/release-review/v1.0.0"), `check: ${JSON.stringify(checkAt(0))}`);
+  assert(checkAt(0).prompt.includes("diff.patch") && checkAt(0).prompt.includes(`${running}`) && checkAt(0).prompt.includes(sha1), "the prompt names the diff and the range");
   openGate();
   await until(() => promoted.length === stopped + 1, "v1.0.0 promoted after the check said ok");
   assert(promoted[stopped] === sha1, `promoted ${promoted[stopped]}`);
   assert(checks.length === 1, "one check for the tag");
-  await until(() => !existsSync(checks[0].cwd), "the check's tree is removed");
+  await until(() => !existsSync(checkAt(0).cwd), "the check's tree is removed");
   running = sha1; // sb-rescue switched
 
   // (f2) v1.1.0: the check finds a concern; nothing is promoted by itself
@@ -242,7 +243,7 @@ try {
   await fire("バックログを進める (公開側 v1.1.0)", "backlog-next");
   const info = await until(async () => { const i = await releaseInfo(); return i.review?.state === "concern" ? i : null; }, "the concern of v1.1.0");
   assert(info.latestRelease?.tag === "v1.1.0" && info.review?.findings.length === 1, `review: ${JSON.stringify(info.review)}`);
-  assert(checks.length === 2 && checks[1].prompt.includes("v1.1.0"), "the second tag has its own check");
+  assert(checks.length === 2 && checkAt(1).prompt.includes("v1.1.0"), "the second tag has its own check");
   await fire("バックログを進める (公開側 v1.1.0 もう一度)", "backlog-next");
   await Bun.sleep(400);
   assert(promoted.length === stopped + 1 && checks.length === 2, `a concern must not be promoted nor checked again (promoted ${promoted.length - stopped}, checks ${checks.length})`);
@@ -275,7 +276,8 @@ try {
   await press(byText("懸念を見たうえで更新する（v1.1.0）", "#release button"), "懸念を見たうえで更新する (OK)");
   await until(() => promoted.length === stopped + 2, "v1.1.0 promoted after OK in the dialog");
   assert(promoted[stopped + 1] === "v1.1.0", `promoted ${promoted[stopped + 1]}`);
-  assert(dialogs.length === 2 && dialogs[1].includes("v1.1.0") && dialogs[1].includes("packages/core/src/exfil.ts") && dialogs[1].includes("起動時に process.env を外の URL へ POST している"), `dialog: ${dialogs[1]}`);
+  const dialog = dialogs[1];
+  assert(dialogs.length === 2 && dialog !== undefined && dialog.includes("v1.1.0") && dialog.includes("packages/core/src/exfil.ts") && dialog.includes("起動時に process.env を外の URL へ POST している"), `dialog: ${dialog}`);
 
   assert(!errors.length, `console errors: ${JSON.stringify(errors)}`);
   console.log(JSON.stringify({ mark, section: ahead.slice(0, 80), notice: notice.slice(0, 80), promoted: promoted.length, checks: checks.length, dialog: dialogs[1]?.slice(0, 40), brief: brief.slice(0, 60) }));

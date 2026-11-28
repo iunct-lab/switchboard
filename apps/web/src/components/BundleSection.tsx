@@ -1,31 +1,33 @@
 import { useEffect, useRef, useState } from "react";
 import type { BacklogItem, BundleHold, Task } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
-import { holdLine, unreadableHold, type BundleGate } from "../bundle.ts";
+import { bundleClosedReason, bundleReasonLine, holdLine, latestRead, unreadableHold, UNREAD, type BundleGate } from "../bundle.ts";
 import { sameRows } from "../backlogSelect.ts";
 import { t } from "../i18n.ts";
 import { bundle as m } from "../i18n/bundle.ts";
 
-/** The hold a bundle has put on the daemon, read when the Backlog loads (`reloadKey` changes); null = none, undefined = not read yet (a failed read keeps what was read before). */
-export function useBundleHold(reloadKey: unknown): [BundleHold | null | undefined, (h: BundleHold | null) => void] {
-  const [hold, setHold] = useState<BundleHold | null | undefined>(undefined);
-  useEffect(() => {
-    api.bundleHold().then(setHold).catch(() => undefined);
-  }, [reloadKey]);
-  return [hold, setHold];
+/**
+ * The hold a bundle has put on the daemon: null = none, undefined = not read yet, UNREAD = the last read failed (the
+ * hold can change on another screen, so an older value is not kept). The caller reads it with `readHold`, where it
+ * reads the list; only the latest read sets the value.
+ */
+export function useBundleHold(): [BundleHold | null | undefined | typeof UNREAD, (h: BundleHold | null) => void, () => Promise<void>] {
+  const [hold, setHold] = useState<BundleHold | null | undefined | typeof UNREAD>(undefined);
+  const [readHold] = useState(() => latestRead(() => api.bundleHold(), setHold));
+  return [hold, setHold, readHold];
 }
 
 /** The button in the selection bar that opens the confirmation; disabled unless the gate is ok, and then the reason is a line under it. */
-export function BundleButton(props: { gate: BundleGate; onOpen: () => void }) {
+export function BundleButton(props: { gate: BundleGate; reason: string; onOpen: () => void }) {
   const { gate } = props;
   return (
     <>
       <button className="queue-btn" data-select-bundle disabled={!gate.ok} onClick={props.onOpen}>
         {t(m.button)}
       </button>
-      {!gate.ok && gate.reason && (
+      {props.reason && (
         <div className="hint select-reason" data-select-bundle-reason>
-          {gate.reason}
+          {props.reason}
         </div>
       )}
     </>
@@ -37,15 +39,25 @@ export function BundleButton(props: { gate: BundleGate; onOpen: () => void }) {
  * selection or the gate changes under it (a reload took a row away, a hold appeared), it closes instead of starting
  * something other than what was read.
  */
-export function BundleDoor(props: { chosen: BacklogItem[]; gate: BundleGate; onStarted: (task: Task) => void; onChanged: () => void; onError: (msg: string) => void }) {
+export function BundleDoor(props: { chosen: BacklogItem[]; gate: BundleGate; hold: BundleHold | null | undefined | typeof UNREAD; onStarted: (task: Task) => void; onChanged: () => void; onError: (msg: string) => void }) {
   const [shown, setShown] = useState<BacklogItem[] | null>(null);
+  const [closed, setClosed] = useState<string | null>(null);
   const stale = shown !== null && (!props.gate.ok || !sameRows(shown, props.chosen));
   useEffect(() => {
-    if (stale) setShown(null);
+    if (!stale) return;
+    setShown(null);
+    setClosed(bundleClosedReason(props.hold));
   }, [stale]);
   return (
     <>
-      <BundleButton gate={props.gate} onOpen={() => setShown(props.chosen)} />
+      <BundleButton
+        gate={props.gate}
+        reason={bundleReasonLine(closed, props.gate)}
+        onOpen={() => {
+          setClosed(null);
+          setShown(props.chosen);
+        }}
+      />
       {shown && !stale && <BundleConfirm items={shown} onClose={() => setShown(null)} onStarted={props.onStarted} onChanged={props.onChanged} onError={props.onError} />}
     </>
   );
@@ -114,9 +126,9 @@ export function BundleConfirm(props: { items: BacklogItem[]; onClose: () => void
 }
 
 /** Shown only while a hold stands, and not folded: schedules and promotion are stopped. Releasing asks once. */
-export function BundleHoldLine(props: { hold: BundleHold | null | undefined; now: number; onOpenTask: (id: string) => void; onReleased: () => void; onError: (msg: string) => void }) {
+export function BundleHoldLine(props: { hold: BundleHold | null | undefined | typeof UNREAD; now: number; onOpenTask: (id: string) => void; onReleased: () => void; onError: (msg: string) => void }) {
   const [busy, setBusy] = useState(false);
-  if (!props.hold) return null;
+  if (!props.hold || props.hold === UNREAD) return null;
   const hold = props.hold;
   const release = () => {
     if (!window.confirm(t(m.releaseConfirm, { n: hold.schedules.length }))) return;

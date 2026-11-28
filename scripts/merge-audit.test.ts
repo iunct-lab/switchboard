@@ -264,8 +264,8 @@ describe("readHistory + tally (fixture)", () => {
   test("marks before the period still give the wait and the recheck merge of a PR answered or merged in it", () => {
     const H = "2026-10-01T23:00:00Z";
     const prs = [
-      { number: 1, mergedAt: "2026-10-02T05:00:00Z", headSha: SHA, marks: parseMarks([c(`[merge-ask] rescue ${SHA}`, H), c(`[merge-answer] yes rescue ${SHA}`, "2026-10-02T01:00:00Z")]) },
-      { number: 2, mergedAt: "2026-10-02T05:00:00Z", headSha: SHA, marks: parseMarks([c(`[recheck] size pass ${SHA}`, H)]) },
+      { number: 1, mergedAt: "2026-10-02T05:00:00Z", headSha: SHA, reviewed: true, marks: parseMarks([c(`[merge-ask] rescue ${SHA}`, H), c(`[merge-answer] yes rescue ${SHA}`, "2026-10-02T01:00:00Z")]) },
+      { number: 2, mergedAt: "2026-10-02T05:00:00Z", headSha: SHA, reviewed: true, marks: parseMarks([c(`[recheck] size pass ${SHA}`, H)]) },
     ];
     const rows = tally(prs, [], { since: "2026-10-02T00:00:00Z", until: "2026-10-03T00:00:00Z" });
     expect(rows.find((r) => r.kind === "rescue")).toMatchObject({ asked: 0, yes: 1, waitHours: 2 });
@@ -277,7 +277,7 @@ describe("readHistory + tally (fixture)", () => {
     const at = (h: number) => `2026-10-02T${String(h).padStart(2, "0")}:00:00Z`;
     const marks = (last: "yes" | "no") => parseMarks([c(`[merge-ask] rescue ${SHA}`, at(1)), c(`[merge-answer] yes rescue ${SHA}`, at(3)), c(`[merge-answer] ${last} rescue ${H2}`, at(5))]);
     const period = { since: "2026-10-02T00:00:00Z", until: "2026-10-03T00:00:00Z" };
-    const row = (last: "yes" | "no") => tally([{ number: 1, mergedAt: null, headSha: H2, marks: marks(last) }], [], period).find((r) => r.kind === "rescue")!;
+    const row = (last: "yes" | "no") => tally([{ number: 1, mergedAt: null, headSha: H2, reviewed: true, marks: marks(last) }], [], period).find((r) => r.kind === "rescue")!;
     expect(row("yes")).toMatchObject({ asked: 1, yes: 1, no: 0, waitHours: 3, waitTotalHours: 6 }); // the waits stay per answer: 2h and 4h; the sum is how long the person was waited for in all
     expect(row("no")).toMatchObject({ asked: 1, yes: 0, no: 1, waitHours: 3 });
   });
@@ -291,7 +291,7 @@ describe("readHistory + tally (fixture)", () => {
     expect(gaps(prs, P).mergedWithoutAnswer).not.toContain(901);
     // asked again on a new head after a yes, then merged without an answer to that ask: merged without an answer
     const H2 = "b".repeat(40);
-    const again = { number: 2, mergedAt: "2026-10-02T06:00:00Z", headSha: H2, marks: parseMarks([c(`[merge-ask] rescue ${SHA}`, "2026-10-02T01:00:00Z"), c(`[merge-answer] yes rescue ${SHA}`, "2026-10-02T02:00:00Z"), c(`[merge-ask] rescue ${H2}`, "2026-10-02T04:00:00Z")]) };
+    const again = { number: 2, mergedAt: "2026-10-02T06:00:00Z", headSha: H2, reviewed: true, marks: parseMarks([c(`[merge-ask] rescue ${SHA}`, "2026-10-02T01:00:00Z"), c(`[merge-answer] yes rescue ${SHA}`, "2026-10-02T02:00:00Z"), c(`[merge-ask] rescue ${H2}`, "2026-10-02T04:00:00Z")]) };
     expect(gaps([again], P)).toEqual({ answeredWithoutAsk: [], mergedWithoutAnswer: [2] });
     // merged outside the period: not named; nothing missing → no line
     expect(gaps([{ ...again, mergedAt: "2026-10-05T00:00:00Z" }], P).mergedWithoutAnswer).toEqual([]);
@@ -451,12 +451,12 @@ describe("tally", () => {
 
   test("median of an even count is the mean of the middle two", () => {
     const waits = [1, 2, 4, 10];
-    const prs = waits.map((w, i) => ({ number: 1 + i, mergedAt: null, headSha: SHA, marks: [at(0, "ask"), at(w, "yes")] }));
+    const prs = waits.map((w, i) => ({ number: 1 + i, mergedAt: null, headSha: SHA, reviewed: true, marks: [at(0, "ask"), at(w, "yes")] }));
     expect(tally(prs as PrRecord[], [], P).find((r) => r.kind === "security:words")?.waitHours).toBe(3);
   });
 
   test("a PR asked twice waits from the latest ask before the answer", () => {
-    const pr = { number: 1, mergedAt: null, headSha: SHA, marks: [at(0, "ask"), at(5, "ask"), at(6, "yes")] };
+    const pr = { number: 1, mergedAt: null, headSha: SHA, reviewed: true, marks: [at(0, "ask"), at(5, "ask"), at(6, "yes")] };
     expect(tally([pr] as PrRecord[], [], P).find((r) => r.kind === "security:words")?.waitHours).toBe(1);
   });
 });
@@ -465,7 +465,7 @@ describe("security sub-kinds", () => {
   const P = { since: "2026-10-01T00:00:00.000Z", until: "2026-10-02T00:00:00.000Z" };
   const t = (h: number) => `2026-10-01T${String(h).padStart(2, "0")}:00:00Z`;
   const pr = (number: number, mergedAt: string | null, ...comments: [string, number][]): PrRecord =>
-    ({ number, mergedAt, headSha: SHA, marks: parseMarks(comments.map(([body, h]) => c(body, t(h)))) });
+    ({ number, mergedAt, headSha: SHA, reviewed: true, marks: parseMarks(comments.map(([body, h]) => c(body, t(h)))) });
   const prs = [
     pr(1, t(4), [`[merge-ask] security:lockfile,security:github ${SHA}`, 1], [`[merge-answer] yes security:lockfile,security:github ${SHA}`, 3]),
     pr(2, null, [`[merge-ask] security:words ${SHA}`, 1], [`[merge-answer] no security:words ${SHA}`, 5]),
@@ -475,7 +475,7 @@ describe("security sub-kinds", () => {
 
   test("tally: security:tests has a row of its own (asked before the owner moved it, rechecked after)", () => {
     const asked = pr(5, t(4), [`[merge-ask] security:tests ${SHA}`, 1], [`[merge-answer] yes security:tests ${SHA}`, 2]);
-    const rechecked: PrRecord = { number: 6, mergedAt: t(4), headSha: SHA, marks: parseMarks([c(`[recheck] security:tests pass ${SHA}`, t(3))]) };
+    const rechecked: PrRecord = { number: 6, mergedAt: t(4), headSha: SHA, reviewed: true, marks: parseMarks([c(`[recheck] security:tests pass ${SHA}`, t(3))]) };
     const row = tally([asked, rechecked], [], P).find((r) => r.kind === "security:tests");
     expect(row).toMatchObject({ asked: 1, yes: 1, no: 0, waitHours: 1, recheckMerged: [6] });
     expect(format(tally([asked, rechecked], [], P))[0]).toStartWith("security:tests 聞いた 1 / 認めた 1");
@@ -496,7 +496,7 @@ describe("security sub-kinds", () => {
   });
 
   test("proposals: an asked security group is never proposed; a group moved to a recheck goes back to asking when its recheck merge is taken back", () => {
-    const rechecked = (number: number, kind: string): PrRecord => ({ number, mergedAt: t(4), headSha: SHA, marks: parseMarks([c(`[recheck] ${kind} pass ${SHA}`, t(3))]) });
+    const rechecked = (number: number, kind: string): PrRecord => ({ number, mergedAt: t(4), headSha: SHA, reviewed: true, marks: parseMarks([c(`[recheck] ${kind} pass ${SHA}`, t(3))]) });
     const lock = rechecked(4, "security:lockfile");
     expect(tally([lock], [], P).find((r) => r.kind === "security:lockfile")).toMatchObject({ recheckMerged: [4] });
     // the asked groups' PRs (`#1`, `#3`) taken back: nothing; the moved group's PR taken back: back to asking
@@ -524,11 +524,11 @@ describe("proposals", () => {
   /** One PR per answer, oldest first: the user's answer on `kind` asked with [merge-ask]. */
   const answered = (kind: string, answers: ("yes" | "no")[], from = 100): PrRecord[] =>
     answers.map((a, i) => ({
-      number: from + i, mergedAt: a === "yes" ? at(i) : null, headSha: SHA,
+      number: from + i, mergedAt: a === "yes" ? at(i) : null, headSha: SHA, reviewed: true,
       marks: parseMarks([c(`[merge-ask] ${kind} ${SHA}`, at(i)), c(`[merge-answer] ${a} ${kind} ${SHA}`, at(i))]),
     }));
   const rechecked = (n: number, kind: string, mergedAt = at(1)): PrRecord =>
-    ({ number: n, mergedAt, headSha: SHA, marks: parseMarks([c(`[recheck] ${kind} pass ${SHA}`, mergedAt)]) });
+    ({ number: n, mergedAt, headSha: SHA, reviewed: true, marks: parseMarks([c(`[recheck] ${kind} pass ${SHA}`, mergedAt)]) });
 
   test("a recheck merge taken back → that kind back to asking (one is enough)", () => {
     const prs = [rechecked(1, "responsibility"), rechecked(2, "responsibility"), rechecked(3, "size")];
@@ -807,7 +807,7 @@ describe("requestFor", () => {
   });
   test("none → null; the title is the same whatever the proposals' order", () => {
     expect(requestFor([], src)).toBeNull();
-    const back = { kind: "migration", evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"], audited: [] };
+    const back = { kind: "migration" as const, evidence: [3], reverts: ["abcdef0123456789abcdef0123456789abcdef01"], audited: [] };
     const a = requestFor([back, { kind: "rescue", evidence: [1, 2], reverts: ["1234567890"], audited: [] }], src)!;
     const b = requestFor([{ kind: "rescue", evidence: [1, 2], reverts: ["1234567890"], audited: [] }, back], src)!;
     expect(a.title).toBe("マージ規則の見直し: rescue を聞くへ / migration を聞くへ");

@@ -1,6 +1,6 @@
 // test-reads: packages/core/fixtures/
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backlog, RunnerAdapter, Task } from "@switchboard/protocol";
@@ -12,6 +12,7 @@ import { Db } from "./db.ts";
 import { leaseKey, PbiLeases } from "./lease.ts";
 import { awsS3, memoryS3, runCommand, uplinkStores, type AwsRun } from "./s3.ts";
 import { leaseRound } from "./server/lease.ts";
+import { performRestart } from "./server/lifecycle.ts";
 import { startServer, type CoreServer } from "./server.ts";
 import { sendUplink } from "./uplink-s3.ts";
 
@@ -573,4 +574,49 @@ describe("the uplink round with a request that never answers", () => {
     for (let k = 0; k < 200 && listed < 2; k++) await Bun.sleep(20);
     expect(listed).toBeGreaterThanOrEqual(2);
   }, 15_000);
+});
+
+describe("the uplink's mode stays with the daemon", () => {
+  test("what it starts does not inherit it: a daemon booted from its environment after the start reads no mode and leaves the bucket alone", async () => {
+    // the instance's sb-env (or a work machine's env file) puts the mode in the daemon's own environment; a runner, a
+    // terminal or a scratch daemon a Task boots from what it inherits must not take leases or write exports as this machine
+    const before = Object.fromEntries(Object.keys(RECEIVE).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, RECEIVE);
+    try {
+      const { s3 } = await boot(RECEIVE);
+      for (const name of ["SWITCHBOARD_UPLINK", "SWITCHBOARD_UPLINK_PREVIEW", "SWITCHBOARD_UPLINK_MACHINES"]) expect({ name, inherited: process.env[name] }).toEqual({ name, inherited: undefined });
+      // the running daemon took the mode at its start (it asked the bucket), and a second one from the inherited environment has none
+      expect(s3.calls).toBeGreaterThan(0);
+      expect(loadConfig({ ...process.env, SWITCHBOARD_HOME: join(home, "scratch") }).uplink.mode).toBeNull();
+    } finally {
+      for (const [k, v] of Object.entries(before)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  test("its own replacement keeps it: a daemon without a supervisor restarted by itself comes back in the same mode", async () => {
+    // a work machine started by hand (no sb-rescue) must not come back as an instance of its own after its own restart
+    const set: Record<string, string> = { ...UPLINK_PREVIEW, SWITCHBOARD_UPLINK: "send", SWITCHBOARD_MACHINE: "pc1", SWITCHBOARD_UPLINK_BUCKET: "b" };
+    const before = Object.fromEntries(Object.keys(set).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, set);
+    home = mkdtempSync(join(tmpdir(), "sb-uplink-restart-"));
+    const health = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+    const exit = process.exit;
+    try {
+      const cfg = loadConfig({ ...set, SWITCHBOARD_HOME: join(home, "sb"), SWITCHBOARD_KNOWLEDGE: join(home, "knowledge"), SWITCHBOARD_CLAUDE_PROJECTS: join(home, "history"), SWITCHBOARD_CODEX_HOME: join(home, "codex"), SWITCHBOARD_HISTORY_POLL_MS: "0", SWITCHBOARD_PORT: "0" });
+      core = await startServer(cfg, [holding], { port: 0, selfdevChecks: false, dryRunRestart: true, gitOrigin: () => null, gh: importing(gh, () => []), judge: () => new Promise(() => undefined), rubricJudge: () => new Promise(() => undefined), s3: memoryS3() });
+      expect(process.env.SWITCHBOARD_UPLINK).toBeUndefined();
+      const out = join(home, "env");
+      process.exit = (() => undefined) as unknown as typeof process.exit;
+      const sc = { db: { listWorkingTasks: () => [] }, restarting: true, broadcast: () => {}, stopAll: async () => {}, cfg, server: { port: health.port } };
+      await performRestart(sc as unknown as Parameters<typeof performRestart>[0], ["/bin/sh", "-c", `env > '${out}.tmp' && mv '${out}.tmp' '${out}'`], false, true);
+      process.exit = exit;
+      for (let n = 0; n < 100 && !existsSync(out); n++) await Bun.sleep(20);
+      const child = Object.fromEntries(readFileSync(out, "utf8").split("\n").filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+      expect(loadConfig({ ...child, SWITCHBOARD_HOME: join(home, "next") }).uplink.mode).toBe("send");
+    } finally {
+      process.exit = exit;
+      health.stop(true);
+      for (const [k, v] of Object.entries(before)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }, 40_000);
 });

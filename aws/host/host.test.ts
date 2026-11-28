@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { loadUplink } from "../../packages/core/src/config";
 
 /**
  * aws/host: the host scripts run against fake `aws`, `sudo`, `systemctl`, `shutdown` and `curl` on PATH, so no
@@ -75,6 +76,71 @@ describe("aws/host", () => {
     expect(run("sb-env.sh", [out]).code).toBe(0);
     expect(readFileSync(out, "utf8")).toBe("SWITCHBOARD_EDGE_HEADER_VALUE=edge-value-xyz\nSWITCHBOARD_STARTER_URL=https://fn.example/\nSWITCHBOARD_STARTER_TOKEN=start-tok\nSWITCHBOARD_SESSION_PUBLIC_KEY=\nSWITCHBOARD_WEB_URL=\n");
     expect(statSync(out).mode & 0o777).toBe(0o600);
+  });
+
+  test("sb-env uplink: /switchboard/uplink-machines makes the instance the receiving side, and without it (or with a value that is not safe) it stays alone", () => {
+    const out = join(dir, "switchboard.env");
+    const envOf = () => Object.fromEntries(readFileSync(out, "utf8").split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+    const answer = (machines: string | null) => fake("aws", `case "$*" in *edge-header*) echo edge-value-xyz;; *uplink-machines*) ${machines === null ? "echo ParameterNotFound >&2; exit 254" : `printf '%b\\n' '${machines}'`};; *) echo "ParameterNotFound" >&2; exit 254;; esac`);
+    // (a) the parameter exists: the three fixed keys, and the daemon's own loadUplink reads them as the receiving side
+    answer("pc1=acme/app");
+    expect(run("sb-env.sh", [out]).code).toBe(0);
+    const env = envOf();
+    expect(env.SWITCHBOARD_UPLINK).toBe("receive");
+    expect(env.SWITCHBOARD_UPLINK_PREVIEW).toBe("not-for-use");
+    expect(env.SWITCHBOARD_UPLINK_MACHINES).toBe("pc1=acme/app");
+    expect(Object.keys(env).filter((k) => k.startsWith("SWITCHBOARD_UPLINK")).sort()).toEqual(["SWITCHBOARD_UPLINK", "SWITCHBOARD_UPLINK_MACHINES", "SWITCHBOARD_UPLINK_PREVIEW"]);
+    const up = loadUplink(env, () => {});
+    expect(up.mode).toBe("receive");
+    expect(Object.keys(up.machines)).toEqual(["pc1"]);
+    expect(up.machines.pc1).toEqual(["acme/app"]);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+    // (b) no parameter: today's file, no uplink line, and loadUplink gives no mode
+    answer(null);
+    expect(run("sb-env.sh", [out]).code).toBe(0);
+    expect(readFileSync(out, "utf8")).not.toContain("SWITCHBOARD_UPLINK");
+    expect(loadUplink(envOf(), () => {}).mode).toBeNull();
+    // (c) a newline (or any character an EnvironmentFile line could read differently) in the value: none of the three lines, the rest still written
+    for (const bad of ["pc1=acme/app\\nSWITCHBOARD_EDGE_HEADER_VALUE=evil", "pc1=acme/app\\rX=1", 'pc1="acme/app"', "pc1=acme/app #x", "pc1=$HOME"]) {
+      answer(bad);
+      const r = run("sb-env.sh", [out]);
+      expect(r.code).toBe(0);
+      const text = readFileSync(out, "utf8");
+      expect(text).not.toContain("SWITCHBOARD_UPLINK");
+      expect(text).not.toContain("evil");
+      expect(text).toContain("SWITCHBOARD_EDGE_HEADER_VALUE=edge-value-xyz\n");
+      expect(r.err).toContain("uplink-machines");
+    }
+    // (d) spaces around "," and "+" are read by the daemon (it trims them), so they are dropped, not refused
+    answer("pc1=acme/app, pc2=acme/app + acme/tools");
+    expect(run("sb-env.sh", [out]).code).toBe(0);
+    expect(envOf().SWITCHBOARD_UPLINK_MACHINES).toBe("pc1=acme/app,pc2=acme/app+acme/tools");
+    expect(Object.keys(loadUplink(envOf(), () => {}).machines)).toEqual(["pc1", "pc2"]);
+    // after "=" too (the daemon trims the first repository); a successful read's warning on stderr is not part of the value
+    answer("pc1= acme/app");
+    expect(run("sb-env.sh", [out]).code).toBe(0);
+    expect(envOf().SWITCHBOARD_UPLINK_MACHINES).toBe("pc1=acme/app");
+    fake("aws", `case "$*" in *edge-header*) echo edge-value-xyz;; *uplink-machines*) echo "a warning" >&2; echo pc1=acme/app;; *) echo "ParameterNotFound" >&2; exit 254;; esac`);
+    expect(run("sb-env.sh", [out]).code).toBe(0);
+    expect(envOf().SWITCHBOARD_UPLINK_MACHINES).toBe("pc1=acme/app");
+    // a space inside a name is not one the daemon trims: refused, not joined into another repository's name
+    answer("pc1=acme/web app");
+    const inner = run("sb-env.sh", [out]);
+    expect(readFileSync(out, "utf8")).not.toContain("SWITCHBOARD_UPLINK");
+    expect(inner.err).toContain("uplink-machines");
+    // (e) a read that fails for another reason than a missing parameter is said; a missing one is not
+    fake("aws", `case "$*" in *edge-header*) echo edge-value-xyz;; *uplink-machines*) echo "AccessDeniedException" >&2; exit 254;; *) echo "ParameterNotFound" >&2; exit 254;; esac`);
+    const denied = run("sb-env.sh", [out]);
+    expect(denied.code).toBe(0);
+    expect(readFileSync(out, "utf8")).not.toContain("SWITCHBOARD_UPLINK");
+    expect(denied.err).toContain("uplink-machines could not be read");
+    answer(null);
+    expect(run("sb-env.sh", [out]).err).not.toContain("could not be read");
+    // (f) no temporary file is needed: a /tmp that takes no new file does not stop the start
+    answer("pc1=acme/app");
+    const noTmp = run("sb-env.sh", [out], { TMPDIR: join(dir, "no-such-dir") });
+    expect(noTmp.code).toBe(0);
+    expect(envOf().SWITCHBOARD_UPLINK).toBe("receive");
   });
 
   test("sb-env hands the login cookie's public key to the daemon and sb-rescue when the parameter exists; never the old HMAC key", () => {

@@ -26,7 +26,7 @@ describe("core daemon", () => {
     // the client cannot dictate the recorded suggestion: it is recomputed from the prompt ("PR review" → codex) and
     // compared with the chosen runner (claude) → overridden
     const t = await post("/api/tasks", { cwd: dir, title: "PR review", prompt: "p", runner: "claude", routing: { suggested: "dak", ruleId: "forged", reason: "x" } });
-    expect(t.routing).toEqual({ suggested: "codex", ruleId: "single-repo-long", reason: expect.any(String), overridden: true, llm: null });
+    expect(t.routing).toEqual({ suggested: "codex", ruleId: "single-repo-long", reason: expect.any(String), overridden: true, suggestedModel: null, chosenModel: null, llm: null });
     expect((await post("/api/tasks/suggest", { cwd: dir, title: "typo", prompt: "fix the typo" })).ruleId).toBe("previous");
     await waitFor(async () => (await getTask(t.id)).task.status === "waiting");
     const ask = (await getTask(t.id)).events.map((e: { ev: AgentEvent }) => e.ev).find((e: AgentEvent) => e.t === "permission.ask");
@@ -34,6 +34,21 @@ describe("core daemon", () => {
     await waitFor(async () => (await getTask(t.id)).task.status === "done");
     const log = await fetch(`${base}/api/routing/log`).then(j);
     expect(log[0]).toMatchObject({ taskId: t.id, suggested: "codex", chosen: "claude", status: "done" });
+  });
+
+  test("suggested model: the rule's proposed model is kept on the task and in the routing log next to the model the task started with", async () => {
+    const dir = join(home, "routing-model-cwd");
+    mkdirSync(dir, { recursive: true });
+    const create = (body: Record<string, unknown>) => fetch(`${base}/api/tasks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: dir, runner: "claude", prompt: "p", ...body }) }).then(j);
+    const logRow = async (id: string) => ((await fetch(`${base}/api/routing/log`).then(j)) as Array<Record<string, unknown>>).filter((r) => r.taskId === id);
+    const status = await create({ title: "状況", prompt: "状況を教えて", model: "claude-fable-5-2" });
+    expect((await getTask(status.id)).task.routing).toMatchObject({ ruleId: "status-question", suggestedModel: "claude-haiku-5-5", chosenModel: "claude-fable-5-2" });
+    await fetch(`${base}/api/tasks/${status.id}/model`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "claude-haiku-5-5" }) }); // a later switch does not rewrite the model the task was created with
+    expect((await getTask(status.id)).task).toMatchObject({ model: "claude-haiku-5-5", routing: { chosenModel: "claude-fable-5-2" } });
+    expect(await logRow(status.id)).toEqual([expect.objectContaining({ suggestedBy: "rule", suggestedModel: "claude-haiku-5-5", chosenModel: "claude-fable-5-2" })]);
+    const other = await create({ title: "typo", prompt: "fix the typo" });
+    expect((await getTask(other.id)).task.routing).toMatchObject({ suggestedModel: null, chosenModel: null });
+    expect(await logRow(other.id)).toEqual([expect.objectContaining({ suggestedModel: null, chosenModel: null })]);
   });
 
   test("the routing log carries the task's outcome (status / costUsd / durationMs) and exports as JSONL", async () => {
@@ -58,7 +73,7 @@ describe("core daemon", () => {
     core.tasks.setBudget(t.id, 100); // stamps updated_at days-later-style without the task doing any work
     expect((await logRows()).find((r) => r.taskId === t.id)!.durationMs).toBe(row.durationMs);
     // …and a record whose timestamps run backwards (an import) reports 0 rather than a negative duration
-    const past = { id: "task_backwards", workspaceId: null, title: "backwards", runner: "claude" as const, cwd: home, scope: [home], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude" as const, ruleId: "r", reason: "why", overridden: false, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 5_000, createdAt: 5_000, updatedAt: 1_000 };
+    const past = { id: "task_backwards", workspaceId: null, title: "backwards", runner: "claude" as const, cwd: home, scope: [home], status: "done" as const, runnerSessionId: null, executionMode: "local" as const, cloudSession: null, sourceCloudTaskId: null, model: null, routing: { suggested: "claude" as const, ruleId: "r", reason: "why", overridden: false, suggestedModel: null, chosenModel: null, llm: null }, budgetUsd: null, scheduleId: null, permissionMode: null, effort: null, origin: "switchboard" as const, resumeAt: null, resumeReason: null, resumeWindow: null, resumeSince: null, resumePlannedAt: null, queuedAt: null, deferredPrompt: null, shadowOf: null, forkOf: null, forkSeq: null, forkTurn: null, shadowStopped: false, workspaceReason: null, outcome: "unknown" as const, reviewedAt: null, archivedAt: null, judgedResult: null, judgedReason: null, judgedBy: null, judgingAt: null, titlePending: false, stage: null, statusAt: 5_000, createdAt: 5_000, updatedAt: 1_000 };
     core.db.insertTask(past);
     expect((await logRows()).find((r) => r.taskId === past.id)!.durationMs).toBe(0);
     // each row carries its task's outcome: the status alone says "done" for a task that stopped to ask
@@ -83,7 +98,7 @@ describe("core daemon", () => {
     expect(lines.length).toBeLessThanOrEqual(5);
     const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(parsed.map((r) => r.taskId)).toContain(t.id);
-    for (const r of parsed) expect(Object.keys(r).sort()).toEqual(["chosen", "costUsd", "durationMs", "outcome", "reason", "ruleId", "status", "suggested", "suggestedBy", "taskId", "title", "ts"]);
+    for (const r of parsed) expect(Object.keys(r).sort()).toEqual(["chosen", "chosenModel", "costUsd", "durationMs", "outcome", "reason", "ruleId", "status", "suggested", "suggestedBy", "suggestedModel", "taskId", "title", "ts"]);
     // newest first, and reproducible: the same request twice returns the same rows in the same order
     expect(parsed.map((r) => r.ts)).toEqual([...(parsed.map((r) => r.ts) as number[])].sort((a, b) => b - a));
     expect(await fetch(`${base}/api/routing/log?format=jsonl&limit=5`).then((r) => r.text())).toBe(body);
