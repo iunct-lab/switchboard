@@ -1,4 +1,4 @@
-// test-reads: docs/design/pbi-progress.md
+// test-reads: docs/design/pbi-progress.md apps/ packages/ scripts/parallel-guard.ts
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { pbiFactsOf } from "./backlog-item.ts";

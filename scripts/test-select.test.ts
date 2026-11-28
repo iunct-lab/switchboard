@@ -472,3 +472,22 @@ test("a change of main.ts alone selects scripts/release-check.test.ts, which sta
   expect(s.full).toBeUndefined();
   expect(s.tests).toContain("scripts/release-check.test.ts");
 });
+
+test("git grep でツリーを検査するテストは、検査するコードの変更で選ばれる", () => {
+  const root = join(import.meta.dir, "..");
+  const files = repoFiles(root);
+  const read = (p: string) => readFileSync(join(root, p), "utf8");
+  const status = "packages/core/src/task-status.test.ts";
+  const progress = "packages/core/src/pbi-progress.test.ts";
+  const pick = (changed: string) => {
+    const s = selectFrom([changed], files, read);
+    expect(s.full).toBeUndefined();
+    return s.tests;
+  };
+  for (const changed of ["packages/core/src/jobs.ts", "apps/web/src/main.tsx", "ops-kit/src/review-note.ts"]) {
+    expect(pick(changed)).toContain(status);
+  }
+  for (const changed of ["packages/core/src/jobs.ts", "apps/web/src/main.tsx"]) {
+    expect(pick(changed)).toContain(progress);
+  }
+}, 30_000);

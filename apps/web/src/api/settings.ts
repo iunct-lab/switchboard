@@ -1,4 +1,5 @@
 import type { CustomRunner, ModelCandidates, RunnerInfo, Settings, SettingsPatch } from "@switchboard/protocol";
+import { saveDevelopSelf } from "../composeDetails.ts";
 import { req } from "./request.ts";
 
 /**
@@ -13,7 +14,12 @@ export const settingsApi = {
   /** The ADK servers added in Settings; read by the daemon at its next start. */
   customRunners: () => req<CustomRunner[]>("/api/custom-runners"),
   putCustomRunners: (list: CustomRunner[]) => req<CustomRunner[]>("/api/custom-runners", { method: "PUT", body: JSON.stringify(list) }),
-  updateSettings: (patch: SettingsPatch) => req<SettingsResponse>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  /** Every save of the settings from this browser goes through here, so the browser's copy of 「Switchboard 自体を開発する」 (what Home's first draw starts from) follows it. */
+  updateSettings: async (patch: SettingsPatch): Promise<SettingsResponse> => {
+    const saved = await req<SettingsResponse>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) });
+    if (typeof localStorage !== "undefined" && typeof saved.developSelf === "boolean") saveDevelopSelf(localStorage, saved.developSelf);
+    return saved;
+  },
   /** 「CLI の表を読む」: the installed CLIs' models neither listed nor hidden, or why a table could not be read. Reads the tables (the claude executable is about 240 MB), so only on the button. */
   modelCandidates: () => req<ModelCandidates>("/api/settings/model-candidates"),
 };

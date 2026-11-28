@@ -182,6 +182,58 @@ The cause was found from CDP traces (`devtools.timeline`, with the JS stack of e
 
 The cause is therefore the side panel's responses being committed one by one, not a state update that the conversation depends on. The wobble goes away when the panel commits these reads in one update (its reads settled together and set in one `setState`); whether it does is checked by measuring, not assumed. Nothing here changes how the bench measures.
 
+### Why launch.layoutCount and launch.recalcStyleCount rose when the Home form moved into Compose
+
+When the instruction form on Home was replaced by `Compose` (`apps/web/src/components/Compose.tsx`), `launch.layoutCount` and `launch.recalcStyleCount` rose above their ceilings and stayed there, and `launch.layoutShift` doubled. This section is where the rise comes from. It is not one render: it is the sum of several elements that `Compose` draws or mounts during launch and the old form did not have, and one of them, the `SaveIssue` block inside the closed `詳細`, is the largest part.
+
+`bun scripts/perf-bench.ts --runs 5` on one machine, the builds one after the other (median of 5 runs; the launch row only):
+
+| Build | `layoutCount` | `recalcStyleCount` | `layoutShift` |
+|---|---|---|---|
+| old Home form | 6 | 7 | 0.0066 |
+| Compose | 8 | 10 | 0.0132 |
+| Compose, upstream hint not drawn before the settings are read | 8 | 9 | 0.0071 |
+| Compose, upstream hint not drawn before the settings are read, with the fix below | 6 | 8 | 0.0071 |
+
+#### What it is not
+
+The old form already had the same effects with the same setters: the debounced `api.suggest`, the `[runner]` effect that empties model and effort, the effect that fills them, and the `api.settings()` response that sets `shadowDefault`, `developSelf`, `newDefaults` and the saved runner. So a response-driven commit that `Compose` also has is not what changed. The bench registers only the `claude` adapter, so the `[runner]` effect and the model / effort effect run once, at mount (counted in the page: 1 and 1), and no runner cascade happens in the launch journey.
+
+#### What `Compose` draws that the old form did not
+
+A `MutationObserver` log (with `performance.mark` in the callback) of the same launch, old form against `Compose`, shows the same big commits for the app shell, the rail and the Workspace select, and the same commits that only reset the `name` and `type` of the runner radio inputs. The differences are these elements in the form:
+
+- `div.hint` with the upstream-request hint (`feedbackText.requestHintUpstream`), drawn in the first render before the settings are read and removed once they are. This is the visible change, and the whole of the `layoutShift` rise (0.0132 → 0.0071 once it is not drawn before the setting is read).
+- `details.compose-save` (`SaveIssue`), mounted inside the closed `詳細` when the Workspace list arrives.
+- `div.compose-fix` inside `詳細`, added when the settings response sets `developSelf`.
+- The shadow toggle row, drawn as "loading" before the default is read and removed when no DAK runner is listed (the old form draws that row only when a DAK runner is listed).
+- The text of `div.compose-hint`, which changes when the Workspace list arrives.
+
+The improve buttons and the closed `詳細`'s summary line, which the old form also had, are not a difference.
+
+#### Which of them costs a layout or a style recalculation
+
+Each element taken out of the third build of the first table (`Compose` with the upstream hint not drawn before the settings are read; the hint is already gone there, so it is not a row below) (launch only, 9 runs each, one after the other; median / mean):
+
+| Build | `layoutCount` | `recalcStyleCount` |
+|---|---|---|
+| old Home form | 5 / 5.3 | 7 / 7.2 |
+| Compose without the early hint, nothing else taken out | 8 / 8.0 | 10 / 9.6 |
+| `SaveIssue` not mounted | 7 / 6.7 | 8 / 7.7 |
+| `compose-fix` not drawn | 7 / 7.4 | 9 / 9.2 |
+| shadow row not drawn | 7 / 7.8 | 9 / 9.3 |
+| improve buttons not drawn (the old form has them) | 8 / 8.4 | 10 / 9.9 |
+| the four above all taken out | 6 / 5.6 | 8 / 7.4 |
+
+Read together:
+
+- It is not narrowed to one commit. `SaveIssue` is the largest part, and `compose-fix` and the shadow row each take off a smaller part. The parts overlap, because a frame runs at most one style recalculation (see the section above), so they do not add up, and with all of them out the counts are within noise of the old form's.
+- Why an element inside a closed `details` costs a layout was not traced. The measurement says it does; it does not say whether the mount itself, the size of its render, or the frame its commit lands in is what counts.
+
+#### What removes it
+
+Two changes, measured together on top of each other. Not drawing the upstream hint before the settings are read removes the `layoutShift` rise (the third row of the first table). That holds for the measured daemon, where developing Switchboard itself is on (the bench daemon has no stored setting, so the schema's default, on, applies; a new HOME is seeded with it off). On an instance with it off, not drawing the hint early inserts it late instead of removing it, unless the first draw knows the value before the settings answer. On top of that, mounting `SaveIssue` only once `詳細` has been opened (and keeping it mounted after that) takes `launch.layoutCount` and `launch.recalcStyleCount` to 6 and 8 (median; mean 6.3 and 7.8 in 11 runs, in the same series where `Compose` without the early hint and nothing else taken out gave 8 and 10, mean 8.2 and 9.7, and the old form 5 and 7, mean 5.4 and 7.1; also the last row of the first table), one recalculation above the old form's 7. The component is inside the closed `詳細` and reads its draft from the browser's storage when it mounts, so the closed form looks the same. Two things a late mount loses unless they are handed over. A mounted `SaveIssue` keeps the last specific Workspace after the Workspace select goes back to `自動`, so a first mount at that point has to be given the last Workspace the person chose, not the first in the list. And whether its draft section starts expanded is decided once, from the draft of the Workspace the form had when the list arrived (a later choice does not change it), so a late mount also has to be given that Workspace. With both handed over, a late mount shows the same Workspace and open state as before, with one limit: it reads the stored drafts when `詳細` is first opened, not when the list arrived, so a draft typed in between (in the feedback dialog over Home) can make the draft section start expanded where an early mount would have kept it collapsed. What is left above the old form (about one recalculation) is not any one of the shadow row, `compose-fix` or the hint line: leaving all three out as well leaves it unchanged.
+
 ## Bundle history
 
 Each time the tag CI measures the bundle of the ref it compares with, the tag before (the first tag: `origin/main`'s tip) (the `perf-base.json` that its CI steps write for the bundle check), it appends one row to `bundle.tsv` on the branch `perf-records` of the repository, whether the run passed or not. A PR's local CI does not measure it and writes no row. The branch is never merged; the tag CI makes it the first time (a root commit with a README) and adds rows with the GitHub contents API, not in a working tree. The columns are `measured_at` (ISO, UTC), `js` and `css` (gzip bytes, as perf-bench measures them) and `main` (the sha that was measured, for reference). A row is a measure, not a commit: the same commit measured twice is two rows, and a commit nobody measured has none. Writing a row never changes the run's result; a failure prints one line. When another run wrote first, the row is put again once on top of it. Once the file is over 1 MB the contents API no longer returns it, and the tag CI writes nothing and says so (it does not replace the rows); `history` says so too. When the file nears 1 MB, splitting it is a request of its own (nothing here splits it). A GitLab repository, or a checkout whose CI writes no `perf-base.json`, writes nothing.

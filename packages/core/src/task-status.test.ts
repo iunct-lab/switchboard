@@ -1,4 +1,4 @@
-// test-reads: docs/design/task-work-phase.md
+// test-reads: docs/design/task-work-phase.md apps/ aws/ container/ ops-kit/ packages/ rescue/ scripts/
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { isWorkingStatus, TaskOutcome, TaskStatus as TaskStatusSchema, type Task, type TaskStatus } from "@switchboard/protocol";
 import { mkdtempSync, rmSync } from "node:fs";

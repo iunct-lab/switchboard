@@ -971,12 +971,21 @@ describe("promotion without cutting or waiting on the Tasks", () => {
       expect((await runSchedule(base, id)).status).toBe(202);
       expect(await health(base)).toMatchObject({ tag: "v0.2.0", tasks: 1 });
       r.state.refuse = true;
+      r.state.refuseDelayMs = 30; // each ask stays in flight for a while, so `asked` shows in health
       claude.end(0);
       await settle(() => core!.db.listTasksByStatus("running").length === 0);
       await Bun.sleep(200);
       expect(r.promoted).toEqual([]);
-      expect(await health(base)).toMatchObject({ tag: "v0.2.0", tasks: 0 }); // still held, with nothing running
+      // an ask can be in flight right now (health then carries `asked`): read again until one is not
+      const settled = async () => {
+        const until = Date.now() + 5000;
+        let h = await health(base);
+        while (h && typeof h === "object" && "asked" in h && Date.now() < until) { await Bun.sleep(10); h = await health(base); }
+        return h;
+      };
+      expect(await settled()).toMatchObject({ tag: "v0.2.0", tasks: 0 }); // still held, with nothing running
       r.state.refuse = false;
+      r.state.refuseDelayMs = 0;
       await settle(() => r.promoted.length > 0);
       expect(r.promoted).toEqual([r.sha]);
     } finally {

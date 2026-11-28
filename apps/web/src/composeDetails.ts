@@ -47,3 +47,27 @@ export function saveDetailsOpen(storage: Pick<Storage, "setItem">, open: boolean
     // private mode, quota: the form still works, it only forgets
   }
 }
+
+const DEVELOP_SELF_KEY = "switchboard.compose.developSelf";
+
+/**
+ * The last 「Switchboard 自体を開発する」 value read from the daemon, for the first draw before the settings answer;
+ * `fallback` (the setting's default) when nothing valid was saved or the storage refuses.
+ */
+export function loadDevelopSelf(storage: Pick<Storage, "getItem">, fallback: boolean): boolean {
+  try {
+    const v = storage.getItem(DEVELOP_SELF_KEY);
+    return v === "on" ? true : v === "off" ? false : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Remembers the value the settings answered for the next first draw; a storage that refuses is ignored. */
+export function saveDevelopSelf(storage: Pick<Storage, "setItem">, value: boolean): void {
+  try {
+    storage.setItem(DEVELOP_SELF_KEY, value ? "on" : "off");
+  } catch {
+    // private mode, quota: the next first draw falls back to the default
+  }
+}

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { NewDefaultsSettings, type CloudPreparation, type ExecutionMode, type CreateTaskInput, type RoutingSuggestion, type RunnerId, type Task, type Workspace } from "@switchboard/protocol";
+import { NewDefaultsSettings, Settings, type CloudPreparation, type ExecutionMode, type CreateTaskInput, type RoutingSuggestion, type RunnerId, type Task, type Workspace } from "@switchboard/protocol";
 import { api } from "../api/index.ts";
 import { type Health } from "../api/daemon.ts";
 import { RunnerPill } from "./ui.tsx";
@@ -9,13 +9,13 @@ import { EffortSelect } from "./EffortSelect.tsx";
 import { staleDraft } from "../presets.ts";
 import { listedRunners, runnerLabel } from "../runners.ts";
 import { shownWorkspaces } from "../workspaceList.ts";
-import { composeShadow } from "../composeShadow.ts";
+import { afterFailedRead, composeShadow } from "../composeShadow.ts";
 import { homeEmptyLabel, initialChoice } from "../runnerSettings.ts";
 import { PresetPicker } from "./PresetPicker.tsx";
 import { SlashPicker } from "./SlashPicker.tsx";
 import { titleToSend } from "../taskTitle.ts";
-import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "../composeDetails.ts";
-import { backlogTargetName, feedbackArgs } from "../compose.ts";
+import { detailsSummary, loadDetailsOpen, loadDevelopSelf, saveDetailsOpen, saveDevelopSelf } from "../composeDetails.ts";
+import { backlogTargetName, feedbackArgs, selectValue } from "../compose.ts";
 import { loadNewIssueDraft, newIssueDraftKey } from "../backlogSync.ts";
 import { SaveIssue } from "./SaveIssue.tsx";
 import { feedbackModes, startWorkspace, type FeedbackTarget } from "../feedbackTarget.ts";
@@ -29,6 +29,8 @@ import { runnerLoginLabel } from "../login.ts";
 
 /** Before the settings are read: no saved model / effort for any runner. */
 const ND_NONE: NewDefaultsSettings = NewDefaultsSettings.parse({});
+/** What the setting is when no one saved it (the schema's default), so the form is drawn with it until the settings are read. */
+const DEVELOP_SELF_DEFAULT: boolean = Settings.shape.developSelf.parse(undefined);
 
 /** The prefix "改善 →" inserted: remembered so a Workspace switch can swap it for the new workspace's brief (and only it). */
 type Brief = { wsId: string; text: string; title: string };
@@ -86,17 +88,30 @@ export function Compose(props: {
   const cloud = runner === "claude" && executionMode === "cloud";
   /** "" = follow the runner's saved default (shown selected); anything else is sent explicitly. */
   const [mode, setMode] = useState("");
-  const [model, setModel] = useState("");
-  const [effort, setEffort] = useState(""); // "" = the CLI's own default
+  /** What the person picked: read only while `modelTouched` / `effortTouched`; an untouched select shows `initial` (below), so no effect fills it. */
+  const [modelPick, setModelPick] = useState("");
+  const [effortPick, setEffortPick] = useState(""); // "" = the CLI's own default
   const [budget, setBudget] = useState("");
   // Shadow run: null = follow the saved default (Settings.shadowRunner); a click makes it explicit for this task.
   const [shadow, setShadow] = useState<boolean | null>(null);
-  /** undefined = not loaded yet (the toggle waits; an untouched creation leaves the choice to the daemon). */
-  // Settings 「Switchboard 自体を開発する」: read with the other defaults below; unread = off, so 「このアプリを改善 →」 never shows for a moment and goes
-  const [developSelf, setDevelopSelf] = useState(false);
-  const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined>(undefined);
+  // Settings 「Switchboard 自体を開発する」: read with the other defaults below. Until it is read the form is drawn with the last
+  // value this browser saw (the setting's default, `DEVELOP_SELF_DEFAULT`, when none was kept): kept when the settings are read here
+  // and when Settings saves them in this browser. A visit after the first therefore gets its final form from the first draw, on or
+  // off; what is not covered is a change made from another browser or device, seen late (the form changes when the answer
+  // comes) on the first draw after it, and the first visit of an instance that turned it off. A failed request leaves what is drawn.
+  const [developSelf, setDevelopSelf] = useState(() => loadDevelopSelf(localStorage, DEVELOP_SELF_DEFAULT));
+  /** The saved shadow default: undefined = not loaded yet, "unread" = the first read failed. Both draw the row off and send `null`. */
+  const [shadowDefault, setShadowDefault] = useState<RunnerId | null | undefined | "unread">(undefined);
   /** 詳細: the rarely set values, folded; open or closed as the person left it in this browser. */
   const [detailsOpen, setDetailsOpen] = useState(() => loadDetailsOpen(localStorage));
+  /** The keep-as-Issue form inside 詳細 is mounted once 詳細 has been open (from the first draw when it was left open), and stays; it reads its draft from storage when it mounts. */
+  const [everOpen, setEverOpen] = useState(detailsOpen);
+  // What a SaveIssue mounted when the Workspace list arrived would have started with, handed to one mounted later (when 詳細 is first
+  // opened): the Workspace the form had then (it decides whether the draft section starts expanded) and the last one chosen.
+  const [firstWs, setFirstWs] = useState<string | undefined>(undefined);
+  const [rememberedWs, setRememberedWs] = useState<string | undefined>(undefined);
+  if (firstWs === undefined && props.workspaces.length > 0) setFirstWs(wsId || props.workspaces[0]!.id);
+  if (wsId && wsId !== rememberedWs) setRememberedWs(wsId);
   const [busy, setBusy] = useState(false);
   const [suggestion, setSuggestion] = useState<RoutingSuggestion | null>(null);
   const [brief, setBrief] = useState<Brief | null>(null);
@@ -207,17 +222,16 @@ export function Compose(props: {
   useEffect(() => {
     if (runner !== "claude") setExecutionMode("local");
     setMode("");
-    setModel(""); // a model belongs to one runner
-    setEffort(""); // so does an effort
+    setModelPick(""); // a model belongs to one runner
+    setEffortPick(""); // so does an effort
     setEffortTouched(false);
   }, [runner]);
-  // After the runner effect above (which empties them): an untouched select takes the rule's model proposal, else the
-  // saved default for this runner, and goes back to the CLI default when there is none.
+  // An untouched select takes the rule's model proposal, else the saved default for this runner, and goes back to the CLI
+  // default when there is none. Read in the render, not filled by an effect after a runner change: a response that changes
+  // the runner is one commit with the final selects.
   const initial = initialChoice(runner, runnerInfo, newDefaults ?? ND_NONE, suggestion ?? undefined);
-  useEffect(() => {
-    if (!modelTouched) setModel(initial.model);
-    if (!effortTouched) setEffort(initial.effort);
-  }, [initial.model, initial.effort, runner, modelTouched, effortTouched]);
+  const model = selectValue(modelTouched, modelPick, initial.model);
+  const effort = selectValue(effortTouched, effortPick, initial.effort);
   useEffect(() => {
     if (props.health?.runners)
       api
@@ -225,20 +239,21 @@ export function Compose(props: {
         .then((s) => {
           setShadowDefault(s.shadowRunner);
           setDevelopSelf(s.developSelf);
+          saveDevelopSelf(localStorage, s.developSelf);
           setNewDefaults(s.newDefaults);
           // only a runner the person saved: left at its default, the router's own fallback (routing.yaml) stands as before
           savedRunnerRef.current = s.newDefaults.taskRunner !== s.defaults.newDefaults.taskRunner ? s.newDefaults.taskRunner : null;
           const r = startRunner(suggestionRef.current);
           if (!runnerTouchedRef.current && r) setRunner(r);
         })
-        .catch(() => undefined);
+        .catch(() => setShadowDefault(afterFailedRead));
   }, [props.health]);
   const dakListed = listedRunners(props.health?.runners).includes("dak");
   const shadowRow = composeShadow({ runner, shadowDefault, touched: shadow, runnerOk: props.runnerOk, dakListed });
   const shadowRowDefault = composeShadow({ runner, shadowDefault, touched: null, runnerOk: props.runnerOk, dakListed });
   // What 詳細 says while closed: what differs from an untouched form (the initial model and effort, the saved shadow). Cloud sends
   // none of model / effort / budget / shadow, so they are not shown as changed there. An untouched model is the rule's
-  // (the effect below fills the select a render later): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
+  // (the select shows it too): read so, the line does not flash 「モデル: CLI 既定」 meanwhile.
   const defaultModel = initial.model;
   const defaultShadow = shadowRowDefault.checked ? shadowRowDefault.runner : null;
   const summary = detailsSummary(
@@ -246,14 +261,14 @@ export function Compose(props: {
     { model: defaultModel, shadow: defaultShadow, briefTitle: brief?.title },
   );
   // What the request says about the shadow: the row's own result. Checked → the named runner; unchecked → null; omitted (the
-  // daemon's saved default then decides) before the default is loaded and for a DAK primary, which has no row.
+  // daemon's saved default then decides) only for a DAK primary, which has no row; loading and unread say null.
   const shadowRunnerField: RunnerId | null | undefined = shadowRow.field;
 
   // runners not listed yet (loading, unreachable, no token): no runner reason is given, the button stays disabled as before
   const offRunners = unavailableNotices(props.health?.runners);
   const runnersKnown = !!props.health?.runners;
   const blocked = startBlockedReason({ prompt, stale, attachBusy: attach.busy, runnerOk: !runnersKnown || props.runnerOk.has(runner), cloud, ws: !!ws, anyRunnerOk: !runnersKnown || props.runnerOk.size > 0 });
-  // the setting is read with the other defaults above; unread = off, so 「要望にしてすぐ直す」 never shows for a moment and goes
+  // the setting is read with the other defaults above; unread, it holds the last value read in this browser (else the default)
   const offer = feedbackModes(developSelf, wsId ? { id: wsId, name: ws?.name ?? "" } : undefined, props.workspaces);
   const locked = busy || sending !== null || capturing;
   useEffect(() => {
@@ -517,7 +532,7 @@ export function Compose(props: {
       )}
       {blocked && prompt.trim() && !stale && <div className="hint warn">{t(home.cannotStart, { reason: blocked })}</div>}
       {!cloud && selectedOpt?.danger && <div className="hint warn">{t(home.dangerMode, { label: selectedOpt.label, description: selectedOpt.description })}</div>}
-      <details className="compose-details" open={detailsOpen} onToggle={(e) => { const open = e.currentTarget.open; setDetailsOpen(open); saveDetailsOpen(localStorage, open); }}>
+      <details className="compose-details" open={detailsOpen} onToggle={(e) => { const open = e.currentTarget.open; setDetailsOpen(open); if (open) setEverOpen(true); saveDetailsOpen(localStorage, open); }}>
         <summary>
           {t(home.details)}{!detailsOpen && summary && <span className="hint"> · {summary}</span>}{!detailsOpen && savedDraft && <span className="hint" data-compose-saved-draft> · {t(home.savedDraft)}</span>}
         </summary>
@@ -527,13 +542,13 @@ export function Compose(props: {
             <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t(home.titlePlaceholder)} />
           </label>
           {runner === "claude" && <label>{t(home.runLocation)} <select aria-label={t(home.runLocation)} value={executionMode} onChange={e => { setExecutionMode(e.target.value as ExecutionMode); setRunnerTouched(true); }}><option value="local">{t(home.local)}</option><option value="cloud">{t(home.cloud)}</option></select></label>}
-          {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModel(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} emptyLabel={homeEmptyLabel("model", runnerInfo)} />}
-          {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffort(e); setEffortTouched(true); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} emptyLabel={homeEmptyLabel("effort", runnerInfo)} />}
+          {!cloud && <ModelSelect runner={runnerInfo} value={model} onChange={(v) => { setModelPick(v); setModelTouched(true); setRunnerTouched(true); /* a model belongs to this runner: the router must not swap it away */ }} label={t(home.model)} title={t(home.modelTitle)} emptyLabel={homeEmptyLabel("model", runnerInfo)} />}
+          {!cloud && <EffortSelect runner={runnerInfo} value={effort} onChange={(e) => { setEffortPick(e); setEffortTouched(true); setRunnerTouched(true); /* chosen for this runner: the router must not swap it away */ }} label={t(home.effort)} title={t(home.effortTitle)} emptyLabel={homeEmptyLabel("effort", runnerInfo)} />}
           {!cloud && <input className="model" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder={t(home.budgetPlaceholder)} inputMode="decimal" title={t(home.budgetTitle)} />}
           {!cloud && shadowRow.show && (
             <label
               className={`hint toggle shadow ${shadowRow.disabled ? "off" : ""}`}
-              title={shadowRow.note === "loading" ? t(home.loadingDefault) : t(home.shadowTitle, { runner: runnerLabel(shadowRow.runner ?? "") })}
+              title={shadowRow.note === "loading" ? t(home.loadingDefault) : shadowRow.note === "unread" ? t(home.shadowUnread) : t(home.shadowTitle, { runner: runnerLabel(shadowRow.runner ?? "") })}
             >
               <input
                 type="checkbox"
@@ -546,6 +561,7 @@ export function Compose(props: {
               />
               {shadowRow.runner ? t(home.shadow, { runner: runnerLabel(shadowRow.runner) }) : t(home.shadowLabel)}
               {shadowRow.checked && shadowRow.saved && <span className="hint">{t(home.defaultTag)}</span>}
+              {shadowRow.note === "unread" && <span className="hint">{t(home.shadowUnread)}</span>}
               {shadowRow.note === "same" && <span className="hint">{t(home.shadowSame)}</span>}
               {shadowRow.note === "missing" && <span className="hint">{shadowRow.runner === "dak" ? t(home.dakUnreachable) : t(home.shadowMissing, { runner: runnerLabel(shadowRow.runner ?? "") })}</span>}
             </label>
@@ -560,7 +576,7 @@ export function Compose(props: {
             <span className="hint">{t(feedbackText.fixHint, { target: targetName })}</span>
           </div>
         )}
-        {props.workspaces.length > 0 && <SaveIssue workspaces={props.workspaces} current={wsId} />}
+        {everOpen && props.workspaces.length > 0 && <SaveIssue workspaces={props.workspaces} current={wsId} first={firstWs} remembered={rememberedWs} />}
       </details>
       {cloud && <div className="cloud-preparation card" role="note">
         <p>{t(home.cloudConsent)}</p>

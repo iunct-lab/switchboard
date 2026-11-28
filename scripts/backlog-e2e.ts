@@ -594,12 +594,15 @@ try {
   await click("作成");
   await until(async () => ((await (await fetch(`${base}/api/schedules`)).json()) as Array<{ model: string }>).some((x) => x.model === "m-e2e"), "the schedule is saved with the default's model");
   await until(() => evaluate(`[...document.querySelectorAll('main.schedules .tag')].some(t => t.textContent === 'バックログを進める')`), "schedule row with its tag");
-  // `#307` has every Task closed, so backlog-next would close it first and take the meta's implement slot: a 閉じる
-  // that ended with no update to the Issue since leaves it, as one that did not close
+  // `#307` has every Task closed, so backlog-next closes it first and it takes one of the meta's implement slots: the gate
+  // holds a start only when it repeats an earlier automatic start with no event since, and this 閉じる (inserted below) was
+  // not one, so its ending with no update to the Issue does not leave `#307` held
   const closedAt = Date.now();
   core.db.insertTask({ ...core.db.getTask(finished.id)!, id: "task_e2e307close", title: "#307 閉じる: PBI", stage: { issue: 307, action: "close" }, status: "done", createdAt: closedAt, updatedAt: closedAt });
   const tasksBefore = core.db.listTasks().length;
-  // two implement slots for this firing: `#306` takes the first, and `#304` would take the second but for its overlap
+  // three implement slots for this firing (the most a slot box takes): `#307`'s 閉じる and `#305`'s 実装 come before the meta's
+  // Ready `#304`, which would take the third but for its overlap, so the overlap is the only thing that stops it. `#306` (also a resume,
+  // ahead of `#304`) is put on hold for this firing, or it would take that slot
   // every workspace's
   const setSweep = async (implement: number) => {
     for (const w of core.db.listWorkspaces()) {
@@ -607,7 +610,9 @@ try {
       assert(r.status === 200, `sweep of ${w.name}: ${r.status}`);
     }
   };
-  await setSweep(2);
+  await setSweep(3);
+  for (const p of pages) for (const n of p.data.repository.issues.nodes) if (n.number === 306) n.labels.nodes.push({ name: "on-hold" });
+  const promptsBeforeFiring = prompts.length;
   // the Tasks above still wait for an answer and fill the default of 3 running at once: a firing's Tasks would wait in the queue with no prompt sent
   assert((await fetch(`${base}/api/settings`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxRunners: 8 }) })).status === 200, "maxRunners");
   libRequest = true;
@@ -618,14 +623,18 @@ try {
   await until(() => evaluate(`!document.querySelector('main.schedules')`), "今すぐ実行 opens the Task");
   await click("Schedules");
   await until(() => evaluate(`!!document.querySelector('main.schedules pre.diff')`), "Schedules screen with its log");
-  // one line per workspace and slot: the meta's `#306` (in progress with Tasks left since its answer above, so it is
-  // resumed before Ready `#304`) and 分解待ち `#303`, lib's Ready `#304` and 要望 `#308`
-  const expectedStarts = [`${metaName} #306 を complete で開始`, `${metaName} #303 を to-tasks で開始`, "lib #304 を complete で開始", "lib #308 を to-pbi で開始"];
+  // one line per repository and slot. Nothing holds the Tasks stopped above any more (the gate reads what happened since an
+  // automatic start, not how the last Task ended), so the meta's implement slots go to `#307` (closable: closed
+  // first), then `#305` (stalled, resumed), before Ready `#304`; `#306` is on hold. The plan slot takes
+  // 分解待ち `#303`. lib's Ready `#304` is implemented, and its 要望 `#308` is fixed directly (the default `autoDirect`
+  // chooses by the criteria of the process definitions) rather than made a PBI
+  const expectedStarts = [`${metaName} #307 を close で開始`, `${metaName} #305 を complete で開始`, `${metaName} #303 を to-tasks で開始`, "lib #304 を complete で開始", "lib #308 を direct で開始"];
   const scheduleLog = await until(async () => {
     const lines = (await evaluate(`[...document.querySelectorAll('main.schedules pre.diff')].map(p => p.textContent).join('').split('\\n')`) as string[]).filter((l) => l.includes(" で開始 "));
     return expectedStarts.every((e) => lines.some((l) => l.includes(e))) ? lines.map((l) => l.replace(/^\S+ /, "")) : null;
   }, "a log line per workspace and slot");
   libRequest = false;
+  for (const p of pages) for (const n of p.data.repository.issues.nodes) if (n.number === 306) n.labels.nodes = n.labels.nodes.filter((l) => l.name !== "on-hold");
   // `#304` overlaps PR `#950`: the firing does not start it and the log names the PR; GitHub was not written to for that
   const overlapLog = await evaluate(`[...document.querySelectorAll('main.schedules pre.diff')].map(p => p.textContent).join('')`) as string;
   assert(overlapLog.includes(`${metaName}: 実装の枠: 重なり: #304（PR #950: src/overlap.ts）`), `overlap log: ${overlapLog}`);
@@ -635,10 +644,11 @@ try {
   await setSweep(1);
   openPulls = [];
   delete dec304.subIssues;
-  // one firing starts an implement and a plan stage Task per workspace; the meta's implementation is the resume of
-  // `#306`, which goes on with pbi-complete's SKILL.md and leaves the merge procedure to the skill (it names the merge gate's scope only)
-  const scheduled = core.db.listTasks().find((t) => t.scheduleId && t.title.startsWith("#306 実装: ") && t.workspaceId === core.db.listWorkspaces().find((w) => w.kind === "meta")!.id);
-  const scheduledPrompt = await until(() => prompts.findLast((p) => p.startsWith("PBI #306 は実装中のまま止まっています")), "the scheduled implementation's prompt");
+  // one firing starts implement and plan stage Tasks per workspace; the meta's implementation includes the resume of
+  // `#305`, which goes on with pbi-complete's SKILL.md and leaves the merge procedure to the skill (it names the merge gate's scope only).
+  // Only the prompts sent since the firing are read: the earlier button resume of `#305` has the same opening
+  const scheduled = core.db.listTasks().find((t) => t.scheduleId && t.title.startsWith("#305 実装: ") && t.workspaceId === core.db.listWorkspaces().find((w) => w.kind === "meta")!.id);
+  const scheduledPrompt = await until(() => prompts.slice(promptsBeforeFiring).findLast((p) => p.startsWith("PBI #305 は実装中のまま止まっています")), "the scheduled implementation's prompt");
   assert(scheduled && scheduledPrompt.includes(".claude/skills/pbi-complete/SKILL.md") && scheduledPrompt.includes("マージ判定（`scripts/merge-gate.ts`）が merge を返した PR のマージ") && !scheduledPrompt.includes("gh stack merge") && !scheduledPrompt.includes("--allow-large"), `scheduled: ${core.db.listTasks().filter((t) => t.scheduleId).map((t) => t.title).join(" / ")}`);
 
   // the slots per workspace: on the 設定 screen, the meta's implement 1 → 2, 保存, and a reload still shows 2
