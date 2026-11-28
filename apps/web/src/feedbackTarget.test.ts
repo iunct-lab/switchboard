@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Workspace } from "@switchboard/protocol";
+import { Settings, type Workspace } from "@switchboard/protocol";
 import { feedbackModes, startWorkspace } from "./feedbackTarget.ts";
 
 const ws = (id: string, kind: Workspace["kind"] = "repo") => ({ id, name: id, path: `/${id}`, kind }) as Workspace;
@@ -28,4 +28,13 @@ test("feedbackModes: on keeps both as today", () => {
   const list = [ws("ws_lib"), ws("ws_meta", "meta")];
   expect(feedbackModes(true, ws("ws_meta", "meta"), list)).toEqual({ fix: true, upstream: false });
   expect(feedbackModes(true, ws("ws_lib"), list)).toEqual({ fix: true, upstream: false });
+});
+
+test("feedbackModes: Home is first drawn with the setting's default, so for an instance on the default the first draw is the answered form", () => {
+  const list = [ws("ws_meta", "meta"), ws("ws_lib")];
+  const unread = Settings.shape.developSelf.parse(undefined); // what the form holds until `api.settings()` answers
+  expect(unread).toBe(true);
+  for (const target of [ws("ws_meta", "meta"), ws("ws_lib"), undefined]) expect(feedbackModes(unread, target, list)).toEqual(feedbackModes(true, target, list));
+  // an instance that turned it off (a new HOME) sees the hint come and the fix go when the answer arrives: accepted
+  expect(feedbackModes(unread, ws("ws_meta", "meta"), list)).not.toEqual(feedbackModes(false, ws("ws_meta", "meta"), list));
 });

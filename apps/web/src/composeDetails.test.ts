@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { RunnerId } from "@switchboard/protocol";
-import { detailsSummary, loadDetailsOpen, saveDetailsOpen } from "./composeDetails.ts";
+import { detailsSummary, loadDetailsOpen, loadDevelopSelf, saveDetailsOpen, saveDevelopSelf } from "./composeDetails.ts";
 
 const untouched = { title: "", executionMode: "local" as const, model: "", effort: "", budget: "", shadow: null as RunnerId | null };
 
@@ -52,4 +52,20 @@ test("loadDetailsOpen / saveDetailsOpen: a storage that throws starts closed and
   const broken = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("quota"); } };
   expect(loadDetailsOpen(broken)).toBe(false);
   expect(() => saveDetailsOpen(broken, true)).not.toThrow();
+});
+
+test("loadDevelopSelf / saveDevelopSelf: the last value read comes back, else the fallback; a refusing storage is ignored", () => {
+  const map = new Map<string, string>();
+  const storage = { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) };
+  expect(loadDevelopSelf(storage, true)).toBe(true);
+  expect(loadDevelopSelf(storage, false)).toBe(false);
+  saveDevelopSelf(storage, false);
+  expect(loadDevelopSelf(storage, true)).toBe(false);
+  saveDevelopSelf(storage, true);
+  expect(loadDevelopSelf(storage, false)).toBe(true);
+  map.set([...map.keys()][0]!, "x");
+  expect(loadDevelopSelf(storage, true)).toBe(true);
+  const refusing = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } };
+  expect(loadDevelopSelf(refusing, true)).toBe(true);
+  expect(() => saveDevelopSelf(refusing, false)).not.toThrow();
 });

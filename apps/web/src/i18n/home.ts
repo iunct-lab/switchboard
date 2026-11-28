@@ -86,6 +86,7 @@ export const home = msgs({
   defaultTag: { ja: "既定", en: "default" },
   dakUnreachable: { ja: "DAK の agent（http://127.0.0.1:8000、SWITCHBOARD_DAK_URL で変更）に到達できません。DAK リポジトリで docker compose up", en: "Cannot reach DAK's agent (http://127.0.0.1:8000, changed with SWITCHBOARD_DAK_URL). Run docker compose up in the DAK repository" },
   shadowSame: { ja: "主と同じランナーなので並走しません", en: "Same runner as the primary, so no parallel run" },
+  shadowUnread: { ja: "保存した既定を読めなかったため並走しません", en: "Could not read the saved default, so no parallel run" },
   shadowMissing: { ja: "{runner} は未検出のため並走しません", en: "{runner} is not detected, so no parallel run" },
   defaultsInSettingsTitle: { ja: "承認モード・並走・使用上限での自動再開・LLM 提案・自動判定の既定は 設定 画面で変えます", en: "The defaults for approval mode, parallel runs, auto-resume at the usage limit, LLM suggestions and auto-judging are changed in Settings" },
   defaultsInSettings: { ja: "既定は 設定 で変える", en: "Change defaults in Settings" },

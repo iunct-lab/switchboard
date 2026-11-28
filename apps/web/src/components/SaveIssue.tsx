@@ -40,13 +40,17 @@ function Made(props: { workspaceId: string; localId: string; title: string; kept
  * labels the Backlog lists by), its localId is followed to the number; what is typed stays until it is kept. It sits in the
  * instruction form's 詳細; an open Backlog reads its list again when one is saved.
  */
-export function SaveIssue(props: { workspaces: Workspace[]; current: string }) {
+export function SaveIssue(props: { workspaces: Workspace[]; current: string; first?: string; remembered?: string }) {
   const keptHere = (workspaceId: string) => props.workspaces.find((w) => w.id === workspaceId)?.backlog === "switchboard";
-  const [ws, setWs] = useState(props.current || props.workspaces[0]?.id || "");
-  const [saved] = useState(() => loadNewIssueDraft(localStorage, newIssueDraftKey(ws)));
-  const [kind, setKind] = useState<NewIssueDraft["kind"]>(saved?.kind ?? "type:request");
-  const [title, setTitle] = useState(saved?.title ?? "");
-  const [body, setBody] = useState(saved?.body ?? "");
+  const [ws, setWs] = useState(props.current || props.remembered || props.first || props.workspaces[0]?.id || "");
+  // `first` / `remembered` are for a mount later than the Workspace list: `first` is what the form had when the list arrived (it
+  // decides, once, whether this starts expanded), `remembered` the last one chosen (kept after the select goes back to 自動); both
+  // as a mount at that time would have had them. Without them this starts from `current`.
+  const [saved] = useState(() => loadNewIssueDraft(localStorage, newIssueDraftKey(props.first || ws)));
+  const [initialDraft] = useState(() => (!props.first || props.first === ws ? saved : loadNewIssueDraft(localStorage, newIssueDraftKey(ws))));
+  const [kind, setKind] = useState<NewIssueDraft["kind"]>(initialDraft?.kind ?? "type:request");
+  const [title, setTitle] = useState(initialDraft?.title ?? "");
+  const [body, setBody] = useState(initialDraft?.body ?? "");
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [made, setMade] = useState<Array<{ workspaceId: string; localId: string; title: string }>>([]);

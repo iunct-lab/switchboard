@@ -32,14 +32,24 @@ test("Home: このアプリを改善 only while Switchboard itself is developed;
 
 const compose = (workspaces: Workspace[]) => renderToStaticMarkup(createElement(Compose, { health: null, workspaces, runnerOk: new Set(), onCreate: async () => undefined, onError: noop, onOpenSettings: noop, screen: "home", onSent: noop }));
 
-test("Compose: before the setting is read (and while off) 要望にしてすぐ直す is not offered for Switchboard itself and a Switchboard request says no Issue is made automatically", () => {
+test("Compose: before the setting is read the form is drawn as the default (on) says: the fix is offered, the upstream hint is not; SaveIssue waits for 詳細 to open", () => {
   globalThis.localStorage ??= { getItem: () => null, setItem: noop } as unknown as Storage; // the form reads whether 詳細 was left open
   const html = compose([ws("ws_meta", "meta")]);
   expect(html).toContain("data-compose");
   expect(html).toContain("data-compose-backlog");
   expect(html).toContain("data-compose-start");
-  expect(html).not.toContain("data-compose-fix");
-  expect(html).toContain("Issue は自動では作らず");
+  expect(html).toContain("data-compose-fix");
+  expect(html).not.toContain("Issue は自動では作らず");
+  expect(html).not.toContain("data-compose-save");
+});
+
+test("Compose: 詳細 left open mounts SaveIssue from the first draw", () => {
+  globalThis.localStorage = { getItem: () => "open", setItem: noop } as unknown as Storage;
+  try {
+    expect(compose([ws("ws_meta", "meta")])).toContain("data-compose-save");
+  } finally {
+    globalThis.localStorage = { getItem: () => null, setItem: noop } as unknown as Storage;
+  }
 });
 
 test("Feedback: a closed dialog draws no form, so Home keeps the only one", () => {
@@ -57,4 +67,47 @@ test("Feedback: the upstream answer is a form link on GitHub, else the text with
   expect(copy).not.toContain("<a ");
   expect(copy).toContain("the request body");
   expect(copy).toContain("<button");
+});
+
+test("Compose: the first draw uses the last value read in this browser, so an instance with it off gets its final form at once", () => {
+  const stored = (value: string | null) => ({ getItem: (k: string) => (k === "switchboard.compose.developSelf" ? value : null), setItem: noop }) as unknown as Storage;
+  const form = (html: string) => ({ fix: html.includes("data-compose-fix"), upstream: html.includes("Issue は自動では作らず"), improveSelf: html.includes("このアプリを改善") });
+  const meta = [ws("ws_meta", "meta")];
+  try {
+    globalThis.localStorage = stored("off");
+    // what the answered form offers for the setting off (`feedbackModes`): no fix for Switchboard itself, the upstream hint instead
+    expect(form(compose(meta))).toEqual({ fix: false, upstream: true, improveSelf: false });
+    globalThis.localStorage = stored("on");
+    expect(form(compose(meta)).fix).toBe(true);
+    // nothing kept (the first visit) or a value that is not one of ours: the setting's default (on)
+    globalThis.localStorage = stored(null);
+    expect(form(compose(meta))).toEqual({ fix: true, upstream: false, improveSelf: true });
+    globalThis.localStorage = stored("garbage");
+    expect(form(compose(meta)).fix).toBe(true);
+  } finally {
+    globalThis.localStorage = { getItem: () => null, setItem: noop } as unknown as Storage;
+  }
+});
+
+test("Settings save: the browser's copy of the setting follows a successful save, which Home's next first draw starts from", async () => {
+  const { api } = await import("./api/index.ts");
+  const { loadDevelopSelf } = await import("./composeDetails.ts");
+  const map = new Map<string, string>();
+  const realStorage = globalThis.localStorage;
+  const realFetch = globalThis.fetch;
+  globalThis.localStorage = { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) } as unknown as Storage;
+  try {
+    for (const on of [false, true, false]) {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ developSelf: on }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+      await api.updateSettings({ developSelf: on });
+      expect(loadDevelopSelf(globalThis.localStorage, !on)).toBe(on);
+    }
+    // a refused save changes nothing
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: "no" }), { status: 500, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    await expect(api.updateSettings({ developSelf: true })).rejects.toThrow();
+    expect(loadDevelopSelf(globalThis.localStorage, true)).toBe(false);
+  } finally {
+    globalThis.localStorage = realStorage;
+    globalThis.fetch = realFetch;
+  }
 });

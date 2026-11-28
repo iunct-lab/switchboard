@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extraRows, frameCount, judge, parseArgs, removeIfEmpty, screens, staleBuild, type Box } from "./screens-audit.ts";
+import { extraRows, frameCount, headerPlan, judge, openSteps, parseArgs, removeIfEmpty, screens, staleBuild, type Box } from "./screens-audit.ts";
 
 const box = (over: Partial<Box>): Box => ({ left: 0, right: 100, width: 100, contentWidth: 100, height: 20, textLines: 1, fontSize: 13, text: "", inHeaderTabs: false, hidden: false, inSideScroller: false, ...over });
 
@@ -96,5 +96,39 @@ describe("screens-audit", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("openSteps: a Backlog layout is kept before the screen opens, and prepare runs last", () => {
+    const base = "http://x";
+    const all = screens("t1");
+    const layoutOnly = all.find((s) => s.name === "backlog-queue")!;
+    const steps = openSteps(layoutOnly, base);
+    const keep = steps.findIndex((st) => "evaluate" in st && st.evaluate.includes("switchboard.backlog.view") && st.evaluate.includes("layout: 'queue'"));
+    const open = steps.findIndex((st) => "navigate" in st && st.navigate === base + layoutOnly.path);
+    expect(keep).toBeGreaterThanOrEqual(0);
+    expect(keep).toBeLessThan(open);
+    const prepared = all.find((s) => s.name === "backlog-queue-selected")!;
+    expect(openSteps(prepared, base).at(-1)).toEqual({ prepare: prepared.prepare!, settle: 500 });
+    expect(openSteps(all.find((s) => s.name === "home")!, base)).toEqual([{ navigate: base + "/", settle: 5000 }]);
+  });
+
+  test("headerPlan opens the screen it names the way that screen was opened", () => {
+    const base = "http://x";
+    const all = screens(null);
+    const first = all.find((s) => s.name === "backlog-queue-selected")!;
+    const plan = headerPlan([first, ...all.filter((s) => s !== first)], [], "phone", base)!;
+    expect(plan.screen).toBe(first);
+    expect(plan.steps).toEqual(openSteps(first, base));
+    expect(plan.steps.some((st) => "evaluate" in st && st.evaluate.includes("layout: 'queue'"))).toBe(true);
+    expect(plan.steps.some((st) => "prepare" in st && st.prepare === first.prepare)).toBe(true);
+  });
+
+  test("headerPlan picks the first screen pictured at this width", () => {
+    const all = screens(null);
+    expect(headerPlan(all, [], "phone", "http://x")!.screen).toBe(all[0]!);
+    // left out at phone: skipped there, and not at pc
+    expect(headerPlan(all, ["phone home"], "phone", "http://x")!.screen).toBe(all[1]!);
+    expect(headerPlan(all, ["phone home"], "pc", "http://x")!.screen).toBe(all[0]!);
+    expect(headerPlan(all, all.map((s) => `phone ${s.name}`), "phone", "http://x")).toBeNull();
   });
 });

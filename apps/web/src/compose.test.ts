@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Workspace } from "@switchboard/protocol";
-import { backlogTargetName, feedbackArgs } from "./compose.ts";
+import { backlogTargetName, feedbackArgs, selectValue } from "./compose.ts";
 
 const ws = (id: string, kind: Workspace["kind"] = "repo") => ({ id, name: `name-${id}`, path: `/${id}`, kind }) as Workspace;
 const base = { text: "直したい", attachmentIds: ["a1"], screen: "Home" };
@@ -19,4 +19,11 @@ test("自動のときの登録先は meta", () => {
   expect(backlogTargetName(list, "")).toBe("name-ws_meta");
   expect(backlogTargetName(list, "ws_lib")).toBe("name-ws_lib");
   expect(backlogTargetName([ws("ws_lib")], "")).toBe("");
+});
+
+test("selectValue: 触っていない select は initial の値、触ったら選んだ値のまま（空の選択も）", () => {
+  expect(selectValue(false, "", "opus")).toBe("opus");
+  expect(selectValue(false, "sonnet", "opus")).toBe("opus");
+  expect(selectValue(true, "sonnet", "opus")).toBe("sonnet");
+  expect(selectValue(true, "", "opus")).toBe("");
 });

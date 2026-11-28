@@ -62,6 +62,30 @@ export function screens(taskId: string | null): Screen[] {
   ];
 }
 
+/** One move in opening a screen: go to a page, run an expression in it, or run the screen's `prepare` (whose failure means the screen cannot be pictured). Each waits `settle` ms after. */
+export type Step = { navigate: string; settle: number } | { evaluate: string; settle: number } | { prepare: string; settle: number };
+
+/** How a screen is opened: keep its Backlog layout (kept in the browser, so from a page of this origin), open it, run its `prepare`. The header's picture opens the screen it names the same way. */
+export function openSteps(s: Screen, base: string): Step[] {
+  return [
+    ...(s.layout
+      ? [
+          { navigate: base + "/", settle: 800 },
+          { evaluate: `localStorage.setItem('switchboard.backlog.view', JSON.stringify({ sort: 'default', stages: [], types: [], priorities: [], query: '', layout: '${s.layout}' }))`, settle: 0 },
+        ]
+      : []),
+    // the screens read the daemon after they open: wait for the requests to settle
+    { navigate: base + s.path, settle: 5000 },
+    ...(s.prepare ? [{ prepare: s.prepare, settle: 500 }] : []),
+  ];
+}
+
+/** The screen the header is pictured on (the first one pictured at this width; one left out is not) and how to open it; null when none was pictured. */
+export function headerPlan(list: Screen[], unprepared: string[], w: Width, base: string): { screen: Screen; steps: Step[] } | null {
+  const screen = list.find((s) => !unprepared.includes(`${w} ${s.name}`));
+  return screen ? { screen, steps: openSteps(screen, base) } : null;
+}
+
 export interface Args {
   home: string | null;
   out: string | null;
@@ -292,7 +316,7 @@ async function main() {
         ws!.send(JSON.stringify({ id: ++seq, method: "Fetch.fulfillRequest", params: { requestId: m.params.requestId, responseCode: 200, responseHeaders: [{ name: "content-type", value: "application/json" }], body: Buffer.from(JSON.stringify(release)).toString("base64") } }));
     };
     const call = (method: string, params: object = {}) => new Promise<{ result?: { result?: { value?: unknown }; data?: string }; error?: { message?: string } }>((r) => { const id = ++seq; pending.set(id, r); ws!.send(JSON.stringify({ id, method, params })); });
-    // an expression that throws is an error here, not an empty result (a prepared screen's is caught by the loop below, which says so and leaves the screen out; any other ends the audit)
+    // an expression that throws is an error here, not an empty result (a prepared screen's is caught by `openScreen` below, which returns its first line; the screen loop and the header each print that line and leave the picture out; any other ends the audit)
     const evaluate = async <T>(expression: string) => {
       const answer = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
       // Chrome could not run it at all (the page's context went away): not an empty result
@@ -300,6 +324,19 @@ async function main() {
       const r = answer.result as { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } } | undefined;
       if (r?.exceptionDetails) throw new Error(`in the page: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? "an exception"}`);
       return r?.result?.value as T;
+    };
+    // opens a screen by its steps; a `prepare` that throws is a state that cannot come up on this data (a bundle hold standing, too few PBIs): its first line comes back and nothing is measured as if it had
+    const openScreen = async (steps: Step[]): Promise<string | null> => {
+      for (const st of steps) {
+        if ("navigate" in st) await call("Page.navigate", { url: st.navigate });
+        else if ("evaluate" in st) await evaluate(st.evaluate);
+        else {
+          const why = await evaluate(st.prepare).then(() => null, (e) => String((e as Error).message ?? e).split("\n")[0]!);
+          if (why !== null) return why;
+        }
+        await Bun.sleep(st.settle);
+      }
+      return null;
     };
     await call("Page.enable");
     await call("Runtime.enable");
@@ -309,23 +346,11 @@ async function main() {
       await call("Emulation.setDeviceMetricsOverride", { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: size.mobile });
       await call("Emulation.setTouchEmulationEnabled", { enabled: size.mobile });
       for (const s of list) {
-        if (s.layout) {
-          await call("Page.navigate", { url: base + "/" });
-          await Bun.sleep(800);
-          await evaluate(`localStorage.setItem('switchboard.backlog.view', JSON.stringify({ sort: 'default', stages: [], types: [], priorities: [], query: '', layout: '${s.layout}' }))`);
-        }
-        await call("Page.navigate", { url: base + s.path });
-        // the screens read the daemon after they open: wait for the requests to settle
-        await Bun.sleep(5000);
-        if (s.prepare) {
-          // a state that cannot come up on this data (a bundle hold standing, too few PBIs) is said and left out: nothing is measured as if it had, and the screens after it are still audited
-          const why = await evaluate(s.prepare).then(() => null, (e) => String((e as Error).message ?? e).split("\n")[0]!);
-          if (why !== null) {
-            console.log(`${w} ${s.name}: 用意できなかったので撮らない（${why}）`);
-            unprepared.push(`${w} ${s.name}`);
-            continue;
-          }
-          await Bun.sleep(500);
+        const why = await openScreen(openSteps(s, base));
+        if (why !== null) {
+          console.log(`${w} ${s.name}: 用意できなかったので撮らない（${why}）`);
+          unprepared.push(`${w} ${s.name}`);
+          continue;
         }
         const verdict = judge(await evaluate<Box[]>(MEASURE), size.width);
         const extra = ((await evaluate<Band[]>(MEASURE_BANDS)) ?? []).reduce((n, b) => n + extraRows(b), 0);
@@ -342,16 +367,23 @@ async function main() {
       }
       // the header once more with 新しい版 in it (the screens' own answer has none): its rows and a picture
       // on a screen that was pictured at this width (one left out above is not shown here either)
-      const first = list.find((s) => !unprepared.includes(`${w} ${s.name}`));
-      if (first) {
+      const plan = headerPlan(list, unprepared, w, base);
+      if (plan) {
         release = RELEASE_WITH_NEW_VERSION;
-        await call("Page.navigate", { url: base + first.path });
-        await Bun.sleep(5000);
-        const extra = ((await evaluate<Band[]>(MEASURE_BANDS)) ?? []).reduce((n, b) => n + extraRows(b), 0);
-        const shot = await call("Page.captureScreenshot", { format: "png" });
-        await Bun.write(join(out, `${w}-header-new-version.png`), Buffer.from(shot.result!.data!, "base64"));
-        console.log(`${w} ヘッダー（新しい版あり、${first.name}）: 帯の余分な段 ${extra}`);
-        release = RELEASE_AS_MANAGED;
+        try {
+          const why = await openScreen(plan.steps);
+          if (why !== null) {
+            console.log(`${w} ヘッダー（新しい版あり、${plan.screen.name}）: 用意できなかったので撮らない（${why}）`);
+            unprepared.push(`${w} ヘッダー（新しい版あり、${plan.screen.name}）`);
+          } else {
+            const extra = ((await evaluate<Band[]>(MEASURE_BANDS)) ?? []).reduce((n, b) => n + extraRows(b), 0);
+            const shot = await call("Page.captureScreenshot", { format: "png" });
+            await Bun.write(join(out, `${w}-header-new-version.png`), Buffer.from(shot.result!.data!, "base64"));
+            console.log(`${w} ヘッダー（新しい版あり、${plan.screen.name}）: 帯の余分な段 ${extra}`);
+          }
+        } finally {
+          release = RELEASE_AS_MANAGED;
+        }
       }
     }
     console.log(`画面: ${out}`);

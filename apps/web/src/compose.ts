@@ -20,3 +20,8 @@ export function feedbackArgs(
 export function backlogTargetName(workspaces: Workspace[], wsId: string): string {
   return (wsId ? workspaces.find((w) => w.id === wsId) : workspaces.find((w) => w.kind === "meta"))?.name ?? "";
 }
+
+/** What a model / effort select holds: what the person picked once they touched it, else what an untouched form starts with (`initial`). */
+export function selectValue(touched: boolean, picked: string, initial: string): string {
+  return touched ? picked : initial;
+}
